@@ -5,8 +5,14 @@
 //! dependency edge runs TUI -> engine and never back.
 
 mod state;
+mod tree;
 
+/// The three-state vocabulary every node is coloured by.
 pub use state::NodeState;
+/// One node of the project tree: its path, its README, its state, its children.
+pub use tree::Node;
+/// A whole project tree, owning its root node.
+pub use tree::Tree;
 
 #[cfg(test)]
 mod tests {
