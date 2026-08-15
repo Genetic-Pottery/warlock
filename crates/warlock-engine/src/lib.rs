@@ -1,7 +1,12 @@
 //! Core engine for warlock.
 //!
-//! Shape only: this crate is intentionally empty for now. Behaviour lands in a
-//! later slice. The engine never depends on the TUI or on any terminal crate.
+//! This crate owns the domain vocabulary. It never depends on the TUI or on
+//! any terminal crate, and it reads no files and opens no sockets: the
+//! dependency edge runs TUI -> engine and never back.
+
+mod state;
+
+pub use state::NodeState;
 
 #[cfg(test)]
 mod tests {

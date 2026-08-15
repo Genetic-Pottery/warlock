@@ -12,3 +12,7 @@ repository = "https://github.com/Genetic-Pottery/warlock"
 # Prefer std. Any entry added here needs a one-line comment directly above it
 # saying why the dependency is worth the supply chain.
 [workspace.dependencies]
+# Derive-based (de)serialisation: hand-rolling it for every engine type is a lot
+# of error-prone boilerplate, and serde is the de facto standard every future
+# format crate already speaks. No on-disk format is committed to here.
+serde = { version = "1", features = ["derive"] }

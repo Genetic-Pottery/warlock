@@ -1,9 +1,14 @@
 # warlock-engine
 
 The core library crate of warlock. It owns the domain logic — the state
-vocabulary, the tree of work, and the rules that move it forward. Nothing in
-here is implemented yet: this crate currently exists as shape only, and
-behaviour arrives in a later slice.
+vocabulary, the tree of work, and the rules that move it forward. So far that
+is `NodeState`, the three-state model from section 5 of the design doc —
+unpacted, pacted-and-stale, pacted-and-fresh, with no "unknown" fourth state
+because unjudged *is* stale. The tree types and the rules arrive in a later
+slice.
+
+The types derive serde's `Serialize`/`Deserialize` so a caller can choose a
+format, but the crate commits to none: it reads and writes no files.
 
 ## The dependency edge runs one way
 
