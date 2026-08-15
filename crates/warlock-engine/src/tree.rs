@@ -41,11 +41,7 @@ impl Node {
     /// Add children with [`Node::with_children`] or by pushing onto
     /// [`Node::children`] directly.
     #[must_use]
-    pub fn new(
-        path: impl Into<PathBuf>,
-        readme: impl Into<PathBuf>,
-        state: NodeState,
-    ) -> Self {
+    pub fn new(path: impl Into<PathBuf>, readme: impl Into<PathBuf>, state: NodeState) -> Self {
         Self {
             path: path.into(),
             readme: readme.into(),
@@ -93,6 +89,174 @@ impl Tree {
     #[must_use]
     pub fn root_path(&self) -> &Path {
         &self.root.path
+    }
+
+    /// Every node, depth first and parents before children, each paired with
+    /// how deep it sits. The root is depth `0`, its children depth `1`, and so
+    /// on.
+    ///
+    /// The depth is yielded rather than left implicit because the renderer
+    /// indents by it: walking the tree and knowing where you are in it should
+    /// be one pass, not two. Siblings come in the order they are stored.
+    ///
+    /// ```
+    /// use warlock_engine::{Node, NodeState, Tree};
+    ///
+    /// let tree = Tree::new(
+    ///     Node::new("repo", "repo/README.md", NodeState::PactedStale)
+    ///         .with_children([Node::new(
+    ///             "repo/docs",
+    ///             "repo/docs/README.md",
+    ///             NodeState::PactedFresh,
+    ///         )]),
+    /// );
+    ///
+    /// let lines: Vec<String> = tree
+    ///     .walk()
+    ///     .map(|(node, depth)| format!("{}{}", "  ".repeat(depth), node.path.display()))
+    ///     .collect();
+    /// assert_eq!(lines, ["repo", "  repo/docs"]);
+    /// ```
+    pub fn walk(&self) -> DepthFirst<'_> {
+        DepthFirst::new(&self.root)
+    }
+
+    /// How many nodes sit in each state.
+    ///
+    /// The result is a fixed struct with one field per state, so a state can
+    /// neither be missed nor invented; a state with no nodes counts zero.
+    ///
+    /// ```
+    /// use warlock_engine::{Node, NodeState, Tree};
+    ///
+    /// let tree = Tree::new(
+    ///     Node::new("repo", "repo/README.md", NodeState::PactedStale)
+    ///         .with_children([Node::new(
+    ///             "repo/docs",
+    ///             "repo/docs/README.md",
+    ///             NodeState::PactedFresh,
+    ///         )]),
+    /// );
+    ///
+    /// let counts = tree.counts();
+    /// assert_eq!(counts.pacted_stale, 1);
+    /// assert_eq!(counts.pacted_fresh, 1);
+    /// assert_eq!(counts.unpacted, 0);
+    /// assert_eq!(counts.total(), 2);
+    /// ```
+    #[must_use]
+    pub fn counts(&self) -> StateCounts {
+        let mut counts = StateCounts::default();
+        for (node, _) in self.walk() {
+            *counts.get_mut(node.state) += 1;
+        }
+        counts
+    }
+
+    /// The node at `path`, or `None` if the tree holds no such node.
+    ///
+    /// Paths are compared as stored, with no normalisation and no filesystem
+    /// access: this crate never touches the disk, so it cannot canonicalise
+    /// and will not pretend to.
+    ///
+    /// ```
+    /// use warlock_engine::{Node, NodeState, Tree};
+    ///
+    /// let tree = Tree::new(
+    ///     Node::new("repo", "repo/README.md", NodeState::PactedStale)
+    ///         .with_children([Node::new(
+    ///             "repo/docs",
+    ///             "repo/docs/README.md",
+    ///             NodeState::PactedFresh,
+    ///         )]),
+    /// );
+    ///
+    /// let found = tree.find("repo/docs").expect("docs is in the tree");
+    /// assert_eq!(found.state, NodeState::PactedFresh);
+    /// assert!(tree.find("repo/nowhere").is_none());
+    /// ```
+    #[must_use]
+    pub fn find(&self, path: impl AsRef<Path>) -> Option<&Node> {
+        let path = path.as_ref();
+        self.walk()
+            .find_map(|(node, _)| (node.path == path).then_some(node))
+    }
+}
+
+/// A depth-first walk over a tree, yielding each node with its depth.
+///
+/// Built by [`Tree::walk`]. Parents come before their children and siblings
+/// keep the order they are stored in, so the sequence is exactly what a
+/// renderer draws top to bottom.
+#[derive(Debug, Clone)]
+pub struct DepthFirst<'a> {
+    /// Nodes still owed, with their depth, nearest first. Children are pushed
+    /// in reverse so the leftmost sibling comes off the stack first.
+    stack: Vec<(&'a Node, usize)>,
+}
+
+impl<'a> DepthFirst<'a> {
+    /// A walk starting at `root`, which is reported at depth `0`.
+    fn new(root: &'a Node) -> Self {
+        Self {
+            stack: vec![(root, 0)],
+        }
+    }
+}
+
+impl<'a> Iterator for DepthFirst<'a> {
+    /// A node and how deep it sits below the root.
+    type Item = (&'a Node, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (node, depth) = self.stack.pop()?;
+        self.stack
+            .extend(node.children.iter().rev().map(|child| (child, depth + 1)));
+        Some((node, depth))
+    }
+}
+
+/// How many nodes sit in each state.
+///
+/// One field per [`NodeState`] variant, so no state can be missing from a
+/// tally and no fourth state can appear in one. A state with no nodes is zero,
+/// which is what [`Default`] gives.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct StateCounts {
+    /// Nodes outside Warlock's management.
+    pub unpacted: usize,
+    /// Pacted nodes owing a freshness pass.
+    pub pacted_stale: usize,
+    /// Pacted nodes that have been granted freshness.
+    pub pacted_fresh: usize,
+}
+
+impl StateCounts {
+    /// The count for one state, for callers that hold a state rather than a
+    /// field name (a legend, say, iterating [`NodeState::ALL`]).
+    #[must_use]
+    pub const fn get(&self, state: NodeState) -> usize {
+        match state {
+            NodeState::Unpacted => self.unpacted,
+            NodeState::PactedStale => self.pacted_stale,
+            NodeState::PactedFresh => self.pacted_fresh,
+        }
+    }
+
+    /// How many nodes were counted in total.
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.unpacted + self.pacted_stale + self.pacted_fresh
+    }
+
+    /// The field for `state`, so counting stays a match on the enum and
+    /// cannot silently skip a variant.
+    fn get_mut(&mut self, state: NodeState) -> &mut usize {
+        match state {
+            NodeState::Unpacted => &mut self.unpacted,
+            NodeState::PactedStale => &mut self.pacted_stale,
+            NodeState::PactedFresh => &mut self.pacted_fresh,
+        }
     }
 }
 
@@ -143,6 +307,80 @@ mod tests {
         assert_eq!(tree.root_path(), std::path::Path::new("repo"));
         assert_eq!(tree.root.state, NodeState::PactedStale);
         assert_eq!(tree.root.readme, std::path::PathBuf::from("repo/README.md"));
+    }
+
+    #[test]
+    fn walk_is_depth_first_with_parents_before_children() {
+        let tree = fixture();
+        let visited: Vec<(String, usize)> = tree
+            .walk()
+            .map(|(node, depth)| (node.path.to_string_lossy().into_owned(), depth))
+            .collect();
+        assert_eq!(
+            visited,
+            [
+                ("repo".to_owned(), 0),
+                ("repo/crates".to_owned(), 1),
+                ("repo/docs".to_owned(), 1),
+                ("repo/docs/adr".to_owned(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn walk_of_a_lone_node_yields_only_the_root_at_depth_zero() {
+        let tree = Tree::new(Node::new("solo", "solo/README.md", NodeState::Unpacted));
+        let visited: Vec<_> = tree
+            .walk()
+            .map(|(node, depth)| (&node.state, depth))
+            .collect();
+        assert_eq!(visited, [(&NodeState::Unpacted, 0)]);
+    }
+
+    #[test]
+    fn counts_tally_every_state() {
+        let counts = fixture().counts();
+        assert_eq!(counts.unpacted, 1);
+        assert_eq!(counts.pacted_stale, 2);
+        assert_eq!(counts.pacted_fresh, 1);
+        assert_eq!(counts.total(), 4);
+        for state in NodeState::ALL {
+            let expected = fixture()
+                .walk()
+                .filter(|(node, _)| node.state == state)
+                .count();
+            assert_eq!(counts.get(state), expected, "count for {state:?}");
+        }
+    }
+
+    #[test]
+    fn counts_of_an_absent_state_are_zero() {
+        let tree = Tree::new(Node::new("solo", "solo/README.md", NodeState::Unpacted));
+        let counts = tree.counts();
+        assert_eq!(counts.unpacted, 1);
+        assert_eq!(counts.pacted_stale, 0);
+        assert_eq!(counts.pacted_fresh, 0);
+    }
+
+    #[test]
+    fn find_reaches_the_root_and_the_deepest_node() {
+        let tree = fixture();
+        assert_eq!(
+            tree.find("repo").map(|node| node.state),
+            Some(NodeState::PactedStale)
+        );
+        assert_eq!(
+            tree.find("repo/docs/adr").map(|node| &node.readme),
+            Some(&std::path::PathBuf::from("repo/docs/adr/README.md"))
+        );
+    }
+
+    #[test]
+    fn find_returns_none_for_a_path_not_in_the_tree() {
+        let tree = fixture();
+        assert!(tree.find("repo/nowhere").is_none());
+        // Paths are compared as stored: no normalisation, no filesystem.
+        assert!(tree.find("./repo").is_none());
     }
 
     #[test]

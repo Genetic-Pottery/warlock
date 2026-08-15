@@ -9,7 +9,14 @@ is:
   because unjudged *is* stale.
 - `Node`, one node of the project tree: its path, the path of its README, its
   state, and its children.
-- `Tree`, which owns the root node.
+- `Tree`, which owns the root node and can be walked, tallied and searched:
+  - `Tree::walk` — a depth-first iterator (`DepthFirst`) yielding every node
+    with its depth, parents before children, siblings in stored order. The
+    depth comes out of the walk because the renderer indents by it.
+  - `Tree::counts` — a `StateCounts` with one field per state, so a state can
+    neither be missed nor invented and an absent state counts zero.
+  - `Tree::find` — the node at a given path, or `None`. Paths are compared as
+    stored: no normalisation, no filesystem.
 
 `Node` and `Tree` are pure shape. Their fields are public so a renderer can
 walk them with each node's depth and state in hand, and a caller builds them
