@@ -10,3 +10,9 @@ repository.workspace = true
 # edge runs TUI -> engine and never back.
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
+
+# Tests only, and deliberately not a format crate: `serde_test` round-trips a
+# value through serde's own tokens, which proves the derives without the crate
+# ever naming an on-disk format.
+[dev-dependencies]
+serde_test = { workspace = true }

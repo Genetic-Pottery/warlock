@@ -16,3 +16,7 @@ repository = "https://github.com/Genetic-Pottery/warlock"
 # of error-prone boilerplate, and serde is the de facto standard every future
 # format crate already speaks. No on-disk format is committed to here.
 serde = { version = "1", features = ["derive"] }
+# Dev-only: round-trips a value through serde's own token stream, so the derives
+# can be tested in memory without pulling in a format crate and accidentally
+# committing to an on-disk format.
+serde_test = { version = "1" }
