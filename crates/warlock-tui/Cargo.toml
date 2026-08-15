@@ -1,0 +1,12 @@
+[package]
+name = "warlock-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The crate is warlock-tui; the executable it ships is `warlock`.
+[[bin]]
+name = "warlock"
+path = "src/main.rs"
