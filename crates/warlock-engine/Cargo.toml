@@ -16,3 +16,8 @@ serde = { workspace = true, features = ["derive"] }
 # ever naming an on-disk format.
 [dev-dependencies]
 serde_test = { workspace = true }
+
+# Lint configuration lives in the root manifest so every crate is held to the
+# same bar; see `[workspace.lints]` there.
+[lints]
+workspace = true

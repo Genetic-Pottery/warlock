@@ -117,6 +117,7 @@ impl Tree {
     ///     .collect();
     /// assert_eq!(lines, ["repo", "  repo/docs"]);
     /// ```
+    #[must_use]
     pub fn walk(&self) -> DepthFirst<'_> {
         DepthFirst::new(&self.root)
     }
