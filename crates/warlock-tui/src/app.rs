@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use warlock_engine::{NodeState, Tree};
+use warlock_engine::{NodeState, StateCounts, Tree};
 
 /// One line of the flattened tree: what to draw, how far to indent it, and
 /// which colour it takes.
@@ -43,14 +43,21 @@ impl Row {
     }
 }
 
-/// The front end's state: the flattened tree and the selected row.
+/// The front end's state: the flattened tree, the selected row and the tally
+/// the footer shows.
 ///
 /// `selected` is kept in range by construction and by every method that moves
 /// it, so [`App::selected_row`] is `None` only when there are no rows at all.
+///
+/// The tally is the engine's own [`StateCounts`], carried along rather than
+/// recomputed: counting states is the engine's job, and a renderer that adds
+/// up its rows itself is a second implementation of that job waiting to
+/// disagree with the first.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct App {
     rows: Vec<Row>,
     selected: usize,
+    counts: StateCounts,
 }
 
 impl App {
@@ -66,23 +73,46 @@ impl App {
                 .map(|(node, depth)| Row::new(depth, node.path.clone(), node.state))
                 .collect(),
         )
+        .with_counts(tree.counts())
     }
 
     /// The app state for an already-flattened list of rows, with the first row
-    /// selected.
+    /// selected and an all-zero tally.
     ///
     /// A [`Tree`] always has a root and so is never empty; this constructor is
     /// how the no-rows case is reachable at all, in tests and in any future
-    /// caller that filters the tree down to nothing.
+    /// caller that filters the tree down to nothing. Zero counts are the
+    /// truth for that empty case; any caller passing rows should say what they
+    /// tally to with [`App::with_counts`].
     #[must_use]
     pub fn from_rows(rows: Vec<Row>) -> Self {
-        Self { rows, selected: 0 }
+        Self {
+            rows,
+            selected: 0,
+            counts: StateCounts::default(),
+        }
+    }
+
+    /// The same app state, reporting `counts` in its footer.
+    ///
+    /// Takes the engine's tally as a value instead of deriving one, so the
+    /// numbers on screen are the engine's numbers.
+    #[must_use]
+    pub const fn with_counts(mut self, counts: StateCounts) -> Self {
+        self.counts = counts;
+        self
     }
 
     /// Every row, in the order they are drawn.
     #[must_use]
     pub fn rows(&self) -> &[Row] {
         &self.rows
+    }
+
+    /// How many nodes sit in each state, as the engine counted them.
+    #[must_use]
+    pub const fn counts(&self) -> StateCounts {
+        self.counts
     }
 
     /// Whether there is nothing to draw and nothing to select.
@@ -127,7 +157,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use warlock_engine::{Node, NodeState, Tree, stub_tree};
+    use warlock_engine::{Node, NodeState, StateCounts, Tree, stub_tree};
 
     use super::{App, Row};
 
@@ -188,6 +218,26 @@ mod tests {
             let node = tree.find(&row.path).expect("row came from the tree");
             assert_eq!(row.state, node.state);
         }
+    }
+
+    #[test]
+    fn an_app_carries_the_trees_own_counts() {
+        let tree = stub_tree();
+
+        let app = App::from_tree(&tree);
+
+        assert_eq!(app.counts(), tree.counts());
+        assert_eq!(app.counts().total(), app.rows().len());
+    }
+
+    #[test]
+    fn an_app_built_from_bare_rows_counts_nothing_until_told() {
+        let counts = stub_tree().counts();
+
+        let app = App::from_rows(three_rows());
+
+        assert_eq!(app.counts(), StateCounts::default());
+        assert_eq!(app.with_counts(counts).counts(), counts);
     }
 
     #[test]
