@@ -9,6 +9,44 @@ rust-version = "1.97.1"
 license = "Apache-2.0"
 repository = "https://github.com/Genetic-Pottery/warlock"
 
+# One lint configuration for the whole workspace; every crate opts in with
+# `[lints] workspace = true` rather than repeating attributes in its root
+# module. CI runs `cargo clippy --workspace --all-targets -- -D warnings`, so
+# everything warned about here fails the build there.
+#
+# Anything set to `allow` must carry a comment directly above it saying why.
+[workspace.lints.rust]
+# The project's hard rule: there is no `unsafe` in warlock. Denied rather than
+# forbidden so a future crate that genuinely needs it has to say so in the diff
+# with an explicit `#[allow]`, where a reviewer will see it.
+unsafe_code = "deny"
+# The tree types are the interface between engine and TUI; an undocumented
+# public item is a seam nobody can read.
+missing_docs = "warn"
+# Catches items left `pub` that nothing re-exports, i.e. accidental API.
+unreachable_pub = "warn"
+# `Debug` is what test failures print. A public type without it makes an
+# assertion message useless.
+missing_debug_implementations = "warn"
+# Group: elided lifetimes in paths, bare trait objects and friends. Priority
+# -1 so a single lint from it could be overridden below if one ever proves
+# noisy.
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+# The bulk of the value, as one group rather than dozens of hand-listed lints.
+# Priority -1 lets any individual `allow` below override the group.
+#
+# `clippy::nursery` and `clippy::cargo` are deliberately not enabled: nursery's
+# `missing_const_for_fn` fires on `fn main`, and `cargo`'s
+# `cargo_common_metadata` demands `description`/`keywords`/`categories` on
+# crates that are not published. Both would cost an `allow` for no real defect
+# caught, so they stay off until they pay their way.
+pedantic = { level = "warn", priority = -1 }
+# A `dbg!` that reaches CI is debug output somebody forgot to delete, and in a
+# terminal UI it prints straight over the frame being drawn.
+dbg_macro = "warn"
+
 # Prefer std. Any entry added here needs a one-line comment directly above it
 # saying why the dependency is worth the supply chain.
 [workspace.dependencies]
