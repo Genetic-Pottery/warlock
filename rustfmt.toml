@@ -1,0 +1,27 @@
+# rustfmt configuration for the warlock workspace.
+#
+# This file stays deliberately close to rustfmt's defaults: the default style is
+# what every Rust reader already expects, and every deviation is a thing new
+# contributors have to learn. Only options with a stated reason belong here, and
+# nothing nightly-only, because the local toolchain is nixpkgs stable rustc with
+# no rustup shims.
+
+# Parse the sources as Rust 2024, matching `edition` in [workspace.package].
+# `cargo fmt` passes the manifest edition through, but a bare `rustfmt` (editors
+# and format-on-save typically call it directly) defaults to 2015 and would
+# choke on 2024-only syntax. Pinning it here keeps both paths identical.
+edition = "2024"
+
+# Pin the Style Guide edition rather than inheriting whatever a given toolchain
+# defaults to, so formatting is reproducible across machines and CI and a
+# toolchain bump can never silently reformat the tree under us.
+style_edition = "2024"
+
+# Always emit LF. The default is "Auto", which infers per file, so a file that
+# ever picked up CRLF keeps it and `--check` disagrees between platforms. CI
+# runs on Linux; forcing Unix endings keeps the check platform-independent.
+newline_style = "Unix"
+
+# Write `Foo { name }` instead of `Foo { name: name }`. Removes pure noise from
+# struct literals and makes it a formatter concern rather than a review comment.
+use_field_init_shorthand = true
