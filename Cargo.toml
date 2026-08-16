@@ -54,6 +54,11 @@ dbg_macro = "warn"
 # of error-prone boilerplate, and serde is the de facto standard every future
 # format crate already speaks. No on-disk format is committed to here.
 serde = { version = "1", features = ["derive"] }
+# The TUI framework section 12 of the design doc fixes on. It also re-exports
+# the terminal backend it is built against as `ratatui::crossterm`, so using
+# that re-export instead of naming crossterm here makes a version skew between
+# frontend and backend impossible.
+ratatui = { version = "0.30" }
 # Dev-only: round-trips a value through serde's own token stream, so the derives
 # can be tested in memory without pulling in a format crate and accidentally
 # committing to an on-disk format.
