@@ -11,6 +11,19 @@ repository.workspace = true
 name = "warlock"
 path = "src/main.rs"
 
+# The pure parts of the front end (state-to-colour, app state) live in the
+# library so they are ordinary reachable API that the binary and the tests both
+# use; `src/main.rs` is the thin shell around them.
+[lib]
+name = "warlock_tui"
+path = "src/lib.rs"
+
+# The dependency edge runs TUI -> engine: the front end knows the domain
+# vocabulary, and the engine knows nothing about terminals.
+[dependencies]
+ratatui = { workspace = true }
+warlock-engine = { path = "../warlock-engine" }
+
 # Lint configuration lives in the root manifest so every crate is held to the
 # same bar; see `[workspace.lints]` there.
 [lints]
