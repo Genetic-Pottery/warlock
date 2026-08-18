@@ -9,6 +9,7 @@ repository.workspace = true
 # No TUI, terminal, HTTP or Anthropic dependency belongs here: the dependency
 # edge runs TUI -> engine and never back.
 [dependencies]
+ignore = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
 

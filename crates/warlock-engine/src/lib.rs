@@ -2,15 +2,23 @@
 //!
 //! This crate owns the domain vocabulary. It never depends on the TUI or on
 //! any terminal crate: the dependency edge runs TUI -> engine and never back.
-//! It does read and write files — the pact manifest at `.warlock/pacts.toml`
-//! is its business — but it opens no sockets and spawns no subprocesses, and
-//! it only ever touches the paths a caller hands it.
+//! It does touch the filesystem — it reads and writes the pact manifest at
+//! `.warlock/pacts.toml`, and it walks a directory to build a [`Tree`] from it
+//! — but it opens no sockets and spawns no subprocesses, and it never follows
+//! a symlink out of the directory a caller hands it.
 
+mod load;
 mod manifest;
 mod state;
 mod stub;
 mod tree;
 
+/// Everything that can stop a directory becoming a tree.
+pub use load::Error as LoadError;
+/// Build a tree from a directory on disk, coloured by the manifest above it.
+pub use load::load_tree;
+/// The nearest ancestor of a directory that holds a `.warlock/` directory.
+pub use load::repository_root;
 /// Everything that can go wrong reading, writing or building a manifest.
 pub use manifest::Error as ManifestError;
 /// The record of which modules are pacted: one `.warlock/pacts.toml` per
@@ -29,11 +37,13 @@ pub use manifest::manifest_path;
 pub use manifest::to_manifest_path;
 /// The three-state vocabulary every node is coloured by.
 pub use state::NodeState;
-/// A placeholder tree, standing in for a filesystem loader that does not exist
-/// yet.
+/// A hard-coded tree for exercising a renderer. Not the loader: that is
+/// [`load_tree`].
 pub use stub::stub_tree;
 /// A depth-first walk over a tree, yielding each node with its depth.
 pub use tree::DepthFirst;
+/// What `Node::new` accepts for a README: anything path-like, or `None`.
+pub use tree::IntoReadme;
 /// One node of the project tree: its path, its README, its state, its children.
 pub use tree::Node;
 /// How many nodes of a tree sit in each state.

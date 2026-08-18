@@ -3,14 +3,14 @@
 The core library crate of warlock. It owns the domain logic — the state
 vocabulary, the tree of work, the record of which modules are pacted, and the
 rules that move it forward. What exists today is the vocabulary, the shape of
-the tree, the on-disk manifest, and a hard-coded tree to render until real
-loading lands:
+the tree, the on-disk manifest, and a loader that builds a tree out of a real
+directory:
 
 - `NodeState`, the three-state model from section 5 of the design doc —
   unpacted, pacted-and-stale, pacted-and-fresh, with no "unknown" fourth state
   because unjudged *is* stale.
-- `Node`, one node of the project tree: its path, the path of its README, its
-  state, and its children.
+- `Node`, one node of the project tree: its path, the path of its README when
+  it has one (`readme: Option<PathBuf>`), its state, and its children.
 - `Tree`, which owns the root node and can be walked, tallied and searched:
   - `Tree::walk` — a depth-first iterator (`DepthFirst`) yielding every node
     with its depth, parents before children, siblings in stored order. The
@@ -24,27 +24,36 @@ loading lands:
   `Manifest::load` to move it on and off disk, and `ManifestError` for
   everything that can go wrong doing so. See [the manifest
   section](#the-manifest-warlockpactstoml) below.
-- `stub_tree`, a **placeholder** returning one small tree written out by hand —
-  three levels deep, with at least one node in each state — so the engine/TUI
-  seam can be exercised before any of it is real.
+- `load_tree`, which turns a working directory into a `Tree` coloured by the
+  manifest above it, with `repository_root` for the upward walk that finds that
+  manifest and `LoadError` for everything that can stop either. See [the
+  loader](#the-loader-load_tree) below.
+- `stub_tree`, one small tree written out by hand — three levels deep, with at
+  least one node in each state — so the engine/TUI seam can be exercised
+  without a repository behind it.
 
 `Node` and `Tree` are pure shape. Their fields are public so a renderer can
 walk them with each node's depth and state in hand, and a caller builds them
 directly with `Node::new` / `Tree::new`. A node's state is a plain stored
-field: nothing here computes staleness. Building a tree from a real directory
-is the job of a filesystem loader that does not exist yet, and the rules
-arrive in a later slice.
+field: nothing in the tree types computes staleness, and nothing anywhere in
+this crate computes it yet — the loader stores what the manifest says and no
+more.
 
 `Node` and `Tree` derive serde's `Serialize`/`Deserialize` so a caller can
 choose a format, and they still commit to none: the derives are tested by
 round-tripping through serde's own token stream (`serde_test`, a
 dev-dependency), which never names a format.
 
-The manifest is the one place the crate does commit, and the one place it
-touches the filesystem: it is TOML, it lives at `.warlock/pacts.toml`, and
-`Manifest::save` / `Manifest::load` read and write exactly the path they are
-given. That is the crate's only new capability — it still depends on no
-terminal crate, opens no sockets and spawns no subprocesses.
+The manifest is the one place the crate commits to a format: it is TOML, it
+lives at `.warlock/pacts.toml`, and `Manifest::save` / `Manifest::load` read
+and write exactly the path they are given.
+
+The crate now reaches the filesystem in two ways and no others. It reads and
+writes that manifest, and it *walks* directories — via the `ignore` crate, so
+`.gitignore` at every level is respected and `.git/` and `target/` are skipped
+without a hand-maintained list, never following a symlink. That is the whole
+capability boundary: it still depends on no terminal crate, opens no sockets,
+spawns no subprocesses and contains no `unsafe`.
 
 ## The manifest: `.warlock/pacts.toml`
 
@@ -146,19 +155,81 @@ a user.
 
 The manifest stores hashes; it does not compute or compare them, and nothing
 here sets `NodeState::PactedFresh`. It is read from and written to a root the
-caller supplies — there is no upward walk to find a repository root, no
-directory scan to discover modules, no file watching, no locking protocol and
-no migration tooling beyond rejecting versions it does not know.
+caller supplies: finding that root is the loader's job (`repository_root`), not
+the manifest's. There is no directory scan to discover modules, no file
+watching, no locking protocol and no migration tooling beyond rejecting
+versions it does not know.
 
-## `stub_tree` is not the loader
+## The loader: `load_tree`
 
-`stub_tree` walks no directory, opens no file and computes no staleness. Every
-path and every state it returns is a literal typed into `src/stub.rs`, chosen
-only to give a renderer something with more than one level of nesting and one
-node of each colour. It exists because section 12 builds the engine before the
-TUI, which would otherwise leave the TUI with nothing to draw. When the
-filesystem loader arrives, `stub_tree` and its module go — it is a stopgap and
-should never be mistaken for the real thing.
+`load_tree(working_dir)` returns the `Tree` for a directory on disk, or a
+`LoadError` saying why it could not.
+
+### What makes a node
+
+**A directory is a module node when it directly contains a `README.md`**, and
+that path becomes its `readme: Some(...)`. That is the whole test. Warlock
+never parses a README — not its headings, not its length, not a word of it. It
+cares only that one exists, because the design doc makes the tree of module
+READMEs the interface, and a README is a module's claim to be one.
+
+A directory with no README of its own is kept only as a **connector**, with
+`readme: None`, and only when a module node sits somewhere below it — `crates/`
+in this repository is one. A README-less directory with no module-node
+descendant is **dropped entirely**: it is neither a module nor on the way to
+one, so putting it in the tree would be noise.
+
+The directory the walk is rooted at is always a node, README or not.
+
+### Where the root comes from
+
+Section 12's modular invocation rule says the scope of a run is wherever it was
+invoked, with no privileged root. So the two roots are deliberately different
+things:
+
+- The **repository root** is the nearest ancestor of the working directory that
+  holds a `.warlock/` directory, found by walking up (`repository_root`). The
+  single manifest is read from there.
+- The **tree root** is the working directory itself. Launch from
+  `crates/warlock-engine` in this repository and `Tree::root_path()` is
+  `crates/warlock-engine`, with node states taken from the manifest two levels
+  above it.
+
+A working directory with no `.warlock/` anywhere above it is not a repository:
+that is `LoadError::NoRepositoryRoot`, whose `Display` names the condition and
+the directory the search started from. It is an error value, never a panic.
+
+### What the walk skips
+
+Traversal is the `ignore` crate, so `.gitignore` at every level, hidden
+directories (`.git/` among them) and global excludes are honoured as git
+honours them — there is no hand-maintained skip list to drift out of date, and
+`target/` disappears because the repository already ignores it. `.warlock/` is
+pruned unconditionally on top of that, even if someone puts a `README.md` in
+it. Symlinks are never followed, so a symlinked directory cycle terminates
+instead of hanging. Siblings come out ordered by directory name, so loading an
+unchanged tree twice gives two `Tree` values that compare equal.
+
+### State is presence, and nothing can be fresh
+
+A node's state is decided by one question: does the manifest hold an entry for
+its path? If it does, the node is `NodeState::PactedStale`. If it does not, the
+node is `NodeState::Unpacted`. **The loader cannot produce
+`NodeState::PactedFresh`** — freshness needs a subtree hash compared against a
+granted one, and this crate computes no hashes. A repository whose `.warlock/`
+holds no manifest, or an empty one, loads with every node `Unpacted`; a
+manifest that exists but cannot be understood is an error, not a silent empty
+one.
+
+## `stub_tree` survives, but is not the source of truth
+
+`load_tree` is where a real tree comes from. `stub_tree` walks no directory,
+opens no file and computes no staleness: every path and every state it returns
+is a literal typed into `src/stub.rs`, chosen only to give a renderer something
+with more than one level of nesting and one node of each colour — including a
+fresh one the loader cannot yet produce. It stays because a front end or a test
+harness benefits from a fixed tree with no filesystem behind it. Nothing about
+a repository can be inferred from it.
 
 ## The dependency edge runs one way
 

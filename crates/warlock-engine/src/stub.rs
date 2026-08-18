@@ -1,22 +1,24 @@
-//! A hard-coded tree, standing in for a loader that does not exist yet.
+//! A hard-coded tree, no longer the only way to get one.
 //!
-//! Section 12 of the design doc builds the engine before the TUI, which leaves
-//! the TUI with nothing to draw until directory walking lands. This module is
-//! that nothing-to-draw problem's stopgap and nothing more: one tree, written
-//! out by hand, so the engine/TUI seam can be proven before the filesystem is
-//! involved.
+//! Section 12 of the design doc builds the engine before the TUI, which left
+//! the TUI with nothing to draw until directory walking landed. It has landed:
+//! [`load_tree`](crate::load_tree) builds a tree from a real directory, and
+//! that is the source of truth. This module survives as one tree written out
+//! by hand, so the engine/TUI seam can be exercised without a filesystem
+//! behind it.
+
+use std::path::PathBuf;
 
 use crate::{Node, NodeState, Tree};
 
-/// **Placeholder.** A small hard-coded tree, to be replaced by a real
-/// filesystem loader.
+/// A small hard-coded tree, for exercising a renderer without a repository.
 ///
-/// This is not the loader and must not be mistaken for one. It reads no
-/// directory, opens no file and computes no staleness: every path and every
-/// state below is a literal typed into this file, chosen only to give a
-/// renderer something with more than one level of nesting and at least one
-/// node in each of the three states. When the loader arrives, this function
-/// and its module go.
+/// This is not the loader and must not be mistaken for one — the loader is
+/// [`load_tree`](crate::load_tree), and it is what a real run uses. This
+/// function reads no directory, opens no file and computes no staleness: every
+/// path and every state below is a literal typed into this file, chosen only
+/// to give a renderer something with more than one level of nesting and at
+/// least one node in each of the three states.
 ///
 /// The shape it returns:
 ///
@@ -41,27 +43,32 @@ use crate::{Node, NodeState, Tree};
 #[must_use]
 pub fn stub_tree() -> Tree {
     Tree::new(
-        Node::new("warlock", "warlock/README.md", NodeState::PactedStale).with_children([
+        Node::new(
+            "warlock",
+            Some(PathBuf::from("warlock/README.md")),
+            NodeState::PactedStale,
+        )
+        .with_children([
             Node::new(
                 "warlock/crates",
-                "warlock/crates/README.md",
+                Some(PathBuf::from("warlock/crates/README.md")),
                 NodeState::PactedStale,
             )
             .with_children([
                 Node::new(
                     "warlock/crates/engine",
-                    "warlock/crates/engine/README.md",
+                    Some(PathBuf::from("warlock/crates/engine/README.md")),
                     NodeState::PactedFresh,
                 ),
                 Node::new(
                     "warlock/crates/tui",
-                    "warlock/crates/tui/README.md",
+                    Some(PathBuf::from("warlock/crates/tui/README.md")),
                     NodeState::PactedStale,
                 ),
             ]),
             Node::new(
                 "warlock/assets",
-                "warlock/assets/README.md",
+                Some(PathBuf::from("warlock/assets/README.md")),
                 NodeState::Unpacted,
             ),
         ]),

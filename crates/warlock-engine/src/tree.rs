@@ -3,8 +3,8 @@
 //! Section 5 of the design doc makes the project tree the interface: a tree of
 //! module READMEs, each coloured by its [`NodeState`]. This module gives that
 //! tree a type. It is pure shape and nothing else — building a tree from a real
-//! directory belongs to a filesystem loader that does not exist yet, and the
-//! state on a node is a plain stored field, never computed here.
+//! directory belongs to [`load_tree`](crate::load_tree), and the state on a
+//! node is a plain stored field, never computed here.
 
 use std::path::{Path, PathBuf};
 
@@ -26,9 +26,11 @@ use crate::NodeState;
 pub struct Node {
     /// The directory this node stands for.
     pub path: PathBuf,
-    /// The README documenting this node. Held separately from `path` because
+    /// The README documenting this node, or `None` when the node has none of
+    /// its own — a connector directory that is in the tree only because
+    /// documented modules sit below it. Held separately from `path` because
     /// the file name is not Warlock's to assume.
-    pub readme: PathBuf,
+    pub readme: Option<PathBuf>,
     /// What Warlock knows about this node right now.
     pub state: NodeState,
     /// Child nodes, in the order they should be rendered. Empty for a leaf.
@@ -38,13 +40,26 @@ pub struct Node {
 impl Node {
     /// A childless node at `path`, documented by `readme`, in `state`.
     ///
+    /// `readme` is anything path-like for a node that has one, or `None` for a
+    /// node that does not — see [`IntoReadme`].
+    ///
     /// Add children with [`Node::with_children`] or by pushing onto
     /// [`Node::children`] directly.
+    ///
+    /// ```
+    /// use warlock_engine::{Node, NodeState};
+    ///
+    /// let module = Node::new("repo/docs", "repo/docs/README.md", NodeState::Unpacted);
+    /// assert!(module.readme.is_some());
+    ///
+    /// let connector = Node::new("repo/crates", None, NodeState::Unpacted);
+    /// assert_eq!(connector.readme, None);
+    /// ```
     #[must_use]
-    pub fn new(path: impl Into<PathBuf>, readme: impl Into<PathBuf>, state: NodeState) -> Self {
+    pub fn new(path: impl Into<PathBuf>, readme: impl IntoReadme, state: NodeState) -> Self {
         Self {
             path: path.into(),
-            readme: readme.into(),
+            readme: readme.into_readme(),
             state,
             children: Vec::new(),
         }
@@ -62,6 +77,52 @@ impl Node {
     #[must_use]
     pub fn is_leaf(&self) -> bool {
         self.children.is_empty()
+    }
+}
+
+/// What [`Node::new`] accepts for a node's README.
+///
+/// A node's README is optional, but most nodes have one and saying `Some`
+/// at every such call site would be noise. This trait takes both forms:
+/// anything path-like means that README, and `None` means the node has none.
+///
+/// The impls are written out one type at a time rather than blanketed over
+/// `Into<PathBuf>`, because a blanket impl plus one for `Option` overlap as
+/// far as coherence is concerned. Listing them also keeps `None` on its own
+/// inferring to `Option<PathBuf>`, since that is the only impl it can match.
+pub trait IntoReadme {
+    /// This value as a node stores it: the README's path, or `None` for a
+    /// node without one.
+    fn into_readme(self) -> Option<PathBuf>;
+}
+
+impl IntoReadme for Option<PathBuf> {
+    fn into_readme(self) -> Option<PathBuf> {
+        self
+    }
+}
+
+impl IntoReadme for PathBuf {
+    fn into_readme(self) -> Option<PathBuf> {
+        Some(self)
+    }
+}
+
+impl IntoReadme for &Path {
+    fn into_readme(self) -> Option<PathBuf> {
+        Some(self.to_path_buf())
+    }
+}
+
+impl IntoReadme for &str {
+    fn into_readme(self) -> Option<PathBuf> {
+        Some(PathBuf::from(self))
+    }
+}
+
+impl IntoReadme for String {
+    fn into_readme(self) -> Option<PathBuf> {
+        Some(PathBuf::from(self))
     }
 }
 
@@ -157,8 +218,8 @@ impl Tree {
     /// The node at `path`, or `None` if the tree holds no such node.
     ///
     /// Paths are compared as stored, with no normalisation and no filesystem
-    /// access: this crate never touches the disk, so it cannot canonicalise
-    /// and will not pretend to.
+    /// access: a tree is just values, and whoever built it — a loader, a test,
+    /// a deserialiser — decided what those paths say.
     ///
     /// ```
     /// use warlock_engine::{Node, NodeState, Tree};
@@ -271,7 +332,8 @@ mod tests {
     fn fixture() -> Tree {
         Tree::new(
             Node::new("repo", "repo/README.md", NodeState::PactedStale).with_children([
-                Node::new("repo/crates", "repo/crates/README.md", NodeState::Unpacted),
+                // A connector: a directory with no README of its own.
+                Node::new("repo/crates", None, NodeState::Unpacted),
                 Node::new("repo/docs", "repo/docs/README.md", NodeState::PactedFresh)
                     .with_children([Node::new(
                         "repo/docs/adr",
@@ -287,6 +349,37 @@ mod tests {
         let node = Node::new("a", "a/README.md", NodeState::Unpacted);
         assert!(node.children.is_empty());
         assert!(node.is_leaf());
+    }
+
+    #[test]
+    fn a_readme_is_stored_however_it_was_given() {
+        let from_str = Node::new("a", "a/README.md", NodeState::Unpacted);
+        let from_path_buf = Node::new(
+            "a",
+            std::path::PathBuf::from("a/README.md"),
+            NodeState::Unpacted,
+        );
+        let from_option = Node::new(
+            "a",
+            Some(std::path::PathBuf::from("a/README.md")),
+            NodeState::Unpacted,
+        );
+        assert_eq!(from_str, from_path_buf);
+        assert_eq!(from_str, from_option);
+        assert_eq!(
+            from_str.readme,
+            Some(std::path::PathBuf::from("a/README.md"))
+        );
+    }
+
+    #[test]
+    fn a_node_with_no_readme_stores_none() {
+        let node = Node::new("repo/crates", None, NodeState::Unpacted);
+        assert_eq!(node.readme, None);
+        assert_eq!(
+            fixture().find("repo/crates").expect("in the tree").readme,
+            None
+        );
     }
 
     #[test]
@@ -307,7 +400,10 @@ mod tests {
         let tree = fixture();
         assert_eq!(tree.root_path(), std::path::Path::new("repo"));
         assert_eq!(tree.root.state, NodeState::PactedStale);
-        assert_eq!(tree.root.readme, std::path::PathBuf::from("repo/README.md"));
+        assert_eq!(
+            tree.root.readme,
+            Some(std::path::PathBuf::from("repo/README.md"))
+        );
     }
 
     #[test]
@@ -371,8 +467,9 @@ mod tests {
             Some(NodeState::PactedStale)
         );
         assert_eq!(
-            tree.find("repo/docs/adr").map(|node| &node.readme),
-            Some(&std::path::PathBuf::from("repo/docs/adr/README.md"))
+            tree.find("repo/docs/adr")
+                .map(|node| node.readme.as_deref()),
+            Some(Some(std::path::Path::new("repo/docs/adr/README.md")))
         );
     }
 
