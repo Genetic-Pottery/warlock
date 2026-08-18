@@ -3,8 +3,8 @@
 //! Section 5 of the design doc makes the project tree the interface: a tree of
 //! module READMEs, each coloured by its [`NodeState`]. This module gives that
 //! tree a type. It is pure shape and nothing else — building a tree from a real
-//! directory belongs to a filesystem loader that does not exist yet, and the
-//! state on a node is a plain stored field, never computed here.
+//! directory belongs to [`load_tree`](crate::load_tree), and the state on a
+//! node is a plain stored field, never computed here.
 
 use std::path::{Path, PathBuf};
 
@@ -218,8 +218,8 @@ impl Tree {
     /// The node at `path`, or `None` if the tree holds no such node.
     ///
     /// Paths are compared as stored, with no normalisation and no filesystem
-    /// access: this crate never touches the disk, so it cannot canonicalise
-    /// and will not pretend to.
+    /// access: a tree is just values, and whoever built it — a loader, a test,
+    /// a deserialiser — decided what those paths say.
     ///
     /// ```
     /// use warlock_engine::{Node, NodeState, Tree};

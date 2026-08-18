@@ -2,9 +2,10 @@
 //!
 //! This crate owns the domain vocabulary. It never depends on the TUI or on
 //! any terminal crate: the dependency edge runs TUI -> engine and never back.
-//! It does read and write files — the pact manifest at `.warlock/pacts.toml`
-//! is its business — but it opens no sockets and spawns no subprocesses, and
-//! it only ever touches the paths a caller hands it.
+//! It does touch the filesystem — it reads and writes the pact manifest at
+//! `.warlock/pacts.toml`, and it walks a directory to build a [`Tree`] from it
+//! — but it opens no sockets and spawns no subprocesses, and it never follows
+//! a symlink out of the directory a caller hands it.
 
 mod load;
 mod manifest;
@@ -36,8 +37,8 @@ pub use manifest::manifest_path;
 pub use manifest::to_manifest_path;
 /// The three-state vocabulary every node is coloured by.
 pub use state::NodeState;
-/// A placeholder tree, standing in for a filesystem loader that does not exist
-/// yet.
+/// A hard-coded tree for exercising a renderer. Not the loader: that is
+/// [`load_tree`].
 pub use stub::stub_tree;
 /// A depth-first walk over a tree, yielding each node with its depth.
 pub use tree::DepthFirst;
