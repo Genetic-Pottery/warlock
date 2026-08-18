@@ -4,10 +4,25 @@
 //! any terminal crate, and it reads no files and opens no sockets: the
 //! dependency edge runs TUI -> engine and never back.
 
+mod manifest;
 mod state;
 mod stub;
 mod tree;
 
+/// Everything that can go wrong reading, writing or building a manifest.
+pub use manifest::Error as ManifestError;
+/// The record of which modules are pacted: one `.warlock/pacts.toml` per
+/// repository.
+pub use manifest::Manifest;
+/// One pacted module: its directory, its README, and whatever was granted to
+/// it.
+pub use manifest::PactEntry;
+/// The manifest schema version this build reads and writes.
+pub use manifest::SCHEMA_VERSION;
+/// A manifest-relative path, back as a path under a root directory.
+pub use manifest::from_manifest_path;
+/// A caller's path in the form the manifest stores: relative, forward slashes.
+pub use manifest::to_manifest_path;
 /// The three-state vocabulary every node is coloured by.
 pub use state::NodeState;
 /// A placeholder tree, standing in for a filesystem loader that does not exist
