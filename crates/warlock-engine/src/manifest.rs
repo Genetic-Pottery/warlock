@@ -6,10 +6,11 @@
 //! committed to git, and it holds nothing but the list of pacted modules and
 //! what was granted to each.
 //!
-//! This module is the in-memory shape of that file and the rules for turning
-//! it into text and back. It touches no filesystem: the caller supplies the
-//! root directory that paths are measured against, and reading and writing the
-//! file itself lives elsewhere.
+//! This module is the in-memory shape of that file, the rules for turning it
+//! into text and back, and the two functions that move it on and off disk:
+//! [`Manifest::save`] and [`Manifest::load`]. Both are given the root directory
+//! — the parent of `.warlock/` — and go straight to it; nothing here searches
+//! upwards for a repository root.
 //!
 //! Two properties are worth stating up front, because everything else follows
 //! from them:
@@ -24,9 +25,21 @@
 //!   paths, on different operating systems, produce the same bytes.
 
 use std::fmt;
+use std::fs;
+use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Deserializer, Serialize};
+
+/// The directory the manifest lives in, directly under the repository root.
+///
+/// Committed to git, like the manifest itself: a pact is a fact about the
+/// repository, not about one developer's checkout.
+const MANIFEST_DIR: &str = ".warlock";
+
+/// The manifest's file name inside [`MANIFEST_DIR`].
+const MANIFEST_FILE: &str = "pacts.toml";
 
 /// The schema version this build reads and writes.
 ///
@@ -176,6 +189,106 @@ impl Manifest {
             version: SCHEMA_VERSION,
             entries,
         })
+    }
+
+    /// Write the manifest to `<root>/.warlock/pacts.toml`, atomically.
+    ///
+    /// `root` is the parent of `.warlock/` — the repository root — and is
+    /// taken as given: nothing here walks upwards looking for one. The
+    /// directory is created if it is not there.
+    ///
+    /// Atomic means the file is never seen half-written, not even if the
+    /// process dies mid-save: the text goes to a temporary file *in the same
+    /// directory* as the target (so the rename cannot cross a filesystem) and
+    /// is then renamed over it. A reader either sees the whole old manifest or
+    /// the whole new one. On success no temporary file is left behind; on
+    /// failure it is cleaned up on a best-effort basis.
+    ///
+    /// ```
+    /// use warlock_engine::{Manifest, PactEntry};
+    ///
+    /// let root = tempfile::tempdir()?;
+    /// let entry = PactEntry::new(root.path(), "crates/engine", "crates/engine/README.md")?;
+    /// let manifest = Manifest::with_entries([entry]);
+    ///
+    /// manifest.save(root.path())?;
+    /// assert_eq!(Manifest::load(root.path())?, manifest);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Serialize`] if the manifest cannot be written as TOML, or
+    /// [`Error::Io`] naming the path that failed if the directory cannot be
+    /// created, the temporary file cannot be written, or the rename fails.
+    pub fn save(&self, root: impl AsRef<Path>) -> Result<(), Error> {
+        // Serialise before touching the filesystem: a manifest that cannot be
+        // written as TOML should not leave a new directory behind.
+        let text = self.to_toml_string()?;
+
+        let dir = root.as_ref().join(MANIFEST_DIR);
+        fs::create_dir_all(&dir).map_err(|source| Error::Io {
+            path: dir.clone(),
+            source,
+        })?;
+
+        let temp = dir.join(temp_file_name());
+        if let Err(source) = write_and_sync(&temp, text.as_bytes()) {
+            drop(fs::remove_file(&temp));
+            return Err(Error::Io { path: temp, source });
+        }
+
+        let target = dir.join(MANIFEST_FILE);
+        if let Err(source) = fs::rename(&temp, &target) {
+            drop(fs::remove_file(&temp));
+            return Err(Error::Io {
+                path: target,
+                source,
+            });
+        }
+        Ok(())
+    }
+
+    /// Read the manifest at `<root>/.warlock/pacts.toml`.
+    ///
+    /// `root` is the parent of `.warlock/`, exactly as for [`Manifest::save`].
+    ///
+    /// **A missing file is [`Error::NotFound`], not an empty manifest.** The
+    /// two are different facts — "this repository has never pacted anything"
+    /// versus "this repository pacted nothing" — and only the caller knows
+    /// which of the two it wants to act on, so nothing is invented here. A
+    /// caller happy to treat the first as the second writes:
+    ///
+    /// ```
+    /// use warlock_engine::{Manifest, ManifestError};
+    ///
+    /// let root = tempfile::tempdir()?;
+    /// let manifest = match Manifest::load(root.path()) {
+    ///     Err(ManifestError::NotFound { .. }) => Manifest::new(),
+    ///     other => other?,
+    /// };
+    ///
+    /// assert_eq!(manifest, Manifest::new());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::NotFound`] if there is no manifest at that path.
+    /// * [`Error::Io`] if there is one but it cannot be read.
+    /// * [`Error::UnsupportedVersion`], [`Error::Syntax`] or [`Error::Entry`]
+    ///   if it can be read but not understood, as per
+    ///   [`Manifest::from_toml_str`] — a corrupt manifest is never confused
+    ///   with a missing one.
+    pub fn load(root: impl AsRef<Path>) -> Result<Self, Error> {
+        let path = manifest_path(root);
+        match fs::read_to_string(&path) {
+            Ok(text) => Self::from_toml_str(&text),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                Err(Error::NotFound { path })
+            }
+            Err(source) => Err(Error::Io { path, source }),
+        }
     }
 }
 
@@ -413,6 +526,48 @@ pub fn from_manifest_path(root: impl AsRef<Path>, stored: &str) -> PathBuf {
     path
 }
 
+/// Where the manifest lives under `root`: `<root>/.warlock/pacts.toml`.
+///
+/// `root` is the parent of `.warlock/`, i.e. the repository root. There is no
+/// search: this is a join, and the caller is the one that knows the root.
+///
+/// ```
+/// use std::path::Path;
+/// use warlock_engine::manifest_path;
+///
+/// assert_eq!(
+///     manifest_path("/repo"),
+///     Path::new("/repo").join(".warlock").join("pacts.toml"),
+/// );
+/// ```
+#[must_use]
+pub fn manifest_path(root: impl AsRef<Path>) -> PathBuf {
+    root.as_ref().join(MANIFEST_DIR).join(MANIFEST_FILE)
+}
+
+/// A file name for the temporary file a save writes before renaming.
+///
+/// It only has to be unique among whatever else might be writing this
+/// directory right now — process id for other processes, a counter for other
+/// threads in this one. It is a dot file so that a save interrupted hard
+/// enough to leave one behind at least leaves it out of a casual `ls`.
+fn temp_file_name() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(".{MANIFEST_FILE}.{}.{n}.tmp", std::process::id())
+}
+
+/// Write `bytes` to a fresh file at `path` and flush them to the disk.
+///
+/// The `sync_all` is the point: without it the rename can land before the
+/// contents do, and a crash in between leaves an empty manifest where a good
+/// one used to be.
+fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
 /// Everything that can go wrong reading, writing or building a manifest.
 ///
 /// Hand-rolled rather than derived: an error-handling dependency would buy
@@ -574,9 +729,13 @@ fn deserialize_version<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{Error, Manifest, PactEntry, SCHEMA_VERSION, from_manifest_path, to_manifest_path};
+    use super::{
+        Error, MANIFEST_FILE, Manifest, PactEntry, SCHEMA_VERSION, from_manifest_path,
+        manifest_path, to_manifest_path,
+    };
 
     /// An entry that has never been judged.
     fn unjudged() -> PactEntry {
@@ -597,6 +756,37 @@ mod tests {
     /// constructed directly.
     fn a_de_error() -> toml::de::Error {
         toml::from_str::<Manifest>("version = \"one\"").expect_err("a string is not an integer")
+    }
+
+    /// A throwaway directory to stand in for a repository root. Each test gets
+    /// its own, so the suite stays parallel-safe and leaves nothing behind.
+    fn a_root() -> tempfile::TempDir {
+        tempfile::tempdir().expect("a temporary directory")
+    }
+
+    /// The file names directly inside `<root>/.warlock`, sorted.
+    fn warlock_dir_listing(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(root.join(".warlock"))
+            .expect("the directory a save just created")
+            .map(|entry| {
+                entry
+                    .expect("a readable entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Write `text` to `<root>/.warlock/pacts.toml` without going through
+    /// [`Manifest::save`], the way a human or a merge conflict would.
+    fn hand_write(root: &Path, text: &str) {
+        let path = manifest_path(root);
+        fs::create_dir_all(path.parent().expect("the manifest has a directory"))
+            .expect("creates .warlock");
+        fs::write(&path, text).expect("writes the manifest");
     }
 
     #[test]
@@ -954,5 +1144,166 @@ mod tests {
             .source()
             .is_none()
         );
+    }
+
+    #[test]
+    fn saving_creates_the_directory_and_leaves_no_temporary_file_behind() {
+        let root = a_root();
+        assert!(!root.path().join(".warlock").exists(), "nothing there yet");
+
+        Manifest::with_entries([judged(), unjudged()])
+            .save(root.path())
+            .expect("saves");
+
+        // Exactly one file: the temporary the save wrote through has been
+        // renamed away, not left lying next to the manifest.
+        assert_eq!(warlock_dir_listing(root.path()), [MANIFEST_FILE]);
+        assert!(manifest_path(root.path()).is_file());
+    }
+
+    #[test]
+    fn saving_again_replaces_the_manifest_and_still_leaves_one_file() {
+        let root = a_root();
+        Manifest::with_entries([judged()])
+            .save(root.path())
+            .expect("saves");
+
+        let replacement = Manifest::with_entries([unjudged()]);
+        replacement.save(root.path()).expect("saves over");
+
+        assert_eq!(warlock_dir_listing(root.path()), [MANIFEST_FILE]);
+        assert_eq!(Manifest::load(root.path()).expect("loads"), replacement);
+    }
+
+    #[test]
+    fn the_same_manifest_saved_under_two_roots_gives_byte_identical_files() {
+        let saved_under = |root: &Path| {
+            let module = root.join("crates").join("warlock-engine");
+            let manifest = Manifest::with_entries([
+                PactEntry::new(root, &module, module.join("README.md"))
+                    .expect("inside the root")
+                    .with_grant("d0f5a1", "2026-08-19T07:32:00Z"),
+                PactEntry::new(root, root, root.join("README.md")).expect("inside the root"),
+            ]);
+            manifest.save(root).expect("saves");
+            fs::read(manifest_path(root)).expect("reads the file back")
+        };
+
+        let (one, two) = (a_root(), a_root());
+        assert_ne!(one.path(), two.path(), "two different absolute roots");
+        assert_eq!(saved_under(one.path()), saved_under(two.path()));
+    }
+
+    #[test]
+    fn loading_what_was_saved_gives_the_manifest_back() {
+        let root = a_root();
+        let manifest = Manifest::with_entries([judged(), unjudged()]);
+        manifest.save(root.path()).expect("saves");
+
+        let loaded = Manifest::load(root.path()).expect("loads");
+        assert_eq!(loaded, manifest);
+        assert_eq!(loaded.entries()[0].granted_hash(), Some("d0f5a1"));
+        assert_eq!(loaded.entries()[1].granted_hash(), None);
+    }
+
+    #[test]
+    fn saving_what_was_loaded_gives_the_file_back_byte_for_byte() {
+        let root = a_root();
+        // Hand-written rather than produced by a save, so this is a real
+        // statement about the file format and not about the serialiser
+        // agreeing with itself.
+        let original = concat!(
+            "version = 1\n\n",
+            "[[pact]]\n",
+            "module = \"crates/warlock-engine\"\n",
+            "readme = \"crates/warlock-engine/README.md\"\n",
+            "granted_hash = \"d0f5a1\"\n",
+            "granted_at = \"2026-08-19T07:32:00Z\"\n\n",
+            "[[pact]]\n",
+            "module = \"crates/warlock-tui\"\n",
+            "readme = \"crates/warlock-tui/README.md\"\n",
+        );
+        hand_write(root.path(), original);
+
+        let loaded = Manifest::load(root.path()).expect("loads");
+        loaded.save(root.path()).expect("saves");
+
+        assert_eq!(
+            fs::read_to_string(manifest_path(root.path())).expect("reads"),
+            original,
+            "a load-then-save is a no-op on the bytes, so it does not churn the diff"
+        );
+        assert_eq!(Manifest::load(root.path()).expect("reloads"), loaded);
+    }
+
+    #[test]
+    fn loading_a_manifest_from_a_future_schema_is_a_version_error() {
+        let root = a_root();
+        hand_write(
+            root.path(),
+            "version = 999\n\n[[pact]]\nmodule = \"x\"\nreadme = \"x/README.md\"\n",
+        );
+
+        match Manifest::load(root.path()) {
+            Err(Error::UnsupportedVersion { found, supported }) => {
+                assert_eq!(found, 999);
+                assert_eq!(supported, SCHEMA_VERSION);
+            }
+            other => panic!("expected an unsupported-version error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn loading_a_manifest_with_a_bad_entry_names_that_entry() {
+        let root = a_root();
+        hand_write(
+            root.path(),
+            concat!(
+                "version = 1\n\n",
+                "[[pact]]\nmodule = \"crates/warlock-engine\"\nreadme = \"crates/warlock-engine/README.md\"\n\n",
+                "[[pact]]\nmodule = \"crates/warlock-tui\"\nreadme = 7\n",
+            ),
+        );
+
+        let error = Manifest::load(root.path()).expect_err("a number is not a path");
+        assert!(matches!(error, Error::Entry { index: 1, .. }), "{error:?}");
+        assert!(
+            error.to_string().contains("crates/warlock-tui"),
+            "the message points at the entry to go and hand-edit: {error}"
+        );
+    }
+
+    #[test]
+    fn loading_a_manifest_that_is_not_there_is_not_found() {
+        let root = a_root();
+
+        // Documented behaviour: absent is `NotFound`, not an empty manifest,
+        // so a caller can tell "never pacted" from "pacted nothing".
+        match Manifest::load(root.path()) {
+            Err(Error::NotFound { path }) => assert_eq!(path, manifest_path(root.path())),
+            other => panic!("expected a not-found error, got {other:?}"),
+        }
+
+        // And a directory with no `.warlock` at all is the same answer, not an
+        // I/O error about the missing parent.
+        assert!(matches!(
+            Manifest::load(root.path().join("nowhere")),
+            Err(Error::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn a_missing_manifest_is_distinguishable_from_a_corrupt_one() {
+        let (missing, corrupt) = (a_root(), a_root());
+        hand_write(corrupt.path(), "this is not a manifest\n");
+
+        assert!(matches!(
+            Manifest::load(missing.path()),
+            Err(Error::NotFound { .. })
+        ));
+        assert!(matches!(
+            Manifest::load(corrupt.path()),
+            Err(Error::Syntax { .. })
+        ));
     }
 }
