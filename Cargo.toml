@@ -51,15 +51,22 @@ dbg_macro = "warn"
 # saying why the dependency is worth the supply chain.
 [workspace.dependencies]
 # Derive-based (de)serialisation: hand-rolling it for every engine type is a lot
-# of error-prone boilerplate, and serde is the de facto standard every future
-# format crate already speaks. No on-disk format is committed to here.
+# of error-prone boilerplate, and serde is the de facto standard every format
+# crate already speaks, including the one below.
 serde = { version = "1", features = ["derive"] }
+# The on-disk format for `.warlock/pacts.toml`: the manifest is committed to git
+# and hand-editable, so it needs a format people can read and diff, and `toml` is
+# the serde-native reader/writer for the one this repo already writes Cargo in.
+toml = { version = "1" }
 # The TUI framework section 12 of the design doc fixes on. It also re-exports
 # the terminal backend it is built against as `ratatui::crossterm`, so using
 # that re-export instead of naming crossterm here makes a version skew between
 # frontend and backend impossible.
 ratatui = { version = "0.30" }
 # Dev-only: round-trips a value through serde's own token stream, so the derives
-# can be tested in memory without pulling in a format crate and accidentally
-# committing to an on-disk format.
+# can be tested in memory, independently of how any one format spells them.
 serde_test = { version = "1" }
+# Dev-only: manifest tests write real files, and a self-deleting temporary
+# directory keeps them off the developer's repository and off each other's toes
+# without hand-rolling unique paths and cleanup in every test.
+tempfile = { version = "3" }
