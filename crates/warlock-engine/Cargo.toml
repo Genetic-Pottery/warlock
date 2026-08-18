@@ -10,12 +10,14 @@ repository.workspace = true
 # edge runs TUI -> engine and never back.
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
+toml = { workspace = true }
 
-# Tests only, and deliberately not a format crate: `serde_test` round-trips a
-# value through serde's own tokens, which proves the derives without the crate
-# ever naming an on-disk format.
+# Tests only. `serde_test` round-trips a value through serde's own tokens, which
+# proves the derives independently of the on-disk format, and `tempfile` gives
+# the manifest tests a throwaway directory to save into and load back from.
 [dev-dependencies]
 serde_test = { workspace = true }
+tempfile = { workspace = true }
 
 # Lint configuration lives in the root manifest so every crate is held to the
 # same bar; see `[workspace.lints]` there.
