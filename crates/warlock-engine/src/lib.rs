@@ -6,11 +6,18 @@
 //! is its business — but it opens no sockets and spawns no subprocesses, and
 //! it only ever touches the paths a caller hands it.
 
+mod load;
 mod manifest;
 mod state;
 mod stub;
 mod tree;
 
+/// Everything that can stop a directory becoming a tree.
+pub use load::Error as LoadError;
+/// Build a tree from a directory on disk, coloured by the manifest above it.
+pub use load::load_tree;
+/// The nearest ancestor of a directory that holds a `.warlock/` directory.
+pub use load::repository_root;
 /// Everything that can go wrong reading, writing or building a manifest.
 pub use manifest::Error as ManifestError;
 /// The record of which modules are pacted: one `.warlock/pacts.toml` per
