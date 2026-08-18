@@ -25,6 +25,27 @@ your project rendered as the AI understands it: a tree of module documents,
 coloured by whether that understanding is still true. You can still open files
 and read them. That is no longer the main event.
 
+## How the work flows
+
+A change does not start with a file. It starts with a conversation.
+
+You talk the change through with the patron, and it pushes back: what exactly do
+you want, which modules does this touch, what does done look like. What comes
+out is a brief and a set of tickets, each carrying a predicted module footprint.
+Later, you or someone else pulls a ticket and works it, with the boundary
+already agreed and the context already written down. The tree goes yellow where
+the code moved. A refresh sends the AI back over its own diff to update what it
+understands, and yellow goes green. That is the loop.
+
+The conversation is not overhead in front of the work. It is the work. Eight
+minutes of genuine back and forth, spent acting as your own PM and
+pressure-testing what you actually want, routinely saves hours on the other end.
+The alternative is the way most people use an agent today: fire a one-line
+prompt, watch it confidently build the wrong shape, then wrestle it back turn
+after turn, paying for the thinking you skipped in the most expensive currency
+available. Warlock's job is to make sure those eight minutes happen, and that
+nothing about them is lost afterwards.
+
 ## What it promises
 
 - **Documentation that is actually current.** A stale doc is stale the moment
@@ -45,8 +66,27 @@ and read them. That is no longer the main event.
   and its job is to spend that spend well by feeding it exactly the right slice
   of the project.
 
-This is an AI workflow framework, not an autopilot. The work stays human-gated,
-and the guiding principle is narrow on purpose:
+## What it is not
+
+- **Not autonomous.** Nothing merges because a model felt good about it. Every
+  consequential step is a human decision, and the point of the framework is that
+  the decision leaves a trace instead of evaporating into your Enter key.
+- **Not a project generator.** It will not turn one sentence into a shipped
+  feature, and it does not manufacture thought. A lazy one-liner inflated into a
+  beautifully formatted page is still a lazy one-liner, now with better
+  typography. The structure carries thinking; it cannot replace it.
+- **Not a way to stop knowing your codebase.** Whether a document needs updating
+  is a subjective call, and Warlock makes that judgment visible rather than
+  pretending to settle it. The map is negotiable. The code still has to work.
+- **Not an editor.** You can hand-edit anything, and the next refresh will
+  notice and reconcile. But the tool is not optimised for living in a file, and
+  anyone who wants to is not the customer.
+
+What it is: the same game you are already playing, given a shape. You were
+already directing an AI. This makes that legible, structured, and durable enough
+to survive handoff, onboarding, and the agent not being you.
+
+The guiding principle is narrow on purpose:
 
 > Warlock makes the right thing visible and easy. It never makes the wrong thing
 > impossible.
