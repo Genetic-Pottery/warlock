@@ -34,6 +34,8 @@ pub use state::NodeState;
 pub use stub::stub_tree;
 /// A depth-first walk over a tree, yielding each node with its depth.
 pub use tree::DepthFirst;
+/// What `Node::new` accepts for a README: anything path-like, or `None`.
+pub use tree::IntoReadme;
 /// One node of the project tree: its path, its README, its state, its children.
 pub use tree::Node;
 /// How many nodes of a tree sit in each state.

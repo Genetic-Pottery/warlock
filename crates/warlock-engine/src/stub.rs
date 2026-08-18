@@ -6,6 +6,8 @@
 //! out by hand, so the engine/TUI seam can be proven before the filesystem is
 //! involved.
 
+use std::path::PathBuf;
+
 use crate::{Node, NodeState, Tree};
 
 /// **Placeholder.** A small hard-coded tree, to be replaced by a real
@@ -41,27 +43,32 @@ use crate::{Node, NodeState, Tree};
 #[must_use]
 pub fn stub_tree() -> Tree {
     Tree::new(
-        Node::new("warlock", "warlock/README.md", NodeState::PactedStale).with_children([
+        Node::new(
+            "warlock",
+            Some(PathBuf::from("warlock/README.md")),
+            NodeState::PactedStale,
+        )
+        .with_children([
             Node::new(
                 "warlock/crates",
-                "warlock/crates/README.md",
+                Some(PathBuf::from("warlock/crates/README.md")),
                 NodeState::PactedStale,
             )
             .with_children([
                 Node::new(
                     "warlock/crates/engine",
-                    "warlock/crates/engine/README.md",
+                    Some(PathBuf::from("warlock/crates/engine/README.md")),
                     NodeState::PactedFresh,
                 ),
                 Node::new(
                     "warlock/crates/tui",
-                    "warlock/crates/tui/README.md",
+                    Some(PathBuf::from("warlock/crates/tui/README.md")),
                     NodeState::PactedStale,
                 ),
             ]),
             Node::new(
                 "warlock/assets",
-                "warlock/assets/README.md",
+                Some(PathBuf::from("warlock/assets/README.md")),
                 NodeState::Unpacted,
             ),
         ]),
