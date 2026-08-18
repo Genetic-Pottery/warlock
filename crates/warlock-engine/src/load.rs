@@ -422,15 +422,159 @@ mod tests {
 
     #[test]
     fn the_walk_skips_ignored_and_warlock_directories() {
-        let repo = fixture(&["target/debug"], &["target/debug", "src"]);
-        fs::write(repo.path().join(".gitignore"), "/target\n").expect("writes a .gitignore");
+        let repo = fixture(
+            &["target/debug"],
+            &["target/debug", ".git/hooks", "vendored", "src"],
+        );
+        fs::write(repo.path().join(".gitignore"), "/target\n/vendored\n")
+            .expect("writes a .gitignore");
         fs::write(repo.path().join(".warlock/README.md"), "# not a module\n")
             .expect("writes a README inside .warlock");
 
         assert_eq!(
             relative_paths(&load_tree(repo.path()).expect("loads"), repo.path()),
-            ["", "src"]
+            ["", "src"],
+            "`target/` and `vendored/` are gitignored, `.git/` is git's own, \
+             and `.warlock/` is ours — a README in any of them changes nothing"
         );
+    }
+
+    #[test]
+    fn nesting_goes_as_deep_as_the_directories_do() {
+        let repo = fixture(
+            &["crates/engine/src/inner"],
+            &["crates/engine", "crates/engine/src/inner/deep"],
+        );
+
+        let tree = load_tree(repo.path()).expect("loads");
+
+        assert_eq!(
+            relative_paths(&tree, repo.path()),
+            [
+                "",
+                "crates",
+                "crates/engine",
+                "crates/engine/src",
+                "crates/engine/src/inner",
+                "crates/engine/src/inner/deep",
+            ],
+            "`src/` and `inner/` are connectors four and five levels down, kept \
+             only because a module sits below them"
+        );
+        assert_eq!(
+            tree.walk()
+                .map(|(_, depth)| depth)
+                .max()
+                .expect("a non-empty tree"),
+            5,
+        );
+    }
+
+    #[test]
+    fn an_empty_manifest_loads_entirely_unpacted() {
+        let repo = fixture(&[], &["docs", "src"]);
+        Manifest::new()
+            .save(repo.path())
+            .expect("saves an empty manifest");
+
+        let tree = load_tree(repo.path()).expect("loads");
+
+        assert_eq!(tree.counts().total(), 3);
+        assert_eq!(tree.counts().unpacted, 3);
+    }
+
+    #[test]
+    fn a_manifest_entry_colours_exactly_the_node_it_names() {
+        let repo = fixture(&[], &["crates/engine", "crates/engine/src", "crates/tui"]);
+        let module = repo.path().join("crates/engine");
+        Manifest::with_entries([
+            PactEntry::new(repo.path(), &module, module.join("README.md"))
+                .expect("inside the root"),
+        ])
+        .save(repo.path())
+        .expect("saves");
+
+        let tree = load_tree(repo.path()).expect("loads");
+
+        assert_eq!(
+            tree.counts(),
+            crate::StateCounts {
+                unpacted: 4,
+                pacted_stale: 1,
+                pacted_fresh: 0,
+            },
+            "one entry, one stale node, and nothing this loader can make fresh"
+        );
+        assert_eq!(
+            tree.find(&module).expect("the pacted module").state,
+            NodeState::PactedStale,
+        );
+        assert_eq!(
+            tree.find(module.join("src"))
+                .expect("the module's own child")
+                .state,
+            NodeState::Unpacted,
+            "an entry colours its own node, not the ones under it",
+        );
+    }
+
+    /// Only on unix, because the fixture needs `std::os::unix::fs::symlink` to
+    /// build the cycle at all. The behaviour under test — that the walk does
+    /// not follow links — is not platform-specific.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_cycle_loads_and_terminates() {
+        let repo = fixture(&[], &["crates/engine"]);
+
+        // Two links, so neither a self-cycle nor a link back to an ancestor is
+        // enough to send the walk round for ever.
+        std::os::unix::fs::symlink(repo.path(), repo.path().join("crates/engine/up"))
+            .expect("links back to the root");
+        std::os::unix::fs::symlink(
+            repo.path().join("crates"),
+            repo.path().join("crates/engine/sideways"),
+        )
+        .expect("links back to an ancestor");
+
+        assert_eq!(
+            relative_paths(&load_tree(repo.path()).expect("loads"), repo.path()),
+            ["", "crates", "crates/engine"],
+            "a symlinked directory is not descended into, so it is not a node"
+        );
+    }
+
+    #[test]
+    fn this_repository_loads_with_its_crates_and_nothing_ignored() {
+        // The repository root from the crate being compiled, not the process's
+        // working directory: `cargo test` sets that per invocation and a test
+        // that depends on it passes or fails by where it was run from.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("crates/warlock-engine sits two levels below the root");
+
+        let tree = load_tree(root).expect("this repository has a `.warlock` directory");
+        let paths = relative_paths(&tree, root);
+
+        for expected in ["", "crates", "crates/warlock-engine", "crates/warlock-tui"] {
+            assert!(paths.iter().any(|path| path == expected), "{paths:?}");
+        }
+        assert_eq!(
+            tree.find(root.join("crates"))
+                .expect("`crates/` is a connector")
+                .readme,
+            None,
+            "`crates/` has no README of its own",
+        );
+        for ignored in ["target", ".git", ".red", ".forman"] {
+            assert!(
+                !paths
+                    .iter()
+                    .any(|path| path.split('/').any(|part| part == ignored)),
+                "`{ignored}` is hidden or gitignored, so the walk should never \
+                 have reached it: {paths:?}"
+            );
+        }
     }
 
     #[test]
