@@ -3,16 +3,22 @@
 //! This crate owns the domain vocabulary. It never depends on the TUI or on
 //! any terminal crate: the dependency edge runs TUI -> engine and never back.
 //! It does touch the filesystem — it reads and writes the pact manifest at
-//! `.warlock/pacts.toml`, and it walks a directory to build a [`Tree`] from it
-//! — but it opens no sockets and spawns no subprocesses, and it never follows
-//! a symlink out of the directory a caller hands it.
+//! `.warlock/pacts.toml`, it walks a directory to build a [`Tree`] from it,
+//! and it reads the bytes of the files under a directory to hash them
+//! ([`subtree_hash`]) — but it opens no sockets and spawns no subprocesses,
+//! and it never follows a symlink out of the directory a caller hands it.
 
+mod hash;
 mod load;
 mod manifest;
 mod state;
 mod stub;
 mod tree;
 
+/// Everything that can stop a subtree being hashed.
+pub use hash::Error as HashError;
+/// The hash of everything at and below a directory.
+pub use hash::subtree_hash;
 /// Everything that can stop a directory becoming a tree.
 pub use load::Error as LoadError;
 /// Build a tree from a directory on disk, coloured by the manifest above it.
