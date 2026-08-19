@@ -14,6 +14,7 @@
 //! to fix.
 
 use std::io::{self, Stdout};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::{env, fmt, panic};
 
@@ -25,8 +26,11 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use warlock_engine::{LoadError, LoadProblem, Loaded, load_tree, repository_root};
-use warlock_tui::{App, draw};
+use warlock_engine::{
+    LoadError, LoadProblem, Loaded, Manifest, ManifestError, PactEntry, load_tree, repository_root,
+    to_manifest_path,
+};
+use warlock_tui::{App, PactToggle, draw};
 
 fn main() -> ExitCode {
     // Before anything touches the terminal: a panic during setup has to leave
@@ -58,9 +62,16 @@ fn main() -> ExitCode {
 ///
 /// After the guard is entered, every `?` returns through its `Drop`, which is
 /// the whole reason the guard exists: there is no error path out of this
-/// function that skips restoration.
+/// function that skips restoration — including the pact key's, which is the
+/// one keystroke that writes to disk and so the one that can fail.
 fn run() -> Result<(), Error> {
-    let mut app = load_app()?;
+    let (mut app, repo_root) = load_app()?;
+    // Loaded before the terminal is touched, for the same reason the tree is:
+    // a manifest that will not parse should say so on the normal screen. This
+    // is a second read of the file the loader already parsed, which is cheap
+    // and keeps the front end from reaching into the loader's internals for a
+    // value it needs to keep and edit.
+    let mut manifest = load_manifest(&repo_root)?;
     let mut guard = TerminalGuard::enter()?;
 
     loop {
@@ -76,12 +87,84 @@ fn run() -> Result<(), Error> {
             Some(Action::Quit) => return Ok(()),
             Some(Action::SelectPrevious) => app.select_previous(),
             Some(Action::SelectNext) => app.select_next(),
+            // The app has already flipped the row's colour and its tally, so
+            // the next frame — drawn at the top of this same loop, with no
+            // reload of the tree — shows the new state. The manifest is
+            // brought into line and saved here, before that frame: the file on
+            // disk and the colour on screen change in the same keystroke, and
+            // a save that fails returns rather than leaving the screen
+            // claiming something that was never written.
+            Some(Action::TogglePact) => {
+                if let Some(toggle) = app.toggle_pact() {
+                    manifest = with_toggle(&manifest, &repo_root, &toggle)
+                        .map_err(|source| Error::Manifest { source })?;
+                    manifest
+                        .save(&repo_root)
+                        .map_err(|source| Error::Manifest { source })?;
+                }
+            }
             None => {}
         }
     }
 }
 
-/// The app state for the directory warlock was invoked from.
+/// `manifest` with `toggle` applied: an entry for a node just pacted, or no
+/// entry for one just unpacted.
+///
+/// Pure, and the only place the front end decides what a pact *is* in the
+/// file: a [`PactEntry`] with no grant, because a module that has just been
+/// pacted has never been judged, and unjudged is stale (design doc §5/§6).
+/// That is also why nothing here hashes anything.
+///
+/// Written as rebuild-then-maybe-push rather than as two branches, so pacting
+/// a module the manifest somehow already lists cannot leave two entries for
+/// it. Order is otherwise the file's own: entries keep their positions and a
+/// new one lands at the end, which keeps the diff to the lines that changed.
+///
+/// # Errors
+///
+/// Whatever [`PactEntry::new`] and [`to_manifest_path`] refuse: a path outside
+/// the repository root, or one that is not UTF-8.
+fn with_toggle(
+    manifest: &Manifest,
+    repo_root: &Path,
+    toggle: &PactToggle,
+) -> Result<Manifest, ManifestError> {
+    let module = to_manifest_path(repo_root, &toggle.path)?;
+    let mut next = Manifest::with_entries(
+        manifest
+            .entries()
+            .iter()
+            .filter(|entry| entry.module() != module)
+            .cloned(),
+    );
+    if toggle.pacted {
+        next.push(PactEntry::new(repo_root, &toggle.path, &toggle.readme)?);
+    }
+    Ok(next)
+}
+
+/// The repository's manifest, or an empty one if it has never pacted anything.
+///
+/// The same reading of a missing file the loader takes: nothing on disk and
+/// nothing pacted are the same thing to draw, and the difference only matters
+/// to code that would refuse to create the file, which this is not — pressing
+/// `p` in a repository with no `.warlock/` is how the first manifest gets
+/// written.
+fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
+    match Manifest::load(repo_root) {
+        Err(ManifestError::NotFound { .. }) => Ok(Manifest::new()),
+        other => other.map_err(|source| Error::Manifest { source }),
+    }
+}
+
+/// The app state for the directory warlock was invoked from, and the
+/// repository root it sits in.
+///
+/// The root is handed back rather than dropped once the header is built,
+/// because it is also where the manifest lives: every pact written during the
+/// run is written relative to this path, and finding it is a walk up the
+/// filesystem that should happen once.
 ///
 /// This is the whole of the front end's knowledge about scope, and it is
 /// section 12's modular invocation rule spelled out: the tree is rooted at the
@@ -94,7 +177,7 @@ fn run() -> Result<(), Error> {
 /// are files Warlock could not read, so the nodes above them are coloured
 /// stale on no evidence; showing that as an ordinary tree would put a colour
 /// on screen that nothing on disk backs up.
-fn load_app() -> Result<App, Error> {
+fn load_app() -> Result<(App, PathBuf), Error> {
     let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
     let Loaded { tree, problems } =
         load_tree(&working_dir).map_err(|source| Error::Load { source })?;
@@ -108,7 +191,8 @@ fn load_app() -> Result<App, Error> {
     // reached.
     let repo_root = repository_root(tree.root_path()).unwrap_or(working_dir);
 
-    Ok(App::from_tree(&tree).with_scope(repo_root, tree.root_path()))
+    let app = App::from_tree(&tree).with_scope(&repo_root, tree.root_path());
+    Ok((app, repo_root))
 }
 
 /// Everything that can stop warlock showing a tree.
@@ -143,6 +227,17 @@ enum Error {
         first: String,
         /// How many further problems went unnamed.
         rest: usize,
+    },
+    /// The pact manifest could not be read at startup, or written when a pact
+    /// was toggled.
+    ///
+    /// The write is the interesting half: a read-only `.warlock/`, a full
+    /// disk. It reaches `main` the same way every other failure does, which is
+    /// the point — the terminal is restored by the guard on the way out, one
+    /// line goes to stderr, and the exit status says it did not work.
+    Manifest {
+        /// Which of the manifest's cases it was, with the path it names.
+        source: ManifestError,
     },
     /// The terminal could not be set up, drawn to, or read from.
     Terminal {
@@ -205,6 +300,9 @@ impl fmt::Display for Error {
             // a user — flattened, because a manifest that will not parse
             // carries the TOML parser's multi-line diagnostic inside it.
             Self::Load { source } => write!(f, "{}", one_line(&source.to_string())),
+            // Flattened for the same reason as a load: the manifest's own
+            // errors carry the TOML parser's multi-line diagnostic.
+            Self::Manifest { source } => write!(f, "{}", one_line(&source.to_string())),
             Self::Problems { first, rest: 0 } => write!(f, "{first}"),
             Self::Problems { first, rest } => {
                 write!(f, "{first} (and {rest} more like it)")
@@ -219,6 +317,7 @@ impl std::error::Error for Error {
         match self {
             Self::WorkingDirectory { source } | Self::Terminal { source } => Some(source),
             Self::Load { source } => Some(source),
+            Self::Manifest { source } => Some(source),
             Self::Problems { .. } => None,
         }
     }
@@ -246,6 +345,8 @@ enum Action {
     SelectPrevious,
     /// Move the selection one row down.
     SelectNext,
+    /// Pact the selected node, or unpact it if it is pacted already.
+    TogglePact,
 }
 
 /// The action `key` asks for, or `None` for a key that means nothing here.
@@ -253,7 +354,9 @@ enum Action {
 /// Only presses count. Crossterm reports key releases and auto-repeats on some
 /// platforms (Windows, and on terminals that speak the Kitty keyboard
 /// protocol) and not on others, so acting on anything but a press would move
-/// the selection twice per keystroke on those platforms and once on the rest.
+/// the selection twice per keystroke on those platforms and once on the rest —
+/// and, since `p` writes the manifest, would toggle a pact straight back off
+/// again on the release of the key that turned it on.
 ///
 /// Ctrl-C is a key event, not a signal: raw mode is exactly the mode in which
 /// the terminal stops turning it into `SIGINT`, so if this function does not
@@ -273,6 +376,10 @@ fn action_for(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
         KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectPrevious),
         KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
+        // Lower case only, and with no confirmation: the mnemonic is the
+        // product's own word (pact, §15), and the action is its own undo —
+        // pressing it again removes what it wrote.
+        KeyCode::Char('p') => Some(Action::TogglePact),
         _ => None,
     }
 }
@@ -349,9 +456,18 @@ fn install_panic_hook() {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use std::path::{Path, PathBuf};
 
-    use super::{Action, Error, action_for, one_line};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use warlock_engine::{Manifest, ManifestError, PactEntry};
+    use warlock_tui::PactToggle;
+
+    use super::{Action, Error, action_for, one_line, with_toggle};
+
+    /// A root no test touches on disk: every path below is made relative to it
+    /// by string surgery, so none of these tests needs a repository, a
+    /// temporary directory or a filesystem at all.
+    const ROOT: &str = "/repo";
 
     /// A plain press of `code`, as crossterm reports one with no modifiers.
     fn press(code: KeyCode) -> KeyEvent {
@@ -427,6 +543,12 @@ mod tests {
                 first: PROBLEM.to_owned(),
                 rest: 2,
             },
+            Error::Manifest {
+                source: ManifestError::Io {
+                    path: PathBuf::from("/repo/.warlock/pacts.toml"),
+                    source: std::io::Error::other("boom"),
+                },
+            },
         ];
 
         for error in errors {
@@ -434,6 +556,21 @@ mod tests {
             assert!(!message.contains('\n'), "{error:?} wrapped: {message}");
             assert!(!message.is_empty(), "{error:?} said nothing");
         }
+    }
+
+    #[test]
+    fn a_manifest_that_cannot_be_saved_says_so_in_the_engines_words() {
+        let error = Error::Manifest {
+            source: ManifestError::Io {
+                path: PathBuf::from("/repo/.warlock/pacts.toml"),
+                source: std::io::Error::other("permission denied"),
+            },
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "could not read or write `/repo/.warlock/pacts.toml`: permission denied"
+        );
     }
 
     #[test]
@@ -482,6 +619,113 @@ mod tests {
         assert_eq!(
             action_for(press(KeyCode::Char('j'))),
             Some(Action::SelectNext)
+        );
+    }
+
+    #[test]
+    fn p_toggles_the_pact_on_the_selected_node() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('p'))),
+            Some(Action::TogglePact)
+        );
+    }
+
+    #[test]
+    fn releases_and_repeats_of_p_write_nothing() {
+        // The same rule as for movement, and it matters more here: a release
+        // acted on would undo the pact the press had just written, and a held
+        // key would rewrite the manifest as fast as the terminal repeats.
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                KeyCode::Char('p'),
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                action_for(event),
+                None,
+                "{kind:?} should not write anything"
+            );
+        }
+    }
+
+    /// The toggle the app hands back for `path`, documented by `path/README.md`.
+    fn toggle(path: &str, pacted: bool) -> PactToggle {
+        PactToggle {
+            path: PathBuf::from(ROOT).join(path),
+            readme: PathBuf::from(ROOT).join(path).join("README.md"),
+            pacted,
+        }
+    }
+
+    #[test]
+    fn pacting_adds_an_entry_with_a_relative_path_and_no_grant() {
+        let manifest = with_toggle(
+            &Manifest::new(),
+            Path::new(ROOT),
+            &toggle("crates/engine", true),
+        )
+        .expect("a path under the root can be stored");
+
+        let entry = manifest
+            .entry("crates/engine")
+            .expect("the entry was added");
+        assert_eq!(entry.module(), "crates/engine");
+        assert_eq!(entry.readme(), "crates/engine/README.md");
+        // Never judged, which is what makes the row stale rather than fresh.
+        assert_eq!(entry.granted_hash(), None);
+    }
+
+    #[test]
+    fn unpacting_takes_the_entry_out_again_and_leaves_the_others() {
+        let other = PactEntry::new(ROOT, "crates/tui", "crates/tui/README.md")
+            .expect("a path under the root can be stored");
+        let start = Manifest::with_entries([other.clone()]);
+
+        let pacted = with_toggle(&start, Path::new(ROOT), &toggle("crates/engine", true))
+            .expect("a path under the root can be stored");
+        let unpacted = with_toggle(&pacted, Path::new(ROOT), &toggle("crates/engine", false))
+            .expect("a path under the root can be stored");
+
+        assert_eq!(pacted.entries().len(), 2);
+        // Back exactly where it started, entry order included.
+        assert_eq!(unpacted, start);
+        assert_eq!(unpacted.entries(), [other]);
+    }
+
+    #[test]
+    fn pacting_the_same_module_twice_leaves_one_entry() {
+        // Unreachable through the app, whose row would be pacted already, but
+        // a duplicate `module` in the file is the one thing a rebuild here
+        // must not produce.
+        let once = with_toggle(
+            &Manifest::new(),
+            Path::new(ROOT),
+            &toggle("crates/engine", true),
+        )
+        .expect("a path under the root can be stored");
+        let twice = with_toggle(&once, Path::new(ROOT), &toggle("crates/engine", true))
+            .expect("a path under the root can be stored");
+
+        assert_eq!(twice.entries().len(), 1);
+    }
+
+    #[test]
+    fn a_node_outside_the_repository_root_is_refused_rather_than_stored() {
+        let outside = PactToggle {
+            path: PathBuf::from("/elsewhere/crates/engine"),
+            readme: PathBuf::from("/elsewhere/crates/engine/README.md"),
+            pacted: true,
+        };
+
+        let error = with_toggle(&Manifest::new(), Path::new(ROOT), &outside)
+            .expect_err("a path outside the root has no manifest spelling");
+
+        assert!(
+            matches!(error, ManifestError::PathOutsideRoot { .. }),
+            "unexpected error: {error}"
         );
     }
 
