@@ -157,9 +157,10 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use warlock_engine::{Node, NodeState, StateCounts, Tree, stub_tree};
+    use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
     use super::{App, Row};
+    use crate::fixture;
 
     /// Three rows, one per state, standing in for a flattened tree without
     /// dragging a `Tree` into tests that are only about the selection.
@@ -209,7 +210,7 @@ mod tests {
 
     #[test]
     fn flattening_a_tree_keeps_every_node_and_its_state() {
-        let tree = stub_tree();
+        let tree = fixture::tree();
 
         let app = App::from_tree(&tree);
 
@@ -222,7 +223,7 @@ mod tests {
 
     #[test]
     fn an_app_carries_the_trees_own_counts() {
-        let tree = stub_tree();
+        let tree = fixture::tree();
 
         let app = App::from_tree(&tree);
 
@@ -232,7 +233,7 @@ mod tests {
 
     #[test]
     fn an_app_built_from_bare_rows_counts_nothing_until_told() {
-        let counts = stub_tree().counts();
+        let counts = fixture::tree().counts();
 
         let app = App::from_rows(three_rows());
 

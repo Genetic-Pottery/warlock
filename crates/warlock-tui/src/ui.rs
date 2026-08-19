@@ -119,11 +119,12 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::style::{Color, Modifier};
-    use warlock_engine::{NodeState, stub_tree};
+    use warlock_engine::NodeState;
 
     use super::{FOOTER_HEIGHT, SELECTION_MARKER, draw};
     use crate::app::App;
     use crate::colour::colour_for;
+    use crate::fixture;
 
     /// Draw `app` onto an in-memory terminal of the given size and hand back
     /// the buffer. No tty is involved, so this runs anywhere `cargo test` does.
@@ -166,7 +167,7 @@ mod tests {
 
     #[test]
     fn every_node_gets_its_own_line_indented_by_depth_in_walk_order() {
-        let app = App::from_tree(&stub_tree());
+        let app = App::from_tree(&fixture::tree());
 
         let buffer = render(&app, 40, 10);
 
@@ -188,14 +189,14 @@ mod tests {
 
     #[test]
     fn each_line_is_drawn_in_its_states_colour() {
-        let app = App::from_tree(&stub_tree());
+        let app = App::from_tree(&fixture::tree());
 
         let buffer = render(&app, 40, 10);
 
         // Including the selected row: the highlight only adds modifiers, so
         // the row's text keeps its state's colour underneath.
         for (index, row) in app.rows().iter().enumerate() {
-            let y = u16::try_from(index).expect("the stub tree is small");
+            let y = u16::try_from(index).expect("the fixture tree is small");
             assert_eq!(
                 first_glyph_colour(&buffer, y),
                 colour_for(row.state),
@@ -207,7 +208,7 @@ mod tests {
 
     #[test]
     fn exactly_one_line_is_highlighted_and_it_is_the_selected_one() {
-        let mut app = App::from_tree(&stub_tree());
+        let mut app = App::from_tree(&fixture::tree());
         app.select_next();
         app.select_next();
 
@@ -222,7 +223,7 @@ mod tests {
 
     #[test]
     fn the_selection_marker_moves_with_the_selection() {
-        let mut app = App::from_tree(&stub_tree());
+        let mut app = App::from_tree(&fixture::tree());
         app.select_next();
 
         let buffer = render(&app, 40, 10);
@@ -233,7 +234,7 @@ mod tests {
 
     #[test]
     fn the_footer_shows_the_engines_counts_and_the_keys() {
-        let tree = stub_tree();
+        let tree = fixture::tree();
         let app = App::from_tree(&tree);
         let height = 10;
 
