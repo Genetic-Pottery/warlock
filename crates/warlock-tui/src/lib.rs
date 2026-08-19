@@ -21,6 +21,8 @@ mod ui;
 
 /// The front end's state: the flattened tree and the selected row.
 pub use app::App;
+/// What a pact toggle changed, for whoever has to write it to the manifest.
+pub use app::PactToggle;
 /// One line of the flattened tree.
 pub use app::Row;
 /// The colour a node state is drawn in.

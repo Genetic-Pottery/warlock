@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{NodeState, StateCounts, Tree, to_manifest_path};
+use warlock_engine::{IntoReadme, NodeState, StateCounts, Tree, to_manifest_path};
 
 /// What the header says when the tree is rooted at the repository root itself.
 ///
@@ -27,6 +27,12 @@ const REPOSITORY_ROOT_LABEL: &str = "(repository root)";
 /// A row owns its path rather than borrowing from the tree, so [`App`] is a
 /// self-contained value that can be built, moved and asserted on without
 /// lifetimes threading through the event loop.
+///
+/// The README comes along for the same reason: pacting a node needs one, and
+/// the row is what the key handler has in its hand when the key is pressed.
+/// Fetching it back out of the tree at that moment would mean keeping the tree
+/// alongside the rows and looking a path up in it, which is two sources for one
+/// fact.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Row {
     /// How deep the node sits: `0` for the root, `1` for its children.
@@ -34,20 +40,51 @@ pub struct Row {
     /// The path of the node this row stands for, exactly as the engine stores
     /// it.
     pub path: PathBuf,
+    /// The README documenting the node, straight from [`warlock_engine::Node`],
+    /// or `None` for a connector directory that has none of its own.
+    pub readme: Option<PathBuf>,
     /// What Warlock knows about the node, which is what colours the row.
     pub state: NodeState,
 }
 
 impl Row {
-    /// A row for a node at `path`, sitting at `depth`, in `state`.
+    /// A row for a node at `path`, documented by `readme`, sitting at `depth`,
+    /// in `state`.
+    ///
+    /// `readme` takes whatever [`warlock_engine::Node::new`] takes: anything
+    /// path-like for a node that has one, or `None` for a connector that does
+    /// not.
     #[must_use]
-    pub fn new(depth: usize, path: impl Into<PathBuf>, state: NodeState) -> Self {
+    pub fn new(
+        depth: usize,
+        path: impl Into<PathBuf>,
+        readme: impl IntoReadme,
+        state: NodeState,
+    ) -> Self {
         Self {
             depth,
             path: path.into(),
+            readme: readme.into_readme(),
             state,
         }
     }
+}
+
+/// What a pact toggle changed, for the caller that has to write it down.
+///
+/// [`App::toggle_pact`] flips the state on screen; the manifest is somebody
+/// else's file, so this says what happened and lets that somebody act on it.
+/// A node with no README cannot be pacted at all, so `readme` is not optional
+/// here — a toggle that produced one of these is a toggle of a real module.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PactToggle {
+    /// The directory whose pact was toggled.
+    pub path: PathBuf,
+    /// The README documenting it, which a manifest entry needs.
+    pub readme: PathBuf,
+    /// Whether the node is pacted *now*, after the toggle: `true` means an
+    /// entry should be written for it, `false` that its entry should go.
+    pub pacted: bool,
 }
 
 /// The front end's state: the flattened tree, the selected row, the tally the
@@ -82,7 +119,9 @@ impl App {
     pub fn from_tree(tree: &Tree) -> Self {
         Self::from_rows(
             tree.walk()
-                .map(|(node, depth)| Row::new(depth, node.path.clone(), node.state))
+                .map(|(node, depth)| {
+                    Row::new(depth, node.path.clone(), node.readme.clone(), node.state)
+                })
                 .collect(),
         )
         .with_counts(tree.counts())
@@ -202,25 +241,127 @@ impl App {
         let last = self.rows.len().saturating_sub(1);
         self.selected = self.selected.saturating_add(1).min(last);
     }
+
+    /// Bring the selected node under Warlock's management, or take it back out
+    /// again, and say what changed.
+    ///
+    /// An unpacted node becomes [`NodeState::PactedStale`], never fresh: a pact
+    /// with no granted hash was never judged, and unjudged *is* stale. A pacted
+    /// node, stale or fresh, becomes [`NodeState::Unpacted`] — dropping a pact
+    /// drops whatever was granted with it.
+    ///
+    /// The tally moves with the row, one node out of the old state's field and
+    /// into the new one, so [`App::counts`] keeps describing [`App::rows`] and
+    /// [`StateCounts::total`] does not budge. Nothing recounts the rows: the
+    /// counts are the engine's numbers, kept current rather than re-derived.
+    ///
+    /// Returns what the caller needs to edit the manifest with, or `None` when
+    /// nothing was toggled — an app with no rows, or a selected node with no
+    /// README. A directory without a README is not a module (it is a connector,
+    /// kept only because modules sit below it) and a manifest entry has nowhere
+    /// to point without one, so such a node is refused outright: no state
+    /// changes, no count changes, nothing to write.
+    ///
+    /// Writing the manifest is the caller's job. This is app state and touches
+    /// no file.
+    pub fn toggle_pact(&mut self) -> Option<PactToggle> {
+        let row = self.rows.get_mut(self.selected)?;
+        let readme = row.readme.clone()?;
+
+        let was = row.state;
+        let now = match was {
+            NodeState::Unpacted => NodeState::PactedStale,
+            NodeState::PactedStale | NodeState::PactedFresh => NodeState::Unpacted,
+        };
+        row.state = now;
+        let path = row.path.clone();
+
+        // Both halves of the move happen together or neither does. An app told
+        // rows but never told a tally (see `App::from_rows`) holds zeroes that
+        // never described those rows, and nudging one field up while the other
+        // cannot come down would turn a tally that is merely absent into one
+        // that counts a node that is not there.
+        let old = count_mut(&mut self.counts, was);
+        if let Some(fewer) = old.checked_sub(1) {
+            *old = fewer;
+            *count_mut(&mut self.counts, now) += 1;
+        }
+
+        Some(PactToggle {
+            path,
+            readme,
+            pacted: now.is_pacted(),
+        })
+    }
+}
+
+/// The field of `counts` holding the tally for `state`.
+///
+/// [`StateCounts`]' fields are public but its own accessor for this is not, so
+/// the match lives here instead. Written as a match on the enum rather than a
+/// lookup, so a fourth state would fail to compile rather than quietly go
+/// uncounted.
+fn count_mut(counts: &mut StateCounts, state: NodeState) -> &mut usize {
+    match state {
+        NodeState::Unpacted => &mut counts.unpacted,
+        NodeState::PactedStale => &mut counts.pacted_stale,
+        NodeState::PactedFresh => &mut counts.pacted_fresh,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
-    use super::{App, REPOSITORY_ROOT_LABEL, Row};
+    use super::{App, PactToggle, REPOSITORY_ROOT_LABEL, Row};
     use crate::fixture;
 
     /// Three rows, one per state, standing in for a flattened tree without
     /// dragging a `Tree` into tests that are only about the selection.
     fn three_rows() -> Vec<Row> {
         vec![
-            Row::new(0, "repo", NodeState::PactedStale),
-            Row::new(1, "repo/crates", NodeState::PactedFresh),
-            Row::new(1, "repo/assets", NodeState::Unpacted),
+            Row::new(0, "repo", "repo/README.md", NodeState::PactedStale),
+            Row::new(
+                1,
+                "repo/crates",
+                "repo/crates/README.md",
+                NodeState::PactedFresh,
+            ),
+            Row::new(
+                1,
+                "repo/assets",
+                "repo/assets/README.md",
+                NodeState::Unpacted,
+            ),
         ]
+    }
+
+    /// The tally the rows actually add up to, counted here rather than asked
+    /// of the app: a test that recomputes is the only way to catch the app's
+    /// carried counts drifting from the rows they claim to describe.
+    fn tally(app: &App) -> StateCounts {
+        let mut counts = StateCounts::default();
+        for row in app.rows() {
+            match row.state {
+                NodeState::Unpacted => counts.unpacted += 1,
+                NodeState::PactedStale => counts.pacted_stale += 1,
+                NodeState::PactedFresh => counts.pacted_fresh += 1,
+            }
+        }
+        counts
+    }
+
+    /// The app for the shared fixture, selecting the row for `path`.
+    fn app_selecting(path: &str) -> App {
+        let mut app = App::from_tree(&fixture::tree());
+        while app.selected_row().expect("the fixture has rows").path != Path::new(path) {
+            let before = app.selected();
+            app.select_next();
+            assert_ne!(app.selected(), before, "no row for {path}");
+        }
+        app
     }
 
     #[test]
@@ -399,5 +540,135 @@ mod tests {
         assert!(app.is_empty());
         assert_eq!(app.selected(), 0);
         assert_eq!(app.selected_row(), None);
+    }
+
+    #[test]
+    fn flattening_a_tree_carries_each_nodes_readme() {
+        let tree = fixture::tree();
+
+        let app = App::from_tree(&tree);
+
+        for row in app.rows() {
+            let node = tree.find(&row.path).expect("row came from the tree");
+            assert_eq!(row.readme, node.readme, "readme for {}", row.path.display());
+        }
+        // Including the connector, whose README is honestly absent.
+        assert!(
+            app.rows()
+                .iter()
+                .any(|row| row.readme.is_none() && row.path == Path::new("warlock/crates"))
+        );
+    }
+
+    #[test]
+    fn pacting_an_unpacted_node_makes_it_stale_and_pacting_again_undoes_it() {
+        let mut app = app_selecting("warlock/assets");
+
+        let pacted = app.toggle_pact().expect("assets has a README");
+
+        assert_eq!(
+            pacted,
+            PactToggle {
+                path: PathBuf::from("warlock/assets"),
+                readme: PathBuf::from("warlock/assets/README.md"),
+                pacted: true,
+            }
+        );
+        // Never fresh: a pact with no granted hash was never judged.
+        assert_eq!(
+            app.selected_row().map(|row| row.state),
+            Some(NodeState::PactedStale)
+        );
+
+        let unpacted = app.toggle_pact().expect("assets still has a README");
+
+        assert_eq!(
+            unpacted,
+            PactToggle {
+                path: PathBuf::from("warlock/assets"),
+                readme: PathBuf::from("warlock/assets/README.md"),
+                pacted: false,
+            }
+        );
+        assert_eq!(
+            app.selected_row().map(|row| row.state),
+            Some(NodeState::Unpacted)
+        );
+        assert_eq!(app.rows(), App::from_tree(&fixture::tree()).rows());
+    }
+
+    #[test]
+    fn unpacting_a_fresh_node_drops_it_all_the_way_out() {
+        let mut app = app_selecting("warlock/crates/engine");
+
+        let toggled = app.toggle_pact().expect("engine has a README");
+
+        // Fresh goes straight to unpacted: the grant goes with the pact.
+        assert!(!toggled.pacted);
+        assert_eq!(
+            app.selected_row().map(|row| row.state),
+            Some(NodeState::Unpacted)
+        );
+    }
+
+    #[test]
+    fn the_counts_move_with_the_rows_and_the_total_never_changes() {
+        let mut app = App::from_tree(&fixture::tree());
+        let total = app.counts().total();
+
+        assert_eq!(app.counts(), tally(&app));
+        // Every row in turn, twice over, so each state is both entered and left.
+        for _ in 0..2 {
+            for index in 0..app.rows().len() {
+                while app.selected() != index {
+                    app.select_next();
+                }
+                app.toggle_pact();
+                assert_eq!(app.counts(), tally(&app), "after toggling row {index}");
+                assert_eq!(app.counts().total(), total);
+            }
+            for _ in 0..app.rows().len() {
+                app.select_previous();
+            }
+        }
+    }
+
+    #[test]
+    fn a_connector_with_no_readme_cannot_be_pacted() {
+        let mut app = app_selecting("warlock/crates");
+        let before = app.clone();
+
+        assert_eq!(app.toggle_pact(), None);
+
+        assert_eq!(app, before);
+        assert_eq!(
+            app.selected_row().map(|row| row.state),
+            Some(NodeState::Unpacted)
+        );
+        assert_eq!(app.counts(), tally(&app));
+    }
+
+    #[test]
+    fn a_root_with_no_readme_cannot_be_pacted_either() {
+        let mut app = App::from_rows(vec![Row::new(0, "repo", None, NodeState::Unpacted)])
+            .with_counts(StateCounts {
+                unpacted: 1,
+                ..StateCounts::default()
+            });
+        let before = app.clone();
+
+        assert_eq!(app.toggle_pact(), None);
+
+        assert_eq!(app, before);
+    }
+
+    #[test]
+    fn toggling_a_pact_on_an_empty_app_is_a_no_op() {
+        let mut app = App::from_rows(Vec::new());
+
+        assert_eq!(app.toggle_pact(), None);
+
+        assert!(app.is_empty());
+        assert_eq!(app.counts(), StateCounts::default());
     }
 }

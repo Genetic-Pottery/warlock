@@ -121,7 +121,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ));
     }
 
-    let keys = Line::from("up/down or k/j: move    q / Esc / Ctrl-C: quit").dim();
+    let keys = Line::from("up/down or k/j: move    p: pact    q / Esc / Ctrl-C: quit").dim();
     frame.render_widget(Paragraph::new(vec![Line::from(tally), keys]), area);
 }
 
@@ -282,7 +282,8 @@ mod tests {
             );
         }
         let keys = row_text(&buffer, height - 1);
-        for key in ["up/down", "k/j", "q", "Esc", "Ctrl-C"] {
+        // "p: pact" and not the bare "p", which "up/down" would satisfy.
+        for key in ["up/down", "k/j", "p: pact", "q", "Esc", "Ctrl-C"] {
             assert!(keys.contains(key), "footer {keys:?} is missing {key}");
         }
     }
