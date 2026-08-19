@@ -8,6 +8,7 @@
 //! ([`subtree_hash`]) — but it opens no sockets and spawns no subprocesses,
 //! and it never follows a symlink out of the directory a caller hands it.
 
+mod decide;
 mod hash;
 mod load;
 mod manifest;
@@ -15,6 +16,15 @@ mod state;
 mod stub;
 mod tree;
 
+/// The colour of a node, from its manifest entry and the hash of its content:
+/// no entry is unpacted, a granted hash equal to the computed one is fresh, and
+/// everything else — including never judged — is stale.
+///
+/// Nothing in this project grants freshness. There is no refresh pass and no
+/// code in this workspace that writes a `granted_hash`, so
+/// [`NodeState::PactedFresh`] is reachable only against a hash a human wrote
+/// into `.warlock/pacts.toml` by hand.
+pub use decide::decide_state;
 /// Everything that can stop a subtree being hashed.
 pub use hash::Error as HashError;
 /// The hash of everything at and below a directory.
