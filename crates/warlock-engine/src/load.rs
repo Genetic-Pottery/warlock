@@ -24,10 +24,22 @@
 //! never followed, and siblings come out ordered by directory name so two
 //! loads of an unchanged tree are equal values.
 //!
-//! State is presence in the manifest and nothing more: an entry makes a node
-//! [`NodeState::PactedStale`], no entry makes it [`NodeState::Unpacted`], and
-//! nothing here can produce [`NodeState::PactedFresh`] — freshness needs a
-//! subtree hash this crate does not compute yet.
+//! State is not presence in the manifest: presence only decides whether the
+//! question is worth asking. A node the manifest names is hashed over its own
+//! subtree with [`subtree_hash`], and its colour is [`decide_state`]'s verdict
+//! on that pair — so a granted hash somebody wrote by hand, still matching what
+//! is on disk, comes back [`NodeState::PactedFresh`]. A node with no entry is
+//! [`NodeState::Unpacted`] and is never hashed at all: unmanaged directories
+//! cost a load nothing.
+//!
+//! Hashing can fail — a file that cannot be read is deliberately fatal to a
+//! digest rather than skipped, see [`hash`](crate::hash) — and one such file is
+//! one node's problem, not the tree's. So a node whose hash failed is coloured
+//! [`NodeState::PactedStale`] (its content is unknown, and unknown is stale),
+//! the failure is recorded in [`Loaded::problems`] with the node it happened at,
+//! and the walk carries on colouring everything else correctly. No error text
+//! and no partial read ever reaches a hash: the failed digest is simply not
+//! there.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -36,7 +48,10 @@ use std::path::{Component, Path, PathBuf};
 
 use ignore::WalkBuilder;
 
-use crate::{Manifest, ManifestError, Node, NodeState, Tree, to_manifest_path};
+use crate::{
+    HashError, Manifest, ManifestError, Node, NodeState, Tree, decide_state, subtree_hash,
+    to_manifest_path,
+};
 
 /// The directory whose presence marks a repository root, and which is itself
 /// never part of the tree.
@@ -54,33 +69,43 @@ const README_FILE: &str = "README.md";
 /// [`NodeState::Unpacted`]; a manifest that exists but cannot be understood is
 /// an error rather than a silent empty one.
 ///
+/// Alongside the tree comes a list of [`Problem`]s: everything that went wrong
+/// without stopping the load. It is empty on a healthy repository, and a caller
+/// that ignores it gets a tree where each affected node is stale — which is
+/// safe, just unexplained.
+///
 /// ```
 /// use std::fs;
-/// use warlock_engine::{NodeState, load_tree};
+/// use warlock_engine::{Loaded, NodeState, load_tree};
 ///
 /// let repo = tempfile::tempdir()?;
 /// fs::create_dir(repo.path().join(".warlock"))?;
 /// fs::create_dir_all(repo.path().join("crates/engine"))?;
 /// fs::write(repo.path().join("crates/engine/README.md"), "# engine\n")?;
 ///
-/// let tree = load_tree(repo.path())?;
+/// let Loaded { tree, problems } = load_tree(repo.path())?;
 /// let paths: Vec<_> = tree.walk().map(|(node, _)| node.path.clone()).collect();
 ///
 /// // `crates/` has no README of its own but is on the way to one that does.
 /// assert_eq!(paths.len(), 3);
 /// assert_eq!(tree.find(repo.path().join("crates")).unwrap().readme, None);
+/// // Nothing is pacted, so nothing was hashed and nothing could go wrong.
 /// assert_eq!(tree.root.state, NodeState::Unpacted);
+/// assert!(problems.is_empty());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 ///
 /// # Errors
+///
+/// The fatal cases, and only these: a load that could not be trusted at all,
+/// as against a node that could not be coloured (which is a [`Problem`]).
 ///
 /// * [`Error::NoRepositoryRoot`] if neither `working_dir` nor any of its
 ///   ancestors contains a `.warlock/` directory.
 /// * [`Error::Io`] if `working_dir` cannot be made absolute.
 /// * [`Error::Manifest`] if a manifest is there but cannot be read or parsed.
 /// * [`Error::Walk`] if the directory tree cannot be walked.
-pub fn load_tree(working_dir: impl AsRef<Path>) -> Result<Tree, Error> {
+pub fn load_tree(working_dir: impl AsRef<Path>) -> Result<Loaded, Error> {
     let working_dir = absolute(working_dir.as_ref())?;
     let repo_root = repository_root(&working_dir).ok_or_else(|| Error::NoRepositoryRoot {
         start: working_dir.clone(),
@@ -99,7 +124,64 @@ pub fn load_tree(working_dir: impl AsRef<Path>) -> Result<Tree, Error> {
         repo_root,
         manifest,
     };
-    Ok(Tree::new(builder.node(&working_dir)))
+    let mut problems = Vec::new();
+    let root = builder.node(&working_dir, &mut problems);
+    Ok(Loaded {
+        tree: Tree::new(root),
+        problems,
+    })
+}
+
+/// What a load produced: the coloured tree, and everything that went wrong on
+/// the way without being bad enough to stop it.
+///
+/// A plain pair rather than a `Tree` with problems hung off it, because they
+/// are answers to different questions and have different lifetimes: the tree is
+/// the thing to render, the problems are the thing to report once. [`Node`]
+/// gains no field for this — a node that could not be hashed is stale like any
+/// other stale node, and a renderer needs to know nothing more.
+#[derive(Debug)]
+pub struct Loaded {
+    /// The tree, every node coloured.
+    pub tree: Tree,
+    /// Everything non-fatal that went wrong, in the order the walk met it:
+    /// children before their parents, siblings in name order. Empty is the
+    /// normal case.
+    pub problems: Vec<Problem>,
+}
+
+/// One thing that went wrong during a load without stopping it.
+///
+/// Today there is exactly one way to get here: a pacted node whose subtree
+/// could not be hashed, which is coloured [`NodeState::PactedStale`] and
+/// reported rather than silently passed over. Silence is the thing being
+/// avoided — an unreadable file that simply dropped out of a digest would hash
+/// exactly like a deleted one, and could hand back a green nobody earned.
+#[derive(Debug)]
+pub struct Problem {
+    /// The node the problem happened at: the directory whose subtree hash was
+    /// wanted. The offending *file* — which is usually somewhere below it — is
+    /// named by `cause`.
+    pub path: PathBuf,
+    /// Why that node has no hash.
+    pub cause: HashError,
+}
+
+impl fmt::Display for Problem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "`{}` could not be hashed and is stale: {}",
+            self.path.display(),
+            self.cause
+        )
+    }
+}
+
+impl std::error::Error for Problem {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
 }
 
 /// The nearest ancestor of `start` — `start` itself included — that contains a
@@ -178,10 +260,13 @@ impl Builder {
     /// a child is kept when it has a README or, transitively, when something
     /// below it does. `dir` itself is never pruned — the caller only ever asks
     /// for the walk root, which is a node whether or not it is documented.
-    fn node(&self, dir: &Path) -> Node {
+    ///
+    /// Anything that went wrong colouring a node, without being worth failing
+    /// the load over, is pushed onto `problems`.
+    fn node(&self, dir: &Path, problems: &mut Vec<Problem>) -> Node {
         let children: Vec<Node> = self
             .children_of(dir)
-            .map(|child| self.node(child))
+            .map(|child| self.node(child, problems))
             .filter(|node| node.readme.is_some() || !node.is_leaf())
             .collect();
 
@@ -192,7 +277,7 @@ impl Builder {
             .unwrap_or_default()
             .then(|| dir.join(README_FILE));
 
-        Node::new(dir, readme, self.state_of(dir)).with_children(children)
+        Node::new(dir, readme, self.state_of(dir, problems)).with_children(children)
     }
 
     /// The directories directly inside `dir`, in name order.
@@ -208,15 +293,43 @@ impl Builder {
             .filter(move |path| path.parent() == Some(dir))
     }
 
-    /// What the manifest says about `dir`, by presence alone.
+    /// The colour of `dir`: what the manifest granted it, against what it
+    /// hashes to now.
+    ///
+    /// The manifest is consulted first and the hash is only computed when there
+    /// is an entry to compare it against. That ordering is the whole of the
+    /// "hash only pacted subtrees" rule: an unpacted node is [`Unpacted`]
+    /// whatever is under it, so reading those bytes would buy nothing.
     ///
     /// A path with no manifest form — one that is not valid UTF-8, say — can
     /// match no entry, so it is unpacted rather than an error: an oddly named
-    /// directory somewhere in the tree should not fail the whole load.
-    fn state_of(&self, dir: &Path) -> NodeState {
-        match to_manifest_path(&self.repo_root, dir) {
-            Ok(key) if self.manifest.entry(&key).is_some() => NodeState::PactedStale,
-            _ => NodeState::Unpacted,
+    /// directory somewhere in the tree should not fail the whole load, and it
+    /// is not a problem to report either, because nobody pacted it.
+    ///
+    /// [`Unpacted`]: NodeState::Unpacted
+    fn state_of(&self, dir: &Path, problems: &mut Vec<Problem>) -> NodeState {
+        let Ok(key) = to_manifest_path(&self.repo_root, dir) else {
+            return NodeState::Unpacted;
+        };
+        let Some(entry) = self.manifest.entry(&key) else {
+            return NodeState::Unpacted;
+        };
+
+        // `dir` itself, not the manifest-relative key: a pact is granted
+        // against the content of its own module, so the same module hashes the
+        // same wherever the repository is checked out to.
+        match subtree_hash(dir) {
+            Ok(hash) => decide_state(Some(entry), &hash),
+            Err(cause) => {
+                // No hash at all is the point: nothing partial and no error
+                // text goes anywhere near `decide_state`, so this cannot be
+                // mistaken for a comparison that happened and failed to match.
+                problems.push(Problem {
+                    path: dir.to_path_buf(),
+                    cause,
+                });
+                NodeState::PactedStale
+            }
         }
     }
 }
@@ -315,8 +428,10 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{Error, load_tree, repository_root};
-    use crate::{Manifest, NodeState, PactEntry};
+    use super::{Error, Loaded, load_tree, repository_root};
+    use crate::{
+        HashError, Manifest, NodeState, PactEntry, StateCounts, Tree, manifest_path, subtree_hash,
+    };
 
     /// A repository with a `.warlock/` directory, `dirs` created under it, and
     /// a `README.md` written into each of `readmes`.
@@ -332,6 +447,63 @@ mod tests {
             fs::write(path.join("README.md"), "# module\n").expect("writes a README");
         }
         repo
+    }
+
+    /// The tree for `dir`, insisting the load found nothing to complain about.
+    ///
+    /// Most of these fixtures are healthy, so an empty problem list is part of
+    /// what they assert: a load that quietly started reporting problems would
+    /// fail here rather than pass unnoticed.
+    fn tree_of(dir: impl AsRef<Path>) -> Tree {
+        let Loaded { tree, problems } = load_tree(dir).expect("loads");
+        assert!(problems.is_empty(), "{problems:?}");
+        tree
+    }
+
+    /// Pact the modules at `modules` (paths relative to `root`), through the
+    /// manifest API — which writes no grant, so every one of them is stale
+    /// unless a test hand-writes one.
+    fn pact(root: &Path, modules: &[&str]) {
+        Manifest::with_entries(modules.iter().map(|module| {
+            let module = root.join(module);
+            PactEntry::new(root, &module, module.join("README.md")).expect("inside the root")
+        }))
+        .save(root)
+        .expect("saves");
+    }
+
+    /// Write `contents` at `path`, creating whatever directories it needs.
+    fn write_file(path: &Path, contents: &str) {
+        fs::create_dir_all(path.parent().expect("a file has a parent")).expect("creates parents");
+        fs::write(path, contents).expect("writes a file");
+    }
+
+    /// A manifest written to `<root>/.warlock/pacts.toml` as text, the way a
+    /// person with an editor would.
+    ///
+    /// The long way round on purpose: a `granted_hash` cannot be produced by
+    /// this workspace at all — nothing in it grants freshness — so a test that
+    /// needs a fresh node has to write one by hand, exactly as the only human
+    /// who can grant one would.
+    fn hand_write_manifest(root: &Path, pacts: &[(&str, Option<&str>)]) {
+        use std::fmt::Write as _;
+
+        let mut text = String::from("version = 1\n");
+        for (module, granted) in pacts {
+            write!(
+                text,
+                "\n[[pact]]\nmodule = \"{module}\"\nreadme = \"{module}/README.md\"\n"
+            )
+            .expect("a string never fails to be written to");
+            if let Some(hash) = granted {
+                write!(
+                    text,
+                    "granted_hash = \"{hash}\"\ngranted_at = \"2026-08-19T07:32:00Z\"\n"
+                )
+                .expect("a string never fails to be written to");
+            }
+        }
+        fs::write(manifest_path(root), text).expect("writes the manifest");
     }
 
     /// Every node path in the tree, relative to `root`, depth first.
@@ -350,7 +522,7 @@ mod tests {
     #[test]
     fn a_readme_makes_a_module_and_a_bare_directory_on_the_way_is_a_connector() {
         let repo = fixture(&["crates/engine/src"], &["crates/engine"]);
-        let tree = load_tree(repo.path()).expect("loads");
+        let tree = tree_of(repo.path());
 
         assert_eq!(
             relative_paths(&tree, repo.path()),
@@ -376,14 +548,9 @@ mod tests {
     fn the_tree_is_rooted_at_the_working_directory_and_the_manifest_is_found_above_it() {
         let repo = fixture(&[], &["crates/engine", "crates/tui"]);
         let module = repo.path().join("crates/engine");
-        Manifest::with_entries([
-            PactEntry::new(repo.path(), &module, module.join("README.md"))
-                .expect("inside the root"),
-        ])
-        .save(repo.path())
-        .expect("saves");
+        pact(repo.path(), &["crates/engine"]);
 
-        let tree = load_tree(repo.path().join("crates")).expect("loads from a subdirectory");
+        let tree = tree_of(repo.path().join("crates"));
 
         assert_eq!(tree.root_path(), repo.path().join("crates"));
         assert_eq!(
@@ -402,16 +569,13 @@ mod tests {
                 .state,
             NodeState::Unpacted,
         );
-        assert_eq!(
-            tree,
-            load_tree(repo.path().join("crates")).expect("reloads")
-        );
+        assert_eq!(tree, tree_of(repo.path().join("crates")));
     }
 
     #[test]
     fn a_repository_with_no_manifest_loads_entirely_unpacted() {
         let repo = fixture(&[], &["docs"]);
-        let tree = load_tree(repo.path()).expect("a missing manifest is an empty one");
+        let tree = tree_of(repo.path());
 
         assert_eq!(tree.counts().total(), 2);
         assert!(
@@ -432,7 +596,7 @@ mod tests {
             .expect("writes a README inside .warlock");
 
         assert_eq!(
-            relative_paths(&load_tree(repo.path()).expect("loads"), repo.path()),
+            relative_paths(&tree_of(repo.path()), repo.path()),
             ["", "src"],
             "`target/` and `vendored/` are gitignored, `.git/` is git's own, \
              and `.warlock/` is ours — a README in any of them changes nothing"
@@ -446,7 +610,7 @@ mod tests {
             &["crates/engine", "crates/engine/src/inner/deep"],
         );
 
-        let tree = load_tree(repo.path()).expect("loads");
+        let tree = tree_of(repo.path());
 
         assert_eq!(
             relative_paths(&tree, repo.path()),
@@ -477,7 +641,7 @@ mod tests {
             .save(repo.path())
             .expect("saves an empty manifest");
 
-        let tree = load_tree(repo.path()).expect("loads");
+        let tree = tree_of(repo.path());
 
         assert_eq!(tree.counts().total(), 3);
         assert_eq!(tree.counts().unpacted, 3);
@@ -487,23 +651,19 @@ mod tests {
     fn a_manifest_entry_colours_exactly_the_node_it_names() {
         let repo = fixture(&[], &["crates/engine", "crates/engine/src", "crates/tui"]);
         let module = repo.path().join("crates/engine");
-        Manifest::with_entries([
-            PactEntry::new(repo.path(), &module, module.join("README.md"))
-                .expect("inside the root"),
-        ])
-        .save(repo.path())
-        .expect("saves");
+        pact(repo.path(), &["crates/engine"]);
 
-        let tree = load_tree(repo.path()).expect("loads");
+        let tree = tree_of(repo.path());
 
         assert_eq!(
             tree.counts(),
-            crate::StateCounts {
+            StateCounts {
                 unpacted: 4,
                 pacted_stale: 1,
                 pacted_fresh: 0,
             },
-            "one entry, one stale node, and nothing this loader can make fresh"
+            "one entry with no grant on it: one stale node, and nothing else \
+             even hashed"
         );
         assert_eq!(
             tree.find(&module).expect("the pacted module").state,
@@ -516,6 +676,132 @@ mod tests {
             NodeState::Unpacted,
             "an entry colours its own node, not the ones under it",
         );
+    }
+
+    #[test]
+    fn a_hand_written_matching_grant_is_fresh_until_something_below_it_changes() {
+        let repo = fixture(&[], &["crates/engine", "crates/tui"]);
+        let module = repo.path().join("crates/engine");
+        write_file(&module.join("src/lib.rs"), "pub fn one() {}\n");
+
+        // The hash is taken over the module's own directory, which is what the
+        // loader hashes too — not the repository root, and not the
+        // manifest-relative path.
+        let granted = subtree_hash(&module).expect("the module hashes");
+        hand_write_manifest(repo.path(), &[("crates/engine", Some(&granted))]);
+
+        let tree = tree_of(repo.path());
+        assert_eq!(
+            tree.find(&module).expect("the pacted module").state,
+            NodeState::PactedFresh,
+            "a grant that still matches the content it was granted against",
+        );
+        assert_eq!(
+            tree.counts(),
+            StateCounts {
+                unpacted: 3,
+                pacted_stale: 0,
+                pacted_fresh: 1,
+            },
+        );
+
+        // A file below the node, not the node's README: the trigger is
+        // everything at and below the module.
+        write_file(&module.join("src/lib.rs"), "pub fn two() {}\n");
+
+        assert_eq!(
+            tree_of(repo.path())
+                .find(&module)
+                .expect("the pacted module")
+                .state,
+            NodeState::PactedStale,
+            "the same manifest, the same load, different content below it",
+        );
+    }
+
+    /// Only on unix, because there is no portable way to make a file
+    /// unreadable. What is under test — a hash that fails colours one node and
+    /// is reported, rather than failing the load — is not platform-specific.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_makes_one_node_stale_and_leaves_the_rest_coloured() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let repo = fixture(&[], &["crates/engine", "crates/tui", "docs"]);
+        let module = repo.path().join("crates/engine");
+        let unreadable = module.join("src/lib.rs");
+        write_file(&unreadable, "pub fn one() {}\n");
+
+        let tui = repo.path().join("crates/tui");
+        let granted = subtree_hash(&tui).expect("the other module hashes");
+        hand_write_manifest(
+            repo.path(),
+            &[("crates/engine", None), ("crates/tui", Some(&granted))],
+        );
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmods");
+        if fs::read(&unreadable).is_ok() {
+            // Running as root: no file is unreadable, so there is nothing here
+            // to assert against.
+            return;
+        }
+
+        let Loaded { tree, problems } = load_tree(repo.path()).expect("a bad file is not fatal");
+
+        assert_eq!(
+            tree.find(&module)
+                .expect("the module with the hole in it")
+                .state,
+            NodeState::PactedStale,
+            "content that cannot be read is content that cannot be vouched for",
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].path, module, "the problem names the node");
+        assert!(
+            matches!(problems[0].cause, HashError::Read { .. }),
+            "{:?}",
+            problems[0],
+        );
+        assert!(
+            problems[0].to_string().contains("lib.rs"),
+            "the cause names the file: {}",
+            problems[0],
+        );
+        assert_eq!(
+            tree.counts(),
+            StateCounts {
+                unpacted: 3,
+                pacted_stale: 1,
+                pacted_fresh: 1,
+            },
+            "one node lost its hash; every other node is coloured as it would \
+             have been",
+        );
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).expect("chmods back");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unpacted_node_is_never_hashed_so_a_file_it_cannot_read_is_no_problem() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let repo = fixture(&[], &["crates/engine"]);
+        let unreadable = repo.path().join("crates/engine/src/lib.rs");
+        write_file(&unreadable, "pub fn one() {}\n");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmods");
+        if fs::read(&unreadable).is_ok() {
+            return; // Running as root, as above.
+        }
+
+        // Nothing is pacted, so nothing is hashed, so the file is never opened
+        // and the load has nothing to say about it.
+        let tree = tree_of(repo.path());
+
+        assert_eq!(tree.counts().total(), 3);
+        assert_eq!(tree.counts().unpacted, 3);
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).expect("chmods back");
     }
 
     /// Only on unix, because the fixture needs `std::os::unix::fs::symlink` to
@@ -537,42 +823,63 @@ mod tests {
         .expect("links back to an ancestor");
 
         assert_eq!(
-            relative_paths(&load_tree(repo.path()).expect("loads"), repo.path()),
+            relative_paths(&tree_of(repo.path()), repo.path()),
             ["", "crates", "crates/engine"],
             "a symlinked directory is not descended into, so it is not a node"
         );
     }
 
+    /// A cargo workspace shaped like this one — two crates under `crates/`, a
+    /// gitignored `target/`, a `.git/` and Warlock's own `.warlock/` — built in
+    /// a temporary directory rather than read off disk. Nothing in this crate's
+    /// test suite asserts on the contents of the warlock repository itself: a
+    /// test that did would change its verdict whenever the repository it lives
+    /// in gained a directory.
     #[test]
-    fn this_repository_loads_with_its_crates_and_nothing_ignored() {
-        // The repository root from the crate being compiled, not the process's
-        // working directory: `cargo test` sets that per invocation and a test
-        // that depends on it passes or fails by where it was run from.
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .expect("crates/warlock-engine sits two levels below the root");
+    fn a_workspace_shaped_repository_loads_with_its_crates_and_nothing_ignored() {
+        let repo = fixture(
+            &["target/debug", ".git/hooks"],
+            &[
+                "",
+                "crates/warlock-engine",
+                "crates/warlock-engine/src",
+                "crates/warlock-tui",
+            ],
+        );
+        fs::write(repo.path().join(".gitignore"), "/target\n").expect("writes a .gitignore");
+        fs::write(
+            repo.path().join("target/debug/README.md"),
+            "# not a module\n",
+        )
+        .expect("writes a README in build output");
 
-        let tree = load_tree(root).expect("this repository has a `.warlock` directory");
-        let paths = relative_paths(&tree, root);
+        let tree = tree_of(repo.path());
+        let paths = relative_paths(&tree, repo.path());
 
-        for expected in ["", "crates", "crates/warlock-engine", "crates/warlock-tui"] {
-            assert!(paths.iter().any(|path| path == expected), "{paths:?}");
-        }
         assert_eq!(
-            tree.find(root.join("crates"))
+            paths,
+            [
+                "",
+                "crates",
+                "crates/warlock-engine",
+                "crates/warlock-engine/src",
+                "crates/warlock-tui",
+            ],
+        );
+        assert_eq!(
+            tree.find(repo.path().join("crates"))
                 .expect("`crates/` is a connector")
                 .readme,
             None,
             "`crates/` has no README of its own",
         );
-        for ignored in ["target", ".git", ".red", ".forman"] {
+        for ignored in ["target", ".git", ".warlock"] {
             assert!(
                 !paths
                     .iter()
                     .any(|path| path.split('/').any(|part| part == ignored)),
-                "`{ignored}` is hidden or gitignored, so the walk should never \
-                 have reached it: {paths:?}"
+                "`{ignored}` is hidden, gitignored or ours, so the walk should \
+                 never have reached it: {paths:?}"
             );
         }
     }

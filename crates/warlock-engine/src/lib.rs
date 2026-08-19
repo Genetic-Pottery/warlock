@@ -31,6 +31,11 @@ pub use hash::Error as HashError;
 pub use hash::subtree_hash;
 /// Everything that can stop a directory becoming a tree.
 pub use load::Error as LoadError;
+/// What a load produced: the coloured tree, plus its non-fatal problems.
+pub use load::Loaded;
+/// One node a load could not colour properly, and why. Non-fatal by
+/// definition: the load that produced it finished.
+pub use load::Problem as LoadProblem;
 /// Build a tree from a directory on disk, coloured by the manifest above it.
 pub use load::load_tree;
 /// The nearest ancestor of a directory that holds a `.warlock/` directory.
