@@ -10,9 +10,16 @@
 //! methods, so every rule about how the selection moves is testable with
 //! nothing attached to stdout.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use warlock_engine::{NodeState, StateCounts, Tree};
+use warlock_engine::{NodeState, StateCounts, Tree, to_manifest_path};
+
+/// What the header says when the tree is rooted at the repository root itself.
+///
+/// The relative path of the root against itself is `"."`, which reads as
+/// nothing much on a header line, and an empty line reads as a bug. The
+/// brackets keep it from being mistaken for a directory of that name.
+const REPOSITORY_ROOT_LABEL: &str = "(repository root)";
 
 /// One line of the flattened tree: what to draw, how far to indent it, and
 /// which colour it takes.
@@ -43,8 +50,8 @@ impl Row {
     }
 }
 
-/// The front end's state: the flattened tree, the selected row and the tally
-/// the footer shows.
+/// The front end's state: the flattened tree, the selected row, the tally the
+/// footer shows and the header line naming what is being shown.
 ///
 /// `selected` is kept in range by construction and by every method that moves
 /// it, so [`App::selected_row`] is `None` only when there are no rows at all.
@@ -53,11 +60,16 @@ impl Row {
 /// recomputed: counting states is the engine's job, and a renderer that adds
 /// up its rows itself is a second implementation of that job waiting to
 /// disagree with the first.
+///
+/// The header is carried as finished text for the same reason: the renderer
+/// draws app state and nothing else, so it never has to know what a repository
+/// root is or ask the engine where this tree came from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct App {
     rows: Vec<Row>,
     selected: usize,
     counts: StateCounts,
+    header: String,
 }
 
 impl App {
@@ -84,12 +96,16 @@ impl App {
     /// caller that filters the tree down to nothing. Zero counts are the
     /// truth for that empty case; any caller passing rows should say what they
     /// tally to with [`App::with_counts`].
+    ///
+    /// The header starts empty: an app nobody has told where its tree came
+    /// from has nothing honest to put there. See [`App::with_scope`].
     #[must_use]
     pub fn from_rows(rows: Vec<Row>) -> Self {
         Self {
             rows,
             selected: 0,
             counts: StateCounts::default(),
+            header: String::new(),
         }
     }
 
@@ -101,6 +117,39 @@ impl App {
     pub const fn with_counts(mut self, counts: StateCounts) -> Self {
         self.counts = counts;
         self
+    }
+
+    /// The same app state, with a header naming the tree rooted at `root`
+    /// inside the repository at `repo_root`.
+    ///
+    /// The text is `root` relative to `repo_root` in forward slashes — the
+    /// engine's own manifest spelling, so the header and the manifest name a
+    /// module the same way on every platform — except that `repo_root` itself
+    /// is named `(repository root)` rather than left as the bare `"."` that
+    /// relative spelling would give.
+    ///
+    /// The caller resolving the pair is where the filesystem is touched; this
+    /// only formats what it was handed, which keeps the header a pure function
+    /// of app state all the way down to the renderer. A `root` that does not
+    /// sit inside `repo_root`, or that is not UTF-8, cannot be described
+    /// relatively at all and falls back to `root` printed lossily: a header is
+    /// a label, and failing to draw one is no reason to fail to draw the tree.
+    #[must_use]
+    pub fn with_scope(mut self, repo_root: impl AsRef<Path>, root: impl AsRef<Path>) -> Self {
+        let root = root.as_ref();
+        self.header = match to_manifest_path(repo_root, root) {
+            Ok(relative) if relative == "." => REPOSITORY_ROOT_LABEL.to_owned(),
+            Ok(relative) => relative,
+            Err(_) => root.display().to_string(),
+        };
+        self
+    }
+
+    /// The header line: what tree is on screen, as [`App::with_scope`] worded
+    /// it, or empty for an app that was never told.
+    #[must_use]
+    pub fn header(&self) -> &str {
+        &self.header
     }
 
     /// Every row, in the order they are drawn.
@@ -157,9 +206,12 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use warlock_engine::{Node, NodeState, StateCounts, Tree, stub_tree};
+    use std::path::Path;
 
-    use super::{App, Row};
+    use warlock_engine::{Node, NodeState, StateCounts, Tree};
+
+    use super::{App, REPOSITORY_ROOT_LABEL, Row};
+    use crate::fixture;
 
     /// Three rows, one per state, standing in for a flattened tree without
     /// dragging a `Tree` into tests that are only about the selection.
@@ -209,7 +261,7 @@ mod tests {
 
     #[test]
     fn flattening_a_tree_keeps_every_node_and_its_state() {
-        let tree = stub_tree();
+        let tree = fixture::tree();
 
         let app = App::from_tree(&tree);
 
@@ -222,7 +274,7 @@ mod tests {
 
     #[test]
     fn an_app_carries_the_trees_own_counts() {
-        let tree = stub_tree();
+        let tree = fixture::tree();
 
         let app = App::from_tree(&tree);
 
@@ -232,12 +284,66 @@ mod tests {
 
     #[test]
     fn an_app_built_from_bare_rows_counts_nothing_until_told() {
-        let counts = stub_tree().counts();
+        let counts = fixture::tree().counts();
 
         let app = App::from_rows(three_rows());
 
         assert_eq!(app.counts(), StateCounts::default());
         assert_eq!(app.with_counts(counts).counts(), counts);
+    }
+
+    #[test]
+    fn a_scope_below_the_repository_root_is_named_relative_to_it() {
+        let app = App::from_rows(three_rows()).with_scope(
+            Path::new("/repo"),
+            Path::new("/repo").join("crates").join("engine"),
+        );
+
+        // Forward slashes even where the separator is a backslash: this is the
+        // engine's manifest spelling.
+        assert_eq!(app.header(), "crates/engine");
+    }
+
+    #[test]
+    fn the_repository_root_itself_is_named_rather_than_left_as_a_dot() {
+        let app = App::from_rows(three_rows()).with_scope("/repo", "/repo");
+
+        assert_eq!(app.header(), REPOSITORY_ROOT_LABEL);
+        assert_ne!(app.header(), ".");
+        assert!(!app.header().is_empty());
+    }
+
+    #[test]
+    fn a_relative_scope_is_taken_to_be_relative_to_the_repository_root_already() {
+        let app = App::from_rows(three_rows()).with_scope("/repo", "docs/adr");
+
+        assert_eq!(app.header(), "docs/adr");
+    }
+
+    #[test]
+    fn a_root_outside_the_repository_falls_back_to_printing_itself() {
+        let app = App::from_rows(three_rows()).with_scope("/repo", "/elsewhere/docs");
+
+        // Not describable relative to the repository root, but a header is a
+        // label: it says what it can rather than going blank.
+        assert_eq!(app.header(), "/elsewhere/docs");
+    }
+
+    #[test]
+    fn an_app_that_was_never_told_its_scope_has_no_header() {
+        assert_eq!(App::from_rows(three_rows()).header(), "");
+        assert_eq!(App::from_tree(&fixture::tree()).header(), "");
+    }
+
+    #[test]
+    fn a_scope_changes_nothing_but_the_header() {
+        let app = App::from_tree(&fixture::tree());
+
+        let scoped = app.clone().with_scope("/repo", "/repo/crates");
+
+        assert_eq!(scoped.rows(), app.rows());
+        assert_eq!(scoped.counts(), app.counts());
+        assert_eq!(scoped.selected(), app.selected());
     }
 
     #[test]

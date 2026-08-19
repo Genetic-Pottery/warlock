@@ -12,6 +12,11 @@
 
 mod app;
 mod colour;
+/// The hand-written tree the tests in this crate draw and walk, so none of
+/// them needs a repository on disk. Test-only, and private on purpose: the
+/// real tree comes from the engine's loader.
+#[cfg(test)]
+mod fixture;
 mod ui;
 
 /// The front end's state: the flattened tree and the selected row.

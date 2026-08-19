@@ -1,11 +1,12 @@
 //! What one frame looks like.
 //!
-//! The whole screen is two things stacked: the flattened tree, one node per
-//! line, and a footer carrying the tally and the keys. [`draw`] takes the app
-//! state and a frame and nothing else — no terminal setup, no globals, no
-//! reaching back into the engine — so what appears on screen is a pure
-//! function of what the app state says, and a test can assert it against an
-//! in-memory buffer with no tty attached.
+//! The whole screen is three things stacked: a header naming which tree is on
+//! screen, the flattened tree itself, one node per line, and a footer carrying
+//! the tally and the keys. [`draw`] takes the app state and a frame and
+//! nothing else — no terminal setup, no globals, no reaching back into the
+//! engine — so what appears on screen is a pure function of what the app state
+//! says, and a test can assert it against an in-memory buffer with no tty
+//! attached.
 //!
 //! There is deliberately no scrolling viewport, no expand/collapse and no
 //! mouse: the flattened tree is drawn as-is.
@@ -28,20 +29,44 @@ const INDENT: &str = "  ";
 /// again for the ones without.
 const SELECTION_MARKER: &str = "> ";
 
+/// The one line naming the tree's root.
+const HEADER_HEIGHT: u16 = 1;
+
 /// The tally line and the keys line.
 const FOOTER_HEIGHT: u16 = 2;
 
-/// Draw the whole frame: the tree above, the footer below.
+/// Draw the whole frame: the header at the top, the tree between, the footer
+/// below.
 ///
 /// Pure in the sense that matters here — it reads `app` and writes `frame`,
 /// touching no terminal state of its own.
+///
+/// The tree takes `Min(0)` and so gives its rows up first when the terminal is
+/// short: on a screen with no room for everything, which nodes are off the
+/// bottom matters less than still being told which tree they belong to and
+/// how to get out.
 pub fn draw(frame: &mut Frame<'_>, app: &App) {
-    let [tree_area, footer_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(FOOTER_HEIGHT)])
-            .areas(frame.area());
+    let [header_area, tree_area, footer_area] = Layout::vertical([
+        Constraint::Length(HEADER_HEIGHT),
+        Constraint::Min(0),
+        Constraint::Length(FOOTER_HEIGHT),
+    ])
+    .areas(frame.area());
 
+    draw_header(frame, header_area, app);
     draw_tree(frame, tree_area, app);
     draw_footer(frame, footer_area, app);
+}
+
+/// Draw the header: which tree this is, as the app state already words it.
+///
+/// Bold rather than coloured, because every colour on this screen already
+/// means a node state and the header is not a node.
+fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    frame.render_widget(
+        Paragraph::new(Line::from(app.header().to_owned()).bold()),
+        area,
+    );
 }
 
 /// Draw every row of the flattened tree, one per line, with the selected one
@@ -115,15 +140,18 @@ const fn noun(state: NodeState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::style::{Color, Modifier};
-    use warlock_engine::{NodeState, stub_tree};
+    use warlock_engine::NodeState;
 
-    use super::{FOOTER_HEIGHT, SELECTION_MARKER, draw};
+    use super::{FOOTER_HEIGHT, HEADER_HEIGHT, SELECTION_MARKER, draw};
     use crate::app::App;
     use crate::colour::colour_for;
+    use crate::fixture;
 
     /// Draw `app` onto an in-memory terminal of the given size and hand back
     /// the buffer. No tty is involved, so this runs anywhere `cargo test` does.
@@ -166,12 +194,13 @@ mod tests {
 
     #[test]
     fn every_node_gets_its_own_line_indented_by_depth_in_walk_order() {
-        let app = App::from_tree(&stub_tree());
+        let app = App::from_tree(&fixture::tree());
 
         let buffer = render(&app, 40, 10);
 
         let drawn: Vec<String> = rows_text(&buffer)
             .into_iter()
+            .skip(usize::from(HEADER_HEIGHT))
             .take(app.rows().len())
             .collect();
         assert_eq!(
@@ -188,14 +217,14 @@ mod tests {
 
     #[test]
     fn each_line_is_drawn_in_its_states_colour() {
-        let app = App::from_tree(&stub_tree());
+        let app = App::from_tree(&fixture::tree());
 
         let buffer = render(&app, 40, 10);
 
         // Including the selected row: the highlight only adds modifiers, so
         // the row's text keeps its state's colour underneath.
         for (index, row) in app.rows().iter().enumerate() {
-            let y = u16::try_from(index).expect("the stub tree is small");
+            let y = HEADER_HEIGHT + u16::try_from(index).expect("the fixture tree is small");
             assert_eq!(
                 first_glyph_colour(&buffer, y),
                 colour_for(row.state),
@@ -207,7 +236,7 @@ mod tests {
 
     #[test]
     fn exactly_one_line_is_highlighted_and_it_is_the_selected_one() {
-        let mut app = App::from_tree(&stub_tree());
+        let mut app = App::from_tree(&fixture::tree());
         app.select_next();
         app.select_next();
 
@@ -216,24 +245,26 @@ mod tests {
         let highlighted: Vec<u16> = (0..buffer.area.height)
             .filter(|&y| buffer[(0, y)].modifier.contains(Modifier::REVERSED))
             .collect();
-        assert_eq!(highlighted, [2]);
-        assert!(row_text(&buffer, 2).starts_with(SELECTION_MARKER));
+        // The third row of the tree, one row down from where it would sit
+        // without the header above it.
+        assert_eq!(highlighted, [HEADER_HEIGHT + 2]);
+        assert!(row_text(&buffer, HEADER_HEIGHT + 2).starts_with(SELECTION_MARKER));
     }
 
     #[test]
     fn the_selection_marker_moves_with_the_selection() {
-        let mut app = App::from_tree(&stub_tree());
+        let mut app = App::from_tree(&fixture::tree());
         app.select_next();
 
         let buffer = render(&app, 40, 10);
 
-        assert!(!row_text(&buffer, 0).starts_with(SELECTION_MARKER));
-        assert_eq!(row_text(&buffer, 1), ">   crates");
+        assert!(!row_text(&buffer, HEADER_HEIGHT).starts_with(SELECTION_MARKER));
+        assert_eq!(row_text(&buffer, HEADER_HEIGHT + 1), ">   crates");
     }
 
     #[test]
     fn the_footer_shows_the_engines_counts_and_the_keys() {
-        let tree = stub_tree();
+        let tree = fixture::tree();
         let app = App::from_tree(&tree);
         let height = 10;
 
@@ -258,6 +289,8 @@ mod tests {
 
     #[test]
     fn an_empty_app_draws_a_footer_and_no_rows() {
+        // No scope either, so the header is blank along with the tree: an app
+        // nobody told where its tree came from claims nothing.
         let app = App::from_rows(Vec::new());
         let height = 6;
 
@@ -267,5 +300,38 @@ mod tests {
             assert_eq!(row_text(&buffer, y), "", "row {y} should be blank");
         }
         assert!(row_text(&buffer, height - FOOTER_HEIGHT).contains("0 unpacted"));
+    }
+
+    #[test]
+    fn the_header_names_the_root_relative_to_the_repository_root() {
+        let app = App::from_tree(&fixture::tree()).with_scope(
+            Path::new("/repo"),
+            Path::new("/repo").join("crates").join("warlock-engine"),
+        );
+
+        let buffer = render(&app, 40, 10);
+
+        // Forward slashes whatever the platform's separator is, because this
+        // is the engine's manifest spelling of a module.
+        assert_eq!(row_text(&buffer, 0), "crates/warlock-engine");
+    }
+
+    #[test]
+    fn a_tree_rooted_at_the_repository_root_gets_a_named_header_not_a_blank_one() {
+        let app = App::from_tree(&fixture::tree()).with_scope("/repo", "/repo");
+
+        let buffer = render(&app, 40, 10);
+
+        assert_eq!(row_text(&buffer, 0), "(repository root)");
+    }
+
+    #[test]
+    fn the_header_sits_above_the_first_tree_row() {
+        let app = App::from_tree(&fixture::tree()).with_scope("/repo", "/repo/crates");
+
+        let buffer = render(&app, 40, 10);
+
+        assert_eq!(row_text(&buffer, 0), "crates");
+        assert_eq!(row_text(&buffer, HEADER_HEIGHT), "> warlock");
     }
 }

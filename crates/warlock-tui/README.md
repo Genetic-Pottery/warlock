@@ -6,7 +6,7 @@ root builds and runs `warlock`, not `warlock-tui`.
 
 Its job is presentation and input — drawing the current state of the work tree
 and turning keystrokes into requests. What runs today is the shell around the
-engine's stub tree:
+tree the engine loads from the working directory:
 
 - The tree, drawn as an indented list on the alternate screen: one node per
   line, indented by the depth the engine's depth-first walk reports, coloured
@@ -17,7 +17,9 @@ engine's stub tree:
   both ends rather than wrapping. `q`, `Esc` and Ctrl-C exit.
 
 Nothing here computes anything about the tree: the front end asks the engine
-for it (today, `stub_tree`) and renders what it gets back.
+for it (`load_tree`, on the working directory the binary was launched in) and
+renders what it gets back. Which directories are modules and what colour each
+one is are the engine's answers, arrived at before a frame is drawn.
 
 ## Pure core, thin shell
 
