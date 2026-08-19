@@ -13,7 +13,6 @@ mod hash;
 mod load;
 mod manifest;
 mod state;
-mod stub;
 mod tree;
 
 /// The colour of a node, from its manifest entry and the hash of its content:
@@ -58,9 +57,6 @@ pub use manifest::manifest_path;
 pub use manifest::to_manifest_path;
 /// The three-state vocabulary every node is coloured by.
 pub use state::NodeState;
-/// A hard-coded tree for exercising a renderer. Not the loader: that is
-/// [`load_tree`].
-pub use stub::stub_tree;
 /// A depth-first walk over a tree, yielding each node with its depth.
 pub use tree::DepthFirst;
 /// What `Node::new` accepts for a README: anything path-like, or `None`.

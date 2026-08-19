@@ -36,9 +36,21 @@ feeds, and a loader that builds a coloured tree out of a real directory:
   `repository_root` for the upward walk that finds that manifest, `LoadError`
   for everything that can stop the load and `LoadProblem` for everything that
   merely spoiled one node of it. See [the loader](#the-loader-load_tree) below.
-- `stub_tree`, one small tree written out by hand — three levels deep, with at
-  least one node in each state — so the engine/TUI seam can be exercised
-  without a repository behind it.
+
+There is no hard-coded tree behind any of this. Every `Tree` is either built by
+a caller node by node with `Node::new` / `Tree::new`, or loaded from a real
+directory by `load_tree` — and what `load_tree` loads is decided by three rules:
+
+- **A directory that directly contains a `README.md` is a module node**, and
+  that path becomes its `readme`. That is the whole test — no README is parsed.
+- **A directory with no README of its own is a connector**, `readme: None`, and
+  is kept only when a module node sits somewhere below it. A README-less
+  directory with no module-node descendant is dropped: it is neither a module
+  nor on the way to one.
+- **A node's state comes from the manifest entry plus the subtree hash.** No
+  entry means `Unpacted` and no hashing at all; an entry means the node's
+  directory is hashed and `decide_state` compares that hash against the granted
+  one. Nothing is coloured by a literal.
 
 `Node` and `Tree` are pure shape. Their fields are public so a renderer can
 walk them with each node's depth and state in hand, and a caller builds them
@@ -394,17 +406,6 @@ simply does not exist, and the node falls back to stale without one.
 How much of `problems` a front end shows a user is the front end's call. A
 caller that ignores the list entirely still gets a safe tree; it is just an
 unexplained one.
-
-## `stub_tree` survives, but is not the source of truth
-
-`load_tree` is where a real tree comes from. `stub_tree` walks no directory,
-opens no file and computes no staleness: every path and every state it returns
-is a literal typed into `src/stub.rs`, chosen only to give a renderer something
-with more than one level of nesting and one node of each colour — its fresh
-node is a typed-in constant, not a comparison anything performed. It stays
-because a front end or a test
-harness benefits from a fixed tree with no filesystem behind it. Nothing about
-a repository can be inferred from it.
 
 ## The dependency edge runs one way
 
