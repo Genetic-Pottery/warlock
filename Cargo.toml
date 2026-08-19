@@ -68,6 +68,10 @@ ratatui = { version = "0.30" }
 # skip list that drifts from what git actually ignores, and re-implementing
 # gitignore matching is the larger supply chain risk of the two.
 ignore = { version = "0.4" }
+# The subtree hash a pact is compared against: a fast, stable, well-specified
+# tree hash, so the same bytes give the same digest on any machine and any
+# build, which is exactly what a grant recorded in a committed manifest needs.
+blake3 = { version = "1" }
 # Dev-only: round-trips a value through serde's own token stream, so the derives
 # can be tested in memory, independently of how any one format spells them.
 serde_test = { version = "1" }
