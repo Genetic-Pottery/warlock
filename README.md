@@ -91,7 +91,7 @@ The guiding principle is narrow on purpose:
 > Warlock makes the right thing visible and easy. It never makes the wrong thing
 > impossible.
 
-See [`warlock-design-doc.md`](warlock-design-doc.md) for the full model: pacts,
+See [`docs/warlock-design-doc.md`](docs/warlock-design-doc.md) for the full model: pacts,
 freshness, gating, and where the boundaries are drawn.
 
 ## Contributing
