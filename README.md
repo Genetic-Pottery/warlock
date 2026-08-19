@@ -94,6 +94,36 @@ The guiding principle is narrow on purpose:
 See [`docs/warlock-design-doc.md`](docs/warlock-design-doc.md) for the full model: pacts,
 freshness, gating, and where the boundaries are drawn.
 
+## What works today
+
+Everything above is the destination. What the binary does right now is smaller,
+and worth saying plainly:
+
+- **It renders your actual repository.** `warlock` walks the directory you
+  launched it in and draws it as a tree of modules, coloured by state. A
+  directory is a module when it directly contains a `README.md` — that is the
+  whole test, and no README is ever parsed. A directory with no README of its
+  own is a connector: it shows up only because a module sits somewhere below
+  it, and it cannot be pacted, because there is no document to pact.
+- **`p` toggles a pact on the selected node.** Gray becomes yellow on the next
+  frame; press `p` again and it goes back to gray. One press, one node, no
+  confirmation — the action is its own undo. Up/down or `k`/`j` move the
+  selection, and `q`, `Esc` or Ctrl-C leave.
+- **The pact is written down as you press the key.** It lands in
+  `.warlock/pacts.toml` at the repository root: one manifest per repository,
+  committed to git, because a pact is a fact about the repository rather than
+  about your checkout. Each pacted module gets one entry naming its directory,
+  the README that documents it, and a granted hash — the last of which appears
+  only once freshness has been granted. Every path in it is relative to the
+  repository root, so two clones of the same commit hold the same file.
+
+**Green is not reachable through the product.** Freshness is granted by an AI
+pass over the diff, and that pass does not exist yet: nothing here invokes
+`claude`, and no code writes a granted hash. A module you pact is yellow from
+the moment you pact it and stays yellow, because a pact that has never been
+judged is stale by definition. The only way to see green today is to hand-write
+a matching `granted_hash` into the manifest yourself.
+
 ## Contributing
 
 Run these three checks before pushing. CI runs exactly the same three commands on
