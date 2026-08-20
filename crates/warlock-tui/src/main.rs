@@ -93,6 +93,13 @@ fn run() -> Result<(), Error> {
             Some(Action::Quit) => return Ok(()),
             Some(Action::SelectPrevious) => app.select_previous(),
             Some(Action::SelectNext) => app.select_next(),
+            // No height is passed: the app was told the viewport's height at
+            // the top of this loop, so a page is whatever the frame just drawn
+            // could show.
+            Some(Action::SelectPageUp) => app.select_page_up(),
+            Some(Action::SelectPageDown) => app.select_page_down(),
+            Some(Action::SelectFirst) => app.select_first(),
+            Some(Action::SelectLast) => app.select_last(),
             // The app has already flipped the row's colour and its tally, so
             // the next frame — drawn at the top of this same loop, with no
             // reload of the tree — shows the new state. The manifest is
@@ -351,6 +358,14 @@ enum Action {
     SelectPrevious,
     /// Move the selection one row down.
     SelectNext,
+    /// Move the selection one screenful up.
+    SelectPageUp,
+    /// Move the selection one screenful down.
+    SelectPageDown,
+    /// Select the first row of the tree.
+    SelectFirst,
+    /// Select the last row of the tree.
+    SelectLast,
     /// Pact the selected node, or unpact it if it is pacted already.
     TogglePact,
 }
@@ -382,6 +397,16 @@ fn action_for(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
         KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectPrevious),
         KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
+        KeyCode::PageUp => Some(Action::SelectPageUp),
+        KeyCode::PageDown => Some(Action::SelectPageDown),
+        // `g` and `G` are the pair every pager and vi-like editor has trained
+        // hands for, and they are told apart by case alone: matching on the
+        // character rather than on `SHIFT` keeps a terminal that reports the
+        // upper-case letter without the modifier — or with it, or with caps
+        // lock instead — landing on the same action, exactly as Ctrl-C above
+        // does not care which of those it is handed.
+        KeyCode::Char('g') => Some(Action::SelectFirst),
+        KeyCode::Char('G') => Some(Action::SelectLast),
         // Lower case only, and with no confirmation: the mnemonic is the
         // product's own word (pact, §15), and the action is its own undo —
         // pressing it again removes what it wrote.
@@ -626,6 +651,66 @@ mod tests {
             action_for(press(KeyCode::Char('j'))),
             Some(Action::SelectNext)
         );
+    }
+
+    #[test]
+    fn page_up_and_page_down_move_the_selection_by_a_screenful() {
+        assert_eq!(
+            action_for(press(KeyCode::PageUp)),
+            Some(Action::SelectPageUp)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::PageDown)),
+            Some(Action::SelectPageDown)
+        );
+    }
+
+    #[test]
+    fn lower_g_jumps_to_the_first_row_and_upper_g_to_the_last() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('g'))),
+            Some(Action::SelectFirst)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('G'))),
+            Some(Action::SelectLast)
+        );
+    }
+
+    #[test]
+    fn upper_g_still_jumps_to_the_last_row_with_shift_reported() {
+        // Terminals disagree about whether the modifier rides along with the
+        // upper-case letter; both spellings are the same keystroke.
+        let shift_g = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
+
+        assert_eq!(action_for(shift_g), Some(Action::SelectLast));
+    }
+
+    #[test]
+    fn releases_and_repeats_of_the_new_movement_keys_move_nothing() {
+        let codes = [
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Char('g'),
+            KeyCode::Char('G'),
+        ];
+
+        for code in codes {
+            for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+                let event = KeyEvent::new_with_kind_and_state(
+                    code,
+                    KeyModifiers::NONE,
+                    kind,
+                    KeyEventState::NONE,
+                );
+
+                assert_eq!(
+                    action_for(event),
+                    None,
+                    "{kind:?} of {code:?} should not move anything"
+                );
+            }
+        }
     }
 
     #[test]
