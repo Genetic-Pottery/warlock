@@ -14,6 +14,13 @@
 //! index means nothing once the row list has been rebuilt — and rebuilding it
 //! is exactly what a reloaded tree does.
 //!
+//! Narrowing the view to what Warlock manages is the same kind of thing, and
+//! goes through the same re-flattening: a pacted-only flag that drops every row
+//! that is neither pacted nor on the way to something pacted. It is a filter
+//! over the walk, not a rule about what the tree contains — the tree keeps every
+//! node it was loaded with, the flag says which of them are worth drawing right
+//! now, and turning it off puts the rest back untouched.
+//!
 //! A tree taller than the terminal does not fit, so the app also remembers
 //! which slice of those rows is on screen: a scroll offset, kept in step with
 //! the selection by every method that moves it, and computed by one pure
@@ -29,6 +36,7 @@
 //! methods, so every rule about how the selection moves is testable with
 //! nothing attached to stdout.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -151,6 +159,13 @@ pub struct PactToggle {
 /// node the moment the row list changes length, and the row list is rebuilt
 /// both by every collapse and by every reload of the tree.
 ///
+/// `pacted_only` is the second input to that rebuild: with it set, only the
+/// pacted nodes and the ancestors leading to them are drawn. It is view state
+/// and nothing else — no node is dropped from `all_rows`, no state is changed,
+/// nothing is written anywhere — so [`App::toggle_pacted_only`] is reversible in
+/// the strongest sense: the rows come back exactly as they were, at the same
+/// depths, in the same order, still collapsed wherever they were collapsed.
+///
 /// `selected` is kept in range by construction and by every method that moves
 /// it, so [`App::selected_row`] is `None` only when there are no rows at all.
 /// It is kept *meaningful* by `reflow`, which puts it back on the node it was
@@ -184,6 +199,7 @@ pub struct App {
     all_rows: Vec<Row>,
     rows: Vec<Row>,
     collapsed: BTreeSet<PathBuf>,
+    pacted_only: bool,
     selected: usize,
     scroll_offset: usize,
     viewport_height: usize,
@@ -240,8 +256,8 @@ impl App {
     /// There is no message either: an app that has answered no keystroke yet
     /// has nothing to say about one. See [`App::message`].
     ///
-    /// Nothing is collapsed, so the rows handed over are exactly the rows
-    /// drawn. They are kept a second time as the unfiltered list a later
+    /// Nothing is collapsed and the pacted-only filter is off, so the rows
+    /// handed over are exactly the rows drawn. They are kept a second time as the unfiltered list a later
     /// collapse re-filters and a later expand restores from; a caller that
     /// wants collapsing to hide anything has to say which rows have children,
     /// with [`Row::with_child_count`], because a bare list of rows is the one
@@ -252,6 +268,7 @@ impl App {
             rows: rows.clone(),
             all_rows: rows,
             collapsed: BTreeSet::new(),
+            pacted_only: false,
             selected: 0,
             scroll_offset: 0,
             viewport_height: 0,
@@ -382,6 +399,49 @@ impl App {
     #[must_use]
     pub fn is_collapsed(&self, path: impl AsRef<Path>) -> bool {
         self.collapsed.contains(path.as_ref())
+    }
+
+    /// Whether the view is narrowed to the pacted part of the tree.
+    ///
+    /// `false` is the whole walk, which is what a freshly built app shows. See
+    /// [`App::toggle_pacted_only`] for what `true` leaves on screen.
+    #[must_use]
+    pub const fn pacted_only(&self) -> bool {
+        self.pacted_only
+    }
+
+    /// Narrow the view to the pacted part of the tree, or widen it back to the
+    /// whole of it.
+    ///
+    /// Narrowed, the drawn rows are every node whose state
+    /// [`NodeState::is_pacted`] calls pacted, plus every ancestor needed to
+    /// reach one, and nothing else: an unpacted directory earns its row only by
+    /// having something pacted somewhere below it. That is a filter over the
+    /// walk and not a change to it — no node leaves [`App::rows`]' source, no
+    /// state moves, [`App::counts`] still describes the whole tree, and nothing
+    /// about the flag reaches a file.
+    ///
+    /// It composes with collapsing rather than replacing it. Which rows survive
+    /// the filter is decided from the whole walk, so a directory that is only on
+    /// the way to something pacted survives even while it is collapsed over that
+    /// something; the collapse then hides its descendants as it always did. A
+    /// directory collapsed before the filter went on is still collapsed after it
+    /// comes off again, because the filter never touched the collapsed set.
+    ///
+    /// The selection is carried by path, so widening the view again finds the
+    /// node that was selected while it was narrow. Narrowing over the selection
+    /// lands it on the nearest still-drawn ancestor — the same rule collapsing
+    /// over the selection follows, and for the same reason: that ancestor is the
+    /// row the hidden node went behind. A node with no drawn ancestor at all,
+    /// which is any node once nothing in the tree is pacted, falls back to the
+    /// first row.
+    ///
+    /// Clears the last keystroke's message, like every other key that does
+    /// something.
+    pub fn toggle_pacted_only(&mut self) {
+        self.pacted_only = !self.pacted_only;
+        self.message = None;
+        self.reflow();
     }
 
     /// How many nodes sit in each state, as the engine counted them.
@@ -545,22 +605,36 @@ impl App {
         );
     }
 
-    /// Rebuild the drawn rows from the whole walk and the collapsed set, and
-    /// put the selection and the window back where they belong.
+    /// Rebuild the drawn rows from the whole walk, the pacted-only flag and the
+    /// collapsed set, and put the selection and the window back where they
+    /// belong.
     ///
     /// Every change to what is drawn ends here, and it is the only place
-    /// `rows` is written: the drawn list is derived from `all_rows` and
-    /// `collapsed` and nothing else, so there is no state to get out of step
-    /// with them.
+    /// `rows` is written: the drawn list is derived from `all_rows`,
+    /// `pacted_only` and `collapsed` and nothing else, so there is no state to
+    /// get out of step with them.
+    ///
+    /// The two filters are applied in that order and never as one pass. What is
+    /// pacted, and what is on the way to something pacted, is read off the whole
+    /// walk, so a directory that is collapsed over the only pacted node below it
+    /// still earns its row; deciding pactedness from the already-collapsed list
+    /// would make collapsing a directory delete it from a narrowed view, which
+    /// is the one thing collapsing must never do.
     ///
     /// The selection is carried by path rather than by index, because the index
     /// it sat at meant a row that may not exist any more. A selection whose
     /// node is still drawn stays exactly where it is, however many rows above
-    /// it have gone; one whose node has just been hidden lands on the nearest
-    /// ancestor still drawn, which is the directory that was collapsed over it.
+    /// it have gone; one whose node has just been hidden — collapsed over or
+    /// filtered away, it makes no difference here — lands on the nearest
+    /// ancestor still drawn, and on the first row when not even that survives.
     fn reflow(&mut self) {
         let selected = self.rows.get(self.selected).map(|row| row.path.clone());
-        self.rows = drawn_rows(&self.all_rows, &self.collapsed);
+        let kept: Cow<'_, [Row]> = if self.pacted_only {
+            Cow::Owned(pacted_rows(&self.all_rows))
+        } else {
+            Cow::Borrowed(&self.all_rows)
+        };
+        self.rows = drawn_rows(&kept, &self.collapsed);
         self.selected = selected
             .and_then(|path| index_for(&self.rows, &path))
             .unwrap_or(0);
@@ -746,12 +820,56 @@ fn drawn_rows(all: &[Row], collapsed: &BTreeSet<PathBuf>) -> Vec<Row> {
     drawn
 }
 
+/// Which of `all` the pacted-only view keeps: every pacted node, plus every
+/// ancestor needed to reach one, in the order and at the depths they came in.
+///
+/// An unpacted node survives only as somebody's way in. That makes the rule a
+/// question about what comes *after* a row rather than before it, which is why
+/// this pass runs backwards: a walk is depth first, so the ancestors of a row
+/// are the rows before it that are shallower than it, and going in reverse means
+/// each row is met with the requirement its descendants have already left
+/// behind. `needed` is that requirement — the depth of the last row kept, which
+/// is still short of an ancestor — so a row is kept when it is pacted itself or
+/// when it is shallower than that, and every row kept replaces the requirement
+/// with its own depth. Forwards, the same rule would mean holding every unpacted
+/// directory aside until its subtree had been read.
+///
+/// Replaces rather than lowers, because the requirement belongs to one branch at
+/// a time: a pacted node met after a shallower one has already been kept still
+/// needs its own way in, and a running minimum would decide that way in had
+/// already been found.
+///
+/// Depth is the whole of it: no path comparisons, so nothing here assumes how a
+/// child's path is spelled relative to its parent's, and one reversed pass
+/// answers for a walk of any shape.
+///
+/// Nothing is dropped from the tree and no state is read but [`Row::state`].
+/// Pure, and deliberately free of [`App`]: rows in, rows out.
+fn pacted_rows(all: &[Row]) -> Vec<Row> {
+    let mut kept = Vec::with_capacity(all.len());
+    // The depth of the last row kept, which is still waiting for an ancestor,
+    // if anything is.
+    let mut needed: Option<usize> = None;
+
+    for row in all.iter().rev() {
+        if row.state.is_pacted() || needed.is_some_and(|depth| row.depth < depth) {
+            needed = Some(row.depth);
+            kept.push(row.clone());
+        }
+    }
+    kept.reverse();
+    kept
+}
+
 /// Where `path` sits in `rows`, or where the deepest drawn ancestor of it
 /// sits, or `None` when neither is drawn.
 ///
-/// The ancestor is the fallback because it is what collapsing leaves behind: a
-/// hidden node's nearest drawn ancestor is the directory that was collapsed
-/// over it, and that is where the selection belongs. Ancestry is a path prefix
+/// The ancestor is the fallback because it is what hiding a row leaves behind: a
+/// collapsed node's nearest drawn ancestor is the directory that was collapsed
+/// over it, and a filtered-away node's is the deepest part of the way to it that
+/// the filter had a reason to keep. Either way that is where the selection
+/// belongs, and either way it is the first row when nothing on the way to the
+/// node survived at all. Ancestry is a path prefix
 /// — the engine's paths nest the way the tree does — taken component by
 /// component, so `crates-old` is no ancestor of anything under `crates`; and
 /// the last matching row is the deepest one, since a walk visits ancestors
@@ -941,6 +1059,18 @@ mod tests {
             "warlock/crates/engine".to_owned(),
             "warlock/crates/tui".to_owned(),
             "warlock/assets".to_owned(),
+        ]
+    }
+
+    /// The fixture under the pacted-only filter: the two pacted leaves, the
+    /// pacted root, and the undocumented `crates/` that is the only way down to
+    /// them. `assets/` is unpacted and has nothing pacted below it, so it goes.
+    fn pacted_fixture() -> Vec<String> {
+        vec![
+            "warlock".to_owned(),
+            "warlock/crates".to_owned(),
+            "warlock/crates/engine".to_owned(),
+            "warlock/crates/tui".to_owned(),
         ]
     }
 
@@ -1899,5 +2029,271 @@ mod tests {
 
         assert!(app.is_empty());
         assert_eq!(app.counts(), StateCounts::default());
+    }
+
+    #[test]
+    fn a_fresh_app_draws_the_whole_tree_rather_than_only_the_pacted_part() {
+        let app = App::from_tree(&fixture::tree());
+
+        assert!(!app.pacted_only());
+        assert_eq!(drawn(&app), whole_fixture());
+    }
+
+    #[test]
+    fn the_filter_keeps_the_pacted_nodes_and_the_way_to_them_and_nothing_else() {
+        let mut app = app_selecting("warlock/crates/tui");
+        let before = app.clone();
+
+        app.toggle_pacted_only();
+
+        assert!(app.pacted_only());
+        assert_eq!(drawn(&app), pacted_fixture());
+        // Every drawn row is pacted or is on the way to one that is, and every
+        // pacted node in the tree is drawn.
+        for row in app.rows() {
+            assert!(
+                row.state.is_pacted()
+                    || app
+                        .rows()
+                        .iter()
+                        .any(|other| other.state.is_pacted() && other.path.starts_with(&row.path)),
+                "{} is neither pacted nor the way to anything pacted",
+                row.path.display()
+            );
+        }
+        assert_eq!(
+            app.rows()
+                .iter()
+                .filter(|row| row.state.is_pacted())
+                .count(),
+            fixture::tree()
+                .walk()
+                .filter(|(node, _)| node.state.is_pacted())
+                .count()
+        );
+
+        app.toggle_pacted_only();
+
+        // Widening again is the whole walk back, and — the selection having
+        // survived the narrowing — an app indistinguishable from the one before.
+        assert!(!app.pacted_only());
+        assert_eq!(drawn(&app), whole_fixture());
+        assert_eq!(app, before);
+    }
+
+    #[test]
+    fn the_filter_keeps_the_depths_and_the_order_the_walk_gave() {
+        let mut app = App::from_tree(&fixture::tree());
+
+        app.toggle_pacted_only();
+
+        let seen: Vec<(usize, &str)> = app
+            .rows()
+            .iter()
+            .map(|row| (row.depth, row.path.to_str().expect("ascii path")))
+            .collect();
+        // `engine` and `tui` still sit at depth 2 under a `crates` that is only
+        // drawn as their way in: the filter narrows the view, it does not
+        // reparent anything.
+        assert_eq!(
+            seen,
+            [
+                (0, "warlock"),
+                (1, "warlock/crates"),
+                (2, "warlock/crates/engine"),
+                (2, "warlock/crates/tui"),
+            ]
+        );
+    }
+
+    #[test]
+    fn filtering_the_selected_node_away_lands_the_selection_on_a_drawn_row() {
+        let mut app = app_selecting("warlock/assets");
+
+        app.toggle_pacted_only();
+
+        // `assets` is gone, and its nearest surviving ancestor is the root,
+        // which is the first row.
+        assert_eq!(app.selected(), 0);
+        assert_eq!(
+            app.selected_row().map(|row| row.path.clone()),
+            Some(PathBuf::from("warlock"))
+        );
+        assert!(app.selected() < app.rows().len());
+    }
+
+    #[test]
+    fn widening_the_view_keeps_the_selection_on_the_node_it_was_on() {
+        let mut app = app_selecting("warlock/assets");
+        app.toggle_pacted_only();
+
+        // Down to the last row the narrowed view has, which is a node the wide
+        // view puts somewhere else entirely.
+        app.select_last();
+        assert_eq!(
+            app.selected_row().map(|row| row.path.clone()),
+            Some(PathBuf::from("warlock/crates/tui"))
+        );
+
+        app.toggle_pacted_only();
+
+        assert_eq!(
+            app.selected_row().map(|row| row.path.clone()),
+            Some(PathBuf::from("warlock/crates/tui"))
+        );
+        assert_eq!(drawn(&app), whole_fixture());
+    }
+
+    #[test]
+    fn the_filter_leaves_the_engines_tally_alone() {
+        let tree = fixture::tree();
+        let mut app = App::from_tree(&tree);
+        let before = app.counts();
+
+        app.toggle_pacted_only();
+
+        // A row fewer on screen, and the same five nodes tallied: the footer
+        // describes the tree, not the view.
+        assert_eq!(app.rows().len(), 4);
+        assert_eq!(app.counts(), before);
+        assert_eq!(app.counts(), tree.counts());
+        assert_eq!(app.counts().total(), 5);
+
+        app.toggle_pacted_only();
+
+        assert_eq!(app.counts(), before);
+        assert_eq!(app.counts(), tally(&app));
+    }
+
+    #[test]
+    fn a_directory_collapsed_before_the_filter_is_still_collapsed_after_it() {
+        let mut app = app_selecting("warlock/crates");
+        app.toggle_collapsed();
+        assert_eq!(drawn(&app), ["warlock", "warlock/crates", "warlock/assets"]);
+
+        app.toggle_pacted_only();
+
+        // `crates` is unpacted and its descendants are hidden, but it is still
+        // the way to them, so it keeps its row: what survives the filter is read
+        // off the whole walk, not off what collapsing left drawn.
+        assert_eq!(drawn(&app), ["warlock", "warlock/crates"]);
+        assert!(app.is_collapsed("warlock/crates"));
+
+        app.toggle_pacted_only();
+
+        assert!(app.is_collapsed("warlock/crates"));
+        assert_eq!(drawn(&app), ["warlock", "warlock/crates", "warlock/assets"]);
+
+        // And the collapse is still a collapse afterwards, not a filter
+        // casualty: expanding puts the descendants back.
+        app.toggle_collapsed();
+        assert_eq!(drawn(&app), whole_fixture());
+    }
+
+    #[test]
+    fn collapsing_under_the_filter_hides_descendants_as_it_always_did() {
+        let mut app = App::from_tree(&fixture::tree());
+        app.toggle_pacted_only();
+
+        app.toggle_collapsed();
+
+        // The root, collapsed over everything the filter kept.
+        assert_eq!(drawn(&app), ["warlock"]);
+        assert!(app.is_collapsed("warlock"));
+
+        app.toggle_collapsed();
+        assert_eq!(drawn(&app), pacted_fixture());
+    }
+
+    #[test]
+    fn nothing_pacted_narrows_to_nothing_at_all() {
+        let mut app = App::from_rows(vec![
+            Row::new(0, "repo", "repo/README.md", NodeState::Unpacted).with_child_count(1),
+            Row::new(1, "repo/crates", None, NodeState::Unpacted),
+        ]);
+
+        app.toggle_pacted_only();
+
+        // No pacted node means no ancestors worth keeping either, and an app
+        // with no rows selects nothing rather than an index off the end.
+        assert!(app.is_empty());
+        assert_eq!(app.selected(), 0);
+        assert_eq!(app.selected_row(), None);
+
+        app.toggle_pacted_only();
+        assert_eq!(drawn(&app), ["repo", "repo/crates"]);
+    }
+
+    #[test]
+    fn pacting_a_node_under_the_filter_brings_its_row_into_the_view_to_stay() {
+        let mut app = app_selecting("warlock/assets");
+        app.toggle_pact().expect("assets has a README");
+
+        app.toggle_pacted_only();
+
+        // Newly pacted, so newly worth drawing: the filter reads the states as
+        // they are now, not as the tree was loaded with them.
+        assert_eq!(
+            drawn(&app),
+            [
+                "warlock",
+                "warlock/crates",
+                "warlock/crates/engine",
+                "warlock/crates/tui",
+                "warlock/assets",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unpacted_subtree_goes_whole_while_its_unpacted_siblings_way_in_stays() {
+        let tree = Tree::new(Node::new("repo", None, NodeState::Unpacted).with_children([
+            Node::new("repo/kept", None, NodeState::Unpacted).with_children([Node::new(
+                "repo/kept/deep",
+                "repo/kept/deep/README.md",
+                NodeState::PactedFresh,
+            )]),
+            Node::new("repo/gone", None, NodeState::Unpacted).with_children([Node::new(
+                "repo/gone/deep",
+                "repo/gone/deep/README.md",
+                NodeState::Unpacted,
+            )]),
+        ]));
+        let mut app = App::from_tree(&tree);
+
+        app.toggle_pacted_only();
+
+        // An unpacted root and an unpacted directory both survive as the way to
+        // one pacted node; the sibling branch with nothing pacted in it goes
+        // whole, parent and child together.
+        assert_eq!(drawn(&app), ["repo", "repo/kept", "repo/kept/deep"]);
+    }
+
+    #[test]
+    fn toggling_the_filter_clears_the_last_keystrokes_message() {
+        let mut app = app_selecting("warlock/crates");
+        assert_eq!(app.toggle_pact(), None);
+        assert!(app.message().is_some());
+
+        app.toggle_pacted_only();
+
+        assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn narrowing_leaves_the_window_in_range_with_the_selection_in_it() {
+        let mut app = app_selecting("warlock/assets");
+        app.set_viewport_height(2);
+        assert!(selection_is_on_screen(&app));
+
+        app.toggle_pacted_only();
+
+        assert!(window_is_in_range(&app));
+        assert!(selection_is_on_screen(&app));
+
+        app.toggle_pacted_only();
+
+        assert!(window_is_in_range(&app));
+        assert!(selection_is_on_screen(&app));
     }
 }
