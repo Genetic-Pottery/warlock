@@ -45,8 +45,8 @@ pub use manifest::Error as ManifestError;
 /// The record of which modules are pacted: one `.warlock/pacts.toml` per
 /// repository.
 pub use manifest::Manifest;
-/// One pacted module: its directory, its README, and whatever was granted to
-/// it.
+/// One pacted module: its directory, its document, and whatever was granted
+/// to it.
 pub use manifest::PactEntry;
 /// The manifest schema version this build reads and writes.
 pub use manifest::SCHEMA_VERSION;
@@ -60,9 +60,11 @@ pub use manifest::to_manifest_path;
 pub use state::NodeState;
 /// A depth-first walk over a tree, yielding each node with its depth.
 pub use tree::DepthFirst;
-/// What `Node::new` accepts for a README: anything path-like, or `None`.
-pub use tree::IntoReadme;
-/// One node of the project tree: its path, its README, its state, its children.
+/// What `Node::new` accepts for a node's `WARLOCK.md`: anything path-like, or
+/// `None` for a node that has none.
+pub use tree::IntoDocument;
+/// One node of the project tree: its path, its document, its state, its
+/// children.
 pub use tree::Node;
 /// How many nodes of a tree sit in each state.
 pub use tree::StateCounts;

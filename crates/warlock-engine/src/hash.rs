@@ -1,8 +1,8 @@
 //! The subtree hash: what "changed" means, mechanically.
 //!
 //! Section 6 of the design doc puts a hash at the trigger and a human (or an
-//! AI) at the judgement: Warlock never decides whether a README is *right*, it
-//! only decides whether the content it was granted against is still the
+//! AI) at the judgement: Warlock never decides whether a document is *right*,
+//! it only decides whether the content it was granted against is still the
 //! content on disk. [`subtree_hash`] is that mechanical half — one digest over
 //! everything at and below a directory, to be compared against the
 //! `granted_hash` a pact recorded.
@@ -59,7 +59,7 @@ const HASH_CONTEXT: &str = "warlock subtree hash v1 2026-08-19";
 /// The hash of everything at and below `dir`, as lowercase hex.
 ///
 /// The digest covers every file the ignore rules keep, at any depth, including
-/// `dir`'s own `README.md` — so editing any file at or below `dir`, adding
+/// `dir`'s own `WARLOCK.md` — so editing any file at or below `dir`, adding
 /// one, deleting one or renaming one changes the result, and editing a file
 /// inside a gitignored or `.warlock/` directory does not. Directories
 /// themselves are not part of the input, so an empty directory is invisible to
@@ -75,12 +75,12 @@ const HASH_CONTEXT: &str = "warlock subtree hash v1 2026-08-19";
 /// use warlock_engine::subtree_hash;
 ///
 /// let dir = tempfile::tempdir()?;
-/// fs::write(dir.path().join("README.md"), "# module\n")?;
+/// fs::write(dir.path().join("WARLOCK.md"), "# module\n")?;
 ///
 /// let before = subtree_hash(dir.path())?;
 /// assert_eq!(before, subtree_hash(dir.path())?, "the same bytes hash the same");
 ///
-/// fs::write(dir.path().join("README.md"), "# module, revised\n")?;
+/// fs::write(dir.path().join("WARLOCK.md"), "# module, revised\n")?;
 /// assert_ne!(before, subtree_hash(dir.path())?);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -237,7 +237,8 @@ mod tests {
 
     use super::{Error, subtree_hash};
 
-    /// A small repository: a root README, two modules, a nested one, a
+    /// A small repository: a root document, two modules, a nested one, a plain
+    /// `README.md` that is nobody's document and an ordinary file here, a
     /// `.gitignore` that ignores `target/`, something inside `target/`, and a
     /// `.warlock/` directory with a manifest in it.
     ///
@@ -246,12 +247,13 @@ mod tests {
     /// itself.
     fn fixture() -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("a temporary directory");
-        write(repo.path(), "README.md", "# repo\n");
+        write(repo.path(), "WARLOCK.md", "# repo\n");
         write(repo.path(), ".gitignore", "/target\n");
-        write(repo.path(), "crates/engine/README.md", "# engine\n");
+        write(repo.path(), "crates/engine/WARLOCK.md", "# engine\n");
         write(repo.path(), "crates/engine/src/lib.rs", "pub fn one() {}\n");
-        write(repo.path(), "crates/engine/src/deep/README.md", "# deep\n");
-        write(repo.path(), "crates/tui/README.md", "# tui\n");
+        write(repo.path(), "crates/engine/src/deep/WARLOCK.md", "# deep\n");
+        write(repo.path(), "crates/tui/WARLOCK.md", "# tui\n");
+        write(repo.path(), "crates/tui/README.md", "# for people\n");
         write(repo.path(), "target/debug/junk.bin", "build output\n");
         write(repo.path(), ".warlock/pacts.toml", "version = 1\n");
         repo
@@ -360,7 +362,7 @@ mod tests {
             ".warlock/pacts.toml",
             "version = 1\n\n[[pact]]\n",
         );
-        write(repo.path(), ".warlock/README.md", "# not a module\n");
+        write(repo.path(), ".warlock/WARLOCK.md", "# not a module\n");
 
         for (node, was) in SPINE.iter().zip(&before) {
             assert_eq!(
@@ -391,19 +393,38 @@ mod tests {
     }
 
     #[test]
-    fn editing_the_nodes_own_readme_changes_its_hash() {
+    fn editing_the_nodes_own_document_changes_its_hash() {
         let repo = fixture();
         let before = hash(repo.path(), "crates/engine");
         let root_before = hash(repo.path(), "");
 
         write(
             repo.path(),
-            "crates/engine/README.md",
+            "crates/engine/WARLOCK.md",
             "# engine\n\nHand-edited, which is exactly what section 9 expects.\n",
         );
 
         assert_ne!(hash(repo.path(), "crates/engine"), before);
         assert_ne!(hash(repo.path(), ""), root_before);
+    }
+
+    #[test]
+    fn a_plain_readme_goes_into_the_digest_like_any_other_file() {
+        let repo = fixture();
+        let before = hash(repo.path(), "crates/tui");
+
+        write(
+            repo.path(),
+            "crates/tui/README.md",
+            "# for people, revised\n",
+        );
+
+        assert_ne!(
+            hash(repo.path(), "crates/tui"),
+            before,
+            "a `README.md` is not Warlock's document and is not special to the \
+             hash either: it is a file at or below the node, so it counts"
+        );
     }
 
     #[test]
