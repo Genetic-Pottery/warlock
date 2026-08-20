@@ -1,12 +1,14 @@
-//! One directory's pact: what a model pass gets to see, and what is done with
-//! what it says.
+//! Pacting: what a model pass gets to see, what is done with what it says, and
+//! how a whole subtree of directories is pacted at once.
 //!
-//! [`pact_directory`] is the whole operation, and it is three steps with
-//! nothing else in them: gather the directory into a request, run one pass
-//! through an [`Agent`], and write what came back to `<directory>/WARLOCK.md`.
-//! It records nothing — no manifest entry, no hash, no grant — because a pact
-//! is one request, one response, one file, and what to remember about it is the
-//! caller's business.
+//! Two operations, one on top of the other. [`pact_directory`] is one
+//! directory, and it is three steps with nothing else in them: gather the
+//! directory into a request, run one pass through an [`Agent`], and write what
+//! came back to `<directory>/WARLOCK.md`. It records nothing — no manifest
+//! entry, no hash, no grant — because a pact of one directory is one request,
+//! one response, one file. [`pact_subtree`] is the operation a keystroke runs:
+//! every directory at and below the selected one, children first, and *then*
+//! the hashing and the granting that turn what was written into a manifest.
 //!
 //! Section 11 of the design doc calls context scoping "the actual
 //! differentiator: maximal relevant context, minimal waste". This module is
@@ -87,6 +89,24 @@
 //! parents, which is what makes [`AgentChildDocument`] worth anything: a parent
 //! is only pacted once every child below it has written the document the parent
 //! will be handed.
+//!
+//! # Write everything, then hash everything
+//!
+//! [`pact_subtree`] runs in two phases, and the split is the whole reason it is
+//! an operation rather than a loop a caller could write. A directory's hash
+//! covers every file below it, its children's `WARLOCK.md` among them, so a
+//! per-directory *write, hash, grant* loop grants a parent a hash that the very
+//! next write invalidates — and finishes with a subtree that is yellow
+//! everywhere except its deepest leaves. So phase one writes every document and
+//! records nothing, and phase two starts only once phase one is over: hash each
+//! directory, build one [`PactEntry`] for it, and grant it the hash just
+//! computed.
+//!
+//! Nothing is granted that was not earned. A directory whose own document
+//! failed gets no entry at all, and every ancestor of it *inside the pact* gets
+//! an entry with no grant — which by [`decide_state`](crate::decide_state)'s
+//! rule is pacted and stale, i.e. yellow. That is what the manifest's optional
+//! grant was for, so partial completion needs no new state and no new field.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -98,7 +118,8 @@ use std::path::{Path, PathBuf};
 use ignore::WalkBuilder;
 
 use crate::{
-    Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, ManifestError, to_manifest_path,
+    Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, HashError, Manifest,
+    ManifestError, PactEntry, now_rfc3339, subtree_hash, to_manifest_path,
 };
 
 /// The directory holding Warlock's own bookkeeping, never part of a request.
@@ -212,6 +233,221 @@ guess what is inside it.
 Output the document and nothing else: no preamble, no sign-off, no commentary \
 about the task, and no code fence wrapping the whole document. Start with a \
 level-one Markdown heading naming the directory.";
+
+/// Pact `directory` and everything below it: write every document first, then
+/// hash and grant.
+///
+/// The operation a keystroke runs. `directory` is the selected directory,
+/// `root` is the repository root the manifest's paths are relative to,
+/// `manifest` is what `.warlock/pacts.toml` says today, and what comes back is
+/// what it should say tomorrow — **this function saves nothing**. A pact writes
+/// its manifest once, at the end, through [`Manifest::save`], and doing that is
+/// the caller's business for the same reason [`pact_directory`] records
+/// nothing: the code that owns the file is the code that decides when it is
+/// written and what to say when writing it fails.
+///
+/// # The two phases
+///
+/// **Phase one writes.** [`pact_directory`] runs over every directory
+/// [`pactable_directories`] found, children before parents, so each parent's
+/// pass is handed the documents its children have just written. Nothing is
+/// hashed and nothing is recorded here.
+///
+/// **Phase two hashes and grants**, and only starts once phase one has
+/// finished for every directory. A directory's [`subtree_hash`] covers its
+/// children's documents, so a hash taken before the last write is a hash of
+/// something that no longer exists — see the [module docs](self) for why this
+/// is a phase rather than a step in a loop. One [`PactEntry`] is built per
+/// documented directory, granted the hash just computed, and stamped with a
+/// single [`now_rfc3339`] taken for the whole pact.
+///
+/// # What ends up in the manifest
+///
+/// Exactly one entry per pacted directory that got a document, whose module is
+/// that directory and whose document is that directory's `WARLOCK.md`. An entry
+/// already there for one of those directories is *replaced where it sits*, so
+/// nothing is duplicated and a manifest's order — and its diff — stays stable.
+/// Entries for directories outside the pact are carried through untouched.
+///
+/// Three things leave a directory less than green, and none of them stops the
+/// rest of the pact:
+///
+/// * **Its document failed.** The directory gets no entry — including no
+///   surviving older one, because this run is what the manifest now describes —
+///   and it renders gray.
+/// * **A directory below it failed.** It gets an entry with no grant: pacted,
+///   never judged, yellow.
+/// * **Its hash failed.** Same shape, for a different reason: the document is
+///   written and there is no hash to grant against, so the entry goes in
+///   ungranted rather than the pact falling over.
+///
+/// ```
+/// use std::fs;
+/// use warlock_engine::{
+///     Agent, AgentError, AgentRequest, AgentResponse, Manifest, NodeState, PactedSubtree,
+///     decide_state, pact_subtree, subtree_hash,
+/// };
+///
+/// /// The engine's own tests reach a model exactly like this: they don't.
+/// struct Canned(String);
+///
+/// impl Agent for Canned {
+///     fn run(&self, _request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+///         Ok(AgentResponse::new(self.0.clone()))
+///     }
+/// }
+///
+/// let repo = tempfile::tempdir()?;
+/// let engine = repo.path().join("crates").join("engine");
+/// fs::create_dir_all(engine.join("src"))?;
+/// fs::write(engine.join("src").join("lib.rs"), "//! Core engine.\n")?;
+/// let markdown = format!("# engine\n\n{}\n", "Core engine for warlock. ".repeat(20));
+///
+/// let PactedSubtree { manifest, failures, .. } =
+///     pact_subtree(&engine, repo.path(), &Manifest::new(), &Canned(markdown))?;
+///
+/// assert!(failures.is_empty());
+/// assert_eq!(manifest.entries().len(), 2, "the directory, and the one below it");
+/// let entry = manifest.entry("crates/engine").expect("the selected directory is pacted");
+/// assert_eq!(entry.document(), "crates/engine/WARLOCK.md");
+/// assert_eq!(decide_state(Some(entry), &subtree_hash(&engine)?), NodeState::PactedFresh);
+///
+/// // Saving is the caller's, once, at the end.
+/// manifest.save(repo.path())?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+///
+/// [`Error::Walk`], and nothing else: the one thing that fails the operation as
+/// a whole is not being able to list the subtree, because a pact planned from
+/// half a walk would silently leave directories out. Everything that goes wrong
+/// after that goes wrong for one directory, and comes back as a [`Failure`] in
+/// [`PactedSubtree::failures`] alongside the manifest the rest of the subtree
+/// earned.
+pub fn pact_subtree(
+    directory: impl AsRef<Path>,
+    root: impl AsRef<Path>,
+    manifest: &Manifest,
+    agent: &dyn Agent,
+) -> Result<PactedSubtree, Error> {
+    let (directory, root) = (directory.as_ref(), root.as_ref());
+    let directories = pactable_directories(directory)?;
+
+    let mut failures = Vec::new();
+    let mut problems = Vec::new();
+
+    // Phase one: every document, children before parents, and nothing else.
+    // `documents` is what got written and `undocumented` is what did not; both
+    // are read in phase two and neither is acted on before it.
+    let mut documents = BTreeMap::new();
+    let mut undocumented = Vec::new();
+    for pacted in &directories {
+        match pact_directory(pacted, agent) {
+            Ok(Pacted {
+                document,
+                problems: caps,
+            }) => {
+                problems.extend(caps);
+                documents.insert(pacted.clone(), document);
+            }
+            Err(error) => {
+                undocumented.push(pacted.clone());
+                failures.push(Failure::Document { source: error });
+            }
+        }
+    }
+
+    // Phase two: hashing and granting, now that every document phase one was
+    // going to write is on disk. One timestamp for the whole pact — the entries
+    // record a single event, and a per-directory clock reading would only
+    // invite someone to read an ordering into it.
+    let granted_at = now_rfc3339();
+    let mut entries = BTreeMap::new();
+    for pacted in &directories {
+        let Some(document) = documents.get(pacted) else {
+            // No document, no entry: a directory this run failed to describe is
+            // not a directory this run pacted.
+            continue;
+        };
+        let entry = match PactEntry::new(root, pacted, document) {
+            Ok(entry) => entry,
+            Err(source) => {
+                failures.push(Failure::Record {
+                    directory: pacted.clone(),
+                    source,
+                });
+                continue;
+            }
+        };
+
+        // An entry with no grant is the whole representation of partial
+        // completion: pacted, never judged, yellow. `starts_with` is a
+        // component-wise prefix test, so `src` never counts as an ancestor of
+        // `src-tests`.
+        if undocumented
+            .iter()
+            .any(|missing| missing.starts_with(pacted))
+        {
+            entries.insert(entry.module().to_owned(), entry);
+            continue;
+        }
+
+        let entry = match subtree_hash(pacted) {
+            Ok(hash) => entry.with_grant(hash, &granted_at),
+            Err(source) => {
+                failures.push(Failure::Hash {
+                    directory: pacted.clone(),
+                    source,
+                });
+                entry
+            }
+        };
+        entries.insert(entry.module().to_owned(), entry);
+    }
+
+    Ok(PactedSubtree {
+        manifest: rewrite(manifest, &directories, root, entries),
+        failures,
+        problems,
+    })
+}
+
+/// `manifest` with the pact's entries in it: `pacted` replaced, everything else
+/// left exactly as it was.
+///
+/// `entries` is what the pact earned, keyed by stored module path, and
+/// `directories` is everything it covered — including the directories that
+/// earned nothing, whose entries go. Existing entries keep their position, so a
+/// re-pact moves no lines around; entries the manifest has never seen are
+/// appended in stored-path order, which puts a parent above the children it
+/// gained.
+fn rewrite(
+    manifest: &Manifest,
+    directories: &[PathBuf],
+    root: &Path,
+    mut entries: BTreeMap<String, PactEntry>,
+) -> Manifest {
+    // Every module the pact is entitled to speak for. A directory whose path
+    // cannot be stored has no entry to match against anyway, so a failure to
+    // name one here can only leave an entry alone, never drop the wrong one.
+    let covered: BTreeSet<String> = directories
+        .iter()
+        .filter_map(|pacted| to_manifest_path(root, pacted).ok())
+        .collect();
+
+    let mut kept = Vec::with_capacity(manifest.entries().len() + entries.len());
+    for existing in manifest.entries() {
+        if let Some(entry) = entries.remove(existing.module()) {
+            // Replaced where it sat: one entry per module, never two.
+            kept.push(entry);
+        } else if !covered.contains(existing.module()) {
+            kept.push(existing.clone());
+        }
+    }
+    kept.extend(entries.into_values());
+    Manifest::with_entries(kept)
+}
 
 /// Pact one directory: gather it, run one pass through `agent`, and write what
 /// came back to `<directory>/WARLOCK.md`.
@@ -341,9 +577,9 @@ pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<
 /// which is arbitrary but fixed — the guarantee is depth, and determinism on top
 /// of it.
 ///
-/// Crate-private on purpose: this is the subtree operation's ordering, not a
-/// second public way to enumerate a project. Callers outside the crate that want
-/// the directories of a subtree already have [`load_tree`](crate::load_tree).
+/// Crate-private on purpose: this is [`pact_subtree`]'s ordering, not a second
+/// public way to enumerate a project. Callers outside the crate that want the
+/// directories of a subtree already have [`load_tree`](crate::load_tree).
 ///
 /// # Errors
 ///
@@ -351,11 +587,6 @@ pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<
 /// there, it cannot be listed, or something vanished from under the walk. There
 /// is no partial answer — a pact planned from half a subtree would silently
 /// leave directories out.
-// Allowed rather than expected: the only caller in this build is the test module
-// below, and the subtree pact operation that will call it in earnest is the next
-// slice. An `#[expect]` would go unfulfilled in the test build, where the
-// function *is* used, and fail the build for the opposite reason.
-#[allow(dead_code)]
 pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
     let walker = WalkBuilder::new(root)
         // The same three rules as `load` and `hash`, for the same reasons: a
@@ -649,6 +880,31 @@ fn relative(dir: &Path, path: &Path) -> Result<String, Error> {
 /// cannot happen.
 fn byte_count(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
+}
+
+/// What a subtree pact produced: the manifest to save, and everything that went
+/// wrong on the way without stopping it.
+///
+/// The manifest is a value, not a file — [`pact_subtree`] writes nothing to
+/// `.warlock/` — and the two lists are what a front end reports. They are
+/// separate because they call for different reactions: a [`Failure`] is a
+/// directory that did not come out of the pact the way it was meant to, while a
+/// [`Problem`] is a file left out of a request that succeeded anyway.
+#[derive(Debug)]
+pub struct PactedSubtree {
+    /// The manifest as it should now be written: the pact's entries, plus every
+    /// entry from outside the pacted subtree, unchanged. Save it once, with
+    /// [`Manifest::save`].
+    pub manifest: Manifest,
+    /// Every directory that failed: the ones with no document first, in the
+    /// order the pact reached them, then the ones that could not be recorded or
+    /// hashed, since that is a later phase. Within a phase it is children
+    /// before parents, like the pact itself. Empty is the whole-subtree
+    /// success, and a non-empty list still comes with a manifest worth saving.
+    pub failures: Vec<Failure>,
+    /// Every file the byte caps left out of a request, gathered from each
+    /// directory's pact as it happened. Nothing here means anything failed.
+    pub problems: Vec<Problem>,
 }
 
 /// What a pact produced: the document it wrote, and everything the byte caps
@@ -952,19 +1208,110 @@ impl std::error::Error for Error {
     }
 }
 
+/// One directory a subtree pact did not finish with, and how far it got.
+///
+/// Three cases because there are three answers, and a caller showing a user one
+/// line per failure should not have to flatten them into "something went
+/// wrong": there is no document, there is a document nobody can record, and
+/// there is a document with no hash to grant it against. Every variant names
+/// its directory, uniformly through [`Failure::directory`].
+///
+/// A failure is never the end of a pact. Each one is about one directory, the
+/// rest of the subtree carries on, and the manifest that comes back alongside
+/// them is a manifest worth saving — see [`pact_subtree`] for what each case
+/// leaves in it.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Failure {
+    /// No document was written for this directory, so it gets no entry at all.
+    /// The ordinary case: the pass was refused, or the disk said no.
+    Document {
+        /// What stopped it, naming the directory itself.
+        source: Error,
+    },
+    /// The document was written and the entry could not be built: the directory
+    /// does not sit under the manifest's root, or its path is not UTF-8, so
+    /// there is no way to spell it in a TOML file.
+    Record {
+        /// The directory that was pacted.
+        directory: PathBuf,
+        /// Why it cannot be named in the manifest.
+        source: ManifestError,
+    },
+    /// The document was written and the directory could not be hashed, so its
+    /// entry goes in without a grant.
+    ///
+    /// Its own case rather than a [`Failure::Document`], because what happened
+    /// is the opposite: the expensive half worked and the cheap half did not.
+    /// The document on disk is real, the entry is real, and only the grant —
+    /// the one thing that must never be invented — is missing.
+    Hash {
+        /// The directory that was pacted.
+        directory: PathBuf,
+        /// Why it has no hash: a file under it could not be read, or named, or
+        /// the walk itself failed.
+        source: HashError,
+    },
+}
+
+impl Failure {
+    /// The directory this failure is about, whichever way it failed.
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        match self {
+            Self::Document { source } => source.directory(),
+            Self::Record { directory, .. } | Self::Hash { directory, .. } => directory,
+        }
+    }
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            // Delegated: the error already reads as a sentence about its own
+            // directory, and wrapping it would say the directory twice.
+            Self::Document { source } => write!(f, "{source}"),
+            Self::Record { directory, source } => write!(
+                f,
+                "`{}` was documented but cannot be recorded in the manifest: {source}",
+                directory.display()
+            ),
+            Self::Hash { directory, source } => write!(
+                f,
+                "`{}` was documented but could not be hashed, so it is pacted without a grant: \
+                 {source}",
+                directory.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Failure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Document { source } => Some(source),
+            Self::Record { source, .. } => Some(source),
+            Self::Hash { source, .. } => Some(source),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::error::Error as _;
     use std::fs;
     use std::path::{Path, PathBuf};
 
     use super::{
-        Gathered, MINIMUM_DOCUMENT_BYTES, Omission, PER_FILE_BYTE_CAP, Pacted, Problem,
-        REQUEST_BYTE_CAP, Refusal, gather_request, pact_directory, pactable_directories,
+        Failure, Gathered, MINIMUM_DOCUMENT_BYTES, Omission, PER_FILE_BYTE_CAP, Pacted,
+        PactedSubtree, Problem, REQUEST_BYTE_CAP, Refusal, gather_request, pact_directory,
+        pact_subtree, pactable_directories,
     };
     use crate::{
         Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, AgentResponse, Loaded,
-        load_tree,
+        Manifest, NodeState, PactEntry, decide_state, from_manifest_path, load_tree, manifest_path,
+        subtree_hash,
     };
 
     /// The whole point of the agent seam, in one struct: a model pass that
@@ -2043,5 +2390,437 @@ mod tests {
 
         assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
         assert_eq!(error.directory(), missing);
+    }
+
+    /// A fake that answers everywhere but one directory, which is how partial
+    /// completion is reached without a filesystem trick: exactly one pass
+    /// refuses, and everything else in the subtree is ordinary.
+    struct FailsFor {
+        /// The one directory nothing is ever written for.
+        directory: PathBuf,
+        /// What every other directory is answered with.
+        text: String,
+    }
+
+    impl Agent for FailsFor {
+        fn run(&self, request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+            if request.directory() == self.directory {
+                return Err(AgentError::EmptyOutput);
+            }
+            Ok(AgentResponse::new(self.text.clone()))
+        }
+    }
+
+    /// A repository with files in it, so that the directories below have
+    /// something to hash and something to be described from.
+    ///
+    /// The same shape as [`repository`] — an ignored `target/`, a `.warlock/`,
+    /// a sibling crate outside the subtree the tests below pact — with content
+    /// added, because a pact that hashes nothing proves nothing about hashing.
+    fn project() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        write(repo.path(), ".git/config", "[core]\n");
+        write(repo.path(), ".gitignore", "/target\n");
+        write(repo.path(), ".warlock/pacts.toml", "version = 1\n");
+        write(repo.path(), "Cargo.toml", "[workspace]\n");
+        write(repo.path(), "crates/engine/Cargo.toml", "[package]\n");
+        write(
+            repo.path(),
+            "crates/engine/src/lib.rs",
+            "//! Core engine.\n",
+        );
+        write(
+            repo.path(),
+            "crates/engine/src/inner/deep.rs",
+            "fn deep() {}\n",
+        );
+        write(
+            repo.path(),
+            "crates/engine/tests/it.rs",
+            "#[test] fn works() {}\n",
+        );
+        write(repo.path(), "crates/tui/src/main.rs", "fn main() {}\n");
+        write(repo.path(), "target/debug/build.log", "noise\n");
+        repo
+    }
+
+    /// The modules a manifest holds, in file order.
+    fn modules(manifest: &Manifest) -> Vec<&str> {
+        manifest.entries().iter().map(PactEntry::module).collect()
+    }
+
+    /// What `module` renders as right now: its entry, judged against what its
+    /// directory hashes to at this moment.
+    fn state(manifest: &Manifest, root: &Path, module: &str) -> NodeState {
+        let hash = subtree_hash(from_manifest_path(root, module)).expect("the subtree hashes");
+        decide_state(manifest.entry(module), &hash)
+    }
+
+    #[test]
+    fn every_directory_is_pacted_before_the_one_above_it() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let agent = Canned::new(document(300));
+
+        pact_subtree(&engine, repo.path(), &Manifest::new(), &agent).expect("pacts");
+
+        let seen: Vec<PathBuf> = agent
+            .seen
+            .borrow()
+            .iter()
+            .map(|request| request.directory().to_path_buf())
+            .collect();
+        assert_eq!(
+            relative_to(repo.path(), &seen),
+            [
+                "crates/engine/tests",
+                "crates/engine/src/inner",
+                "crates/engine/src",
+                "crates/engine",
+            ],
+            "one pass per directory, deepest first, the selected directory last",
+        );
+        // Said again as the property, since the listing above is one fixture and
+        // this is the rule: no request may be issued for a directory before
+        // every request below it has been.
+        for (index, directory) in seen.iter().enumerate() {
+            for (other, descendant) in seen.iter().enumerate() {
+                if descendant != directory && descendant.starts_with(directory) {
+                    assert!(
+                        other < index,
+                        "`{}` is below `{}` and has to be pacted first",
+                        descendant.display(),
+                        directory.display(),
+                    );
+                }
+            }
+        }
+        // And this is what the ordering is *for*: the last pass was handed the
+        // documents the earlier ones had already written.
+        let seen = agent.seen.borrow();
+        let parent = seen.last().expect("the selected directory was pacted");
+        assert_eq!(
+            parent
+                .child_documents()
+                .iter()
+                .map(AgentChildDocument::directory)
+                .collect::<Vec<_>>(),
+            ["src", "tests"],
+            "a parent reads its children's finished documents, not their source",
+        );
+    }
+
+    #[test]
+    fn a_whole_subtree_comes_out_fresh_the_directory_it_started_from_included() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+
+        let PactedSubtree {
+            manifest,
+            failures,
+            problems,
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &Canned::new(document(300)),
+        )
+        .expect("pacts");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            modules(&manifest),
+            [
+                "crates/engine",
+                "crates/engine/src",
+                "crates/engine/src/inner",
+                "crates/engine/tests",
+            ],
+        );
+
+        // The two-phase rule, asserted where it can be seen: a write-hash-grant
+        // loop would have hashed `crates/engine` before its children's documents
+        // existed, and every directory but the deepest leaf would be stale here.
+        for module in modules(&manifest) {
+            let entry = manifest.entry(module).expect("just built");
+            let hash = subtree_hash(from_manifest_path(repo.path(), module)).expect("hashes");
+            assert_eq!(
+                entry.granted_hash(),
+                Some(hash.as_str()),
+                "`{module}` was granted a hash of something other than its own content",
+            );
+            assert_eq!(decide_state(Some(entry), &hash), NodeState::PactedFresh);
+        }
+        assert_eq!(
+            manifest
+                .entries()
+                .iter()
+                .filter_map(PactEntry::granted_at)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            1,
+            "one pact is one event, so its entries share one timestamp",
+        );
+
+        assert_eq!(
+            fs::read_to_string(manifest_path(repo.path())).expect("the manifest is still there"),
+            "version = 1\n",
+            "the operation saves nothing: writing the manifest is the caller's, once",
+        );
+    }
+
+    #[test]
+    fn a_pact_replaces_the_entries_it_owns_and_leaves_every_other_one_alone() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let outside = PactEntry::new(repo.path(), "crates/tui", "crates/tui/WARLOCK.md")
+            .expect("a path inside the root is storable")
+            .with_grant("f".repeat(64), "2020-01-01T00:00:00Z");
+        let inside = PactEntry::new(
+            repo.path(),
+            "crates/engine/src",
+            "crates/engine/src/WARLOCK.md",
+        )
+        .expect("a path inside the root is storable")
+        .with_grant("0".repeat(64), "2020-01-01T00:00:00Z");
+        let before = Manifest::with_entries([outside.clone(), inside]);
+
+        let PactedSubtree { manifest, .. } =
+            pact_subtree(&engine, repo.path(), &before, &Canned::new(document(300)))
+                .expect("pacts");
+
+        assert_eq!(
+            modules(&manifest),
+            [
+                "crates/tui",
+                "crates/engine/src",
+                "crates/engine",
+                "crates/engine/src/inner",
+                "crates/engine/tests",
+            ],
+            "an entry already there keeps its line, and the new ones are appended \
+             in path order",
+        );
+        for module in modules(&manifest) {
+            assert_eq!(
+                manifest
+                    .entries()
+                    .iter()
+                    .filter(|entry| entry.module() == module)
+                    .count(),
+                1,
+                "`{module}` is in the manifest exactly once",
+            );
+        }
+        for module in [
+            "crates/engine",
+            "crates/engine/src",
+            "crates/engine/src/inner",
+            "crates/engine/tests",
+        ] {
+            let entry = manifest.entry(module).expect("pacted");
+            assert_eq!(
+                entry.document(),
+                format!("{module}/WARLOCK.md"),
+                "a directory is documented by its own `WARLOCK.md`",
+            );
+        }
+        assert_ne!(
+            manifest
+                .entry("crates/engine/src")
+                .and_then(PactEntry::granted_hash),
+            Some("0".repeat(64).as_str()),
+            "the entry that was already there was replaced, grant and all",
+        );
+        assert_eq!(
+            manifest.entry("crates/tui"),
+            Some(&outside),
+            "a module outside the pacted subtree is not the pact's business",
+        );
+        assert_eq!(
+            state(&manifest, repo.path(), "crates/tui"),
+            NodeState::PactedStale,
+            "and its colour is whatever it already was",
+        );
+    }
+
+    #[test]
+    fn a_directory_with_no_document_gets_no_entry_and_costs_its_ancestors_their_grants() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let failing = engine.join("src").join("inner");
+        let agent = FailsFor {
+            directory: failing.clone(),
+            text: document(300),
+        };
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = pact_subtree(&engine, repo.path(), &Manifest::new(), &agent)
+            .expect("one directory failing is not the pact failing");
+
+        assert!(
+            manifest.entry("crates/engine/src/inner").is_none(),
+            "a directory this run could not describe is not one it pacted",
+        );
+        assert_eq!(
+            written(&failing),
+            None,
+            "and nothing was written for it either",
+        );
+
+        for module in ["crates/engine/src", "crates/engine"] {
+            let entry = manifest.entry(module).expect("pacted, if not judged");
+            assert_eq!(
+                entry.granted_hash(),
+                None,
+                "`{module}` has an incomplete subtree below it, so it earned no grant",
+            );
+            assert_eq!(entry.granted_at(), None, "and no timestamp for one");
+            assert_eq!(
+                state(&manifest, repo.path(), module),
+                NodeState::PactedStale,
+                "which renders yellow, by the existing freshness rule",
+            );
+        }
+
+        let sibling = manifest
+            .entry("crates/engine/tests")
+            .expect("a completed subtree is still pacted");
+        assert_eq!(
+            sibling.granted_hash(),
+            Some(subtree_hash(engine.join("tests")).expect("hashes").as_str()),
+        );
+        assert_eq!(
+            state(&manifest, repo.path(), "crates/engine/tests"),
+            NodeState::PactedFresh,
+            "one failure elsewhere does not take a finished subtree's grant away",
+        );
+
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(
+            matches!(&failures[0], Failure::Document { .. }),
+            "{:?}",
+            failures[0],
+        );
+        assert_eq!(failures[0].directory(), failing);
+        assert!(
+            failures[0]
+                .to_string()
+                .contains(&failing.display().to_string()),
+            "a failure says which directory it is about: {}",
+            failures[0],
+        );
+    }
+
+    #[test]
+    fn the_repository_root_is_a_module_like_any_other_and_stores_as_a_dot() {
+        let repo = project();
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = pact_subtree(
+            repo.path(),
+            repo.path(),
+            &Manifest::new(),
+            &Canned::new(document(300)),
+        )
+        .expect("pacts");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            modules(&manifest),
+            [
+                ".",
+                "crates",
+                "crates/engine",
+                "crates/engine/src",
+                "crates/engine/src/inner",
+                "crates/engine/tests",
+                "crates/tui",
+                "crates/tui/src",
+            ],
+            "the root stores as `.`, and `target/`, `.git/` and `.warlock/` are \
+             not modules",
+        );
+
+        let root = manifest.entry(".").expect("the root is pacted too");
+        assert_eq!(
+            root.document(),
+            "WARLOCK.md",
+            "documented by the `WARLOCK.md` sitting in the root itself",
+        );
+        assert_eq!(root.module_path(repo.path()), repo.path());
+        assert_eq!(
+            state(&manifest, repo.path(), "."),
+            NodeState::PactedFresh,
+            "and a whole-repository pact leaves the whole repository green",
+        );
+    }
+
+    /// Only on unix, because there is no portable way to make a file
+    /// unreadable. What is under test — that a hash nobody can compute leaves an
+    /// entry ungranted instead of taking the pact down — is not
+    /// platform-specific.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_cannot_be_hashed_is_pacted_without_a_grant() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let unreadable = engine.join("tests").join("it.rs");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmods");
+        if fs::read(&unreadable).is_ok() {
+            // Running as root: no file is unreadable, so there is nothing here
+            // to assert against.
+            return;
+        }
+
+        let PactedSubtree {
+            manifest,
+            failures,
+            problems,
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &Canned::new(document(300)),
+        )
+        .expect("a file nobody can read never fails the pact");
+
+        // Both directories whose hash would have covered the unreadable file.
+        for module in ["crates/engine/tests", "crates/engine"] {
+            let entry = manifest.entry(module).expect("documented, so pacted");
+            assert_eq!(
+                entry.granted_hash(),
+                None,
+                "`{module}` has no hash, and a hash nobody computed is never invented",
+            );
+        }
+        assert_eq!(
+            manifest
+                .entry("crates/engine/src")
+                .and_then(PactEntry::granted_hash),
+            Some(subtree_hash(engine.join("src")).expect("hashes").as_str()),
+            "the part of the subtree that can be hashed is still granted",
+        );
+
+        assert_eq!(failures.len(), 2, "{failures:?}");
+        assert!(
+            failures
+                .iter()
+                .all(|failure| matches!(failure, Failure::Hash { .. })),
+            "a document that was written is never reported as one that was not: \
+             {failures:?}",
+        );
+        assert!(
+            problems.iter().any(|problem| problem.path == unreadable
+                && matches!(problem.cause, Omission::Unreadable { .. })),
+            "and the request that could not read it said so, non-fatally: {problems:?}",
+        );
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).expect("chmods back");
     }
 }
