@@ -19,7 +19,8 @@ mod colour;
 mod fixture;
 mod ui;
 
-/// The front end's state: the flattened tree and the selected row.
+/// The front end's state: the flattened tree, the selected row and the slice
+/// of rows on screen.
 pub use app::App;
 /// What a pact toggle changed, for whoever has to write it to the manifest.
 pub use app::PactToggle;
