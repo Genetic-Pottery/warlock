@@ -37,7 +37,8 @@ pub use load::Loaded;
 pub use load::Problem as LoadProblem;
 /// Build a tree from a directory on disk, coloured by the manifest above it.
 pub use load::load_tree;
-/// The nearest ancestor of a directory that holds a `.warlock/` directory.
+/// The nearest ancestor of a directory that holds a `.git/` directory: the
+/// repository root, under which the manifest lives at `.warlock/pacts.toml`.
 pub use load::repository_root;
 /// Everything that can go wrong reading, writing or building a manifest.
 pub use manifest::Error as ManifestError;

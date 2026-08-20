@@ -5,7 +5,9 @@
 //! it was invoked — there is no privileged root. Both fall out of one function,
 //! [`load_tree`]: the tree it returns is rooted at the working directory it was
 //! given, while the single manifest that colours the nodes is read from the
-//! repository root found by walking *up* from there.
+//! repository root found by walking *up* from there — the nearest ancestor
+//! holding a `.git/` directory, whose manifest, if it has one at all, is at
+//! `<root>/.warlock/pacts.toml`.
 //!
 //! What makes a node:
 //!
@@ -54,8 +56,12 @@ use crate::{
     to_manifest_path,
 };
 
-/// The directory whose presence marks a repository root, and which is itself
-/// never part of the tree.
+/// The directory whose presence marks a repository root. Git's own, read as a
+/// name on disk and nothing more.
+const GIT_DIR: &str = ".git";
+
+/// The directory Warlock keeps its manifest in, and which is itself never part
+/// of the tree.
 const MANIFEST_DIR: &str = ".warlock";
 
 /// The file whose presence in a directory makes that directory a module node.
@@ -64,9 +70,9 @@ const README_FILE: &str = "README.md";
 /// Build the tree rooted at `working_dir`, coloured by the manifest above it.
 ///
 /// The returned tree's [`root_path`](Tree::root_path) is `working_dir` itself,
-/// made absolute; the manifest is loaded from the nearest ancestor holding a
-/// `.warlock/` directory (see [`repository_root`]). A repository that has no
-/// manifest yet, or an empty one, loads with every node
+/// made absolute; the manifest is loaded from `.warlock/pacts.toml` under the
+/// nearest ancestor holding a `.git/` directory (see [`repository_root`]). A
+/// repository that has no manifest yet, or an empty one, loads with every node
 /// [`NodeState::Unpacted`]; a manifest that exists but cannot be understood is
 /// an error rather than a silent empty one.
 ///
@@ -80,7 +86,7 @@ const README_FILE: &str = "README.md";
 /// use warlock_engine::{Loaded, NodeState, load_tree};
 ///
 /// let repo = tempfile::tempdir()?;
-/// fs::create_dir(repo.path().join(".warlock"))?;
+/// fs::create_dir(repo.path().join(".git"))?;
 /// fs::create_dir_all(repo.path().join("crates/engine/src"))?;
 /// fs::write(repo.path().join("crates/engine/README.md"), "# engine\n")?;
 ///
@@ -109,7 +115,7 @@ const README_FILE: &str = "README.md";
 /// as against a node that could not be coloured (which is a [`Problem`]).
 ///
 /// * [`Error::NoRepositoryRoot`] if neither `working_dir` nor any of its
-///   ancestors contains a `.warlock/` directory.
+///   ancestors contains a `.git/` directory.
 /// * [`Error::Io`] if `working_dir` cannot be made absolute.
 /// * [`Error::Manifest`] if a manifest is there but cannot be read or parsed.
 /// * [`Error::Walk`] if the directory tree cannot be walked.
@@ -193,12 +199,18 @@ impl std::error::Error for Problem {
 }
 
 /// The nearest ancestor of `start` — `start` itself included — that contains a
-/// `.warlock/` directory, or `None` if there is no such directory anywhere
-/// above it.
+/// `.git/` directory, or `None` if there is no such directory anywhere above
+/// it.
 ///
 /// This is the repository root in Warlock's sense: the one place a manifest
-/// lives. It is deliberately not "wherever `.git/` is" — a repository can hold
-/// several pacted checkouts, and it is the manifest that scopes a run.
+/// lives, at `<root>/.warlock/pacts.toml`. The anchor is `.git/` and not that
+/// manifest, because a repository nobody has pacted yet is the normal way to
+/// meet Warlock — it opens as a tree of unpacted modules, and the manifest
+/// appears under the same root the first time something is pacted.
+///
+/// A filesystem check and nothing more: `.git` counts when it is a directory,
+/// so a checkout where it is a *file* (a worktree, a submodule) is not a root
+/// here.
 ///
 /// `start` is used as given; [`load_tree`] makes its working directory absolute
 /// before calling this, which is what a relative path needs for the walk
@@ -208,7 +220,7 @@ pub fn repository_root(start: impl AsRef<Path>) -> Option<PathBuf> {
     start
         .as_ref()
         .ancestors()
-        .find(|dir| dir.join(MANIFEST_DIR).is_dir())
+        .find(|dir| dir.join(GIT_DIR).is_dir())
         .map(Path::to_path_buf)
 }
 
@@ -376,8 +388,9 @@ fn absolute(path: &Path) -> Result<PathBuf, Error> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Neither the working directory nor any ancestor holds a `.warlock/`
-    /// directory, so there is no repository to load and no manifest to read.
+    /// Neither the working directory nor any ancestor holds a `.git/`
+    /// directory, so there is no repository to load and nowhere a manifest
+    /// could live.
     NoRepositoryRoot {
         /// The working directory the search started from.
         start: PathBuf,
@@ -407,7 +420,7 @@ impl fmt::Display for Error {
         match self {
             Self::NoRepositoryRoot { start } => write!(
                 f,
-                "no `{MANIFEST_DIR}` directory in `{}` or any of its parents",
+                "no `{GIT_DIR}` directory in `{}` or any of its parents",
                 start.display()
             ),
             Self::Io { path, source } => {
@@ -440,11 +453,17 @@ mod tests {
         HashError, Manifest, NodeState, PactEntry, StateCounts, Tree, manifest_path, subtree_hash,
     };
 
-    /// A repository with a `.warlock/` directory, `dirs` created under it, and
-    /// a `README.md` written into each of `readmes`.
+    /// A repository with a `.git/` directory — what makes it a repository — and
+    /// a `.warlock/` one beside it, `dirs` created under them, and a
+    /// `README.md` written into each of `readmes`.
+    ///
+    /// `.warlock/` is not needed to find the root any more, but it is where the
+    /// manifest goes and it is pruned from the walk, so the fixture keeps
+    /// making one: every test below sees the same tree shape either way.
     fn fixture(dirs: &[&str], readmes: &[&str]) -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("a temporary directory");
-        fs::create_dir(repo.path().join(".warlock")).expect("creates .warlock");
+        fs::create_dir_all(repo.path().join(".git")).expect("creates .git");
+        fs::create_dir_all(repo.path().join(".warlock")).expect("creates .warlock");
         for dir in dirs {
             fs::create_dir_all(repo.path().join(dir)).expect("creates a directory");
         }
@@ -930,9 +949,9 @@ mod tests {
         let outside = tempfile::tempdir().expect("a temporary directory");
         assert!(repository_root(outside.path()).is_none());
 
-        let error = load_tree(outside.path()).expect_err("there is no `.warlock` anywhere above");
+        let error = load_tree(outside.path()).expect_err("there is no `.git` anywhere above");
         assert!(matches!(error, Error::NoRepositoryRoot { .. }), "{error:?}");
-        assert!(error.to_string().contains("`.warlock`"), "{error}");
+        assert!(error.to_string().contains("`.git`"), "{error}");
     }
 
     #[test]
@@ -953,7 +972,7 @@ mod tests {
                 Error::NoRepositoryRoot {
                     start: PathBuf::from("/elsewhere"),
                 },
-                "no `.warlock` directory in `/elsewhere` or any of its parents",
+                "no `.git` directory in `/elsewhere` or any of its parents",
             ),
             (
                 Error::Io {
