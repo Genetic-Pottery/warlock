@@ -28,12 +28,12 @@ one is are the engine's answers, arrived at before a frame is drawn.
 
 **A directory is a module when it directly contains a `README.md`.** That is
 the whole test — no README is parsed, not its headings and not a word of it. A
-directory with no README of its own is a *connector*: it is on screen only
-because a module sits somewhere below it, and it cannot be pacted, because a
-pact is a promise about a document and there is no document to promise
-anything about. Pressing `p` on one does nothing at all — no colour change, no
-write. The directory you launched in is always drawn, README or not, and
-without one it cannot be pacted either.
+directory with no README of its own is an ordinary directory that has no
+documentation yet: it is drawn like any other node, and it cannot be pacted,
+because a pact is a promise about a document and there is no document to
+promise anything about yet. Pressing `p` on one does nothing at all — no colour
+change, no write. The directory you launched in is drawn the same way, README
+or not, and without one it cannot be pacted either.
 
 ## The pact key
 

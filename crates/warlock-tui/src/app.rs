@@ -46,7 +46,7 @@ pub struct Row {
     /// it.
     pub path: PathBuf,
     /// The README documenting the node, straight from [`warlock_engine::Node`],
-    /// or `None` for a connector directory that has none of its own.
+    /// or `None` for an ordinary directory that has no documentation yet.
     pub readme: Option<PathBuf>,
     /// What Warlock knows about the node, which is what colours the row.
     pub state: NodeState,
@@ -57,8 +57,8 @@ impl Row {
     /// in `state`.
     ///
     /// `readme` takes whatever [`warlock_engine::Node::new`] takes: anything
-    /// path-like for a node that has one, or `None` for a connector that does
-    /// not.
+    /// path-like for a node that has one, or `None` for a directory that has
+    /// no documentation yet.
     #[must_use]
     pub fn new(
         depth: usize,
@@ -394,10 +394,9 @@ impl App {
     ///
     /// Returns what the caller needs to edit the manifest with, or `None` when
     /// nothing was toggled — an app with no rows, or a selected node with no
-    /// README. A directory without a README is not a module (it is a connector,
-    /// kept only because modules sit below it) and a manifest entry has nowhere
-    /// to point without one, so such a node is refused outright: no state
-    /// changes, no count changes, nothing to write.
+    /// README. A directory with no documentation yet is not a module, and a
+    /// manifest entry has nowhere to point without a README, so such a node is
+    /// refused outright: no state changes, no count changes, nothing to write.
     ///
     /// Writing the manifest is the caller's job. This is app state and touches
     /// no file.
@@ -1010,7 +1009,7 @@ mod tests {
             let node = tree.find(&row.path).expect("row came from the tree");
             assert_eq!(row.readme, node.readme, "readme for {}", row.path.display());
         }
-        // Including the connector, whose README is honestly absent.
+        // Including `crates/`, whose README is honestly absent.
         assert!(
             app.rows()
                 .iter()
@@ -1092,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn a_connector_with_no_readme_cannot_be_pacted() {
+    fn a_directory_with_no_readme_cannot_be_pacted() {
         let mut app = app_selecting("warlock/crates");
         let before = app.clone();
 
