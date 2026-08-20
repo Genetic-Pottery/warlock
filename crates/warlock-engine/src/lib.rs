@@ -135,6 +135,10 @@ pub use pact::pact_directory;
 /// children before parents, then hash each directory and grant it what it
 /// earned. Returns the manifest to save and saves nothing itself.
 pub use pact::pact_subtree;
+/// Un-pact a directory and everything below it: drop their manifest entries and
+/// leave every `WARLOCK.md` on disk, byte for byte. Returns the manifest to save
+/// and saves nothing itself.
+pub use pact::unpact_subtree;
 /// The three-state vocabulary every node is coloured by.
 pub use state::NodeState;
 /// A depth-first walk over a tree, yielding each node with its depth.

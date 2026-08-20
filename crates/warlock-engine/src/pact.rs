@@ -107,6 +107,17 @@
 //! an entry with no grant — which by [`decide_state`](crate::decide_state)'s
 //! rule is pacted and stale, i.e. yellow. That is what the manifest's optional
 //! grant was for, so partial completion needs no new state and no new field.
+//!
+//! # Un-pacting keeps the documents
+//!
+//! [`unpact_subtree`] is the reverse, and it is deliberately not symmetric: it
+//! drops the manifest entries for a directory and everything below it and
+//! leaves every `WARLOCK.md` exactly where it is. Nothing in this module — or
+//! this crate — deletes a document. A pact is a claim that Warlock keeps
+//! judging a directory; the document it produced is the project's, reviewed in
+//! the git diff like any other file, and taking back the claim is no reason to
+//! throw away the writing. Un-pacting is pure manifest editing: no walk, no
+//! hash, no agent, no file opened for writing.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -128,6 +139,10 @@ const MANIFEST_DIR: &str = ".warlock";
 /// The document a directory is described by, and the only file name a child
 /// directory contributes to its parent's request.
 const DOCUMENT_FILE: &str = "WARLOCK.md";
+
+/// How the repository root itself is spelled as a stored module path, per
+/// [`to_manifest_path`]: the one module that is an ancestor of every other.
+const ROOT_MODULE: &str = ".";
 
 /// How deep the walk goes: the directory itself (0), its own files and its
 /// immediate children (1), and the files directly inside those children (2),
@@ -447,6 +462,91 @@ fn rewrite(
     }
     kept.extend(entries.into_values());
     Manifest::with_entries(kept)
+}
+
+/// `manifest` with the pact on `directory` and on every directory below it
+/// dropped — and **nothing on disk touched at all**.
+///
+/// The other half of the pact key: pressing it on a directory that is already
+/// pacted un-pacts that directory and its whole subtree, which is a manifest
+/// edit and only a manifest edit. Every `WARLOCK.md` those pacts wrote stays
+/// exactly where it is with exactly the bytes it had — the document belongs to
+/// the project, and the pact was only Warlock's standing claim to keep judging
+/// it. Dropping the claim is not a reason to delete somebody's documentation,
+/// and this function opens no file for writing, so it cannot.
+///
+/// Like [`pact_subtree`], **this saves nothing**: `directory` and `root` are the
+/// selected directory and the repository root, `manifest` is what
+/// `.warlock/pacts.toml` says today, and what comes back is what it should say
+/// tomorrow. Entries outside the subtree are carried through in place,
+/// unchanged, grants and all.
+///
+/// # What counts as below
+///
+/// Descendants are matched on the paths **as the manifest stores them** —
+/// relative, forward slashes, [`to_manifest_path`]'s form — not on the
+/// filesystem, so an entry is dropped whether or not its directory is still
+/// there. The match is by whole path segment: `crates/engine` covers
+/// `crates/engine/src` and does not cover `crates/engine-tools`, which a plain
+/// string prefix would have taken with it.
+///
+/// The repository root stores as `"."`, and it is every module's ancestor: un-
+/// pacting the root drops every entry there is. It is also nobody's descendant,
+/// so un-pacting `crates/engine` never drops the root's own entry.
+///
+/// ```
+/// use warlock_engine::{Manifest, PactEntry, unpact_subtree};
+///
+/// let entry = |module: &str| PactEntry::new(".", module, format!("{module}/WARLOCK.md"));
+/// let manifest = Manifest::with_entries([
+///     entry("crates/engine")?,
+///     entry("crates/engine/src")?,
+///     entry("crates/engine-tools")?,
+/// ]);
+///
+/// let manifest = unpact_subtree("crates/engine", ".", &manifest)?;
+///
+/// let modules: Vec<&str> = manifest.entries().iter().map(PactEntry::module).collect();
+/// assert_eq!(modules, ["crates/engine-tools"], "a sibling that shares a prefix is not below");
+/// # Ok::<(), warlock_engine::ManifestError>(())
+/// ```
+///
+/// # Errors
+///
+/// [`ManifestError::PathOutsideRoot`] or [`ManifestError::NonUtf8Path`] if
+/// `directory` has no manifest-relative form, i.e. it does not sit under `root`
+/// or cannot be spelled as text. Such a directory has no entry in this manifest
+/// to drop, but saying so is better than handing back a manifest that quietly
+/// dropped nothing when the caller asked for a subtree to go.
+pub fn unpact_subtree(
+    directory: impl AsRef<Path>,
+    root: impl AsRef<Path>,
+    manifest: &Manifest,
+) -> Result<Manifest, ManifestError> {
+    let selected = to_manifest_path(root, directory)?;
+    Ok(Manifest::with_entries(
+        manifest
+            .entries()
+            .iter()
+            .filter(|entry| !at_or_below(entry.module(), &selected))
+            .cloned(),
+    ))
+}
+
+/// Whether the stored module path `module` is `selected` itself or sits below
+/// it.
+///
+/// Both are in the manifest's own form, so this is string work on forward-slash
+/// paths and never a question for the filesystem. The `/` in the prefix test is
+/// what makes it segment-wise rather than textual — without it `crates/engine`
+/// would swallow `crates/engine-tools`.
+fn at_or_below(module: &str, selected: &str) -> bool {
+    // The repository root is above everything, itself included.
+    selected == ROOT_MODULE
+        || module == selected
+        || module
+            .strip_prefix(selected)
+            .is_some_and(|below| below.starts_with('/'))
 }
 
 /// Pact one directory: gather it, run one pass through `agent`, and write what
@@ -1298,20 +1398,20 @@ impl std::error::Error for Failure {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error as _;
     use std::fs;
     use std::path::{Path, PathBuf};
 
     use super::{
-        Failure, Gathered, MINIMUM_DOCUMENT_BYTES, Omission, PER_FILE_BYTE_CAP, Pacted,
-        PactedSubtree, Problem, REQUEST_BYTE_CAP, Refusal, gather_request, pact_directory,
-        pact_subtree, pactable_directories,
+        DOCUMENT_FILE, Failure, Gathered, MINIMUM_DOCUMENT_BYTES, Omission, PER_FILE_BYTE_CAP,
+        Pacted, PactedSubtree, Problem, REQUEST_BYTE_CAP, Refusal, gather_request, pact_directory,
+        pact_subtree, pactable_directories, unpact_subtree,
     };
     use crate::{
         Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, AgentResponse, Loaded,
-        Manifest, NodeState, PactEntry, decide_state, from_manifest_path, load_tree, manifest_path,
-        subtree_hash,
+        Manifest, ManifestError, NodeState, PactEntry, decide_state, from_manifest_path, load_tree,
+        manifest_path, subtree_hash,
     };
 
     /// The whole point of the agent seam, in one struct: a model pass that
@@ -2822,5 +2922,203 @@ mod tests {
         );
 
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).expect("chmods back");
+    }
+
+    // Un-pacting: dropping the entries and keeping the documents.
+
+    /// A manifest of hand-built entries for `modules`, each documented by its
+    /// own `WARLOCK.md` and each granted, so that "kept unchanged" is a claim
+    /// about the grants too and not only about the paths.
+    fn pacted(modules: &[&str]) -> Manifest {
+        Manifest::with_entries(modules.iter().map(|module| {
+            PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+                .expect("a relative path inside the root is storable")
+                .with_grant(format!("hash-of-{module}"), "2026-08-21T09:00:00Z")
+        }))
+    }
+
+    /// Every file at and below `dir`, as its path relative to `dir` and its
+    /// bytes. The whole filesystem state a test cares about, in one value, so
+    /// "nothing was written and nothing was deleted" is a single assertion.
+    fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in fs::read_dir(&next).expect("a readable directory") {
+                let path = entry.expect("a readable entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let relative = path
+                        .strip_prefix(dir)
+                        .expect("under the root")
+                        .to_path_buf();
+                    files.insert(relative, fs::read(&path).expect("a readable file"));
+                }
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn an_un_pact_drops_the_directory_and_everything_below_it() {
+        let manifest = pacted(&[
+            ".",
+            "crates/engine",
+            "crates/engine/src",
+            "crates/engine/src/inner",
+            "crates/engine/tests",
+            "crates/engine-tools",
+            "crates/tui",
+        ]);
+
+        let left = unpact_subtree("crates/engine", ".", &manifest).expect("un-pacts");
+
+        assert_eq!(
+            modules(&left),
+            [".", "crates/engine-tools", "crates/tui"],
+            "the directory and its descendants go, and nothing else does",
+        );
+    }
+
+    #[test]
+    fn every_entry_that_stays_stays_exactly_where_and_what_it_was() {
+        let manifest = pacted(&["crates/tui", "crates/engine", "docs", "crates/engine/src"]);
+
+        let left = unpact_subtree("crates/engine", ".", &manifest).expect("un-pacts");
+
+        assert_eq!(
+            left.entries(),
+            [
+                manifest.entry("crates/tui").expect("pacted").clone(),
+                manifest.entry("docs").expect("pacted").clone(),
+            ],
+            "order, document paths and grants all survive: an un-pact of one \
+             subtree is not a rewrite of the file",
+        );
+        assert_eq!(left.version(), manifest.version());
+    }
+
+    #[test]
+    fn a_sibling_that_shares_a_prefix_is_not_a_descendant() {
+        // The whole reason the match is by path segment: `engine-tools` sorts
+        // right next to `engine` and starts with every character of it.
+        let manifest = pacted(&[
+            "crates/engine",
+            "crates/engine-tools",
+            "crates/engine-tools/src",
+            "crates/engineering",
+        ]);
+
+        let left = unpact_subtree("crates/engine", ".", &manifest).expect("un-pacts");
+
+        assert_eq!(
+            modules(&left),
+            [
+                "crates/engine-tools",
+                "crates/engine-tools/src",
+                "crates/engineering"
+            ],
+        );
+    }
+
+    #[test]
+    fn un_pacting_the_repository_root_drops_every_entry() {
+        let manifest = pacted(&[".", "crates/engine", "crates/engine/src"]);
+
+        // Both spellings of the root reach it: the stored `.` and the root path
+        // itself, which `to_manifest_path` turns into that same `.`.
+        for directory in [".", "/repo"] {
+            let left = unpact_subtree(directory, "/repo", &manifest).expect("un-pacts");
+            assert!(left.entries().is_empty(), "{:?}", modules(&left));
+        }
+    }
+
+    #[test]
+    fn the_repository_root_is_below_nothing_but_itself() {
+        let manifest = pacted(&[".", "crates/engine/src"]);
+
+        let left = unpact_subtree("crates/engine", ".", &manifest).expect("un-pacts");
+
+        assert_eq!(
+            modules(&left),
+            ["."],
+            "a pact on the repository as a whole is not a pact on the subtree, \
+             so un-pacting the subtree leaves it alone",
+        );
+    }
+
+    #[test]
+    fn un_pacting_something_that_was_never_pacted_changes_nothing() {
+        let manifest = pacted(&["crates/engine", "crates/engine/src"]);
+
+        let left = unpact_subtree("docs/adr", ".", &manifest).expect("un-pacts");
+        assert_eq!(left, manifest);
+
+        // And doing it twice says the same thing as doing it once.
+        let once = unpact_subtree("crates/engine", ".", &manifest).expect("un-pacts");
+        let twice = unpact_subtree("crates/engine", ".", &once).expect("un-pacts again");
+        assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn a_directory_with_no_manifest_relative_form_is_an_error() {
+        let manifest = pacted(&["crates/engine"]);
+        assert!(matches!(
+            unpact_subtree("/elsewhere/crates", "/repo", &manifest),
+            Err(ManifestError::PathOutsideRoot { .. })
+        ));
+    }
+
+    #[test]
+    fn un_pacting_a_real_subtree_leaves_every_document_on_disk_untouched() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let PactedSubtree { manifest, .. } = pact_subtree(
+            &engine,
+            repo.path(),
+            &pacted(&["crates/tui"]),
+            &Canned::new(document(300)),
+        )
+        .expect("pacts");
+        assert_eq!(
+            modules(&manifest),
+            [
+                "crates/tui",
+                "crates/engine",
+                "crates/engine/src",
+                "crates/engine/src/inner",
+                "crates/engine/tests",
+            ],
+        );
+
+        let before = snapshot(repo.path());
+        assert_eq!(
+            before
+                .keys()
+                .filter(|path| path.ends_with(DOCUMENT_FILE))
+                .count(),
+            4,
+            "four documents were written, and they are what must survive",
+        );
+
+        let left = unpact_subtree(&engine, repo.path(), &manifest).expect("un-pacts");
+
+        assert_eq!(modules(&left), ["crates/tui"]);
+        assert_eq!(
+            snapshot(repo.path()),
+            before,
+            "un-pacting deletes no file, writes no file and changes no byte — \
+             the documents stay, the manifest on disk is the caller's to save",
+        );
+        for module in [
+            "crates/engine",
+            "crates/engine/src",
+            "crates/engine/src/inner",
+            "crates/engine/tests",
+        ] {
+            let document = from_manifest_path(repo.path(), module).join(DOCUMENT_FILE);
+            assert!(document.is_file(), "`{}` was deleted", document.display());
+        }
     }
 }
