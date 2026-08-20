@@ -137,10 +137,10 @@ and worth saying plainly:
 
 **Green is not reachable through the product.** Freshness is granted by an AI
 pass over the diff, and that pass does not exist yet: nothing here invokes
-`claude`, and no code writes a granted hash. A module you pact is yellow from
-the moment you pact it and stays yellow, because a pact that has never been
-judged is stale by definition. The only way to see green today is to hand-write
-a matching `granted_hash` into the manifest yourself.
+`claude`, and no code outside the tests writes a granted hash. A module you pact
+is yellow from the moment you pact it and stays yellow, because a pact that has
+never been judged is stale by definition. The only way to see green today is to
+hand-write a matching `granted_hash` into the manifest yourself.
 
 ## Contributing
 

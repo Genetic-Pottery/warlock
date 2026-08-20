@@ -7,7 +7,8 @@ root builds and runs `warlock`, not `warlock-tui`.
 Its job is presentation and input — drawing the current state of the work tree
 and turning keystrokes into requests. What runs today is the shell around the
 tree the engine loads from the **real working directory** the binary was
-launched in:
+launched in — every directory that walk reached, documented or not, and nothing
+that git ignores:
 
 - A header naming which tree is on screen: the walk's root, spelled relative to
   the repository root it sits in, or `(repository root)` when they are the same
@@ -164,12 +165,12 @@ is **view state owned by `App` and held nowhere else**:
 
 None of it reaches disk, and there is nowhere for it to reach. The engine's
 `Node` and `Tree` derive `Serialize` and `Deserialize`, and those derives are
-its persisted vocabulary — path, README, state, children, files — with no field
-for a collapsed set, a filter flag, a selection or an offset, so no view state
-can ride out through them. `.warlock/pacts.toml` is narrower still: it holds
-pacts, one entry per pacted module, and the [schema in
-`warlock-engine`](../warlock-engine/README.md#the-manifest-warlockpactstoml) has
-nothing in it about what was on screen when a pact was made.
+the whole vocabulary a node could be written down in — path, README, state,
+children, files — with no field for a collapsed set, a filter flag, a selection
+or an offset, so no view state can ride out through them. `.warlock/pacts.toml`
+is narrower still: it holds pacts, one entry per pacted module, and the [schema
+in `warlock-engine`](../warlock-engine/README.md#the-manifest-warlockpactstoml)
+has nothing in it about what was on screen when a pact was made.
 
 That is why none of these keys saves anything or re-reads anything. Collapsing,
 filtering and showing files re-filter the walk the app already holds, put the
@@ -185,8 +186,8 @@ reload — but nothing writes it out, and nothing in the binary reloads today.
 A node you pact here goes yellow and stays yellow, however long you look at it.
 That is not a bug and not a missing refresh button: freshness is granted by an
 AI pass that reads the diff and confirms or rewrites the document, and **that
-pass does not exist yet**. Nothing in this workspace runs `claude`, prompts a
-model, or writes a `granted_hash`.
+pass does not exist yet**. Nothing in this workspace runs `claude` or prompts a
+model, and nothing outside the tests writes a `granted_hash`.
 
 So a pacted module with no granted hash is stale by definition — unjudged *is*
 stale, and there is no fourth "unknown" colour — which is also why toggling a

@@ -68,14 +68,16 @@ round-tripping through serde's own token stream (`serde_test`, a
 dev-dependency), which never names a format.
 
 The manifest is the one place the crate commits to a format: it is TOML, it
-lives at `.warlock/pacts.toml`, and `Manifest::save` / `Manifest::load` read
-and write exactly the path they are given.
+lives at `.warlock/pacts.toml`, and `Manifest::save` / `Manifest::load` take
+the repository root and read and write `<root>/.warlock/pacts.toml` under it —
+the path `manifest_path` spells out.
 
 The crate reaches the filesystem in three ways and no others. It reads and
 writes that manifest; it *walks* directories — via the `ignore` crate, so
-`.gitignore` at every level is respected and `.git/` and `target/` are skipped
-without a hand-maintained list, never following a symlink; and it *reads the
-bytes* of the files under a pacted directory, in order to hash them. It reads
+`.gitignore` at every level is respected, hidden directories such as `.git/` are
+skipped and a `target/` the repository ignores never appears, all without a
+hand-maintained list and never following a symlink; and it *reads the bytes* of
+the files under a pacted directory, in order to hash them. It reads
 those bytes and does not interpret them: no README is parsed, and the only
 thing that ever comes back out is a digest. That is the whole capability
 boundary: it still depends on no terminal crate, opens no sockets, spawns no
@@ -214,8 +216,9 @@ supplies: finding that root is the loader's job (`repository_root`), not the
 manifest's. There is no directory scan to discover modules, no file watching,
 no locking protocol and no migration tooling beyond rejecting versions it does
 not know. Nor does anything **write** a `granted_hash`: `Manifest::save` can,
-if a caller hands it an entry carrying one, but no code in this workspace ever
-does — see [nothing here grants freshness](#nothing-here-grants-freshness).
+if a caller hands it an entry carrying one, but nothing outside this crate's own
+tests ever hands it one — see [nothing here grants
+freshness](#nothing-here-grants-freshness).
 
 ## The subtree hash: `subtree_hash`
 
@@ -323,7 +326,7 @@ one where a recorded hash equals a computed one, compared as plain strings.
 ### Nothing here grants freshness
 
 There is no refresh pass in this workspace, no `claude` invocation, no
-prompting, no context scoping, and no code anywhere that writes a
+prompting, no context scoping, and nothing but a test that ever writes a
 `granted_hash` into `.warlock/pacts.toml`. `NodeState::PactedFresh` is
 therefore reachable today **only by a human hand-writing a granted hash into
 the manifest** — which is exactly how the tests that cover the fresh case reach
