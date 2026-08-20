@@ -76,9 +76,20 @@
 //! [`MINIMUM_DOCUMENT_BYTES`] once surrounding whitespace is trimmed. There is
 //! no third rule, and in particular no phrase list — see the constant for why
 //! a length is the only thing worth checking here.
+//!
+//! # Which directories a subtree pact covers, and in what order
+//!
+//! [`pact_directory`] is one directory, and a pact is a subtree. The list of
+//! directories that subtree comes to is [`pactable_directories`], and it is
+//! deliberately the *same* list [`load_tree`](crate::load_tree) would have made
+//! nodes of — same walk, same ignore rules — so that "everything under here"
+//! means on screen what it means to this module. It is ordered children before
+//! parents, which is what makes [`AgentChildDocument`] worth anything: a parent
+//! is only pacted once every child below it has written the document the parent
+//! will be handed.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
@@ -305,6 +316,75 @@ pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<
     }
 
     Ok(Pacted { document, problems })
+}
+
+/// Every directory a pact of `root` covers: `root` itself and every non-ignored
+/// directory below it, children before parents.
+///
+/// This is the shape of a subtree pact, and it is one walk with two properties.
+///
+/// **The same directories the tree has.** The walk is
+/// [`load`](crate::load)'s and [`hash`](crate::hash)'s — the [`ignore`] crate,
+/// `follow_links(false)`, `require_git(false)`, `.warlock/` pruned by name — so
+/// a directory that is gitignored, hidden (`.git/` with it) or Warlock's own
+/// bookkeeping is as absent from a pact as it is from a tree or a digest.
+/// Nothing is filtered on top of that: an undocumented directory is exactly the
+/// one a pact exists to give a document to, so there is no "already has a
+/// `WARLOCK.md`" test here and no "has source in it" test either.
+///
+/// **Children before parents.** A parent's request carries its immediate
+/// children's documents ([`AgentChildDocument`]), so pacting a parent before its
+/// children hands the pass a stale account of the subtree — or none at all.
+/// Reverse path order gets this for free and costs a sort nobody has to trust:
+/// every descendant sorts after its own ancestor, so reversing puts every
+/// directory after everything below it. Siblings come out in reverse name order,
+/// which is arbitrary but fixed — the guarantee is depth, and determinism on top
+/// of it.
+///
+/// Crate-private on purpose: this is the subtree operation's ordering, not a
+/// second public way to enumerate a project. Callers outside the crate that want
+/// the directories of a subtree already have [`load_tree`](crate::load_tree).
+///
+/// # Errors
+///
+/// [`Error::Walk`], naming `root`, if the directory cannot be walked: it is not
+/// there, it cannot be listed, or something vanished from under the walk. There
+/// is no partial answer — a pact planned from half a subtree would silently
+/// leave directories out.
+// Allowed rather than expected: the only caller in this build is the test module
+// below, and the subtree pact operation that will call it in earnest is the next
+// slice. An `#[expect]` would go unfulfilled in the test build, where the
+// function *is* used, and fail the build for the opposite reason.
+#[allow(dead_code)]
+pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
+    let walker = WalkBuilder::new(root)
+        // The same three rules as `load` and `hash`, for the same reasons: a
+        // symlinked cycle has to terminate, a fixture with a `.gitignore` and
+        // no `.git` still has to be ignored properly, and `.warlock/` is
+        // Warlock's own bookkeeping rather than content of the module.
+        .follow_links(false)
+        .require_git(false)
+        .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR))
+        .build();
+
+    // A set, so whatever order the walker offered is thrown away rather than
+    // reversed: the ordering below is a property of the paths, not of the
+    // filesystem. Files are not collected at all — a pact is over directories,
+    // and each one gathers its own files when its turn comes.
+    let mut directories = BTreeSet::new();
+    for entry in walker {
+        let entry = entry.map_err(|source| Error::Walk {
+            directory: root.to_path_buf(),
+            source,
+        })?;
+        // Directories only. With `follow_links(false)` a symlinked directory
+        // reports as a symlink, so it is neither descended into nor pacted as
+        // whatever it points at.
+        if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+            directories.insert(entry.into_path());
+        }
+    }
+    Ok(directories.into_iter().rev().collect())
 }
 
 /// Build the request for one pass over `directory`, asking `prompt`.
@@ -880,9 +960,12 @@ mod tests {
 
     use super::{
         Gathered, MINIMUM_DOCUMENT_BYTES, Omission, PER_FILE_BYTE_CAP, Pacted, Problem,
-        REQUEST_BYTE_CAP, Refusal, gather_request, pact_directory,
+        REQUEST_BYTE_CAP, Refusal, gather_request, pact_directory, pactable_directories,
     };
-    use crate::{Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, AgentResponse};
+    use crate::{
+        Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, AgentResponse, Loaded,
+        load_tree,
+    };
 
     /// The whole point of the agent seam, in one struct: a model pass that
     /// answers with canned markdown and keeps what it was asked. No `claude`,
@@ -1820,5 +1903,145 @@ mod tests {
                 .is_some(),
             "and a refusal's cause reaches the agent error under it",
         );
+    }
+
+    /// A repository with one directory of every kind the walk has an opinion
+    /// about, so that "the same rules as the loader" is asserted against
+    /// something and not just claimed.
+    ///
+    /// Under `crates/engine` — the subtree the tests below pact — sit three
+    /// ordinary directories, a gitignored one, a hidden one and a `.warlock/`
+    /// one; outside it sit a sibling crate and a gitignored `target/`, so a walk
+    /// that started from the wrong place would be caught too.
+    fn repository() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        write(repo.path(), ".git/config", "[core]\n");
+        write(repo.path(), ".gitignore", "/target\ngenerated/\n");
+        write(repo.path(), ".warlock/pacts.toml", "version = 1\n");
+        for dir in [
+            "crates/engine/src/inner",
+            "crates/engine/tests",
+            "crates/engine/generated/schema",
+            "crates/engine/.hidden/cache",
+            "crates/engine/.warlock",
+            "crates/tui/src",
+            "target/debug",
+        ] {
+            fs::create_dir_all(repo.path().join(dir)).expect("creates a directory");
+        }
+        repo
+    }
+
+    /// `paths` spelled relative to `root`, with forward slashes: what the
+    /// assertions below are written in, rather than temporary directory names
+    /// nobody can predict.
+    fn relative_to(root: &Path, paths: &[PathBuf]) -> Vec<String> {
+        paths
+            .iter()
+            .map(|path| {
+                path.strip_prefix(root)
+                    .expect("every directory sits under the root")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_subtree_is_exactly_the_directories_the_loader_makes_nodes_of() {
+        let repo = repository();
+        let subtree = repo.path().join("crates/engine");
+
+        let pacted = pactable_directories(&subtree).expect("walks");
+
+        // The loader is the authority on which directories exist, because it is
+        // what the user is looking at when they press the key. Compared as sets,
+        // since the two orders are deliberately opposite.
+        let Loaded { tree, problems } = load_tree(&subtree).expect("loads");
+        assert!(problems.is_empty(), "{problems:?}");
+        let mut walked: Vec<PathBuf> = tree.walk().map(|(node, _)| node.path.clone()).collect();
+        let mut sorted = pacted.clone();
+        walked.sort();
+        sorted.sort();
+        assert_eq!(
+            sorted, walked,
+            "a pact covers the nodes of the subtree, no more and no fewer",
+        );
+
+        assert_eq!(
+            relative_to(repo.path(), &sorted),
+            [
+                "crates/engine",
+                "crates/engine/src",
+                "crates/engine/src/inner",
+                "crates/engine/tests",
+            ],
+            "the selected directory and every ordinary directory below it; \
+             `generated/` is gitignored, `.hidden/` is hidden and `.warlock/` \
+             is ours, so none of them — nor anything inside them — is pactable",
+        );
+    }
+
+    #[test]
+    fn every_child_comes_before_its_parent_and_the_selected_directory_is_last() {
+        let repo = repository();
+        let subtree = repo.path().join("crates/engine");
+
+        let pacted = pactable_directories(&subtree).expect("walks");
+
+        assert_eq!(
+            relative_to(repo.path(), &pacted),
+            [
+                "crates/engine/tests",
+                "crates/engine/src/inner",
+                "crates/engine/src",
+                "crates/engine",
+            ],
+            "deepest first, and the directory the pact was asked for last",
+        );
+        // Said again as the property rather than the listing: a parent's request
+        // carries its children's documents, so no directory may be pacted before
+        // anything below it has written one.
+        for (index, directory) in pacted.iter().enumerate() {
+            for (other, descendant) in pacted.iter().enumerate() {
+                if descendant != directory && descendant.starts_with(directory) {
+                    assert!(
+                        other < index,
+                        "`{}` is below `{}` and has to come first",
+                        descendant.display(),
+                        directory.display(),
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            pacted.last().map(PathBuf::as_path),
+            Some(subtree.as_path()),
+            "and the last pass is the one the whole subtree was gathered for",
+        );
+    }
+
+    #[test]
+    fn a_directory_with_nothing_below_it_is_a_subtree_of_one() {
+        let repo = repository();
+        let leaf = repo.path().join("crates/engine/src/inner");
+
+        assert_eq!(
+            pactable_directories(&leaf).expect("walks"),
+            [leaf],
+            "a pact always covers the directory it was asked for, documented \
+             or not, empty or not",
+        );
+    }
+
+    #[test]
+    fn a_subtree_that_cannot_be_walked_says_which_directory_it_was() {
+        let repo = repository();
+        let missing = repo.path().join("crates/engine/nowhere");
+
+        let error = pactable_directories(&missing).expect_err("there is nothing to walk");
+
+        assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
+        assert_eq!(error.directory(), missing);
     }
 }
