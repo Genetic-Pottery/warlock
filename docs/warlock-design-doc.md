@@ -9,7 +9,7 @@
 
 ## 1. What it is
 
-A terminal UI for operating a codebase through its documentation tree. You direct an AI rather than write most code by hand, and the interface is the project rendered as the AI sees it: a tree of module READMEs, colored by whether they are fresh or stale.
+A terminal UI for operating a codebase through its documentation tree. You direct an AI rather than write most code by hand, and the interface is the project rendered as the AI sees it: a tree of per-directory `WARLOCK.md` files, colored by whether they are fresh or stale.
 
 ## 2. Thesis
 
@@ -39,12 +39,12 @@ Each fact has exactly one home. The others reference it, never copy it.
 | Store | Owns | Notes |
 |---|---|---|
 | **Engineer's journal** | Why decisions were made | Private, isolated, not audited. Lives at `~/.warlock/<project>/<date>` |
-| **The repo** | What the system *is* | Code + module READMEs + state files. Committed to git. |
+| **The repo** | What the system *is* | Code + per-directory `WARLOCK.md` files + state files. Committed to git. |
 | **Linear (for now)** | What *should happen* | Tickets, intent, gate workflow state. Behind an adapter, swappable. |
 
 The journal's serious job is reasoning capture, not activity logging. The repo says what the code is, Linear says what the tickets were, and the journal says why you made the calls you made. That last one is what actually evaporates today and what no other tool captures. Annual review recall is the cheap demo of that value.
 
-State files and READMEs are committed to git. A teammate clones the repo and their AI driver picks up full context immediately. Context lives with the code, not in anyone's head or any one subscription.
+State files and `WARLOCK.md` files are committed to git. A teammate clones the repo and their AI driver picks up full context immediately. Context lives with the code, not in anyone's head or any one subscription.
 
 ## 5. The tree
 
@@ -54,13 +54,17 @@ The project tree is the interface. It renders every directory in the project tha
 
 **Colors:**
 - **Gray** = not pacted. Outside Warlock's management.
-- **Yellow** = pacted and stale. Files at or below this node's README have changed since the last freshness grant.
+- **Yellow** = pacted and stale. Files at or below this node's `WARLOCK.md` have changed since the last freshness grant.
 - **Green** = pacted and fresh. An AI has checked and granted freshness.
 
 **The state model is deliberately two-way, with no limbo:**
 - Stale is mechanical. The subtree hash broke, so it is stale. Immediately, by definition.
 - Fresh is earned. Only an AI pass can grant it, by reading the diff and either confirming the docs still hold or updating them until they do. Either outcome ends green.
 - There is no "unjudged" third state, because unjudged *is* stale.
+
+**A module is a directory.** Node, directory, pact and `WARLOCK.md` are the same thing, and which directories exist is a fact about the filesystem rather than a judgment anyone has to make. Pacting is recursive: pact a directory and every directory beneath it is pacted too, each getting its own `WARLOCK.md`, its own manifest entry and its own hash, so each carries its own color. There is no subtree pact — no single document standing in for the directories below it — because that would put the AI in charge of deciding what counts as a module, and the filesystem has already answered that question. Trivial directories get one too. Uniformity is the point: there is no per-directory judgment call, so there is none to get wrong.
+
+**Warlock's file is `WARLOCK.md`.** Not `README.md`: that is the project's own file and has a job already — install instructions, badges, whatever a package registry publishes — and rewriting it would clobber something Warlock does not own. `WARLOCK.md` is Warlock's, and being overwritable is the point rather than a hazard: the AI reads whatever is there and revises it against the hash instead of regenerating from nothing, so a hand-edit is reconciled on the way back in (section 9) rather than fought. A directory holding a `WARLOCK.md` is one Warlock has written and should be pacted; a directory without one has never been pacted, and that is the ordinary starting state for every directory in a fresh repo.
 
 **Files are shown, and take their module's color.** A file has no state of its own. It is green because the module holding it is green, and when it changes that module goes yellow. Those are the same fact stated twice, since a changed file is exactly what breaks a subtree hash. There is still no fourth state and no per-file pact.
 
@@ -74,7 +78,7 @@ Showing files is a toggle, off by default. The default view is modules, because 
 
 ## 6. Freshness: hash as trigger, AI as judge
 
-Whether a README needs updating is a **subjective** call, and that is fine. A human engineer faces the identical judgment today: does a trivial change warrant a doc update? There is no mechanical answer and never was. Warlock is not automating away a solved problem, it is giving visibility to a judgment that was always being made silently.
+Whether a `WARLOCK.md` needs updating is a **subjective** call, and that is fine. A human engineer faces the identical judgment today: does a trivial change warrant a doc update? There is no mechanical answer and never was. Warlock is not automating away a solved problem, it is giving visibility to a judgment that was always being made silently.
 
 We are not trying to be *correct*. We are trying to be *visible*.
 
@@ -89,7 +93,7 @@ Call this subjective coding, and keep it separate from correctness when pitching
 
 ## 7. Blessing (the human gate)
 
-**One human gate, on the work.** The human blesses the change, and the documentation updating is a mechanical consequence of that same act. Nobody sits there separately confirming "yes, update my README." Freshness turns green as a byproduct.
+**One human gate, on the work.** The human blesses the change, and the documentation updating is a mechanical consequence of that same act. Nobody sits there separately confirming "yes, update my `WARLOCK.md`." Freshness turns green as a byproduct.
 
 A gate is a human decision about a ticket that has consequences for the repo. Today that decision lives in your head and your Enter key: real, but it leaves no trace, is not tied to the specific delta, and nothing stops a merge that skipped it. Blessing promotes it from a keystroke to a recorded, linked artifact: this human approved this delta as satisfying this ticket.
 
@@ -103,8 +107,8 @@ A pact is the boundary of what Warlock manages. Where that boundary starts is a 
 
 **Two adoption paths, one mechanism:**
 
-- **Greenfield: pact everything on day one.** A new project has no reason to start partially managed. Pact at root, the AI works down the tree writing a README per module, and the whole thing comes up green. Full coverage is the default here, not an aspiration.
-- **Existing codebase: pact per module.** Leadership at an established company is unlikely to bless the whole repo up front, and should not have to. Scoped adoption is a first-class path: pact one module, prove it, expand when the work demands it.
+- **Greenfield: pact everything on day one.** A new project has no reason to start partially managed. Pact at root, the AI works down the tree writing a `WARLOCK.md` per directory entry, and the whole thing comes up green. Full coverage is the default here, not an aspiration.
+- **Existing codebase: pact per module.** Leadership at an established company is unlikely to bless the whole repo up front, and should not have to. Scoped adoption is a first-class path: pact one module and everything under it, prove it, expand when the work demands it.
 
 Both are the same pacting operation run over a different number of nodes. Warlock does not need to know which story a team is telling, and nothing in the product is tuned to prefer one.
 
@@ -167,7 +171,7 @@ To decide during implementation: headless/print mode per task vs. a longer sessi
 A TUI that:
 1. renders the project tree, every non-ignored directory, collapsible,
 2. colors pacted nodes from the hash-based freshness check,
-3. lets an AI propose README updates on manual refresh.
+3. lets an AI propose `WARLOCK.md` updates on manual refresh.
 
 Collapsing is in the first version rather than deferred, because section 5 renders whole repos and a few hundred uncollapsible rows is not a shippable view. The file toggle is not in it: files are specified in section 5 but nothing in the loop above needs them, so they wait.
 
@@ -210,7 +214,6 @@ Order matters: freshness lands *after* the audience understands the AI reads the
 - Manifest schema fields. Decide early; migrations hurt.
 - Validator as a separate CI-facing tool sharing the engine's freshness definition, or one tool with two entry points. Leaning: separate entry points, shared logic.
 - How far the project-structure spec goes: lightweight convention plus CI check, or full opinionated scaffold.
-- Fixed README section skeleton. The agent reads positionally, so the skeleton should be rigid even where the prose is loose. Candidate sections: purpose, public interface, dependencies, invariants.
-- Pact granularity. Section 5 specifies one README per directory: node, directory and pact are the same thing. The alternative is a pact covering a *subtree*, one README at its top applying downward until the next pact, which lets the AI decide what counts as a module instead of the filesystem deciding for it. Directory-granular is simpler and is what is specified. Revisit if generated READMEs for trivial directories turn out to be noise that dilutes the signal, which is the failure mode to watch for on a root pact over a large repo.
+- Fixed `WARLOCK.md` section skeleton. The agent reads positionally, so the skeleton should be rigid even where the prose is loose. Candidate sections: purpose, public interface, dependencies, invariants.
 - `claude` invocation mode and context-feeding strategy.
 - Whether "bless" survives as the gate verb given the warlock theme, or becomes seal / sign / ward.

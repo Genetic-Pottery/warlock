@@ -2,6 +2,8 @@
 
 # warlock
 
+(Currently under development)
+
 See your codebase the way your AI does. A TUI where documentation is the interface.
 
 > **warlock** *(n.)* one who draws power from a pact with an entity greater than
@@ -93,54 +95,6 @@ The guiding principle is narrow on purpose:
 
 See [`docs/warlock-design-doc.md`](docs/warlock-design-doc.md) for the full model: pacts,
 freshness, gating, and where the boundaries are drawn.
-
-## What works today
-
-Everything above is the destination. What the binary does right now is smaller,
-and worth saying plainly:
-
-- **It renders your actual repository.** `warlock` walks the directory you
-  launched it in and draws every directory underneath it that git would not
-  ignore — `.gitignore` at every level, hidden directories and your global
-  excludes are all honoured, and Warlock's own `.warlock/` is skipped on top of
-  that. That is the whole tree, not the documented part of it: every directory
-  is a row, and every row is gray until you pact it.
-- **A module is a directory with a `README.md` in it.** The file has to sit
-  directly in the directory, that is the entire test, and no README is ever
-  parsed — Warlock only cares that one exists. A directory without one is not a
-  special kind of row; it is an ordinary undocumented directory, drawn like any
-  other, which cannot be pacted because there is no document to pact.
-- **The keys.** Up/down or `k`/`j` move the selection by a row, PgUp/PgDn by a
-  screenful, and `g` and `G` jump to the first and last row. Space collapses the
-  selected directory and expands it again. `f` shows the files inside each
-  directory and hides them again; `o` narrows the tree to the pacted nodes and
-  the ancestors that reach them, and shows the whole thing again. `p` pacts.
-  `q`, `Esc` or Ctrl-C leave.
-- **`p` toggles a pact on the selected node.** Gray becomes yellow on the next
-  frame; press `p` again and it goes back to gray. One press, one node, no
-  confirmation — the action is its own undo. Pressed on an undocumented
-  directory or on a file, it changes nothing and puts one line in the footer
-  saying which it was, rather than doing nothing quietly.
-- **The pact is written down as you press the key.** It lands in
-  `.warlock/pacts.toml` at the repository root — the nearest ancestor holding a
-  `.git/` directory: one manifest per repository, committed to git, because a
-  pact is a fact about the repository rather than about your checkout. Each
-  pacted module gets one entry naming its directory, the README that documents
-  it, and a granted hash — the last of which appears only once freshness has
-  been granted. Every path in it is relative to the repository root, so two
-  clones of the same commit hold the same file.
-- **Files are visible, not readable.** `f` puts them on screen in the colour of
-  the module holding them, and that is all it does: nothing opens a file, and no
-  key tries to. A viewer pane is deliberately the next thing to build rather
-  than a missing part of this one — the tree had to be worth moving around in
-  before there was any point putting a file beside it.
-
-**Green is not reachable through the product.** Freshness is granted by an AI
-pass over the diff, and that pass does not exist yet: nothing here invokes
-`claude`, and no code outside the tests writes a granted hash. A module you pact
-is yellow from the moment you pact it and stays yellow, because a pact that has
-never been judged is stale by definition. The only way to see green today is to
-hand-write a matching `granted_hash` into the manifest yourself.
 
 ## Contributing
 
