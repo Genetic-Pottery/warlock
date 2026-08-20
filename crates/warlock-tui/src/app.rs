@@ -11,6 +11,12 @@
 //! the selection by every method that moves it, and computed by one pure
 //! function (`scroll_offset_for`) that the tests can drive directly.
 //!
+//! It also holds the one line it has to say about the last keystroke — why a
+//! pact was refused, say. That wording is state like everything else here, set
+//! by whatever refused and dropped by the next movement, so the renderer draws
+//! it without knowing what happened and the key handler never has to explain
+//! itself.
+//!
 //! Nothing here touches a terminal: it is a plain data structure with plain
 //! methods, so every rule about how the selection moves is testable with
 //! nothing attached to stdout.
@@ -113,6 +119,14 @@ pub struct PactToggle {
 /// The header is carried as finished text for the same reason: the renderer
 /// draws app state and nothing else, so it never has to know what a repository
 /// root is or ask the engine where this tree came from.
+///
+/// The message is the one line the app has to say about the keystroke just
+/// pressed — why a pact was refused, or whatever the caller put there. It is
+/// finished text for the same reason the header is, and it lives here rather
+/// than in the caller's hand because it is display state like everything else
+/// around it: the renderer draws whatever is in it, and every method that moves
+/// the selection empties it, so a message lasts exactly until the next
+/// keystroke.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct App {
     rows: Vec<Row>,
@@ -121,6 +135,7 @@ pub struct App {
     viewport_height: usize,
     counts: StateCounts,
     header: String,
+    message: Option<String>,
 }
 
 impl App {
@@ -157,6 +172,9 @@ impl App {
     /// is what is true of an app that has never been drawn: nothing is on
     /// screen yet, so nothing has been scrolled past. See
     /// [`App::set_viewport_height`].
+    ///
+    /// There is no message either: an app that has answered no keystroke yet
+    /// has nothing to say about one. See [`App::message`].
     #[must_use]
     pub fn from_rows(rows: Vec<Row>) -> Self {
         Self {
@@ -166,6 +184,7 @@ impl App {
             viewport_height: 0,
             counts: StateCounts::default(),
             header: String::new(),
+            message: None,
         }
     }
 
@@ -210,6 +229,28 @@ impl App {
     #[must_use]
     pub fn header(&self) -> &str {
         &self.header
+    }
+
+    /// What the app has to say about the last keystroke, or `None` when it has
+    /// nothing to say.
+    ///
+    /// Set by whatever refused to do something — [`App::toggle_pact`] on a
+    /// directory with no README — or by the caller through
+    /// [`App::set_message`], and emptied by the next movement, so what is here
+    /// always belongs to the keystroke just pressed.
+    #[must_use]
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
+    /// Say `message` until the next keystroke moves the selection.
+    ///
+    /// For the caller's own sentences — a manifest that would not write is the
+    /// caller's news, not the app's — so that there is one place a line reaches
+    /// the screen from rather than two. Replaces whatever was there: only the
+    /// latest keystroke has anything to report.
+    pub fn set_message(&mut self, message: impl Into<String>) {
+        self.message = Some(message.into());
     }
 
     /// Every row, in the order they are drawn.
@@ -300,7 +341,7 @@ impl App {
     /// stepping, not teleporting. A no-op when there are no rows.
     pub fn select_previous(&mut self) {
         self.selected = self.selected.saturating_sub(1);
-        self.rescroll();
+        self.moved();
     }
 
     /// Move the selection one row down, stopping at the last row.
@@ -310,7 +351,7 @@ impl App {
     pub fn select_next(&mut self) {
         let last = self.rows.len().saturating_sub(1);
         self.selected = self.selected.saturating_add(1).min(last);
-        self.rescroll();
+        self.moved();
     }
 
     /// Move the selection one screenful up, stopping at the first row.
@@ -325,7 +366,7 @@ impl App {
     /// below one row. A no-op when there are no rows.
     pub fn select_page_up(&mut self) {
         self.selected = self.selected.saturating_sub(self.page());
-        self.rescroll();
+        self.moved();
     }
 
     /// Move the selection one screenful down, stopping at the last row.
@@ -335,7 +376,7 @@ impl App {
     pub fn select_page_down(&mut self) {
         let last = self.rows.len().saturating_sub(1);
         self.selected = self.selected.saturating_add(self.page()).min(last);
-        self.rescroll();
+        self.moved();
     }
 
     /// Select the first row, scrolling the window back to the top of the tree.
@@ -343,7 +384,7 @@ impl App {
     /// A no-op when there are no rows.
     pub fn select_first(&mut self) {
         self.selected = 0;
-        self.rescroll();
+        self.moved();
     }
 
     /// Select the last row, scrolling the window to the bottom of the tree.
@@ -351,7 +392,7 @@ impl App {
     /// A no-op when there are no rows.
     pub fn select_last(&mut self) {
         self.selected = self.rows.len().saturating_sub(1);
-        self.rescroll();
+        self.moved();
     }
 
     /// How many rows one page key moves by: a windowful, or a single row for
@@ -379,6 +420,41 @@ impl App {
         );
     }
 
+    /// The selection has just moved: forget last keystroke's message and bring
+    /// the window back into line with it.
+    ///
+    /// Every movement method ends here rather than in `rescroll` alone, so no
+    /// caller has to remember to clear a message by hand — a message belongs to
+    /// the keystroke that produced it, and the next one has moved on. Clearing
+    /// lives here and not in `rescroll` because `App::set_viewport_height`
+    /// rescrolls on every frame, including the frame that is about to draw the
+    /// message.
+    fn moved(&mut self) {
+        self.message = None;
+        self.rescroll();
+    }
+
+    /// How to name `path` in a message: relative to the root of the tree on
+    /// screen, in the engine's own forward-slash manifest spelling.
+    ///
+    /// A message naming a directory by its absolute path spends most of a
+    /// footer line on the part of it the reader already knows, and truncation
+    /// then eats the part they do not. The root row's path is the root of the
+    /// tree by construction, so relative spelling is available without keeping
+    /// a second copy of it. A path that cannot be described relative to that
+    /// root — including the root itself, which is `"."` — is printed as it
+    /// stands: a label that says something odd beats a label that says nothing.
+    fn label_for(&self, path: &Path) -> String {
+        match self
+            .rows
+            .first()
+            .map(|root| to_manifest_path(&root.path, path))
+        {
+            Some(Ok(relative)) if relative != "." => relative,
+            _ => path.display().to_string(),
+        }
+    }
+
     /// Bring the selected node under Warlock's management, or take it back out
     /// again, and say what changed.
     ///
@@ -398,19 +474,31 @@ impl App {
     /// manifest entry has nowhere to point without a README, so such a node is
     /// refused outright: no state changes, no count changes, nothing to write.
     ///
+    /// A refusal sets [`App::message`] to say so, and the return value stays a
+    /// bare `Option`: the wording is display state, it belongs here with the
+    /// rest of the display state, and a caller that had to translate an outcome
+    /// into a sentence would be a second place that decides what a missing
+    /// README means. A toggle that went through clears the message instead —
+    /// whatever the last keystroke said, this one did something.
+    ///
     /// Writing the manifest is the caller's job. This is app state and touches
     /// no file.
     pub fn toggle_pact(&mut self) -> Option<PactToggle> {
-        let row = self.rows.get_mut(self.selected)?;
-        let readme = row.readme.clone()?;
+        let row = self.rows.get(self.selected)?;
+        let path = row.path.clone();
+        let Some(readme) = row.readme.clone() else {
+            self.message = Some(no_readme_message(&self.label_for(&path)));
+            return None;
+        };
 
+        let row = &mut self.rows[self.selected];
         let was = row.state;
         let now = match was {
             NodeState::Unpacted => NodeState::PactedStale,
             NodeState::PactedStale | NodeState::PactedFresh => NodeState::Unpacted,
         };
         row.state = now;
-        let path = row.path.clone();
+        self.message = None;
 
         // Both halves of the move happen together or neither does. An app told
         // rows but never told a tally (see `App::from_rows`) holds zeroes that
@@ -478,6 +566,23 @@ fn scroll_offset_for(rows: usize, viewport: usize, selected: usize, offset: usiz
     }
 }
 
+/// What the app says when a pact is refused for want of a README, naming the
+/// directory as `label`.
+///
+/// Worded as a capability that is not wired up yet rather than as a chore for
+/// the reader, because that is what it is: a README is no part of what a pact
+/// means. Under the real pact operation the AI reads the module and writes one,
+/// and a refresh puts back a README somebody deleted — today's `p` is a
+/// placeholder that only flips a colour and writes a manifest line, so it has
+/// nothing to point an entry at. Telling the reader to go and write the file
+/// themselves would teach them a rule that is about to stop being true.
+fn no_readme_message(label: &str) -> String {
+    format!(
+        "{label} has no README — writing one is the pact operation's job, \
+         and that is not wired up yet"
+    )
+}
+
 /// The field of `counts` holding the tally for `state`.
 ///
 /// [`StateCounts`]' fields are public but its own accessor for this is not, so
@@ -508,6 +613,10 @@ mod tests {
     /// The window height those tests set, small enough to leave rows off both
     /// ends of it.
     const WINDOW: u16 = 5;
+
+    /// One of [`App`]'s selection-moving methods, so a test can drive the whole
+    /// set of them from a list rather than repeating itself six times.
+    type Movement = fn(&mut App);
 
     /// Three rows, one per state, standing in for a flattened tree without
     /// dragging a `Tree` into tests that are only about the selection.
@@ -1097,12 +1206,87 @@ mod tests {
 
         assert_eq!(app.toggle_pact(), None);
 
-        assert_eq!(app, before);
+        // Everything but the message is exactly as it was: no state change, no
+        // count change, and nothing for the caller to write down. Compared
+        // field by field rather than as whole apps, because the message is the
+        // one thing a refusal is meant to change.
+        assert_eq!(app.rows(), before.rows());
+        assert_eq!(app.counts(), before.counts());
+        assert_eq!(app.selected(), before.selected());
         assert_eq!(
             app.selected_row().map(|row| row.state),
             Some(NodeState::Unpacted)
         );
         assert_eq!(app.counts(), tally(&app));
+    }
+
+    #[test]
+    fn refusing_to_pact_says_why_naming_the_directory() {
+        let mut app = app_selecting("warlock/crates");
+
+        assert_eq!(app.toggle_pact(), None);
+
+        let message = app.message().expect("a refusal says why");
+        assert!(
+            message.starts_with("warlock/crates has no README"),
+            "{message}"
+        );
+        // Framed as a capability that is not wired up yet, not as a file the
+        // reader has to go and write.
+        assert!(message.contains("not wired up yet"), "{message}");
+    }
+
+    #[test]
+    fn the_next_keystroke_clears_the_message() {
+        let mut app = app_selecting("warlock/crates");
+        assert_eq!(app.toggle_pact(), None);
+        assert!(app.message().is_some());
+
+        app.select_next();
+
+        assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn every_movement_clears_a_message() {
+        let movements: [(&str, Movement); 6] = [
+            ("select_next", App::select_next),
+            ("select_previous", App::select_previous),
+            ("select_page_down", App::select_page_down),
+            ("select_page_up", App::select_page_up),
+            ("select_first", App::select_first),
+            ("select_last", App::select_last),
+        ];
+
+        for (name, movement) in movements {
+            let mut app = app_selecting("warlock/crates");
+            app.set_message("something to forget");
+
+            movement(&mut app);
+
+            assert_eq!(app.message(), None, "{name} left the message behind");
+        }
+    }
+
+    #[test]
+    fn a_toggle_that_goes_through_leaves_no_refusal_behind() {
+        let mut app = app_selecting("warlock/crates");
+        assert_eq!(app.toggle_pact(), None);
+        assert!(app.message().is_some());
+
+        // Onto a documented row, which the movement clears the message for, and
+        // then a toggle that works, which must not put one back.
+        while app
+            .selected_row()
+            .expect("the fixture has rows")
+            .readme
+            .is_none()
+        {
+            app.select_next();
+        }
+        app.toggle_pact().expect("a documented row can be pacted");
+
+        assert_eq!(app.message(), None);
     }
 
     #[test]
@@ -1116,7 +1300,35 @@ mod tests {
 
         assert_eq!(app.toggle_pact(), None);
 
-        assert_eq!(app, before);
+        assert_eq!(app.rows(), before.rows());
+        assert_eq!(app.counts(), before.counts());
+        // The root cannot be named relative to itself, so it is named as it
+        // stands rather than as the `"."` that relative spelling would give.
+        assert_eq!(
+            app.message().map(|message| message
+                .split(" has no README")
+                .next()
+                .expect("a split always yields a first part")
+                .to_owned()),
+            Some("repo".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_app_with_nothing_to_say_says_nothing() {
+        assert_eq!(App::from_rows(three_rows()).message(), None);
+        assert_eq!(App::from_tree(&fixture::tree()).message(), None);
+    }
+
+    #[test]
+    fn a_caller_can_put_its_own_line_up_and_the_next_move_takes_it_down() {
+        let mut app = App::from_rows(three_rows());
+
+        app.set_message("could not write the pact manifest");
+
+        assert_eq!(app.message(), Some("could not write the pact manifest"));
+        app.select_next();
+        assert_eq!(app.message(), None);
     }
 
     #[test]
