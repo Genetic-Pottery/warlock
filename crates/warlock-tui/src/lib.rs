@@ -19,7 +19,8 @@ mod colour;
 mod fixture;
 mod ui;
 
-/// The front end's state: the flattened tree and the selected row.
+/// The front end's state: the flattened tree, the selected row and the slice
+/// of rows on screen.
 pub use app::App;
 /// What a pact toggle changed, for whoever has to write it to the manifest.
 pub use app::PactToggle;
@@ -29,3 +30,5 @@ pub use app::Row;
 pub use colour::colour_for;
 /// Draw one frame of the app.
 pub use ui::draw;
+/// How many rows of tree a terminal of a given size has room for.
+pub use ui::tree_height;
