@@ -12,8 +12,10 @@
 //! starting at the app's scroll offset and running for as many rows as the area
 //! is tall, so a tree taller than the terminal scrolls under a header and a
 //! footer that stay where they are. The window is the app's, not the widget's —
-//! see [`draw_tree`]. There is deliberately no expand/collapse and no mouse:
-//! whatever rows the app holds are the rows drawn.
+//! see [`draw_tree`]. Which rows exist at all is the app's too: collapsing a
+//! directory takes its descendants out of [`App::rows`], and whatever rows the
+//! app holds are the rows drawn — this module only says which of them is
+//! collapsed, with a marker on the line. There is deliberately no mouse.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect, Size};
@@ -32,6 +34,27 @@ const INDENT: &str = "  ";
 /// where the selection is on any terminal with colour; the marker says it
 /// again for the ones without.
 const SELECTION_MARKER: &str = "> ";
+
+/// Drawn on a directory whose children are hidden, between its indent and its
+/// name.
+///
+/// Plus and minus rather than arrows or triangles: the selection marker is
+/// already plain ASCII for the terminals and fonts that would make a mess of
+/// anything else, and a marker that renders as a box on such a terminal says
+/// less than no marker at all.
+const COLLAPSED_MARKER: &str = "+ ";
+
+/// Drawn on a directory whose children are on screen. See [`COLLAPSED_MARKER`].
+const EXPANDED_MARKER: &str = "- ";
+
+/// Drawn on a node with no children: nothing, in the width of a marker.
+///
+/// A node with nothing under it is neither collapsed nor expanded and says so
+/// by carrying no marker — an empty directory must not look like one hiding
+/// something. It still takes the marker's two columns, because a name that
+/// slid left when a directory turned out to be empty would put the siblings of
+/// one parent at two different indents and undo what the indent is for.
+const NO_MARKER: &str = "  ";
 
 /// The one line naming the tree's root.
 const HEADER_HEIGHT: u16 = 1;
@@ -120,7 +143,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let items: Vec<ListItem<'_>> = app.rows()[first..]
         .iter()
         .take(height)
-        .map(|row| ListItem::new(line(row)))
+        .map(|row| ListItem::new(line(row, app.is_collapsed(&row.path))))
         .collect();
     let list = List::new(items)
         .highlight_symbol(SELECTION_MARKER)
@@ -139,22 +162,37 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// One line of the tree: indented by depth, named by its last path component,
-/// coloured by its state.
+/// One line of the tree: indented by depth, marked by whether its children are
+/// hidden, named by its last path component, coloured by its state.
 ///
 /// The indentation already spells out the ancestry, so repeating the full
 /// path on every line would be noise; a path with no final component (a bare
 /// root) falls back to printing itself, because a blank line is worse than a
 /// long one.
-fn line(row: &Row) -> Line<'static> {
+///
+/// The marker goes inside the indent, so it sits with the node it describes and
+/// every sibling's name starts in the same column whichever marker it carries —
+/// see [`NO_MARKER`]. Whether the row is collapsed is passed in rather than read
+/// off the row: which nodes are collapsed is view state the app owns, and a
+/// [`Row`] describes the tree, which knows nothing about it.
+///
+/// The whole line takes one style, the row's state colour, marker included:
+/// colour on this screen means node state and nothing else, so a marker in a
+/// colour of its own would be a second thing colour meant.
+fn line(row: &Row, collapsed: bool) -> Line<'static> {
     let name = row
         .path
         .file_name()
         .unwrap_or(row.path.as_os_str())
         .to_string_lossy();
+    let marker = match (row.has_children(), collapsed) {
+        (false, _) => NO_MARKER,
+        (true, true) => COLLAPSED_MARKER,
+        (true, false) => EXPANDED_MARKER,
+    };
 
     Line::styled(
-        format!("{}{name}", INDENT.repeat(row.depth)),
+        format!("{}{marker}{name}", INDENT.repeat(row.depth)),
         colour_for(row.state),
     )
 }
@@ -181,10 +219,12 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 
     // The movement keys first and together, in the order a reader reaches for
-    // them: one row, one screen, the whole tree.
+    // them: one row, one screen, the whole tree. Then space, which moves
+    // nothing but changes what there is to move through, and only then the
+    // keys that change something.
     let keys = Line::from(
         "up/down or k/j: move    PgUp/PgDn: page    g/G: first/last    \
-         p: pact    q / Esc / Ctrl-C: quit",
+         space: collapse    p: pact    q / Esc / Ctrl-C: quit",
     )
     .dim();
 
@@ -216,7 +256,9 @@ mod tests {
     use ratatui::style::{Color, Modifier};
     use warlock_engine::NodeState;
 
-    use super::{FOOTER_HEIGHT, HEADER_HEIGHT, INDENT, SELECTION_MARKER, draw, tree_height};
+    use super::{
+        FOOTER_HEIGHT, HEADER_HEIGHT, INDENT, NO_MARKER, SELECTION_MARKER, draw, tree_height,
+    };
     use crate::app::{App, Row};
     use crate::colour::colour_for;
     use crate::fixture;
@@ -282,14 +324,16 @@ mod tests {
     }
 
     /// The line row `index` of [`many_rows`] is drawn as when `selected` is the
-    /// selected row: the marker's gutter, the depth's indent, then the name.
+    /// selected row: the selection marker's gutter, the depth's indent, the
+    /// blank a childless row carries where a collapse marker would go, then the
+    /// name.
     fn drawn_row(index: usize, selected: usize) -> String {
         let gutter = if index == selected {
             SELECTION_MARKER.to_owned()
         } else {
             " ".repeat(SELECTION_MARKER.chars().count())
         };
-        format!("{gutter}{INDENT}module{index}")
+        format!("{gutter}{INDENT}{NO_MARKER}module{index}")
     }
 
     /// Draw `app` onto an in-memory terminal of the given size and hand back
@@ -345,13 +389,57 @@ mod tests {
         assert_eq!(
             drawn,
             [
-                "> warlock",
-                "    crates",
-                "      engine",
-                "      tui",
-                "    assets",
+                "> - warlock",
+                "    - crates",
+                "        engine",
+                "        tui",
+                "      assets",
             ]
         );
+    }
+
+    #[test]
+    fn a_collapsed_directory_is_marked_differently_from_an_expanded_one() {
+        let expanded = App::from_tree(&fixture::tree());
+        let collapsed = App::from_tree(&fixture::tree()).with_collapsed(["warlock/crates"]);
+
+        let before = render(&expanded, 40, 10);
+        let after = render(&collapsed, 40, 10);
+
+        // Same directory, same indent, same name, and the one thing that
+        // differs is the marker saying whether anything is under it.
+        assert_eq!(row_text(&before, HEADER_HEIGHT + 1), "    - crates");
+        assert_eq!(row_text(&after, HEADER_HEIGHT + 1), "    + crates");
+        // And what it was hiding is gone from the screen, leaving the root's
+        // other child where the children were.
+        let drawn: Vec<String> = rows_text(&after)
+            .into_iter()
+            .skip(usize::from(HEADER_HEIGHT))
+            .take(collapsed.rows().len())
+            .collect();
+        assert_eq!(drawn, ["> - warlock", "    + crates", "      assets"]);
+    }
+
+    #[test]
+    fn a_directory_with_nothing_under_it_carries_neither_marker() {
+        let app = App::from_tree(&fixture::tree());
+
+        let buffer = render(&app, 40, 10);
+
+        // `assets` has no children, so it is neither collapsed nor expanded and
+        // says so by carrying no marker — while still lining its name up with
+        // the marked rows at its own depth.
+        let leaf = row_text(&buffer, HEADER_HEIGHT + 4);
+        assert_eq!(leaf, "      assets");
+        assert!(!leaf.contains('+') && !leaf.contains('-'), "{leaf:?}");
+        assert_eq!(
+            leaf.find("assets"),
+            row_text(&buffer, HEADER_HEIGHT + 1).find("crates"),
+            "a leaf's name should start where a sibling directory's does"
+        );
+        // Pressing space on it changes nothing on screen: nothing to hide.
+        let pressed = App::from_tree(&fixture::tree()).with_collapsed(["warlock/assets"]);
+        assert_eq!(rows_text(&render(&pressed, 40, 10)), rows_text(&buffer));
     }
 
     #[test]
@@ -398,7 +486,7 @@ mod tests {
         let buffer = render(&app, 40, 10);
 
         assert!(!row_text(&buffer, HEADER_HEIGHT).starts_with(SELECTION_MARKER));
-        assert_eq!(row_text(&buffer, HEADER_HEIGHT + 1), ">   crates");
+        assert_eq!(row_text(&buffer, HEADER_HEIGHT + 1), ">   - crates");
     }
 
     #[test]
@@ -530,6 +618,9 @@ mod tests {
             "page",
             "g/G",
             "first/last",
+            // Named, not left to be discovered: the one key that changes what
+            // there is to scroll through.
+            "space: collapse",
             "p: pact",
             "q",
             "Esc",
@@ -618,6 +709,6 @@ mod tests {
         let buffer = render(&app, 40, 10);
 
         assert_eq!(row_text(&buffer, 0), "crates");
-        assert_eq!(row_text(&buffer, HEADER_HEIGHT), "> warlock");
+        assert_eq!(row_text(&buffer, HEADER_HEIGHT), "> - warlock");
     }
 }
