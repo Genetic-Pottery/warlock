@@ -2,11 +2,11 @@
 //!
 //! The whole screen is three things stacked: a header naming which tree is on
 //! screen, the flattened tree itself, one node per line, and a footer carrying
-//! the tally and the keys. [`draw`] takes the app state and a frame and
-//! nothing else — no terminal setup, no globals, no reaching back into the
-//! engine — so what appears on screen is a pure function of what the app state
-//! says, and a test can assert it against an in-memory buffer with no tty
-//! attached.
+//! the tally, the keys and whatever the app has to say about the last
+//! keystroke. [`draw`] takes the app state and a frame and nothing else — no
+//! terminal setup, no globals, no reaching back into the engine — so what
+//! appears on screen is a pure function of what the app state says, and a test
+//! can assert it against an in-memory buffer with no tty attached.
 //!
 //! The tree area is a window onto the flattened rows: it draws the slice
 //! starting at the app's scroll offset and running for as many rows as the area
@@ -36,8 +36,13 @@ const SELECTION_MARKER: &str = "> ";
 /// The one line naming the tree's root.
 const HEADER_HEIGHT: u16 = 1;
 
-/// The tally line and the keys line.
-const FOOTER_HEIGHT: u16 = 2;
+/// The tally line, the keys line and the message line.
+///
+/// The message line is there whether or not there is a message to put on it: a
+/// footer that grew a line when the app had something to say would shove the
+/// tree down a row and reflow the whole window on a keystroke that changed
+/// nothing about the tree.
+const FOOTER_HEIGHT: u16 = 3;
 
 /// Draw the whole frame: the header at the top, the tree between, the footer
 /// below.
@@ -154,7 +159,14 @@ fn line(row: &Row) -> Line<'static> {
     )
 }
 
-/// Draw the tally of nodes by state and the keys that do something.
+/// Draw the tally of nodes by state, the keys that do something, and the one
+/// line the app has to say about the last keystroke.
+///
+/// The message goes last, nearest the bottom of the screen, so the tally and
+/// the keys sit where they always have. It is dim and uncoloured like the keys:
+/// every colour on this screen already means a node state, and a sentence about
+/// a keystroke is not a node. With no message the line is drawn blank rather
+/// than skipped — see [`FOOTER_HEIGHT`].
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let counts = app.counts();
     let mut tally = Vec::new();
@@ -175,7 +187,9 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
          p: pact    q / Esc / Ctrl-C: quit",
     )
     .dim();
-    frame.render_widget(Paragraph::new(vec![Line::from(tally), keys]), area);
+
+    let message = Line::from(app.message().unwrap_or_default().to_owned()).dim();
+    frame.render_widget(Paragraph::new(vec![Line::from(tally), keys, message]), area);
 }
 
 /// What a state is called in the footer.
@@ -441,12 +455,17 @@ mod tests {
             let (header, footer) = header_and_footer(&buffer);
             assert_eq!(header, ["crates"], "selection {selected}");
             // The footer is still the footer, and no tree row has leaked into
-            // it: the tally and the keys, on however many lines it has.
+            // it: the tally and the keys are on it, wherever it puts them. Not
+            // every line of it: the message line is blank while the app has
+            // nothing to say, which is the whole of this walk.
             assert!(
-                footer.iter().all(|line| !line.is_empty())
-                    && footer.iter().any(|line| line.contains("unpacted"))
+                footer.iter().any(|line| line.contains("unpacted"))
                     && footer.iter().any(|line| line.contains("move")),
                 "footer {footer:?} at selection {selected}"
+            );
+            assert!(
+                footer.iter().all(|line| !line.contains("module")),
+                "a tree row leaked into footer {footer:?} at selection {selected}"
             );
             // Byte for byte the same rows, whatever the tree between them is
             // showing.
@@ -501,7 +520,7 @@ mod tests {
                 "footer {tally:?} is missing the count for {state:?}"
             );
         }
-        let keys = row_text(&buffer, height - 1);
+        let keys = row_text(&buffer, height - FOOTER_HEIGHT + 1);
         // "p: pact" and not the bare "p", which "up/down" would satisfy.
         for key in [
             "up/down",
@@ -518,6 +537,40 @@ mod tests {
         ] {
             assert!(keys.contains(key), "footer {keys:?} is missing {key}");
         }
+    }
+
+    #[test]
+    fn a_refused_toggle_shows_its_message_on_the_footers_last_line_until_the_next_key() {
+        let mut app = App::from_tree(&fixture::tree());
+        // Onto the directory with no documentation yet, which `p` refuses.
+        app.select_next();
+        assert!(
+            app.selected_row()
+                .expect("a row is selected")
+                .readme
+                .is_none(),
+            "the fixture's second row is the one with no README"
+        );
+
+        assert!(app.toggle_pact().is_none(), "the toggle should be refused");
+
+        // Wide enough for the whole sentence: what is under test is that it is
+        // on screen, not how it survives a narrow terminal.
+        let height = 10;
+        let buffer = render(&app, 120, height);
+        let said = app.message().expect("a refusal says why").to_owned();
+        assert!(said.contains("has no README"), "{said:?}");
+        assert_eq!(row_text(&buffer, height - 1), said);
+        // And it took nothing else's line: the tally and the keys are still on
+        // the two lines above it.
+        assert!(row_text(&buffer, height - FOOTER_HEIGHT).contains("unpacted"));
+        assert!(row_text(&buffer, height - FOOTER_HEIGHT + 1).contains("p: pact"));
+
+        // The next keystroke moves on, and the line goes blank again.
+        app.select_next();
+        let buffer = render(&app, 120, height);
+        assert_eq!(app.message(), None);
+        assert_eq!(row_text(&buffer, height - 1), "");
     }
 
     #[test]
