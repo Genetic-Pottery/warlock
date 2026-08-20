@@ -16,6 +16,7 @@
 //! seam, and these tests need no `claude`, no network and no terminal.
 
 mod agent;
+mod clock;
 mod decide;
 mod hash;
 mod load;
@@ -41,14 +42,20 @@ pub use agent::File as AgentFile;
 pub use agent::Request as AgentRequest;
 /// What one model pass produced: the text the model wrote, unparsed.
 pub use agent::Response as AgentResponse;
+/// Now, as the RFC 3339 UTC timestamp a grant records: `2026-08-21T14:03:11Z`.
+/// Computed from the system clock with this crate's own calendar arithmetic —
+/// no date/time dependency — and infallible, because a clock set before 1970 is
+/// not something a caller can do anything about either.
+pub use clock::now_rfc3339;
 /// The colour of a node, from its manifest entry and the hash of its content:
 /// no entry is unpacted, a granted hash equal to the computed one is fresh, and
 /// everything else — including never judged — is stale.
 ///
-/// Nothing in this project grants freshness. There is no refresh pass and no
-/// code in this workspace that writes a `granted_hash`, so
-/// [`NodeState::PactedFresh`] is reachable only against a hash a human wrote
-/// into `.warlock/pacts.toml` by hand.
+/// Freshness is granted in exactly one place: [`pact_subtree`], once every
+/// document of a pact is written. Nothing else in this workspace writes a
+/// `granted_hash`, and in particular nothing re-grants a node that has gone
+/// stale — there is no refresh pass yet, so a directory edited after its pact
+/// stays stale until it is pacted again.
 pub use decide::decide_state;
 /// Everything that can stop a subtree being hashed.
 pub use hash::Error as HashError;
@@ -86,6 +93,9 @@ pub use manifest::to_manifest_path;
 /// directory. Neither byte cap is in here: an over-budget file is a
 /// [`PactProblem`], never a failure.
 pub use pact::Error as PactError;
+/// One directory a subtree pact did not finish with: no document, no manifest
+/// entry, or no hash to grant it against. Never fatal to the pact around it.
+pub use pact::Failure as PactFailure;
 /// What building a request produced: the request itself, plus the files its
 /// byte caps left out.
 pub use pact::Gathered;
@@ -102,6 +112,9 @@ pub use pact::PER_FILE_BYTE_CAP;
 /// What a pact produced: the `WARLOCK.md` it wrote, plus the files its byte
 /// caps left out of the request behind it.
 pub use pact::Pacted;
+/// What a subtree pact produced: the manifest to save, the directories that
+/// failed, and the files its byte caps left out.
+pub use pact::PactedSubtree;
 /// One file the byte caps left out of a request, and why. Non-fatal by
 /// definition: the request that produced it is still a whole request.
 pub use pact::Problem as PactProblem;
@@ -118,6 +131,14 @@ pub use pact::gather_request;
 /// came back verbatim to its `WARLOCK.md`. Writes no manifest entry and grants
 /// nothing.
 pub use pact::pact_directory;
+/// Pact a directory and everything below it: write every document first,
+/// children before parents, then hash each directory and grant it what it
+/// earned. Returns the manifest to save and saves nothing itself.
+pub use pact::pact_subtree;
+/// Un-pact a directory and everything below it: drop their manifest entries and
+/// leave every `WARLOCK.md` on disk, byte for byte. Returns the manifest to save
+/// and saves nothing itself.
+pub use pact::unpact_subtree;
 /// The three-state vocabulary every node is coloured by.
 pub use state::NodeState;
 /// A depth-first walk over a tree, yielding each node with its depth.

@@ -779,14 +779,13 @@ mod tests {
     #[test]
     fn a_refused_toggle_shows_its_message_on_the_footers_last_line_until_the_next_key() {
         let mut app = App::from_tree(&fixture::tree());
-        // Onto the directory with no documentation yet, which `p` refuses.
+        // Onto a file, which is the one row `p` refuses: a pact is made with
+        // the directory holding a file, not with the file.
+        app.toggle_files();
         app.select_next();
         assert!(
-            app.selected_row()
-                .expect("a row is selected")
-                .document
-                .is_none(),
-            "the fixture's second row is the one with no WARLOCK.md"
+            app.selected_row().expect("a row is selected").is_file(),
+            "the second row with files shown is the root's first file"
         );
 
         assert!(app.toggle_pact().is_none(), "the toggle should be refused");
@@ -796,7 +795,7 @@ mod tests {
         let height = 10;
         let buffer = render(&app, 120, height);
         let said = app.message().expect("a refusal says why").to_owned();
-        assert!(said.contains("has no WARLOCK.md"), "{said:?}");
+        assert!(said.contains("is a file"), "{said:?}");
         assert_eq!(row_text(&buffer, height - 1), said);
         // And it took nothing else's line: the tally and the keys are still on
         // the two lines above it.

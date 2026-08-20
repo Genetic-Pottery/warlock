@@ -27,11 +27,16 @@
 //! through this function returns stale except the single one where a hash
 //! somebody recorded matches a hash just computed.
 //!
-//! And nothing in this project grants freshness today. There is no refresh
-//! pass, no `claude` invocation, no code anywhere in this workspace that writes
-//! a `granted_hash`. [`PactedFresh`] is reachable only when a human hand-writes
-//! a hash into `.warlock/pacts.toml` — which is exactly how the test below
-//! reaches it.
+//! One operation grants freshness, and it is [`pact_subtree`]: once a pact has
+//! written every document it was going to, it hashes each directory and records
+//! that hash, which is the only code in this workspace that writes a
+//! `granted_hash`. Nothing re-grants a node that has gone stale — there is no
+//! refresh pass yet — so a directory edited after its pact stays [`PactedStale`]
+//! until it is pacted again. The tests below reach [`PactedFresh`] the third
+//! way, by writing a hash into an entry by hand, because this function's job is
+//! the comparison and not where either side of it came from.
+//!
+//! [`pact_subtree`]: crate::pact_subtree
 //!
 //! [`Unpacted`]: NodeState::Unpacted
 //! [`PactedStale`]: NodeState::PactedStale
