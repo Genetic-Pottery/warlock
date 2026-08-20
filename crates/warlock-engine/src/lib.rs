@@ -26,11 +26,17 @@ mod tree;
 /// One pass of a model over one directory: the port the engine asks through
 /// and the binary implements with a subprocess.
 pub use agent::Agent;
+/// One immediate child directory's `WARLOCK.md`, carried in its parent's
+/// request so a pass learns what is below it without reading down there.
+pub use agent::ChildDocument as AgentChildDocument;
 /// Everything that can stop a model pass producing a document, in the engine's
 /// vocabulary rather than the transport's.
 pub use agent::Error as AgentError;
-/// What one model pass needs in order to run: the prompt, and the directory to
-/// run it in.
+/// One file of the directory a model pass is about: its relative path, and its
+/// bytes — or, for a file left out, its size in place of them.
+pub use agent::File as AgentFile;
+/// What one model pass needs in order to run: the prompt, the directory to run
+/// it in, that directory's files, and its children's documents.
 pub use agent::Request as AgentRequest;
 /// What one model pass produced: the text the model wrote, unparsed.
 pub use agent::Response as AgentResponse;
