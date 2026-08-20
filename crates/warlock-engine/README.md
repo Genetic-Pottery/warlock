@@ -9,10 +9,10 @@ feeds, and a loader that builds a coloured tree out of a real directory:
 - `NodeState`, the three-state model from section 5 of the design doc —
   unpacted, pacted-and-stale, pacted-and-fresh, with no "unknown" fourth state
   because unjudged *is* stale.
-- `Node`, one node of the project tree: its `path`, the path of its README when
-  it has one (`readme: Option<PathBuf>`), its `state`, its `children`, and
-  `files: Vec<PathBuf>` — the files sitting directly in that directory, its own
-  `README.md` among them, sorted by path. See [files are a listing, not
+- `Node`, one node of the project tree: its `path`, the path of its document
+  when it has one (`document: Option<PathBuf>`), its `state`, its `children`,
+  and `files: Vec<PathBuf>` — the files sitting directly in that directory, its
+  own `WARLOCK.md` among them, sorted by path. See [files are a listing, not
   children](#files-are-a-listing-not-children) below.
 - `Tree`, which owns the root node and can be walked, tallied and searched:
   - `Tree::walk` — a depth-first iterator (`DepthFirst`) yielding every node
@@ -46,10 +46,10 @@ directory by `load_tree` — and what `load_tree` loads is decided by three rule
 
 - **Every directory the walk reaches is a node**, the working directory
   included. Nothing is pruned for being undocumented.
-- **A directory that directly contains a `README.md` is a module node**, and
-  that path becomes its `readme`. That is the whole test — no README is parsed.
-  A directory with no README of its own is a node with `readme: None`: an
-  ordinary directory that has no documentation yet.
+- **A directory that directly contains a `WARLOCK.md` is a module node**, and
+  that path becomes its `document`. That is the whole test — no document is
+  parsed. A directory with no document of its own is a node with
+  `document: None`: an ordinary directory that has no documentation yet.
 - **A node's state comes from the manifest entry plus the subtree hash.** No
   entry means `Unpacted` and no hashing at all; an entry means the node's
   directory is hashed and `decide_state` compares that hash against the granted
@@ -78,7 +78,7 @@ writes that manifest; it *walks* directories — via the `ignore` crate, so
 skipped and a `target/` the repository ignores never appears, all without a
 hand-maintained list and never following a symlink; and it *reads the bytes* of
 the files under a pacted directory, in order to hash them. It reads
-those bytes and does not interpret them: no README is parsed, and the only
+those bytes and does not interpret them: no document is parsed, and the only
 thing that ever comes back out is a digest. That is the whole capability
 boundary: it still depends on no terminal crate, opens no sockets, spawns no
 subprocesses and contains no `unsafe`.
@@ -88,7 +88,7 @@ subprocesses and contains no `unsafe`.
 `Node::files` exists so a renderer can show what is inside a directory. It is a
 listing and nothing more, and every consequence of that is deliberate:
 
-- **A file is not a node.** It has no state, no README and no children of its
+- **A file is not a node.** It has no state, no document and no children of its
   own, and nothing gives it any. `Node::new` starts a node with an empty list
   and `Node::with_files` attaches one, the same way `with_children` attaches
   children.
@@ -104,12 +104,12 @@ listing and nothing more, and every consequence of that is deliberate:
   The listing is a view's input, never the trigger's.
 
 A loaded node lists what the walk saw directly inside the directory, its own
-`README.md` included: a faithful listing rather than a listing minus one special
-name, and a front end that would rather not draw the README twice leaves it out
-on the way to the screen. Subdirectories are not in the list; they are
-`children`. The order is the loader's doing, not the type's: `with_files` stores
-what it is given, exactly as `with_children` does, and the loader is what hands
-the paths over sorted.
+`WARLOCK.md` included: a faithful listing rather than a listing minus one
+special name, and a front end that would rather not draw the document twice
+leaves it out on the way to the screen. Subdirectories are not in the list;
+they are `children`. The order is the loader's doing, not the type's:
+`with_files` stores what it is given, exactly as `with_children` does, and the
+loader is what hands the paths over sorted.
 
 ## The manifest: `.warlock/pacts.toml`
 
@@ -132,13 +132,13 @@ version = 1
 
 [[pact]]
 module = "crates/warlock-engine"
-readme = "crates/warlock-engine/README.md"
+document = "crates/warlock-engine/WARLOCK.md"
 granted_hash = "9f2b1c…"
 granted_at = "2026-08-19T14:03:11Z"
 
 [[pact]]
 module = "crates/warlock-tui"
-readme = "crates/warlock-tui/README.md"
+document = "crates/warlock-tui/WARLOCK.md"
 ```
 
 ### The keys
@@ -148,7 +148,7 @@ readme = "crates/warlock-tui/README.md"
 | `version` | top level, integer, required | The schema version. This build reads and writes `1` (`SCHEMA_VERSION`). |
 | `[[pact]]` | top level, array of tables | One table per pacted module, in file order. Omitted entirely when nothing is pacted. |
 | `module` | in a `[[pact]]`, string, required | The pacted directory, relative to the manifest's directory. |
-| `readme` | in a `[[pact]]`, string, required | The README documenting that module — held separately because the file name is not Warlock's to assume. |
+| `document` | in a `[[pact]]`, string, required | The document describing that module — held separately because the file name is not Warlock's to assume. |
 | `granted_hash` | in a `[[pact]]`, string, optional | The subtree hash captured when freshness was last granted — what [`subtree_hash`](#the-subtree-hash-subtree_hash) returns. Opaque to the manifest itself, which stores and compares it as a string and never computes one. |
 | `granted_at` | in a `[[pact]]`, string, optional | When that grant happened, as an RFC 3339 timestamp. A plain string, so no date/time crate is needed to read a field nothing here does arithmetic on. |
 
@@ -170,7 +170,7 @@ logical manifest under two different temporary roots and comparing the file
 bytes. `PactEntry::new` normalises a caller's path on the way in (rejecting
 anything outside the root, or not valid UTF-8), `to_manifest_path` and
 `from_manifest_path` do the conversion on their own, and
-`PactEntry::module_path` / `readme_path` give a real path back under a root.
+`PactEntry::module_path` / `document_path` give a real path back under a root.
 
 ### No granted hash means never judged
 
@@ -258,8 +258,8 @@ deliberate rather than an oversight:
 | **Directories themselves** | Only files contribute, so an empty directory is invisible to the hash — there is nothing in it to be out of date about. |
 | **Symlinks** | Never followed and never hashed as their target: a link inside the subtree already has its target hashed, and a link out of it is not the subtree's content. |
 
-The hash covers the node's own `README.md` and every file in every descendant
-directory. So editing any file at or below the node — the README included, by
+The hash covers the node's own `WARLOCK.md` and every file in every descendant
+directory. So editing any file at or below the node — the document included, by
 hand, which section 9 says is correct behaviour to be reconciled rather than
 fought — changes that node's hash and every ancestor's. Adding a file, deleting
 one, or renaming one (same bytes, new relative path) changes it too.
@@ -276,7 +276,7 @@ records would never settle.
 
 So editing a file inside a gitignored directory (`target/`, a build artefact, a
 local scratch file) changes no node's hash. That is the point: what a
-repository declares ignored is not what its READMEs document.
+repository declares ignored is not what its documents describe.
 
 ### An unreadable file is an error, never a skip
 
@@ -345,23 +345,26 @@ rooted at included. The loader drops nothing for being undocumented, so the
 tree is the shape of the working directory rather than an opinion about which
 parts of it are worth seeing.
 
-**A directory is a module node when it directly contains a `README.md`**, and
-that path becomes its `readme: Some(...)`. That is the whole test. Warlock
-never parses a README — not its headings, not its length, not a word of it. It
+**A directory is a module node when it directly contains a `WARLOCK.md`**, and
+that path becomes its `document: Some(...)`. That is the whole test. Warlock
+never parses a document — not its headings, not its length, not a word of it. It
 cares only that one exists, because the design doc makes the tree of module
-READMEs the interface, and a README is a module's claim to be one.
+documents the interface, and a `WARLOCK.md` is a module's claim to be one. No
+other name is special: a `README.md` beside it is the project's file, written
+for people, and Warlock treats it as an ordinary file — it documents nothing
+here, though its bytes go into the subtree hash like any other file's.
 
-A directory with no README of its own is a node with `readme: None` — an
+A directory with no document of its own is a node with `document: None` — an
 ordinary directory that has no documentation yet, such as `crates/` or any
 `src/` in this repository. It is not a lesser kind of node, and nothing about
-it is missing except a README somebody has yet to write. A front end that wants
-to show only the documented ones filters what it renders; that is a view's
-decision, taken on the way to the screen, not the loader's.
+it is missing except a document somebody has yet to write. A front end that
+wants to show only the documented ones filters what it renders; that is a
+view's decision, taken on the way to the screen, not the loader's.
 
 **The files sitting directly in a directory come back on its node**, in path
 order, as [`files`](#files-are-a-listing-not-children). They make no difference
-to the node's children, its state or its README; the loader copies them across
-and nothing else consults them.
+to the node's children, its state or its document; the loader copies them
+across and nothing else consults them.
 
 ### Where the root comes from
 
@@ -395,7 +398,7 @@ Traversal is the `ignore` crate, so `.gitignore` at every level, hidden
 directories (`.git/` among them) and global excludes are honoured as git
 honours them — there is no hand-maintained skip list to drift out of date, and
 `target/` disappears because the repository already ignores it. `.warlock/` is
-pruned unconditionally on top of that, even if someone puts a `README.md` in
+pruned unconditionally on top of that, even if someone puts a `WARLOCK.md` in
 it. Symlinks are never followed, so a symlinked directory cycle terminates
 instead of hanging. Siblings come out ordered by directory name, so loading an
 unchanged tree twice gives two `Tree` values that compare equal.
@@ -406,9 +409,9 @@ so there is no second walk and no `read_dir`. A file therefore obeys exactly the
 rules a directory does — a gitignored, hidden or `.warlock/` file is absent for
 the same reason a gitignored, hidden or `.warlock/` directory is — and is
 ordered the same way, by name, with each node's list sorted before the tree is
-built. (The one asymmetry: a node's `readme` is a direct filesystem check for
-`README.md`, so an ignore rule covering a README still leaves it documenting its
-node while keeping it out of the listing.)
+built. (The one asymmetry: a node's `document` is a direct filesystem check for
+`WARLOCK.md`, so an ignore rule covering a document still leaves it documenting
+its node while keeping it out of the listing.)
 
 ### Colouring goes through the hash
 

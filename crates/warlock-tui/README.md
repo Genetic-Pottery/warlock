@@ -34,15 +34,16 @@ for it (`load_tree`, on the working directory the binary was launched in) and
 renders what it gets back. Which directories are modules and what colour each
 one is are the engine's answers, arrived at before a frame is drawn.
 
-**A directory is a module when it directly contains a `README.md`.** That is
-the whole test — no README is parsed, not its headings and not a word of it. A
-directory with no README of its own is an ordinary directory that has no
+**A directory is a module when it directly contains a `WARLOCK.md`.** That is
+the whole test — no document is parsed, not its headings and not a word of it.
+A directory with no document of its own is an ordinary directory that has no
 documentation yet: it is drawn like any other node, and it cannot be pacted,
 because a pact is a promise about a document and there is no document to
 promise anything about yet. Pressing `p` on one changes no colour and writes
 nothing; it puts one line in the footer saying so, rather than refusing
-silently. The directory you launched in is drawn the same way, README or not,
-and without one it cannot be pacted either.
+silently. The directory you launched in is drawn the same way, document or not,
+and without one it cannot be pacted either. A `README.md` is nobody's document:
+it is drawn as an ordinary file like any other and makes no module.
 
 ## The keys
 
@@ -84,8 +85,8 @@ confirmation prompt: the action is cheap and its own undo.
   goes back to gray.
 - On an undocumented directory, or on a file row, it refuses: no state moves,
   no count moves, nothing is written, and the footer's message line says which
-  refusal it was — a directory with no README yet, or a file, which is part of
-  a module rather than being one.
+  refusal it was — a directory with no `WARLOCK.md` yet, or a file, which is
+  part of a module rather than being one.
 
 Exactly one node — the selected one — changes per press. There is no bulk or
 recursive pacting, no undo stack and no dialog.
@@ -112,7 +113,7 @@ else:
   state of the directory holding it — the colour says which module the file
   belongs to, not something about the file — so pacting a directory recolours
   its file rows in the same keystroke.
-- **It has no state of its own.** No README, no children, nothing the engine
+- **It has no state of its own.** No document, no children, nothing the engine
   ever decided about it; the engine does not treat a file as a node, and neither
   does anything here.
 - **It is counted nowhere.** The footer's tally is the engine's count of nodes,
@@ -140,8 +141,8 @@ that subdirectory while the pacts still come from, and go to, the one manifest
 above it.
 
 It holds one entry per pacted module. An entry names the pacted **directory**,
-the **README** that documents it (held separately, because the file name is not
-Warlock's to assume), and — only once freshness has been granted — the
+the **document** that describes it (held separately, because the file name is
+not Warlock's to assume), and — only once freshness has been granted — the
 **granted hash** it was granted against, and when. Pressing `p` writes the
 first two and never the rest, so every entry this key creates carries no
 granted hash. **Every path in it is relative to the repository
@@ -165,7 +166,7 @@ is **view state owned by `App` and held nowhere else**:
 
 None of it reaches disk, and there is nowhere for it to reach. The engine's
 `Node` and `Tree` derive `Serialize` and `Deserialize`, and those derives are
-the whole vocabulary a node could be written down in — path, README, state,
+the whole vocabulary a node could be written down in — path, document, state,
 children, files — with no field for a collapsed set, a filter flag, a selection
 or an offset, so no view state can ride out through them. `.warlock/pacts.toml`
 is narrower still: it holds pacts, one entry per pacted module, and the [schema
@@ -202,7 +203,7 @@ Everything that can be tested without a terminal lives in the library
 the view state above — the collapsed set, the two filter flags, the selection
 and the scroll offset — the tally and the one line the footer has to say, and
 whose `toggle_pact` flips the selected row and hands back what a manifest entry
-needs (its path, its README, and whether it is now pacted) without touching a
+needs (its path, its document, and whether it is now pacted) without touching a
 file; `colour_for`, a function from state to colour and nothing else; `draw`,
 which turns an app and a frame into a picture; and `tree_height`, which answers
 from the same layout `draw` uses how many rows of tree a terminal has room for.
