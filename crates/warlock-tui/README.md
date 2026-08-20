@@ -63,7 +63,9 @@ says it did not work.
 
 There is **one manifest per repository**, at `.warlock/pacts.toml` under the
 repository root — the nearest ancestor of the working directory holding a
-`.warlock/` directory. It is **committed to git**: a pact is a fact about the
+`.git/` directory. The manifest's place under that root has not moved; only
+what marks the root has. A repository with no `.warlock/` yet opens fine, all
+unpacted, and the first pact creates the directory. It is **committed to git**: a pact is a fact about the
 repository, not about one developer's checkout, so `.warlock` does not belong
 in `.gitignore`. Launching from a subdirectory therefore scopes the *tree* to
 that subdirectory while the pacts still come from, and go to, the one manifest
