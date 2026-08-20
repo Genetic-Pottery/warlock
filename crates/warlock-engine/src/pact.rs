@@ -1,4 +1,12 @@
-//! Scoping one directory into one request: what a model pass gets to see.
+//! One directory's pact: what a model pass gets to see, and what is done with
+//! what it says.
+//!
+//! [`pact_directory`] is the whole operation, and it is three steps with
+//! nothing else in them: gather the directory into a request, run one pass
+//! through an [`Agent`], and write what came back to `<directory>/WARLOCK.md`.
+//! It records nothing — no manifest entry, no hash, no grant — because a pact
+//! is one request, one response, one file, and what to remember about it is the
+//! caller's business.
 //!
 //! Section 11 of the design doc calls context scoping "the actual
 //! differentiator: maximal relevant context, minimal waste". This module is
@@ -54,6 +62,20 @@
 //! green nobody earned. A file that genuinely cannot be read is a third case
 //! again, and gets its own cause ([`Omission::Unreadable`]) so it is never
 //! mistaken for either.
+//!
+//! # The answer, and the two ways it is turned down
+//!
+//! An accepted response is written out **verbatim**: not trimmed, not parsed,
+//! not reformatted, no sections looked for. Warlock does not read `WARLOCK.md`
+//! — it cares that one exists and what its bytes hash to — and section 17's
+//! question about a document skeleton is open, so this module writes the
+//! answer rather than an opinion about the answer.
+//!
+//! A response is turned down in exactly two cases: the [`Agent`] came back with
+//! an [`AgentError`] instead of an answer, or the answer is shorter than
+//! [`MINIMUM_DOCUMENT_BYTES`] once surrounding whitespace is trimmed. There is
+//! no third rule, and in particular no phrase list — see the constant for why
+//! a length is the only thing worth checking here.
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -64,7 +86,9 @@ use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
 
-use crate::{AgentChildDocument, AgentFile, AgentRequest, ManifestError, to_manifest_path};
+use crate::{
+    Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, ManifestError, to_manifest_path,
+};
 
 /// The directory holding Warlock's own bookkeeping, never part of a request.
 const MANIFEST_DIR: &str = ".warlock";
@@ -107,6 +131,181 @@ pub const PER_FILE_BYTE_CAP: u64 = 128 * 1024;
 /// sent whole, and the text of the children's documents. Only files are ever
 /// dropped to get under it — see [`gather_request`].
 pub const REQUEST_BYTE_CAP: u64 = 256 * 1024;
+
+/// The fewest bytes an answer may come to, once surrounding whitespace is
+/// trimmed, and still be written as a document: 200.
+///
+/// A floor exists because a zero-byte or one-line `WARLOCK.md` that gets
+/// written, then hashed, then granted is a false green, and section 6 of the
+/// design doc is explicit that green is earned. 200 bytes is about a heading
+/// and two sentences: below anything that describes any real directory,
+/// including the emptiest one in this repository, and above what a pass
+/// produces when it has quietly given up.
+///
+/// It is a length, and it is the only thing measured. Whether the text
+/// apologises, refuses, hedges, or is confidently about some other directory is
+/// not checked here and deliberately never will be: a phrase list is a guess
+/// about wording that fails open on every refusal it did not anticipate and
+/// fails closed on the honest document that happens to say "unfortunately".
+/// Section 7 of the design doc makes the git diff the review surface for
+/// documentation, so a bad document is caught where every other bad change is
+/// caught — by a human reading the diff — and a length check is only here to
+/// stop the case where there is no document at all.
+pub const MINIMUM_DOCUMENT_BYTES: usize = 200;
+
+/// The whole instruction a pass is given, and the only one there is.
+///
+/// The prompt is code. No configuration file, no template directory, no
+/// per-project override: making it configurable before there is a single prompt
+/// that works builds the knob before the thing the knob turns. Changing what
+/// Warlock asks for is a change to this string, reviewed in a diff like
+/// everything else.
+///
+/// # The invocation mode this assumes
+///
+/// **Headless print mode, one invocation per directory.** Section 11 of the
+/// design doc leaves the choice open between that and one longer session, and
+/// this is the one taken: build a request, run one pass, write the answer, and
+/// the pass is over. Each directory is independent, and section 11 already
+/// specifies this lifetime as the short one with small context. A pass that
+/// cannot outlive one directory cannot carry a misunderstanding from one
+/// directory into the next, can be cancelled or killed without stranding a
+/// conversation, and needs no session to resume when the one after it fails.
+///
+/// The cost is real, and is named here rather than left to be discovered:
+/// **every directory re-establishes its context from nothing.** Forty
+/// directories pay for forty cold starts, and a pass that has just finished
+/// describing a child begins its parent knowing none of it. What buys most of
+/// that back is [`AgentChildDocument`] — the parent is handed the child's
+/// finished document, so what the earlier pass concluded arrives as text even
+/// though the pass itself is gone. The rest is the price of passes that are
+/// independent, restartable and interruptible one at a time, and it is paid on
+/// purpose.
+const PROMPT: &str = "\
+Write the WARLOCK.md for this directory.
+
+WARLOCK.md documents one directory of a codebase for someone about to work in \
+it. Say what this directory is, what it is for, how its parts fit together, \
+and what a reader has to know before changing anything in it. Prefer what is \
+not obvious from the file names.
+
+You are given this directory's own files and the WARLOCK.md of each immediate \
+subdirectory. The subdirectories have already described themselves: summarise \
+them from their documents rather than restating their contents, and do not \
+speculate about files further down that you were not given.
+
+Some files may appear as a name and a byte size with no contents. Those were \
+too large to send. Mention such a file if it matters what it is, and never \
+guess what is inside it.
+
+Output the document and nothing else: no preamble, no sign-off, no commentary \
+about the task, and no code fence wrapping the whole document. Start with a \
+level-one Markdown heading naming the directory.";
+
+/// Pact one directory: gather it, run one pass through `agent`, and write what
+/// came back to `<directory>/WARLOCK.md`.
+///
+/// The document is written **verbatim** — the response's own bytes, untrimmed,
+/// unparsed and unreformatted — over whatever was there before, unconditionally
+/// and without reading it first. An existing document is not a special case
+/// anywhere in this operation: it went into the request as one of the
+/// directory's files, and it is overwritten here as the ordinary outcome of a
+/// pass that was asked to write one.
+///
+/// Nothing is recorded. No manifest entry, no subtree hash, no grant: this is
+/// one request, one response, one file, and a caller that wants the directory
+/// to go green does that afterwards with what it knows about the rest of the
+/// subtree.
+///
+/// The [`Problem`]s the byte caps produced come back on success, alongside the
+/// document that was written — a pact over budget is still a pact, so they are
+/// something to report rather than something to act on.
+///
+/// `&dyn Agent` rather than a generic: there is one code path whatever the
+/// implementation is, a boxed agent works without a second signature, and a
+/// concrete fake in a test still coerces at the call site.
+///
+/// ```
+/// use std::fs;
+/// use warlock_engine::{Agent, AgentError, AgentRequest, AgentResponse, Pacted, pact_directory};
+///
+/// /// The engine's own tests reach a model exactly like this: they don't.
+/// struct Canned(String);
+///
+/// impl Agent for Canned {
+///     fn run(&self, _request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+///         Ok(AgentResponse::new(self.0.clone()))
+///     }
+/// }
+///
+/// let dir = tempfile::tempdir()?;
+/// fs::write(dir.path().join("lib.rs"), "//! Core engine.\n")?;
+/// let markdown = format!("# engine\n\n{}\n", "Core engine for warlock. ".repeat(20));
+///
+/// let Pacted { document, problems } = pact_directory(dir.path(), &Canned(markdown.clone()))?;
+///
+/// assert_eq!(document, dir.path().join("WARLOCK.md"));
+/// assert_eq!(fs::read_to_string(&document)?, markdown, "written verbatim");
+/// assert!(problems.is_empty());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+///
+/// [`Error`], every variant of which names `directory` (see
+/// [`Error::directory`]), because a caller pacting a subtree is holding a list
+/// of these and has to be able to say which directory each one is about.
+///
+/// * [`Error::Walk`] or [`Error::Path`] if there is no request to build — see
+///   [`gather_request`]. Neither byte cap is ever one of these.
+/// * [`Error::Refused`] if the pass produced no usable document: the agent
+///   returned an [`AgentError`], or the answer was under
+///   [`MINIMUM_DOCUMENT_BYTES`] trimmed. **Nothing is written on this path**:
+///   a directory with no document still has none, and an existing document is
+///   byte-identical to what it was before.
+/// * [`Error::Write`] if the document could not be written. A different kind of
+///   failure from a refusal — the answer was good and the disk said no — and
+///   the only one that can leave the filesystem in a state the caller did not
+///   ask for.
+pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<Pacted, Error> {
+    let directory = directory.as_ref();
+    let Gathered { request, problems } = gather_request(PROMPT, directory)?;
+
+    let response = agent.run(&request).map_err(|source| Error::Refused {
+        directory: directory.to_path_buf(),
+        cause: Refusal::Agent { source },
+    })?;
+
+    // Measured on the trimmed text, written from the untrimmed one: leading
+    // blank lines are not a document, but they are also not this module's to
+    // tidy away.
+    let text = response.into_text();
+    let trimmed = text.trim().len();
+    if trimmed < MINIMUM_DOCUMENT_BYTES {
+        return Err(Error::Refused {
+            directory: directory.to_path_buf(),
+            cause: Refusal::TooShort { bytes: trimmed },
+        });
+    }
+
+    // A plain overwrite, where `Manifest::save` writes a temporary file and
+    // renames it. The idiom is not copied here on purpose: a torn manifest is a
+    // data file Warlock reads back and would misread, while a torn `WARLOCK.md`
+    // is documentation nobody parses that the next pass overwrites whole. The
+    // temporary file, meanwhile, would land in the very directory just
+    // described — a file in the tree, in the next subtree hash, and in the next
+    // request — which is a worse thing to risk than the tear it prevents.
+    let document = directory.join(DOCUMENT_FILE);
+    if let Err(source) = fs::write(&document, &text) {
+        return Err(Error::Write {
+            directory: directory.to_path_buf(),
+            path: document,
+            source,
+        });
+    }
+
+    Ok(Pacted { document, problems })
+}
 
 /// Build the request for one pass over `directory`, asking `prompt`.
 ///
@@ -322,7 +521,10 @@ fn walk(dir: &Path) -> Result<Found, Error> {
         child_documents: BTreeMap::new(),
     };
     for entry in walker {
-        let entry = entry.map_err(|source| Error::Walk { source })?;
+        let entry = entry.map_err(|source| Error::Walk {
+            directory: dir.to_path_buf(),
+            source,
+        })?;
         let depth = entry.depth();
         // Regular files only. With `follow_links(false)` a symlink reports as a
         // symlink, so it is neither descended into nor listed as whatever it
@@ -353,6 +555,7 @@ fn walk(dir: &Path) -> Result<Found, Error> {
 /// `path` named relative to `dir`, in the manifest's forward-slash spelling.
 fn relative(dir: &Path, path: &Path) -> Result<String, Error> {
     to_manifest_path(dir, path).map_err(|source| Error::Path {
+        directory: dir.to_path_buf(),
         path: path.to_path_buf(),
         source: Box::new(source),
     })
@@ -366,6 +569,27 @@ fn relative(dir: &Path, path: &Path) -> Result<String, Error> {
 /// cannot happen.
 fn byte_count(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
+}
+
+/// What a pact produced: the document it wrote, and everything the byte caps
+/// left out of the request behind it.
+///
+/// A plain pair like [`Gathered`], for the same reason: the document is the
+/// thing that happened, the problems are the thing to report once. Reaching
+/// this type at all means a document was written — there is no "pacted but not
+/// written" case, because every way of not writing one is an [`Error`].
+#[derive(Debug)]
+pub struct Pacted {
+    /// The document that was written: `<directory>/WARLOCK.md`. Given back
+    /// rather than left to be recomputed, because a caller recording a pact
+    /// needs exactly this path and should not have to know the file name to
+    /// build it.
+    pub document: PathBuf,
+    /// Every file the caps left out of the request, as [`gather_request`]
+    /// reported it. Empty is the normal case, and a non-empty list never means
+    /// the document is worse — only that it was written about slightly less
+    /// than the whole directory.
+    pub problems: Vec<Problem>,
 }
 
 /// What gathering produced: the request, and everything left out of it.
@@ -475,22 +699,85 @@ impl std::error::Error for Omission {
     }
 }
 
-/// Everything that can stop a directory becoming a request.
+/// Why a pass produced no document, when it was not the filesystem's fault.
+///
+/// Two cases and no more, which is the whole rejection policy: the pass did not
+/// come back with an answer, or what it came back with is too short to be one.
+/// Nothing here looks at what the text *says* — see [`MINIMUM_DOCUMENT_BYTES`]
+/// for why a length is the only measure taken.
+///
+/// Separate from [`Error`] because a caller may well want to treat these
+/// differently from a walk that failed: a refusal is worth retrying, and a
+/// directory that cannot be listed is not.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Refusal {
+    /// The agent came back with an error instead of an answer: no `claude` on
+    /// `PATH`, a non-zero exit, empty output, a timeout, or any other way the
+    /// transport reported not reaching a model.
+    Agent {
+        /// What the agent said, in the engine's vocabulary rather than the
+        /// transport's.
+        source: AgentError,
+    },
+    /// The answer, once surrounding whitespace was trimmed, was shorter than
+    /// [`MINIMUM_DOCUMENT_BYTES`]. An empty or whitespace-only answer is this
+    /// case with `bytes` of zero rather than a variant of its own: they are the
+    /// same fact — there is not enough here to be a document — and splitting
+    /// them would invite a caller to treat one as more real than the other.
+    TooShort {
+        /// How many bytes it did come to, trimmed.
+        bytes: usize,
+    },
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Agent { source } => write!(f, "the model pass produced no answer: {source}"),
+            Self::TooShort { bytes } => write!(
+                f,
+                "the answer is {bytes} bytes once trimmed, under the \
+                 {MINIMUM_DOCUMENT_BYTES} bytes a document has to reach"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Refusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Agent { source } => Some(source),
+            Self::TooShort { .. } => None,
+        }
+    }
+}
+
+/// Everything that can stop a directory getting a document.
 ///
 /// Hand-rolled like every other error in this crate, and deliberately short:
-/// neither cap is in here, because neither cap can fail a pact.
+/// neither byte cap is in here, because neither cap can fail a pact.
+///
+/// Every variant carries the directory it is about, reachable uniformly through
+/// [`Error::directory`]. A caller pacting a subtree collects a pile of these
+/// and has to be able to say which directory each one belongs to without
+/// matching on the variant to find out.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
     /// The directory could not be walked: it is not there, it cannot be
     /// listed, or something vanished from under the walk.
     Walk {
+        /// The directory that was being pacted.
+        directory: PathBuf,
         /// What the walker said, including which path it was on.
         source: ignore::Error,
     },
     /// A file's path has no relative, forward-slash, UTF-8 form, so it cannot
     /// be named to a model.
     Path {
+        /// The directory that was being pacted.
+        directory: PathBuf,
         /// The path that could not be named.
         path: PathBuf,
         /// Why it could not be. Boxed for the same reason as
@@ -499,16 +786,76 @@ pub enum Error {
         /// `ignore::Error`.
         source: Box<ManifestError>,
     },
+    /// The pass ran and produced nothing worth writing. **Nothing was
+    /// written**: whatever was in the directory before is exactly what is in it
+    /// now.
+    Refused {
+        /// The directory that was being pacted.
+        directory: PathBuf,
+        /// Which of the two rejection rules applied.
+        cause: Refusal,
+    },
+    /// The answer was good and the document could not be written anyway.
+    ///
+    /// Its own variant rather than a [`Refusal`], because it is a different
+    /// failure with a different answer: nothing is wrong with the model, the
+    /// disk is full or the directory is read-only, and a caller retrying the
+    /// pass is retrying the expensive half of something that already worked.
+    Write {
+        /// The directory that was being pacted.
+        directory: PathBuf,
+        /// The document that could not be written.
+        path: PathBuf,
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
+}
+
+impl Error {
+    /// The directory this failure is about, whichever way it failed.
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        match self {
+            Self::Walk { directory, .. }
+            | Self::Path { directory, .. }
+            | Self::Refused { directory, .. }
+            | Self::Write { directory, .. } => directory,
+        }
+    }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Walk { source } => write!(f, "could not walk the directory: {source}"),
-            Self::Path { path, source } => write!(
+            Self::Walk { directory, source } => write!(
                 f,
-                "could not name `{}` relative to the directory being pacted: {source}",
-                path.display()
+                "could not walk `{}` to pact it: {source}",
+                directory.display()
+            ),
+            Self::Path {
+                directory,
+                path,
+                source,
+            } => write!(
+                f,
+                "could not name `{}` relative to `{}`, the directory being pacted: {source}",
+                path.display(),
+                directory.display(),
+            ),
+            Self::Refused { directory, cause } => write!(
+                f,
+                "nothing was written for `{}`: {cause}",
+                directory.display()
+            ),
+            Self::Write {
+                directory,
+                path,
+                source,
+            } => write!(
+                f,
+                "the pass over `{}` produced a document but `{}` could not be written: {source}",
+                directory.display(),
+                path.display(),
             ),
         }
     }
@@ -517,8 +864,10 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Walk { source } => Some(source),
+            Self::Walk { source, .. } => Some(source),
             Self::Path { source, .. } => Some(source.as_ref()),
+            Self::Refused { cause, .. } => Some(cause),
+            Self::Write { source, .. } => Some(source),
         }
     }
 }
@@ -529,8 +878,63 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{Gathered, Omission, PER_FILE_BYTE_CAP, Problem, REQUEST_BYTE_CAP, gather_request};
-    use crate::{AgentChildDocument, AgentFile, AgentRequest};
+    use super::{
+        Gathered, MINIMUM_DOCUMENT_BYTES, Omission, PER_FILE_BYTE_CAP, Pacted, Problem,
+        REQUEST_BYTE_CAP, Refusal, gather_request, pact_directory,
+    };
+    use crate::{Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, AgentResponse};
+
+    /// The whole point of the agent seam, in one struct: a model pass that
+    /// answers with canned markdown and keeps what it was asked. No `claude`,
+    /// no network, no terminal, no mocking framework.
+    struct Canned {
+        /// What every pass answers.
+        text: String,
+        /// Every request that reached it, in call order.
+        seen: std::cell::RefCell<Vec<AgentRequest>>,
+    }
+
+    impl Canned {
+        /// A fake answering `text` to anything.
+        fn new(text: impl Into<String>) -> Self {
+            Self {
+                text: text.into(),
+                seen: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Agent for Canned {
+        fn run(&self, request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+            self.seen.borrow_mut().push(request.clone());
+            Ok(AgentResponse::new(self.text.clone()))
+        }
+    }
+
+    /// The other half of a fake: one that never comes back with an answer. The
+    /// failure is a function rather than a field because [`AgentError`] is not
+    /// [`Clone`], and a test that wants a particular one should be able to say
+    /// so at the call site.
+    struct Fails(fn() -> AgentError);
+
+    impl Agent for Fails {
+        fn run(&self, _request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+            Err(self.0())
+        }
+    }
+
+    /// A plausible document of exactly `bytes` bytes, with no whitespace at
+    /// either end so its trimmed length is its length.
+    fn document(bytes: usize) -> String {
+        let head = "# engine\n\nCore engine for warlock. ";
+        assert!(bytes > head.len(), "a document has room for its heading");
+        format!("{head}{}", "x".repeat(bytes - head.len()))
+    }
+
+    /// What is in `dir`'s `WARLOCK.md`, or `None` if it has none.
+    fn written(dir: &Path) -> Option<Vec<u8>> {
+        fs::read(dir.join("WARLOCK.md")).ok()
+    }
 
     /// Write `contents` at `dir/name`, creating whatever directories it needs.
     fn write(dir: &Path, name: &str, contents: impl AsRef<[u8]>) -> PathBuf {
@@ -1000,6 +1404,306 @@ mod tests {
                 .and_then(std::error::Error::source)
                 .is_some(),
             "and an unreadable file's cause names the io error under it",
+        );
+    }
+
+    #[test]
+    fn a_pact_writes_the_answer_verbatim_and_says_where() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+        // Ragged on purpose: blank lines around it, trailing spaces, no final
+        // newline. All of it survives.
+        let answer = format!("\n\n   {}  ", document(300));
+        let agent = Canned::new(&answer);
+
+        let Pacted {
+            document: path,
+            problems,
+        } = pact_directory(dir.path(), &agent).expect("a good answer is written");
+
+        assert_eq!(path, dir.path().join("WARLOCK.md"));
+        assert_eq!(
+            written(dir.path()).as_deref(),
+            Some(answer.as_bytes()),
+            "byte for byte: not trimmed, not parsed, not reformatted",
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+
+        let seen = agent.seen.borrow();
+        assert_eq!(seen.len(), 1, "one pass, one directory");
+        assert_eq!(seen[0].directory(), dir.path());
+        assert_eq!(
+            seen[0].prompt(),
+            super::PROMPT,
+            "the prompt is code, and it is this one",
+        );
+        assert_eq!(file_paths(&seen[0]), ["lib.rs"]);
+    }
+
+    #[test]
+    fn a_pact_leaves_nothing_behind_but_the_document() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+
+        pact_directory(dir.path(), &Canned::new(document(300))).expect("pacts");
+
+        let mut left = fs::read_dir(dir.path())
+            .expect("lists")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(
+            left,
+            ["WARLOCK.md", "lib.rs"],
+            "no temporary file leaks into the directory the pact just described",
+        );
+    }
+
+    #[test]
+    fn an_existing_document_is_overwritten_unconditionally() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(
+            dir.path(),
+            "WARLOCK.md",
+            "# engine\n\nWhat it used to say.\n",
+        );
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+        let answer = document(400);
+        let agent = Canned::new(&answer);
+
+        pact_directory(dir.path(), &agent).expect("pacts");
+
+        assert_eq!(
+            written(dir.path()).as_deref(),
+            Some(answer.as_bytes()),
+            "the old document is gone, whole, with nothing merged into it",
+        );
+        assert_eq!(
+            file(&agent.seen.borrow()[0], "WARLOCK.md").bytes(),
+            Some(&b"# engine\n\nWhat it used to say.\n"[..]),
+            "and the pass saw it first, as one of the directory's files",
+        );
+    }
+
+    #[test]
+    fn an_agent_that_fails_writes_nothing_and_names_the_directory() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+        let agent = Fails(|| AgentError::Failed {
+            code: Some(2),
+            stderr: "Invalid API key\n".to_owned(),
+        });
+
+        let error = pact_directory(dir.path(), &agent).expect_err("a failed pass is no document");
+
+        assert!(
+            matches!(
+                error,
+                super::Error::Refused {
+                    cause: Refusal::Agent {
+                        source: AgentError::Failed { code: Some(2), .. }
+                    },
+                    ..
+                }
+            ),
+            "{error:?}",
+        );
+        assert_eq!(error.directory(), dir.path());
+        assert_eq!(
+            written(dir.path()),
+            None,
+            "a directory with no document still has none",
+        );
+    }
+
+    #[test]
+    fn an_empty_or_whitespace_only_answer_is_rejected() {
+        for answer in ["", "   \n\t\n   "] {
+            let dir = tempfile::tempdir().expect("a temporary directory");
+
+            let error = pact_directory(dir.path(), &Canned::new(answer))
+                .expect_err("there is nothing here to write");
+
+            assert!(
+                matches!(
+                    error,
+                    super::Error::Refused {
+                        cause: Refusal::TooShort { bytes: 0 },
+                        ..
+                    }
+                ),
+                "whitespace is not a document: {error:?}",
+            );
+            assert_eq!(written(dir.path()), None);
+        }
+    }
+
+    #[test]
+    fn an_answer_one_byte_under_the_minimum_is_rejected() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+
+        let error = pact_directory(
+            dir.path(),
+            &Canned::new(document(MINIMUM_DOCUMENT_BYTES - 1)),
+        )
+        .expect_err("under the floor");
+
+        assert!(
+            matches!(
+                error,
+                super::Error::Refused {
+                    cause: Refusal::TooShort { bytes },
+                    ..
+                } if bytes == MINIMUM_DOCUMENT_BYTES - 1
+            ),
+            "{error:?}",
+        );
+        assert_eq!(written(dir.path()), None);
+    }
+
+    #[test]
+    fn an_answer_exactly_at_the_minimum_is_written() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let answer = document(MINIMUM_DOCUMENT_BYTES);
+
+        pact_directory(dir.path(), &Canned::new(&answer))
+            .expect("the floor is what a document has to reach, not exceed");
+
+        assert_eq!(written(dir.path()).as_deref(), Some(answer.as_bytes()));
+    }
+
+    #[test]
+    fn the_minimum_is_measured_on_the_trimmed_answer() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // Long enough untrimmed, far too short once the padding goes.
+        let answer = format!("\n\n{}{}\n\n", " ".repeat(MINIMUM_DOCUMENT_BYTES), "# x");
+
+        let error = pact_directory(dir.path(), &Canned::new(answer))
+            .expect_err("padding is not a document");
+
+        assert!(
+            matches!(
+                error,
+                super::Error::Refused {
+                    cause: Refusal::TooShort { bytes: 3 },
+                    ..
+                }
+            ),
+            "{error:?}",
+        );
+        assert_eq!(written(dir.path()), None);
+    }
+
+    #[test]
+    fn a_rejection_leaves_an_existing_document_byte_identical() {
+        let before = b"# engine\n\nWhat it says today, and will keep saying.\n";
+        let rejected: [&dyn Agent; 3] = [
+            &Canned::new(""),
+            &Canned::new(document(MINIMUM_DOCUMENT_BYTES - 1)),
+            &Fails(|| AgentError::EmptyOutput),
+        ];
+
+        for agent in rejected {
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            write(dir.path(), "WARLOCK.md", before);
+
+            let error = pact_directory(dir.path(), agent).expect_err("nothing to write");
+
+            assert!(matches!(error, super::Error::Refused { .. }), "{error:?}");
+            assert_eq!(
+                written(dir.path()).as_deref(),
+                Some(&before[..]),
+                "a turned-down answer never touches the document already there",
+            );
+        }
+    }
+
+    #[test]
+    fn the_caps_problems_come_back_alongside_the_document() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let size = PER_FILE_BYTE_CAP + 1;
+        let lock = write(dir.path(), "Cargo.lock", filler(size));
+        let answer = document(300);
+
+        let Pacted { problems, .. } = pact_directory(dir.path(), &Canned::new(&answer))
+            .expect("an over-budget file never fails a pact");
+
+        assert_eq!(written(dir.path()).as_deref(), Some(answer.as_bytes()));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].path, lock);
+        assert!(
+            matches!(problems[0].cause, Omission::TooLarge { .. }),
+            "{:?}",
+            problems[0],
+        );
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_gathered_never_reaches_the_agent() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let missing = dir.path().join("nowhere");
+        let agent = Canned::new(document(300));
+
+        let error = pact_directory(&missing, &agent).expect_err("there is nothing to walk");
+
+        assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
+        assert_eq!(
+            error.directory(),
+            missing,
+            "a walk that failed still says which directory it was",
+        );
+        assert!(
+            agent.seen.borrow().is_empty(),
+            "no request, no pass: the expensive half never runs",
+        );
+    }
+
+    #[test]
+    fn every_failure_names_its_directory_on_one_line() {
+        let errors = [
+            super::Error::Refused {
+                directory: PathBuf::from("/repo/crates/engine"),
+                cause: Refusal::Agent {
+                    source: AgentError::NotFound {
+                        program: "claude".to_owned(),
+                    },
+                },
+            },
+            super::Error::Refused {
+                directory: PathBuf::from("/repo/crates/engine"),
+                cause: Refusal::TooShort { bytes: 12 },
+            },
+            super::Error::Write {
+                directory: PathBuf::from("/repo/crates/engine"),
+                path: PathBuf::from("/repo/crates/engine/WARLOCK.md"),
+                source: std::io::Error::other("read-only file system"),
+            },
+        ];
+
+        for error in &errors {
+            let rendered = error.to_string();
+            assert!(!rendered.contains('\n'), "{rendered}");
+            assert!(
+                rendered.contains("/repo/crates/engine"),
+                "a failure says which directory it is about: {rendered}",
+            );
+            assert_eq!(error.directory(), Path::new("/repo/crates/engine"));
+            assert!(error.source().is_some(), "{error:?}");
+        }
+        assert!(errors[0].to_string().contains("claude"), "{}", errors[0],);
+        assert!(
+            errors[1]
+                .to_string()
+                .contains(&MINIMUM_DOCUMENT_BYTES.to_string()),
+            "a too-short answer says what it fell short of: {}",
+            errors[1],
+        );
+        assert!(
+            errors[0]
+                .source()
+                .and_then(std::error::Error::source)
+                .is_some(),
+            "and a refusal's cause reaches the agent error under it",
         );
     }
 }

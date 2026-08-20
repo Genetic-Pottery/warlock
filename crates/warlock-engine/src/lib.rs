@@ -82,27 +82,42 @@ pub use manifest::from_manifest_path;
 pub use manifest::manifest_path;
 /// A caller's path in the form the manifest stores: relative, forward slashes.
 pub use manifest::to_manifest_path;
-/// Everything that can stop a directory becoming a model request. Neither byte
-/// cap is in here: an over-budget file is a [`PactProblem`], never a failure.
+/// Everything that can stop a directory getting a document, each one naming the
+/// directory. Neither byte cap is in here: an over-budget file is a
+/// [`PactProblem`], never a failure.
 pub use pact::Error as PactError;
 /// What building a request produced: the request itself, plus the files its
 /// byte caps left out.
 pub use pact::Gathered;
+/// The fewest bytes an answer may come to, trimmed, and still be written as a
+/// document. A length is the only measure taken: nothing anywhere reads what
+/// the text says.
+pub use pact::MINIMUM_DOCUMENT_BYTES;
 /// Why one file's contents are not in a request: too large by itself, dropped
 /// to fit the whole request, or unreadable.
 pub use pact::Omission;
 /// The most bytes one file may carry before it is listed by name and size
 /// instead.
 pub use pact::PER_FILE_BYTE_CAP;
+/// What a pact produced: the `WARLOCK.md` it wrote, plus the files its byte
+/// caps left out of the request behind it.
+pub use pact::Pacted;
 /// One file the byte caps left out of a request, and why. Non-fatal by
 /// definition: the request that produced it is still a whole request.
 pub use pact::Problem as PactProblem;
 /// The most bytes one whole request may carry before its largest files are
 /// listed rather than sent.
 pub use pact::REQUEST_BYTE_CAP;
+/// Why a model pass produced no document: the agent failed, or the answer was
+/// too short to be one. The whole rejection policy, in two variants.
+pub use pact::Refusal;
 /// Build the request for one model pass over one directory: its own files, its
 /// children's documents, and what the byte caps left out.
 pub use pact::gather_request;
+/// Pact one directory: gather it, run one model pass over it, and write what
+/// came back verbatim to its `WARLOCK.md`. Writes no manifest entry and grants
+/// nothing.
+pub use pact::pact_directory;
 /// The three-state vocabulary every node is coloured by.
 pub use state::NodeState;
 /// A depth-first walk over a tree, yielding each node with its depth.
