@@ -28,7 +28,7 @@ use ratatui::crossterm::terminal::{
 };
 use warlock_engine::{
     LoadError, LoadProblem, Loaded, Manifest, ManifestError, PactEntry, load_tree, repository_root,
-    to_manifest_path,
+    to_manifest_path, unpact_subtree,
 };
 use warlock_tui::{App, PactToggle, draw, tree_height};
 
@@ -124,11 +124,11 @@ fn run() -> Result<(), Error> {
             // the scroll offset in range; the next frame draws the longer or
             // shorter list.
             Some(Action::ToggleFiles) => app.toggle_files(),
-            // The app has already flipped the row's colour and its tally, so
+            // The app has already moved the subtree's colours and the tally, so
             // the next frame — drawn at the top of this same loop, with no
             // reload of the tree — shows the new state. The manifest is
             // brought into line and saved here, before that frame: the file on
-            // disk and the colour on screen change in the same keystroke, and
+            // disk and the colours on screen change in the same keystroke, and
             // a save that fails returns rather than leaving the screen
             // claiming something that was never written.
             //
@@ -138,6 +138,12 @@ fn run() -> Result<(), Error> {
             // it from the selected row here would be a second answer to the
             // same question.
             Some(Action::TogglePact) => {
+                // Copied before the toggle paints anything, because the toggle
+                // is no longer its own undo: it puts a whole subtree into one
+                // state, and the states it painted over were not all the same
+                // one. The copy is a list of rows and a tally, and it is taken
+                // once per press of one key.
+                let before = app.clone();
                 if let Some(toggle) = app.toggle_pact() {
                     match with_toggle(&manifest, &repo_root, &toggle) {
                         Ok(next) => {
@@ -149,16 +155,12 @@ fn run() -> Result<(), Error> {
                         // yet. This is a node the manifest has no spelling
                         // for: a path outside the repository root, or one that
                         // is not UTF-8. There is nothing for the user to fix
-                        // and nothing broken to exit over, so the row goes
-                        // back to the state it was just moved out of and the
-                        // reason goes on the app's line, the same one a
-                        // refused toggle uses, rather than down a second
-                        // channel of this file's own.
+                        // and nothing broken to exit over, so the rows go back
+                        // exactly as they were and the reason goes on the app's
+                        // line, the same one a refused toggle uses, rather than
+                        // down a second channel of this file's own.
                         Err(source) => {
-                            // The toggle is its own undo, so this puts the row
-                            // and the tally back; it cannot refuse, because the
-                            // toggle it is undoing did not.
-                            let _ = app.toggle_pact();
+                            app = before;
                             app.set_message(one_line(&source.to_string()));
                         }
                     }
@@ -169,28 +171,41 @@ fn run() -> Result<(), Error> {
     }
 }
 
-/// `manifest` with `toggle` applied: an entry for a node just pacted, or no
-/// entry for one just unpacted.
+/// `manifest` with `toggle` applied: an entry for a directory just pacted, or
+/// no entry for a directory just un-pacted and none for anything below it.
 ///
-/// Pure, and the only place the front end decides what a pact *is* in the
-/// file: a [`PactEntry`] with no grant, because a module that has just been
-/// pacted has never been judged, and unjudged is stale (design doc §5/§6).
-/// That is also why nothing here hashes anything.
+/// The un-pacting half is the engine's [`unpact_subtree`] and nothing else,
+/// because un-pacting is a subtree operation — the key takes the directory and
+/// everything under it out of the manifest, which is exactly what the app has
+/// just greyed on screen — and because dropping entries is the one half of a
+/// pact that needs no model, no document and no hash.
 ///
-/// Written as rebuild-then-maybe-push rather than as two branches, so pacting
-/// a module the manifest somehow already lists cannot leave two entries for
-/// it. Order is otherwise the file's own: entries keep their positions and a
-/// new one lands at the end, which keeps the diff to the lines that changed.
+/// The pacting half is still the placeholder it has always been: one
+/// [`PactEntry`] with no grant, because a module that has just been pacted has
+/// never been judged, and unjudged is stale (design doc §5/§6). That is also
+/// why nothing here hashes anything, and why the document is spelled out from
+/// the directory rather than taken from the toggle — the real operation writes
+/// that file and hands its path back, and this line goes when this key calls
+/// it.
+///
+/// Written as rebuild-then-push rather than as two branches, so pacting a
+/// module the manifest somehow already lists cannot leave two entries for it.
+/// Order is otherwise the file's own: entries keep their positions and a new
+/// one lands at the end, which keeps the diff to the lines that changed.
 ///
 /// # Errors
 ///
-/// Whatever [`PactEntry::new`] and [`to_manifest_path`] refuse: a path outside
-/// the repository root, or one that is not UTF-8.
+/// Whatever [`PactEntry::new`], [`to_manifest_path`] and [`unpact_subtree`]
+/// refuse: a path outside the repository root, or one that is not UTF-8.
 fn with_toggle(
     manifest: &Manifest,
     repo_root: &Path,
     toggle: &PactToggle,
 ) -> Result<Manifest, ManifestError> {
+    if !toggle.pacted {
+        return unpact_subtree(&toggle.path, repo_root, manifest);
+    }
+
     let module = to_manifest_path(repo_root, &toggle.path)?;
     let mut next = Manifest::with_entries(
         manifest
@@ -199,11 +214,23 @@ fn with_toggle(
             .filter(|entry| entry.module() != module)
             .cloned(),
     );
-    if toggle.pacted {
-        next.push(PactEntry::new(repo_root, &toggle.path, &toggle.document)?);
-    }
+    next.push(PactEntry::new(
+        repo_root,
+        &toggle.path,
+        toggle.path.join(DOCUMENT_FILE),
+    )?);
     Ok(next)
 }
+
+/// The name of the file a module is documented in, as the engine's loader looks
+/// for it and as the pact operation writes it.
+///
+/// Spelled here only for as long as this file builds a manifest entry by hand:
+/// the entry's document is whatever the pact operation actually wrote, and that
+/// operation hands the path back, so nobody has to know this name. Until that
+/// call is wired up, an entry pointing anywhere else would be an entry the
+/// loader could not follow.
+const DOCUMENT_FILE: &str = "WARLOCK.md";
 
 /// The repository's manifest, or an empty one if it has never pacted anything.
 ///
@@ -566,7 +593,7 @@ mod tests {
     use warlock_engine::{Manifest, ManifestError, PactEntry};
     use warlock_tui::PactToggle;
 
-    use super::{Action, Error, action_for, one_line, with_toggle};
+    use super::{Action, DOCUMENT_FILE, Error, action_for, one_line, with_toggle};
 
     /// A root no test touches on disk: every path below is made relative to it
     /// by string surgery, so none of these tests needs a repository, a
@@ -964,11 +991,10 @@ mod tests {
         }
     }
 
-    /// The toggle the app hands back for `path`, documented by `path/WARLOCK.md`.
+    /// The toggle the app hands back for `path`.
     fn toggle(path: &str, pacted: bool) -> PactToggle {
         PactToggle {
             path: PathBuf::from(ROOT).join(path),
-            document: PathBuf::from(ROOT).join(path).join("WARLOCK.md"),
             pacted,
         }
     }
@@ -1026,10 +1052,31 @@ mod tests {
     }
 
     #[test]
+    fn unpacting_takes_everything_below_the_directory_out_with_it() {
+        let entry = |module: &str| {
+            let directory = PathBuf::from(ROOT).join(module);
+            PactEntry::new(ROOT, &directory, directory.join(DOCUMENT_FILE))
+                .expect("a path under the root can be stored")
+        };
+        let start = Manifest::with_entries([
+            entry("crates/engine"),
+            entry("crates/engine/src"),
+            entry("crates/engine-tools"),
+        ]);
+
+        let unpacted = with_toggle(&start, Path::new(ROOT), &toggle("crates/engine", false))
+            .expect("a path under the root can be stored");
+
+        // The subtree goes whole, the way the app has just greyed it; a sibling
+        // that shares a prefix is not below it and stays.
+        let modules: Vec<&str> = unpacted.entries().iter().map(PactEntry::module).collect();
+        assert_eq!(modules, ["crates/engine-tools"]);
+    }
+
+    #[test]
     fn a_node_outside_the_repository_root_is_refused_rather_than_stored() {
         let outside = PactToggle {
             path: PathBuf::from("/elsewhere/crates/engine"),
-            document: PathBuf::from("/elsewhere/crates/engine/WARLOCK.md"),
             pacted: true,
         };
 

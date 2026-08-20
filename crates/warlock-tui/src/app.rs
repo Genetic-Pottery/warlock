@@ -141,9 +141,9 @@ impl Row {
     /// flattening, because the design doc's rule is that a file takes its
     /// module's colour — the colour says which module the file belongs to, not
     /// something about the file. That copy is the reason
-    /// [`App::toggle_pact`] writes a new state onto a directory's file rows as
-    /// well as onto the directory: a copy nobody updates is a colour that goes
-    /// quietly stale.
+    /// [`App::set_subtree_state`] writes a new state onto a directory's file
+    /// rows as well as onto the directory: a copy nobody updates is a colour
+    /// that goes quietly stale.
     ///
     /// `depth` is the caller's too, and is one deeper than the directory's, so
     /// the file indents under it.
@@ -180,21 +180,23 @@ impl Row {
     }
 }
 
-/// What a pact toggle changed, for the caller that has to write it down.
+/// What a pact toggle asked for, for the caller that has to carry it out.
 ///
-/// [`App::toggle_pact`] flips the state on screen; the manifest is somebody
-/// else's file, so this says what happened and lets that somebody act on it.
-/// A node with no document cannot be pacted at all, so `document` is not
-/// optional here — a toggle that produced one of these is a toggle of a real
-/// module.
+/// [`App::toggle_pact`] moves the colours on screen; the documents and the
+/// manifest are somebody else's, so this says which directory the key was
+/// pressed on and which way it went, and lets that somebody act on it.
+///
+/// There is no document in here, and no list of directories either. A pact
+/// covers the directory and everything below it, and the documents are the pact
+/// operation's own output rather than something the front end finds and hands
+/// over: the one directory the user chose is the whole of what a caller needs
+/// to run that operation over the subtree, or to undo it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PactToggle {
-    /// The directory whose pact was toggled.
+    /// The directory the key was pressed on, whose subtree the toggle covers.
     pub path: PathBuf,
-    /// The `WARLOCK.md` documenting it, which a manifest entry needs.
-    pub document: PathBuf,
-    /// Whether the node is pacted *now*, after the toggle: `true` means an
-    /// entry should be written for it, `false` that its entry should go.
+    /// Whether the subtree is pacted *now*, after the toggle: `true` means the
+    /// pact operation should run over it, `false` that its entries should go.
     pub pacted: bool,
 }
 
@@ -430,10 +432,10 @@ impl App {
     /// What the app has to say about the last keystroke, or `None` when it has
     /// nothing to say.
     ///
-    /// Set by whatever refused to do something — [`App::toggle_pact`] on a
-    /// directory with no document — or by the caller through
-    /// [`App::set_message`], and emptied by the next movement, so what is here
-    /// always belongs to the keystroke just pressed.
+    /// Set by whatever refused to do something — [`App::toggle_pact`] on a file
+    /// row — or by something that did it and had news about it, or by the
+    /// caller through [`App::set_message`], and emptied by the next movement, so
+    /// what is here always belongs to the keystroke just pressed.
     #[must_use]
     pub fn message(&self) -> Option<&str> {
         self.message.as_deref()
@@ -545,7 +547,7 @@ impl App {
     /// directory come in the order the tree listed them, before the rows for
     /// that directory's subdirectories.
     ///
-    /// A file row is drawn and nothing else. It documents nothing, so
+    /// A file row is drawn and nothing else. It is no module, so
     /// [`App::toggle_pact`] refuses it; it contains nothing, so collapsing it
     /// hides nothing; and it is no node, so [`App::counts`] does not move by a
     /// single one when this is toggled either way — the footer counts modules,
@@ -845,42 +847,38 @@ impl App {
         self.reflow();
     }
 
-    /// Bring the selected node under Warlock's management, or take it back out
-    /// again, and say what changed.
+    /// Bring the selected directory and everything below it under Warlock's
+    /// management, or take the lot back out again, and say what was asked for.
     ///
-    /// An unpacted node becomes [`NodeState::PactedStale`], never fresh: a pact
-    /// with no granted hash was never judged, and unjudged *is* stale. A pacted
-    /// node, stale or fresh, becomes [`NodeState::Unpacted`] — dropping a pact
-    /// drops whatever was granted with it.
+    /// A pact covers a subtree, so both directions do: the selected directory's
+    /// row, every row below it and every file row inside any of them move
+    /// together, through [`App::set_subtree_state`].
     ///
-    /// The tally moves with the row, one node out of the old state's field and
-    /// into the new one, so [`App::counts`] keeps describing [`App::rows`] and
-    /// [`StateCounts::total`] does not budge. Nothing recounts the rows: the
-    /// counts are the engine's numbers, kept current rather than re-derived.
+    /// An unpacted subtree becomes [`NodeState::PactedStale`], never fresh: a
+    /// pact with no granted hash was never judged, and unjudged *is* stale. The
+    /// caller that runs the pact and lands the grants says so afterwards, with
+    /// [`App::set_subtree_state`] again. A pacted subtree, stale or fresh,
+    /// becomes [`NodeState::Unpacted`] — dropping a pact drops whatever was
+    /// granted with it.
     ///
-    /// Returns what the caller needs to edit the manifest with, or `None` when
-    /// nothing was toggled — an app with no rows, a selected file, or a selected
-    /// node with no document. A directory with no documentation yet is not a
-    /// module, and a manifest entry has nowhere to point without a document, so
-    /// such a node is refused outright: no state changes, no count changes,
-    /// nothing to write. A file is refused for a reason of its own: a pact is
-    /// made with a module, and a file is part of one rather than being one.
+    /// A directory with no `WARLOCK.md` is pacted like any other: writing that
+    /// document is what the pact operation *does*, so having none yet is the
+    /// ordinary case rather than a reason to refuse. A file row is refused, and
+    /// is the only thing that is: a pact is made with a module, and a file is
+    /// part of one rather than being one. So `None` comes back for an app with
+    /// no rows and for a selected file, and nothing moves in either case.
     ///
     /// A refusal sets [`App::message`] to say so, and the return value stays a
     /// bare `Option`: the wording is display state, it belongs here with the
     /// rest of the display state, and a caller that had to translate an outcome
-    /// into a sentence would be a second place that decides what a missing
-    /// document means. A toggle that went through clears the message instead —
-    /// whatever the last keystroke said, this one did something.
+    /// into a sentence would be a second place deciding what a file row means.
+    /// Un-pacting sets a message of its own — the documents stay on disk, and a
+    /// subtree that has just gone grey should say that the writing survived it.
+    /// Pacting clears the message instead: whatever the last keystroke said,
+    /// this one did something.
     ///
-    /// A toggle that goes through moves the state of the directory's file rows
-    /// with it, in the drawn list and in the whole walk behind it. A file row
-    /// carries a copy of its directory's state so that it can be drawn in its
-    /// module's colour, and a copy that is not kept up is a file drawn in the
-    /// colour its module used to be.
-    ///
-    /// Writing the manifest is the caller's job. This is app state and touches
-    /// no file.
+    /// Writing documents and saving the manifest are the caller's job. This is
+    /// app state and touches no file.
     pub fn toggle_pact(&mut self) -> Option<PactToggle> {
         let row = self.rows.get(self.selected)?;
         let path = row.path.clone();
@@ -888,39 +886,79 @@ impl App {
             self.message = Some(file_row_message(&self.label_for(&path)));
             return None;
         }
-        let Some(document) = row.document.clone() else {
-            self.message = Some(no_document_message(&self.label_for(&path)));
-            return None;
-        };
 
-        let was = self.rows[self.selected].state;
-        let now = match was {
-            NodeState::Unpacted => NodeState::PactedStale,
-            NodeState::PactedStale | NodeState::PactedFresh => NodeState::Unpacted,
-        };
-        set_state(&mut self.rows, &path, now);
-        // And in the unfiltered list the next collapse rebuilds the drawn rows
-        // from, or the new state would last exactly until something was
-        // collapsed and then quietly revert.
-        set_state(&mut self.all_rows, &path, now);
-        self.message = None;
+        let pacted = !row.state.is_pacted();
+        self.set_subtree_state(
+            &path,
+            if pacted {
+                NodeState::PactedStale
+            } else {
+                NodeState::Unpacted
+            },
+        );
+        self.message = (!pacted).then(|| left_on_disk_message(&self.label_for(&path)));
 
-        // Both halves of the move happen together or neither does. An app told
-        // rows but never told a tally (see `App::from_rows`) holds zeroes that
-        // never described those rows, and nudging one field up while the other
-        // cannot come down would turn a tally that is merely absent into one
-        // that counts a node that is not there.
-        let old = count_mut(&mut self.counts, was);
-        if let Some(fewer) = old.checked_sub(1) {
-            *old = fewer;
-            *count_mut(&mut self.counts, now) += 1;
+        Some(PactToggle { path, pacted })
+    }
+
+    /// Put the directory at `path`, every directory below it and every file
+    /// inside any of them into `state`.
+    ///
+    /// This is how a whole subtree changes colour at once, and it is the only
+    /// way any state moves after the tree was loaded: [`App::toggle_pact`] goes
+    /// through it, and so does a caller with news about how a pact actually
+    /// went — a subtree pacted and granted is [`NodeState::PactedFresh`], and
+    /// only whoever ran it knows that.
+    ///
+    /// Both lists move together: the drawn rows, and the whole walk behind them
+    /// that the next collapse or filter rebuilds those rows from. Writing only
+    /// the drawn ones would make the new colour last exactly until something
+    /// was collapsed and then quietly revert.
+    ///
+    /// The file rows move with the directories holding them. A file row carries
+    /// a copy of its directory's state so that it can be drawn in its module's
+    /// colour, and a copy nobody updates is a file drawn in the colour its
+    /// module used to be.
+    ///
+    /// The tally moves too, one node out of each old state's field and into
+    /// `state`, so [`App::counts`] keeps describing [`App::rows`] and
+    /// [`StateCounts::total`] does not budge. Nothing recounts the rows: the
+    /// counts are the engine's numbers, kept current rather than re-derived.
+    /// Files are counted nowhere, and so move nothing.
+    ///
+    /// A `path` no row stands for changes nothing at all — a subtree that is
+    /// not on screen has no colour to move — and neither does a `path` whose
+    /// rows are in `state` already.
+    ///
+    /// Says nothing: this is not a keystroke, so it neither sets a message nor
+    /// clears the one the last keystroke left. It does not re-filter the drawn
+    /// rows either, which is what lets a subtree that has just been un-pacted
+    /// stay on screen under the pacted-only filter until the next keystroke
+    /// rebuilds the view.
+    pub fn set_subtree_state(&mut self, path: impl AsRef<Path>, state: NodeState) {
+        let path = path.as_ref();
+
+        // The tally first, off the unfiltered list, so that every node is
+        // counted once whether or not it is drawn — and before the states are
+        // written, since what moves out of a field is what each node is now.
+        for row in &self.all_rows {
+            if row.is_file() || row.state == state || !in_subtree(&row.path, path) {
+                continue;
+            }
+            // Both halves of the move happen together or neither does. An app
+            // told rows but never told a tally (see `App::from_rows`) holds
+            // zeroes that never described those rows, and nudging one field up
+            // while the other cannot come down would turn a tally that is
+            // merely absent into one that counts a node that is not there.
+            let old = count_mut(&mut self.counts, row.state);
+            if let Some(fewer) = old.checked_sub(1) {
+                *old = fewer;
+                *count_mut(&mut self.counts, state) += 1;
+            }
         }
 
-        Some(PactToggle {
-            path,
-            document,
-            pacted: now.is_pacted(),
-        })
+        paint_subtree(&mut self.all_rows, path, state);
+        paint_subtree(&mut self.rows, path, state);
     }
 }
 
@@ -937,26 +975,32 @@ fn node_rows(all: &[Row]) -> Vec<Row> {
     all.iter().filter(|row| !row.is_file()).cloned().collect()
 }
 
-/// Put every row standing for the node at `path`, or for a file sitting
-/// directly in it, into `state`.
+/// Put every row inside the subtree at `path` into `state`: the directory
+/// itself, every directory below it, and every file in any of them.
 ///
-/// One directory's row and its file rows move together because they are one
-/// fact drawn more than once: a file takes its module's colour, so the state on
-/// a file row is the state of the directory holding it and has no other source
-/// to be refreshed from. A file is recognised by its parent directory rather
-/// than by a prefix match, so nothing below a subdirectory is touched — a pact
-/// is one node's, not a subtree's.
-fn set_state(rows: &mut [Row], path: &Path, state: NodeState) {
+/// A pact covers a subtree, so a colour does too. The directories and their
+/// files move together because they are one fact drawn more than once: a file
+/// takes its module's colour, so the state on a file row is the state of the
+/// directory holding it and has no other source to be refreshed from.
+///
+/// Pure, and deliberately free of [`App`]: rows in, rows painted.
+fn paint_subtree(rows: &mut [Row], path: &Path, state: NodeState) {
     for row in rows {
-        let stands_for_it = if row.is_file() {
-            row.path.parent() == Some(path)
-        } else {
-            row.path == path
-        };
-        if stands_for_it {
+        if in_subtree(&row.path, path) {
             row.state = state;
         }
     }
+}
+
+/// Whether `path` is the subtree rooted at `root`, or something inside it —
+/// a directory below it, or a file in any of them.
+///
+/// Ancestry is a path prefix taken component by component, the way
+/// [`Path::starts_with`] takes it and the way the engine's paths nest, so
+/// `crates-old` is no part of the subtree at `crates` however much of the name
+/// it shares.
+fn in_subtree(path: &Path, root: &Path) -> bool {
+    path.starts_with(root)
 }
 
 /// Which of `all` are drawn, given that every node in `collapsed` is
@@ -1104,34 +1148,31 @@ fn scroll_offset_for(rows: usize, viewport: usize, selected: usize, offset: usiz
     }
 }
 
-/// What the app says when a pact is refused for want of a document, naming the
-/// directory as `label`.
+/// What the app says when a subtree has just been un-pacted, naming the
+/// directory it was rooted at as `label`.
 ///
-/// Worded as a capability that is not wired up yet rather than as a chore for
-/// the reader, because that is what it is: a document is no part of what a pact
-/// means. Under the real pact operation the AI reads the module and writes one,
-/// and a refresh puts back a document somebody deleted — today's `p` is a
-/// placeholder that only flips a colour and writes a manifest line, so it has
-/// nothing to point an entry at. Telling the reader to go and write the file
-/// themselves would teach them a rule that is about to stop being true.
-fn no_document_message(label: &str) -> String {
+/// Un-pacting drops the manifest entries for a directory and everything below
+/// it, and nothing else: the `WARLOCK.md` files those pacts were written in
+/// stay exactly where they are. That is worth a line, because the subtree has
+/// just gone grey, and grey is the colour of a directory Warlock knows nothing
+/// about — a reader could easily take a whole subtree turning that colour for
+/// the writing having been thrown away.
+fn left_on_disk_message(label: &str) -> String {
     format!(
-        "{label} has no WARLOCK.md — writing one is the pact operation's job, \
-         and that is not wired up yet"
+        "{label} is no longer pacted — every WARLOCK.md in it was left on disk, \
+         untouched"
     )
 }
 
 /// What the app says when the pact key is pressed on a file, naming it as
 /// `label`.
 ///
-/// Its own wording rather than the missing-document one, because it is its own
-/// refusal: the file is not undocumented, it is not a thing a pact is made with
-/// at all. A pact is an agreement about a module — the document it is written
-/// in and the directory it covers — and the files are what the module is made
-/// of, so the answer is to point at the directory rather than to explain a
-/// capability that is coming. Said out loud rather than silently ignored: a key
-/// that does nothing on some rows and something on others has to say which it
-/// just did.
+/// The one refusal the pact key has left, and the one it should have: a pact is
+/// an agreement about a module — the document it is written in and the
+/// directory it covers — and the files are what the module is made of, so the
+/// answer is to point at the directory holding this one. Said out loud rather
+/// than silently ignored: a key that does nothing on some rows and something on
+/// others has to say which it just did.
 fn file_row_message(label: &str) -> String {
     format!("{label} is a file — pacts are made with the directory holding it, not with a file")
 }
@@ -1239,6 +1280,15 @@ mod tests {
         app.rows()
             .iter()
             .map(|row| row.path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The drawn rows, by path and state, for a test that is about which rows
+    /// changed colour and which were left alone.
+    fn states(app: &App) -> Vec<(&str, NodeState)> {
+        app.rows()
+            .iter()
+            .map(|row| (row.path.to_str().expect("ascii path"), row.state))
             .collect()
     }
 
@@ -1752,13 +1802,12 @@ mod tests {
     fn pacting_an_unpacted_node_makes_it_stale_and_pacting_again_undoes_it() {
         let mut app = app_selecting("warlock/assets");
 
-        let pacted = app.toggle_pact().expect("assets has a document");
+        let pacted = app.toggle_pact().expect("a directory can be pacted");
 
         assert_eq!(
             pacted,
             PactToggle {
                 path: PathBuf::from("warlock/assets"),
-                document: PathBuf::from("warlock/assets/WARLOCK.md"),
                 pacted: true,
             }
         );
@@ -1768,13 +1817,12 @@ mod tests {
             Some(NodeState::PactedStale)
         );
 
-        let unpacted = app.toggle_pact().expect("assets still has a document");
+        let unpacted = app.toggle_pact().expect("a directory can be un-pacted");
 
         assert_eq!(
             unpacted,
             PactToggle {
                 path: PathBuf::from("warlock/assets"),
-                document: PathBuf::from("warlock/assets/WARLOCK.md"),
                 pacted: false,
             }
         );
@@ -1789,7 +1837,7 @@ mod tests {
     fn unpacting_a_fresh_node_drops_it_all_the_way_out() {
         let mut app = app_selecting("warlock/crates/engine");
 
-        let toggled = app.toggle_pact().expect("engine has a document");
+        let toggled = app.toggle_pact().expect("a directory can be un-pacted");
 
         // Fresh goes straight to unpacted: the grant goes with the pact.
         assert!(!toggled.pacted);
@@ -1797,6 +1845,155 @@ mod tests {
             app.selected_row().map(|row| row.state),
             Some(NodeState::Unpacted)
         );
+    }
+
+    #[test]
+    fn a_directory_with_no_document_is_pacted_like_any_other() {
+        // `crates/` has no `WARLOCK.md` in the fixture, which is exactly the
+        // case the pact operation exists to fix: it writes one.
+        let mut app = app_selecting("warlock/crates");
+        assert_eq!(
+            app.selected_row().and_then(|row| row.document.clone()),
+            None
+        );
+
+        let pacted = app.toggle_pact().expect("an undocumented directory pacts");
+
+        assert_eq!(
+            pacted,
+            PactToggle {
+                path: PathBuf::from("warlock/crates"),
+                pacted: true,
+            }
+        );
+        assert_eq!(
+            app.selected_row().map(|row| row.state),
+            Some(NodeState::PactedStale)
+        );
+        assert_eq!(app.message(), None);
+        assert_eq!(app.counts(), tally(&app));
+    }
+
+    #[test]
+    fn pacting_a_directory_pacts_everything_below_it() {
+        let mut app = app_selecting("warlock/crates");
+
+        app.toggle_pact().expect("a directory can be pacted");
+
+        // The directory the key was pressed on and both modules under it, and
+        // nothing outside the subtree.
+        assert_eq!(
+            states(&app),
+            [
+                ("warlock", NodeState::PactedStale),
+                ("warlock/crates", NodeState::PactedStale),
+                ("warlock/crates/engine", NodeState::PactedStale),
+                ("warlock/crates/tui", NodeState::PactedStale),
+                ("warlock/assets", NodeState::Unpacted),
+            ]
+        );
+        assert_eq!(app.counts(), tally(&app));
+        assert_eq!(app.counts().total(), 5);
+    }
+
+    #[test]
+    fn un_pacting_a_directory_greys_the_whole_subtree() {
+        // The root, so the subtree is the whole tree and holds all three states
+        // on the way in.
+        let mut app = app_selecting("warlock");
+
+        let toggled = app.toggle_pact().expect("a directory can be un-pacted");
+
+        assert!(!toggled.pacted);
+        assert!(
+            app.rows()
+                .iter()
+                .all(|row| row.state == NodeState::Unpacted),
+            "{:?}",
+            states(&app)
+        );
+        assert_eq!(app.counts(), tally(&app));
+        assert_eq!(app.counts().unpacted, 5);
+        assert_eq!(app.counts().total(), 5);
+    }
+
+    #[test]
+    fn un_pacting_says_the_documents_were_left_on_disk() {
+        let mut app = app_selecting("warlock/crates/tui");
+
+        app.toggle_pact().expect("a directory can be un-pacted");
+
+        let message = app.message().expect("un-pacting says what it left behind");
+        assert!(message.starts_with("warlock/crates/tui"), "{message}");
+        assert!(message.contains("left on disk"), "{message}");
+    }
+
+    #[test]
+    fn a_subtree_can_be_put_into_a_state_the_toggle_never_reaches() {
+        // What a caller that has really pacted a subtree — documents written,
+        // hashes granted — says afterwards. The toggle itself never reaches
+        // fresh, because it grants nothing.
+        let mut app = App::from_tree(&fixture::tree());
+
+        app.set_subtree_state("warlock/crates", NodeState::PactedFresh);
+
+        assert_eq!(
+            states(&app),
+            [
+                ("warlock", NodeState::PactedStale),
+                ("warlock/crates", NodeState::PactedFresh),
+                ("warlock/crates/engine", NodeState::PactedFresh),
+                ("warlock/crates/tui", NodeState::PactedFresh),
+                ("warlock/assets", NodeState::Unpacted),
+            ]
+        );
+        assert_eq!(app.counts(), tally(&app));
+        assert_eq!(app.counts().total(), 5);
+    }
+
+    #[test]
+    fn a_subtree_state_reaches_the_rows_no_view_is_drawing() {
+        let mut app = App::from_tree(&fixture::tree()).with_collapsed(["warlock/crates"]);
+        assert_eq!(drawn(&app), ["warlock", "warlock/crates", "warlock/assets"]);
+
+        app.set_subtree_state("warlock/crates", NodeState::PactedFresh);
+        app.select_next();
+        app.toggle_collapsed();
+
+        // Hidden under a collapsed directory while the state was set, and still
+        // coloured by it when the directory opens again.
+        let engine = app
+            .rows()
+            .iter()
+            .find(|row| row.path == Path::new("warlock/crates/engine"))
+            .expect("expanding brought it back");
+        assert_eq!(engine.state, NodeState::PactedFresh);
+        assert_eq!(app.counts(), tally(&app));
+    }
+
+    #[test]
+    fn a_subtree_state_for_a_path_no_row_stands_for_changes_nothing() {
+        let mut app = App::from_tree(&fixture::tree());
+        let before = app.clone();
+
+        app.set_subtree_state("warlock/crates-old", NodeState::PactedFresh);
+
+        // A sibling is not a descendant, however much of its name it shares,
+        // and a directory the tree has never heard of is nothing at all.
+        assert_eq!(app.rows(), before.rows());
+        assert_eq!(app.counts(), before.counts());
+    }
+
+    #[test]
+    fn a_subtree_state_leaves_the_message_alone() {
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_message("something the caller said");
+
+        app.set_subtree_state("warlock", NodeState::PactedFresh);
+
+        // Not a keystroke: it neither says anything nor takes down what the
+        // keystroke it belongs to put up.
+        assert_eq!(app.message(), Some("something the caller said"));
     }
 
     #[test]
@@ -1822,45 +2019,8 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_with_no_document_cannot_be_pacted() {
-        let mut app = app_selecting("warlock/crates");
-        let before = app.clone();
-
-        assert_eq!(app.toggle_pact(), None);
-
-        // Everything but the message is exactly as it was: no state change, no
-        // count change, and nothing for the caller to write down. Compared
-        // field by field rather than as whole apps, because the message is the
-        // one thing a refusal is meant to change.
-        assert_eq!(app.rows(), before.rows());
-        assert_eq!(app.counts(), before.counts());
-        assert_eq!(app.selected(), before.selected());
-        assert_eq!(
-            app.selected_row().map(|row| row.state),
-            Some(NodeState::Unpacted)
-        );
-        assert_eq!(app.counts(), tally(&app));
-    }
-
-    #[test]
-    fn refusing_to_pact_says_why_naming_the_directory() {
-        let mut app = app_selecting("warlock/crates");
-
-        assert_eq!(app.toggle_pact(), None);
-
-        let message = app.message().expect("a refusal says why");
-        assert!(
-            message.starts_with("warlock/crates has no WARLOCK.md"),
-            "{message}"
-        );
-        // Framed as a capability that is not wired up yet, not as a file the
-        // reader has to go and write.
-        assert!(message.contains("not wired up yet"), "{message}");
-    }
-
-    #[test]
     fn the_next_keystroke_clears_the_message() {
-        let mut app = app_selecting("warlock/crates");
+        let mut app = app_with_files_selecting("warlock/assets/logo.svg");
         assert_eq!(app.toggle_pact(), None);
         assert!(app.message().is_some());
 
@@ -1891,49 +2051,40 @@ mod tests {
     }
 
     #[test]
-    fn a_toggle_that_goes_through_leaves_no_refusal_behind() {
-        let mut app = app_selecting("warlock/crates");
+    fn a_pact_that_goes_through_leaves_no_refusal_behind() {
+        let mut app = app_with_files_selecting("warlock/assets/logo.svg");
         assert_eq!(app.toggle_pact(), None);
         assert!(app.message().is_some());
 
-        // Onto a documented row, which the movement clears the message for, and
-        // then a toggle that works, which must not put one back.
-        while app
-            .selected_row()
-            .expect("the fixture has rows")
-            .document
-            .is_none()
-        {
-            app.select_next();
-        }
-        app.toggle_pact().expect("a documented row can be pacted");
+        // Onto the directory holding it, which the movement clears the message
+        // for, and then a toggle that works, which must not put one back.
+        app.select_previous();
+        app.select_previous();
+        assert_eq!(
+            app.selected_row().map(|row| row.path.clone()),
+            Some(PathBuf::from("warlock/assets"))
+        );
+        app.toggle_pact().expect("a directory can be pacted");
 
         assert_eq!(app.message(), None);
     }
 
     #[test]
-    fn a_root_with_no_document_cannot_be_pacted_either() {
-        let mut app = App::from_rows(vec![Row::new(0, "repo", None, NodeState::Unpacted)])
+    fn a_root_with_no_document_is_pacted_and_named_as_it_stands() {
+        let mut app = App::from_rows(vec![Row::new(0, "repo", None, NodeState::PactedStale)])
             .with_counts(StateCounts {
-                unpacted: 1,
+                pacted_stale: 1,
                 ..StateCounts::default()
             });
-        let before = app.clone();
 
-        assert_eq!(app.toggle_pact(), None);
+        let toggled = app.toggle_pact().expect("the root can be un-pacted");
 
-        assert_eq!(app.rows(), before.rows());
-        assert_eq!(app.counts(), before.counts());
+        assert!(!toggled.pacted);
+        assert_eq!(app.counts(), tally(&app));
         // The root cannot be named relative to itself, so it is named as it
         // stands rather than as the `"."` that relative spelling would give.
-        assert_eq!(
-            app.message().map(|message| message
-                .split(" has no WARLOCK.md")
-                .next()
-                .expect("a split always yields a first part")
-                .to_owned()),
-            Some("repo".to_owned())
-        );
+        let message = app.message().expect("un-pacting says what it left behind");
+        assert!(message.starts_with("repo is no longer pacted"), "{message}");
     }
 
     #[test]
@@ -2201,8 +2352,10 @@ mod tests {
 
     #[test]
     fn a_collapse_clears_the_last_keystrokes_message() {
-        let mut app = app_selecting("warlock/crates");
-        assert_eq!(app.toggle_pact(), None);
+        // The root, which has both something to say when it is un-pacted and
+        // children to collapse.
+        let mut app = app_selecting("warlock");
+        app.toggle_pact().expect("a directory can be un-pacted");
         assert!(app.message().is_some());
 
         app.toggle_collapsed();
@@ -2499,7 +2652,7 @@ mod tests {
 
     #[test]
     fn toggling_the_filter_clears_the_last_keystrokes_message() {
-        let mut app = app_selecting("warlock/crates");
+        let mut app = app_with_files_selecting("warlock/assets/logo.svg");
         assert_eq!(app.toggle_pact(), None);
         assert!(app.message().is_some());
 
@@ -2839,7 +2992,7 @@ mod tests {
 
     #[test]
     fn toggling_the_files_clears_the_last_keystrokes_message() {
-        let mut app = app_selecting("warlock/crates");
+        let mut app = app_with_files_selecting("warlock/assets/logo.svg");
         assert_eq!(app.toggle_pact(), None);
         assert!(app.message().is_some());
 
