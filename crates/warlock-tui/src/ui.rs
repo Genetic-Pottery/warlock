@@ -62,18 +62,21 @@ const HEADER_HEIGHT: u16 = 1;
 /// The keys line of the footer: every key that does something, in one line.
 ///
 /// The movement keys first and together, in the order a reader reaches for
-/// them: one row, one screen, the whole tree. Then the two keys that move
+/// them: one row, one screen, the whole tree. Then the three keys that move
 /// nothing but change what there is to move through — space, which hides a
-/// subtree, and `o`, which hides everything Warlock is not managing — and only
-/// then the keys that change something.
+/// subtree, `o`, which hides everything Warlock is not managing, and `f`, which
+/// is the one of the three that puts rows on screen rather than taking them
+/// off — and only then the keys that change something.
 ///
 /// Every name here is as short as it can be and still be read: the line is
 /// already wider than an eighty-column terminal, and a key nobody can see
 /// because the line ran off the right-hand edge is a key nobody knows about.
 /// That is why `o` is labelled with what it leaves on screen rather than with a
-/// sentence about filtering.
+/// sentence about filtering, and `f` with what it shows rather than with a
+/// sentence about a toggle.
 const KEYS: &str = "up/down k/j: move    PgUp/PgDn: page    g/G: first/last    \
-                    space: collapse    o: pacted    p: pact    q/Esc/Ctrl-C: quit";
+                    space: collapse    o: pacted    f: files    p: pact    \
+                    q/Esc/Ctrl-C: quit";
 
 /// The tally line, the keys line and the message line.
 ///
@@ -195,6 +198,14 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// The whole line takes one style, the row's state colour, marker included:
 /// colour on this screen means node state and nothing else, so a marker in a
 /// colour of its own would be a second thing colour meant.
+///
+/// A file row needs no case of its own here and deliberately does not get one.
+/// It carries no children, so it falls into [`NO_MARKER`] like any other
+/// childless row — there is nothing under a file to collapse — and its depth is
+/// already one deeper than its directory's, so it indents under it. Its colour
+/// is its directory's state, copied onto the row when the tree was flattened
+/// (see [`Row::file`]), which is how the design doc's rule that a file takes its
+/// module's colour arrives here as an ordinary row with an ordinary colour.
 fn line(row: &Row, collapsed: bool) -> Line<'static> {
     let name = row
         .path
@@ -280,6 +291,17 @@ mod tests {
     const WIDTH: u16 = 40;
     /// See [`WIDTH`].
     const HEIGHT: u16 = 8;
+
+    /// A terminal wide enough for the whole of [`KEYS`], whatever it grows to:
+    /// the footer test asserts that line for equality, and a line drawn onto a
+    /// narrower terminal than it needs would be compared against its own
+    /// truncation.
+    const KEYS_WIDTH: u16 = 160;
+
+    /// Tall enough for the whole fixture with its files on screen, header and
+    /// footer included, so a file test asserts about rows rather than about
+    /// where the window happened to stop.
+    const FILES_HEIGHT: u16 = 20;
 
     /// `count` rows of nothing in particular, named so that a line on screen
     /// says which row of the tree it is.
@@ -470,6 +492,89 @@ mod tests {
     }
 
     #[test]
+    fn a_file_row_is_drawn_in_the_colour_of_the_directory_holding_it() {
+        let tree = fixture::tree();
+        let mut app = App::from_tree(&tree);
+        app.toggle_files();
+
+        let buffer = render(&app, 40, FILES_HEIGHT);
+
+        let mut colours = Vec::new();
+        for (index, row) in app.rows().iter().enumerate() {
+            if !row.is_file() {
+                continue;
+            }
+            let y = HEADER_HEIGHT + u16::try_from(index).expect("the fixture tree is small");
+            // Asked of the engine's tree rather than of the row, so what is
+            // under test is that the colour on screen is the *directory's*
+            // state and not merely whatever the row happened to be built with.
+            let directory = row.path.parent().expect("a file sits in a directory");
+            let node = tree.find(directory).expect("the file came from that node");
+            let colour = first_glyph_colour(&buffer, y);
+            assert_eq!(
+                colour,
+                colour_for(node.state),
+                "file row {index} ({}) is not its module's colour",
+                row.path.display()
+            );
+            colours.push(colour);
+        }
+        // And the fixture really did exercise more than one colour, so a row
+        // drawn in some single colour for every file would fail above.
+        assert!(colours.len() > 1, "the fixture should list some files");
+        assert!(
+            colours.iter().any(|colour| *colour != colours[0]),
+            "every file was drawn in the same colour: {colours:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_is_drawn_under_its_directory_one_indent_deeper_and_with_no_marker() {
+        let mut app = App::from_tree(&fixture::tree());
+        let before = render(&app, 40, FILES_HEIGHT);
+
+        app.toggle_files();
+        let buffer = render(&app, 40, FILES_HEIGHT);
+
+        let drawn: Vec<String> = rows_text(&buffer)
+            .into_iter()
+            .skip(usize::from(HEADER_HEIGHT))
+            .take(app.rows().len())
+            .collect();
+        // Every file under the directory that lists it, one indent further in
+        // than that directory, carrying neither collapse marker: there is
+        // nothing under a file to hide.
+        assert_eq!(
+            drawn,
+            [
+                "> - warlock",
+                "      Cargo.toml",
+                "      README.md",
+                "    - crates",
+                "        engine",
+                "          Cargo.toml",
+                "          README.md",
+                "        tui",
+                "          README.md",
+                "      assets",
+                "        README.md",
+                "        logo.svg",
+            ]
+        );
+        assert!(
+            drawn[1].find("Cargo.toml") > drawn[0].find("warlock"),
+            "a file should indent past its directory's name: {drawn:?}"
+        );
+        // And pressing the key again draws what was on screen before it, to
+        // the byte: the toggle takes rows off as cleanly as it puts them on.
+        app.toggle_files();
+        assert_eq!(
+            rows_text(&render(&app, 40, FILES_HEIGHT)),
+            rows_text(&before)
+        );
+    }
+
+    #[test]
     fn exactly_one_line_is_highlighted_and_it_is_the_selected_one() {
         let mut app = App::from_tree(&fixture::tree());
         app.select_next();
@@ -601,9 +706,11 @@ mod tests {
         let app = App::from_tree(&tree);
         let height = 10;
 
-        // Wide enough for the whole key line: what is under test is which keys
-        // it lists, not how it survives a narrow terminal.
-        let buffer = render(&app, 120, height);
+        // Wide enough for the whole key line — wider than the line, so that
+        // adding a key widens the terminal here rather than quietly truncating
+        // what is being asserted. What is under test is which keys it lists,
+        // not how it survives a narrow terminal.
+        let buffer = render(&app, KEYS_WIDTH, height);
 
         let tally = row_text(&buffer, height - FOOTER_HEIGHT);
         for state in NodeState::ALL {
@@ -630,10 +737,11 @@ mod tests {
             "page",
             "g/G",
             "first/last",
-            // Named, not left to be discovered: the two keys that change what
+            // Named, not left to be discovered: the three keys that change what
             // there is to scroll through.
             "space: collapse",
             "o: pacted",
+            "f: files",
             "p: pact",
             "q",
             "Esc",

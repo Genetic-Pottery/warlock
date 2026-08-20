@@ -115,6 +115,15 @@ fn run() -> Result<(), Error> {
             // selection and the scroll offset back in range; the next frame
             // draws whatever is left.
             Some(Action::TogglePactedOnly) => app.toggle_pacted_only(),
+            // Nothing else here either, for the third time and for the same
+            // reasons as the two arms above: whether the files inside a module
+            // are on screen is the front end's view of the tree and is never
+            // written down (§5), so there is no manifest to save, and the files
+            // were read by the load that built these rows, so there is nothing
+            // to re-read. The app re-flows its rows and keeps the selection and
+            // the scroll offset in range; the next frame draws the longer or
+            // shorter list.
+            Some(Action::ToggleFiles) => app.toggle_files(),
             // The app has already flipped the row's colour and its tally, so
             // the next frame — drawn at the top of this same loop, with no
             // reload of the tree — shows the new state. The manifest is
@@ -411,6 +420,9 @@ enum Action {
     /// Draw only the pacted nodes and the ancestors that reach them, or the
     /// whole tree again if that is what is on screen already.
     TogglePactedOnly,
+    /// Draw the files inside each directory as well as the directories, or go
+    /// back to directories alone if the files are on screen already.
+    ToggleFiles,
     /// Pact the selected node, or unpact it if it is pacted already.
     TogglePact,
 }
@@ -462,6 +474,12 @@ fn action_for(key: KeyEvent) -> Option<Action> {
         // answered to `O` would take a key that a later binding may want. The
         // mnemonic is "only": what stays on screen is the pacted nodes only.
         KeyCode::Char('o') => Some(Action::TogglePactedOnly),
+        // Lower case only, like `o` above and `p` below. The mnemonic is
+        // "files": what the key adds to the screen is the files inside each
+        // module. It writes nothing and reads nothing — the files came with the
+        // tree — so, unlike `p`, there is nothing here that a stray press could
+        // cost anybody.
+        KeyCode::Char('f') => Some(Action::ToggleFiles),
         // Lower case only, and with no confirmation: the mnemonic is the
         // product's own word (pact, §15), and the action is its own undo —
         // pressing it again removes what it wrote.
@@ -862,6 +880,57 @@ mod tests {
                 action_for(press(code)),
                 Some(Action::TogglePactedOnly),
                 "{code:?} should not filter anything"
+            );
+        }
+    }
+
+    #[test]
+    fn f_toggles_the_files_inside_each_directory() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('f'))),
+            Some(Action::ToggleFiles)
+        );
+    }
+
+    #[test]
+    fn releases_and_repeats_of_f_show_nothing() {
+        // The same rule as space and `o`: a release acted on would hide again
+        // the files the press had just shown, so one keystroke would look like
+        // none at all.
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                KeyCode::Char('f'),
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                action_for(event),
+                None,
+                "{kind:?} of f should not show anything"
+            );
+        }
+    }
+
+    #[test]
+    fn f_is_the_only_key_that_shows_files() {
+        // Its neighbours on the keyboard, the keys it sits between in the match
+        // arms above, and its upper-case self, which this binding does not
+        // answer to.
+        for code in [
+            KeyCode::Char('d'),
+            KeyCode::Char('g'),
+            KeyCode::Char('r'),
+            KeyCode::Char('o'),
+            KeyCode::Char('p'),
+            KeyCode::Char('F'),
+            KeyCode::Char(' '),
+        ] {
+            assert_ne!(
+                action_for(press(code)),
+                Some(Action::ToggleFiles),
+                "{code:?} should not show any files"
             );
         }
     }
