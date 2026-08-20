@@ -41,12 +41,12 @@ There is no hard-coded tree behind any of this. Every `Tree` is either built by
 a caller node by node with `Node::new` / `Tree::new`, or loaded from a real
 directory by `load_tree` — and what `load_tree` loads is decided by three rules:
 
+- **Every directory the walk reaches is a node**, the working directory
+  included. Nothing is pruned for being undocumented.
 - **A directory that directly contains a `README.md` is a module node**, and
   that path becomes its `readme`. That is the whole test — no README is parsed.
-- **A directory with no README of its own is a connector**, `readme: None`, and
-  is kept only when a module node sits somewhere below it. A README-less
-  directory with no module-node descendant is dropped: it is neither a module
-  nor on the way to one.
+  A directory with no README of its own is a node with `readme: None`: an
+  ordinary directory that has no documentation yet.
 - **A node's state comes from the manifest entry plus the subtree hash.** No
   entry means `Unpacted` and no hashing at all; an entry means the node's
   directory is hashed and `decide_state` compares that hash against the granted
@@ -306,19 +306,23 @@ or a `LoadError` saying why it could not.
 
 ### What makes a node
 
+**Every directory the walk reaches is a node**, the directory the walk is
+rooted at included. The loader drops nothing for being undocumented, so the
+tree is the shape of the working directory rather than an opinion about which
+parts of it are worth seeing.
+
 **A directory is a module node when it directly contains a `README.md`**, and
 that path becomes its `readme: Some(...)`. That is the whole test. Warlock
 never parses a README — not its headings, not its length, not a word of it. It
 cares only that one exists, because the design doc makes the tree of module
 READMEs the interface, and a README is a module's claim to be one.
 
-A directory with no README of its own is kept only as a **connector**, with
-`readme: None`, and only when a module node sits somewhere below it — `crates/`
-in this repository is one. A README-less directory with no module-node
-descendant is **dropped entirely**: it is neither a module nor on the way to
-one, so putting it in the tree would be noise.
-
-The directory the walk is rooted at is always a node, README or not.
+A directory with no README of its own is a node with `readme: None` — an
+ordinary directory that has no documentation yet, such as `crates/` or any
+`src/` in this repository. It is not a lesser kind of node, and nothing about
+it is missing except a README somebody has yet to write. A front end that wants
+to show only the documented ones filters what it renders; that is a view's
+decision, taken on the way to the screen, not the loader's.
 
 ### Where the root comes from
 

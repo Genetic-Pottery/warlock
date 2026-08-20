@@ -9,13 +9,14 @@
 //!
 //! What makes a node:
 //!
+//! * Every directory the walk reaches is a node, the directory it starts at
+//!   included. Nothing is pruned for being undocumented.
 //! * A directory that directly contains a `README.md` is a module node, and
 //!   carries it as [`Node::readme`]. Nothing here reads that file — Warlock
 //!   cares only that one exists.
-//! * A directory with no README of its own is a connector: it is kept, with
-//!   `readme: None`, only when a module node sits somewhere below it. One with
-//!   no module-node descendant is not in the tree at all.
-//! * The directory the walk starts at is always a node, README or not.
+//! * A directory with no README of its own is a node with `readme: None`: an
+//!   ordinary directory that has no documentation yet. Showing fewer nodes than
+//!   the walk found is a view's business, not the loader's.
 //!
 //! What the walk skips is not a list kept in this file: traversal is the
 //! [`ignore`] crate, so `.gitignore` at every level, hidden directories
@@ -80,15 +81,22 @@ const README_FILE: &str = "README.md";
 ///
 /// let repo = tempfile::tempdir()?;
 /// fs::create_dir(repo.path().join(".warlock"))?;
-/// fs::create_dir_all(repo.path().join("crates/engine"))?;
+/// fs::create_dir_all(repo.path().join("crates/engine/src"))?;
 /// fs::write(repo.path().join("crates/engine/README.md"), "# engine\n")?;
 ///
 /// let Loaded { tree, problems } = load_tree(repo.path())?;
 /// let paths: Vec<_> = tree.walk().map(|(node, _)| node.path.clone()).collect();
 ///
-/// // `crates/` has no README of its own but is on the way to one that does.
-/// assert_eq!(paths.len(), 3);
-/// assert_eq!(tree.find(repo.path().join("crates")).unwrap().readme, None);
+/// // Every directory the walk reached is a node, documented or not.
+/// assert_eq!(paths, [
+///     repo.path().to_path_buf(),
+///     repo.path().join("crates"),
+///     repo.path().join("crates/engine"),
+///     repo.path().join("crates/engine/src"),
+/// ]);
+/// // Only `crates/engine` has a README; the other three simply have none yet.
+/// let src = tree.find(repo.path().join("crates/engine/src")).unwrap();
+/// assert_eq!(src.readme, None);
 /// // Nothing is pacted, so nothing was hashed and nothing could go wrong.
 /// assert_eq!(tree.root.state, NodeState::Unpacted);
 /// assert!(problems.is_empty());
@@ -254,12 +262,12 @@ struct Builder {
 }
 
 impl Builder {
-    /// The node for `dir`, with its kept descendants hanging off it.
+    /// The node for `dir`, with every directory below it hanging off it.
     ///
-    /// Pruning is bottom-up and happens here rather than in a pass of its own:
-    /// a child is kept when it has a README or, transitively, when something
-    /// below it does. `dir` itself is never pruned — the caller only ever asks
-    /// for the walk root, which is a node whether or not it is documented.
+    /// Nothing is dropped: a directory the walk reached is a node whether or
+    /// not it is documented, so the tree is the shape of the working directory
+    /// and not an opinion about which parts of it are interesting. A view that
+    /// wants only the documented ones filters what it renders.
     ///
     /// Anything that went wrong colouring a node, without being worth failing
     /// the load over, is pushed onto `problems`.
@@ -267,7 +275,6 @@ impl Builder {
         let children: Vec<Node> = self
             .children_of(dir)
             .map(|child| self.node(child, problems))
-            .filter(|node| node.readme.is_some() || !node.is_leaf())
             .collect();
 
         let readme = self
@@ -520,19 +527,25 @@ mod tests {
     }
 
     #[test]
-    fn a_readme_makes_a_module_and_a_bare_directory_on_the_way_is_a_connector() {
+    fn a_readme_makes_a_module_and_an_undocumented_directory_is_still_a_node() {
         let repo = fixture(&["crates/engine/src"], &["crates/engine"]);
         let tree = tree_of(repo.path());
 
         assert_eq!(
             relative_paths(&tree, repo.path()),
-            ["", "crates", "crates/engine"],
-            "src/ has no README and nothing documented below it, so it is pruned"
+            ["", "crates", "crates/engine", "crates/engine/src"],
+            "every walked directory is a node; a README only decides `readme`"
         );
         assert_eq!(tree.root.readme, None, "the fixture root has no README");
         assert_eq!(
             tree.find(repo.path().join("crates"))
-                .expect("the connector is a node")
+                .expect("an undocumented directory is a node")
+                .readme,
+            None,
+        );
+        assert_eq!(
+            tree.find(repo.path().join("crates/engine/src"))
+                .expect("an undocumented leaf is a node")
                 .readme,
             None,
         );
@@ -542,6 +555,26 @@ mod tests {
                 .readme,
             Some(repo.path().join("crates/engine/README.md")),
         );
+    }
+
+    #[test]
+    fn a_repository_with_no_readme_anywhere_still_loads_every_directory() {
+        let repo = fixture(&["crates/engine/src"], &[]);
+        let tree = tree_of(repo.path());
+
+        assert_eq!(
+            relative_paths(&tree, repo.path()),
+            ["", "crates", "crates/engine", "crates/engine/src"],
+            "nothing is documented, so nothing has a README — and every \
+             directory is still a node"
+        );
+        assert_eq!(
+            tree.find(repo.path().join("crates/engine/src"))
+                .expect("the deepest directory is a node")
+                .readme,
+            None,
+        );
+        assert!(tree.walk().all(|(node, _)| node.readme.is_none()));
     }
 
     #[test]
@@ -622,8 +655,8 @@ mod tests {
                 "crates/engine/src/inner",
                 "crates/engine/src/inner/deep",
             ],
-            "`src/` and `inner/` are connectors four and five levels down, kept \
-             only because a module sits below them"
+            "`src/` and `inner/` have no README of their own and are nodes four \
+             and five levels down all the same"
         );
         assert_eq!(
             tree.walk()
@@ -699,7 +732,7 @@ mod tests {
         assert_eq!(
             tree.counts(),
             StateCounts {
-                unpacted: 3,
+                unpacted: 4,
                 pacted_stale: 0,
                 pacted_fresh: 1,
             },
@@ -770,7 +803,7 @@ mod tests {
         assert_eq!(
             tree.counts(),
             StateCounts {
-                unpacted: 3,
+                unpacted: 4,
                 pacted_stale: 1,
                 pacted_fresh: 1,
             },
@@ -798,8 +831,8 @@ mod tests {
         // and the load has nothing to say about it.
         let tree = tree_of(repo.path());
 
-        assert_eq!(tree.counts().total(), 3);
-        assert_eq!(tree.counts().unpacted, 3);
+        assert_eq!(tree.counts().total(), 4);
+        assert_eq!(tree.counts().unpacted, 4);
 
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).expect("chmods back");
     }
@@ -838,7 +871,7 @@ mod tests {
     #[test]
     fn a_workspace_shaped_repository_loads_with_its_crates_and_nothing_ignored() {
         let repo = fixture(
-            &["target/debug", ".git/hooks"],
+            &["target/debug", ".git/hooks", "crates/warlock-tui/src"],
             &[
                 "",
                 "crates/warlock-engine",
@@ -864,14 +897,22 @@ mod tests {
                 "crates/warlock-engine",
                 "crates/warlock-engine/src",
                 "crates/warlock-tui",
+                "crates/warlock-tui/src",
             ],
         );
         assert_eq!(
             tree.find(repo.path().join("crates"))
-                .expect("`crates/` is a connector")
+                .expect("`crates/` is a node")
                 .readme,
             None,
             "`crates/` has no README of its own",
+        );
+        assert_eq!(
+            tree.find(repo.path().join("crates/warlock-tui/src"))
+                .expect("an undocumented `src/` is a node")
+                .readme,
+            None,
+            "and neither has `crates/warlock-tui/src`",
         );
         for ignored in ["target", ".git", ".warlock"] {
             assert!(
