@@ -1573,6 +1573,21 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_one_byte_over_the_minimum_is_written() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let answer = document(MINIMUM_DOCUMENT_BYTES + 1);
+
+        pact_directory(dir.path(), &Canned::new(&answer))
+            .expect("a byte past the floor is over it");
+
+        assert_eq!(
+            written(dir.path()).as_deref(),
+            Some(answer.as_bytes()),
+            "the two sides of the floor differ by one byte and nothing else",
+        );
+    }
+
+    #[test]
     fn the_minimum_is_measured_on_the_trimmed_answer() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         // Long enough untrimmed, far too short once the padding goes.
@@ -1624,9 +1639,10 @@ mod tests {
         let size = PER_FILE_BYTE_CAP + 1;
         let lock = write(dir.path(), "Cargo.lock", filler(size));
         let answer = document(300);
+        let agent = Canned::new(&answer);
 
-        let Pacted { problems, .. } = pact_directory(dir.path(), &Canned::new(&answer))
-            .expect("an over-budget file never fails a pact");
+        let Pacted { problems, .. } =
+            pact_directory(dir.path(), &agent).expect("an over-budget file never fails a pact");
 
         assert_eq!(written(dir.path()).as_deref(), Some(answer.as_bytes()));
         assert_eq!(problems.len(), 1, "{problems:?}");
@@ -1635,6 +1651,105 @@ mod tests {
             matches!(problems[0].cause, Omission::TooLarge { .. }),
             "{:?}",
             problems[0],
+        );
+
+        // Read off the request the pass actually saw, rather than trusting
+        // that gathering did what its own tests say it does.
+        let seen = agent.seen.borrow();
+        let listed = file(&seen[0], "Cargo.lock");
+        assert!(listed.is_omitted(), "the pass was not sent the bytes");
+        assert_eq!(listed.path(), "Cargo.lock", "but it was told the name");
+        assert_eq!(listed.size(), size, "and the size");
+        assert_eq!(listed.bytes(), None, "and no part of the file at all");
+    }
+
+    #[test]
+    fn a_pass_over_a_fat_directory_is_sent_its_smallest_files_and_told_the_rest() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // Named so alphabetical order is the reverse of size order: an
+        // operation that gave files up in path order would fail here.
+        let sizes = [
+            ("a.bin", 80 * 1024),
+            ("b.bin", 90 * 1024),
+            ("c.bin", 100 * 1024),
+            ("d.bin", 110 * 1024),
+            ("e.bin", 120 * 1024),
+        ];
+        for (name, size) in sizes {
+            write(dir.path(), name, filler(size));
+        }
+        let agent = Canned::new(document(300));
+
+        let Pacted { problems, .. } =
+            pact_directory(dir.path(), &agent).expect("a fat directory is still pactable");
+
+        let seen = agent.seen.borrow();
+        assert_eq!(
+            seen[0]
+                .files()
+                .iter()
+                .filter(|file| !file.is_omitted())
+                .map(AgentFile::path)
+                .collect::<Vec<_>>(),
+            ["a.bin", "b.bin"],
+            "the largest are given up first, so the fewest files are lost",
+        );
+        for (name, size) in sizes {
+            assert_eq!(
+                file(&seen[0], name).size(),
+                size,
+                "and every file, sent or not, still says how big it is",
+            );
+        }
+        assert!(
+            carried(&seen[0]) <= REQUEST_BYTE_CAP,
+            "{} bytes is still over the {REQUEST_BYTE_CAP}-byte cap",
+            carried(&seen[0]),
+        );
+        assert_eq!(
+            problems
+                .iter()
+                .map(|problem| problem.path.clone())
+                .collect::<Vec<_>>(),
+            ["e.bin", "d.bin", "c.bin"].map(|name| dir.path().join(name)),
+            "and the pact reports each one, largest first, having succeeded anyway",
+        );
+    }
+
+    #[test]
+    fn a_pass_is_sent_its_childrens_documents_and_none_of_their_source() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "Cargo.toml", "[package]\n");
+        write(dir.path(), "src/WARLOCK.md", "# src\n\nThe code.\n");
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "//! Not for the parent to read.\n",
+        );
+        write(dir.path(), "tests/it.rs", "#[test] fn works() {}\n");
+        let agent = Canned::new(document(300));
+
+        pact_directory(dir.path(), &agent).expect("pacts");
+
+        let seen = agent.seen.borrow();
+        assert_eq!(
+            seen[0]
+                .child_documents()
+                .iter()
+                .map(|child| (child.directory(), child.text()))
+                .collect::<Vec<_>>(),
+            [("src", "# src\n\nThe code.\n")],
+            "the child describes itself; `tests/` has no document and \
+             contributes no entry, which is not an error",
+        );
+        assert_eq!(
+            file_paths(&seen[0]),
+            ["Cargo.toml"],
+            "and the child's source is not a file of the parent",
+        );
+        assert!(
+            !format!("{:?}", seen[0]).contains("Not for the parent to read"),
+            "nor is it anywhere else in the request",
         );
     }
 
