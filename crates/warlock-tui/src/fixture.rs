@@ -24,61 +24,63 @@ use warlock_engine::{Node, NodeState, Tree};
 ///
 /// Chosen to exercise, in one value: more than one level of nesting, a node in
 /// each of the three [`NodeState`]s, an ordinary directory that has no
-/// documentation yet — a node like any other, carrying no README of its own —
+/// documentation yet — a node like any other, carrying no document of its own —
 /// and files listed on more than one directory, under a pacted node and under
 /// an unpacted one, so that a view drawing them in their module's colour has
 /// more than one colour to get right.
 ///
 /// ```text
-/// warlock                          README, pacted, stale
-/// │   Cargo.toml, README.md
-/// ├── warlock/crates               no README yet, unpacted, no files of its own
-/// │   ├── warlock/crates/engine    README, pacted, fresh
-/// │   │       Cargo.toml, README.md
-/// │   └── warlock/crates/tui       README, pacted, stale
-/// │           README.md
-/// └── warlock/assets               README, unpacted
-///             README.md, logo.svg
+/// warlock                          document, pacted, stale
+/// │   README.md, WARLOCK.md
+/// ├── warlock/crates               no document yet, unpacted, no files of its own
+/// │   ├── warlock/crates/engine    document, pacted, fresh
+/// │   │       Cargo.toml, WARLOCK.md
+/// │   └── warlock/crates/tui       document, pacted, stale
+/// │           WARLOCK.md
+/// └── warlock/assets               document, unpacted
+///             WARLOCK.md, logo.svg
 /// ```
 ///
 /// The listings follow the loader's own rules, so that a view tested against
 /// this fixture is tested against something a real load could produce: they are
 /// in path order, they hold no subdirectory — those are children — and a
-/// directory's own `README.md` is among them, since the loader lists what the
+/// directory's own `WARLOCK.md` is among them, since the loader lists what the
 /// walk saw rather than what the walk saw minus one special name. `crates/`
 /// lists nothing, because a directory holding only directories is a real case
-/// too.
+/// too. The root's `README.md` is in there for the same reason and is nothing
+/// more than an ordinary file: Warlock's document is `WARLOCK.md`, and a README
+/// beside it documents nothing as far as the tree is concerned.
 ///
 /// The paths are literals, related to this repository's layout only so that a
 /// failing assertion reads like something recognisable; nothing here is read
 /// off disk.
 pub(crate) fn tree() -> Tree {
     Tree::new(
-        Node::new("warlock", "warlock/README.md", NodeState::PactedStale)
-            .with_files(files("warlock", ["Cargo.toml", "README.md"]))
+        Node::new("warlock", "warlock/WARLOCK.md", NodeState::PactedStale)
+            .with_files(files("warlock", ["README.md", "WARLOCK.md"]))
             .with_children([
-                // No README of its own yet, so `None` and unpacted, which is
+                // No document of its own yet, so `None` and unpacted, which is
                 // what the loader makes of such a directory.
                 Node::new("warlock/crates", None, NodeState::Unpacted).with_children([
                     Node::new(
                         "warlock/crates/engine",
-                        "warlock/crates/engine/README.md",
+                        "warlock/crates/engine/WARLOCK.md",
                         NodeState::PactedFresh,
                     )
-                    .with_files(files("warlock/crates/engine", ["Cargo.toml", "README.md"])),
+                    .with_files(files("warlock/crates/engine", ["Cargo.toml", "WARLOCK.md"])),
                     Node::new(
                         "warlock/crates/tui",
-                        "warlock/crates/tui/README.md",
+                        "warlock/crates/tui/WARLOCK.md",
                         NodeState::PactedStale,
                     )
-                    .with_files(files("warlock/crates/tui", ["README.md"])),
+                    .with_files(files("warlock/crates/tui", ["WARLOCK.md"])),
                 ]),
                 Node::new(
                     "warlock/assets",
-                    "warlock/assets/README.md",
+                    "warlock/assets/WARLOCK.md",
                     NodeState::Unpacted,
                 )
-                .with_files(files("warlock/assets", ["README.md", "logo.svg"])),
+                .with_files(files("warlock/assets", ["WARLOCK.md", "logo.svg"])),
             ]),
     )
 }
@@ -161,8 +163,10 @@ mod tests {
                 (
                     "warlock".to_owned(),
                     vec![
-                        "warlock/Cargo.toml".to_owned(),
+                        // A plain README beside the document, ordinary in every
+                        // way: the loader lists it and nothing else notices it.
                         "warlock/README.md".to_owned(),
+                        "warlock/WARLOCK.md".to_owned(),
                     ],
                 ),
                 // A directory of nothing but directories lists nothing.
@@ -171,17 +175,17 @@ mod tests {
                     "warlock/crates/engine".to_owned(),
                     vec![
                         "warlock/crates/engine/Cargo.toml".to_owned(),
-                        "warlock/crates/engine/README.md".to_owned(),
+                        "warlock/crates/engine/WARLOCK.md".to_owned(),
                     ],
                 ),
                 (
                     "warlock/crates/tui".to_owned(),
-                    vec!["warlock/crates/tui/README.md".to_owned()],
+                    vec!["warlock/crates/tui/WARLOCK.md".to_owned()],
                 ),
                 (
                     "warlock/assets".to_owned(),
                     vec![
-                        "warlock/assets/README.md".to_owned(),
+                        "warlock/assets/WARLOCK.md".to_owned(),
                         "warlock/assets/logo.svg".to_owned(),
                     ],
                 ),
@@ -249,13 +253,13 @@ mod tests {
     }
 
     #[test]
-    fn the_fixture_holds_a_directory_with_no_readme() {
+    fn the_fixture_holds_a_directory_with_no_document() {
         let undocumented = tree()
             .find("warlock/crates")
             .expect("the undocumented directory is in the fixture")
             .clone();
 
-        assert_eq!(undocumented.readme, None);
+        assert_eq!(undocumented.document, None);
         assert!(
             !undocumented.is_leaf(),
             "documented modules sit below it as well"
