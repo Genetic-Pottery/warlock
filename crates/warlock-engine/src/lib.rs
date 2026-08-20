@@ -16,6 +16,7 @@
 //! seam, and these tests need no `claude`, no network and no terminal.
 
 mod agent;
+mod clock;
 mod decide;
 mod hash;
 mod load;
@@ -41,6 +42,11 @@ pub use agent::File as AgentFile;
 pub use agent::Request as AgentRequest;
 /// What one model pass produced: the text the model wrote, unparsed.
 pub use agent::Response as AgentResponse;
+/// Now, as the RFC 3339 UTC timestamp a grant records: `2026-08-21T14:03:11Z`.
+/// Computed from the system clock with this crate's own calendar arithmetic —
+/// no date/time dependency — and infallible, because a clock set before 1970 is
+/// not something a caller can do anything about either.
+pub use clock::now_rfc3339;
 /// The colour of a node, from its manifest entry and the hash of its content:
 /// no entry is unpacted, a granted hash equal to the computed one is fresh, and
 /// everything else — including never judged — is stale.
