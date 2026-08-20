@@ -986,7 +986,7 @@ mod tests {
             .entry("crates/engine")
             .expect("the entry was added");
         assert_eq!(entry.module(), "crates/engine");
-        assert_eq!(entry.readme(), "crates/engine/README.md");
+        assert_eq!(entry.document(), "crates/engine/README.md");
         // Never judged, which is what makes the row stale rather than fresh.
         assert_eq!(entry.granted_hash(), None);
     }

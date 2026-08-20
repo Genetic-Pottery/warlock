@@ -57,7 +57,7 @@ use crate::{NodeState, PactEntry};
 /// ```
 /// use warlock_engine::{NodeState, PactEntry, decide_state};
 ///
-/// let entry = PactEntry::new(".", "crates/engine", "crates/engine/README.md")?;
+/// let entry = PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?;
 ///
 /// // No entry: outside Warlock's management, whatever the content hashes to.
 /// assert_eq!(decide_state(None, "abc123"), NodeState::Unpacted);
@@ -111,7 +111,7 @@ mod tests {
         PactEntry::new(
             ".",
             "crates/warlock-engine",
-            "crates/warlock-engine/README.md",
+            "crates/warlock-engine/WARLOCK.md",
         )
         .expect("a relative path inside the root is storable")
     }
@@ -188,12 +188,12 @@ mod tests {
                     "version = 1\n\n",
                     "[[pact]]\n",
                     "module = \"crates/warlock-engine\"\n",
-                    "readme = \"crates/warlock-engine/README.md\"\n",
+                    "document = \"crates/warlock-engine/WARLOCK.md\"\n",
                     "granted_hash = \"{granted}\"\n",
                     "granted_at = \"2026-08-19T07:32:00Z\"\n\n",
                     "[[pact]]\n",
                     "module = \"crates/warlock-tui\"\n",
-                    "readme = \"crates/warlock-tui/README.md\"\n",
+                    "document = \"crates/warlock-tui/WARLOCK.md\"\n",
                 ),
                 granted = COMPUTED,
             ),

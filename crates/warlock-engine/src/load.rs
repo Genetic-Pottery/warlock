@@ -598,7 +598,7 @@ mod tests {
         for (module, granted) in pacts {
             write!(
                 text,
-                "\n[[pact]]\nmodule = \"{module}\"\nreadme = \"{module}/WARLOCK.md\"\n"
+                "\n[[pact]]\nmodule = \"{module}\"\ndocument = \"{module}/WARLOCK.md\"\n"
             )
             .expect("a string never fails to be written to");
             if let Some(hash) = granted {
@@ -843,7 +843,7 @@ mod tests {
 
         let manifest = Manifest::load(repo.path()).expect("loads what was just saved");
         let entry = manifest.entry("docs").expect("the entry just written");
-        assert_eq!(entry.readme(), "docs/WARLOCK.md");
+        assert_eq!(entry.document(), "docs/WARLOCK.md");
         assert_eq!(
             tree_of(repo.path())
                 .find(repo.path().join("docs"))
