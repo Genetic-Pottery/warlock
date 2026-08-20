@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 pub enum NodeState {
     /// Not pacted: outside Warlock's management. Rendered gray.
     Unpacted,
-    /// Pacted, and stale: files at or below this node's README have changed
+    /// Pacted, and stale: files at or below this node's document have changed
     /// since the last freshness grant, or freshness was never granted at all.
     /// Stale is mechanical and immediate. Rendered yellow.
     PactedStale,

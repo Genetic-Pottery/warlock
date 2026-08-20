@@ -123,7 +123,7 @@ impl Manifest {
     /// ```
     /// use warlock_engine::{Manifest, PactEntry};
     ///
-    /// let entry = PactEntry::new(".", "crates/engine", "crates/engine/README.md")?;
+    /// let entry = PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?;
     /// let toml = Manifest::with_entries([entry]).to_toml_string()?;
     ///
     /// assert!(toml.starts_with("version = 1\n"));
@@ -208,7 +208,7 @@ impl Manifest {
     /// use warlock_engine::{Manifest, PactEntry};
     ///
     /// let root = tempfile::tempdir()?;
-    /// let entry = PactEntry::new(root.path(), "crates/engine", "crates/engine/README.md")?;
+    /// let entry = PactEntry::new(root.path(), "crates/engine", "crates/engine/WARLOCK.md")?;
     /// let manifest = Manifest::with_entries([entry]);
     ///
     /// manifest.save(root.path())?;
@@ -305,17 +305,17 @@ impl Default for Manifest {
 /// Both paths are held in manifest-relative forward-slash form, which is why
 /// they are private: [`PactEntry::new`] is the only way in from a caller's
 /// path, and it is the thing that normalises. Read them back as stored with
-/// [`PactEntry::module`] / [`PactEntry::readme`], or as real paths under a
-/// root with [`PactEntry::module_path`] / [`PactEntry::readme_path`].
+/// [`PactEntry::module`] / [`PactEntry::document`], or as real paths under a
+/// root with [`PactEntry::module_path`] / [`PactEntry::document_path`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PactEntry {
     /// The pacted directory, relative to the manifest's directory.
     module: String,
-    /// The README documenting it, relative to the manifest's directory. Held
+    /// The document describing it, relative to the manifest's directory. Held
     /// separately from `module` because the file name is not Warlock's to
     /// assume.
-    readme: String,
+    document: String,
     /// The subtree hash captured when freshness was last granted. Opaque here:
     /// this crate neither computes nor verifies it. Absent means never judged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -328,7 +328,7 @@ pub struct PactEntry {
 }
 
 impl PactEntry {
-    /// An entry for `module`, documented by `readme`, never judged.
+    /// An entry for `module`, documented by `document`, never judged.
     ///
     /// Both paths may be absolute or relative. An absolute path is made
     /// relative to `root`; a relative one is taken to already be relative to
@@ -338,8 +338,8 @@ impl PactEntry {
     /// ```
     /// use warlock_engine::PactEntry;
     ///
-    /// let under_a = PactEntry::new("/tmp/a", "/tmp/a/crates/engine", "/tmp/a/crates/engine/README.md")?;
-    /// let under_b = PactEntry::new("/tmp/b", "/tmp/b/crates/engine", "/tmp/b/crates/engine/README.md")?;
+    /// let under_a = PactEntry::new("/tmp/a", "/tmp/a/crates/engine", "/tmp/a/crates/engine/WARLOCK.md")?;
+    /// let under_b = PactEntry::new("/tmp/b", "/tmp/b/crates/engine", "/tmp/b/crates/engine/WARLOCK.md")?;
     ///
     /// assert_eq!(under_a.module(), "crates/engine");
     /// assert_eq!(under_a, under_b);
@@ -355,12 +355,12 @@ impl PactEntry {
     pub fn new(
         root: impl AsRef<Path>,
         module: impl AsRef<Path>,
-        readme: impl AsRef<Path>,
+        document: impl AsRef<Path>,
     ) -> Result<Self, Error> {
         let root = root.as_ref();
         Ok(Self {
             module: to_manifest_path(root, module)?,
-            readme: to_manifest_path(root, readme)?,
+            document: to_manifest_path(root, document)?,
             granted_hash: None,
             granted_at: None,
         })
@@ -397,10 +397,10 @@ impl PactEntry {
         &self.module
     }
 
-    /// The README as stored, in the same form as [`PactEntry::module`].
+    /// The document as stored, in the same form as [`PactEntry::module`].
     #[must_use]
-    pub fn readme(&self) -> &str {
-        &self.readme
+    pub fn document(&self) -> &str {
+        &self.document
     }
 
     /// The module directory as a path under `root`.
@@ -409,10 +409,10 @@ impl PactEntry {
         from_manifest_path(root, &self.module)
     }
 
-    /// The README as a path under `root`.
+    /// The document as a path under `root`.
     #[must_use]
-    pub fn readme_path(&self, root: impl AsRef<Path>) -> PathBuf {
-        from_manifest_path(root, &self.readme)
+    pub fn document_path(&self, root: impl AsRef<Path>) -> PathBuf {
+        from_manifest_path(root, &self.document)
     }
 
     /// The subtree hash captured at the last grant, or `None` if this module
@@ -742,7 +742,7 @@ mod tests {
         PactEntry::new(
             ".",
             "crates/warlock-engine",
-            "crates/warlock-engine/README.md",
+            "crates/warlock-engine/WARLOCK.md",
         )
         .expect("a relative path inside the root is storable")
     }
@@ -872,11 +872,11 @@ mod tests {
     fn paths_are_stored_with_forward_slashes() {
         // Built with the platform separator, stored with slashes.
         let module = Path::new("crates").join("warlock-engine");
-        let readme = module.join("README.md");
-        let entry = PactEntry::new(".", &module, &readme).expect("inside the root");
+        let document = module.join("WARLOCK.md");
+        let entry = PactEntry::new(".", &module, &document).expect("inside the root");
 
         assert_eq!(entry.module(), "crates/warlock-engine");
-        assert_eq!(entry.readme(), "crates/warlock-engine/README.md");
+        assert_eq!(entry.document(), "crates/warlock-engine/WARLOCK.md");
 
         let text = Manifest::with_entries([entry])
             .to_toml_string()
@@ -892,12 +892,12 @@ mod tests {
         let under = |root: &str| {
             let root = PathBuf::from(root);
             let module = root.join("crates").join("warlock-engine");
-            let readme = module.join("README.md");
+            let document = module.join("WARLOCK.md");
             Manifest::with_entries([
-                PactEntry::new(&root, &module, &readme)
+                PactEntry::new(&root, &module, &document)
                     .expect("inside the root")
                     .with_grant("d0f5a1", "2026-08-19T07:32:00Z"),
-                PactEntry::new(&root, &root, root.join("README.md")).expect("inside the root"),
+                PactEntry::new(&root, &root, root.join("WARLOCK.md")).expect("inside the root"),
             ])
             .to_toml_string()
             .expect("serialises")
@@ -940,11 +940,11 @@ mod tests {
             Path::new("/repo").join("crates").join("warlock-engine")
         );
         assert_eq!(
-            entry.readme_path("/repo"),
+            entry.document_path("/repo"),
             Path::new("/repo")
                 .join("crates")
                 .join("warlock-engine")
-                .join("README.md")
+                .join("WARLOCK.md")
         );
         // And back again, unchanged.
         assert_eq!(
@@ -964,7 +964,7 @@ mod tests {
             Err(Error::PathOutsideRoot { .. })
         ));
         assert!(matches!(
-            PactEntry::new("/repo", "/elsewhere", "/elsewhere/README.md"),
+            PactEntry::new("/repo", "/elsewhere", "/elsewhere/WARLOCK.md"),
             Err(Error::PathOutsideRoot { .. })
         ));
     }
@@ -984,7 +984,7 @@ mod tests {
 
     #[test]
     fn an_unrecognised_version_is_rejected_before_the_entries_are_read() {
-        let text = "version = 999\n\n[[pact]]\nmodule = \"x\"\nreadme = \"x/README.md\"\n";
+        let text = "version = 999\n\n[[pact]]\nmodule = \"x\"\ndocument = \"x/WARLOCK.md\"\n";
         match Manifest::from_toml_str(text) {
             Err(Error::UnsupportedVersion { found, supported }) => {
                 assert_eq!(found, 999);
@@ -1000,8 +1000,8 @@ mod tests {
     fn a_malformed_entry_names_itself() {
         let text = concat!(
             "version = 1\n\n",
-            "[[pact]]\nmodule = \"crates/warlock-engine\"\nreadme = \"crates/warlock-engine/README.md\"\n\n",
-            "[[pact]]\nmodule = \"crates/warlock-tui\"\nreadme = 7\n",
+            "[[pact]]\nmodule = \"crates/warlock-engine\"\ndocument = \"crates/warlock-engine/WARLOCK.md\"\n\n",
+            "[[pact]]\nmodule = \"crates/warlock-tui\"\ndocument = 7\n",
         );
         match Manifest::from_toml_str(text) {
             Err(error @ Error::Entry { index: 1, .. }) => {
@@ -1014,11 +1014,34 @@ mod tests {
     #[test]
     fn an_entry_with_an_unknown_key_is_an_error_too() {
         let text =
-            "version = 1\n\n[[pact]]\nmodule = \"x\"\nreadme = \"x/README.md\"\nfresh = true\n";
+            "version = 1\n\n[[pact]]\nmodule = \"x\"\ndocument = \"x/WARLOCK.md\"\nfresh = true\n";
         assert!(matches!(
             Manifest::from_toml_str(text),
             Err(Error::Entry { .. })
         ));
+    }
+
+    #[test]
+    fn the_old_readme_key_is_an_error_rather_than_an_alias() {
+        // The document key was called `readme` before Warlock's artifact was
+        // named. There are no manifests in the wild carrying it, so it is an
+        // unknown key like any other — no alias, no migration, no quiet
+        // acceptance that would let two spellings of one field coexist.
+        let text = "version = 1\n\n[[pact]]\nmodule = \"x\"\nreadme = \"x/WARLOCK.md\"\n";
+        assert!(matches!(
+            Manifest::from_toml_str(text),
+            Err(Error::Entry { .. })
+        ));
+
+        // And the key that is written is the new one.
+        let written = Manifest::with_entries([unjudged()])
+            .to_toml_string()
+            .expect("serialises");
+        assert!(
+            written.contains("document = \"crates/warlock-engine/WARLOCK.md\""),
+            "{written}"
+        );
+        assert!(!written.contains("readme"), "{written}");
     }
 
     #[test]
@@ -1180,10 +1203,10 @@ mod tests {
         let saved_under = |root: &Path| {
             let module = root.join("crates").join("warlock-engine");
             let manifest = Manifest::with_entries([
-                PactEntry::new(root, &module, module.join("README.md"))
+                PactEntry::new(root, &module, module.join("WARLOCK.md"))
                     .expect("inside the root")
                     .with_grant("d0f5a1", "2026-08-19T07:32:00Z"),
-                PactEntry::new(root, root, root.join("README.md")).expect("inside the root"),
+                PactEntry::new(root, root, root.join("WARLOCK.md")).expect("inside the root"),
             ]);
             manifest.save(root).expect("saves");
             fs::read(manifest_path(root)).expect("reads the file back")
@@ -1216,12 +1239,12 @@ mod tests {
             "version = 1\n\n",
             "[[pact]]\n",
             "module = \"crates/warlock-engine\"\n",
-            "readme = \"crates/warlock-engine/README.md\"\n",
+            "document = \"crates/warlock-engine/WARLOCK.md\"\n",
             "granted_hash = \"d0f5a1\"\n",
             "granted_at = \"2026-08-19T07:32:00Z\"\n\n",
             "[[pact]]\n",
             "module = \"crates/warlock-tui\"\n",
-            "readme = \"crates/warlock-tui/README.md\"\n",
+            "document = \"crates/warlock-tui/WARLOCK.md\"\n",
         );
         hand_write(root.path(), original);
 
@@ -1241,7 +1264,7 @@ mod tests {
         let root = a_root();
         hand_write(
             root.path(),
-            "version = 999\n\n[[pact]]\nmodule = \"x\"\nreadme = \"x/README.md\"\n",
+            "version = 999\n\n[[pact]]\nmodule = \"x\"\ndocument = \"x/WARLOCK.md\"\n",
         );
 
         match Manifest::load(root.path()) {
@@ -1260,8 +1283,8 @@ mod tests {
             root.path(),
             concat!(
                 "version = 1\n\n",
-                "[[pact]]\nmodule = \"crates/warlock-engine\"\nreadme = \"crates/warlock-engine/README.md\"\n\n",
-                "[[pact]]\nmodule = \"crates/warlock-tui\"\nreadme = 7\n",
+                "[[pact]]\nmodule = \"crates/warlock-engine\"\ndocument = \"crates/warlock-engine/WARLOCK.md\"\n\n",
+                "[[pact]]\nmodule = \"crates/warlock-tui\"\ndocument = 7\n",
             ),
         );
 

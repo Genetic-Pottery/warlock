@@ -28,9 +28,9 @@
 //! the flag go off again without the tree: the rows were never thrown away, so
 //! turning files off is the same filter-and-re-flatten every other view change
 //! goes through. A file row is a row for something that is not a node — no
-//! README, no children, and the state of the directory holding it, because the
-//! colour of a file is the colour of its module — so the operations that act on
-//! nodes refuse it rather than half-working on it.
+//! document, no children, and the state of the directory holding it, because
+//! the colour of a file is the colour of its module — so the operations that
+//! act on nodes refuse it rather than half-working on it.
 //!
 //! A tree taller than the terminal does not fit, so the app also remembers
 //! which slice of those rows is on screen: a scroll offset, kept in step with
@@ -51,7 +51,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{IntoReadme, NodeState, StateCounts, Tree, to_manifest_path};
+use warlock_engine::{IntoDocument, NodeState, StateCounts, Tree, to_manifest_path};
 
 /// What the header says when the tree is rooted at the repository root itself.
 ///
@@ -67,7 +67,7 @@ const REPOSITORY_ROOT_LABEL: &str = "(repository root)";
 /// self-contained value that can be built, moved and asserted on without
 /// lifetimes threading through the event loop.
 ///
-/// The README comes along for the same reason: pacting a node needs one, and
+/// The document comes along for the same reason: pacting a node needs one, and
 /// the row is what the key handler has in its hand when the key is pressed.
 /// Fetching it back out of the tree at that moment would mean keeping the tree
 /// alongside the rows and looking a path up in it, which is two sources for one
@@ -89,9 +89,10 @@ pub struct Row {
     /// The path of the node this row stands for, exactly as the engine stores
     /// it.
     pub path: PathBuf,
-    /// The README documenting the node, straight from [`warlock_engine::Node`],
-    /// or `None` for an ordinary directory that has no documentation yet.
-    pub readme: Option<PathBuf>,
+    /// The `WARLOCK.md` documenting the node, straight from
+    /// [`warlock_engine::Node`], or `None` for an ordinary directory that has
+    /// no documentation yet.
+    pub document: Option<PathBuf>,
     /// What Warlock knows about the node, which is what colours the row.
     pub state: NodeState,
     /// How many children the node has in the tree — not how many are drawn,
@@ -105,10 +106,10 @@ pub struct Row {
 }
 
 impl Row {
-    /// A row for a childless node at `path`, documented by `readme`, sitting at
-    /// `depth`, in `state`.
+    /// A row for a childless node at `path`, documented by `document`, sitting
+    /// at `depth`, in `state`.
     ///
-    /// `readme` takes whatever [`warlock_engine::Node::new`] takes: anything
+    /// `document` takes whatever [`warlock_engine::Node::new`] takes: anything
     /// path-like for a node that has one, or `None` for a directory that has
     /// no documentation yet.
     ///
@@ -119,13 +120,13 @@ impl Row {
     pub fn new(
         depth: usize,
         path: impl Into<PathBuf>,
-        readme: impl IntoReadme,
+        document: impl IntoDocument,
         state: NodeState,
     ) -> Self {
         Self {
             depth,
             path: path.into(),
-            readme: readme.into_readme(),
+            document: document.into_document(),
             state,
             children: 0,
             file: false,
@@ -134,7 +135,7 @@ impl Row {
 
     /// A row for the file at `path`, sitting at `depth`, in `state`.
     ///
-    /// A file is not a node: it has no README of its own, no children, and no
+    /// A file is not a node: it has no document of its own, no children, and no
     /// state the engine ever decided for it. What it has is the state of the
     /// directory holding it, handed over here by the caller doing the
     /// flattening, because the design doc's rule is that a file takes its
@@ -183,14 +184,15 @@ impl Row {
 ///
 /// [`App::toggle_pact`] flips the state on screen; the manifest is somebody
 /// else's file, so this says what happened and lets that somebody act on it.
-/// A node with no README cannot be pacted at all, so `readme` is not optional
-/// here — a toggle that produced one of these is a toggle of a real module.
+/// A node with no document cannot be pacted at all, so `document` is not
+/// optional here — a toggle that produced one of these is a toggle of a real
+/// module.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PactToggle {
     /// The directory whose pact was toggled.
     pub path: PathBuf,
-    /// The README documenting it, which a manifest entry needs.
-    pub readme: PathBuf,
+    /// The `WARLOCK.md` documenting it, which a manifest entry needs.
+    pub document: PathBuf,
     /// Whether the node is pacted *now*, after the toggle: `true` means an
     /// entry should be written for it, `false` that its entry should go.
     pub pacted: bool,
@@ -298,7 +300,7 @@ impl App {
         let mut rows = Vec::new();
         for (node, depth) in tree.walk() {
             rows.push(
-                Row::new(depth, node.path.clone(), node.readme.clone(), node.state)
+                Row::new(depth, node.path.clone(), node.document.clone(), node.state)
                     .with_child_count(node.children.len()),
             );
             rows.extend(
@@ -429,7 +431,7 @@ impl App {
     /// nothing to say.
     ///
     /// Set by whatever refused to do something — [`App::toggle_pact`] on a
-    /// directory with no README — or by the caller through
+    /// directory with no document — or by the caller through
     /// [`App::set_message`], and emptied by the next movement, so what is here
     /// always belongs to the keystroke just pressed.
     #[must_use]
@@ -858,8 +860,8 @@ impl App {
     ///
     /// Returns what the caller needs to edit the manifest with, or `None` when
     /// nothing was toggled — an app with no rows, a selected file, or a selected
-    /// node with no README. A directory with no documentation yet is not a
-    /// module, and a manifest entry has nowhere to point without a README, so
+    /// node with no document. A directory with no documentation yet is not a
+    /// module, and a manifest entry has nowhere to point without a document, so
     /// such a node is refused outright: no state changes, no count changes,
     /// nothing to write. A file is refused for a reason of its own: a pact is
     /// made with a module, and a file is part of one rather than being one.
@@ -868,7 +870,7 @@ impl App {
     /// bare `Option`: the wording is display state, it belongs here with the
     /// rest of the display state, and a caller that had to translate an outcome
     /// into a sentence would be a second place that decides what a missing
-    /// README means. A toggle that went through clears the message instead —
+    /// document means. A toggle that went through clears the message instead —
     /// whatever the last keystroke said, this one did something.
     ///
     /// A toggle that goes through moves the state of the directory's file rows
@@ -886,8 +888,8 @@ impl App {
             self.message = Some(file_row_message(&self.label_for(&path)));
             return None;
         }
-        let Some(readme) = row.readme.clone() else {
-            self.message = Some(no_readme_message(&self.label_for(&path)));
+        let Some(document) = row.document.clone() else {
+            self.message = Some(no_document_message(&self.label_for(&path)));
             return None;
         };
 
@@ -916,7 +918,7 @@ impl App {
 
         Some(PactToggle {
             path,
-            readme,
+            document,
             pacted: now.is_pacted(),
         })
     }
@@ -1102,19 +1104,19 @@ fn scroll_offset_for(rows: usize, viewport: usize, selected: usize, offset: usiz
     }
 }
 
-/// What the app says when a pact is refused for want of a README, naming the
+/// What the app says when a pact is refused for want of a document, naming the
 /// directory as `label`.
 ///
 /// Worded as a capability that is not wired up yet rather than as a chore for
-/// the reader, because that is what it is: a README is no part of what a pact
+/// the reader, because that is what it is: a document is no part of what a pact
 /// means. Under the real pact operation the AI reads the module and writes one,
-/// and a refresh puts back a README somebody deleted — today's `p` is a
+/// and a refresh puts back a document somebody deleted — today's `p` is a
 /// placeholder that only flips a colour and writes a manifest line, so it has
 /// nothing to point an entry at. Telling the reader to go and write the file
 /// themselves would teach them a rule that is about to stop being true.
-fn no_readme_message(label: &str) -> String {
+fn no_document_message(label: &str) -> String {
     format!(
-        "{label} has no README — writing one is the pact operation's job, \
+        "{label} has no WARLOCK.md — writing one is the pact operation's job, \
          and that is not wired up yet"
     )
 }
@@ -1122,11 +1124,11 @@ fn no_readme_message(label: &str) -> String {
 /// What the app says when the pact key is pressed on a file, naming it as
 /// `label`.
 ///
-/// Its own wording rather than the missing-README one, because it is its own
+/// Its own wording rather than the missing-document one, because it is its own
 /// refusal: the file is not undocumented, it is not a thing a pact is made with
-/// at all. A pact is an agreement about a module — the README it is written in
-/// and the directory it covers — and the files are what the module is made of,
-/// so the answer is to point at the directory rather than to explain a
+/// at all. A pact is an agreement about a module — the document it is written
+/// in and the directory it covers — and the files are what the module is made
+/// of, so the answer is to point at the directory rather than to explain a
 /// capability that is coming. Said out loud rather than silently ignored: a key
 /// that does nothing on some rows and something on others has to say which it
 /// just did.
@@ -1173,17 +1175,17 @@ mod tests {
     /// dragging a `Tree` into tests that are only about the selection.
     fn three_rows() -> Vec<Row> {
         vec![
-            Row::new(0, "repo", "repo/README.md", NodeState::PactedStale),
+            Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale),
             Row::new(
                 1,
                 "repo/crates",
-                "repo/crates/README.md",
+                "repo/crates/WARLOCK.md",
                 NodeState::PactedFresh,
             ),
             Row::new(
                 1,
                 "repo/assets",
-                "repo/assets/README.md",
+                "repo/assets/WARLOCK.md",
                 NodeState::Unpacted,
             ),
         ]
@@ -1212,7 +1214,7 @@ mod tests {
                 Row::new(
                     1,
                     format!("repo/module{index}"),
-                    format!("repo/module{index}/README.md"),
+                    format!("repo/module{index}/WARLOCK.md"),
                     NodeState::Unpacted,
                 )
             })
@@ -1269,16 +1271,16 @@ mod tests {
     fn whole_fixture_with_files() -> Vec<String> {
         vec![
             "warlock".to_owned(),
-            "warlock/Cargo.toml".to_owned(),
             "warlock/README.md".to_owned(),
+            "warlock/WARLOCK.md".to_owned(),
             "warlock/crates".to_owned(),
             "warlock/crates/engine".to_owned(),
             "warlock/crates/engine/Cargo.toml".to_owned(),
-            "warlock/crates/engine/README.md".to_owned(),
+            "warlock/crates/engine/WARLOCK.md".to_owned(),
             "warlock/crates/tui".to_owned(),
-            "warlock/crates/tui/README.md".to_owned(),
+            "warlock/crates/tui/WARLOCK.md".to_owned(),
             "warlock/assets".to_owned(),
-            "warlock/assets/README.md".to_owned(),
+            "warlock/assets/WARLOCK.md".to_owned(),
             "warlock/assets/logo.svg".to_owned(),
         ]
     }
@@ -1309,18 +1311,18 @@ mod tests {
     #[test]
     fn flattening_a_tree_keeps_depth_first_order_and_depth() {
         let tree = Tree::new(
-            Node::new("repo", "repo/README.md", NodeState::PactedStale).with_children([
+            Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale).with_children([
                 Node::new(
                     "repo/crates",
-                    "repo/crates/README.md",
+                    "repo/crates/WARLOCK.md",
                     NodeState::PactedFresh,
                 )
                 .with_children([Node::new(
                     "repo/crates/engine",
-                    "repo/crates/engine/README.md",
+                    "repo/crates/engine/WARLOCK.md",
                     NodeState::PactedFresh,
                 )]),
-                Node::new("repo/assets", "repo/assets/README.md", NodeState::Unpacted),
+                Node::new("repo/assets", "repo/assets/WARLOCK.md", NodeState::Unpacted),
             ]),
         );
 
@@ -1724,20 +1726,25 @@ mod tests {
     }
 
     #[test]
-    fn flattening_a_tree_carries_each_nodes_readme() {
+    fn flattening_a_tree_carries_each_nodes_document() {
         let tree = fixture::tree();
 
         let app = App::from_tree(&tree);
 
         for row in app.rows() {
             let node = tree.find(&row.path).expect("row came from the tree");
-            assert_eq!(row.readme, node.readme, "readme for {}", row.path.display());
+            assert_eq!(
+                row.document,
+                node.document,
+                "document for {}",
+                row.path.display()
+            );
         }
-        // Including `crates/`, whose README is honestly absent.
+        // Including `crates/`, whose document is honestly absent.
         assert!(
             app.rows()
                 .iter()
-                .any(|row| row.readme.is_none() && row.path == Path::new("warlock/crates"))
+                .any(|row| row.document.is_none() && row.path == Path::new("warlock/crates"))
         );
     }
 
@@ -1745,13 +1752,13 @@ mod tests {
     fn pacting_an_unpacted_node_makes_it_stale_and_pacting_again_undoes_it() {
         let mut app = app_selecting("warlock/assets");
 
-        let pacted = app.toggle_pact().expect("assets has a README");
+        let pacted = app.toggle_pact().expect("assets has a document");
 
         assert_eq!(
             pacted,
             PactToggle {
                 path: PathBuf::from("warlock/assets"),
-                readme: PathBuf::from("warlock/assets/README.md"),
+                document: PathBuf::from("warlock/assets/WARLOCK.md"),
                 pacted: true,
             }
         );
@@ -1761,13 +1768,13 @@ mod tests {
             Some(NodeState::PactedStale)
         );
 
-        let unpacted = app.toggle_pact().expect("assets still has a README");
+        let unpacted = app.toggle_pact().expect("assets still has a document");
 
         assert_eq!(
             unpacted,
             PactToggle {
                 path: PathBuf::from("warlock/assets"),
-                readme: PathBuf::from("warlock/assets/README.md"),
+                document: PathBuf::from("warlock/assets/WARLOCK.md"),
                 pacted: false,
             }
         );
@@ -1782,7 +1789,7 @@ mod tests {
     fn unpacting_a_fresh_node_drops_it_all_the_way_out() {
         let mut app = app_selecting("warlock/crates/engine");
 
-        let toggled = app.toggle_pact().expect("engine has a README");
+        let toggled = app.toggle_pact().expect("engine has a document");
 
         // Fresh goes straight to unpacted: the grant goes with the pact.
         assert!(!toggled.pacted);
@@ -1815,7 +1822,7 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_with_no_readme_cannot_be_pacted() {
+    fn a_directory_with_no_document_cannot_be_pacted() {
         let mut app = app_selecting("warlock/crates");
         let before = app.clone();
 
@@ -1843,7 +1850,7 @@ mod tests {
 
         let message = app.message().expect("a refusal says why");
         assert!(
-            message.starts_with("warlock/crates has no README"),
+            message.starts_with("warlock/crates has no WARLOCK.md"),
             "{message}"
         );
         // Framed as a capability that is not wired up yet, not as a file the
@@ -1894,7 +1901,7 @@ mod tests {
         while app
             .selected_row()
             .expect("the fixture has rows")
-            .readme
+            .document
             .is_none()
         {
             app.select_next();
@@ -1905,7 +1912,7 @@ mod tests {
     }
 
     #[test]
-    fn a_root_with_no_readme_cannot_be_pacted_either() {
+    fn a_root_with_no_document_cannot_be_pacted_either() {
         let mut app = App::from_rows(vec![Row::new(0, "repo", None, NodeState::Unpacted)])
             .with_counts(StateCounts {
                 unpacted: 1,
@@ -1921,7 +1928,7 @@ mod tests {
         // stands rather than as the `"."` that relative spelling would give.
         assert_eq!(
             app.message().map(|message| message
-                .split(" has no README")
+                .split(" has no WARLOCK.md")
                 .next()
                 .expect("a split always yields a first part")
                 .to_owned()),
@@ -2141,7 +2148,7 @@ mod tests {
     #[test]
     fn a_pact_survives_a_collapse_and_expand_of_the_directory_above_it() {
         let mut app = app_selecting("warlock/crates/tui");
-        app.toggle_pact().expect("tui has a README");
+        app.toggle_pact().expect("tui has a document");
         assert_eq!(
             app.selected_row().map(|row| row.state),
             Some(NodeState::Unpacted)
@@ -2206,10 +2213,10 @@ mod tests {
     #[test]
     fn collapsing_a_directory_leaves_a_sibling_whose_name_it_prefixes_alone() {
         let tree = Tree::new(
-            Node::new("repo", "repo/README.md", NodeState::PactedStale).with_children([
+            Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale).with_children([
                 Node::new("repo/crates", None, NodeState::Unpacted).with_children([Node::new(
                     "repo/crates/engine",
-                    "repo/crates/engine/README.md",
+                    "repo/crates/engine/WARLOCK.md",
                     NodeState::PactedFresh,
                 )]),
                 Node::new("repo/crates-old", None, NodeState::Unpacted),
@@ -2227,7 +2234,7 @@ mod tests {
     #[test]
     fn rows_from_a_bare_list_collapse_only_where_they_claim_children() {
         let mut app = App::from_rows(vec![
-            Row::new(0, "repo", "repo/README.md", NodeState::PactedStale).with_child_count(1),
+            Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale).with_child_count(1),
             Row::new(1, "repo/crates", None, NodeState::Unpacted),
         ]);
 
@@ -2429,7 +2436,7 @@ mod tests {
     #[test]
     fn nothing_pacted_narrows_to_nothing_at_all() {
         let mut app = App::from_rows(vec![
-            Row::new(0, "repo", "repo/README.md", NodeState::Unpacted).with_child_count(1),
+            Row::new(0, "repo", "repo/WARLOCK.md", NodeState::Unpacted).with_child_count(1),
             Row::new(1, "repo/crates", None, NodeState::Unpacted),
         ]);
 
@@ -2448,7 +2455,7 @@ mod tests {
     #[test]
     fn pacting_a_node_under_the_filter_brings_its_row_into_the_view_to_stay() {
         let mut app = app_selecting("warlock/assets");
-        app.toggle_pact().expect("assets has a README");
+        app.toggle_pact().expect("assets has a document");
 
         app.toggle_pacted_only();
 
@@ -2471,12 +2478,12 @@ mod tests {
         let tree = Tree::new(Node::new("repo", None, NodeState::Unpacted).with_children([
             Node::new("repo/kept", None, NodeState::Unpacted).with_children([Node::new(
                 "repo/kept/deep",
-                "repo/kept/deep/README.md",
+                "repo/kept/deep/WARLOCK.md",
                 NodeState::PactedFresh,
             )]),
             Node::new("repo/gone", None, NodeState::Unpacted).with_children([Node::new(
                 "repo/gone/deep",
-                "repo/gone/deep/README.md",
+                "repo/gone/deep/WARLOCK.md",
                 NodeState::Unpacted,
             )]),
         ]));
@@ -2539,16 +2546,16 @@ mod tests {
             seen,
             [
                 (0, "warlock", false),
-                (1, "warlock/Cargo.toml", true),
                 (1, "warlock/README.md", true),
+                (1, "warlock/WARLOCK.md", true),
                 (1, "warlock/crates", false),
                 (2, "warlock/crates/engine", false),
                 (3, "warlock/crates/engine/Cargo.toml", true),
-                (3, "warlock/crates/engine/README.md", true),
+                (3, "warlock/crates/engine/WARLOCK.md", true),
                 (2, "warlock/crates/tui", false),
-                (3, "warlock/crates/tui/README.md", true),
+                (3, "warlock/crates/tui/WARLOCK.md", true),
                 (1, "warlock/assets", false),
-                (2, "warlock/assets/README.md", true),
+                (2, "warlock/assets/WARLOCK.md", true),
                 (2, "warlock/assets/logo.svg", true),
             ]
         );
@@ -2588,7 +2595,12 @@ mod tests {
         app.toggle_files();
 
         for row in app.rows().iter().filter(|row| row.is_file()) {
-            assert_eq!(row.readme, None, "{} claims a README", row.path.display());
+            assert_eq!(
+                row.document,
+                None,
+                "{} claims a document",
+                row.path.display()
+            );
             assert_eq!(row.children, 0);
             assert!(!row.has_children());
             let directory = row.path.parent().expect("a file sits in a directory");
@@ -2618,7 +2630,7 @@ mod tests {
     fn pacting_a_directory_recolours_the_files_in_it() {
         let mut app = app_with_files_selecting("warlock/assets");
 
-        app.toggle_pact().expect("assets has a README");
+        app.toggle_pact().expect("assets has a document");
 
         // The directory's own files move with it; a file of another directory
         // does not.
@@ -2633,7 +2645,7 @@ mod tests {
             Some(NodeState::PactedStale)
         );
         assert_eq!(
-            state_of(&app, "warlock/assets/README.md"),
+            state_of(&app, "warlock/assets/WARLOCK.md"),
             Some(NodeState::PactedStale)
         );
         assert_eq!(
@@ -2641,11 +2653,11 @@ mod tests {
             Some(NodeState::PactedStale)
         );
         assert_eq!(
-            state_of(&app, "warlock/crates/tui/README.md"),
+            state_of(&app, "warlock/crates/tui/WARLOCK.md"),
             Some(NodeState::PactedStale),
         );
         assert_eq!(
-            state_of(&app, "warlock/crates/engine/README.md"),
+            state_of(&app, "warlock/crates/engine/WARLOCK.md"),
             Some(NodeState::PactedFresh)
         );
 
@@ -2676,17 +2688,17 @@ mod tests {
             message.starts_with("warlock/assets/logo.svg is a file"),
             "{message}"
         );
-        // Its own wording, not the missing-README one, though a file has no
-        // README either.
-        assert!(!message.contains("no README"), "{message}");
+        // Its own wording, not the missing-document one, though a file has no
+        // document either.
+        assert!(!message.contains("no WARLOCK.md"), "{message}");
         assert!(message.contains("directory"), "{message}");
     }
 
     #[test]
     fn a_file_under_a_documented_directory_is_refused_all_the_same() {
-        // The README of a documented module, which is the row most likely to be
-        // mistaken for the module itself.
-        let mut app = app_with_files_selecting("warlock/crates/tui/README.md");
+        // The document of a documented module, which is the row most likely
+        // to be mistaken for the module itself.
+        let mut app = app_with_files_selecting("warlock/crates/tui/WARLOCK.md");
         let before = app.clone();
 
         assert_eq!(app.toggle_pact(), None);
@@ -2721,7 +2733,7 @@ mod tests {
         let mut app = app_with_files_selecting("warlock/assets");
         let before = app.counts();
 
-        app.toggle_pact().expect("assets has a README");
+        app.toggle_pact().expect("assets has a document");
 
         assert_eq!(app.counts().total(), before.total());
         assert_eq!(app.counts().unpacted, before.unpacted - 1);
@@ -2749,11 +2761,11 @@ mod tests {
             drawn(&app),
             [
                 "warlock",
-                "warlock/Cargo.toml",
                 "warlock/README.md",
+                "warlock/WARLOCK.md",
                 "warlock/crates",
                 "warlock/assets",
-                "warlock/assets/README.md",
+                "warlock/assets/WARLOCK.md",
                 "warlock/assets/logo.svg",
             ]
         );
@@ -2780,7 +2792,7 @@ mod tests {
 
     #[test]
     fn hiding_the_files_under_the_selection_lands_it_on_the_directory() {
-        let mut app = app_with_files_selecting("warlock/crates/engine/README.md");
+        let mut app = app_with_files_selecting("warlock/crates/engine/WARLOCK.md");
 
         app.toggle_files();
 
@@ -2807,14 +2819,14 @@ mod tests {
             drawn(&app),
             [
                 "warlock",
-                "warlock/Cargo.toml",
                 "warlock/README.md",
+                "warlock/WARLOCK.md",
                 "warlock/crates",
                 "warlock/crates/engine",
                 "warlock/crates/engine/Cargo.toml",
-                "warlock/crates/engine/README.md",
+                "warlock/crates/engine/WARLOCK.md",
                 "warlock/crates/tui",
-                "warlock/crates/tui/README.md",
+                "warlock/crates/tui/WARLOCK.md",
             ]
         );
 
@@ -2855,8 +2867,8 @@ mod tests {
     #[test]
     fn a_bare_list_of_rows_can_hold_files_too_and_starts_with_them_hidden() {
         let app = App::from_rows(vec![
-            Row::new(0, "repo", "repo/README.md", NodeState::PactedStale).with_child_count(1),
-            Row::file(1, "repo/README.md", NodeState::PactedStale),
+            Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale).with_child_count(1),
+            Row::file(1, "repo/WARLOCK.md", NodeState::PactedStale),
             Row::new(1, "repo/crates", None, NodeState::Unpacted),
         ]);
 
@@ -2865,7 +2877,7 @@ mod tests {
 
         let mut app = app;
         app.toggle_files();
-        assert_eq!(drawn(&app), ["repo", "repo/README.md", "repo/crates"]);
+        assert_eq!(drawn(&app), ["repo", "repo/WARLOCK.md", "repo/crates"]);
     }
 
     #[test]

@@ -311,7 +311,7 @@ mod tests {
                 Row::new(
                     1,
                     format!("repo/module{index}"),
-                    format!("repo/module{index}/README.md"),
+                    format!("repo/module{index}/WARLOCK.md"),
                     NodeState::Unpacted,
                 )
             })
@@ -548,21 +548,21 @@ mod tests {
             drawn,
             [
                 "> - warlock",
-                "      Cargo.toml",
                 "      README.md",
+                "      WARLOCK.md",
                 "    - crates",
                 "        engine",
                 "          Cargo.toml",
-                "          README.md",
+                "          WARLOCK.md",
                 "        tui",
-                "          README.md",
+                "          WARLOCK.md",
                 "      assets",
-                "        README.md",
+                "        WARLOCK.md",
                 "        logo.svg",
             ]
         );
         assert!(
-            drawn[1].find("Cargo.toml") > drawn[0].find("warlock"),
+            drawn[1].find("README.md") > drawn[0].find("warlock"),
             "a file should indent past its directory's name: {drawn:?}"
         );
         // And pressing the key again draws what was on screen before it, to
@@ -784,9 +784,9 @@ mod tests {
         assert!(
             app.selected_row()
                 .expect("a row is selected")
-                .readme
+                .document
                 .is_none(),
-            "the fixture's second row is the one with no README"
+            "the fixture's second row is the one with no WARLOCK.md"
         );
 
         assert!(app.toggle_pact().is_none(), "the toggle should be refused");
@@ -796,7 +796,7 @@ mod tests {
         let height = 10;
         let buffer = render(&app, 120, height);
         let said = app.message().expect("a refusal says why").to_owned();
-        assert!(said.contains("has no README"), "{said:?}");
+        assert!(said.contains("has no WARLOCK.md"), "{said:?}");
         assert_eq!(row_text(&buffer, height - 1), said);
         // And it took nothing else's line: the tally and the keys are still on
         // the two lines above it.

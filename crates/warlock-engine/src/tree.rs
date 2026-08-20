@@ -1,10 +1,10 @@
 //! The shape of the tree.
 //!
 //! Section 5 of the design doc makes the project tree the interface: a tree of
-//! module READMEs, each coloured by its [`NodeState`]. This module gives that
-//! tree a type. It is pure shape and nothing else — building a tree from a real
-//! directory belongs to [`load_tree`](crate::load_tree), and the state on a
-//! node is a plain stored field, never computed here.
+//! module documents, each coloured by its [`NodeState`]. This module gives
+//! that tree a type. It is pure shape and nothing else — building a tree from
+//! a real directory belongs to [`load_tree`](crate::load_tree), and the state
+//! on a node is a plain stored field, never computed here.
 
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::NodeState;
 
-/// One node of the project tree: a directory, the README that documents it,
+/// One node of the project tree: a directory, the `WARLOCK.md` documenting it,
 /// and whatever Warlock currently knows about it.
 ///
 /// The fields are public on purpose. A renderer walks this structure with each
@@ -26,11 +26,11 @@ use crate::NodeState;
 pub struct Node {
     /// The directory this node stands for.
     pub path: PathBuf,
-    /// The README documenting this node, or `None` when the node has none of
+    /// Warlock's document for this node, or `None` when the node has none of
     /// its own — an ordinary directory that has no documentation yet, which is
     /// a node like any other. Held separately from `path` because the file
     /// name is not Warlock's to assume.
-    pub readme: Option<PathBuf>,
+    pub document: Option<PathBuf>,
     /// What Warlock knows about this node right now.
     pub state: NodeState,
     /// Child nodes, in the order they should be rendered. Empty for a leaf.
@@ -38,29 +38,29 @@ pub struct Node {
     /// The files sitting directly in this directory, in path order.
     ///
     /// A listing and nothing more. A file is not a node: it has no state, no
-    /// README and no children, it is no part of [`is_leaf`](Node::is_leaf) — a
-    /// node with files and no subdirectories is still a leaf — and nothing
+    /// document and no children, it is no part of [`is_leaf`](Node::is_leaf)
+    /// — a node with files and no subdirectories is still a leaf — and nothing
     /// here is hashed, since a pacted subtree's digest is taken from disk
     /// rather than from this list. Subdirectories are not listed here either;
     /// they are `children`.
     ///
     /// A loaded node lists what the walk saw directly inside the directory,
-    /// its own `README.md` included: this is a faithful listing rather than a
+    /// its own `WARLOCK.md` included: this is a faithful listing rather than a
     /// listing minus one special name, and a view that would rather not draw
-    /// the README twice can leave it out on the way to the screen. Only what
+    /// the document twice can leave it out on the way to the screen. Only what
     /// the walk yielded appears, so ignored and hidden files are absent
     /// exactly as ignored and hidden directories are — and, the same fact seen
-    /// from the other side, a README an ignore rule covers still documents its
-    /// node through `readme` while not appearing here.
+    /// from the other side, a `WARLOCK.md` an ignore rule covers still
+    /// documents its node through `document` while not appearing here.
     pub files: Vec<PathBuf>,
 }
 
 impl Node {
-    /// A childless node at `path`, documented by `readme`, in `state`, holding
-    /// no files.
+    /// A childless node at `path`, documented by `document`, in `state`,
+    /// holding no files.
     ///
-    /// `readme` is anything path-like for a node that has one, or `None` for a
-    /// node that does not — see [`IntoReadme`].
+    /// `document` is anything path-like for a node that has one, or `None`
+    /// for a node that does not — see [`IntoDocument`].
     ///
     /// Add children with [`Node::with_children`] and files with
     /// [`Node::with_files`], or by pushing onto [`Node::children`] and
@@ -69,18 +69,18 @@ impl Node {
     /// ```
     /// use warlock_engine::{Node, NodeState};
     ///
-    /// let module = Node::new("repo/docs", "repo/docs/README.md", NodeState::Unpacted);
-    /// assert!(module.readme.is_some());
+    /// let module = Node::new("repo/docs", "repo/docs/WARLOCK.md", NodeState::Unpacted);
+    /// assert!(module.document.is_some());
     /// assert!(module.files.is_empty());
     ///
     /// let undocumented = Node::new("repo/crates", None, NodeState::Unpacted);
-    /// assert_eq!(undocumented.readme, None);
+    /// assert_eq!(undocumented.document, None);
     /// ```
     #[must_use]
-    pub fn new(path: impl Into<PathBuf>, readme: impl IntoReadme, state: NodeState) -> Self {
+    pub fn new(path: impl Into<PathBuf>, document: impl IntoDocument, state: NodeState) -> Self {
         Self {
             path: path.into(),
-            readme: readme.into_readme(),
+            document: document.into_document(),
             state,
             children: Vec::new(),
             files: Vec::new(),
@@ -107,8 +107,8 @@ impl Node {
     /// ```
     /// use warlock_engine::{Node, NodeState};
     ///
-    /// let module = Node::new("repo/docs", "repo/docs/README.md", NodeState::Unpacted)
-    ///     .with_files(["repo/docs/README.md", "repo/docs/adr.md"].map(std::path::PathBuf::from));
+    /// let module = Node::new("repo/docs", "repo/docs/WARLOCK.md", NodeState::Unpacted)
+    ///     .with_files(["repo/docs/WARLOCK.md", "repo/docs/adr.md"].map(std::path::PathBuf::from));
     /// assert_eq!(module.files.len(), 2);
     /// // Files are a listing, not children: a node with files is still a leaf.
     /// assert!(module.is_leaf());
@@ -129,48 +129,48 @@ impl Node {
     }
 }
 
-/// What [`Node::new`] accepts for a node's README.
+/// What [`Node::new`] accepts for a node's document.
 ///
-/// A node's README is optional, but most nodes have one and saying `Some`
+/// A node's document is optional, but most nodes have one and saying `Some`
 /// at every such call site would be noise. This trait takes both forms:
-/// anything path-like means that README, and `None` means the node has none.
+/// anything path-like means that document, and `None` means the node has none.
 ///
 /// The impls are written out one type at a time rather than blanketed over
 /// `Into<PathBuf>`, because a blanket impl plus one for `Option` overlap as
 /// far as coherence is concerned. Listing them also keeps `None` on its own
 /// inferring to `Option<PathBuf>`, since that is the only impl it can match.
-pub trait IntoReadme {
-    /// This value as a node stores it: the README's path, or `None` for a
+pub trait IntoDocument {
+    /// This value as a node stores it: the document's path, or `None` for a
     /// node without one.
-    fn into_readme(self) -> Option<PathBuf>;
+    fn into_document(self) -> Option<PathBuf>;
 }
 
-impl IntoReadme for Option<PathBuf> {
-    fn into_readme(self) -> Option<PathBuf> {
+impl IntoDocument for Option<PathBuf> {
+    fn into_document(self) -> Option<PathBuf> {
         self
     }
 }
 
-impl IntoReadme for PathBuf {
-    fn into_readme(self) -> Option<PathBuf> {
+impl IntoDocument for PathBuf {
+    fn into_document(self) -> Option<PathBuf> {
         Some(self)
     }
 }
 
-impl IntoReadme for &Path {
-    fn into_readme(self) -> Option<PathBuf> {
+impl IntoDocument for &Path {
+    fn into_document(self) -> Option<PathBuf> {
         Some(self.to_path_buf())
     }
 }
 
-impl IntoReadme for &str {
-    fn into_readme(self) -> Option<PathBuf> {
+impl IntoDocument for &str {
+    fn into_document(self) -> Option<PathBuf> {
         Some(PathBuf::from(self))
     }
 }
 
-impl IntoReadme for String {
-    fn into_readme(self) -> Option<PathBuf> {
+impl IntoDocument for String {
+    fn into_document(self) -> Option<PathBuf> {
         Some(PathBuf::from(self))
     }
 }
@@ -183,7 +183,7 @@ impl IntoReadme for String {
 /// through any loader.
 ///
 /// A loaded tree holds a node per directory, documented or not: one whose
-/// [`readme`](Node::readme) is `None` is an ordinary directory that has no
+/// [`document`](Node::document) is `None` is an ordinary directory that has no
 /// documentation yet, not a lesser kind of node. Rendering fewer of them than
 /// the tree holds is a view's decision, taken on the way to the screen.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -218,10 +218,10 @@ impl Tree {
     /// use warlock_engine::{Node, NodeState, Tree};
     ///
     /// let tree = Tree::new(
-    ///     Node::new("repo", "repo/README.md", NodeState::PactedStale)
+    ///     Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
     ///         .with_children([Node::new(
     ///             "repo/docs",
-    ///             "repo/docs/README.md",
+    ///             "repo/docs/WARLOCK.md",
     ///             NodeState::PactedFresh,
     ///         )]),
     /// );
@@ -246,10 +246,10 @@ impl Tree {
     /// use warlock_engine::{Node, NodeState, Tree};
     ///
     /// let tree = Tree::new(
-    ///     Node::new("repo", "repo/README.md", NodeState::PactedStale)
+    ///     Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
     ///         .with_children([Node::new(
     ///             "repo/docs",
-    ///             "repo/docs/README.md",
+    ///             "repo/docs/WARLOCK.md",
     ///             NodeState::PactedFresh,
     ///         )]),
     /// );
@@ -279,10 +279,10 @@ impl Tree {
     /// use warlock_engine::{Node, NodeState, Tree};
     ///
     /// let tree = Tree::new(
-    ///     Node::new("repo", "repo/README.md", NodeState::PactedStale)
+    ///     Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
     ///         .with_children([Node::new(
     ///             "repo/docs",
-    ///             "repo/docs/README.md",
+    ///             "repo/docs/WARLOCK.md",
     ///             NodeState::PactedFresh,
     ///         )]),
     /// );
@@ -387,13 +387,14 @@ mod tests {
     /// has a leaf of its own, so nesting is more than one level deep.
     fn fixture() -> Tree {
         Tree::new(
-            Node::new("repo", "repo/README.md", NodeState::PactedStale).with_children([
-                // A directory with no README of its own, and a node all the same.
+            Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale).with_children([
+                // A directory with no document of its own, and a node all
+                // the same.
                 Node::new("repo/crates", None, NodeState::Unpacted),
-                Node::new("repo/docs", "repo/docs/README.md", NodeState::PactedFresh)
+                Node::new("repo/docs", "repo/docs/WARLOCK.md", NodeState::PactedFresh)
                     .with_children([Node::new(
                         "repo/docs/adr",
-                        "repo/docs/adr/README.md",
+                        "repo/docs/adr/WARLOCK.md",
                         NodeState::PactedStale,
                     )]),
             ]),
@@ -404,7 +405,7 @@ mod tests {
     /// what difference files make by holding the two trees side by side.
     fn fixture_with_files() -> Tree {
         fn listing(node: &Node) -> Node {
-            Node::new(&node.path, node.readme.clone(), node.state)
+            Node::new(&node.path, node.document.clone(), node.state)
                 .with_children(node.children.iter().map(listing))
                 .with_files([node.path.join("Cargo.toml"), node.path.join("notes.md")])
         }
@@ -413,7 +414,7 @@ mod tests {
 
     #[test]
     fn new_node_starts_childless() {
-        let node = Node::new("a", "a/README.md", NodeState::Unpacted);
+        let node = Node::new("a", "a/WARLOCK.md", NodeState::Unpacted);
         assert!(node.children.is_empty());
         assert!(node.files.is_empty());
         assert!(node.is_leaf());
@@ -421,11 +422,17 @@ mod tests {
 
     #[test]
     fn with_files_attaches_them_in_order_and_leaves_the_node_a_leaf() {
-        let node = Node::new("a", "a/README.md", NodeState::Unpacted)
-            .with_files(["a/README.md", "a/Cargo.toml"].map(PathBuf::from));
+        // A plain `README.md` rides along as an ordinary file: it is a listing
+        // entry like any other and documents nothing.
+        let node = Node::new("a", "a/WARLOCK.md", NodeState::Unpacted)
+            .with_files(["a/WARLOCK.md", "a/README.md", "a/Cargo.toml"].map(PathBuf::from));
         assert_eq!(
             node.files,
-            [PathBuf::from("a/README.md"), PathBuf::from("a/Cargo.toml"),],
+            [
+                PathBuf::from("a/WARLOCK.md"),
+                PathBuf::from("a/README.md"),
+                PathBuf::from("a/Cargo.toml"),
+            ],
             "stored as given: ordering is the caller's business",
         );
         assert!(
@@ -461,32 +468,32 @@ mod tests {
     }
 
     #[test]
-    fn a_readme_is_stored_however_it_was_given() {
-        let from_str = Node::new("a", "a/README.md", NodeState::Unpacted);
+    fn a_document_is_stored_however_it_was_given() {
+        let from_str = Node::new("a", "a/WARLOCK.md", NodeState::Unpacted);
         let from_path_buf = Node::new(
             "a",
-            std::path::PathBuf::from("a/README.md"),
+            std::path::PathBuf::from("a/WARLOCK.md"),
             NodeState::Unpacted,
         );
         let from_option = Node::new(
             "a",
-            Some(std::path::PathBuf::from("a/README.md")),
+            Some(std::path::PathBuf::from("a/WARLOCK.md")),
             NodeState::Unpacted,
         );
         assert_eq!(from_str, from_path_buf);
         assert_eq!(from_str, from_option);
         assert_eq!(
-            from_str.readme,
-            Some(std::path::PathBuf::from("a/README.md"))
+            from_str.document,
+            Some(std::path::PathBuf::from("a/WARLOCK.md"))
         );
     }
 
     #[test]
-    fn a_node_with_no_readme_stores_none() {
+    fn a_node_with_no_document_stores_none() {
         let node = Node::new("repo/crates", None, NodeState::Unpacted);
-        assert_eq!(node.readme, None);
+        assert_eq!(node.document, None);
         assert_eq!(
-            fixture().find("repo/crates").expect("in the tree").readme,
+            fixture().find("repo/crates").expect("in the tree").document,
             None
         );
     }
@@ -510,8 +517,8 @@ mod tests {
         assert_eq!(tree.root_path(), std::path::Path::new("repo"));
         assert_eq!(tree.root.state, NodeState::PactedStale);
         assert_eq!(
-            tree.root.readme,
-            Some(std::path::PathBuf::from("repo/README.md"))
+            tree.root.document,
+            Some(std::path::PathBuf::from("repo/WARLOCK.md"))
         );
     }
 
@@ -535,7 +542,7 @@ mod tests {
 
     #[test]
     fn walk_of_a_lone_node_yields_only_the_root_at_depth_zero() {
-        let tree = Tree::new(Node::new("solo", "solo/README.md", NodeState::Unpacted));
+        let tree = Tree::new(Node::new("solo", "solo/WARLOCK.md", NodeState::Unpacted));
         let visited: Vec<_> = tree
             .walk()
             .map(|(node, depth)| (&node.state, depth))
@@ -561,7 +568,7 @@ mod tests {
 
     #[test]
     fn counts_of_an_absent_state_are_zero() {
-        let tree = Tree::new(Node::new("solo", "solo/README.md", NodeState::Unpacted));
+        let tree = Tree::new(Node::new("solo", "solo/WARLOCK.md", NodeState::Unpacted));
         let counts = tree.counts();
         assert_eq!(counts.unpacted, 1);
         assert_eq!(counts.pacted_stale, 0);
@@ -577,8 +584,8 @@ mod tests {
         );
         assert_eq!(
             tree.find("repo/docs/adr")
-                .map(|node| node.readme.as_deref()),
-            Some(Some(std::path::Path::new("repo/docs/adr/README.md")))
+                .map(|node| node.document.as_deref()),
+            Some(Some(std::path::Path::new("repo/docs/adr/WARLOCK.md")))
         );
     }
 
@@ -610,12 +617,12 @@ mod tests {
         // silently. No format is involved, so nothing below fixes an on-disk
         // representation.
         let tree = Tree::new(
-            Node::new("repo", "repo/README.md", NodeState::PactedStale)
+            Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
                 .with_children([Node::new("repo/docs", None, NodeState::Unpacted)
                     .with_files([PathBuf::from("repo/docs/adr.md")])])
                 .with_files([
                     PathBuf::from("repo/Cargo.toml"),
-                    PathBuf::from("repo/README.md"),
+                    PathBuf::from("repo/WARLOCK.md"),
                 ]),
         );
 
@@ -633,9 +640,9 @@ mod tests {
                 },
                 Token::Str("path"),
                 Token::Str("repo"),
-                Token::Str("readme"),
+                Token::Str("document"),
                 Token::Some,
-                Token::Str("repo/README.md"),
+                Token::Str("repo/WARLOCK.md"),
                 Token::Str("state"),
                 Token::UnitVariant {
                     name: "NodeState",
@@ -649,7 +656,7 @@ mod tests {
                 },
                 Token::Str("path"),
                 Token::Str("repo/docs"),
-                Token::Str("readme"),
+                Token::Str("document"),
                 Token::None,
                 Token::Str("state"),
                 Token::UnitVariant {
@@ -668,7 +675,7 @@ mod tests {
                 Token::Str("files"),
                 Token::Seq { len: Some(2) },
                 Token::Str("repo/Cargo.toml"),
-                Token::Str("repo/README.md"),
+                Token::Str("repo/WARLOCK.md"),
                 Token::SeqEnd,
                 Token::StructEnd,
                 Token::StructEnd,

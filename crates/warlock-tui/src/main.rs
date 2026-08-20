@@ -200,7 +200,7 @@ fn with_toggle(
             .cloned(),
     );
     if toggle.pacted {
-        next.push(PactEntry::new(repo_root, &toggle.path, &toggle.readme)?);
+        next.push(PactEntry::new(repo_root, &toggle.path, &toggle.document)?);
     }
     Ok(next)
 }
@@ -964,11 +964,11 @@ mod tests {
         }
     }
 
-    /// The toggle the app hands back for `path`, documented by `path/README.md`.
+    /// The toggle the app hands back for `path`, documented by `path/WARLOCK.md`.
     fn toggle(path: &str, pacted: bool) -> PactToggle {
         PactToggle {
             path: PathBuf::from(ROOT).join(path),
-            readme: PathBuf::from(ROOT).join(path).join("README.md"),
+            document: PathBuf::from(ROOT).join(path).join("WARLOCK.md"),
             pacted,
         }
     }
@@ -986,14 +986,14 @@ mod tests {
             .entry("crates/engine")
             .expect("the entry was added");
         assert_eq!(entry.module(), "crates/engine");
-        assert_eq!(entry.readme(), "crates/engine/README.md");
+        assert_eq!(entry.document(), "crates/engine/WARLOCK.md");
         // Never judged, which is what makes the row stale rather than fresh.
         assert_eq!(entry.granted_hash(), None);
     }
 
     #[test]
     fn unpacting_takes_the_entry_out_again_and_leaves_the_others() {
-        let other = PactEntry::new(ROOT, "crates/tui", "crates/tui/README.md")
+        let other = PactEntry::new(ROOT, "crates/tui", "crates/tui/WARLOCK.md")
             .expect("a path under the root can be stored");
         let start = Manifest::with_entries([other.clone()]);
 
@@ -1029,7 +1029,7 @@ mod tests {
     fn a_node_outside_the_repository_root_is_refused_rather_than_stored() {
         let outside = PactToggle {
             path: PathBuf::from("/elsewhere/crates/engine"),
-            readme: PathBuf::from("/elsewhere/crates/engine/README.md"),
+            document: PathBuf::from("/elsewhere/crates/engine/WARLOCK.md"),
             pacted: true,
         };
 

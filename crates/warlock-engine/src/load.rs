@@ -1,27 +1,29 @@
 //! Building a [`Tree`] from a real directory.
 //!
-//! Section 5 of the design doc makes the tree of module READMEs the interface,
-//! and section 12's modular invocation rule says the scope of a run is wherever
-//! it was invoked — there is no privileged root. Both fall out of one function,
-//! [`load_tree`]: the tree it returns is rooted at the working directory it was
-//! given, while the single manifest that colours the nodes is read from the
-//! repository root found by walking *up* from there — the nearest ancestor
-//! holding a `.git/` directory, whose manifest, if it has one at all, is at
-//! `<root>/.warlock/pacts.toml`.
+//! Section 5 of the design doc makes the tree of module documents the
+//! interface, and section 12's modular invocation rule says the scope of a run
+//! is wherever it was invoked — there is no privileged root. Both fall out of
+//! one function, [`load_tree`]: the tree it returns is rooted at the working
+//! directory it was given, while the single manifest that colours the nodes is
+//! read from the repository root found by walking *up* from there — the
+//! nearest ancestor holding a `.git/` directory, whose manifest, if it has one
+//! at all, is at `<root>/.warlock/pacts.toml`.
 //!
 //! What makes a node:
 //!
 //! * Every directory the walk reaches is a node, the directory it starts at
 //!   included. Nothing is pruned for being undocumented.
-//! * A directory that directly contains a `README.md` is a module node, and
-//!   carries it as [`Node::readme`]. Nothing here reads that file — Warlock
+//! * A directory that directly contains a `WARLOCK.md` is a module node, and
+//!   carries it as [`Node::document`]. Nothing here reads that file — Warlock
 //!   cares only that one exists.
-//! * A directory with no README of its own is a node with `readme: None`: an
-//!   ordinary directory that has no documentation yet. Showing fewer nodes than
-//!   the walk found is a view's business, not the loader's.
+//! * A directory with no document of its own is a node with `document: None`:
+//!   an ordinary directory that has no documentation yet. Showing fewer nodes
+//!   than the walk found is a view's business, not the loader's. A `README.md`
+//!   makes no difference to any of this: it is the project's file, not
+//!   Warlock's, so it documents no node and is listed like any other file.
 //! * The files sitting directly in a directory come back on that node as
 //!   [`Node::files`], in path order, gathered as the same single pass meets
-//!   them — including the directory's own `README.md`. They are a listing and
+//!   them — including the directory's own `WARLOCK.md`. They are a listing and
 //!   nothing else: a file is not a node, has no state of its own, and is no
 //!   input to any hash.
 //!
@@ -72,8 +74,11 @@ const GIT_DIR: &str = ".git";
 /// of the tree.
 const MANIFEST_DIR: &str = ".warlock";
 
-/// The file whose presence in a directory makes that directory a module node.
-const README_FILE: &str = "README.md";
+/// The file whose presence in a directory makes that directory a module node:
+/// Warlock's own document, and the one place in the workspace where its name
+/// is spelled. No other name is special — a `README.md` belongs to the project
+/// and is an ordinary file here.
+const DOCUMENT_FILE: &str = "WARLOCK.md";
 
 /// Build the tree rooted at `working_dir`, coloured by the manifest above it.
 ///
@@ -96,7 +101,7 @@ const README_FILE: &str = "README.md";
 /// let repo = tempfile::tempdir()?;
 /// fs::create_dir(repo.path().join(".git"))?;
 /// fs::create_dir_all(repo.path().join("crates/engine/src"))?;
-/// fs::write(repo.path().join("crates/engine/README.md"), "# engine\n")?;
+/// fs::write(repo.path().join("crates/engine/WARLOCK.md"), "# engine\n")?;
 ///
 /// let Loaded { tree, problems } = load_tree(repo.path())?;
 /// let paths: Vec<_> = tree.walk().map(|(node, _)| node.path.clone()).collect();
@@ -108,12 +113,12 @@ const README_FILE: &str = "README.md";
 ///     repo.path().join("crates/engine"),
 ///     repo.path().join("crates/engine/src"),
 /// ]);
-/// // Only `crates/engine` has a README; the other three simply have none yet.
+/// // Only `crates/engine` has a document; the others simply have none yet.
 /// let src = tree.find(repo.path().join("crates/engine/src")).unwrap();
-/// assert_eq!(src.readme, None);
-/// // Files ride along on the directory that holds them, that README included.
+/// assert_eq!(src.document, None);
+/// // Files ride along on the directory holding them, that document included.
 /// let engine = tree.find(repo.path().join("crates/engine")).unwrap();
-/// assert_eq!(engine.files, [repo.path().join("crates/engine/README.md")]);
+/// assert_eq!(engine.files, [repo.path().join("crates/engine/WARLOCK.md")]);
 /// assert!(src.files.is_empty(), "an empty directory lists nothing");
 /// // Nothing is pacted, so nothing was hashed and nothing could go wrong.
 /// assert_eq!(tree.root.state, NodeState::Unpacted);
@@ -237,8 +242,8 @@ pub fn repository_root(start: impl AsRef<Path>) -> Option<PathBuf> {
 }
 
 /// Every directory at or below `root` that survives the ignore rules, each
-/// mapped to what the walk found in it: whether it holds a `README.md`, and the
-/// files sitting directly inside it.
+/// mapped to what the walk found in it: whether it holds a `WARLOCK.md`, and
+/// the files sitting directly inside it.
 ///
 /// One pass over the filesystem answers both questions. The walker yields
 /// directories and files interleaved, so a file is filed under its parent as it
@@ -260,8 +265,8 @@ fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
         // out of this crate.
         .require_git(false)
         // `.warlock/` is Warlock's own bookkeeping, never a module of the
-        // project. Pruned by name so it stays out even if it holds a README and
-        // even if hidden directories are ever let back in.
+        // project. Pruned by name so it stays out even if it holds a document
+        // and even if hidden directories are ever let back in.
         .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR))
         .build();
 
@@ -272,13 +277,13 @@ fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
         let path = entry.into_path();
         if file_type.is_some_and(|kind| kind.is_dir()) {
             // Asked for directly rather than inferred from the walk's file
-            // entries: a README is what makes a module, so an ignore rule that
-            // happens to cover it should not quietly unmake one.
-            let has_readme = path.join(README_FILE).is_file();
+            // entries: a document is what makes a module, so an ignore rule
+            // that happens to cover it should not quietly unmake one.
+            let has_document = path.join(DOCUMENT_FILE).is_file();
             // An entry rather than an insert: a file inside this directory may
             // have arrived first and already opened the record, and overwriting
             // it here would drop the listing.
-            directories.entry(path).or_default().has_readme = has_readme;
+            directories.entry(path).or_default().has_document = has_document;
         } else if file_type.is_some_and(|kind| kind.is_file()) {
             // Anything that is neither a directory nor a regular file — a
             // symlink above all, which this walk declines to follow — is
@@ -301,9 +306,9 @@ fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
 /// way, which is what lets [`Builder::children_of`] treat every key as one.
 #[derive(Debug, Default)]
 struct Directory {
-    /// Whether the directory directly contains a `README.md`.
-    has_readme: bool,
-    /// The files directly inside it, in path order, its `README.md` among
+    /// Whether the directory directly contains a `WARLOCK.md`.
+    has_document: bool,
+    /// The files directly inside it, in path order, its `WARLOCK.md` among
     /// them. See [`Node::files`] for what a listing is and is not.
     files: Vec<PathBuf>,
 }
@@ -328,7 +333,7 @@ impl Builder {
     /// and not an opinion about which parts of it are interesting. A view that
     /// wants only the documented ones filters what it renders. The files the
     /// walk met in `dir` are copied onto the node as a listing; they make no
-    /// difference to its children, its state or its README.
+    /// difference to its children, its state or its document.
     ///
     /// Anything that went wrong colouring a node, without being worth failing
     /// the load over, is pushed onto `problems`.
@@ -339,14 +344,14 @@ impl Builder {
             .collect();
 
         let found = self.directories.get(dir);
-        let readme = found
-            .is_some_and(|directory| directory.has_readme)
-            .then(|| dir.join(README_FILE));
+        let document = found
+            .is_some_and(|directory| directory.has_document)
+            .then(|| dir.join(DOCUMENT_FILE));
         let files = found
             .map(|directory| directory.files.clone())
             .unwrap_or_default();
 
-        Node::new(dir, readme, self.state_of(dir, problems))
+        Node::new(dir, document, self.state_of(dir, problems))
             .with_children(children)
             .with_files(files)
     }
@@ -507,41 +512,41 @@ mod tests {
 
     /// A repository with a `.git/` directory — what makes it a repository — and
     /// a `.warlock/` one beside it, `dirs` created under them, and a
-    /// `README.md` written into each of `readmes`.
+    /// `WARLOCK.md` written into each of `documents`.
     ///
     /// `.warlock/` is not needed to find the root any more, but it is where the
     /// manifest goes and it is pruned from the walk, so the fixture keeps
     /// making one: every test below sees the same tree shape either way.
-    fn fixture(dirs: &[&str], readmes: &[&str]) -> tempfile::TempDir {
+    fn fixture(dirs: &[&str], documents: &[&str]) -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("a temporary directory");
         fs::create_dir_all(repo.path().join(".git")).expect("creates .git");
         fs::create_dir_all(repo.path().join(".warlock")).expect("creates .warlock");
         for dir in dirs {
             fs::create_dir_all(repo.path().join(dir)).expect("creates a directory");
         }
-        for dir in readmes {
+        for dir in documents {
             let path = repo.path().join(dir);
             fs::create_dir_all(&path).expect("creates a directory");
-            fs::write(path.join("README.md"), "# module\n").expect("writes a README");
+            fs::write(path.join("WARLOCK.md"), "# module\n").expect("writes a document");
         }
         repo
     }
 
     /// A repository nobody has pacted: a `.git/` directory, no `.warlock/`
-    /// anywhere, and a `README.md` in each of `readmes`.
+    /// anywhere, and a `WARLOCK.md` in each of `documents`.
     ///
     /// Separate from [`fixture`] rather than a weakening of it, because the two
     /// answer different questions. Most tests want a repository with somewhere
     /// to put a manifest; the cold-open tests below want the state a repository
     /// is in the very first time Warlock is pointed at it, which is precisely
     /// the absence [`fixture`] fills in.
-    fn git_only_fixture(readmes: &[&str]) -> tempfile::TempDir {
+    fn git_only_fixture(documents: &[&str]) -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("a temporary directory");
         fs::create_dir_all(repo.path().join(".git")).expect("creates .git");
-        for dir in readmes {
+        for dir in documents {
             let path = repo.path().join(dir);
             fs::create_dir_all(&path).expect("creates a directory");
-            fs::write(path.join("README.md"), "# module\n").expect("writes a README");
+            fs::write(path.join("WARLOCK.md"), "# module\n").expect("writes a document");
         }
         assert!(
             !repo.path().join(".warlock").exists(),
@@ -567,7 +572,7 @@ mod tests {
     fn pact(root: &Path, modules: &[&str]) {
         Manifest::with_entries(modules.iter().map(|module| {
             let module = root.join(module);
-            PactEntry::new(root, &module, module.join("README.md")).expect("inside the root")
+            PactEntry::new(root, &module, module.join("WARLOCK.md")).expect("inside the root")
         }))
         .save(root)
         .expect("saves");
@@ -593,7 +598,7 @@ mod tests {
         for (module, granted) in pacts {
             write!(
                 text,
-                "\n[[pact]]\nmodule = \"{module}\"\nreadme = \"{module}/README.md\"\n"
+                "\n[[pact]]\nmodule = \"{module}\"\ndocument = \"{module}/WARLOCK.md\"\n"
             )
             .expect("a string never fails to be written to");
             if let Some(hash) = granted {
@@ -640,54 +645,117 @@ mod tests {
     }
 
     #[test]
-    fn a_readme_makes_a_module_and_an_undocumented_directory_is_still_a_node() {
+    fn a_document_makes_a_module_and_an_undocumented_directory_is_still_a_node() {
         let repo = fixture(&["crates/engine/src"], &["crates/engine"]);
         let tree = tree_of(repo.path());
 
         assert_eq!(
             relative_paths(&tree, repo.path()),
             ["", "crates", "crates/engine", "crates/engine/src"],
-            "every walked directory is a node; a README only decides `readme`"
+            "every walked directory is a node; a document only decides the \
+             `document` field"
         );
-        assert_eq!(tree.root.readme, None, "the fixture root has no README");
+        assert_eq!(tree.root.document, None, "the fixture root has no document");
         assert_eq!(
             tree.find(repo.path().join("crates"))
                 .expect("an undocumented directory is a node")
-                .readme,
+                .document,
             None,
         );
         assert_eq!(
             tree.find(repo.path().join("crates/engine/src"))
                 .expect("an undocumented leaf is a node")
-                .readme,
+                .document,
             None,
         );
         assert_eq!(
             tree.find(repo.path().join("crates/engine"))
                 .expect("the module is a node")
-                .readme,
-            Some(repo.path().join("crates/engine/README.md")),
+                .document,
+            Some(repo.path().join("crates/engine/WARLOCK.md")),
         );
     }
 
     #[test]
-    fn a_repository_with_no_readme_anywhere_still_loads_every_directory() {
+    fn a_plain_readme_documents_nothing_and_is_listed_like_any_other_file() {
+        // Two directories that differ only in which file they hold: one has
+        // Warlock's document, the other the project's README.
+        let repo = fixture(&["docs"], &["crates/engine"]);
+        write_file(&repo.path().join("docs/README.md"), "# for people\n");
+
+        let tree = tree_of(repo.path());
+
+        assert_eq!(
+            tree.find(repo.path().join("crates/engine"))
+                .expect("the module is a node")
+                .document,
+            Some(repo.path().join("crates/engine/WARLOCK.md")),
+            "a `WARLOCK.md` documents the directory holding it",
+        );
+        assert_eq!(
+            tree.find(repo.path().join("docs"))
+                .expect("`docs/` is a node all the same")
+                .document,
+            None,
+            "a `README.md` is the project's file, not Warlock's: it documents \
+             nothing",
+        );
+        assert_eq!(
+            file_names(&tree, repo.path().join("docs")),
+            ["README.md"],
+            "and it is listed under its directory like any other file",
+        );
+    }
+
+    #[test]
+    fn a_plain_readme_is_hashed_like_any_other_file_below_a_pacted_node() {
+        let repo = fixture(&["docs"], &[]);
+        let module = repo.path().join("docs");
+        write_file(&module.join("README.md"), "# for people\n");
+
+        let granted = subtree_hash(&module).expect("the module hashes");
+        hand_write_manifest(repo.path(), &[("docs", Some(&granted))]);
+
+        assert_eq!(
+            tree_of(repo.path())
+                .find(&module)
+                .expect("the pacted module")
+                .state,
+            NodeState::PactedFresh,
+            "the grant was taken over content that includes the README",
+        );
+
+        write_file(&module.join("README.md"), "# for people, revised\n");
+
+        assert_eq!(
+            tree_of(repo.path())
+                .find(&module)
+                .expect("the pacted module")
+                .state,
+            NodeState::PactedStale,
+            "editing it moves the subtree hash exactly as editing any other \
+             file would",
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_document_anywhere_still_loads_every_directory() {
         let repo = fixture(&["crates/engine/src"], &[]);
         let tree = tree_of(repo.path());
 
         assert_eq!(
             relative_paths(&tree, repo.path()),
             ["", "crates", "crates/engine", "crates/engine/src"],
-            "nothing is documented, so nothing has a README — and every \
+            "nothing is documented, so nothing has a document — and every \
              directory is still a node"
         );
         assert_eq!(
             tree.find(repo.path().join("crates/engine/src"))
                 .expect("the deepest directory is a node")
-                .readme,
+                .document,
             None,
         );
-        assert!(tree.walk().all(|(node, _)| node.readme.is_none()));
+        assert!(tree.walk().all(|(node, _)| node.document.is_none()));
     }
 
     #[test]
@@ -775,7 +843,7 @@ mod tests {
 
         let manifest = Manifest::load(repo.path()).expect("loads what was just saved");
         let entry = manifest.entry("docs").expect("the entry just written");
-        assert_eq!(entry.readme(), "docs/README.md");
+        assert_eq!(entry.document(), "docs/WARLOCK.md");
         assert_eq!(
             tree_of(repo.path())
                 .find(repo.path().join("docs"))
@@ -794,19 +862,20 @@ mod tests {
         );
         fs::write(repo.path().join(".gitignore"), "/target\n/vendored\n")
             .expect("writes a .gitignore");
-        fs::write(repo.path().join(".warlock/README.md"), "# not a module\n")
-            .expect("writes a README inside .warlock");
+        fs::write(repo.path().join(".warlock/WARLOCK.md"), "# not a module\n")
+            .expect("writes a document inside .warlock");
 
         assert_eq!(
             relative_paths(&tree_of(repo.path()), repo.path()),
             ["", "src"],
             "`target/` and `vendored/` are gitignored, `.git/` is git's own, \
-             and `.warlock/` is ours — a README in any of them changes nothing"
+             and `.warlock/` is ours — a document in any of them changes \
+             nothing"
         );
     }
 
     #[test]
-    fn a_node_lists_the_files_directly_inside_it_readme_included() {
+    fn a_node_lists_the_files_directly_inside_it_document_included() {
         let repo = fixture(&[], &["crates/engine"]);
         let module = repo.path().join("crates/engine");
         // Written in an order that is not the sorted one, so a listing that
@@ -820,8 +889,8 @@ mod tests {
 
         assert_eq!(
             file_names(&tree, &module),
-            ["README.md", "alpha.rs", "zeta.rs"],
-            "sorted, and the module's own README is one of its files"
+            ["WARLOCK.md", "alpha.rs", "zeta.rs"],
+            "sorted, and the module's own document is one of its files"
         );
         assert_eq!(
             file_names(&tree, module.join("src")),
@@ -877,7 +946,7 @@ mod tests {
 
         assert_eq!(
             listed,
-            ["src/README.md", "src/lib.rs"],
+            ["src/WARLOCK.md", "src/lib.rs"],
             "gitignored, hidden and `.warlock/` files come through the same \
              walk as directories, so they never arrive at all"
         );
@@ -902,8 +971,8 @@ mod tests {
                 "crates/engine/src/inner",
                 "crates/engine/src/inner/deep",
             ],
-            "`src/` and `inner/` have no README of their own and are nodes four \
-             and five levels down all the same"
+            "`src/` and `inner/` have no document of their own and are nodes \
+             four and five levels down all the same"
         );
         assert_eq!(
             tree.walk()
@@ -985,7 +1054,7 @@ mod tests {
             },
         );
 
-        // A file below the node, not the node's README: the trigger is
+        // A file below the node, not the node's document: the trigger is
         // everything at and below the module.
         write_file(&module.join("src/lib.rs"), "pub fn two() {}\n");
 
@@ -1110,7 +1179,7 @@ mod tests {
         );
         assert_eq!(
             file_names(&tree, repo.path().join("crates/engine")),
-            ["README.md"],
+            ["WARLOCK.md"],
             "and it is not listed as one of its parent's files either: a \
              symlink is neither walked nor listed"
         );
@@ -1135,10 +1204,10 @@ mod tests {
         );
         fs::write(repo.path().join(".gitignore"), "/target\n").expect("writes a .gitignore");
         fs::write(
-            repo.path().join("target/debug/README.md"),
+            repo.path().join("target/debug/WARLOCK.md"),
             "# not a module\n",
         )
-        .expect("writes a README in build output");
+        .expect("writes a document in build output");
 
         let tree = tree_of(repo.path());
         let paths = relative_paths(&tree, repo.path());
@@ -1157,14 +1226,14 @@ mod tests {
         assert_eq!(
             tree.find(repo.path().join("crates"))
                 .expect("`crates/` is a node")
-                .readme,
+                .document,
             None,
-            "`crates/` has no README of its own",
+            "`crates/` has no document of its own",
         );
         assert_eq!(
             tree.find(repo.path().join("crates/warlock-tui/src"))
                 .expect("an undocumented `src/` is a node")
-                .readme,
+                .document,
             None,
             "and neither has `crates/warlock-tui/src`",
         );
