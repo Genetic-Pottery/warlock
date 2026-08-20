@@ -103,6 +103,10 @@ pub use pact::Gathered;
 /// document. A length is the only measure taken: nothing anywhere reads what
 /// the text says.
 pub use pact::MINIMUM_DOCUMENT_BYTES;
+/// Where a subtree pact has got to and whether it should carry on: the port a
+/// front end draws progress from and cancels through, asked once per directory
+/// and never bound to a thread.
+pub use pact::Observer as PactObserver;
 /// Why one file's contents are not in a request: too large by itself, dropped
 /// to fit the whole request, or unreadable.
 pub use pact::Omission;
@@ -115,6 +119,9 @@ pub use pact::Pacted;
 /// What a subtree pact produced: the manifest to save, the directories that
 /// failed, and the files its byte caps left out.
 pub use pact::PactedSubtree;
+/// What a [`PactObserver`] answers about the directory it was just offered:
+/// pact it, or stop the pact before it.
+pub use pact::Pacting;
 /// One file the byte caps left out of a request, and why. Non-fatal by
 /// definition: the request that produced it is still a whole request.
 pub use pact::Problem as PactProblem;
@@ -124,6 +131,9 @@ pub use pact::REQUEST_BYTE_CAP;
 /// Why a model pass produced no document: the agent failed, or the answer was
 /// too short to be one. The whole rejection policy, in two variants.
 pub use pact::Refusal;
+/// The [`PactObserver`] for a caller with nothing to show and nothing to
+/// cancel: every directory is pacted and nothing is reported.
+pub use pact::Unwatched;
 /// Build the request for one model pass over one directory: its own files, its
 /// children's documents, and what the byte caps left out.
 pub use pact::gather_request;
@@ -133,7 +143,8 @@ pub use pact::gather_request;
 pub use pact::pact_directory;
 /// Pact a directory and everything below it: write every document first,
 /// children before parents, then hash each directory and grant it what it
-/// earned. Returns the manifest to save and saves nothing itself.
+/// earned. Returns the manifest to save and saves nothing itself. Each directory
+/// is announced to a [`PactObserver`] first, which may stop the pact there.
 pub use pact::pact_subtree;
 /// Un-pact a directory and everything below it: drop their manifest entries and
 /// leave every `WARLOCK.md` on disk, byte for byte. Returns the manifest to save

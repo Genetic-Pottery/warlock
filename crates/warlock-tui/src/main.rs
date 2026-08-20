@@ -28,7 +28,8 @@ use ratatui::crossterm::terminal::{
 };
 use warlock_engine::{
     Agent, LoadError, LoadProblem, Loaded, Manifest, ManifestError, NodeState, PactFailure,
-    PactProblem, PactedSubtree, load_tree, pact_subtree, repository_root, unpact_subtree,
+    PactProblem, PactedSubtree, Unwatched, load_tree, pact_subtree, repository_root,
+    unpact_subtree,
 };
 use warlock_tui::{App, ClaudeAgent, PactToggle, draw, tree_height};
 
@@ -236,6 +237,12 @@ struct Toggled {
 /// The agent is passed in as the engine's port rather than reached for here, so
 /// that the tests of this file drive it with a fake and never run `claude`.
 ///
+/// The pact runs [`Unwatched`]: this call is still made from the event loop's
+/// own thread, where there is nobody left to draw a progress line and nobody to
+/// press a key that would cancel it. Wiring the engine's observer to a worker
+/// thread and to the footer is the next slice's, and it changes this call and
+/// not the engine.
+///
 /// # Errors
 ///
 /// A line for the footer, not an error type: the only two things that stop this
@@ -255,7 +262,7 @@ fn apply_toggle(
             manifest,
             failures,
             problems,
-        } = pact_subtree(&toggle.path, repo_root, manifest, agent)
+        } = pact_subtree(&toggle.path, repo_root, manifest, agent, &mut Unwatched)
             .map_err(|source| one_line(&source.to_string()))?;
         // Failures alone decide freshness, and the byte caps' problems do not:
         // a request that left a lockfile out still produced a document, a hash
