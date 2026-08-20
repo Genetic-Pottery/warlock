@@ -27,10 +27,10 @@ use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use warlock_engine::{
-    LoadError, LoadProblem, Loaded, Manifest, ManifestError, PactEntry, load_tree, repository_root,
-    to_manifest_path, unpact_subtree,
+    Agent, LoadError, LoadProblem, Loaded, Manifest, ManifestError, NodeState, PactFailure,
+    PactProblem, PactedSubtree, load_tree, pact_subtree, repository_root, unpact_subtree,
 };
-use warlock_tui::{App, PactToggle, draw, tree_height};
+use warlock_tui::{App, ClaudeAgent, PactToggle, draw, tree_height};
 
 fn main() -> ExitCode {
     // Before anything touches the terminal: a panic during setup has to leave
@@ -62,8 +62,10 @@ fn main() -> ExitCode {
 ///
 /// After the guard is entered, every `?` returns through its `Drop`, which is
 /// the whole reason the guard exists: there is no error path out of this
-/// function that skips restoration — including the pact key's, which is the
-/// one keystroke that writes to disk and so the one that can fail.
+/// function that skips restoration. The pact key is the one keystroke that
+/// writes to disk, and it is deliberately not one of those paths — a pact that
+/// goes wrong is news for the footer, not a reason to tear the screen down
+/// (see [`apply_toggle`]).
 fn run() -> Result<(), Error> {
     let (mut app, repo_root) = load_app()?;
     // Loaded before the terminal is touched, for the same reason the tree is:
@@ -72,6 +74,10 @@ fn run() -> Result<(), Error> {
     // and keeps the front end from reaching into the loader's internals for a
     // value it needs to keep and edit.
     let mut manifest = load_manifest(&repo_root)?;
+    // The one thing in this binary that runs a model, built once because it is
+    // a command line and a timeout rather than a connection: nothing is spawned
+    // until a pact actually asks for a pass.
+    let agent = ClaudeAgent::new();
     let mut guard = TerminalGuard::enter()?;
 
     loop {
@@ -124,13 +130,13 @@ fn run() -> Result<(), Error> {
             // the scroll offset in range; the next frame draws the longer or
             // shorter list.
             Some(Action::ToggleFiles) => app.toggle_files(),
-            // The app has already moved the subtree's colours and the tally, so
-            // the next frame — drawn at the top of this same loop, with no
-            // reload of the tree — shows the new state. The manifest is
-            // brought into line and saved here, before that frame: the file on
-            // disk and the colours on screen change in the same keystroke, and
-            // a save that fails returns rather than leaving the screen
-            // claiming something that was never written.
+            // The one keystroke that writes anything, and the one that takes
+            // longer than a frame: pacting a subtree runs a model pass per
+            // directory, here, on this thread, so the loop stops until it is
+            // done. Blocking is this slice's deliberate limit — the background
+            // thread, the progress line and cancelling a pass in flight are the
+            // next one — and the frame drawn just below is what the user is
+            // left looking at while it runs.
             //
             // `None` needs nothing done about it. A refused toggle has already
             // put its own sentence in `App::message`, which the next frame
@@ -145,23 +151,52 @@ fn run() -> Result<(), Error> {
                 // once per press of one key.
                 let before = app.clone();
                 if let Some(toggle) = app.toggle_pact() {
-                    match with_toggle(&manifest, &repo_root, &toggle) {
-                        Ok(next) => {
-                            next.save(&repo_root)
-                                .map_err(|source| Error::Manifest { source })?;
+                    // One extra frame, out of band with the loop's own, because
+                    // the loop is about to stop drawing for as long as the pact
+                    // takes. It shows the subtree the key was pressed on
+                    // already yellow — pacted, not yet judged — which is the
+                    // truth of the moment and the closest this slice comes to
+                    // saying that something is happening.
+                    guard.terminal.draw(|frame| draw(frame, &app))?;
+
+                    match apply_toggle(&manifest, &repo_root, &toggle, &agent) {
+                        Ok(Toggled {
+                            manifest: next,
+                            granted,
+                            message,
+                        }) => {
                             manifest = next;
+                            // The app painted the subtree stale before any of
+                            // this ran, because stale is all it could know. A
+                            // pact that came back with nothing wrong wrote,
+                            // hashed and granted every directory in it, so the
+                            // subtree is fresh and only this line knows it.
+                            //
+                            // A pact with a failure in it leaves the whole
+                            // subtree yellow, branches that did earn grants
+                            // included: yellow is "pacted, not proven fresh",
+                            // which is true of every directory in it until the
+                            // next load, and colouring the rest green from here
+                            // would be this file second-guessing per node a
+                            // manifest it did not compute.
+                            if granted {
+                                app.set_subtree_state(&toggle.path, NodeState::PactedFresh);
+                            }
+                            if let Some(message) = message {
+                                app.set_message(message);
+                            }
                         }
-                        // Not a write that failed — nothing has been written
-                        // yet. This is a node the manifest has no spelling
-                        // for: a path outside the repository root, or one that
-                        // is not UTF-8. There is nothing for the user to fix
-                        // and nothing broken to exit over, so the rows go back
-                        // exactly as they were and the reason goes on the app's
-                        // line, the same one a refused toggle uses, rather than
-                        // down a second channel of this file's own.
-                        Err(source) => {
+                        // Nothing was recorded: either the subtree could not be
+                        // listed, or the manifest would not save. Documents may
+                        // well be on disk in the second case, but the manifest
+                        // is the record of what is pacted and it still says
+                        // what it said before, so the rows go back to matching
+                        // it and the reason goes on the app's line — the same
+                        // one a refused toggle uses — rather than out of the
+                        // loop, which would take the screen with it.
+                        Err(message) => {
                             app = before;
-                            app.set_message(one_line(&source.to_string()));
+                            app.set_message(message);
                         }
                     }
                 }
@@ -171,66 +206,106 @@ fn run() -> Result<(), Error> {
     }
 }
 
-/// `manifest` with `toggle` applied: an entry for a directory just pacted, or
-/// no entry for a directory just un-pacted and none for anything below it.
+/// What one press of the pact key came to, once the manifest it produced is on
+/// disk.
+#[derive(Debug)]
+struct Toggled {
+    /// The manifest as it now stands in `.warlock/pacts.toml`, to keep as the
+    /// one the *next* keystroke edits.
+    manifest: Manifest,
+    /// Whether every directory in the subtree came out documented, hashed and
+    /// granted — the only case in which the subtree on screen is fresh rather
+    /// than merely pacted. Always `false` for an un-pact, which grants nothing.
+    granted: bool,
+    /// One line about what went wrong on the way, or `None` when nothing did.
+    /// Never a reason to throw the manifest away: everything it can say is
+    /// about part of a subtree, and the rest of it earned what it got.
+    message: Option<String>,
+}
+
+/// Carry `toggle` out — pact the subtree, or take it out of the manifest — and
+/// write the result to disk.
 ///
-/// The un-pacting half is the engine's [`unpact_subtree`] and nothing else,
-/// because un-pacting is a subtree operation — the key takes the directory and
-/// everything under it out of the manifest, which is exactly what the app has
-/// just greyed on screen — and because dropping entries is the one half of a
-/// pact that needs no model, no document and no hash.
+/// Both halves are the engine's ([`pact_subtree`], [`unpact_subtree`]); what
+/// this function owns is the order the front end needs them in and the single
+/// [`Manifest::save`] at the end of it. Once, at the end, is the whole point:
+/// a save per directory would leave `.warlock/pacts.toml` recording a pact that
+/// was still running, and one that died half way through would be indexed as
+/// finished.
 ///
-/// The pacting half is still the placeholder it has always been: one
-/// [`PactEntry`] with no grant, because a module that has just been pacted has
-/// never been judged, and unjudged is stale (design doc §5/§6). That is also
-/// why nothing here hashes anything, and why the document is spelled out from
-/// the directory rather than taken from the toggle — the real operation writes
-/// that file and hands its path back, and this line goes when this key calls
-/// it.
-///
-/// Written as rebuild-then-push rather than as two branches, so pacting a
-/// module the manifest somehow already lists cannot leave two entries for it.
-/// Order is otherwise the file's own: entries keep their positions and a new
-/// one lands at the end, which keeps the diff to the lines that changed.
+/// The agent is passed in as the engine's port rather than reached for here, so
+/// that the tests of this file drive it with a fake and never run `claude`.
 ///
 /// # Errors
 ///
-/// Whatever [`PactEntry::new`], [`to_manifest_path`] and [`unpact_subtree`]
-/// refuse: a path outside the repository root, or one that is not UTF-8.
-fn with_toggle(
+/// A line for the footer, not an error type: the only two things that stop this
+/// getting as far as a saved manifest are a subtree that cannot be walked and a
+/// manifest that cannot be written, and the single thing the caller does with
+/// either is show it. Anything richer would be a vocabulary invented for one
+/// `match` arm that puts a string on the screen. Both cases leave the previous
+/// `.warlock/pacts.toml` exactly as it was.
+fn apply_toggle(
     manifest: &Manifest,
     repo_root: &Path,
     toggle: &PactToggle,
-) -> Result<Manifest, ManifestError> {
-    if !toggle.pacted {
-        return unpact_subtree(&toggle.path, repo_root, manifest);
-    }
+    agent: &dyn Agent,
+) -> Result<Toggled, String> {
+    let (next, granted, message) = if toggle.pacted {
+        let PactedSubtree {
+            manifest,
+            failures,
+            problems,
+        } = pact_subtree(&toggle.path, repo_root, manifest, agent)
+            .map_err(|source| one_line(&source.to_string()))?;
+        // Failures alone decide freshness, and the byte caps' problems do not:
+        // a request that left a lockfile out still produced a document, a hash
+        // and a grant. They are still worth a line, which is why the two travel
+        // separately from here on.
+        let granted = failures.is_empty();
+        (manifest, granted, pact_message(&failures, &problems))
+    } else {
+        // Un-pacting is pure manifest editing — no walk, no pass, no hash, and
+        // every `WARLOCK.md` left where it is — so the only thing it can refuse
+        // is a path the manifest has no spelling for. The app has already said
+        // what un-pacting leaves behind, and nothing here talks over it.
+        let next = unpact_subtree(&toggle.path, repo_root, manifest)
+            .map_err(|source| Error::Manifest { source }.to_string())?;
+        (next, false, None)
+    };
 
-    let module = to_manifest_path(repo_root, &toggle.path)?;
-    let mut next = Manifest::with_entries(
-        manifest
-            .entries()
-            .iter()
-            .filter(|entry| entry.module() != module)
-            .cloned(),
-    );
-    next.push(PactEntry::new(
-        repo_root,
-        &toggle.path,
-        toggle.path.join(DOCUMENT_FILE),
-    )?);
-    Ok(next)
+    next.save(repo_root)
+        .map_err(|source| Error::Manifest { source }.to_string())?;
+    Ok(Toggled {
+        manifest: next,
+        granted,
+        message,
+    })
 }
 
-/// The name of the file a module is documented in, as the engine's loader looks
-/// for it and as the pact operation writes it.
+/// The footer's one line about a pact that did not go perfectly, or `None` for
+/// one that did.
 ///
-/// Spelled here only for as long as this file builds a manifest entry by hand:
-/// the entry's document is whatever the pact operation actually wrote, and that
-/// operation hands the path back, so nobody has to know this name. Until that
-/// call is wired up, an entry pointing anywhere else would be an entry the
-/// loader could not follow.
-const DOCUMENT_FILE: &str = "WARLOCK.md";
+/// A pact is N directories and each of them can go wrong on its own, so this is
+/// the same shape as [`Error::from_problems`] and for the same reason: one
+/// failure quoted in full, because it is the one worth acting on, and a count
+/// of everything else, because a line per directory would push the useful one
+/// off a footer that is one line tall. Failures come first — a directory with
+/// no document is worse news than a file left out of a request that worked —
+/// and the count covers both piles, which is why it does not claim the rest are
+/// "like it".
+fn pact_message(failures: &[PactFailure], problems: &[PactProblem]) -> Option<String> {
+    let (first, rest) = match (failures.split_first(), problems.split_first()) {
+        (Some((first, others)), _) => (first.to_string(), others.len() + problems.len()),
+        (None, Some((first, others))) => (first.to_string(), others.len()),
+        (None, None) => return None,
+    };
+
+    let first = one_line(&first);
+    Some(match rest {
+        0 => first,
+        rest => format!("{first} (and {rest} more)"),
+    })
+}
 
 /// The repository's manifest, or an empty one if it has never pacted anything.
 ///
@@ -587,17 +662,16 @@ fn install_panic_hook() {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use warlock_engine::{Manifest, ManifestError, PactEntry};
-    use warlock_tui::PactToggle;
+    use warlock_engine::ManifestError;
 
-    use super::{Action, DOCUMENT_FILE, Error, action_for, one_line, with_toggle};
+    use super::{Action, Error, action_for, one_line};
 
     /// A root no test touches on disk: every path below is made relative to it
-    /// by string surgery, so none of these tests needs a repository, a
-    /// temporary directory or a filesystem at all.
+    /// by string surgery, so the tests using it need no repository, no
+    /// temporary directory and no filesystem at all.
     const ROOT: &str = "/repo";
 
     /// A plain press of `code`, as crossterm reports one with no modifiers.
@@ -991,104 +1065,6 @@ mod tests {
         }
     }
 
-    /// The toggle the app hands back for `path`.
-    fn toggle(path: &str, pacted: bool) -> PactToggle {
-        PactToggle {
-            path: PathBuf::from(ROOT).join(path),
-            pacted,
-        }
-    }
-
-    #[test]
-    fn pacting_adds_an_entry_with_a_relative_path_and_no_grant() {
-        let manifest = with_toggle(
-            &Manifest::new(),
-            Path::new(ROOT),
-            &toggle("crates/engine", true),
-        )
-        .expect("a path under the root can be stored");
-
-        let entry = manifest
-            .entry("crates/engine")
-            .expect("the entry was added");
-        assert_eq!(entry.module(), "crates/engine");
-        assert_eq!(entry.document(), "crates/engine/WARLOCK.md");
-        // Never judged, which is what makes the row stale rather than fresh.
-        assert_eq!(entry.granted_hash(), None);
-    }
-
-    #[test]
-    fn unpacting_takes_the_entry_out_again_and_leaves_the_others() {
-        let other = PactEntry::new(ROOT, "crates/tui", "crates/tui/WARLOCK.md")
-            .expect("a path under the root can be stored");
-        let start = Manifest::with_entries([other.clone()]);
-
-        let pacted = with_toggle(&start, Path::new(ROOT), &toggle("crates/engine", true))
-            .expect("a path under the root can be stored");
-        let unpacted = with_toggle(&pacted, Path::new(ROOT), &toggle("crates/engine", false))
-            .expect("a path under the root can be stored");
-
-        assert_eq!(pacted.entries().len(), 2);
-        // Back exactly where it started, entry order included.
-        assert_eq!(unpacted, start);
-        assert_eq!(unpacted.entries(), [other]);
-    }
-
-    #[test]
-    fn pacting_the_same_module_twice_leaves_one_entry() {
-        // Unreachable through the app, whose row would be pacted already, but
-        // a duplicate `module` in the file is the one thing a rebuild here
-        // must not produce.
-        let once = with_toggle(
-            &Manifest::new(),
-            Path::new(ROOT),
-            &toggle("crates/engine", true),
-        )
-        .expect("a path under the root can be stored");
-        let twice = with_toggle(&once, Path::new(ROOT), &toggle("crates/engine", true))
-            .expect("a path under the root can be stored");
-
-        assert_eq!(twice.entries().len(), 1);
-    }
-
-    #[test]
-    fn unpacting_takes_everything_below_the_directory_out_with_it() {
-        let entry = |module: &str| {
-            let directory = PathBuf::from(ROOT).join(module);
-            PactEntry::new(ROOT, &directory, directory.join(DOCUMENT_FILE))
-                .expect("a path under the root can be stored")
-        };
-        let start = Manifest::with_entries([
-            entry("crates/engine"),
-            entry("crates/engine/src"),
-            entry("crates/engine-tools"),
-        ]);
-
-        let unpacted = with_toggle(&start, Path::new(ROOT), &toggle("crates/engine", false))
-            .expect("a path under the root can be stored");
-
-        // The subtree goes whole, the way the app has just greyed it; a sibling
-        // that shares a prefix is not below it and stays.
-        let modules: Vec<&str> = unpacted.entries().iter().map(PactEntry::module).collect();
-        assert_eq!(modules, ["crates/engine-tools"]);
-    }
-
-    #[test]
-    fn a_node_outside_the_repository_root_is_refused_rather_than_stored() {
-        let outside = PactToggle {
-            path: PathBuf::from("/elsewhere/crates/engine"),
-            pacted: true,
-        };
-
-        let error = with_toggle(&Manifest::new(), Path::new(ROOT), &outside)
-            .expect_err("a path outside the root has no manifest spelling");
-
-        assert!(
-            matches!(error, ManifestError::PathOutsideRoot { .. }),
-            "unexpected error: {error}"
-        );
-    }
-
     #[test]
     fn keys_with_no_meaning_here_are_ignored() {
         assert_eq!(action_for(press(KeyCode::Char('x'))), None);
@@ -1107,6 +1083,481 @@ mod tests {
             );
 
             assert_eq!(action_for(event), None, "{kind:?} should not move anything");
+        }
+    }
+
+    /// What one press of the pact key actually does: the manifest that ends up
+    /// on disk, how many times it is written, what the footer is told, and
+    /// whether the subtree comes out fresh.
+    ///
+    /// Every test here drives the real engine operations over a repository of
+    /// its own under the temporary directory, with a hand-written fake in place
+    /// of the model. No `claude`, no network, no terminal, no mocking
+    /// framework — the agent seam is what makes that possible, and this is what
+    /// it was for.
+    mod pacting {
+        use std::cell::RefCell;
+        use std::path::{Path, PathBuf};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::{env, fs, process};
+
+        use warlock_engine::{
+            Agent, AgentError, AgentRequest, AgentResponse, Manifest, NodeState, PactEntry,
+            decide_state, subtree_hash,
+        };
+        use warlock_tui::PactToggle;
+
+        use super::super::{Toggled, apply_toggle};
+        use super::ROOT;
+
+        /// The file every pacted directory is documented in, as the engine
+        /// writes it. Spelled out here so a test can go and look for it.
+        const DOCUMENT_FILE: &str = "WARLOCK.md";
+
+        /// A model pass that never happens: it answers with the same markdown
+        /// every time, turns down whatever it was told to turn down, and notes
+        /// what the manifest looked like when each request arrived.
+        struct Canned {
+            /// The repository root, so a request can be recorded by its
+            /// directory's relative path and the manifest can be looked for.
+            root: PathBuf,
+            /// Directories, relative to the root, whose pass comes back with an
+            /// answer too short for the engine to accept.
+            refused: Vec<&'static str>,
+            /// One entry per request in call order: which directory it was for,
+            /// and whether `.warlock/pacts.toml` existed at that moment.
+            seen: RefCell<Vec<(PathBuf, bool)>>,
+        }
+
+        impl Canned {
+            /// A fake over `scratch` that refuses the directories in `refused`
+            /// and answers everything else.
+            fn new(scratch: &Scratch, refused: impl IntoIterator<Item = &'static str>) -> Self {
+                Self {
+                    root: scratch.root.clone(),
+                    refused: refused.into_iter().collect(),
+                    seen: RefCell::new(Vec::new()),
+                }
+            }
+
+            /// The directories a pass ran for, in call order.
+            fn directories(&self) -> Vec<PathBuf> {
+                self.seen
+                    .borrow()
+                    .iter()
+                    .map(|(directory, _)| directory.clone())
+                    .collect()
+            }
+
+            /// Whether a manifest was on disk while the passes were running.
+            fn saw_a_manifest(&self) -> bool {
+                self.seen.borrow().iter().any(|(_, saved)| *saved)
+            }
+        }
+
+        impl Agent for Canned {
+            fn run(&self, request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+                let directory = request.directory();
+                let relative = directory
+                    .strip_prefix(&self.root)
+                    .unwrap_or(directory)
+                    .to_path_buf();
+                self.seen
+                    .borrow_mut()
+                    .push((relative.clone(), saved(&self.root).is_some()));
+
+                if self.refused.iter().any(|name| Path::new(name) == relative) {
+                    // Short enough that the engine turns it down: the cheapest
+                    // way to fail one directory of a pact for real, rather than
+                    // by reaching into the engine's error types, which are
+                    // `#[non_exhaustive]` and cannot be built from here.
+                    return Ok(AgentResponse::new("no."));
+                }
+                Ok(AgentResponse::new(document()))
+            }
+        }
+
+        /// A document long enough for the engine to accept. The rule is a byte
+        /// count and nothing here reads what it says, so this is filler.
+        fn document() -> String {
+            format!("# module\n\n{}\n", "What it does, at length. ".repeat(20))
+        }
+
+        /// The manifest as it sits on disk under `root`, or `None` when there
+        /// is none.
+        fn saved(root: &Path) -> Option<Manifest> {
+            Manifest::load(root).ok()
+        }
+
+        /// A repository of this test's own under the temporary directory,
+        /// removed when the test that made it ends.
+        ///
+        /// Hand-rolled the way `claude.rs`'s tests do it: this crate's manifest
+        /// gains nothing for a `mkdir` and an `rm -r`.
+        struct Scratch {
+            /// The root every path below is built from, and the root the
+            /// manifest is saved under.
+            root: PathBuf,
+        }
+
+        impl Scratch {
+            /// An empty repository, named after the test using it so a leftover
+            /// says where it came from.
+            fn new(name: &str) -> Self {
+                static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+                let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+                let root =
+                    env::temp_dir().join(format!("warlock-pact-{}-{name}-{unique}", process::id()));
+                fs::create_dir_all(&root).expect("a scratch repository under the temp directory");
+                Self { root }
+            }
+
+            /// Write `contents` at `relative`, creating every directory above
+            /// it.
+            fn write(&self, relative: &str, contents: &str) {
+                let path = self.root.join(relative);
+                fs::create_dir_all(path.parent().expect("a file has a parent"))
+                    .expect("creates the directories above a file");
+                fs::write(&path, contents).expect("writes a file");
+            }
+
+            /// The path at `relative`, as the app would name it.
+            fn path(&self, relative: &str) -> PathBuf {
+                self.root.join(relative)
+            }
+        }
+
+        impl Drop for Scratch {
+            /// Best effort: a leftover under the temporary directory is untidy,
+            /// not a test failure.
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+
+        /// The toggle the app hands back for the directory at `relative`.
+        fn toggle(scratch: &Scratch, relative: &str, pacted: bool) -> PactToggle {
+            PactToggle {
+                path: scratch.path(relative),
+                pacted,
+            }
+        }
+
+        /// A repository with one crate of two directories in it.
+        fn one_crate(name: &str) -> Scratch {
+            let scratch = Scratch::new(name);
+            scratch.write("crates/engine/src/lib.rs", "//! Core engine.\n");
+            scratch
+        }
+
+        #[test]
+        fn a_pact_documents_every_directory_in_the_subtree_and_grants_it() {
+            let scratch = one_crate("grants");
+            let agent = Canned::new(&scratch, []);
+
+            let Toggled {
+                manifest,
+                granted,
+                message,
+            } = apply_toggle(
+                &Manifest::new(),
+                &scratch.root,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+            )
+            .expect("a subtree that walks and a manifest that writes");
+
+            assert!(granted, "nothing went wrong, so the subtree is fresh");
+            assert_eq!(message, None, "and there is nothing to report");
+
+            let mut modules: Vec<&str> = manifest.entries().iter().map(PactEntry::module).collect();
+            modules.sort_unstable();
+            assert_eq!(modules, ["crates/engine", "crates/engine/src"]);
+
+            for entry in manifest.entries() {
+                let directory = entry.module_path(&scratch.root);
+                let module = entry.module();
+                assert_eq!(entry.document(), format!("{module}/{DOCUMENT_FILE}"));
+                assert!(
+                    directory.join(DOCUMENT_FILE).is_file(),
+                    "{module} has no document"
+                );
+                // The point of the two phases: every document was written
+                // before any hash was taken, so a parent is as fresh as its
+                // children.
+                let hash = subtree_hash(&directory).expect("a directory just written hashes");
+                assert_eq!(
+                    decide_state(Some(entry), &hash),
+                    NodeState::PactedFresh,
+                    "{module} is not fresh"
+                );
+            }
+        }
+
+        #[test]
+        fn the_manifest_is_written_once_and_only_when_the_pact_is_over() {
+            let scratch = one_crate("once");
+            let agent = Canned::new(&scratch, []);
+
+            let Toggled { manifest, .. } = apply_toggle(
+                &Manifest::new(),
+                &scratch.root,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+            )
+            .expect("a subtree that walks and a manifest that writes");
+
+            // Two passes ran, and neither of them found a manifest: a save per
+            // directory would have left one on disk for the second to see.
+            assert_eq!(
+                agent.directories(),
+                [
+                    PathBuf::from("crates/engine/src"),
+                    PathBuf::from("crates/engine")
+                ],
+                "children before parents",
+            );
+            assert!(
+                !agent.saw_a_manifest(),
+                "the manifest was written while the pact was still running"
+            );
+            // And it is there afterwards, saying exactly what came back.
+            assert_eq!(
+                saved(&scratch.root).expect("the manifest was written"),
+                manifest
+            );
+        }
+
+        #[test]
+        fn entries_outside_the_pacted_subtree_are_kept_exactly_as_they_were() {
+            let scratch = one_crate("outside");
+            scratch.write("crates/tui/src/main.rs", "fn main() {}\n");
+            let outside = PactEntry::new(
+                &scratch.root,
+                scratch.path("crates/tui"),
+                scratch.path("crates/tui").join(DOCUMENT_FILE),
+            )
+            .expect("a path under the root can be stored")
+            .with_grant("earned-earlier", "2026-01-01T00:00:00Z");
+            let agent = Canned::new(&scratch, []);
+
+            let Toggled { manifest, .. } = apply_toggle(
+                &Manifest::with_entries([outside.clone()]),
+                &scratch.root,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+            )
+            .expect("a subtree that walks and a manifest that writes");
+
+            // Same entry, same grant: a pact of one subtree is no judgement of
+            // any other.
+            assert_eq!(manifest.entry("crates/tui"), Some(&outside));
+            assert!(
+                !scratch.path("crates/tui").join(DOCUMENT_FILE).exists(),
+                "a directory outside the pact was written to"
+            );
+            assert_eq!(agent.directories().len(), 2, "and no pass ran for it");
+        }
+
+        #[test]
+        fn a_directory_the_pass_refuses_is_summarised_on_the_footers_one_line() {
+            let scratch = one_crate("refused");
+            let agent = Canned::new(&scratch, ["crates/engine/src"]);
+
+            let Toggled {
+                manifest,
+                granted,
+                message,
+            } = apply_toggle(
+                &Manifest::new(),
+                &scratch.root,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+            )
+            .expect("half a pact is still a manifest worth writing");
+
+            assert!(!granted, "a subtree with a failure in it is not fresh");
+            let message = message.expect("the failure is reported");
+            assert!(!message.contains('\n'), "the footer is one line: {message}");
+            assert!(
+                message.contains("crates/engine/src"),
+                "the failing directory is named: {message}"
+            );
+            assert!(
+                !message.contains("(and"),
+                "one failure has nothing to count: {message}"
+            );
+
+            // No document, no entry; the ancestor inside the pact is recorded
+            // with nothing granted, which is what draws it yellow.
+            assert_eq!(manifest.entry("crates/engine/src"), None);
+            let entry = manifest
+                .entry("crates/engine")
+                .expect("the ancestor is still pacted");
+            assert_eq!(entry.granted_hash(), None);
+            assert_eq!(
+                saved(&scratch.root).expect("the manifest was written"),
+                manifest
+            );
+        }
+
+        #[test]
+        fn several_things_going_wrong_are_one_line_with_the_rest_counted() {
+            let scratch = one_crate("counted");
+            let agent = Canned::new(&scratch, ["crates/engine/src", "crates/engine"]);
+
+            let Toggled {
+                manifest, message, ..
+            } = apply_toggle(
+                &Manifest::new(),
+                &scratch.root,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+            )
+            .expect("a pact that documented nothing still saves");
+
+            let message = message.expect("the failures are reported");
+            assert!(!message.contains('\n'), "the footer is one line: {message}");
+            // The first failure in full — children first, so it is the deeper
+            // directory — and the other counted rather than quoted.
+            assert!(
+                message.contains("crates/engine/src"),
+                "the first failure is quoted: {message}"
+            );
+            assert!(message.ends_with("(and 1 more)"), "{message}");
+            assert!(
+                manifest.entries().is_empty(),
+                "nothing was documented, so nothing is recorded: {manifest:?}"
+            );
+        }
+
+        #[test]
+        fn un_pacting_saves_a_manifest_without_the_subtree_and_keeps_the_documents() {
+            let scratch = one_crate("unpact");
+            let agent = Canned::new(&scratch, []);
+            let pacted = apply_toggle(
+                &Manifest::new(),
+                &scratch.root,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+            )
+            .expect("a subtree that walks and a manifest that writes")
+            .manifest;
+
+            let Toggled {
+                manifest,
+                granted,
+                message,
+            } = apply_toggle(
+                &pacted,
+                &scratch.root,
+                &toggle(&scratch, "crates/engine", false),
+                &agent,
+            )
+            .expect("dropping entries needs nothing but the manifest");
+
+            assert!(!granted, "un-pacting grants nothing");
+            assert_eq!(
+                message, None,
+                "the app has already said what un-pacting leaves behind"
+            );
+            assert!(manifest.entries().is_empty());
+            assert_eq!(
+                saved(&scratch.root).expect("the manifest was written"),
+                manifest
+            );
+            // The writing survives the claim being taken back.
+            for module in ["crates/engine", "crates/engine/src"] {
+                assert!(
+                    scratch.path(module).join(DOCUMENT_FILE).is_file(),
+                    "{module}'s document was deleted"
+                );
+            }
+            assert_eq!(
+                agent.directories().len(),
+                2,
+                "un-pacting runs no model passes"
+            );
+        }
+
+        #[test]
+        fn a_directory_outside_the_repository_root_is_refused_rather_than_stored() {
+            // No filesystem: un-pacting is path arithmetic, and this path has
+            // no manifest spelling to do it with.
+            let outside = PactToggle {
+                path: PathBuf::from("/elsewhere/crates/engine"),
+                pacted: false,
+            };
+            let scratch = Scratch::new("elsewhere");
+
+            let message = apply_toggle(
+                &Manifest::new(),
+                Path::new(ROOT),
+                &outside,
+                &Canned::new(&scratch, []),
+            )
+            .expect_err("a path outside the root has no manifest spelling");
+
+            assert!(!message.contains('\n'), "the footer is one line: {message}");
+            assert!(
+                message.contains("/elsewhere/crates/engine"),
+                "the refused path is named: {message}"
+            );
+            assert!(
+                saved(Path::new(ROOT)).is_none(),
+                "nothing was written anywhere"
+            );
+        }
+
+        /// The one failure that needs a directory nobody can write to, and
+        /// making one is Unix-only: `chmod` has no portable stand-in, and the
+        /// alternative — a second binary, or a dependency — costs more than the
+        /// coverage.
+        #[cfg(unix)]
+        #[test]
+        fn a_manifest_that_cannot_be_saved_leaves_the_previous_one_alone() {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let scratch = one_crate("readonly");
+            let agent = Canned::new(&scratch, []);
+            // Something for the failed save to spare: a manifest from an
+            // earlier run, and the bytes it is expected to still hold.
+            let previous = Manifest::with_entries([PactEntry::new(
+                &scratch.root,
+                scratch.path("crates/tui"),
+                scratch.path("crates/tui").join(DOCUMENT_FILE),
+            )
+            .expect("a path under the root can be stored")]);
+            previous.save(&scratch.root).expect("the first save works");
+            let manifest_dir = scratch.path(".warlock");
+            let before = fs::read(manifest_dir.join("pacts.toml")).expect("reads what was saved");
+            fs::set_permissions(&manifest_dir, fs::Permissions::from_mode(0o555))
+                .expect("chmods the manifest directory read-only");
+
+            let message = apply_toggle(
+                &previous,
+                &scratch.root,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+            )
+            .expect_err("a manifest directory nobody can write to");
+
+            // Back to writable before anything can fail, so the scratch
+            // repository can still be removed.
+            fs::set_permissions(&manifest_dir, fs::Permissions::from_mode(0o755))
+                .expect("chmods it back");
+
+            assert!(!message.contains('\n'), "the footer is one line: {message}");
+            assert!(
+                message.starts_with("could not read or write "),
+                "the engine's own wording: {message}"
+            );
+            assert_eq!(
+                fs::read(manifest_dir.join("pacts.toml")).expect("reads it again"),
+                before,
+                "the previous manifest was not touched"
+            );
         }
     }
 }
