@@ -21,6 +21,17 @@
 //! node it was loaded with, the flag says which of them are worth drawing right
 //! now, and turning it off puts the rest back untouched.
 //!
+//! Showing the files inside a directory is the third flag of that same shape.
+//! The files a node lists are flattened into rows alongside the nodes, once,
+//! when the app is built; the flag decides whether those rows are drawn. Doing
+//! it that way rather than splicing files in when the flag goes on is what lets
+//! the flag go off again without the tree: the rows were never thrown away, so
+//! turning files off is the same filter-and-re-flatten every other view change
+//! goes through. A file row is a row for something that is not a node — no
+//! README, no children, and the state of the directory holding it, because the
+//! colour of a file is the colour of its module — so the operations that act on
+//! nodes refuse it rather than half-working on it.
+//!
 //! A tree taller than the terminal does not fit, so the app also remembers
 //! which slice of those rows is on screen: a scroll offset, kept in step with
 //! the selection by every method that moves it, and computed by one pure
@@ -66,6 +77,11 @@ const REPOSITORY_ROOT_LABEL: &str = "(repository root)";
 /// directory with no children can be neither collapsed nor expanded, and a row
 /// that could not say so would send the renderer back to the tree to find out
 /// whether to draw a marker.
+///
+/// Most rows stand for a node. A row can also stand for one of the files a node
+/// lists — see [`Row::file`] — which is drawn like any other row and is nothing
+/// like one otherwise: it documents nothing, contains nothing, and is counted
+/// nowhere.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Row {
     /// How deep the node sits: `0` for the root, `1` for its children.
@@ -82,6 +98,10 @@ pub struct Row {
     /// which is none of them while the node is collapsed. `0` for a leaf, and
     /// a leaf is what [`App::toggle_collapsed`] refuses to toggle.
     pub children: usize,
+    /// Whether the row stands for a file rather than a node. See [`Row::file`],
+    /// and ask it with [`Row::is_file`] rather than reading this: what the flag
+    /// *means* is the interesting part.
+    pub file: bool,
 }
 
 impl Row {
@@ -108,6 +128,29 @@ impl Row {
             readme: readme.into_readme(),
             state,
             children: 0,
+            file: false,
+        }
+    }
+
+    /// A row for the file at `path`, sitting at `depth`, in `state`.
+    ///
+    /// A file is not a node: it has no README of its own, no children, and no
+    /// state the engine ever decided for it. What it has is the state of the
+    /// directory holding it, handed over here by the caller doing the
+    /// flattening, because the design doc's rule is that a file takes its
+    /// module's colour — the colour says which module the file belongs to, not
+    /// something about the file. That copy is the reason
+    /// [`App::toggle_pact`] writes a new state onto a directory's file rows as
+    /// well as onto the directory: a copy nobody updates is a colour that goes
+    /// quietly stale.
+    ///
+    /// `depth` is the caller's too, and is one deeper than the directory's, so
+    /// the file indents under it.
+    #[must_use]
+    pub fn file(depth: usize, path: impl Into<PathBuf>, state: NodeState) -> Self {
+        Self {
+            file: true,
+            ..Self::new(depth, path, None, state)
         }
     }
 
@@ -123,6 +166,16 @@ impl Row {
     #[must_use]
     pub const fn has_children(&self) -> bool {
         self.children > 0
+    }
+
+    /// Whether the row stands for a file rather than for a node.
+    ///
+    /// The one bit that tells a file row from a childless, undocumented
+    /// directory, which is otherwise the same set of fields. Everything that
+    /// acts on a node — pacting, above all — asks this first.
+    #[must_use]
+    pub const fn is_file(&self) -> bool {
+        self.file
     }
 }
 
@@ -166,6 +219,14 @@ pub struct PactToggle {
 /// the strongest sense: the rows come back exactly as they were, at the same
 /// depths, in the same order, still collapsed wherever they were collapsed.
 ///
+/// `show_files` is the third, and the only one that can put a row on screen
+/// rather than take one off: `all_rows` holds a row for every file the tree
+/// listed as well as one for every node, and with the flag off — which is how an
+/// app starts — every one of those file rows is filtered out before anything
+/// else looks at the list. Keeping them in `all_rows` rather than splicing them
+/// in when the flag goes on is what makes the flag reversible without the tree,
+/// exactly as `collapsed` is.
+///
 /// `selected` is kept in range by construction and by every method that moves
 /// it, so [`App::selected_row`] is `None` only when there are no rows at all.
 /// It is kept *meaningful* by `reflow`, which puts it back on the node it was
@@ -200,6 +261,7 @@ pub struct App {
     rows: Vec<Row>,
     collapsed: BTreeSet<PathBuf>,
     pacted_only: bool,
+    show_files: bool,
     selected: usize,
     scroll_offset: usize,
     viewport_height: usize,
@@ -223,17 +285,29 @@ impl App {
     /// Nothing starts collapsed, which is what makes a freshly launched app
     /// draw every node the walk yields. Carrying a previous run's collapsed
     /// directories onto a reloaded tree is [`App::with_collapsed`]'s job.
+    ///
+    /// The files each node lists are flattened in here too, each one a
+    /// [`Row::file`] straight after the row for the directory holding it, one
+    /// level deeper and in the state that directory is in. They are not drawn:
+    /// the file toggle starts off (see [`App::toggle_files`]), so a freshly
+    /// built app draws the nodes and nothing else. Reading the listing once,
+    /// here, is what lets the toggle be a filter later rather than a second
+    /// visit to a tree the app does not keep.
     #[must_use]
     pub fn from_tree(tree: &Tree) -> Self {
-        Self::from_rows(
-            tree.walk()
-                .map(|(node, depth)| {
-                    Row::new(depth, node.path.clone(), node.readme.clone(), node.state)
-                        .with_child_count(node.children.len())
-                })
-                .collect(),
-        )
-        .with_counts(tree.counts())
+        let mut rows = Vec::new();
+        for (node, depth) in tree.walk() {
+            rows.push(
+                Row::new(depth, node.path.clone(), node.readme.clone(), node.state)
+                    .with_child_count(node.children.len()),
+            );
+            rows.extend(
+                node.files
+                    .iter()
+                    .map(|file| Row::file(depth + 1, file.clone(), node.state)),
+            );
+        }
+        Self::from_rows(rows).with_counts(tree.counts())
     }
 
     /// The app state for an already-flattened list of rows, with everything
@@ -257,25 +331,31 @@ impl App {
     /// has nothing to say about one. See [`App::message`].
     ///
     /// Nothing is collapsed and the pacted-only filter is off, so the rows
-    /// handed over are exactly the rows drawn. They are kept a second time as the unfiltered list a later
-    /// collapse re-filters and a later expand restores from; a caller that
-    /// wants collapsing to hide anything has to say which rows have children,
-    /// with [`Row::with_child_count`], because a bare list of rows is the one
-    /// input here that does not come from a tree.
+    /// handed over are exactly the rows drawn — unless some of them are file
+    /// rows, which the file toggle starts off over. They are kept a second time
+    /// as the unfiltered list a later collapse re-filters and a later expand
+    /// restores from; a caller that wants collapsing to hide anything has to
+    /// say which rows have children, with [`Row::with_child_count`], because a
+    /// bare list of rows is the one input here that does not come from a tree.
     #[must_use]
     pub fn from_rows(rows: Vec<Row>) -> Self {
-        Self {
+        let mut app = Self {
             rows: rows.clone(),
             all_rows: rows,
             collapsed: BTreeSet::new(),
             pacted_only: false,
+            show_files: false,
             selected: 0,
             scroll_offset: 0,
             viewport_height: 0,
             counts: StateCounts::default(),
             header: String::new(),
             message: None,
-        }
+        };
+        // The rows handed over may hold file rows, which the file toggle starts
+        // off over, so the drawn list is derived rather than assumed even here.
+        app.reflow();
+        app
     }
 
     /// The same app state, with every node in `collapsed` collapsed and the
@@ -444,6 +524,48 @@ impl App {
         self.reflow();
     }
 
+    /// Whether the files inside each directory are drawn as well as the
+    /// directories themselves.
+    ///
+    /// `false` for a freshly built app: the tree is a tree of modules, and the
+    /// files are detail asked for by [`App::toggle_files`] rather than the
+    /// first thing a reader is shown.
+    #[must_use]
+    pub const fn show_files(&self) -> bool {
+        self.show_files
+    }
+
+    /// Show the files inside each directory, or hide them again.
+    ///
+    /// Shown, every file a node listed gets a row directly under the row for
+    /// the directory holding it, one level deeper, in that directory's state
+    /// and so in that module's colour. The order is the walk's: the files of a
+    /// directory come in the order the tree listed them, before the rows for
+    /// that directory's subdirectories.
+    ///
+    /// A file row is drawn and nothing else. It documents nothing, so
+    /// [`App::toggle_pact`] refuses it; it contains nothing, so collapsing it
+    /// hides nothing; and it is no node, so [`App::counts`] does not move by a
+    /// single one when this is toggled either way — the footer counts modules,
+    /// and a module has the same files whether or not they are on screen.
+    ///
+    /// It composes with the other two view flags the way they compose with each
+    /// other, and in that order: the file rows are filtered out first, so with
+    /// files hidden the pacted-only pass and the collapsed set see exactly the
+    /// list of nodes they saw before files existed. With files shown, a file
+    /// under a collapsed directory is hidden with it, and — because a file row
+    /// carries its directory's state — a file under a pacted directory survives
+    /// the pacted-only filter while one under a directory that is merely on the
+    /// way to something pacted does not.
+    ///
+    /// Clears the last keystroke's message, like every other key that does
+    /// something.
+    pub fn toggle_files(&mut self) {
+        self.show_files = !self.show_files;
+        self.message = None;
+        self.reflow();
+    }
+
     /// How many nodes sit in each state, as the engine counted them.
     #[must_use]
     pub const fn counts(&self) -> StateCounts {
@@ -605,21 +727,25 @@ impl App {
         );
     }
 
-    /// Rebuild the drawn rows from the whole walk, the pacted-only flag and the
-    /// collapsed set, and put the selection and the window back where they
-    /// belong.
+    /// Rebuild the drawn rows from the whole walk, the file and pacted-only
+    /// flags and the collapsed set, and put the selection and the window back
+    /// where they belong.
     ///
     /// Every change to what is drawn ends here, and it is the only place
     /// `rows` is written: the drawn list is derived from `all_rows`,
-    /// `pacted_only` and `collapsed` and nothing else, so there is no state to
-    /// get out of step with them.
+    /// `show_files`, `pacted_only` and `collapsed` and nothing else, so there is
+    /// no state to get out of step with them.
     ///
-    /// The two filters are applied in that order and never as one pass. What is
-    /// pacted, and what is on the way to something pacted, is read off the whole
-    /// walk, so a directory that is collapsed over the only pacted node below it
-    /// still earns its row; deciding pactedness from the already-collapsed list
-    /// would make collapsing a directory delete it from a narrowed view, which
-    /// is the one thing collapsing must never do.
+    /// The three filters are applied in that order and never as one pass. Files
+    /// go first, so that with the toggle off the two passes below it see the
+    /// list of nodes and only that: both of them reason by depth, and a file row
+    /// sits deeper than the directory holding it, so a hidden file left in the
+    /// list would be a row those passes had to reason around for no reason.
+    /// Then pactedness: what is pacted, and what is on the way to something
+    /// pacted, is read off the whole walk, so a directory that is collapsed over
+    /// the only pacted node below it still earns its row; deciding pactedness
+    /// from the already-collapsed list would make collapsing a directory delete
+    /// it from a narrowed view, which is the one thing collapsing must never do.
     ///
     /// The selection is carried by path rather than by index, because the index
     /// it sat at meant a row that may not exist any more. A selection whose
@@ -629,10 +755,15 @@ impl App {
     /// ancestor still drawn, and on the first row when not even that survives.
     fn reflow(&mut self) {
         let selected = self.rows.get(self.selected).map(|row| row.path.clone());
-        let kept: Cow<'_, [Row]> = if self.pacted_only {
-            Cow::Owned(pacted_rows(&self.all_rows))
-        } else {
+        let kept: Cow<'_, [Row]> = if self.show_files {
             Cow::Borrowed(&self.all_rows)
+        } else {
+            Cow::Owned(node_rows(&self.all_rows))
+        };
+        let kept: Cow<'_, [Row]> = if self.pacted_only {
+            Cow::Owned(pacted_rows(&kept))
+        } else {
+            kept
         };
         self.rows = drawn_rows(&kept, &self.collapsed);
         self.selected = selected
@@ -726,10 +857,12 @@ impl App {
     /// counts are the engine's numbers, kept current rather than re-derived.
     ///
     /// Returns what the caller needs to edit the manifest with, or `None` when
-    /// nothing was toggled — an app with no rows, or a selected node with no
-    /// README. A directory with no documentation yet is not a module, and a
-    /// manifest entry has nowhere to point without a README, so such a node is
-    /// refused outright: no state changes, no count changes, nothing to write.
+    /// nothing was toggled — an app with no rows, a selected file, or a selected
+    /// node with no README. A directory with no documentation yet is not a
+    /// module, and a manifest entry has nowhere to point without a README, so
+    /// such a node is refused outright: no state changes, no count changes,
+    /// nothing to write. A file is refused for a reason of its own: a pact is
+    /// made with a module, and a file is part of one rather than being one.
     ///
     /// A refusal sets [`App::message`] to say so, and the return value stays a
     /// bare `Option`: the wording is display state, it belongs here with the
@@ -738,29 +871,36 @@ impl App {
     /// README means. A toggle that went through clears the message instead —
     /// whatever the last keystroke said, this one did something.
     ///
+    /// A toggle that goes through moves the state of the directory's file rows
+    /// with it, in the drawn list and in the whole walk behind it. A file row
+    /// carries a copy of its directory's state so that it can be drawn in its
+    /// module's colour, and a copy that is not kept up is a file drawn in the
+    /// colour its module used to be.
+    ///
     /// Writing the manifest is the caller's job. This is app state and touches
     /// no file.
     pub fn toggle_pact(&mut self) -> Option<PactToggle> {
         let row = self.rows.get(self.selected)?;
         let path = row.path.clone();
+        if row.is_file() {
+            self.message = Some(file_row_message(&self.label_for(&path)));
+            return None;
+        }
         let Some(readme) = row.readme.clone() else {
             self.message = Some(no_readme_message(&self.label_for(&path)));
             return None;
         };
 
-        let row = &mut self.rows[self.selected];
-        let was = row.state;
+        let was = self.rows[self.selected].state;
         let now = match was {
             NodeState::Unpacted => NodeState::PactedStale,
             NodeState::PactedStale | NodeState::PactedFresh => NodeState::Unpacted,
         };
-        row.state = now;
+        set_state(&mut self.rows, &path, now);
         // And in the unfiltered list the next collapse rebuilds the drawn rows
         // from, or the new state would last exactly until something was
         // collapsed and then quietly revert.
-        if let Some(row) = self.all_rows.iter_mut().find(|row| row.path == path) {
-            row.state = now;
-        }
+        set_state(&mut self.all_rows, &path, now);
         self.message = None;
 
         // Both halves of the move happen together or neither does. An app told
@@ -779,6 +919,41 @@ impl App {
             readme,
             pacted: now.is_pacted(),
         })
+    }
+}
+
+/// Which of `all` stand for nodes: the walk with every file row dropped, which
+/// is what the view shows when the file toggle is off.
+///
+/// The one filter here that is about what a row *is* rather than about where it
+/// sits, which is why it runs before the other two: the passes below reason
+/// about depth alone, and they are owed a list in which every depth belongs to
+/// a node.
+///
+/// Pure, and deliberately free of [`App`]: rows in, rows out.
+fn node_rows(all: &[Row]) -> Vec<Row> {
+    all.iter().filter(|row| !row.is_file()).cloned().collect()
+}
+
+/// Put every row standing for the node at `path`, or for a file sitting
+/// directly in it, into `state`.
+///
+/// One directory's row and its file rows move together because they are one
+/// fact drawn more than once: a file takes its module's colour, so the state on
+/// a file row is the state of the directory holding it and has no other source
+/// to be refreshed from. A file is recognised by its parent directory rather
+/// than by a prefix match, so nothing below a subdirectory is touched — a pact
+/// is one node's, not a subtree's.
+fn set_state(rows: &mut [Row], path: &Path, state: NodeState) {
+    for row in rows {
+        let stands_for_it = if row.is_file() {
+            row.path.parent() == Some(path)
+        } else {
+            row.path == path
+        };
+        if stands_for_it {
+            row.state = state;
+        }
     }
 }
 
@@ -944,6 +1119,21 @@ fn no_readme_message(label: &str) -> String {
     )
 }
 
+/// What the app says when the pact key is pressed on a file, naming it as
+/// `label`.
+///
+/// Its own wording rather than the missing-README one, because it is its own
+/// refusal: the file is not undocumented, it is not a thing a pact is made with
+/// at all. A pact is an agreement about a module — the README it is written in
+/// and the directory it covers — and the files are what the module is made of,
+/// so the answer is to point at the directory rather than to explain a
+/// capability that is coming. Said out loud rather than silently ignored: a key
+/// that does nothing on some rows and something on others has to say which it
+/// just did.
+fn file_row_message(label: &str) -> String {
+    format!("{label} is a file — pacts are made with the directory holding it, not with a file")
+}
+
 /// The field of `counts` holding the tally for `state`.
 ///
 /// [`StateCounts`]' fields are public but its own accessor for this is not, so
@@ -1074,9 +1264,40 @@ mod tests {
         ]
     }
 
+    /// The whole fixture with its files shown: every node, each one followed by
+    /// the files it lists, one level deeper.
+    fn whole_fixture_with_files() -> Vec<String> {
+        vec![
+            "warlock".to_owned(),
+            "warlock/Cargo.toml".to_owned(),
+            "warlock/README.md".to_owned(),
+            "warlock/crates".to_owned(),
+            "warlock/crates/engine".to_owned(),
+            "warlock/crates/engine/Cargo.toml".to_owned(),
+            "warlock/crates/engine/README.md".to_owned(),
+            "warlock/crates/tui".to_owned(),
+            "warlock/crates/tui/README.md".to_owned(),
+            "warlock/assets".to_owned(),
+            "warlock/assets/README.md".to_owned(),
+            "warlock/assets/logo.svg".to_owned(),
+        ]
+    }
+
     /// The app for the shared fixture, selecting the row for `path`.
     fn app_selecting(path: &str) -> App {
+        select(App::from_tree(&fixture::tree()), path)
+    }
+
+    /// The app for the shared fixture with its files shown, selecting the row
+    /// for `path` — which may be a file.
+    fn app_with_files_selecting(path: &str) -> App {
         let mut app = App::from_tree(&fixture::tree());
+        app.toggle_files();
+        select(app, path)
+    }
+
+    /// `app` with the row for `path` selected, reached by stepping down to it.
+    fn select(mut app: App, path: &str) -> App {
         while app.selected_row().expect("the fixture has rows").path != Path::new(path) {
             let before = app.selected();
             app.select_next();
@@ -2278,6 +2499,373 @@ mod tests {
         app.toggle_pacted_only();
 
         assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn a_fresh_app_draws_the_directories_and_not_the_files_in_them() {
+        let app = App::from_tree(&fixture::tree());
+
+        assert!(!app.show_files());
+        assert_eq!(drawn(&app), whole_fixture());
+        assert!(app.rows().iter().all(|row| !row.is_file()));
+        // Not because the fixture has no files: they are held, and hidden.
+        assert!(
+            fixture::tree()
+                .walk()
+                .any(|(node, _)| !node.files.is_empty())
+        );
+    }
+
+    #[test]
+    fn showing_files_puts_each_one_under_its_directory_one_level_deeper() {
+        let mut app = App::from_tree(&fixture::tree());
+
+        app.toggle_files();
+
+        assert!(app.show_files());
+        assert_eq!(drawn(&app), whole_fixture_with_files());
+        let seen: Vec<(usize, &str, bool)> = app
+            .rows()
+            .iter()
+            .map(|row| {
+                (
+                    row.depth,
+                    row.path.to_str().expect("ascii path"),
+                    row.is_file(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (0, "warlock", false),
+                (1, "warlock/Cargo.toml", true),
+                (1, "warlock/README.md", true),
+                (1, "warlock/crates", false),
+                (2, "warlock/crates/engine", false),
+                (3, "warlock/crates/engine/Cargo.toml", true),
+                (3, "warlock/crates/engine/README.md", true),
+                (2, "warlock/crates/tui", false),
+                (3, "warlock/crates/tui/README.md", true),
+                (1, "warlock/assets", false),
+                (2, "warlock/assets/README.md", true),
+                (2, "warlock/assets/logo.svg", true),
+            ]
+        );
+        // Every file row sits one level under the directory that listed it.
+        for (index, row) in app.rows().iter().enumerate() {
+            if !row.is_file() {
+                continue;
+            }
+            let parent = app.rows()[..index]
+                .iter()
+                .rposition(|other| !other.is_file())
+                .map(|at| &app.rows()[at]);
+            let parent = parent.expect("a file row always follows a directory row");
+            assert_eq!(row.path.parent(), Some(parent.path.as_path()));
+            assert_eq!(row.depth, parent.depth + 1);
+        }
+    }
+
+    #[test]
+    fn hiding_the_files_again_puts_the_app_back_as_it_was() {
+        let before = App::from_tree(&fixture::tree());
+        let mut app = before.clone();
+
+        app.toggle_files();
+        app.toggle_files();
+
+        assert!(!app.show_files());
+        assert_eq!(drawn(&app), whole_fixture());
+        assert_eq!(app, before);
+    }
+
+    #[test]
+    fn a_file_row_documents_nothing_contains_nothing_and_takes_its_modules_state() {
+        let tree = fixture::tree();
+        let mut app = App::from_tree(&tree);
+
+        app.toggle_files();
+
+        for row in app.rows().iter().filter(|row| row.is_file()) {
+            assert_eq!(row.readme, None, "{} claims a README", row.path.display());
+            assert_eq!(row.children, 0);
+            assert!(!row.has_children());
+            let directory = row.path.parent().expect("a file sits in a directory");
+            let node = tree.find(directory).expect("the file came from that node");
+            assert_eq!(
+                row.state,
+                node.state,
+                "{} is not its module's colour",
+                row.path.display()
+            );
+        }
+        // Including files under two different states, so the copy is a copy of
+        // the right node rather than of any node.
+        assert!(
+            app.rows()
+                .iter()
+                .any(|row| row.is_file() && row.state == NodeState::PactedFresh)
+        );
+        assert!(
+            app.rows()
+                .iter()
+                .any(|row| row.is_file() && row.state == NodeState::Unpacted)
+        );
+    }
+
+    #[test]
+    fn pacting_a_directory_recolours_the_files_in_it() {
+        let mut app = app_with_files_selecting("warlock/assets");
+
+        app.toggle_pact().expect("assets has a README");
+
+        // The directory's own files move with it; a file of another directory
+        // does not.
+        let state_of = |app: &App, path: &str| {
+            app.rows()
+                .iter()
+                .find(|row| row.path == Path::new(path))
+                .map(|row| row.state)
+        };
+        assert_eq!(
+            state_of(&app, "warlock/assets"),
+            Some(NodeState::PactedStale)
+        );
+        assert_eq!(
+            state_of(&app, "warlock/assets/README.md"),
+            Some(NodeState::PactedStale)
+        );
+        assert_eq!(
+            state_of(&app, "warlock/assets/logo.svg"),
+            Some(NodeState::PactedStale)
+        );
+        assert_eq!(
+            state_of(&app, "warlock/crates/tui/README.md"),
+            Some(NodeState::PactedStale),
+        );
+        assert_eq!(
+            state_of(&app, "warlock/crates/engine/README.md"),
+            Some(NodeState::PactedFresh)
+        );
+
+        // And in the list behind the drawn one, or the colour would revert the
+        // moment anything re-filtered the rows.
+        app.toggle_files();
+        app.toggle_files();
+        assert_eq!(
+            state_of(&app, "warlock/assets/logo.svg"),
+            Some(NodeState::PactedStale)
+        );
+    }
+
+    #[test]
+    fn a_file_cannot_be_pacted_and_the_refusal_says_why() {
+        let mut app = app_with_files_selecting("warlock/assets/logo.svg");
+        let before = app.clone();
+
+        assert_eq!(app.toggle_pact(), None);
+
+        // Everything but the message is exactly as it was: no state change, no
+        // count change, and nothing for the caller to write down.
+        assert_eq!(app.rows(), before.rows());
+        assert_eq!(app.counts(), before.counts());
+        assert_eq!(app.selected(), before.selected());
+        let message = app.message().expect("a refusal says why");
+        assert!(
+            message.starts_with("warlock/assets/logo.svg is a file"),
+            "{message}"
+        );
+        // Its own wording, not the missing-README one, though a file has no
+        // README either.
+        assert!(!message.contains("no README"), "{message}");
+        assert!(message.contains("directory"), "{message}");
+    }
+
+    #[test]
+    fn a_file_under_a_documented_directory_is_refused_all_the_same() {
+        // The README of a documented module, which is the row most likely to be
+        // mistaken for the module itself.
+        let mut app = app_with_files_selecting("warlock/crates/tui/README.md");
+        let before = app.clone();
+
+        assert_eq!(app.toggle_pact(), None);
+
+        assert_eq!(app.rows(), before.rows());
+        assert_eq!(app.counts(), before.counts());
+        assert!(app.message().is_some());
+    }
+
+    #[test]
+    fn showing_files_leaves_the_engines_tally_alone() {
+        let tree = fixture::tree();
+        let mut app = App::from_tree(&tree);
+        let before = app.counts();
+        assert_eq!(before, tally(&app));
+
+        app.toggle_files();
+
+        // More rows on screen and not one more node: the footer counts modules.
+        assert!(app.rows().len() > tree.counts().total());
+        assert_eq!(app.counts(), before);
+        assert_eq!(app.counts(), tree.counts());
+
+        app.toggle_files();
+
+        assert_eq!(app.counts(), before);
+        assert_eq!(app.counts(), tally(&app));
+    }
+
+    #[test]
+    fn pacting_with_files_shown_still_moves_exactly_one_node_in_the_tally() {
+        let mut app = app_with_files_selecting("warlock/assets");
+        let before = app.counts();
+
+        app.toggle_pact().expect("assets has a README");
+
+        assert_eq!(app.counts().total(), before.total());
+        assert_eq!(app.counts().unpacted, before.unpacted - 1);
+        assert_eq!(app.counts().pacted_stale, before.pacted_stale + 1);
+    }
+
+    #[test]
+    fn collapsing_a_directory_hides_its_files_with_it_and_expanding_puts_them_back() {
+        let mut leaf = app_with_files_selecting("warlock/assets");
+
+        leaf.toggle_collapsed();
+
+        // `assets` has files and no child directories, so there is nothing to
+        // collapse and nothing is hidden: files are a listing, not children.
+        assert_eq!(drawn(&leaf), whole_fixture_with_files());
+        assert!(leaf.collapsed().is_empty());
+
+        // A directory with children, on the other hand, takes its own files and
+        // its descendants' with it.
+        let mut app = app_with_files_selecting("warlock/crates");
+        let before = app.rows().to_vec();
+        app.toggle_collapsed();
+
+        assert_eq!(
+            drawn(&app),
+            [
+                "warlock",
+                "warlock/Cargo.toml",
+                "warlock/README.md",
+                "warlock/crates",
+                "warlock/assets",
+                "warlock/assets/README.md",
+                "warlock/assets/logo.svg",
+            ]
+        );
+
+        app.toggle_collapsed();
+
+        // Byte for byte what was there before: same rows, same order, same
+        // depths, same states.
+        assert_eq!(app.rows(), before);
+    }
+
+    #[test]
+    fn collapsing_the_root_hides_every_file_in_the_tree() {
+        let mut app = app_with_files_selecting("warlock");
+
+        app.toggle_collapsed();
+
+        assert_eq!(drawn(&app), ["warlock"]);
+
+        app.toggle_collapsed();
+
+        assert_eq!(drawn(&app), whole_fixture_with_files());
+    }
+
+    #[test]
+    fn hiding_the_files_under_the_selection_lands_it_on_the_directory() {
+        let mut app = app_with_files_selecting("warlock/crates/engine/README.md");
+
+        app.toggle_files();
+
+        // The file's row is gone, and what it went behind is the directory that
+        // held it.
+        assert_eq!(
+            app.selected_row().map(|row| row.path.clone()),
+            Some(PathBuf::from("warlock/crates/engine"))
+        );
+        assert!(app.selected() < app.rows().len());
+    }
+
+    #[test]
+    fn the_filter_keeps_the_files_of_pacted_directories_and_no_others() {
+        let mut app = App::from_tree(&fixture::tree());
+        app.toggle_files();
+
+        app.toggle_pacted_only();
+
+        // `crates/` survives as the way down to the pacted modules, but nothing
+        // of it is pacted, so it brings no files with it — and it has none.
+        // `assets/` is unpacted and goes whole, its files with it.
+        assert_eq!(
+            drawn(&app),
+            [
+                "warlock",
+                "warlock/Cargo.toml",
+                "warlock/README.md",
+                "warlock/crates",
+                "warlock/crates/engine",
+                "warlock/crates/engine/Cargo.toml",
+                "warlock/crates/engine/README.md",
+                "warlock/crates/tui",
+                "warlock/crates/tui/README.md",
+            ]
+        );
+
+        app.toggle_files();
+
+        // And with the files hidden again the narrowed view is exactly the one
+        // it was before files existed.
+        assert_eq!(drawn(&app), pacted_fixture());
+    }
+
+    #[test]
+    fn toggling_the_files_clears_the_last_keystrokes_message() {
+        let mut app = app_selecting("warlock/crates");
+        assert_eq!(app.toggle_pact(), None);
+        assert!(app.message().is_some());
+
+        app.toggle_files();
+
+        assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn showing_files_leaves_the_window_in_range_with_the_selection_in_it() {
+        let mut app = app_selecting("warlock/assets");
+        app.set_viewport_height(2);
+
+        app.toggle_files();
+
+        assert!(window_is_in_range(&app));
+        assert!(selection_is_on_screen(&app));
+
+        app.toggle_files();
+
+        assert!(window_is_in_range(&app));
+        assert!(selection_is_on_screen(&app));
+    }
+
+    #[test]
+    fn a_bare_list_of_rows_can_hold_files_too_and_starts_with_them_hidden() {
+        let app = App::from_rows(vec![
+            Row::new(0, "repo", "repo/README.md", NodeState::PactedStale).with_child_count(1),
+            Row::file(1, "repo/README.md", NodeState::PactedStale),
+            Row::new(1, "repo/crates", None, NodeState::Unpacted),
+        ]);
+
+        assert!(!app.show_files());
+        assert_eq!(drawn(&app), ["repo", "repo/crates"]);
+
+        let mut app = app;
+        app.toggle_files();
+        assert_eq!(drawn(&app), ["repo", "repo/README.md", "repo/crates"]);
     }
 
     #[test]
