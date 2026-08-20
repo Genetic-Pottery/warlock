@@ -35,22 +35,43 @@ pub struct Node {
     pub state: NodeState,
     /// Child nodes, in the order they should be rendered. Empty for a leaf.
     pub children: Vec<Node>,
+    /// The files sitting directly in this directory, in path order.
+    ///
+    /// A listing and nothing more. A file is not a node: it has no state, no
+    /// README and no children, it is no part of [`is_leaf`](Node::is_leaf) — a
+    /// node with files and no subdirectories is still a leaf — and nothing
+    /// here is hashed, since a pacted subtree's digest is taken from disk
+    /// rather than from this list. Subdirectories are not listed here either;
+    /// they are `children`.
+    ///
+    /// A loaded node lists what the walk saw directly inside the directory,
+    /// its own `README.md` included: this is a faithful listing rather than a
+    /// listing minus one special name, and a view that would rather not draw
+    /// the README twice can leave it out on the way to the screen. Only what
+    /// the walk yielded appears, so ignored and hidden files are absent
+    /// exactly as ignored and hidden directories are — and, the same fact seen
+    /// from the other side, a README an ignore rule covers still documents its
+    /// node through `readme` while not appearing here.
+    pub files: Vec<PathBuf>,
 }
 
 impl Node {
-    /// A childless node at `path`, documented by `readme`, in `state`.
+    /// A childless node at `path`, documented by `readme`, in `state`, holding
+    /// no files.
     ///
     /// `readme` is anything path-like for a node that has one, or `None` for a
     /// node that does not — see [`IntoReadme`].
     ///
-    /// Add children with [`Node::with_children`] or by pushing onto
-    /// [`Node::children`] directly.
+    /// Add children with [`Node::with_children`] and files with
+    /// [`Node::with_files`], or by pushing onto [`Node::children`] and
+    /// [`Node::files`] directly.
     ///
     /// ```
     /// use warlock_engine::{Node, NodeState};
     ///
     /// let module = Node::new("repo/docs", "repo/docs/README.md", NodeState::Unpacted);
     /// assert!(module.readme.is_some());
+    /// assert!(module.files.is_empty());
     ///
     /// let undocumented = Node::new("repo/crates", None, NodeState::Unpacted);
     /// assert_eq!(undocumented.readme, None);
@@ -62,6 +83,7 @@ impl Node {
             readme: readme.into_readme(),
             state,
             children: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -73,7 +95,34 @@ impl Node {
         self
     }
 
+    /// The same node with `files` attached, the companion to
+    /// [`with_children`](Node::with_children) for the paths that are a listing
+    /// rather than nodes of their own.
+    ///
+    /// The files are stored in the order given and are not sorted here, for
+    /// the same reason children are not reordered: this is a constructor, not
+    /// a policy. Whoever builds the node decides the order — the loader hands
+    /// them over in path order.
+    ///
+    /// ```
+    /// use warlock_engine::{Node, NodeState};
+    ///
+    /// let module = Node::new("repo/docs", "repo/docs/README.md", NodeState::Unpacted)
+    ///     .with_files(["repo/docs/README.md", "repo/docs/adr.md"].map(std::path::PathBuf::from));
+    /// assert_eq!(module.files.len(), 2);
+    /// // Files are a listing, not children: a node with files is still a leaf.
+    /// assert!(module.is_leaf());
+    /// ```
+    #[must_use]
+    pub fn with_files(mut self, files: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.files = files.into_iter().collect();
+        self
+    }
+
     /// Whether this node has no children.
+    ///
+    /// Child *nodes*, that is: [`files`](Node::files) do not count, so a
+    /// directory full of files and no subdirectories is a leaf.
     #[must_use]
     pub fn is_leaf(&self) -> bool {
         self.children.is_empty()
@@ -329,6 +378,8 @@ impl StateCounts {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{Node, Tree};
     use crate::NodeState;
 
@@ -349,11 +400,64 @@ mod tests {
         )
     }
 
+    /// The same fixture with two files listed on every node, so a test can ask
+    /// what difference files make by holding the two trees side by side.
+    fn fixture_with_files() -> Tree {
+        fn listing(node: &Node) -> Node {
+            Node::new(&node.path, node.readme.clone(), node.state)
+                .with_children(node.children.iter().map(listing))
+                .with_files([node.path.join("Cargo.toml"), node.path.join("notes.md")])
+        }
+        Tree::new(listing(&fixture().root))
+    }
+
     #[test]
     fn new_node_starts_childless() {
         let node = Node::new("a", "a/README.md", NodeState::Unpacted);
         assert!(node.children.is_empty());
+        assert!(node.files.is_empty());
         assert!(node.is_leaf());
+    }
+
+    #[test]
+    fn with_files_attaches_them_in_order_and_leaves_the_node_a_leaf() {
+        let node = Node::new("a", "a/README.md", NodeState::Unpacted)
+            .with_files(["a/README.md", "a/Cargo.toml"].map(PathBuf::from));
+        assert_eq!(
+            node.files,
+            [PathBuf::from("a/README.md"), PathBuf::from("a/Cargo.toml"),],
+            "stored as given: ordering is the caller's business",
+        );
+        assert!(
+            node.is_leaf(),
+            "files are a listing, not children, so they cannot unmake a leaf",
+        );
+        assert!(node.children.is_empty());
+    }
+
+    #[test]
+    fn files_are_no_part_of_walking_or_counting() {
+        let listed: Vec<_> = fixture_with_files()
+            .walk()
+            .map(|(node, depth)| (node.path.clone(), depth))
+            .collect();
+        let bare: Vec<_> = fixture()
+            .walk()
+            .map(|(node, depth)| (node.path.clone(), depth))
+            .collect();
+
+        assert_eq!(listed, bare, "a file is never yielded as a node");
+        assert_eq!(
+            fixture_with_files().counts(),
+            fixture().counts(),
+            "the tally counts nodes, and a file is not one",
+        );
+        assert!(
+            fixture_with_files()
+                .walk()
+                .all(|(node, _)| node.files.len() == 2),
+            "the files really are there to be missed",
+        );
     }
 
     #[test]
@@ -493,5 +597,82 @@ mod tests {
         assert_eq!(docs.children.len(), 1);
         assert_eq!(docs.children[0].state, NodeState::PactedStale);
         assert!(docs.children[0].is_leaf());
+    }
+
+    #[test]
+    fn a_tree_carrying_files_survives_a_serde_round_trip() {
+        use serde_test::{Token, assert_tokens};
+
+        // A root with one child, each listing files, so the round trip covers
+        // a nested node and a `files` list that is neither empty nor shared.
+        // The tokens are written out by hand rather than derived from the
+        // value: a renamed or reordered field fails here instead of passing
+        // silently. No format is involved, so nothing below fixes an on-disk
+        // representation.
+        let tree = Tree::new(
+            Node::new("repo", "repo/README.md", NodeState::PactedStale)
+                .with_children([Node::new("repo/docs", None, NodeState::Unpacted)
+                    .with_files([PathBuf::from("repo/docs/adr.md")])])
+                .with_files([
+                    PathBuf::from("repo/Cargo.toml"),
+                    PathBuf::from("repo/README.md"),
+                ]),
+        );
+
+        assert_tokens(
+            &tree,
+            &[
+                Token::Struct {
+                    name: "Tree",
+                    len: 1,
+                },
+                Token::Str("root"),
+                Token::Struct {
+                    name: "Node",
+                    len: 5,
+                },
+                Token::Str("path"),
+                Token::Str("repo"),
+                Token::Str("readme"),
+                Token::Some,
+                Token::Str("repo/README.md"),
+                Token::Str("state"),
+                Token::UnitVariant {
+                    name: "NodeState",
+                    variant: "PactedStale",
+                },
+                Token::Str("children"),
+                Token::Seq { len: Some(1) },
+                Token::Struct {
+                    name: "Node",
+                    len: 5,
+                },
+                Token::Str("path"),
+                Token::Str("repo/docs"),
+                Token::Str("readme"),
+                Token::None,
+                Token::Str("state"),
+                Token::UnitVariant {
+                    name: "NodeState",
+                    variant: "Unpacted",
+                },
+                Token::Str("children"),
+                Token::Seq { len: Some(0) },
+                Token::SeqEnd,
+                Token::Str("files"),
+                Token::Seq { len: Some(1) },
+                Token::Str("repo/docs/adr.md"),
+                Token::SeqEnd,
+                Token::StructEnd,
+                Token::SeqEnd,
+                Token::Str("files"),
+                Token::Seq { len: Some(2) },
+                Token::Str("repo/Cargo.toml"),
+                Token::Str("repo/README.md"),
+                Token::SeqEnd,
+                Token::StructEnd,
+                Token::StructEnd,
+            ],
+        );
     }
 }
