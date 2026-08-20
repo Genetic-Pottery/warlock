@@ -331,16 +331,24 @@ invoked, with no privileged root. So the two roots are deliberately different
 things:
 
 - The **repository root** is the nearest ancestor of the working directory that
-  holds a `.warlock/` directory, found by walking up (`repository_root`). The
-  single manifest is read from there.
+  holds a `.git/` directory, found by walking up (`repository_root`). The
+  single manifest is read from `<root>/.warlock/pacts.toml`, exactly where it
+  has always lived — the anchor moved, the manifest did not. `.git/` is the
+  anchor because a repository nobody has pacted yet is the normal way to meet
+  Warlock: it opens as a tree of unpacted modules, and `.warlock/` appears
+  under that same root the first time something is pacted. The check is a
+  filesystem test for a directory named `.git`, so a checkout where `.git` is
+  a *file* — a worktree, a submodule — is not a root here.
 - The **tree root** is the working directory itself. Launch from
   `crates/warlock-engine` in this repository and `Tree::root_path()` is
   `crates/warlock-engine`, with node states taken from the manifest two levels
   above it.
 
-A working directory with no `.warlock/` anywhere above it is not a repository:
-that is `LoadError::NoRepositoryRoot`, whose `Display` names the condition and
-the directory the search started from. It is an error value, never a panic.
+A working directory with no `.git/` anywhere above it is not a repository, and
+that is the only way resolving the root fails: `LoadError::NoRepositoryRoot`,
+whose `Display` names `.git` and the directory the search started from. A
+missing `.warlock/` is not a failure at all — it loads as an empty manifest.
+It is an error value, never a panic.
 
 ### What the walk skips
 
