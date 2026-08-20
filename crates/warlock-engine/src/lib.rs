@@ -7,7 +7,15 @@
 //! and it reads the bytes of the files under a directory to hash them
 //! ([`subtree_hash`]) — but it opens no sockets and spawns no subprocesses,
 //! and it never follows a symlink out of the directory a caller hands it.
+//!
+//! That last promise holds even though a pact is written by a model. Reaching
+//! one is a port: this crate defines the trait ([`Agent`]), the request and the
+//! response, and owns what to ask and what an answer means, while the binary
+//! implements the trait by running the `claude` CLI and owns the child process,
+//! its output and its timeout. So the process lives on the far side of the
+//! seam, and these tests need no `claude`, no network and no terminal.
 
+mod agent;
 mod decide;
 mod hash;
 mod load;
@@ -15,6 +23,17 @@ mod manifest;
 mod state;
 mod tree;
 
+/// One pass of a model over one directory: the port the engine asks through
+/// and the binary implements with a subprocess.
+pub use agent::Agent;
+/// Everything that can stop a model pass producing a document, in the engine's
+/// vocabulary rather than the transport's.
+pub use agent::Error as AgentError;
+/// What one model pass needs in order to run: the prompt, and the directory to
+/// run it in.
+pub use agent::Request as AgentRequest;
+/// What one model pass produced: the text the model wrote, unparsed.
+pub use agent::Response as AgentResponse;
 /// The colour of a node, from its manifest entry and the hash of its content:
 /// no entry is unpacted, a granted hash equal to the computed one is fresh, and
 /// everything else — including never judged — is stale.
