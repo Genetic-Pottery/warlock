@@ -232,7 +232,7 @@ impl Manifest {
             source,
         })?;
 
-        let temp = dir.join(temp_file_name());
+        let temp = dir.join(temp_file_name(MANIFEST_FILE));
         if let Err(source) = write_and_sync(&temp, text.as_bytes()) {
             drop(fs::remove_file(&temp));
             return Err(Error::Io { path: temp, source });
@@ -545,24 +545,32 @@ pub fn manifest_path(root: impl AsRef<Path>) -> PathBuf {
     root.as_ref().join(MANIFEST_DIR).join(MANIFEST_FILE)
 }
 
-/// A file name for the temporary file a save writes before renaming.
+/// A file name for the temporary file a write-then-rename goes through, for a
+/// target file called `target`.
 ///
 /// It only has to be unique among whatever else might be writing this
 /// directory right now — process id for other processes, a counter for other
-/// threads in this one. It is a dot file so that a save interrupted hard
-/// enough to leave one behind at least leaves it out of a casual `ls`.
-fn temp_file_name() -> String {
+/// threads in this one. It is a dot file for two reasons: a save interrupted
+/// hard enough to leave one behind at least stays out of a casual `ls`, and the
+/// [`ignore`] walks the rest of the crate is built on skip hidden entries, so a
+/// temporary sitting in a module directory cannot reach a tree, a subtree hash
+/// or a pact request while it exists.
+///
+/// Crate-private and parameterised because [`pact`](crate::pact) writes
+/// `WARLOCK.md` the same way: one idiom for every atomic write in the engine,
+/// not two that can drift apart.
+pub(crate) fn temp_file_name(target: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!(".{MANIFEST_FILE}.{}.{n}.tmp", std::process::id())
+    format!(".{target}.{}.{n}.tmp", std::process::id())
 }
 
 /// Write `bytes` to a fresh file at `path` and flush them to the disk.
 ///
 /// The `sync_all` is the point: without it the rename can land before the
-/// contents do, and a crash in between leaves an empty manifest where a good
-/// one used to be.
-fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// contents do, and a crash in between leaves an empty file where a good one
+/// used to be.
+pub(crate) fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = fs::File::create(path)?;
     file.write_all(bytes)?;
     file.sync_all()

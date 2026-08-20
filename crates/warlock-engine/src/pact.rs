@@ -71,7 +71,11 @@
 //! not reformatted, no sections looked for. Warlock does not read `WARLOCK.md`
 //! — it cares that one exists and what its bytes hash to — and section 17's
 //! question about a document skeleton is open, so this module writes the
-//! answer rather than an opinion about the answer.
+//! answer rather than an opinion about the answer. It is written the way
+//! [`Manifest::save`] writes a manifest, through the same two helpers: to a
+//! hidden temporary beside it, then renamed over the document. A pact is long
+//! enough to be worth cancelling, so a front end has to be free to kill the
+//! pass and quit at any moment without leaving half a `WARLOCK.md` on disk.
 //!
 //! A response is turned down in exactly two cases: the [`Agent`] came back with
 //! an [`AgentError`] instead of an answer, or the answer is shorter than
@@ -128,6 +132,7 @@ use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
 
+use crate::manifest::{temp_file_name, write_and_sync};
 use crate::{
     Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, HashError, Manifest,
     ManifestError, PactEntry, now_rfc3339, subtree_hash, to_manifest_path,
@@ -559,6 +564,14 @@ fn at_or_below(module: &str, selected: &str) -> bool {
 /// directory's files, and it is overwritten here as the ordinary outcome of a
 /// pass that was asked to write one.
 ///
+/// The write is **atomic**: the bytes go to a hidden temporary file in the same
+/// directory and are renamed over `WARLOCK.md`, so `WARLOCK.md` holds the whole
+/// old document or the whole new one and never a prefix of either — not even if
+/// the process is killed in the middle of a pact. The temporary is never
+/// visible to this crate's walks (hidden entries are skipped, so it reaches no
+/// tree, no [`subtree_hash`] and no request) and is left behind on neither the
+/// success nor the failure path.
+///
 /// Nothing is recorded. No manifest entry, no subtree hash, no grant: this is
 /// one request, one response, one file, and a caller that wants the directory
 /// to go green does that afterwards with what it knows about the rest of the
@@ -610,10 +623,10 @@ fn at_or_below(module: &str, selected: &str) -> bool {
 ///   [`MINIMUM_DOCUMENT_BYTES`] trimmed. **Nothing is written on this path**:
 ///   a directory with no document still has none, and an existing document is
 ///   byte-identical to what it was before.
-/// * [`Error::Write`] if the document could not be written. A different kind of
+/// * [`Error::Write`] if the document could not be written, whether the
+///   temporary file or the rename over it was what failed. A different kind of
 ///   failure from a refusal — the answer was good and the disk said no — and
-///   the only one that can leave the filesystem in a state the caller did not
-///   ask for.
+///   either way `WARLOCK.md` is byte for byte what it was before.
 pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<Pacted, Error> {
     let directory = directory.as_ref();
     let Gathered { request, problems } = gather_request(PROMPT, directory)?;
@@ -635,16 +648,29 @@ pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<
         });
     }
 
-    // A plain overwrite, where `Manifest::save` writes a temporary file and
-    // renames it. The idiom is not copied here on purpose: a torn manifest is a
-    // data file Warlock reads back and would misread, while a torn `WARLOCK.md`
-    // is documentation nobody parses that the next pass overwrites whole. The
-    // temporary file, meanwhile, would land in the very directory just
-    // described — a file in the tree, in the next subtree hash, and in the next
-    // request — which is a worse thing to risk than the tear it prevents.
+    // Written beside and renamed over, the same idiom as `Manifest::save` and
+    // through the same two helpers. A pact is minutes of model passes that a
+    // user is invited to cancel, and a front end that quits mid-pact — killing
+    // the pass, restoring the terminal, and never waiting for this function to
+    // come back — must not be able to leave half a document behind. A rename is
+    // the only way to make that safe: the file is the old document or the new
+    // one, never a prefix of either. The temporary lands in the directory just
+    // described, which is exactly why it is named with a leading dot: hidden
+    // entries are skipped by every [`ignore`] walk in this crate, so it is in no
+    // tree, no subtree hash and no request for the moment it exists, and it is
+    // removed on both ways out.
     let document = directory.join(DOCUMENT_FILE);
-    if let Err(source) = fs::write(&document, &text) {
+    let temp = directory.join(temp_file_name(DOCUMENT_FILE));
+    let write = write_and_sync(&temp, text.as_bytes()).and_then(|()| fs::rename(&temp, &document));
+    if let Err(source) = write {
+        // Best effort, and nothing to report if it fails: the caller is already
+        // being told the document was not written, and a stray dot file is
+        // invisible to everything this crate does.
+        drop(fs::remove_file(&temp));
         return Err(Error::Write {
+            // The document, not the temporary: the caller asked for
+            // `WARLOCK.md` and the mechanics of how it is written are this
+            // function's business, not something to name in an error.
             directory: directory.to_path_buf(),
             path: document,
             source,
@@ -1237,10 +1263,16 @@ pub enum Error {
     /// failure with a different answer: nothing is wrong with the model, the
     /// disk is full or the directory is read-only, and a caller retrying the
     /// pass is retrying the expensive half of something that already worked.
+    ///
+    /// The write is atomic, so this is also the variant that says the document
+    /// on disk is untouched: whatever `WARLOCK.md` held before the pass, it
+    /// still holds.
     Write {
         /// The directory that was being pacted.
         directory: PathBuf,
-        /// The document that could not be written.
+        /// The document that could not be written: `<directory>/WARLOCK.md`,
+        /// never the temporary the write went through — that is a mechanism,
+        /// not something a user asked for or can act on.
         path: PathBuf,
         /// What the filesystem said.
         source: std::io::Error,
@@ -1986,6 +2018,95 @@ mod tests {
             left,
             ["WARLOCK.md", "lib.rs"],
             "no temporary file leaks into the directory the pact just described",
+        );
+    }
+
+    #[test]
+    fn how_the_document_is_written_is_invisible_to_a_subtree_hash() {
+        // Two identical directories, one written through the pact's rename and
+        // one written by hand. The digests have to agree: the temporary the
+        // pact goes through is hidden, so it is in no walk, and nothing about
+        // the mechanism can reach a hash or a request.
+        let answer = document(300);
+        let (pacted, plain) = (
+            tempfile::tempdir().expect("a temporary directory"),
+            tempfile::tempdir().expect("a temporary directory"),
+        );
+        for dir in [pacted.path(), plain.path()] {
+            write(dir, "lib.rs", "//! Core engine.\n");
+        }
+
+        pact_directory(pacted.path(), &Canned::new(&answer)).expect("pacts");
+        write(plain.path(), DOCUMENT_FILE, &answer);
+
+        assert_eq!(
+            subtree_hash(pacted.path()).expect("hashes"),
+            subtree_hash(plain.path()).expect("hashes"),
+        );
+        assert!(
+            file_paths(&request_for(pacted.path())).contains(&DOCUMENT_FILE),
+            "and the next request carries the document, and only the document",
+        );
+        assert_eq!(
+            file_paths(&request_for(pacted.path())),
+            ["WARLOCK.md", "lib.rs"]
+        );
+    }
+
+    /// Only on unix, because there is no portable way to make a directory
+    /// unwritable. What is under test — that a document the filesystem refuses
+    /// is [`Error::Write`], naming the document — is not platform-specific.
+    #[cfg(unix)]
+    #[test]
+    fn a_document_that_cannot_be_written_names_itself_and_leaves_the_old_one() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let before = "# engine\n\nWhat it used to say.\n";
+        write(dir.path(), DOCUMENT_FILE, before);
+        // Readable and listable, so the gather still works, but nothing new can
+        // be created in it — neither the temporary nor a rename over the
+        // document.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).expect("chmods");
+        if fs::write(dir.path().join("probe"), "").is_ok() {
+            // Running as root: no directory is unwritable, so there is nothing
+            // here to assert against.
+            fs::remove_file(dir.path().join("probe")).expect("removes the probe");
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755))
+                .expect("chmods back");
+            return;
+        }
+
+        let error = pact_directory(dir.path(), &Canned::new(document(300)))
+            .expect_err("a read-only directory takes no document");
+
+        match &error {
+            super::Error::Write { path, .. } => {
+                assert_eq!(
+                    path,
+                    &dir.path().join(DOCUMENT_FILE),
+                    "the document, not the temporary"
+                );
+            }
+            other => panic!("expected a write failure, got {other:?}"),
+        }
+        assert_eq!(error.directory(), dir.path());
+        assert_eq!(
+            written(dir.path()).as_deref(),
+            Some(before.as_bytes()),
+            "the write is atomic, so a failure leaves the old document whole",
+        );
+
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).expect("chmods back");
+        let mut left = fs::read_dir(dir.path())
+            .expect("lists")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(
+            left,
+            [DOCUMENT_FILE],
+            "and no temporary behind on the failure path"
         );
     }
 
