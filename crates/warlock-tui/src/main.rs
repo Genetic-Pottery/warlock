@@ -107,13 +107,37 @@ fn run() -> Result<(), Error> {
             // disk and the colour on screen change in the same keystroke, and
             // a save that fails returns rather than leaving the screen
             // claiming something that was never written.
+            //
+            // `None` needs nothing done about it. A refused toggle has already
+            // put its own sentence in `App::message`, which the next frame
+            // draws; why it was refused is the app's to know, and re-deriving
+            // it from the selected row here would be a second answer to the
+            // same question.
             Some(Action::TogglePact) => {
                 if let Some(toggle) = app.toggle_pact() {
-                    manifest = with_toggle(&manifest, &repo_root, &toggle)
-                        .map_err(|source| Error::Manifest { source })?;
-                    manifest
-                        .save(&repo_root)
-                        .map_err(|source| Error::Manifest { source })?;
+                    match with_toggle(&manifest, &repo_root, &toggle) {
+                        Ok(next) => {
+                            next.save(&repo_root)
+                                .map_err(|source| Error::Manifest { source })?;
+                            manifest = next;
+                        }
+                        // Not a write that failed — nothing has been written
+                        // yet. This is a node the manifest has no spelling
+                        // for: a path outside the repository root, or one that
+                        // is not UTF-8. There is nothing for the user to fix
+                        // and nothing broken to exit over, so the row goes
+                        // back to the state it was just moved out of and the
+                        // reason goes on the app's line, the same one a
+                        // refused toggle uses, rather than down a second
+                        // channel of this file's own.
+                        Err(source) => {
+                            // The toggle is its own undo, so this puts the row
+                            // and the tally back; it cannot refuse, because the
+                            // toggle it is undoing did not.
+                            let _ = app.toggle_pact();
+                            app.set_message(one_line(&source.to_string()));
+                        }
+                    }
                 }
             }
             None => {}

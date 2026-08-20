@@ -21,13 +21,12 @@ use warlock_engine::{Node, NodeState, Tree};
 /// A small hand-written tree covering everything the renderer has to handle.
 ///
 /// Chosen to exercise, in one value: more than one level of nesting, a node in
-/// each of the three [`NodeState`]s, and a connector — a directory kept in the
-/// tree only because documented modules sit below it, and so carrying no
-/// README of its own.
+/// each of the three [`NodeState`]s, and an ordinary directory that has no
+/// documentation yet — a node like any other, carrying no README of its own.
 ///
 /// ```text
 /// warlock                          README, pacted, stale
-/// ├── warlock/crates               no README (connector), unpacted
+/// ├── warlock/crates               no README yet, unpacted
 /// │   ├── warlock/crates/engine    README, pacted, fresh
 /// │   └── warlock/crates/tui       README, pacted, stale
 /// └── warlock/assets               README, unpacted
@@ -39,8 +38,8 @@ use warlock_engine::{Node, NodeState, Tree};
 pub(crate) fn tree() -> Tree {
     Tree::new(
         Node::new("warlock", "warlock/README.md", NodeState::PactedStale).with_children([
-            // A connector: no README of its own, so `None` and unpacted, which
-            // is what the loader makes of such a directory.
+            // No README of its own yet, so `None` and unpacted, which is what
+            // the loader makes of such a directory.
             Node::new("warlock/crates", None, NodeState::Unpacted).with_children([
                 Node::new(
                     "warlock/crates/engine",
@@ -109,13 +108,16 @@ mod tests {
     }
 
     #[test]
-    fn the_fixture_holds_a_connector_with_no_readme() {
-        let connector = tree()
+    fn the_fixture_holds_a_directory_with_no_readme() {
+        let undocumented = tree()
             .find("warlock/crates")
-            .expect("the connector is in the fixture")
+            .expect("the undocumented directory is in the fixture")
             .clone();
 
-        assert_eq!(connector.readme, None);
-        assert!(!connector.is_leaf(), "a connector exists for its children");
+        assert_eq!(undocumented.readme, None);
+        assert!(
+            !undocumented.is_leaf(),
+            "documented modules sit below it as well"
+        );
     }
 }

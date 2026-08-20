@@ -27,9 +27,9 @@ pub struct Node {
     /// The directory this node stands for.
     pub path: PathBuf,
     /// The README documenting this node, or `None` when the node has none of
-    /// its own — a connector directory that is in the tree only because
-    /// documented modules sit below it. Held separately from `path` because
-    /// the file name is not Warlock's to assume.
+    /// its own — an ordinary directory that has no documentation yet, which is
+    /// a node like any other. Held separately from `path` because the file
+    /// name is not Warlock's to assume.
     pub readme: Option<PathBuf>,
     /// What Warlock knows about this node right now.
     pub state: NodeState,
@@ -52,8 +52,8 @@ impl Node {
     /// let module = Node::new("repo/docs", "repo/docs/README.md", NodeState::Unpacted);
     /// assert!(module.readme.is_some());
     ///
-    /// let connector = Node::new("repo/crates", None, NodeState::Unpacted);
-    /// assert_eq!(connector.readme, None);
+    /// let undocumented = Node::new("repo/crates", None, NodeState::Unpacted);
+    /// assert_eq!(undocumented.readme, None);
     /// ```
     #[must_use]
     pub fn new(path: impl Into<PathBuf>, readme: impl IntoReadme, state: NodeState) -> Self {
@@ -132,6 +132,11 @@ impl IntoReadme for String {
 /// [`Tree::root`]. Callers outside the crate build one with [`Tree::new`], so
 /// a test or another front end can hand the engine a tree without going
 /// through any loader.
+///
+/// A loaded tree holds a node per directory, documented or not: one whose
+/// [`readme`](Node::readme) is `None` is an ordinary directory that has no
+/// documentation yet, not a lesser kind of node. Rendering fewer of them than
+/// the tree holds is a view's decision, taken on the way to the screen.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Tree {
     /// The node every other node descends from.
@@ -332,7 +337,7 @@ mod tests {
     fn fixture() -> Tree {
         Tree::new(
             Node::new("repo", "repo/README.md", NodeState::PactedStale).with_children([
-                // A connector: a directory with no README of its own.
+                // A directory with no README of its own, and a node all the same.
                 Node::new("repo/crates", None, NodeState::Unpacted),
                 Node::new("repo/docs", "repo/docs/README.md", NodeState::PactedFresh)
                     .with_children([Node::new(
