@@ -1,10 +1,18 @@
 //! What the front end holds between keystrokes.
 //!
 //! The tree is a tree, but the screen is a list of lines, so the app state
-//! keeps the engine's depth-first walk already flattened into [`Row`]s and
-//! remembers which one is selected. Flattening once, up front, means the
-//! renderer and the key handler agree on what "the next row" is without either
-//! of them walking the tree again.
+//! keeps the engine's depth-first walk flattened into [`Row`]s and remembers
+//! which one is selected. Flattening here, rather than in the renderer, means
+//! the renderer and the key handler agree on what "the next row" is without
+//! either of them walking the tree again.
+//!
+//! The whole walk is kept, though, not only the part on screen: collapsing a
+//! directory re-runs that flattening with the directory's descendants filtered
+//! out, and expanding it re-runs the same flattening with them back, at the
+//! depths and in the order the engine gave them. Which directories are
+//! collapsed is remembered as node *paths* rather than row indices, because an
+//! index means nothing once the row list has been rebuilt — and rebuilding it
+//! is exactly what a reloaded tree does.
 //!
 //! A tree taller than the terminal does not fit, so the app also remembers
 //! which slice of those rows is on screen: a scroll offset, kept in step with
@@ -21,6 +29,7 @@
 //! methods, so every rule about how the selection moves is testable with
 //! nothing attached to stdout.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use warlock_engine::{IntoReadme, NodeState, StateCounts, Tree, to_manifest_path};
@@ -44,6 +53,11 @@ const REPOSITORY_ROOT_LABEL: &str = "(repository root)";
 /// Fetching it back out of the tree at that moment would mean keeping the tree
 /// alongside the rows and looking a path up in it, which is two sources for one
 /// fact.
+///
+/// The child count comes along for a third reason of the same shape: a
+/// directory with no children can be neither collapsed nor expanded, and a row
+/// that could not say so would send the renderer back to the tree to find out
+/// whether to draw a marker.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Row {
     /// How deep the node sits: `0` for the root, `1` for its children.
@@ -56,15 +70,23 @@ pub struct Row {
     pub readme: Option<PathBuf>,
     /// What Warlock knows about the node, which is what colours the row.
     pub state: NodeState,
+    /// How many children the node has in the tree — not how many are drawn,
+    /// which is none of them while the node is collapsed. `0` for a leaf, and
+    /// a leaf is what [`App::toggle_collapsed`] refuses to toggle.
+    pub children: usize,
 }
 
 impl Row {
-    /// A row for a node at `path`, documented by `readme`, sitting at `depth`,
-    /// in `state`.
+    /// A row for a childless node at `path`, documented by `readme`, sitting at
+    /// `depth`, in `state`.
     ///
     /// `readme` takes whatever [`warlock_engine::Node::new`] takes: anything
     /// path-like for a node that has one, or `None` for a directory that has
     /// no documentation yet.
+    ///
+    /// Childless is the safe default rather than the common case: a row that
+    /// claims children it does not have is a row the collapse key hides
+    /// nothing with. Say otherwise with [`Row::with_child_count`].
     #[must_use]
     pub fn new(
         depth: usize,
@@ -77,7 +99,22 @@ impl Row {
             path: path.into(),
             readme: readme.into_readme(),
             state,
+            children: 0,
         }
+    }
+
+    /// The same row, standing for a node with `children` children of its own.
+    #[must_use]
+    pub const fn with_child_count(mut self, children: usize) -> Self {
+        self.children = children;
+        self
+    }
+
+    /// Whether the node has children, and so whether collapsing it would hide
+    /// anything.
+    #[must_use]
+    pub const fn has_children(&self) -> bool {
+        self.children > 0
     }
 }
 
@@ -98,12 +135,27 @@ pub struct PactToggle {
     pub pacted: bool,
 }
 
-/// The front end's state: the flattened tree, the selected row, the slice of
-/// rows on screen, the tally the footer shows and the header line naming what
-/// is being shown.
+/// The front end's state: the flattened tree, which of it is collapsed, the
+/// selected row, the slice of rows on screen, the tally the footer shows and
+/// the header line naming what is being shown.
+///
+/// `all_rows` is the engine's whole walk as it was when the app was built, and
+/// nothing but a reload changes it; `rows` is what is actually drawn, rebuilt
+/// from `all_rows` every time the collapsed set changes, with the descendants
+/// of every collapsed node filtered out. Keeping both means collapsing is
+/// reversible without a second walk of a tree the app no longer holds, and that
+/// a row hidden under a collapsed parent keeps its depth and its place in the
+/// order for when the parent opens again.
+///
+/// `collapsed` holds node paths, never row indices: an index names a different
+/// node the moment the row list changes length, and the row list is rebuilt
+/// both by every collapse and by every reload of the tree.
 ///
 /// `selected` is kept in range by construction and by every method that moves
 /// it, so [`App::selected_row`] is `None` only when there are no rows at all.
+/// It is kept *meaningful* by `reflow`, which puts it back on the node it was
+/// on after the row list changes, or on that node's nearest drawn ancestor when
+/// collapsing has taken it off screen.
 ///
 /// `scroll_offset` is kept in step with `selected` by those same methods, so
 /// the selected row is always inside the window the renderer draws — see
@@ -129,7 +181,9 @@ pub struct PactToggle {
 /// keystroke.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct App {
+    all_rows: Vec<Row>,
     rows: Vec<Row>,
+    collapsed: BTreeSet<PathBuf>,
     selected: usize,
     scroll_offset: usize,
     viewport_height: usize,
@@ -139,25 +193,35 @@ pub struct App {
 }
 
 impl App {
-    /// The app state for `tree`, with the first row selected.
+    /// The app state for `tree`, with everything expanded and the first row
+    /// selected.
     ///
-    /// This is the only place the tree's shape is read. The front end gets its
-    /// tree by calling the engine's constructor and hands it straight here; it
-    /// never learns where the tree came from.
+    /// This is the only place the tree's shape is read: the whole walk is
+    /// flattened here, and every later question about the tree's shape — which
+    /// nodes hang under a collapsed one, whether a node has children to hide at
+    /// all — is answered from the rows this produces rather than from a tree
+    /// the app would otherwise have to keep. The front end gets its tree by
+    /// calling the engine's constructor and hands it straight here; it never
+    /// learns where the tree came from.
+    ///
+    /// Nothing starts collapsed, which is what makes a freshly launched app
+    /// draw every node the walk yields. Carrying a previous run's collapsed
+    /// directories onto a reloaded tree is [`App::with_collapsed`]'s job.
     #[must_use]
     pub fn from_tree(tree: &Tree) -> Self {
         Self::from_rows(
             tree.walk()
                 .map(|(node, depth)| {
                     Row::new(depth, node.path.clone(), node.readme.clone(), node.state)
+                        .with_child_count(node.children.len())
                 })
                 .collect(),
         )
         .with_counts(tree.counts())
     }
 
-    /// The app state for an already-flattened list of rows, with the first row
-    /// selected and an all-zero tally.
+    /// The app state for an already-flattened list of rows, with everything
+    /// expanded, the first row selected and an all-zero tally.
     ///
     /// A [`Tree`] always has a root and so is never empty; this constructor is
     /// how the no-rows case is reachable at all, in tests and in any future
@@ -175,10 +239,19 @@ impl App {
     ///
     /// There is no message either: an app that has answered no keystroke yet
     /// has nothing to say about one. See [`App::message`].
+    ///
+    /// Nothing is collapsed, so the rows handed over are exactly the rows
+    /// drawn. They are kept a second time as the unfiltered list a later
+    /// collapse re-filters and a later expand restores from; a caller that
+    /// wants collapsing to hide anything has to say which rows have children,
+    /// with [`Row::with_child_count`], because a bare list of rows is the one
+    /// input here that does not come from a tree.
     #[must_use]
     pub fn from_rows(rows: Vec<Row>) -> Self {
         Self {
-            rows,
+            rows: rows.clone(),
+            all_rows: rows,
+            collapsed: BTreeSet::new(),
             selected: 0,
             scroll_offset: 0,
             viewport_height: 0,
@@ -186,6 +259,30 @@ impl App {
             header: String::new(),
             message: None,
         }
+    }
+
+    /// The same app state, with every node in `collapsed` collapsed and the
+    /// rows re-filtered to match.
+    ///
+    /// This is how a collapsed tree survives a reload. The app state is thrown
+    /// away and rebuilt from the new tree whenever the tree is re-read, so
+    /// something has to carry the view across the gap; paths carry, which is
+    /// the whole reason [`App::collapsed`] hands back paths rather than the row
+    /// indices they were pressed on. A path the new tree no longer has is kept
+    /// and ignored — a directory that has come and gone and come back should
+    /// find itself as the user left it, and the set is small enough that
+    /// pruning it would cost more than carrying it.
+    ///
+    /// The rows are filtered on the way in rather than at the next keystroke,
+    /// so the first frame drawn after a reload is already the collapsed one.
+    #[must_use]
+    pub fn with_collapsed(
+        mut self,
+        collapsed: impl IntoIterator<Item = impl Into<PathBuf>>,
+    ) -> Self {
+        self.collapsed = collapsed.into_iter().map(Into::into).collect();
+        self.reflow();
+        self
     }
 
     /// The same app state, reporting `counts` in its footer.
@@ -253,10 +350,38 @@ impl App {
         self.message = Some(message.into());
     }
 
-    /// Every row, in the order they are drawn.
+    /// Every row that is drawn, in the order it is drawn: the engine's walk
+    /// with the descendants of every collapsed node left out.
+    ///
+    /// Depths are the tree's own, not the drawn list's, so a row whose parent
+    /// is two levels of collapsed directory above it still indents to where it
+    /// belongs when those levels open again.
     #[must_use]
     pub fn rows(&self) -> &[Row] {
         &self.rows
+    }
+
+    /// Which nodes are collapsed, by path, in a fixed order.
+    ///
+    /// For handing to [`App::with_collapsed`] on a rebuild, and for a test to
+    /// assert on. It is what the user pressed the key on, which is not
+    /// necessarily what is on screen: a node under a collapsed parent can be
+    /// in here and drawn nowhere.
+    #[must_use]
+    pub const fn collapsed(&self) -> &BTreeSet<PathBuf> {
+        &self.collapsed
+    }
+
+    /// Whether the node at `path` is collapsed.
+    ///
+    /// Answers for a node with no children too, where it means only that the
+    /// key was pressed on it: there was nothing to hide, so nothing is hidden.
+    /// A renderer deciding which marker to draw wants this *and*
+    /// [`Row::has_children`] — collapsed, expanded-with-children and childless
+    /// are three cases, and this answers one bit of them.
+    #[must_use]
+    pub fn is_collapsed(&self, path: impl AsRef<Path>) -> bool {
+        self.collapsed.contains(path.as_ref())
     }
 
     /// How many nodes sit in each state, as the engine counted them.
@@ -420,6 +545,28 @@ impl App {
         );
     }
 
+    /// Rebuild the drawn rows from the whole walk and the collapsed set, and
+    /// put the selection and the window back where they belong.
+    ///
+    /// Every change to what is drawn ends here, and it is the only place
+    /// `rows` is written: the drawn list is derived from `all_rows` and
+    /// `collapsed` and nothing else, so there is no state to get out of step
+    /// with them.
+    ///
+    /// The selection is carried by path rather than by index, because the index
+    /// it sat at meant a row that may not exist any more. A selection whose
+    /// node is still drawn stays exactly where it is, however many rows above
+    /// it have gone; one whose node has just been hidden lands on the nearest
+    /// ancestor still drawn, which is the directory that was collapsed over it.
+    fn reflow(&mut self) {
+        let selected = self.rows.get(self.selected).map(|row| row.path.clone());
+        self.rows = drawn_rows(&self.all_rows, &self.collapsed);
+        self.selected = selected
+            .and_then(|path| index_for(&self.rows, &path))
+            .unwrap_or(0);
+        self.rescroll();
+    }
+
     /// The selection has just moved: forget last keystroke's message and bring
     /// the window back into line with it.
     ///
@@ -453,6 +600,42 @@ impl App {
             Some(Ok(relative)) if relative != "." => relative,
             _ => path.display().to_string(),
         }
+    }
+
+    /// Hide the selected node's descendants, or bring them back.
+    ///
+    /// The rows come back exactly as they were — same nodes, same order, same
+    /// depths — because they were never thrown away: expanding re-filters the
+    /// walk this app was built from rather than reconstructing anything.
+    ///
+    /// A no-op, and deliberately a *complete* no-op, on a node with no
+    /// children: nothing to hide means nothing collapses, nothing is recorded,
+    /// and last keystroke's message is left on screen rather than swept away by
+    /// a key that did nothing. A no-op on an app with no rows too.
+    ///
+    /// Collapsing a directory the selection sits inside moves the selection
+    /// onto that directory — see `reflow` — because a selection on a row that
+    /// is not drawn is a selection the next keystroke moves invisibly. The
+    /// window follows, so the selected row is on screen when the frame is next
+    /// drawn whichever way the row count went.
+    ///
+    /// Collapsing a node under a *collapsed* node is allowed and draws nothing:
+    /// what is recorded is the state of that node, and it takes effect when the
+    /// node is on screen to take effect on.
+    pub fn toggle_collapsed(&mut self) {
+        let Some(row) = self.rows.get(self.selected) else {
+            return;
+        };
+        if !row.has_children() {
+            return;
+        }
+
+        let path = row.path.clone();
+        if !self.collapsed.remove(&path) {
+            self.collapsed.insert(path);
+        }
+        self.message = None;
+        self.reflow();
     }
 
     /// Bring the selected node under Warlock's management, or take it back out
@@ -498,6 +681,12 @@ impl App {
             NodeState::PactedStale | NodeState::PactedFresh => NodeState::Unpacted,
         };
         row.state = now;
+        // And in the unfiltered list the next collapse rebuilds the drawn rows
+        // from, or the new state would last exactly until something was
+        // collapsed and then quietly revert.
+        if let Some(row) = self.all_rows.iter_mut().find(|row| row.path == path) {
+            row.state = now;
+        }
         self.message = None;
 
         // Both halves of the move happen together or neither does. An app told
@@ -517,6 +706,60 @@ impl App {
             pacted: now.is_pacted(),
         })
     }
+}
+
+/// Which of `all` are drawn, given that every node in `collapsed` is
+/// collapsed: the same rows in the same order at the same depths, less the
+/// descendants of any collapsed node.
+///
+/// The filtering is done on depth rather than on paths, which is what makes it
+/// one pass. A walk is depth first and parents come before children, so a
+/// node's descendants are exactly the rows following it that are deeper than
+/// it, up to the first row that is not — no path comparisons, and no
+/// assumptions about how a child's path is spelled relative to its parent's.
+///
+/// A collapsed node inside a collapsed node is skipped like any other
+/// descendant, so its own state is remembered and does nothing until its
+/// ancestor opens: expanding a directory you cannot see is allowed and draws
+/// nothing, which is the only reading that lets the collapsed set be carried
+/// whole across a reload.
+///
+/// A collapsed node with no children hides nothing. It cannot arrive through
+/// [`App::toggle_collapsed`], which refuses such a node, but it can arrive
+/// through [`App::with_collapsed`] carrying a set from a tree whose shape has
+/// since changed.
+///
+/// Pure, and deliberately free of [`App`]: rows in, rows out.
+fn drawn_rows(all: &[Row], collapsed: &BTreeSet<PathBuf>) -> Vec<Row> {
+    let mut drawn = Vec::with_capacity(all.len());
+    // The depth of the collapsed node whose descendants are being skipped, if
+    // any are.
+    let mut hiding: Option<usize> = None;
+
+    for row in all {
+        if hiding.is_some_and(|depth| row.depth > depth) {
+            continue;
+        }
+        hiding = (row.has_children() && collapsed.contains(&row.path)).then_some(row.depth);
+        drawn.push(row.clone());
+    }
+    drawn
+}
+
+/// Where `path` sits in `rows`, or where the deepest drawn ancestor of it
+/// sits, or `None` when neither is drawn.
+///
+/// The ancestor is the fallback because it is what collapsing leaves behind: a
+/// hidden node's nearest drawn ancestor is the directory that was collapsed
+/// over it, and that is where the selection belongs. Ancestry is a path prefix
+/// — the engine's paths nest the way the tree does — taken component by
+/// component, so `crates-old` is no ancestor of anything under `crates`; and
+/// the last matching row is the deepest one, since a walk visits ancestors
+/// before descendants.
+fn index_for(rows: &[Row], path: &Path) -> Option<usize> {
+    rows.iter()
+        .position(|row| row.path == path)
+        .or_else(|| rows.iter().rposition(|row| path.starts_with(&row.path)))
 }
 
 /// Where the window onto `rows` rows should start, given a window `viewport`
@@ -678,6 +921,27 @@ mod tests {
             app.select_next();
         }
         app
+    }
+
+    /// The rows an app draws, by path, for a test that is about which rows are
+    /// on screen rather than what is on them.
+    fn drawn(app: &App) -> Vec<String> {
+        app.rows()
+            .iter()
+            .map(|row| row.path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The whole fixture, in walk order: what an app with nothing collapsed
+    /// draws.
+    fn whole_fixture() -> Vec<String> {
+        vec![
+            "warlock".to_owned(),
+            "warlock/crates".to_owned(),
+            "warlock/crates/engine".to_owned(),
+            "warlock/crates/tui".to_owned(),
+            "warlock/assets".to_owned(),
+        ]
     }
 
     /// The app for the shared fixture, selecting the row for `path`.
@@ -1329,6 +1593,302 @@ mod tests {
         assert_eq!(app.message(), Some("could not write the pact manifest"));
         app.select_next();
         assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn a_fresh_app_has_nothing_collapsed_and_draws_the_whole_walk() {
+        let app = App::from_tree(&fixture::tree());
+
+        assert!(app.collapsed().is_empty());
+        assert_eq!(drawn(&app), whole_fixture());
+        // And it knows which of those rows could be collapsed at all.
+        for row in app.rows() {
+            assert_eq!(
+                row.children,
+                children_in_fixture(&row.path),
+                "child count for {}",
+                row.path.display()
+            );
+            assert_eq!(row.has_children(), row.children > 0);
+        }
+    }
+
+    /// How many children the fixture's tree gives the node at `path`.
+    fn children_in_fixture(path: &Path) -> usize {
+        fixture::tree()
+            .find(path)
+            .expect("the row came from the fixture")
+            .children
+            .len()
+    }
+
+    #[test]
+    fn collapsing_a_directory_hides_its_descendants_and_expanding_puts_them_back() {
+        let mut app = app_selecting("warlock/crates");
+        let before = app.rows().to_vec();
+
+        app.toggle_collapsed();
+
+        assert_eq!(drawn(&app), ["warlock", "warlock/crates", "warlock/assets"]);
+        assert!(app.is_collapsed("warlock/crates"));
+        // The directory itself keeps its place and the selection.
+        assert_eq!(
+            app.selected_row().map(|row| row.path.clone()),
+            Some(PathBuf::from("warlock/crates"))
+        );
+
+        app.toggle_collapsed();
+
+        // Byte for byte the rows that were there before: same nodes, same
+        // order, same depths, same states.
+        assert_eq!(app.rows(), before);
+        assert!(app.collapsed().is_empty());
+    }
+
+    #[test]
+    fn collapsing_over_the_selection_puts_it_on_the_collapsed_directory() {
+        let before = App::from_tree(&fixture::tree()).rows().to_vec();
+
+        // The collapse arrives from outside, which is the only way a directory
+        // above the selection is collapsed: the key itself acts on the row
+        // under the selection.
+        let mut app = app_selecting("warlock/crates/tui").with_collapsed(["warlock/crates"]);
+
+        assert_eq!(drawn(&app), ["warlock", "warlock/crates", "warlock/assets"]);
+        assert_eq!(
+            app.selected_row().map(|row| row.path.clone()),
+            Some(PathBuf::from("warlock/crates"))
+        );
+        // Never an index that is not drawn.
+        assert!(app.selected() < app.rows().len());
+
+        app.toggle_collapsed();
+
+        assert_eq!(app.rows(), before);
+    }
+
+    #[test]
+    fn collapsing_the_root_leaves_the_root_alone_on_screen() {
+        let mut app = app_selecting("warlock/crates/engine");
+
+        app.select_first();
+        app.toggle_collapsed();
+
+        assert_eq!(drawn(&app), ["warlock"]);
+        assert_eq!(app.selected(), 0);
+        assert_eq!(
+            app.selected_row().map(|row| row.path.clone()),
+            Some(PathBuf::from("warlock"))
+        );
+
+        app.toggle_collapsed();
+
+        assert_eq!(drawn(&app), whole_fixture());
+    }
+
+    #[test]
+    fn expanding_under_a_collapsed_parent_draws_nothing_until_the_parent_opens() {
+        // Both collapsed, so only the root is drawn.
+        let app = App::from_tree(&fixture::tree()).with_collapsed(["warlock", "warlock/crates"]);
+        assert_eq!(drawn(&app), ["warlock"]);
+
+        // `crates` expands while it is nowhere on screen: recorded, and drawn
+        // nowhere, because its parent is still shut.
+        let mut app = app.with_collapsed(["warlock"]);
+        assert_eq!(drawn(&app), ["warlock"]);
+        assert!(!app.is_collapsed("warlock/crates"));
+
+        // And the expansion was waiting for the root all along.
+        app.toggle_collapsed();
+
+        assert_eq!(drawn(&app), whole_fixture());
+    }
+
+    #[test]
+    fn a_collapse_above_the_selection_leaves_it_on_the_same_node() {
+        let app = app_selecting("warlock/assets");
+        assert_eq!(app.selected(), 4);
+
+        let app = app.with_collapsed(["warlock/crates"]);
+
+        // Two rows fewer above it, and the same node under it.
+        assert_eq!(app.selected(), 2);
+        assert_eq!(
+            app.selected_row().map(|row| row.path.clone()),
+            Some(PathBuf::from("warlock/assets"))
+        );
+    }
+
+    #[test]
+    fn a_rebuilt_app_carrying_the_collapsed_set_hides_the_same_rows() {
+        let mut app = app_selecting("warlock/crates");
+        app.toggle_collapsed();
+
+        // What the binary does when the tree is reloaded: new app state from a
+        // fresh tree, the view carried across by path.
+        let rebuilt = App::from_tree(&fixture::tree()).with_collapsed(app.collapsed());
+
+        assert_eq!(rebuilt.rows(), app.rows());
+        assert_eq!(rebuilt.collapsed(), app.collapsed());
+        // Filtered on the way in, not at the next keystroke.
+        assert_eq!(
+            drawn(&rebuilt),
+            ["warlock", "warlock/crates", "warlock/assets"]
+        );
+    }
+
+    #[test]
+    fn a_collapsed_path_the_new_tree_has_no_node_for_hides_nothing() {
+        let app = App::from_tree(&fixture::tree()).with_collapsed(["warlock/gone"]);
+
+        assert_eq!(drawn(&app), whole_fixture());
+        // Kept all the same: a directory that comes back should come back shut.
+        assert!(app.is_collapsed("warlock/gone"));
+    }
+
+    #[test]
+    fn toggling_a_childless_node_changes_nothing_at_all() {
+        let mut app = app_selecting("warlock/assets");
+        app.set_message("something from the last keystroke");
+        let before = app.clone();
+
+        app.toggle_collapsed();
+
+        // Including the message: a key that did nothing should not look like a
+        // key that did something.
+        assert_eq!(app, before);
+        assert!(app.collapsed().is_empty());
+        assert_eq!(drawn(&app), whole_fixture());
+    }
+
+    #[test]
+    fn toggling_collapse_on_an_empty_app_is_a_no_op() {
+        let mut app = App::from_rows(Vec::new());
+
+        app.toggle_collapsed();
+
+        assert!(app.is_empty());
+        assert_eq!(app.selected(), 0);
+        assert!(app.collapsed().is_empty());
+    }
+
+    #[test]
+    fn collapsing_leaves_the_engines_tally_alone() {
+        let tree = fixture::tree();
+        let mut app = App::from_tree(&tree);
+
+        app.select_first();
+        app.toggle_collapsed();
+
+        // Four of the five rows are hidden; the footer still describes the
+        // whole tree, because that is what the engine counted.
+        assert_eq!(app.rows().len(), 1);
+        assert_eq!(app.counts(), tree.counts());
+        assert_eq!(app.counts().total(), 5);
+    }
+
+    #[test]
+    fn a_pact_survives_a_collapse_and_expand_of_the_directory_above_it() {
+        let mut app = app_selecting("warlock/crates/tui");
+        app.toggle_pact().expect("tui has a README");
+        assert_eq!(
+            app.selected_row().map(|row| row.state),
+            Some(NodeState::Unpacted)
+        );
+
+        let mut app = app.with_collapsed(["warlock/crates"]);
+        app.toggle_collapsed();
+
+        let row = app
+            .rows()
+            .iter()
+            .find(|row| row.path == Path::new("warlock/crates/tui"))
+            .expect("expanding brought it back");
+        assert_eq!(row.state, NodeState::Unpacted);
+    }
+
+    #[test]
+    fn a_toggle_leaves_the_window_in_range_with_the_selection_in_it() {
+        let mut app = app_selecting("warlock/assets");
+        app.set_viewport_height(2);
+        assert!(selection_is_on_screen(&app));
+
+        // A collapse from above, shortening the tree under a window that was
+        // scrolled to the bottom of it.
+        let mut app = app.with_collapsed(["warlock/crates"]);
+
+        assert!(window_is_in_range(&app));
+        assert!(selection_is_on_screen(&app));
+
+        // And the extreme of it: everything but the root gone.
+        app.select_first();
+        app.toggle_collapsed();
+
+        assert_eq!(app.rows().len(), 1);
+        assert_eq!(app.scroll_offset(), 0);
+        assert!(window_is_in_range(&app));
+        assert!(selection_is_on_screen(&app));
+
+        app.toggle_collapsed();
+
+        assert!(window_is_in_range(&app));
+        assert!(selection_is_on_screen(&app));
+    }
+
+    /// Whether the window sits over rows that exist: it may start at the top of
+    /// a tree shorter than itself, but it must never hang off the end of one.
+    fn window_is_in_range(app: &App) -> bool {
+        app.scroll_offset() <= app.rows().len().saturating_sub(app.viewport_height())
+    }
+
+    #[test]
+    fn a_collapse_clears_the_last_keystrokes_message() {
+        let mut app = app_selecting("warlock/crates");
+        assert_eq!(app.toggle_pact(), None);
+        assert!(app.message().is_some());
+
+        app.toggle_collapsed();
+
+        assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn collapsing_a_directory_leaves_a_sibling_whose_name_it_prefixes_alone() {
+        let tree = Tree::new(
+            Node::new("repo", "repo/README.md", NodeState::PactedStale).with_children([
+                Node::new("repo/crates", None, NodeState::Unpacted).with_children([Node::new(
+                    "repo/crates/engine",
+                    "repo/crates/engine/README.md",
+                    NodeState::PactedFresh,
+                )]),
+                Node::new("repo/crates-old", None, NodeState::Unpacted),
+            ]),
+        );
+        let mut app = App::from_tree(&tree);
+
+        app.select_next();
+        app.toggle_collapsed();
+
+        // A sibling is not a descendant, however much of its name it shares.
+        assert_eq!(drawn(&app), ["repo", "repo/crates", "repo/crates-old"]);
+    }
+
+    #[test]
+    fn rows_from_a_bare_list_collapse_only_where_they_claim_children() {
+        let mut app = App::from_rows(vec![
+            Row::new(0, "repo", "repo/README.md", NodeState::PactedStale).with_child_count(1),
+            Row::new(1, "repo/crates", None, NodeState::Unpacted),
+        ]);
+
+        app.toggle_collapsed();
+        assert_eq!(drawn(&app), ["repo"]);
+
+        app.toggle_collapsed();
+        assert_eq!(drawn(&app), ["repo", "repo/crates"]);
+        // The child, which claims none of its own, is not collapsible.
+        app.select_next();
+        app.toggle_collapsed();
+        assert!(app.collapsed().is_empty());
     }
 
     #[test]

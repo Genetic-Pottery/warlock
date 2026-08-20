@@ -12,8 +12,9 @@
 //! starting at the app's scroll offset and running for as many rows as the area
 //! is tall, so a tree taller than the terminal scrolls under a header and a
 //! footer that stay where they are. The window is the app's, not the widget's —
-//! see [`draw_tree`]. There is deliberately no expand/collapse and no mouse:
-//! whatever rows the app holds are the rows drawn.
+//! see [`draw_tree`]. Which rows exist at all is the app's too: collapsing a
+//! directory takes its descendants out of [`App::rows`], and whatever rows the
+//! app holds are the rows drawn. There is deliberately no mouse.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect, Size};
