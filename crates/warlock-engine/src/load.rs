@@ -475,6 +475,29 @@ mod tests {
         repo
     }
 
+    /// A repository nobody has pacted: a `.git/` directory, no `.warlock/`
+    /// anywhere, and a `README.md` in each of `readmes`.
+    ///
+    /// Separate from [`fixture`] rather than a weakening of it, because the two
+    /// answer different questions. Most tests want a repository with somewhere
+    /// to put a manifest; the cold-open tests below want the state a repository
+    /// is in the very first time Warlock is pointed at it, which is precisely
+    /// the absence [`fixture`] fills in.
+    fn git_only_fixture(readmes: &[&str]) -> tempfile::TempDir {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        fs::create_dir_all(repo.path().join(".git")).expect("creates .git");
+        for dir in readmes {
+            let path = repo.path().join(dir);
+            fs::create_dir_all(&path).expect("creates a directory");
+            fs::write(path.join("README.md"), "# module\n").expect("writes a README");
+        }
+        assert!(
+            !repo.path().join(".warlock").exists(),
+            "the point of this fixture is that there is no `.warlock/` in it",
+        );
+        repo
+    }
+
     /// The tree for `dir`, insisting the load found nothing to complain about.
     ///
     /// Most of these fixtures are healthy, so an empty problem list is part of
@@ -633,6 +656,62 @@ mod tests {
         assert!(
             tree.walk()
                 .all(|(node, _)| node.state == NodeState::Unpacted)
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_warlock_directory_at_all_opens_entirely_unpacted() {
+        // The cold open: a repository Warlock has never been run on, opened
+        // from a subdirectory so the root has to be found by walking up to the
+        // `.git/` — there is no `.warlock/` anywhere to find instead.
+        let repo = git_only_fixture(&["crates/engine", "crates/engine/src"]);
+
+        let Loaded { tree, problems } = load_tree(repo.path().join("crates"))
+            .expect("a `.git/` and nothing else is still a repository");
+
+        assert_eq!(
+            relative_paths(&tree, repo.path()),
+            ["crates", "crates/engine", "crates/engine/src"],
+        );
+        assert!(
+            tree.walk()
+                .all(|(node, _)| node.state == NodeState::Unpacted),
+            "with no manifest nothing is pacted, so the whole tree is gray: {:?}",
+            tree.counts(),
+        );
+        assert!(
+            problems.is_empty(),
+            "a missing manifest is not a problem, it is the normal first state: {problems:?}",
+        );
+    }
+
+    #[test]
+    fn the_first_pact_in_a_never_pacted_repository_creates_the_warlock_directory() {
+        let repo = git_only_fixture(&["docs"]);
+
+        // No setup step in between: straight from a repository that has never
+        // heard of Warlock to a saved pact.
+        pact(repo.path(), &["docs"]);
+
+        assert!(
+            repo.path().join(".warlock").is_dir(),
+            "saving makes the directory it needs",
+        );
+        assert!(
+            manifest_path(repo.path()).is_file(),
+            "and the manifest goes inside it, at `<root>/.warlock/pacts.toml`",
+        );
+
+        let manifest = Manifest::load(repo.path()).expect("loads what was just saved");
+        let entry = manifest.entry("docs").expect("the entry just written");
+        assert_eq!(entry.readme(), "docs/README.md");
+        assert_eq!(
+            tree_of(repo.path())
+                .find(repo.path().join("docs"))
+                .expect("the pacted module")
+                .state,
+            NodeState::PactedStale,
+            "and the next load sees it: a pact with no grant on it is stale",
         );
     }
 
@@ -946,10 +1025,23 @@ mod tests {
 
     #[test]
     fn a_directory_outside_any_repository_is_an_error_that_says_so() {
-        let outside = tempfile::tempdir().expect("a temporary directory");
-        assert!(repository_root(outside.path()).is_none());
+        // Deliberately not a `tempfile::tempdir()`: `$TMPDIR` may itself sit
+        // inside a checkout, and then the temporary directory has a `.git/`
+        // ancestor and is not outside a repository at all. A name directly
+        // under the filesystem root has exactly two ancestors — itself and `/`
+        // — so nothing but a `/.git` could make it a repository. It need not
+        // exist, either: `load_tree` makes the path absolute lexically and
+        // resolves the root before it walks anything, so this reaches
+        // `NoRepositoryRoot` without ever touching the disk.
+        let outside = Path::new("/").join("warlock-no-repository-lives-here");
+        assert!(
+            repository_root(&outside).is_none(),
+            "`{}` has no `.git` above it unless the filesystem root is a \
+             repository",
+            outside.display(),
+        );
 
-        let error = load_tree(outside.path()).expect_err("there is no `.git` anywhere above");
+        let error = load_tree(&outside).expect_err("there is no `.git` anywhere above");
         assert!(matches!(error, Error::NoRepositoryRoot { .. }), "{error:?}");
         assert!(error.to_string().contains("`.git`"), "{error}");
     }
