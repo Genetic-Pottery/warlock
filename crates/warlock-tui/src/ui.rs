@@ -59,6 +59,22 @@ const NO_MARKER: &str = "  ";
 /// The one line naming the tree's root.
 const HEADER_HEIGHT: u16 = 1;
 
+/// The keys line of the footer: every key that does something, in one line.
+///
+/// The movement keys first and together, in the order a reader reaches for
+/// them: one row, one screen, the whole tree. Then the two keys that move
+/// nothing but change what there is to move through — space, which hides a
+/// subtree, and `o`, which hides everything Warlock is not managing — and only
+/// then the keys that change something.
+///
+/// Every name here is as short as it can be and still be read: the line is
+/// already wider than an eighty-column terminal, and a key nobody can see
+/// because the line ran off the right-hand edge is a key nobody knows about.
+/// That is why `o` is labelled with what it leaves on screen rather than with a
+/// sentence about filtering.
+const KEYS: &str = "up/down k/j: move    PgUp/PgDn: page    g/G: first/last    \
+                    space: collapse    o: pacted    p: pact    q/Esc/Ctrl-C: quit";
+
 /// The tally line, the keys line and the message line.
 ///
 /// The message line is there whether or not there is a message to put on it: a
@@ -218,15 +234,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ));
     }
 
-    // The movement keys first and together, in the order a reader reaches for
-    // them: one row, one screen, the whole tree. Then space, which moves
-    // nothing but changes what there is to move through, and only then the
-    // keys that change something.
-    let keys = Line::from(
-        "up/down or k/j: move    PgUp/PgDn: page    g/G: first/last    \
-         space: collapse    p: pact    q / Esc / Ctrl-C: quit",
-    )
-    .dim();
+    let keys = Line::from(KEYS).dim();
 
     let message = Line::from(app.message().unwrap_or_default().to_owned()).dim();
     frame.render_widget(Paragraph::new(vec![Line::from(tally), keys, message]), area);
@@ -257,7 +265,7 @@ mod tests {
     use warlock_engine::NodeState;
 
     use super::{
-        FOOTER_HEIGHT, HEADER_HEIGHT, INDENT, NO_MARKER, SELECTION_MARKER, draw, tree_height,
+        FOOTER_HEIGHT, HEADER_HEIGHT, INDENT, KEYS, NO_MARKER, SELECTION_MARKER, draw, tree_height,
     };
     use crate::app::{App, Row};
     use crate::colour::colour_for;
@@ -609,6 +617,10 @@ mod tests {
             );
         }
         let keys = row_text(&buffer, height - FOOTER_HEIGHT + 1);
+        // Every key, in full: equality rather than a bag of substrings, so a
+        // line that has grown past the width it is drawn at fails here instead
+        // of quietly losing whatever sat on the right-hand end of it.
+        assert_eq!(keys, KEYS);
         // "p: pact" and not the bare "p", which "up/down" would satisfy.
         for key in [
             "up/down",
@@ -618,9 +630,10 @@ mod tests {
             "page",
             "g/G",
             "first/last",
-            // Named, not left to be discovered: the one key that changes what
+            // Named, not left to be discovered: the two keys that change what
             // there is to scroll through.
             "space: collapse",
+            "o: pacted",
             "p: pact",
             "q",
             "Esc",
@@ -628,6 +641,31 @@ mod tests {
         ] {
             assert!(keys.contains(key), "footer {keys:?} is missing {key}");
         }
+        // And the lines either side of it are the footer's own, untouched by
+        // the new key: the tally still counts the whole tree, and the message
+        // line is blank because nothing has been said.
+        assert_eq!(row_text(&buffer, height - 1), "");
+    }
+
+    #[test]
+    fn the_filter_changes_which_rows_are_drawn_and_nothing_else_in_the_footer() {
+        let tree = fixture::tree();
+        let mut app = App::from_tree(&tree);
+        let height = 10;
+
+        let before = render(&app, 120, height);
+        app.toggle_pacted_only();
+        let after = render(&app, 120, height);
+
+        // The tally describes the tree, not the window onto it, so it says the
+        // same thing with the filter on; the keys line and the message line are
+        // the same too.
+        for line in 0..FOOTER_HEIGHT {
+            let y = height - FOOTER_HEIGHT + line;
+            assert_eq!(row_text(&before, y), row_text(&after, y), "footer line {y}");
+        }
+        // While the tree above it really did lose rows.
+        assert_ne!(tree_rows(&before), tree_rows(&after));
     }
 
     #[test]

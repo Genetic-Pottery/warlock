@@ -107,6 +107,14 @@ fn run() -> Result<(), Error> {
             // offset back into range itself, and the next frame — the top of
             // this same loop — draws the shorter or longer list.
             Some(Action::ToggleCollapsed) => app.toggle_collapsed(),
+            // Nothing else happens here either, and for the same reasons as
+            // collapsing: which rows are worth looking at is the front end's
+            // view of the tree and is never written down (§5), so there is no
+            // manifest to save, and the tree itself has not changed, so there
+            // is nothing to re-read. The app re-flows its rows and puts the
+            // selection and the scroll offset back in range; the next frame
+            // draws whatever is left.
+            Some(Action::TogglePactedOnly) => app.toggle_pacted_only(),
             // The app has already flipped the row's colour and its tally, so
             // the next frame — drawn at the top of this same loop, with no
             // reload of the tree — shows the new state. The manifest is
@@ -400,6 +408,9 @@ enum Action {
     /// Hide the selected directory's descendants, or show them again if they
     /// are hidden already.
     ToggleCollapsed,
+    /// Draw only the pacted nodes and the ancestors that reach them, or the
+    /// whole tree again if that is what is on screen already.
+    TogglePactedOnly,
     /// Pact the selected node, or unpact it if it is pacted already.
     TogglePact,
 }
@@ -446,6 +457,11 @@ fn action_for(key: KeyEvent) -> Option<Action> {
         // the whole of it. Nothing rides along that needs matching — a modifier
         // held with space is a different keystroke, not this one badly spelled.
         KeyCode::Char(' ') => Some(Action::ToggleCollapsed),
+        // Lower case only, like `p` below: the upper-case letter is a
+        // different keystroke and means nothing here, and a filter that also
+        // answered to `O` would take a key that a later binding may want. The
+        // mnemonic is "only": what stays on screen is the pacted nodes only.
+        KeyCode::Char('o') => Some(Action::TogglePactedOnly),
         // Lower case only, and with no confirmation: the mnemonic is the
         // product's own word (pact, §15), and the action is its own undo —
         // pressing it again removes what it wrote.
@@ -796,6 +812,56 @@ mod tests {
                 action_for(press(code)),
                 Some(Action::ToggleCollapsed),
                 "{code:?} should not collapse anything"
+            );
+        }
+    }
+
+    #[test]
+    fn o_toggles_the_pacted_only_filter() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('o'))),
+            Some(Action::TogglePactedOnly)
+        );
+    }
+
+    #[test]
+    fn releases_and_repeats_of_o_filter_nothing() {
+        // The same rule as space: a release acted on would restore the whole
+        // tree the press had just narrowed, so one keystroke would look like
+        // none at all.
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                KeyCode::Char('o'),
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                action_for(event),
+                None,
+                "{kind:?} of o should not filter anything"
+            );
+        }
+    }
+
+    #[test]
+    fn o_is_the_only_key_that_filters() {
+        // Its neighbours on the keyboard, the key it sits next to in the match
+        // arms above, and its upper-case self, which this binding does not
+        // answer to.
+        for code in [
+            KeyCode::Char('i'),
+            KeyCode::Char('p'),
+            KeyCode::Char('k'),
+            KeyCode::Char('l'),
+            KeyCode::Char('O'),
+            KeyCode::Char(' '),
+        ] {
+            assert_ne!(
+                action_for(press(code)),
+                Some(Action::TogglePactedOnly),
+                "{code:?} should not filter anything"
             );
         }
     }
