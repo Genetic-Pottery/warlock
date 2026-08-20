@@ -30,7 +30,7 @@ use warlock_engine::{
     LoadError, LoadProblem, Loaded, Manifest, ManifestError, PactEntry, load_tree, repository_root,
     to_manifest_path,
 };
-use warlock_tui::{App, PactToggle, draw};
+use warlock_tui::{App, PactToggle, draw, tree_height};
 
 fn main() -> ExitCode {
     // Before anything touches the terminal: a panic during setup has to leave
@@ -75,6 +75,12 @@ fn run() -> Result<(), Error> {
     let mut guard = TerminalGuard::enter()?;
 
     loop {
+        // Told before it is drawn, and every frame rather than on resize: the
+        // scroll offset is only right if it was computed against the height
+        // this frame gives the tree, and `tree_height` is the same layout the
+        // frame is cut by. A terminal resized while warlock was blocked on a
+        // key is handled by that alone — the next frame measures again.
+        app.set_viewport_height(tree_height(guard.terminal.size()?));
         guard.terminal.draw(|frame| draw(frame, &app))?;
 
         // Blocking: warlock has no animation, no timers and nothing in flight,

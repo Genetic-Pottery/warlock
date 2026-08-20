@@ -30,3 +30,5 @@ pub use app::Row;
 pub use colour::colour_for;
 /// Draw one frame of the app.
 pub use ui::draw;
+/// How many rows of tree a terminal of a given size has room for.
+pub use ui::tree_height;
