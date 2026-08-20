@@ -100,6 +100,13 @@ fn run() -> Result<(), Error> {
             Some(Action::SelectPageDown) => app.select_page_down(),
             Some(Action::SelectFirst) => app.select_first(),
             Some(Action::SelectLast) => app.select_last(),
+            // Nothing else happens here on purpose. What is collapsed is the
+            // front end's view of the tree and never touches disk (§8), so
+            // there is no manifest to write; the tree has not changed, so there
+            // is nothing to re-read. The app moves the selection and the scroll
+            // offset back into range itself, and the next frame — the top of
+            // this same loop — draws the shorter or longer list.
+            Some(Action::ToggleCollapsed) => app.toggle_collapsed(),
             // The app has already flipped the row's colour and its tally, so
             // the next frame — drawn at the top of this same loop, with no
             // reload of the tree — shows the new state. The manifest is
@@ -390,6 +397,9 @@ enum Action {
     SelectFirst,
     /// Select the last row of the tree.
     SelectLast,
+    /// Hide the selected directory's descendants, or show them again if they
+    /// are hidden already.
+    ToggleCollapsed,
     /// Pact the selected node, or unpact it if it is pacted already.
     TogglePact,
 }
@@ -431,6 +441,11 @@ fn action_for(key: KeyEvent) -> Option<Action> {
         // does not care which of those it is handed.
         KeyCode::Char('g') => Some(Action::SelectFirst),
         KeyCode::Char('G') => Some(Action::SelectLast),
+        // Space is the file-tree key everywhere, and crossterm spells it as an
+        // ordinary character: there is no `KeyCode::Space`, so `Char(' ')` is
+        // the whole of it. Nothing rides along that needs matching — a modifier
+        // held with space is a different keystroke, not this one badly spelled.
+        KeyCode::Char(' ') => Some(Action::ToggleCollapsed),
         // Lower case only, and with no confirmation: the mnemonic is the
         // product's own word (pact, §15), and the action is its own undo —
         // pressing it again removes what it wrote.
@@ -734,6 +749,54 @@ mod tests {
                     "{kind:?} of {code:?} should not move anything"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn space_toggles_the_collapse_of_the_selected_directory() {
+        assert_eq!(
+            action_for(press(KeyCode::Char(' '))),
+            Some(Action::ToggleCollapsed)
+        );
+    }
+
+    #[test]
+    fn releases_and_repeats_of_space_collapse_nothing() {
+        // The same rule as every other key: a release acted on would expand
+        // again what the press had just collapsed, so one keystroke would look
+        // like none at all.
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                action_for(event),
+                None,
+                "{kind:?} of space should not collapse anything"
+            );
+        }
+    }
+
+    #[test]
+    fn space_is_the_only_key_that_collapses() {
+        // Neighbours on the keyboard and in the match arms above, in case a
+        // space ever gets typed into the wrong pattern.
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Tab,
+            KeyCode::Char('s'),
+            KeyCode::Char('p'),
+            KeyCode::Char('g'),
+        ] {
+            assert_ne!(
+                action_for(press(code)),
+                Some(Action::ToggleCollapsed),
+                "{code:?} should not collapse anything"
+            );
         }
     }
 
