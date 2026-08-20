@@ -19,13 +19,21 @@
 //! * A directory with no README of its own is a node with `readme: None`: an
 //!   ordinary directory that has no documentation yet. Showing fewer nodes than
 //!   the walk found is a view's business, not the loader's.
+//! * The files sitting directly in a directory come back on that node as
+//!   [`Node::files`], in path order, gathered as the same single pass meets
+//!   them — including the directory's own `README.md`. They are a listing and
+//!   nothing else: a file is not a node, has no state of its own, and is no
+//!   input to any hash.
 //!
 //! What the walk skips is not a list kept in this file: traversal is the
-//! [`ignore`] crate, so `.gitignore` at every level, hidden directories
-//! (`.git/` among them) and global excludes are all honoured as git honours
-//! them. `.warlock/` is pruned unconditionally on top of that, symlinks are
-//! never followed, and siblings come out ordered by directory name so two
-//! loads of an unchanged tree are equal values.
+//! [`ignore`] crate, so `.gitignore` at every level, hidden files and
+//! directories (`.git/` among them) and global excludes are all honoured as git
+//! honours them — and files inherit every one of those rules by coming out of
+//! the same walk, so an ignored file is as absent from a node's listing as an
+//! ignored directory is from the tree. `.warlock/` is pruned unconditionally on
+//! top of that, symlinks are never followed and never listed, and both
+//! directories and files come out in name order so two loads of an unchanged
+//! tree are equal values.
 //!
 //! State is not presence in the manifest: presence only decides whether the
 //! question is worth asking. A node the manifest names is hashed over its own
@@ -103,6 +111,10 @@ const README_FILE: &str = "README.md";
 /// // Only `crates/engine` has a README; the other three simply have none yet.
 /// let src = tree.find(repo.path().join("crates/engine/src")).unwrap();
 /// assert_eq!(src.readme, None);
+/// // Files ride along on the directory that holds them, that README included.
+/// let engine = tree.find(repo.path().join("crates/engine")).unwrap();
+/// assert_eq!(engine.files, [repo.path().join("crates/engine/README.md")]);
+/// assert!(src.files.is_empty(), "an empty directory lists nothing");
 /// // Nothing is pacted, so nothing was hashed and nothing could go wrong.
 /// assert_eq!(tree.root.state, NodeState::Unpacted);
 /// assert!(problems.is_empty());
@@ -225,12 +237,20 @@ pub fn repository_root(start: impl AsRef<Path>) -> Option<PathBuf> {
 }
 
 /// Every directory at or below `root` that survives the ignore rules, each
-/// mapped to whether it directly contains a `README.md`.
+/// mapped to what the walk found in it: whether it holds a `README.md`, and the
+/// files sitting directly inside it.
+///
+/// One pass over the filesystem answers both questions. The walker yields
+/// directories and files interleaved, so a file is filed under its parent as it
+/// arrives — which means no second walk, no [`read_dir`](std::fs::read_dir), and
+/// files that obey the ignore rules because they came through them.
 ///
 /// A [`BTreeMap`] rather than a `Vec` because [`Path`] orders by component:
 /// iterating it yields parents before children and siblings in name order,
-/// which is the whole of this loader's determinism.
-fn walk(root: &Path) -> Result<BTreeMap<PathBuf, bool>, Error> {
+/// which is the whole of this loader's determinism. The files under each key are
+/// sorted before the map is handed back, for the same reason: the order the
+/// filesystem offers them in is nobody's guarantee.
+fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
     let walker = WalkBuilder::new(root)
         // A symlinked directory is walked as a symlink, i.e. not descended
         // into, so a cycle of them terminates instead of recursing.
@@ -245,28 +265,55 @@ fn walk(root: &Path) -> Result<BTreeMap<PathBuf, bool>, Error> {
         .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR))
         .build();
 
-    let mut directories = BTreeMap::new();
+    let mut directories: BTreeMap<PathBuf, Directory> = BTreeMap::new();
     for entry in walker {
         let entry = entry.map_err(|source| Error::Walk { source })?;
-        if !entry.file_type().is_some_and(|kind| kind.is_dir()) {
-            continue;
-        }
+        let file_type = entry.file_type();
         let path = entry.into_path();
-        // Asked for directly rather than inferred from the walk's file
-        // entries: a README is what makes a module, so an ignore rule that
-        // happens to cover it should not quietly unmake one.
-        let has_readme = path.join(README_FILE).is_file();
-        directories.insert(path, has_readme);
+        if file_type.is_some_and(|kind| kind.is_dir()) {
+            // Asked for directly rather than inferred from the walk's file
+            // entries: a README is what makes a module, so an ignore rule that
+            // happens to cover it should not quietly unmake one.
+            let has_readme = path.join(README_FILE).is_file();
+            // An entry rather than an insert: a file inside this directory may
+            // have arrived first and already opened the record, and overwriting
+            // it here would drop the listing.
+            directories.entry(path).or_default().has_readme = has_readme;
+        } else if file_type.is_some_and(|kind| kind.is_file()) {
+            // Anything that is neither a directory nor a regular file — a
+            // symlink above all, which this walk declines to follow — is
+            // neither descended into nor listed.
+            if let Some(parent) = path.parent().map(Path::to_path_buf) {
+                directories.entry(parent).or_default().files.push(path);
+            }
+        }
+    }
+    for directory in directories.values_mut() {
+        directory.files.sort();
     }
     Ok(directories)
+}
+
+/// What one pass of the walk learned about a single directory.
+///
+/// Widened from the bare `bool` it used to be so that files could ride along
+/// with the directory that holds them: the map is keyed by directory either
+/// way, which is what lets [`Builder::children_of`] treat every key as one.
+#[derive(Debug, Default)]
+struct Directory {
+    /// Whether the directory directly contains a `README.md`.
+    has_readme: bool,
+    /// The files directly inside it, in path order, its `README.md` among
+    /// them. See [`Node::files`] for what a listing is and is not.
+    files: Vec<PathBuf>,
 }
 
 /// The directories a walk found, plus everything needed to turn one into a
 /// [`Node`].
 #[derive(Debug)]
 struct Builder {
-    /// Directory to whether it holds a README, in path order.
-    directories: BTreeMap<PathBuf, bool>,
+    /// What the walk found in each directory, in path order.
+    directories: BTreeMap<PathBuf, Directory>,
     /// The manifest's own directory, which its paths are relative to.
     repo_root: PathBuf,
     /// The manifest, or an empty one where the repository has none.
@@ -279,7 +326,9 @@ impl Builder {
     /// Nothing is dropped: a directory the walk reached is a node whether or
     /// not it is documented, so the tree is the shape of the working directory
     /// and not an opinion about which parts of it are interesting. A view that
-    /// wants only the documented ones filters what it renders.
+    /// wants only the documented ones filters what it renders. The files the
+    /// walk met in `dir` are copied onto the node as a listing; they make no
+    /// difference to its children, its state or its README.
     ///
     /// Anything that went wrong colouring a node, without being worth failing
     /// the load over, is pushed onto `problems`.
@@ -289,14 +338,17 @@ impl Builder {
             .map(|child| self.node(child, problems))
             .collect();
 
-        let readme = self
-            .directories
-            .get(dir)
-            .copied()
-            .unwrap_or_default()
+        let found = self.directories.get(dir);
+        let readme = found
+            .is_some_and(|directory| directory.has_readme)
             .then(|| dir.join(README_FILE));
+        let files = found
+            .map(|directory| directory.files.clone())
+            .unwrap_or_default();
 
-        Node::new(dir, readme, self.state_of(dir, problems)).with_children(children)
+        Node::new(dir, readme, self.state_of(dir, problems))
+            .with_children(children)
+            .with_files(files)
     }
 
     /// The directories directly inside `dir`, in name order.
@@ -555,6 +607,25 @@ mod tests {
         fs::write(manifest_path(root), text).expect("writes the manifest");
     }
 
+    /// The file names the node at `dir` lists, in the order it lists them.
+    ///
+    /// Names rather than whole paths, because what is under test is which
+    /// files a node claims and in what order; that they sit under the node is
+    /// the loader's business and is asserted where it belongs.
+    fn file_names(tree: &Tree, dir: impl AsRef<Path>) -> Vec<String> {
+        tree.find(dir.as_ref())
+            .unwrap_or_else(|| panic!("`{}` is a node", dir.as_ref().display()))
+            .files
+            .iter()
+            .map(|file| {
+                file.file_name()
+                    .expect("a file has a name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
     /// Every node path in the tree, relative to `root`, depth first.
     fn relative_paths(tree: &crate::Tree, root: &Path) -> Vec<String> {
         tree.walk()
@@ -731,6 +802,84 @@ mod tests {
             ["", "src"],
             "`target/` and `vendored/` are gitignored, `.git/` is git's own, \
              and `.warlock/` is ours — a README in any of them changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_node_lists_the_files_directly_inside_it_readme_included() {
+        let repo = fixture(&[], &["crates/engine"]);
+        let module = repo.path().join("crates/engine");
+        // Written in an order that is not the sorted one, so a listing that
+        // simply kept what the filesystem offered would have to be lucky to
+        // pass.
+        write_file(&module.join("zeta.rs"), "");
+        write_file(&module.join("alpha.rs"), "");
+        write_file(&module.join("src/lib.rs"), "");
+
+        let tree = tree_of(repo.path());
+
+        assert_eq!(
+            file_names(&tree, &module),
+            ["README.md", "alpha.rs", "zeta.rs"],
+            "sorted, and the module's own README is one of its files"
+        );
+        assert_eq!(
+            file_names(&tree, module.join("src")),
+            ["lib.rs"],
+            "a file belongs to the directory that holds it, not to an ancestor"
+        );
+        assert_eq!(
+            file_names(&tree, repo.path()),
+            [] as [String; 0],
+            "the fixture root holds no files of its own"
+        );
+        assert!(
+            !tree.find(&module).expect("the module").is_leaf(),
+            "the module has a child directory, so it is no leaf",
+        );
+        assert!(
+            tree.find(module.join("src"))
+                .expect("the child directory")
+                .is_leaf(),
+            "and a directory whose only contents are files still is one",
+        );
+        assert_eq!(tree, tree_of(repo.path()), "two loads, one value");
+    }
+
+    #[test]
+    fn the_files_a_node_lists_obey_the_same_rules_as_its_directories() {
+        // The mirror of `the_walk_skips_ignored_and_warlock_directories`, one
+        // level down: the same four kinds of thing a directory is skipped for,
+        // asserted against files instead.
+        let repo = fixture(&["target/debug"], &["src"]);
+        fs::write(repo.path().join(".gitignore"), "/target\nsecret.txt\n")
+            .expect("writes a .gitignore");
+        write_file(&repo.path().join("secret.txt"), "shh\n");
+        write_file(&repo.path().join(".hidden"), "shh\n");
+        write_file(&repo.path().join("src/secret.txt"), "shh\n");
+        write_file(&repo.path().join("target/debug/build.log"), "noise\n");
+        write_file(&repo.path().join(".git/config"), "[core]\n");
+        write_file(&repo.path().join(".warlock/notes.md"), "# ours\n");
+        write_file(&repo.path().join("src/lib.rs"), "");
+
+        let tree = tree_of(repo.path());
+        let listed: Vec<String> = tree
+            .walk()
+            .flat_map(|(node, _)| {
+                node.files.iter().map(|file| {
+                    file.strip_prefix(repo.path())
+                        .expect("every file sits under the root")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+            })
+            .collect();
+
+        assert_eq!(
+            listed,
+            ["src/README.md", "src/lib.rs"],
+            "gitignored, hidden and `.warlock/` files come through the same \
+             walk as directories, so they never arrive at all"
         );
     }
 
@@ -953,10 +1102,17 @@ mod tests {
         )
         .expect("links back to an ancestor");
 
+        let tree = tree_of(repo.path());
         assert_eq!(
-            relative_paths(&tree_of(repo.path()), repo.path()),
+            relative_paths(&tree, repo.path()),
             ["", "crates", "crates/engine"],
             "a symlinked directory is not descended into, so it is not a node"
+        );
+        assert_eq!(
+            file_names(&tree, repo.path().join("crates/engine")),
+            ["README.md"],
+            "and it is not listed as one of its parent's files either: a \
+             symlink is neither walked nor listed"
         );
     }
 
