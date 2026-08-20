@@ -27,11 +27,15 @@
 //!   the binary reports back in the engine's vocabulary; a caller reading them
 //!   never learns that a process was involved, and a future implementation that
 //!   is not a process still fits.
-//! * **This is transport, not payload.** A [`Request`] carries only what
-//!   running a pass needs — the prompt text, and the directory to run it in.
-//!   What goes *into* a prompt, and which files a request should scope, is a
-//!   separate decision; the request's fields are private behind a constructor
-//!   so that decision can add to it without touching [`Agent::run`].
+//! * **This is transport, not payload.** A [`Request`] carries the prompt, the
+//!   directory to run it in, that directory's own files ([`File`]), and the
+//!   `WARLOCK.md` of each immediate child ([`ChildDocument`]) — the context one
+//!   pass is scoped to, and nothing about how that scope was decided. Which
+//!   files a walk gathers, what it does with one too large to send, and how any
+//!   of it is spelled into prompt text are decisions elsewhere. The fields are
+//!   private behind [`Request::new`] and builder methods that only ever add, so
+//!   the next thing a pass needs lands here without touching [`Agent::run`] or
+//!   any implementation of it.
 //!
 //! The failure vocabulary is deliberately not one `Io` bucket. Each variant is
 //! a different thing for a caller to say or do: a missing `claude` is the
@@ -95,14 +99,26 @@ pub trait Agent {
     fn run(&self, request: &Request) -> Result<Response, Error>;
 }
 
-/// What one pass needs in order to run: a prompt, and where to run it.
+/// What one pass needs in order to run: a prompt, where to run it, and the
+/// context it is scoped to.
 ///
-/// Nothing more, on purpose. This is the transport's half of the contract —
-/// the prompt's *content*, and which files it should describe, is a decision
-/// this type is shaped to absorb rather than one it makes. The fields are
-/// private and reached through [`Request::new`] and the accessors, so a later
-/// slice adds what it needs here and every implementation of [`Agent`] keeps
-/// compiling.
+/// The context is two lists and no more. The directory's own files
+/// ([`File`]) — its whole listing, each either carrying its bytes or standing
+/// in as a name and a size — and the `WARLOCK.md` of each immediate child
+/// ([`ChildDocument`]), which is how a directory learns what is underneath it
+/// without reading a single source file down there.
+///
+/// There is no field for an *existing* `WARLOCK.md` of this directory, and
+/// deliberately never will be: it is one of the directory's files, listed like
+/// any other. A pass that wants to know whether a document is already there
+/// looks in [`Request::files`]. Giving it a slot of its own would bake a
+/// refresh workflow into the transport before anything has decided what a
+/// refresh is.
+///
+/// The fields are private and reached through [`Request::new`], the
+/// builder-style `with_*` methods and the accessors. Every widening so far has
+/// been additive for exactly that reason: an existing [`Agent`] implementation
+/// and every existing call site keep compiling.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Request {
     /// The whole text handed to the model.
@@ -110,14 +126,24 @@ pub struct Request {
     /// The directory the pass runs in, so relative paths in the prompt mean
     /// what the model would see if it looked.
     directory: PathBuf,
+    /// The files sitting directly in that directory, in whatever order the
+    /// caller added them.
+    files: Vec<File>,
+    /// The `WARLOCK.md` of each immediate child directory that has one. A
+    /// child without one contributes no entry.
+    child_documents: Vec<ChildDocument>,
 }
 
 impl Request {
-    /// A pass that asks `prompt`, run from `directory`.
+    /// A pass that asks `prompt`, run from `directory`, carrying no files and
+    /// no child documents.
     ///
-    /// Infallible: neither field is validated here. Whether the directory
-    /// exists is the transport's problem, and it reports back as
-    /// [`Error::Io`].
+    /// Infallible: nothing is validated here. Whether the directory exists is
+    /// the transport's problem, and it reports back as [`Error::Io`]. Context
+    /// is added afterwards with [`Request::with_files`] and
+    /// [`Request::with_child_documents`], so a caller that has none — a test,
+    /// or a question about a directory rather than about its contents — says
+    /// nothing extra.
     ///
     /// ```
     /// use std::path::Path;
@@ -127,13 +153,66 @@ impl Request {
     ///
     /// assert_eq!(request.prompt(), "summarise this module");
     /// assert_eq!(request.directory(), Path::new("crates/warlock-engine"));
+    /// assert!(request.files().is_empty());
+    /// assert!(request.child_documents().is_empty());
     /// ```
     #[must_use]
     pub fn new(prompt: impl Into<String>, directory: impl Into<PathBuf>) -> Self {
         Self {
             prompt: prompt.into(),
             directory: directory.into(),
+            files: Vec::new(),
+            child_documents: Vec::new(),
         }
+    }
+
+    /// The same request with `files` appended to the directory's listing.
+    ///
+    /// Appends rather than replaces, and can be called more than once: a
+    /// caller gathering a directory in passes never has to hold the whole
+    /// listing in one iterator. Order is the caller's — nothing here sorts,
+    /// because the order files reach a prompt in is the prompt's business.
+    ///
+    /// ```
+    /// use warlock_engine::{AgentFile, AgentRequest};
+    ///
+    /// let request = AgentRequest::new("summarise this module", "crates/engine")
+    ///     .with_files([AgentFile::present("src/lib.rs", *b"//! Core engine.\n")])
+    ///     .with_files([AgentFile::omitted("Cargo.lock", 4_200_000)]);
+    ///
+    /// assert_eq!(request.files().len(), 2);
+    /// assert_eq!(request.files()[0].bytes(), Some(&b"//! Core engine.\n"[..]));
+    /// // An omitted file is still listed, by name and size, never truncated.
+    /// assert_eq!(request.files()[1].bytes(), None);
+    /// assert_eq!(request.files()[1].size(), 4_200_000);
+    /// ```
+    #[must_use]
+    pub fn with_files(mut self, files: impl IntoIterator<Item = File>) -> Self {
+        self.files.extend(files);
+        self
+    }
+
+    /// The same request with `documents` appended to the child documents.
+    ///
+    /// Appends rather than replaces, on the same terms as
+    /// [`Request::with_files`].
+    ///
+    /// ```
+    /// use warlock_engine::{AgentChildDocument, AgentRequest};
+    ///
+    /// let request = AgentRequest::new("summarise this module", "crates/engine")
+    ///     .with_child_documents([AgentChildDocument::new("src", "# src\n\nThe code.\n")]);
+    ///
+    /// assert_eq!(request.child_documents()[0].directory(), "src");
+    /// assert!(request.child_documents()[0].text().starts_with("# src"));
+    /// ```
+    #[must_use]
+    pub fn with_child_documents(
+        mut self,
+        documents: impl IntoIterator<Item = ChildDocument>,
+    ) -> Self {
+        self.child_documents.extend(documents);
+        self
     }
 
     /// The text to hand the model.
@@ -146,6 +225,156 @@ impl Request {
     #[must_use]
     pub fn directory(&self) -> &Path {
         &self.directory
+    }
+
+    /// The files sitting directly in that directory, the directory's own
+    /// `WARLOCK.md` among them if it has one.
+    #[must_use]
+    pub fn files(&self) -> &[File] {
+        &self.files
+    }
+
+    /// The `WARLOCK.md` of each immediate child directory that has one.
+    #[must_use]
+    pub fn child_documents(&self) -> &[ChildDocument] {
+        &self.child_documents
+    }
+}
+
+/// One file of the directory a pass is about: its path, and its bytes if they
+/// were sent.
+///
+/// Bytes rather than text, because a directory's files are whatever is in it —
+/// a PNG, a binary fixture, a latin-1 CSV — and a type that could only hold
+/// UTF-8 would make those unrepresentable rather than merely awkward.
+///
+/// A file the caller chose not to send is here all the same, as its path and
+/// its size ([`File::omitted`]). That is the whole vocabulary for leaving
+/// something out: there is no half-sent file, because a truncated source file
+/// invites confident wrong conclusions about the part that never arrived,
+/// while a name and a size is accurate information a model can document
+/// honestly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct File {
+    /// Where the file is, relative to the request's directory, spelled with
+    /// forward slashes — the same spelling the manifest uses, so one path
+    /// means one thing on every platform.
+    path: String,
+    /// Its bytes, or the size standing in for them.
+    content: Content,
+}
+
+/// What a [`File`] has to say about its contents: all of them, or how many
+/// there were.
+///
+/// Private, and reached through [`File::bytes`] and [`File::size`], so
+/// "omitted" stays one bit of the public surface rather than a variant callers
+/// match on and grow special cases around.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Content {
+    /// The file, whole.
+    Bytes(Vec<u8>),
+    /// The file's size in bytes, its contents left out.
+    Omitted(u64),
+}
+
+impl File {
+    /// A file sent whole: `path`, carrying `bytes`.
+    #[must_use]
+    pub fn present(path: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
+        Self {
+            path: path.into(),
+            content: Content::Bytes(bytes.into()),
+        }
+    }
+
+    /// A file listed but not sent: `path`, and the `size` in bytes it has on
+    /// disk.
+    ///
+    /// The size is given rather than measured, because the point of this
+    /// constructor is that nobody is holding the bytes.
+    #[must_use]
+    pub fn omitted(path: impl Into<String>, size: u64) -> Self {
+        Self {
+            path: path.into(),
+            content: Content::Omitted(size),
+        }
+    }
+
+    /// Where the file is, relative to the request's directory.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The file's bytes, or `None` if it was listed rather than sent.
+    #[must_use]
+    pub fn bytes(&self) -> Option<&[u8]> {
+        match &self.content {
+            Content::Bytes(bytes) => Some(bytes),
+            Content::Omitted(_) => None,
+        }
+    }
+
+    /// How many bytes the file has — answered whether or not they were sent,
+    /// which is what makes an omitted file a fact rather than a hole.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        match &self.content {
+            Content::Bytes(bytes) => bytes.len() as u64,
+            Content::Omitted(size) => *size,
+        }
+    }
+
+    /// Whether the file was listed rather than sent.
+    #[must_use]
+    pub fn is_omitted(&self) -> bool {
+        matches!(self.content, Content::Omitted(_))
+    }
+}
+
+/// One immediate child directory's `WARLOCK.md`, as its parent's pass sees it.
+///
+/// This is how a directory describes what it contains without reading it: the
+/// children summarise themselves, and their parent is handed those summaries
+/// instead of every source file below. Nothing deeper than the immediate
+/// children ever appears — a grandchild is already described by the child's
+/// document.
+///
+/// Text rather than bytes, unlike [`File`]: this is Warlock's own document,
+/// the same string an [`Agent`] handed back as a [`Response`] when the child
+/// was pacted, not an arbitrary file that happens to sit in a directory.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChildDocument {
+    /// The child directory, relative to the request's directory, with forward
+    /// slashes. The directory rather than the document, because the document's
+    /// name is the same for every child and the directory is what a reader
+    /// needs to place it.
+    directory: String,
+    /// The document, verbatim.
+    text: String,
+}
+
+impl ChildDocument {
+    /// The document `text`, belonging to the child directory `directory`.
+    #[must_use]
+    pub fn new(directory: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            directory: directory.into(),
+            text: text.into(),
+        }
+    }
+
+    /// The child directory, relative to the request's directory.
+    #[must_use]
+    pub fn directory(&self) -> &str {
+        &self.directory
+    }
+
+    /// What that child's document says.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
     }
 }
 
@@ -294,7 +523,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use super::{Agent, Error, Request, Response};
+    use super::{Agent, ChildDocument, Error, File, Request, Response};
 
     /// The whole point of the seam, in one struct: an [`Agent`] that answers
     /// with canned markdown. No `claude`, no terminal, no network, no mocking
@@ -417,6 +646,139 @@ mod tests {
         assert_eq!(request.prompt(), "summarise this module");
         assert_eq!(request.directory(), Path::new("/repo/crates/engine"));
         assert_eq!(request, request.clone());
+    }
+
+    #[test]
+    fn a_request_needs_no_files_or_child_documents_to_exist() {
+        // `new` alone is still a whole request: everything the widening added
+        // is optional, so nothing that built one before has to change.
+        let request = Request::new("summarise this module", "/repo/crates/engine");
+
+        assert!(request.files().is_empty());
+        assert!(request.child_documents().is_empty());
+    }
+
+    #[test]
+    fn a_request_round_trips_its_files() {
+        let request = Request::new("summarise", "/repo/crates/engine").with_files([
+            File::present("src/lib.rs", *b"//! Core engine.\n"),
+            File::present("logo.png", vec![0x89, b'P', b'N', b'G', 0x00, 0xff]),
+        ]);
+
+        let files = request.files();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path(), "src/lib.rs");
+        assert_eq!(files[0].bytes(), Some(&b"//! Core engine.\n"[..]));
+        assert_eq!(files[0].size(), 17);
+        assert!(!files[0].is_omitted());
+        assert_eq!(
+            files[1].bytes(),
+            Some(&[0x89, b'P', b'N', b'G', 0x00, 0xff][..]),
+            "bytes, not text: a file in a directory need not be UTF-8"
+        );
+    }
+
+    #[test]
+    fn an_omitted_file_is_listed_by_name_and_size_with_no_bytes() {
+        let request =
+            Request::new("summarise", "/repo").with_files([File::omitted("Cargo.lock", 4_200_000)]);
+
+        let file = &request.files()[0];
+        assert_eq!(file.path(), "Cargo.lock");
+        assert_eq!(file.size(), 4_200_000);
+        assert!(file.is_omitted());
+        assert_eq!(
+            file.bytes(),
+            None,
+            "never truncated: an omitted file has no bytes at all, not some of them"
+        );
+    }
+
+    #[test]
+    fn a_request_round_trips_its_child_documents() {
+        let request = Request::new("summarise", "/repo/crates/engine").with_child_documents([
+            ChildDocument::new("src", "# src\n\nThe code.\n"),
+            ChildDocument::new("tests", "# tests\n"),
+        ]);
+
+        let children = request.child_documents();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].directory(), "src");
+        assert_eq!(children[0].text(), "# src\n\nThe code.\n");
+        assert_eq!(children[1].directory(), "tests");
+    }
+
+    #[test]
+    fn the_builders_add_rather_than_replace() {
+        let request = Request::new("summarise", "/repo")
+            .with_files([File::present("a.rs", *b"a")])
+            .with_child_documents([ChildDocument::new("one", "# one\n")])
+            .with_files([File::omitted("b.bin", 9)])
+            .with_child_documents([ChildDocument::new("two", "# two\n")]);
+
+        assert_eq!(
+            request
+                .files()
+                .iter()
+                .map(File::path)
+                .collect::<Vec<_>>()
+                .as_slice(),
+            ["a.rs", "b.bin"]
+        );
+        assert_eq!(
+            request
+                .child_documents()
+                .iter()
+                .map(ChildDocument::directory)
+                .collect::<Vec<_>>()
+                .as_slice(),
+            ["one", "two"]
+        );
+        assert_eq!(request, request.clone(), "and the whole thing is a value");
+    }
+
+    #[test]
+    fn the_directorys_own_document_is_an_ordinary_file_of_it() {
+        // The one assertion that has to keep holding: `WARLOCK.md` gets no slot
+        // of its own, so an existing document arrives as a file like any other
+        // and no caller can special-case what it cannot find.
+        let request = Request::new("summarise", "/repo/crates/engine").with_files([
+            File::present("WARLOCK.md", *b"# engine\n"),
+            File::present("src/lib.rs", *b"//! Core engine.\n"),
+        ]);
+
+        let document = request
+            .files()
+            .iter()
+            .find(|file| file.path() == "WARLOCK.md")
+            .expect("the existing document is in the listing");
+        assert_eq!(document.bytes(), Some(&b"# engine\n"[..]));
+        assert!(
+            request
+                .child_documents()
+                .iter()
+                .all(|child| child.directory() != "."),
+            "a directory's own document is not one of its children's"
+        );
+    }
+
+    #[test]
+    fn a_request_with_context_still_reaches_an_agent_whole() {
+        let agent = Canned::new("# engine\n");
+        let request = Request::new("describe this directory", "crates/warlock-engine")
+            .with_files([File::present("src/lib.rs", *b"//! Core engine.\n")])
+            .with_child_documents([ChildDocument::new("src", "# src\n")]);
+
+        agent.run(&request).expect("the fake always answers");
+
+        assert_eq!(
+            agent.seen.borrow().as_slice(),
+            [(
+                "describe this directory".to_owned(),
+                PathBuf::from("crates/warlock-engine"),
+            )],
+            "widening the request breaks no existing implementation of the trait"
+        );
     }
 
     #[test]

@@ -1,0 +1,1824 @@
+//! One directory's pact: what a model pass gets to see, and what is done with
+//! what it says.
+//!
+//! [`pact_directory`] is the whole operation, and it is three steps with
+//! nothing else in them: gather the directory into a request, run one pass
+//! through an [`Agent`], and write what came back to `<directory>/WARLOCK.md`.
+//! It records nothing — no manifest entry, no hash, no grant — because a pact
+//! is one request, one response, one file, and what to remember about it is the
+//! caller's business.
+//!
+//! Section 11 of the design doc calls context scoping "the actual
+//! differentiator: maximal relevant context, minimal waste". This module is
+//! that sentence made mechanical. [`gather_request`] turns a directory on disk
+//! into the [`AgentRequest`](crate::AgentRequest) a pass runs on, and decides
+//! the one hard question in it — what to do about a directory holding a
+//! four-megabyte lockfile — without ever refusing to produce a request.
+//!
+//! What goes in, and nothing else:
+//!
+//! * **The directory's own files**, each with its bytes: the whole listing, its
+//!   own `WARLOCK.md` among them as an ordinary file. Files below the immediate
+//!   children are never read — that is the waste the scoping exists to avoid.
+//! * **Each immediate child directory's `WARLOCK.md`**, where one exists. This
+//!   is how a directory learns what is under it: the children have already
+//!   described themselves, so their parent reads summaries instead of source.
+//!   A child with no document contributes no entry and is not an error; it is
+//!   the ordinary state of a directory nobody has pacted yet.
+//!
+//! The walk is the same walk as [`load`](crate::load) and [`hash`](crate::hash)
+//! — the [`ignore`] crate, `follow_links(false)`, `require_git(false)`,
+//! `.warlock/` pruned by name — so a file that is gitignored, hidden or
+//! Warlock's own bookkeeping is as absent from a request as it is from a tree
+//! or a digest. Symlinks are neither followed nor listed. Relative paths are
+//! spelled by [`to_manifest_path`], forward slashes and all, and everything
+//! comes out sorted, so two builds of an unchanged directory are equal values.
+//!
+//! # The two caps, and why neither can fail a pact
+//!
+//! A request has a budget, because a context window does:
+//! [`PER_FILE_BYTE_CAP`] for any one file and [`REQUEST_BYTE_CAP`] for the
+//! whole thing. What happens at the edge of a budget is a decision, and two
+//! were made here.
+//!
+//! **Omit and list, never truncate.** A file over budget is still in the
+//! request — as its name and its size in bytes, with no contents at all. Half a
+//! source file invites confident wrong conclusions about the half that never
+//! arrived; a name and a size is accurate information a model can document
+//! honestly ("a 4.1 MB `Cargo.lock`, not read").
+//!
+//! **Over budget is never fatal.** Section 3 of the design doc says Warlock
+//! never makes the wrong thing impossible, and failing here would do exactly
+//! that: one committed lockfile or one generated schema would leave a directory
+//! permanently unpactable, with no way out but deleting the file. So every
+//! omission is a [`Problem`] reported alongside a request that is still
+//! perfectly good — the same non-fatal shape [`LoadProblem`](crate::LoadProblem)
+//! established, for the same reason: the thing that went wrong is said out
+//! loud, once, rather than silently changing what happened.
+//!
+//! This does not contradict the rule that an unreadable file is fatal to a
+//! *hash* (see [`hash`](crate::hash)): over budget is a disclosed policy this
+//! module applies on purpose, while an undetected hole in a digest is a false
+//! green nobody earned. A file that genuinely cannot be read is a third case
+//! again, and gets its own cause ([`Omission::Unreadable`]) so it is never
+//! mistaken for either.
+//!
+//! # The answer, and the two ways it is turned down
+//!
+//! An accepted response is written out **verbatim**: not trimmed, not parsed,
+//! not reformatted, no sections looked for. Warlock does not read `WARLOCK.md`
+//! — it cares that one exists and what its bytes hash to — and section 17's
+//! question about a document skeleton is open, so this module writes the
+//! answer rather than an opinion about the answer.
+//!
+//! A response is turned down in exactly two cases: the [`Agent`] came back with
+//! an [`AgentError`] instead of an answer, or the answer is shorter than
+//! [`MINIMUM_DOCUMENT_BYTES`] once surrounding whitespace is trimmed. There is
+//! no third rule, and in particular no phrase list — see the constant for why
+//! a length is the only thing worth checking here.
+
+use std::cmp::Reverse;
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use ignore::WalkBuilder;
+
+use crate::{
+    Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, ManifestError, to_manifest_path,
+};
+
+/// The directory holding Warlock's own bookkeeping, never part of a request.
+const MANIFEST_DIR: &str = ".warlock";
+
+/// The document a directory is described by, and the only file name a child
+/// directory contributes to its parent's request.
+const DOCUMENT_FILE: &str = "WARLOCK.md";
+
+/// How deep the walk goes: the directory itself (0), its own files and its
+/// immediate children (1), and the files directly inside those children (2),
+/// of which only `WARLOCK.md` is kept.
+///
+/// The depth limit *is* the scoping rule, enforced by the walker rather than by
+/// remembering to check: source below an immediate child cannot reach a request
+/// even by accident, because the walk never descends far enough to meet it.
+const WALK_DEPTH: usize = 2;
+
+/// The most bytes one file may contribute before it is listed instead of sent:
+/// 128 KiB.
+///
+/// Roughly 37,000 tokens of source at the ~3.5 bytes per token that code
+/// tokenises at — comfortably more than any hand-written source file (the
+/// largest module in this repository is under 50 KiB), and comfortably less
+/// than the generated artefacts this cap exists for: lockfiles, vendored
+/// bundles, checked-in schemas, minified assets. A file that trips this cap is
+/// almost never a file a model needed to read line by line; its name, and the
+/// fact that it is enormous, is the part worth documenting.
+pub const PER_FILE_BYTE_CAP: u64 = 128 * 1024;
+
+/// The most bytes one whole request may carry: 256 KiB.
+///
+/// About 75,000 tokens by the same measure — a large but workable share of a
+/// 200,000-token window, leaving the prompt, the children's documents and the
+/// answer itself room to breathe. Twice [`PER_FILE_BYTE_CAP`] on purpose: even
+/// a directory holding two maximal files still sends both, while the directory
+/// that trips this cap is one holding hundreds of ordinary files, where sending
+/// every one of them buys less than it costs.
+///
+/// The budget counts everything the request carries: the bytes of the files
+/// sent whole, and the text of the children's documents. Only files are ever
+/// dropped to get under it — see [`gather_request`].
+pub const REQUEST_BYTE_CAP: u64 = 256 * 1024;
+
+/// The fewest bytes an answer may come to, once surrounding whitespace is
+/// trimmed, and still be written as a document: 200.
+///
+/// A floor exists because a zero-byte or one-line `WARLOCK.md` that gets
+/// written, then hashed, then granted is a false green, and section 6 of the
+/// design doc is explicit that green is earned. 200 bytes is about a heading
+/// and two sentences: below anything that describes any real directory,
+/// including the emptiest one in this repository, and above what a pass
+/// produces when it has quietly given up.
+///
+/// It is a length, and it is the only thing measured. Whether the text
+/// apologises, refuses, hedges, or is confidently about some other directory is
+/// not checked here and deliberately never will be: a phrase list is a guess
+/// about wording that fails open on every refusal it did not anticipate and
+/// fails closed on the honest document that happens to say "unfortunately".
+/// Section 7 of the design doc makes the git diff the review surface for
+/// documentation, so a bad document is caught where every other bad change is
+/// caught — by a human reading the diff — and a length check is only here to
+/// stop the case where there is no document at all.
+pub const MINIMUM_DOCUMENT_BYTES: usize = 200;
+
+/// The whole instruction a pass is given, and the only one there is.
+///
+/// The prompt is code. No configuration file, no template directory, no
+/// per-project override: making it configurable before there is a single prompt
+/// that works builds the knob before the thing the knob turns. Changing what
+/// Warlock asks for is a change to this string, reviewed in a diff like
+/// everything else.
+///
+/// # The invocation mode this assumes
+///
+/// **Headless print mode, one invocation per directory.** Section 11 of the
+/// design doc leaves the choice open between that and one longer session, and
+/// this is the one taken: build a request, run one pass, write the answer, and
+/// the pass is over. Each directory is independent, and section 11 already
+/// specifies this lifetime as the short one with small context. A pass that
+/// cannot outlive one directory cannot carry a misunderstanding from one
+/// directory into the next, can be cancelled or killed without stranding a
+/// conversation, and needs no session to resume when the one after it fails.
+///
+/// The cost is real, and is named here rather than left to be discovered:
+/// **every directory re-establishes its context from nothing.** Forty
+/// directories pay for forty cold starts, and a pass that has just finished
+/// describing a child begins its parent knowing none of it. What buys most of
+/// that back is [`AgentChildDocument`] — the parent is handed the child's
+/// finished document, so what the earlier pass concluded arrives as text even
+/// though the pass itself is gone. The rest is the price of passes that are
+/// independent, restartable and interruptible one at a time, and it is paid on
+/// purpose.
+const PROMPT: &str = "\
+Write the WARLOCK.md for this directory.
+
+WARLOCK.md documents one directory of a codebase for someone about to work in \
+it. Say what this directory is, what it is for, how its parts fit together, \
+and what a reader has to know before changing anything in it. Prefer what is \
+not obvious from the file names.
+
+You are given this directory's own files and the WARLOCK.md of each immediate \
+subdirectory. The subdirectories have already described themselves: summarise \
+them from their documents rather than restating their contents, and do not \
+speculate about files further down that you were not given.
+
+Some files may appear as a name and a byte size with no contents. Those were \
+too large to send. Mention such a file if it matters what it is, and never \
+guess what is inside it.
+
+Output the document and nothing else: no preamble, no sign-off, no commentary \
+about the task, and no code fence wrapping the whole document. Start with a \
+level-one Markdown heading naming the directory.";
+
+/// Pact one directory: gather it, run one pass through `agent`, and write what
+/// came back to `<directory>/WARLOCK.md`.
+///
+/// The document is written **verbatim** — the response's own bytes, untrimmed,
+/// unparsed and unreformatted — over whatever was there before, unconditionally
+/// and without reading it first. An existing document is not a special case
+/// anywhere in this operation: it went into the request as one of the
+/// directory's files, and it is overwritten here as the ordinary outcome of a
+/// pass that was asked to write one.
+///
+/// Nothing is recorded. No manifest entry, no subtree hash, no grant: this is
+/// one request, one response, one file, and a caller that wants the directory
+/// to go green does that afterwards with what it knows about the rest of the
+/// subtree.
+///
+/// The [`Problem`]s the byte caps produced come back on success, alongside the
+/// document that was written — a pact over budget is still a pact, so they are
+/// something to report rather than something to act on.
+///
+/// `&dyn Agent` rather than a generic: there is one code path whatever the
+/// implementation is, a boxed agent works without a second signature, and a
+/// concrete fake in a test still coerces at the call site.
+///
+/// ```
+/// use std::fs;
+/// use warlock_engine::{Agent, AgentError, AgentRequest, AgentResponse, Pacted, pact_directory};
+///
+/// /// The engine's own tests reach a model exactly like this: they don't.
+/// struct Canned(String);
+///
+/// impl Agent for Canned {
+///     fn run(&self, _request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+///         Ok(AgentResponse::new(self.0.clone()))
+///     }
+/// }
+///
+/// let dir = tempfile::tempdir()?;
+/// fs::write(dir.path().join("lib.rs"), "//! Core engine.\n")?;
+/// let markdown = format!("# engine\n\n{}\n", "Core engine for warlock. ".repeat(20));
+///
+/// let Pacted { document, problems } = pact_directory(dir.path(), &Canned(markdown.clone()))?;
+///
+/// assert_eq!(document, dir.path().join("WARLOCK.md"));
+/// assert_eq!(fs::read_to_string(&document)?, markdown, "written verbatim");
+/// assert!(problems.is_empty());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+///
+/// [`Error`], every variant of which names `directory` (see
+/// [`Error::directory`]), because a caller pacting a subtree is holding a list
+/// of these and has to be able to say which directory each one is about.
+///
+/// * [`Error::Walk`] or [`Error::Path`] if there is no request to build — see
+///   [`gather_request`]. Neither byte cap is ever one of these.
+/// * [`Error::Refused`] if the pass produced no usable document: the agent
+///   returned an [`AgentError`], or the answer was under
+///   [`MINIMUM_DOCUMENT_BYTES`] trimmed. **Nothing is written on this path**:
+///   a directory with no document still has none, and an existing document is
+///   byte-identical to what it was before.
+/// * [`Error::Write`] if the document could not be written. A different kind of
+///   failure from a refusal — the answer was good and the disk said no — and
+///   the only one that can leave the filesystem in a state the caller did not
+///   ask for.
+pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<Pacted, Error> {
+    let directory = directory.as_ref();
+    let Gathered { request, problems } = gather_request(PROMPT, directory)?;
+
+    let response = agent.run(&request).map_err(|source| Error::Refused {
+        directory: directory.to_path_buf(),
+        cause: Refusal::Agent { source },
+    })?;
+
+    // Measured on the trimmed text, written from the untrimmed one: leading
+    // blank lines are not a document, but they are also not this module's to
+    // tidy away.
+    let text = response.into_text();
+    let trimmed = text.trim().len();
+    if trimmed < MINIMUM_DOCUMENT_BYTES {
+        return Err(Error::Refused {
+            directory: directory.to_path_buf(),
+            cause: Refusal::TooShort { bytes: trimmed },
+        });
+    }
+
+    // A plain overwrite, where `Manifest::save` writes a temporary file and
+    // renames it. The idiom is not copied here on purpose: a torn manifest is a
+    // data file Warlock reads back and would misread, while a torn `WARLOCK.md`
+    // is documentation nobody parses that the next pass overwrites whole. The
+    // temporary file, meanwhile, would land in the very directory just
+    // described — a file in the tree, in the next subtree hash, and in the next
+    // request — which is a worse thing to risk than the tear it prevents.
+    let document = directory.join(DOCUMENT_FILE);
+    if let Err(source) = fs::write(&document, &text) {
+        return Err(Error::Write {
+            directory: directory.to_path_buf(),
+            path: document,
+            source,
+        });
+    }
+
+    Ok(Pacted { document, problems })
+}
+
+/// Build the request for one pass over `directory`, asking `prompt`.
+///
+/// The request carries `directory`'s own files and its immediate children's
+/// documents, gathered under the ignore rules and the two byte caps this module
+/// documents. Alongside it comes every [`Problem`] the budget caused — an empty
+/// list on the ordinary directory, and never a reason to stop.
+///
+/// Trimming, when [`REQUEST_BYTE_CAP`] is exceeded, is largest-first: the
+/// biggest file is turned into a name and a size, then the next, until the
+/// request fits. Largest-first because it reaches the budget in the fewest
+/// omissions, and because a directory's biggest file is the least likely to be
+/// the one that explains what the directory is for. Ties are broken by path so
+/// the result is a value, not a race. Children's documents count towards the
+/// budget but are never dropped: a file left out still says its name and size,
+/// while a document left out would replace the only account of a whole subtree
+/// with nothing — so a pathological child document can leave a request over the
+/// cap with every file listed rather than sent, which is a fact about that
+/// document and still not a failure.
+///
+/// ```
+/// use std::fs;
+/// use warlock_engine::{Gathered, gather_request};
+///
+/// let dir = tempfile::tempdir()?;
+/// fs::write(dir.path().join("lib.rs"), "//! Core engine.\n")?;
+/// fs::create_dir(dir.path().join("inner"))?;
+/// fs::write(dir.path().join("inner/WARLOCK.md"), "# inner\n")?;
+/// fs::write(dir.path().join("inner/deep.rs"), "fn deep() {}\n")?;
+///
+/// let Gathered { request, problems } = gather_request("summarise", dir.path())?;
+///
+/// // The directory's own files, with their bytes.
+/// assert_eq!(request.files().len(), 1);
+/// assert_eq!(request.files()[0].path(), "lib.rs");
+/// assert_eq!(request.files()[0].bytes(), Some(&b"//! Core engine.\n"[..]));
+/// // The child describes itself; its source is never read.
+/// assert_eq!(request.child_documents().len(), 1);
+/// assert_eq!(request.child_documents()[0].directory(), "inner");
+/// assert!(problems.is_empty());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+///
+/// Only the two ways there is no request to build at all — nothing about the
+/// caps is here, because nothing about the caps is fatal:
+///
+/// * [`Error::Walk`] if `directory` cannot be walked: it is not there, it
+///   cannot be listed, or something vanished from under the walk.
+/// * [`Error::Path`] if a file's path has no relative, forward-slash, UTF-8
+///   form, and so cannot be named to a model. The same rule, for the same
+///   reason, as [`subtree_hash`](crate::subtree_hash).
+pub fn gather_request(
+    prompt: impl Into<String>,
+    directory: impl AsRef<Path>,
+) -> Result<Gathered, Error> {
+    let directory = directory.as_ref();
+    let found = walk(directory)?;
+
+    let mut problems = Vec::new();
+    let mut carried: u64 = 0;
+
+    // Children first: their documents are part of the budget the files are
+    // then fitted into, and they are the part that never gives way.
+    let mut child_documents = Vec::new();
+    for (child, path) in found.child_documents {
+        match fs::read_to_string(&path) {
+            Ok(text) => {
+                carried = carried.saturating_add(byte_count(text.len()));
+                child_documents.push(AgentChildDocument::new(child, text));
+            }
+            // Including a document that could not be read is not an option —
+            // there is no text — so it contributes nothing and says so.
+            Err(source) => problems.push(Problem {
+                path,
+                cause: Omission::Unreadable { source },
+            }),
+        }
+    }
+
+    // Files in sorted order, each sent whole unless it alone is too big. The
+    // size comes from the filesystem before anything is opened, so an enormous
+    // file is never read into memory just to be dropped again.
+    let mut files = Vec::new();
+    let mut on_disk = Vec::new();
+    for (relative, path) in found.files {
+        let size = match fs::metadata(&path) {
+            Ok(metadata) => metadata.len(),
+            // No size means nothing true to list, so the file is left out
+            // entirely rather than listed at a made-up length.
+            Err(source) => {
+                problems.push(Problem {
+                    path,
+                    cause: Omission::Unreadable { source },
+                });
+                continue;
+            }
+        };
+
+        let file = if size > PER_FILE_BYTE_CAP {
+            problems.push(Problem {
+                path: path.clone(),
+                cause: Omission::TooLarge { size },
+            });
+            AgentFile::omitted(relative, size)
+        } else {
+            match fs::read(&path) {
+                Ok(bytes) => {
+                    carried = carried.saturating_add(byte_count(bytes.len()));
+                    AgentFile::present(relative, bytes)
+                }
+                Err(source) => {
+                    problems.push(Problem {
+                        path: path.clone(),
+                        cause: Omission::Unreadable { source },
+                    });
+                    AgentFile::omitted(relative, size)
+                }
+            }
+        };
+        files.push(file);
+        on_disk.push(path);
+    }
+
+    trim_to_budget(&mut files, &on_disk, carried, &mut problems);
+
+    Ok(Gathered {
+        request: AgentRequest::new(prompt, directory)
+            .with_files(files)
+            .with_child_documents(child_documents),
+        problems,
+    })
+}
+
+/// Turn the biggest files into names and sizes until `carried` is inside
+/// [`REQUEST_BYTE_CAP`], reporting each one.
+///
+/// `on_disk` is the path each entry of `files` came from, index for index, so a
+/// problem can name a file on the filesystem rather than a relative spelling.
+/// Stops when the budget is met or when there is nothing left to give up,
+/// whichever comes first — the second case is over budget with every file
+/// already listed, which is still a request and still not an error.
+fn trim_to_budget(
+    files: &mut [AgentFile],
+    on_disk: &[PathBuf],
+    carried: u64,
+    problems: &mut Vec<Problem>,
+) {
+    if carried <= REQUEST_BYTE_CAP {
+        return;
+    }
+
+    // Biggest first, and by path where two are the same size: the order files
+    // are given up in has to be a property of the directory, not of how the
+    // filesystem happened to enumerate it.
+    let mut order: Vec<usize> = (0..files.len())
+        .filter(|&index| !files[index].is_omitted())
+        .collect();
+    order.sort_by_key(|&index| (Reverse(files[index].size()), files[index].path().to_owned()));
+
+    let mut carried = carried;
+    for index in order {
+        if carried <= REQUEST_BYTE_CAP {
+            break;
+        }
+        let size = files[index].size();
+        let path = files[index].path().to_owned();
+        files[index] = AgentFile::omitted(path, size);
+        carried = carried.saturating_sub(size);
+        problems.push(Problem {
+            path: on_disk[index].clone(),
+            cause: Omission::OverBudget { size },
+        });
+    }
+}
+
+/// What one request is built from: the directory's own files, and its immediate
+/// children's documents, each keyed by the relative path it will be named by.
+///
+/// [`BTreeMap`]s because the key order is the request's order, and the request's
+/// order has to be the same on two machines that enumerate a directory
+/// differently.
+#[derive(Debug)]
+struct Found {
+    /// The files sitting directly in the directory, keyed by name.
+    files: BTreeMap<String, PathBuf>,
+    /// The `WARLOCK.md` of each immediate child that has one, keyed by the
+    /// child directory's name.
+    child_documents: BTreeMap<String, PathBuf>,
+}
+
+/// Everything at or just below `dir` that a request can be built from.
+///
+/// One pass, [`WALK_DEPTH`] deep, under the ignore rules the rest of the crate
+/// walks by. Directories are not collected: a child directory matters here only
+/// as the place a `WARLOCK.md` was found, and a child with none simply never
+/// appears.
+fn walk(dir: &Path) -> Result<Found, Error> {
+    let walker = WalkBuilder::new(dir)
+        // The same three rules as `load` and `hash`, for the same reasons: a
+        // symlinked cycle has to terminate, a fixture with a `.gitignore` and
+        // no `.git` still has to be ignored properly, and `.warlock/` is
+        // Warlock's own bookkeeping rather than content of the module.
+        .follow_links(false)
+        .require_git(false)
+        .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR))
+        .max_depth(Some(WALK_DEPTH))
+        .build();
+
+    let mut found = Found {
+        files: BTreeMap::new(),
+        child_documents: BTreeMap::new(),
+    };
+    for entry in walker {
+        let entry = entry.map_err(|source| Error::Walk {
+            directory: dir.to_path_buf(),
+            source,
+        })?;
+        let depth = entry.depth();
+        // Regular files only. With `follow_links(false)` a symlink reports as a
+        // symlink, so it is neither descended into nor listed as whatever it
+        // points at.
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let path = entry.into_path();
+
+        if depth == 1 {
+            // The directory's own file, its `WARLOCK.md` among them: an
+            // existing document is an ordinary file of the directory that holds
+            // it, and gets no slot of its own anywhere.
+            found.files.insert(relative(dir, &path)?, path);
+        } else if depth == WALK_DEPTH && path.file_name() == Some(OsStr::new(DOCUMENT_FILE)) {
+            // A child's document, filed under the child directory rather than
+            // under the document: the name is the same for every child, and the
+            // directory is what a reader needs to place it.
+            let Some(child) = path.parent().map(Path::to_path_buf) else {
+                continue;
+            };
+            found.child_documents.insert(relative(dir, &child)?, path);
+        }
+    }
+    Ok(found)
+}
+
+/// `path` named relative to `dir`, in the manifest's forward-slash spelling.
+fn relative(dir: &Path, path: &Path) -> Result<String, Error> {
+    to_manifest_path(dir, path).map_err(|source| Error::Path {
+        directory: dir.to_path_buf(),
+        path: path.to_path_buf(),
+        source: Box::new(source),
+    })
+}
+
+/// A byte count as the budget counts it.
+///
+/// Saturating rather than fallible, exactly as in [`hash`](crate::hash):
+/// `usize` is at most 64 bits on every target this builds for, so the clamp is
+/// unreachable, and a budget is no place to introduce a panic over a case that
+/// cannot happen.
+fn byte_count(bytes: usize) -> u64 {
+    u64::try_from(bytes).unwrap_or(u64::MAX)
+}
+
+/// What a pact produced: the document it wrote, and everything the byte caps
+/// left out of the request behind it.
+///
+/// A plain pair like [`Gathered`], for the same reason: the document is the
+/// thing that happened, the problems are the thing to report once. Reaching
+/// this type at all means a document was written — there is no "pacted but not
+/// written" case, because every way of not writing one is an [`Error`].
+#[derive(Debug)]
+pub struct Pacted {
+    /// The document that was written: `<directory>/WARLOCK.md`. Given back
+    /// rather than left to be recomputed, because a caller recording a pact
+    /// needs exactly this path and should not have to know the file name to
+    /// build it.
+    pub document: PathBuf,
+    /// Every file the caps left out of the request, as [`gather_request`]
+    /// reported it. Empty is the normal case, and a non-empty list never means
+    /// the document is worse — only that it was written about slightly less
+    /// than the whole directory.
+    pub problems: Vec<Problem>,
+}
+
+/// What gathering produced: the request, and everything left out of it.
+///
+/// A plain pair for the same reason as [`Loaded`](crate::Loaded): the request is
+/// the thing to send, the problems are the thing to report once, and they have
+/// different lifetimes. Nothing on [`AgentRequest`] records that a file was
+/// omitted beyond the file's own missing bytes — a request is what a model sees,
+/// not a log of how it was built.
+#[derive(Debug)]
+pub struct Gathered {
+    /// The request, ready to hand to an [`Agent`](crate::Agent).
+    pub request: AgentRequest,
+    /// Every file the caps left out, in the order they were given up: the
+    /// per-file cases in path order, then the whole-request ones largest first.
+    /// Empty is the normal case.
+    pub problems: Vec<Problem>,
+}
+
+/// One file left out of a request, and why.
+///
+/// The shape [`LoadProblem`](crate::LoadProblem) established — a path, a cause,
+/// one line of [`Display`](fmt::Display) — because it is the same kind of thing:
+/// something that went wrong without being worth failing over, said once and in
+/// full. A caller that ignores these gets a pact built on slightly less than the
+/// whole directory, which is safe, just unexplained.
+#[derive(Debug)]
+pub struct Problem {
+    /// The file that was left out, as it sits on disk.
+    pub path: PathBuf,
+    /// Why it was left out.
+    pub cause: Omission,
+}
+
+impl fmt::Display for Problem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "`{}` was left out of the pact request: {}",
+            self.path.display(),
+            self.cause
+        )
+    }
+}
+
+impl std::error::Error for Problem {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
+/// Why one file's contents are not in a request.
+///
+/// Three separate answers rather than one "skipped", because they call for
+/// three different reactions: nothing at all, since a huge generated file is
+/// working as intended; nothing at all again, though a directory that keeps
+/// tripping the whole-request cap is one worth splitting up; and a look at the
+/// filesystem, because a file Warlock cannot read is a file nobody's tooling
+/// can read.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Omission {
+    /// The file is larger by itself than [`PER_FILE_BYTE_CAP`], so it was
+    /// listed rather than sent. Nothing else in the directory is affected.
+    TooLarge {
+        /// Its size in bytes, which is what the request carries in place of it.
+        size: u64,
+    },
+    /// The file fitted [`PER_FILE_BYTE_CAP`], but the directory as a whole was
+    /// over [`REQUEST_BYTE_CAP`] and this was one of the largest files in it.
+    OverBudget {
+        /// Its size in bytes, which is what the request carries in place of it.
+        size: u64,
+    },
+    /// The file could not be read at all. Not a budget decision and never
+    /// counted as one: this is the filesystem saying no.
+    Unreadable {
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
+}
+
+impl fmt::Display for Omission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooLarge { size } => write!(
+                f,
+                "{size} bytes is over the {PER_FILE_BYTE_CAP}-byte per-file cap, so it is listed \
+                 by name and size"
+            ),
+            Self::OverBudget { size } => write!(
+                f,
+                "the directory is over the {REQUEST_BYTE_CAP}-byte request cap, so this file of \
+                 {size} bytes is listed by name and size"
+            ),
+            Self::Unreadable { source } => write!(f, "it could not be read: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for Omission {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unreadable { source } => Some(source),
+            Self::TooLarge { .. } | Self::OverBudget { .. } => None,
+        }
+    }
+}
+
+/// Why a pass produced no document, when it was not the filesystem's fault.
+///
+/// Two cases and no more, which is the whole rejection policy: the pass did not
+/// come back with an answer, or what it came back with is too short to be one.
+/// Nothing here looks at what the text *says* — see [`MINIMUM_DOCUMENT_BYTES`]
+/// for why a length is the only measure taken.
+///
+/// Separate from [`Error`] because a caller may well want to treat these
+/// differently from a walk that failed: a refusal is worth retrying, and a
+/// directory that cannot be listed is not.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Refusal {
+    /// The agent came back with an error instead of an answer: no `claude` on
+    /// `PATH`, a non-zero exit, empty output, a timeout, or any other way the
+    /// transport reported not reaching a model.
+    Agent {
+        /// What the agent said, in the engine's vocabulary rather than the
+        /// transport's.
+        source: AgentError,
+    },
+    /// The answer, once surrounding whitespace was trimmed, was shorter than
+    /// [`MINIMUM_DOCUMENT_BYTES`]. An empty or whitespace-only answer is this
+    /// case with `bytes` of zero rather than a variant of its own: they are the
+    /// same fact — there is not enough here to be a document — and splitting
+    /// them would invite a caller to treat one as more real than the other.
+    TooShort {
+        /// How many bytes it did come to, trimmed.
+        bytes: usize,
+    },
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Agent { source } => write!(f, "the model pass produced no answer: {source}"),
+            Self::TooShort { bytes } => write!(
+                f,
+                "the answer is {bytes} bytes once trimmed, under the \
+                 {MINIMUM_DOCUMENT_BYTES} bytes a document has to reach"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Refusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Agent { source } => Some(source),
+            Self::TooShort { .. } => None,
+        }
+    }
+}
+
+/// Everything that can stop a directory getting a document.
+///
+/// Hand-rolled like every other error in this crate, and deliberately short:
+/// neither byte cap is in here, because neither cap can fail a pact.
+///
+/// Every variant carries the directory it is about, reachable uniformly through
+/// [`Error::directory`]. A caller pacting a subtree collects a pile of these
+/// and has to be able to say which directory each one belongs to without
+/// matching on the variant to find out.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Error {
+    /// The directory could not be walked: it is not there, it cannot be
+    /// listed, or something vanished from under the walk.
+    Walk {
+        /// The directory that was being pacted.
+        directory: PathBuf,
+        /// What the walker said, including which path it was on.
+        source: ignore::Error,
+    },
+    /// A file's path has no relative, forward-slash, UTF-8 form, so it cannot
+    /// be named to a model.
+    Path {
+        /// The directory that was being pacted.
+        directory: PathBuf,
+        /// The path that could not be named.
+        path: PathBuf,
+        /// Why it could not be. Boxed for the same reason as
+        /// [`HashError::Path`](crate::HashError::Path): a manifest error
+        /// carries a parser error inside it, and the other variant here is an
+        /// `ignore::Error`.
+        source: Box<ManifestError>,
+    },
+    /// The pass ran and produced nothing worth writing. **Nothing was
+    /// written**: whatever was in the directory before is exactly what is in it
+    /// now.
+    Refused {
+        /// The directory that was being pacted.
+        directory: PathBuf,
+        /// Which of the two rejection rules applied.
+        cause: Refusal,
+    },
+    /// The answer was good and the document could not be written anyway.
+    ///
+    /// Its own variant rather than a [`Refusal`], because it is a different
+    /// failure with a different answer: nothing is wrong with the model, the
+    /// disk is full or the directory is read-only, and a caller retrying the
+    /// pass is retrying the expensive half of something that already worked.
+    Write {
+        /// The directory that was being pacted.
+        directory: PathBuf,
+        /// The document that could not be written.
+        path: PathBuf,
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
+}
+
+impl Error {
+    /// The directory this failure is about, whichever way it failed.
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        match self {
+            Self::Walk { directory, .. }
+            | Self::Path { directory, .. }
+            | Self::Refused { directory, .. }
+            | Self::Write { directory, .. } => directory,
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Walk { directory, source } => write!(
+                f,
+                "could not walk `{}` to pact it: {source}",
+                directory.display()
+            ),
+            Self::Path {
+                directory,
+                path,
+                source,
+            } => write!(
+                f,
+                "could not name `{}` relative to `{}`, the directory being pacted: {source}",
+                path.display(),
+                directory.display(),
+            ),
+            Self::Refused { directory, cause } => write!(
+                f,
+                "nothing was written for `{}`: {cause}",
+                directory.display()
+            ),
+            Self::Write {
+                directory,
+                path,
+                source,
+            } => write!(
+                f,
+                "the pass over `{}` produced a document but `{}` could not be written: {source}",
+                directory.display(),
+                path.display(),
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Walk { source, .. } => Some(source),
+            Self::Path { source, .. } => Some(source.as_ref()),
+            Self::Refused { cause, .. } => Some(cause),
+            Self::Write { source, .. } => Some(source),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::{
+        Gathered, MINIMUM_DOCUMENT_BYTES, Omission, PER_FILE_BYTE_CAP, Pacted, Problem,
+        REQUEST_BYTE_CAP, Refusal, gather_request, pact_directory,
+    };
+    use crate::{Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, AgentResponse};
+
+    /// The whole point of the agent seam, in one struct: a model pass that
+    /// answers with canned markdown and keeps what it was asked. No `claude`,
+    /// no network, no terminal, no mocking framework.
+    struct Canned {
+        /// What every pass answers.
+        text: String,
+        /// Every request that reached it, in call order.
+        seen: std::cell::RefCell<Vec<AgentRequest>>,
+    }
+
+    impl Canned {
+        /// A fake answering `text` to anything.
+        fn new(text: impl Into<String>) -> Self {
+            Self {
+                text: text.into(),
+                seen: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Agent for Canned {
+        fn run(&self, request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+            self.seen.borrow_mut().push(request.clone());
+            Ok(AgentResponse::new(self.text.clone()))
+        }
+    }
+
+    /// The other half of a fake: one that never comes back with an answer. The
+    /// failure is a function rather than a field because [`AgentError`] is not
+    /// [`Clone`], and a test that wants a particular one should be able to say
+    /// so at the call site.
+    struct Fails(fn() -> AgentError);
+
+    impl Agent for Fails {
+        fn run(&self, _request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+            Err(self.0())
+        }
+    }
+
+    /// A plausible document of exactly `bytes` bytes, with no whitespace at
+    /// either end so its trimmed length is its length.
+    fn document(bytes: usize) -> String {
+        let head = "# engine\n\nCore engine for warlock. ";
+        assert!(bytes > head.len(), "a document has room for its heading");
+        format!("{head}{}", "x".repeat(bytes - head.len()))
+    }
+
+    /// What is in `dir`'s `WARLOCK.md`, or `None` if it has none.
+    fn written(dir: &Path) -> Option<Vec<u8>> {
+        fs::read(dir.join("WARLOCK.md")).ok()
+    }
+
+    /// Write `contents` at `dir/name`, creating whatever directories it needs.
+    fn write(dir: &Path, name: &str, contents: impl AsRef<[u8]>) -> PathBuf {
+        let path = dir.join(name);
+        fs::create_dir_all(path.parent().expect("a file has a parent")).expect("creates parents");
+        fs::write(&path, contents).expect("writes a file");
+        path
+    }
+
+    /// `size` bytes of something, cheap to make and impossible to confuse with
+    /// a fixture's real text.
+    fn filler(size: u64) -> Vec<u8> {
+        vec![b'x'; usize::try_from(size).expect("a test file fits in memory")]
+    }
+
+    /// The request for `dir`, insisting nothing was left out of it.
+    ///
+    /// Most of these fixtures are small enough to send whole, so an empty
+    /// problem list is part of what they assert: a gather that quietly started
+    /// dropping files would fail here rather than pass unnoticed.
+    fn request_for(dir: &Path) -> AgentRequest {
+        let Gathered { request, problems } = gather_request("summarise", dir).expect("gathers");
+        assert!(problems.is_empty(), "{problems:?}");
+        request
+    }
+
+    /// The paths of a request's files, in the order it carries them.
+    fn file_paths(request: &AgentRequest) -> Vec<&str> {
+        request.files().iter().map(AgentFile::path).collect()
+    }
+
+    /// The file a request carries at `path`.
+    fn file<'a>(request: &'a AgentRequest, path: &str) -> &'a AgentFile {
+        request
+            .files()
+            .iter()
+            .find(|file| file.path() == path)
+            .unwrap_or_else(|| panic!("`{path}` is in the request: {:?}", file_paths(request)))
+    }
+
+    /// How many bytes a request actually carries: file contents sent whole,
+    /// plus the children's documents.
+    fn carried(request: &AgentRequest) -> u64 {
+        let files: u64 = request
+            .files()
+            .iter()
+            .filter(|file| !file.is_omitted())
+            .map(AgentFile::size)
+            .sum();
+        let children: u64 = request
+            .child_documents()
+            .iter()
+            .map(|child| child.text().len() as u64)
+            .sum();
+        files + children
+    }
+
+    #[test]
+    fn a_directory_sends_its_own_files_and_its_children_summarise_themselves() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "Cargo.toml", "[package]\n");
+        write(dir.path(), "build.rs", "fn main() {}\n");
+        write(dir.path(), "src/WARLOCK.md", "# src\n\nThe code.\n");
+        write(dir.path(), "src/lib.rs", "//! Core engine.\n");
+        write(dir.path(), "src/inner/lib.rs", "//! Deeper still.\n");
+        write(dir.path(), "src/inner/WARLOCK.md", "# inner\n");
+        write(dir.path(), "tests/it.rs", "#[test] fn works() {}\n");
+
+        let request = request_for(dir.path());
+
+        assert_eq!(
+            file_paths(&request),
+            ["Cargo.toml", "build.rs"],
+            "only the directory's own files, sorted; nothing from below it"
+        );
+        assert_eq!(
+            file(&request, "build.rs").bytes(),
+            Some(&b"fn main() {}\n"[..]),
+            "and they carry their bytes",
+        );
+        assert_eq!(
+            request
+                .child_documents()
+                .iter()
+                .map(|child| (child.directory(), child.text()))
+                .collect::<Vec<_>>(),
+            [("src", "# src\n\nThe code.\n")],
+            "a child with a document contributes it; `tests/` has none and \
+             contributes no entry, which is not an error",
+        );
+        assert!(
+            !format!("{request:?}").contains("Deeper still"),
+            "a grandchild's document is already covered by its parent's, and \
+             its source is never read at all",
+        );
+        assert_eq!(request.directory(), dir.path());
+        assert_eq!(request.prompt(), "summarise");
+    }
+
+    #[test]
+    fn two_gathers_of_an_unchanged_directory_are_the_same_value() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // Written in an order that is not the sorted one, so a request that
+        // simply kept what the filesystem offered would have to be lucky.
+        write(dir.path(), "zeta.rs", "//! z\n");
+        write(dir.path(), "alpha.rs", "//! a\n");
+        write(dir.path(), "zeta/WARLOCK.md", "# zeta\n");
+        write(dir.path(), "alpha/WARLOCK.md", "# alpha\n");
+
+        let request = request_for(dir.path());
+
+        assert_eq!(file_paths(&request), ["alpha.rs", "zeta.rs"]);
+        assert_eq!(
+            request
+                .child_documents()
+                .iter()
+                .map(AgentChildDocument::directory)
+                .collect::<Vec<_>>(),
+            ["alpha", "zeta"],
+        );
+        assert_eq!(request, request_for(dir.path()), "two gathers, one value");
+    }
+
+    #[test]
+    fn the_request_obeys_the_same_ignore_rules_as_the_rest_of_the_crate() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), ".gitignore", "secret.txt\n/generated\n");
+        write(dir.path(), "secret.txt", "shh\n");
+        write(dir.path(), ".hidden", "shh\n");
+        write(dir.path(), ".warlock/notes.md", "# ours\n");
+        write(dir.path(), ".warlock/WARLOCK.md", "# not a module\n");
+        write(
+            dir.path(),
+            "generated/WARLOCK.md",
+            "# not a module either\n",
+        );
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+
+        let request = request_for(dir.path());
+
+        assert_eq!(
+            file_paths(&request),
+            ["lib.rs"],
+            "gitignored, hidden and `.warlock/` files come through the same \
+             walk as everything else, so they never arrive at all"
+        );
+        assert!(
+            request.child_documents().is_empty(),
+            "and a document inside an ignored or pruned directory is not a \
+             child document: {:?}",
+            request.child_documents(),
+        );
+    }
+
+    /// Only on unix, because the fixture needs `std::os::unix::fs::symlink` to
+    /// build the cycle at all. The behaviour under test — that the walk does
+    /// not follow links — is not platform-specific.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_neither_followed_nor_listed() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("up")).expect("links to itself");
+        std::os::unix::fs::symlink(dir.path().join("lib.rs"), dir.path().join("alias.rs"))
+            .expect("links to a file");
+
+        let request = request_for(dir.path());
+
+        assert_eq!(file_paths(&request), ["lib.rs"]);
+        assert!(request.child_documents().is_empty());
+    }
+
+    #[test]
+    fn an_existing_document_is_an_ordinary_file_of_its_own_directory() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "WARLOCK.md", "# engine\n\nWhat it was.\n");
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+
+        let request = request_for(dir.path());
+
+        assert_eq!(
+            file_paths(&request),
+            ["WARLOCK.md", "lib.rs"],
+            "the directory's own document is listed like any other file",
+        );
+        assert_eq!(
+            file(&request, "WARLOCK.md").bytes(),
+            Some(&b"# engine\n\nWhat it was.\n"[..]),
+        );
+        assert!(
+            request
+                .child_documents()
+                .iter()
+                .all(|child| child.directory() != "." && child.directory() != "WARLOCK.md"),
+            "and it is nobody's child document: {:?}",
+            request.child_documents(),
+        );
+    }
+
+    #[test]
+    fn a_file_over_the_per_file_cap_is_listed_by_name_and_size_and_reported() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let size = PER_FILE_BYTE_CAP + 1;
+        let lock = write(dir.path(), "Cargo.lock", filler(size));
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+
+        let Gathered { request, problems } =
+            gather_request("summarise", dir.path()).expect("a huge file is not fatal");
+
+        let listed = file(&request, "Cargo.lock");
+        assert!(listed.is_omitted());
+        assert_eq!(
+            listed.size(),
+            size,
+            "the size is the fact that goes instead"
+        );
+        assert_eq!(
+            listed.bytes(),
+            None,
+            "never truncated: no part of it is presented as if it were the whole"
+        );
+        assert_eq!(
+            file(&request, "lib.rs").bytes(),
+            Some(&b"//! Core engine.\n"[..]),
+            "and the rest of the directory is untouched",
+        );
+
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].path, lock, "the problem names the file on disk");
+        assert!(
+            matches!(problems[0].cause, Omission::TooLarge { size: reported } if reported == size),
+            "{:?}",
+            problems[0],
+        );
+    }
+
+    #[test]
+    fn a_file_exactly_at_the_per_file_cap_is_still_sent_whole() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "big.bin", filler(PER_FILE_BYTE_CAP));
+
+        let request = request_for(dir.path());
+
+        assert_eq!(
+            file(&request, "big.bin").bytes().map(<[u8]>::len),
+            Some(usize::try_from(PER_FILE_BYTE_CAP).expect("fits")),
+            "the cap is what a file may not exceed, not what it may not reach",
+        );
+    }
+
+    #[test]
+    fn a_directory_over_the_request_cap_gives_up_its_largest_files_first() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // Named so that alphabetical order is the reverse of size order: a
+        // gather that dropped files in path order would fail here.
+        let sizes = [
+            ("a.bin", 80 * 1024),
+            ("b.bin", 90 * 1024),
+            ("c.bin", 100 * 1024),
+            ("d.bin", 110 * 1024),
+            ("e.bin", 120 * 1024),
+        ];
+        for (name, size) in sizes {
+            write(dir.path(), name, filler(size));
+        }
+
+        let Gathered { request, problems } =
+            gather_request("summarise", dir.path()).expect("a fat directory is not fatal");
+
+        assert_eq!(
+            file_paths(&request),
+            ["a.bin", "b.bin", "c.bin", "d.bin", "e.bin"],
+            "every file is still in the request, in path order",
+        );
+        for (name, size) in sizes {
+            assert_eq!(
+                file(&request, name).size(),
+                size,
+                "and every one of them still says how big it is",
+            );
+        }
+        assert_eq!(
+            request
+                .files()
+                .iter()
+                .filter(|file| !file.is_omitted())
+                .map(AgentFile::path)
+                .collect::<Vec<_>>(),
+            ["a.bin", "b.bin"],
+            "the two smallest survive: the biggest are given up first, so the \
+             fewest files are lost",
+        );
+        assert!(
+            carried(&request) <= REQUEST_BYTE_CAP,
+            "{} bytes is still over the {REQUEST_BYTE_CAP}-byte cap",
+            carried(&request),
+        );
+
+        assert_eq!(
+            problems
+                .iter()
+                .map(|problem| problem.path.clone())
+                .collect::<Vec<_>>(),
+            ["e.bin", "d.bin", "c.bin"].map(|name| dir.path().join(name)),
+            "reported in the order they were given up, largest first",
+        );
+        assert!(
+            problems
+                .iter()
+                .all(|problem| matches!(problem.cause, Omission::OverBudget { .. })),
+            "over budget is its own cause, not the per-file one: {problems:?}",
+        );
+    }
+
+    #[test]
+    fn a_directory_inside_the_request_cap_gives_up_nothing() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "a.bin", filler(REQUEST_BYTE_CAP / 2));
+        write(dir.path(), "b.bin", filler(REQUEST_BYTE_CAP / 2));
+
+        let request = request_for(dir.path());
+
+        assert!(
+            request.files().iter().all(|file| !file.is_omitted()),
+            "exactly at the cap is inside it",
+        );
+        assert_eq!(carried(&request), REQUEST_BYTE_CAP);
+    }
+
+    #[test]
+    fn a_childs_document_counts_towards_the_budget_and_is_never_the_thing_dropped() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(
+            dir.path(),
+            "src/WARLOCK.md",
+            "x".repeat(usize::try_from(REQUEST_BYTE_CAP).expect("fits")),
+        );
+        write(dir.path(), "lib.rs", filler(1024));
+
+        let Gathered { request, problems } = gather_request("summarise", dir.path())
+            .expect("an enormous child document is not fatal either");
+
+        assert_eq!(
+            request.child_documents().len(),
+            1,
+            "the account of a whole subtree is the one thing that never gives \
+             way: dropping it would leave nothing in its place",
+        );
+        assert!(
+            file(&request, "lib.rs").is_omitted(),
+            "the file gives way instead, and still says its name and size",
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            matches!(problems[0].cause, Omission::OverBudget { size: 1024 }),
+            "{:?}",
+            problems[0],
+        );
+    }
+
+    /// Only on unix, because there is no portable way to make a file
+    /// unreadable. What is under test — that a file the filesystem refuses is
+    /// its own case, and still not fatal — is not platform-specific.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_its_own_cause_and_still_not_fatal() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let unreadable = write(dir.path(), "secret.rs", "fn hidden() {}\n");
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmods");
+        if fs::read(&unreadable).is_ok() {
+            // Running as root: no file is unreadable, so there is nothing here
+            // to assert against.
+            return;
+        }
+
+        let Gathered { request, problems } =
+            gather_request("summarise", dir.path()).expect("an unreadable file is not fatal");
+
+        assert!(file(&request, "secret.rs").is_omitted());
+        assert_eq!(
+            file(&request, "lib.rs").bytes(),
+            Some(&b"//! Core engine.\n"[..]),
+            "one file nobody can read is one file's problem",
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            matches!(problems[0].cause, Omission::Unreadable { .. }),
+            "a refused file is never reported as a budget decision: {:?}",
+            problems[0],
+        );
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).expect("chmods back");
+    }
+
+    #[test]
+    fn an_empty_directory_is_a_request_with_nothing_in_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+
+        let request = request_for(dir.path());
+
+        assert!(request.files().is_empty());
+        assert!(request.child_documents().is_empty());
+    }
+
+    #[test]
+    fn a_directory_that_is_not_there_is_a_walk_error() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+
+        let error = gather_request("summarise", dir.path().join("nowhere"))
+            .expect_err("there is nothing to walk");
+
+        assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
+        assert!(error.source().is_some(), "{error:?}");
+    }
+
+    #[test]
+    fn every_problem_says_what_was_left_out_and_why_on_one_line() {
+        let problems = [
+            Problem {
+                path: PathBuf::from("/repo/Cargo.lock"),
+                cause: Omission::TooLarge { size: 4_200_000 },
+            },
+            Problem {
+                path: PathBuf::from("/repo/data.json"),
+                cause: Omission::OverBudget { size: 90_000 },
+            },
+            Problem {
+                path: PathBuf::from("/repo/secret.rs"),
+                cause: Omission::Unreadable {
+                    source: std::io::Error::other("permission denied"),
+                },
+            },
+        ];
+
+        for problem in &problems {
+            let rendered = problem.to_string();
+            assert!(!rendered.contains('\n'), "{rendered}");
+            assert!(
+                rendered.contains(&problem.path.display().to_string()),
+                "a problem names its file: {rendered}",
+            );
+        }
+        assert!(
+            problems[0].to_string().contains("4200000"),
+            "{}",
+            problems[0],
+        );
+        assert!(
+            problems[2].to_string().contains("permission denied"),
+            "{}",
+            problems[2],
+        );
+        assert_eq!(
+            problems
+                .iter()
+                .filter(|problem| problem.source().is_some())
+                .count(),
+            3,
+            "every problem's cause is reachable as a source",
+        );
+        assert!(
+            problems[2]
+                .source()
+                .and_then(std::error::Error::source)
+                .is_some(),
+            "and an unreadable file's cause names the io error under it",
+        );
+    }
+
+    #[test]
+    fn a_pact_writes_the_answer_verbatim_and_says_where() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+        // Ragged on purpose: blank lines around it, trailing spaces, no final
+        // newline. All of it survives.
+        let answer = format!("\n\n   {}  ", document(300));
+        let agent = Canned::new(&answer);
+
+        let Pacted {
+            document: path,
+            problems,
+        } = pact_directory(dir.path(), &agent).expect("a good answer is written");
+
+        assert_eq!(path, dir.path().join("WARLOCK.md"));
+        assert_eq!(
+            written(dir.path()).as_deref(),
+            Some(answer.as_bytes()),
+            "byte for byte: not trimmed, not parsed, not reformatted",
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+
+        let seen = agent.seen.borrow();
+        assert_eq!(seen.len(), 1, "one pass, one directory");
+        assert_eq!(seen[0].directory(), dir.path());
+        assert_eq!(
+            seen[0].prompt(),
+            super::PROMPT,
+            "the prompt is code, and it is this one",
+        );
+        assert_eq!(file_paths(&seen[0]), ["lib.rs"]);
+    }
+
+    #[test]
+    fn a_pact_leaves_nothing_behind_but_the_document() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+
+        pact_directory(dir.path(), &Canned::new(document(300))).expect("pacts");
+
+        let mut left = fs::read_dir(dir.path())
+            .expect("lists")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(
+            left,
+            ["WARLOCK.md", "lib.rs"],
+            "no temporary file leaks into the directory the pact just described",
+        );
+    }
+
+    #[test]
+    fn an_existing_document_is_overwritten_unconditionally() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(
+            dir.path(),
+            "WARLOCK.md",
+            "# engine\n\nWhat it used to say.\n",
+        );
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+        let answer = document(400);
+        let agent = Canned::new(&answer);
+
+        pact_directory(dir.path(), &agent).expect("pacts");
+
+        assert_eq!(
+            written(dir.path()).as_deref(),
+            Some(answer.as_bytes()),
+            "the old document is gone, whole, with nothing merged into it",
+        );
+        assert_eq!(
+            file(&agent.seen.borrow()[0], "WARLOCK.md").bytes(),
+            Some(&b"# engine\n\nWhat it used to say.\n"[..]),
+            "and the pass saw it first, as one of the directory's files",
+        );
+    }
+
+    #[test]
+    fn an_agent_that_fails_writes_nothing_and_names_the_directory() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+        let agent = Fails(|| AgentError::Failed {
+            code: Some(2),
+            stderr: "Invalid API key\n".to_owned(),
+        });
+
+        let error = pact_directory(dir.path(), &agent).expect_err("a failed pass is no document");
+
+        assert!(
+            matches!(
+                error,
+                super::Error::Refused {
+                    cause: Refusal::Agent {
+                        source: AgentError::Failed { code: Some(2), .. }
+                    },
+                    ..
+                }
+            ),
+            "{error:?}",
+        );
+        assert_eq!(error.directory(), dir.path());
+        assert_eq!(
+            written(dir.path()),
+            None,
+            "a directory with no document still has none",
+        );
+    }
+
+    #[test]
+    fn an_empty_or_whitespace_only_answer_is_rejected() {
+        for answer in ["", "   \n\t\n   "] {
+            let dir = tempfile::tempdir().expect("a temporary directory");
+
+            let error = pact_directory(dir.path(), &Canned::new(answer))
+                .expect_err("there is nothing here to write");
+
+            assert!(
+                matches!(
+                    error,
+                    super::Error::Refused {
+                        cause: Refusal::TooShort { bytes: 0 },
+                        ..
+                    }
+                ),
+                "whitespace is not a document: {error:?}",
+            );
+            assert_eq!(written(dir.path()), None);
+        }
+    }
+
+    #[test]
+    fn an_answer_one_byte_under_the_minimum_is_rejected() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+
+        let error = pact_directory(
+            dir.path(),
+            &Canned::new(document(MINIMUM_DOCUMENT_BYTES - 1)),
+        )
+        .expect_err("under the floor");
+
+        assert!(
+            matches!(
+                error,
+                super::Error::Refused {
+                    cause: Refusal::TooShort { bytes },
+                    ..
+                } if bytes == MINIMUM_DOCUMENT_BYTES - 1
+            ),
+            "{error:?}",
+        );
+        assert_eq!(written(dir.path()), None);
+    }
+
+    #[test]
+    fn an_answer_exactly_at_the_minimum_is_written() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let answer = document(MINIMUM_DOCUMENT_BYTES);
+
+        pact_directory(dir.path(), &Canned::new(&answer))
+            .expect("the floor is what a document has to reach, not exceed");
+
+        assert_eq!(written(dir.path()).as_deref(), Some(answer.as_bytes()));
+    }
+
+    #[test]
+    fn an_answer_one_byte_over_the_minimum_is_written() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let answer = document(MINIMUM_DOCUMENT_BYTES + 1);
+
+        pact_directory(dir.path(), &Canned::new(&answer))
+            .expect("a byte past the floor is over it");
+
+        assert_eq!(
+            written(dir.path()).as_deref(),
+            Some(answer.as_bytes()),
+            "the two sides of the floor differ by one byte and nothing else",
+        );
+    }
+
+    #[test]
+    fn the_minimum_is_measured_on_the_trimmed_answer() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // Long enough untrimmed, far too short once the padding goes.
+        let answer = format!("\n\n{}{}\n\n", " ".repeat(MINIMUM_DOCUMENT_BYTES), "# x");
+
+        let error = pact_directory(dir.path(), &Canned::new(answer))
+            .expect_err("padding is not a document");
+
+        assert!(
+            matches!(
+                error,
+                super::Error::Refused {
+                    cause: Refusal::TooShort { bytes: 3 },
+                    ..
+                }
+            ),
+            "{error:?}",
+        );
+        assert_eq!(written(dir.path()), None);
+    }
+
+    #[test]
+    fn a_rejection_leaves_an_existing_document_byte_identical() {
+        let before = b"# engine\n\nWhat it says today, and will keep saying.\n";
+        let rejected: [&dyn Agent; 3] = [
+            &Canned::new(""),
+            &Canned::new(document(MINIMUM_DOCUMENT_BYTES - 1)),
+            &Fails(|| AgentError::EmptyOutput),
+        ];
+
+        for agent in rejected {
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            write(dir.path(), "WARLOCK.md", before);
+
+            let error = pact_directory(dir.path(), agent).expect_err("nothing to write");
+
+            assert!(matches!(error, super::Error::Refused { .. }), "{error:?}");
+            assert_eq!(
+                written(dir.path()).as_deref(),
+                Some(&before[..]),
+                "a turned-down answer never touches the document already there",
+            );
+        }
+    }
+
+    #[test]
+    fn the_caps_problems_come_back_alongside_the_document() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let size = PER_FILE_BYTE_CAP + 1;
+        let lock = write(dir.path(), "Cargo.lock", filler(size));
+        let answer = document(300);
+        let agent = Canned::new(&answer);
+
+        let Pacted { problems, .. } =
+            pact_directory(dir.path(), &agent).expect("an over-budget file never fails a pact");
+
+        assert_eq!(written(dir.path()).as_deref(), Some(answer.as_bytes()));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].path, lock);
+        assert!(
+            matches!(problems[0].cause, Omission::TooLarge { .. }),
+            "{:?}",
+            problems[0],
+        );
+
+        // Read off the request the pass actually saw, rather than trusting
+        // that gathering did what its own tests say it does.
+        let seen = agent.seen.borrow();
+        let listed = file(&seen[0], "Cargo.lock");
+        assert!(listed.is_omitted(), "the pass was not sent the bytes");
+        assert_eq!(listed.path(), "Cargo.lock", "but it was told the name");
+        assert_eq!(listed.size(), size, "and the size");
+        assert_eq!(listed.bytes(), None, "and no part of the file at all");
+    }
+
+    #[test]
+    fn a_pass_over_a_fat_directory_is_sent_its_smallest_files_and_told_the_rest() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // Named so alphabetical order is the reverse of size order: an
+        // operation that gave files up in path order would fail here.
+        let sizes = [
+            ("a.bin", 80 * 1024),
+            ("b.bin", 90 * 1024),
+            ("c.bin", 100 * 1024),
+            ("d.bin", 110 * 1024),
+            ("e.bin", 120 * 1024),
+        ];
+        for (name, size) in sizes {
+            write(dir.path(), name, filler(size));
+        }
+        let agent = Canned::new(document(300));
+
+        let Pacted { problems, .. } =
+            pact_directory(dir.path(), &agent).expect("a fat directory is still pactable");
+
+        let seen = agent.seen.borrow();
+        assert_eq!(
+            seen[0]
+                .files()
+                .iter()
+                .filter(|file| !file.is_omitted())
+                .map(AgentFile::path)
+                .collect::<Vec<_>>(),
+            ["a.bin", "b.bin"],
+            "the largest are given up first, so the fewest files are lost",
+        );
+        for (name, size) in sizes {
+            assert_eq!(
+                file(&seen[0], name).size(),
+                size,
+                "and every file, sent or not, still says how big it is",
+            );
+        }
+        assert!(
+            carried(&seen[0]) <= REQUEST_BYTE_CAP,
+            "{} bytes is still over the {REQUEST_BYTE_CAP}-byte cap",
+            carried(&seen[0]),
+        );
+        assert_eq!(
+            problems
+                .iter()
+                .map(|problem| problem.path.clone())
+                .collect::<Vec<_>>(),
+            ["e.bin", "d.bin", "c.bin"].map(|name| dir.path().join(name)),
+            "and the pact reports each one, largest first, having succeeded anyway",
+        );
+    }
+
+    #[test]
+    fn a_pass_is_sent_its_childrens_documents_and_none_of_their_source() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "Cargo.toml", "[package]\n");
+        write(dir.path(), "src/WARLOCK.md", "# src\n\nThe code.\n");
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "//! Not for the parent to read.\n",
+        );
+        write(dir.path(), "tests/it.rs", "#[test] fn works() {}\n");
+        let agent = Canned::new(document(300));
+
+        pact_directory(dir.path(), &agent).expect("pacts");
+
+        let seen = agent.seen.borrow();
+        assert_eq!(
+            seen[0]
+                .child_documents()
+                .iter()
+                .map(|child| (child.directory(), child.text()))
+                .collect::<Vec<_>>(),
+            [("src", "# src\n\nThe code.\n")],
+            "the child describes itself; `tests/` has no document and \
+             contributes no entry, which is not an error",
+        );
+        assert_eq!(
+            file_paths(&seen[0]),
+            ["Cargo.toml"],
+            "and the child's source is not a file of the parent",
+        );
+        assert!(
+            !format!("{:?}", seen[0]).contains("Not for the parent to read"),
+            "nor is it anywhere else in the request",
+        );
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_gathered_never_reaches_the_agent() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let missing = dir.path().join("nowhere");
+        let agent = Canned::new(document(300));
+
+        let error = pact_directory(&missing, &agent).expect_err("there is nothing to walk");
+
+        assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
+        assert_eq!(
+            error.directory(),
+            missing,
+            "a walk that failed still says which directory it was",
+        );
+        assert!(
+            agent.seen.borrow().is_empty(),
+            "no request, no pass: the expensive half never runs",
+        );
+    }
+
+    #[test]
+    fn every_failure_names_its_directory_on_one_line() {
+        let errors = [
+            super::Error::Refused {
+                directory: PathBuf::from("/repo/crates/engine"),
+                cause: Refusal::Agent {
+                    source: AgentError::NotFound {
+                        program: "claude".to_owned(),
+                    },
+                },
+            },
+            super::Error::Refused {
+                directory: PathBuf::from("/repo/crates/engine"),
+                cause: Refusal::TooShort { bytes: 12 },
+            },
+            super::Error::Write {
+                directory: PathBuf::from("/repo/crates/engine"),
+                path: PathBuf::from("/repo/crates/engine/WARLOCK.md"),
+                source: std::io::Error::other("read-only file system"),
+            },
+        ];
+
+        for error in &errors {
+            let rendered = error.to_string();
+            assert!(!rendered.contains('\n'), "{rendered}");
+            assert!(
+                rendered.contains("/repo/crates/engine"),
+                "a failure says which directory it is about: {rendered}",
+            );
+            assert_eq!(error.directory(), Path::new("/repo/crates/engine"));
+            assert!(error.source().is_some(), "{error:?}");
+        }
+        assert!(errors[0].to_string().contains("claude"), "{}", errors[0],);
+        assert!(
+            errors[1]
+                .to_string()
+                .contains(&MINIMUM_DOCUMENT_BYTES.to_string()),
+            "a too-short answer says what it fell short of: {}",
+            errors[1],
+        );
+        assert!(
+            errors[0]
+                .source()
+                .and_then(std::error::Error::source)
+                .is_some(),
+            "and a refusal's cause reaches the agent error under it",
+        );
+    }
+}
