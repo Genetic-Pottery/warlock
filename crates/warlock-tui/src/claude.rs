@@ -403,7 +403,22 @@ impl Agent for ClaudeAgent {
         let (waiter, exited) = watch(&child);
 
         let outcome = match exited.recv_timeout(self.timeout) {
+            Ok(Ok(status)) if !status.success() && self.cancel.is_cancelled() => {
+                // The exit a cancel caused. Its output is not read, for the
+                // same reason the timeout arm below does not read it: the
+                // child is gone, but a grandchild the kill did not reach can
+                // still hold the pipes open, and a join here would sit out
+                // whatever that grandchild is doing — the very wait the cancel
+                // was pressed to end. There is nothing in that output worth
+                // waiting for anyway, because a pass killed mid-word has no
+                // document to judge, and the rewrite below is what this
+                // failure would come back as regardless.
+                let _ = waiter.join();
+                Err(cancelled())
+            }
             Ok(Ok(status)) => {
+                // Exited on its own — including the pass that beat a cancel by
+                // a hair, which is why success is not read as a cancel above.
                 // The child is gone, so every pipe it held is closed and each
                 // join returns: the readers with what they read, the writer
                 // with nothing.
@@ -909,6 +924,58 @@ mod tests {
                 elapsed < Duration::from_secs(20),
                 "the call sat out the sleep it was told to cut short: {elapsed:?}"
             );
+            clean_up(&directory);
+        }
+
+        /// A cancel ends the call even when something the kill did not reach
+        /// is still holding the child's pipes open.
+        ///
+        /// The stand-ins above are at the mercy of whichever `/bin/sh` the
+        /// machine has: `sh -c "echo $$ > pid; sleep 30"` is one process under
+        /// a shell that execs its last command, and two under one that forks,
+        /// and only in the second case does anything outlive the kill. This
+        /// one forks on purpose — `wait` is a builtin, so no shell can exec
+        /// away — and pins the behaviour on both. It is the shape a real
+        /// `claude` has: a tool subprocess of its own, inheriting the pipes it
+        /// was given.
+        #[test]
+        fn a_cancel_does_not_wait_on_output_a_survivor_still_holds() {
+            let directory = scratch("cancel-survivor");
+            let pid_file = directory.join("pid");
+            let survivor_file = directory.join("survivor");
+            let cancel = Cancel::new();
+            let agent = stand_in("sleep 30 & echo $! > survivor; echo $$ > pid; wait")
+                .with_cancel(cancel.clone());
+
+            let stopper = {
+                let pid_file = pid_file.clone();
+                thread::spawn(move || {
+                    let waited = Instant::now();
+                    while pid(&pid_file).is_none() && waited.elapsed() < AT_MOST {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    cancel.cancel();
+                })
+            };
+
+            let started = Instant::now();
+            let error = agent
+                .run(&AgentRequest::new("anything", &directory))
+                .expect_err("a cancelled pass has no document");
+            let elapsed = started.elapsed();
+            stopper.join().expect("the cancelling thread ran");
+
+            assert!(is_cancelled(&error), "{error:?}");
+            assert!(
+                elapsed < Duration::from_secs(20),
+                "the call waited on output the survivor was still holding: {elapsed:?}"
+            );
+            // The survivor is the point of the test, so it is this test's to
+            // clear up. Nothing else can: the kill reaches the child, and this
+            // one was never the child.
+            if let Some(survivor) = pid(&survivor_file) {
+                let _ = process::Command::new("/bin/kill").arg(survivor).status();
+            }
             clean_up(&directory);
         }
 
