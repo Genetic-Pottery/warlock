@@ -211,6 +211,16 @@ fn run() -> Result<(), Error> {
                         running.cancel.cancel();
                     }
                 }
+                // Nothing but a bit of view state moves here, and deliberately
+                // so: focus decides which border the next frame lights and
+                // whether a movement key means anything, and both of those
+                // questions are answered where they are asked — by the renderer
+                // reading `App::focus`, and by the app's own movement methods,
+                // which return early when the tree is not the pane being driven
+                // (WAR-23.01). There is nothing for this arm to gate a second
+                // time, and no message: a key that changes what the *next* key
+                // means has nothing to report.
+                Some(Action::ToggleFocus) => app.toggle_focus(),
                 Some(Action::SelectPrevious) => app.select_previous(),
                 Some(Action::SelectNext) => app.select_next(),
                 // No height is passed: the app was told the viewport's height
@@ -967,6 +977,15 @@ enum Action {
     Quit,
     /// Stop the pact that is running, and stay.
     CancelPact,
+    /// Move the keys from one pane to the other: the tree column and the panel
+    /// beside it swap which of them is lit and which of them the movement keys
+    /// drive.
+    ///
+    /// One action rather than a focus-the-tree and a focus-the-panel, because
+    /// there is one key and two panes: with only two places focus can be, "go to
+    /// the other one" is the whole of what a reader can mean by pressing it, and
+    /// a pair of actions would be two names for the same keystroke read twice.
+    ToggleFocus,
     /// Move the selection one row up.
     SelectPrevious,
     /// Move the selection one row down.
@@ -1039,6 +1058,12 @@ fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
         // stops being a way out for as long as there is a run to stop.
         KeyCode::Esc if in_flight => Some(Action::CancelPact),
         KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
+        // Tab is the key every two-pane program moves focus with, and it is the
+        // only new binding here: it takes no argument and asks no question, so
+        // it means the same thing whether or not a pact is in flight, exactly
+        // like every key below it. Shift-Tab is a different keystroke and is not
+        // bound — with two panes there is no "backwards" for it to mean.
+        KeyCode::Tab => Some(Action::ToggleFocus),
         KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectPrevious),
         KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
         KeyCode::PageUp => Some(Action::SelectPageUp),
@@ -1312,6 +1337,7 @@ mod tests {
             KeyCode::Char('o'),
             KeyCode::Char('f'),
             KeyCode::Char('p'),
+            KeyCode::Tab,
             KeyCode::Char('x'),
         ];
 
@@ -1342,6 +1368,74 @@ mod tests {
         );
 
         assert_eq!(action_for(ctrl_shift_c, false), Some(Action::Quit));
+    }
+
+    #[test]
+    fn tab_moves_the_keys_to_the_other_pane() {
+        assert_eq!(
+            action_for(press(KeyCode::Tab), false),
+            Some(Action::ToggleFocus)
+        );
+    }
+
+    #[test]
+    fn tab_means_the_same_thing_during_a_pact() {
+        // Esc is the one key a run in flight re-reads, and focus is nothing to
+        // do with a run: the tree stays drivable while a pact works
+        // (WAR-21.05), so the key that says which pane is being driven has to
+        // work then too.
+        assert_eq!(
+            action_for(press(KeyCode::Tab), true),
+            Some(Action::ToggleFocus)
+        );
+    }
+
+    #[test]
+    fn releases_and_repeats_of_tab_move_no_focus() {
+        // The same rule as every other key, and with the same consequence: a
+        // release acted on would put focus straight back where the press took
+        // it from, so one keystroke would look like none at all.
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                KeyCode::Tab,
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                action_for(event, false),
+                None,
+                "{kind:?} of Tab should not move focus"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_is_the_only_key_that_moves_focus() {
+        // Its neighbours on the keyboard and the keys it sits between in the
+        // match arms above, plus the back-tab a terminal sends for Shift-Tab,
+        // which is a keystroke of its own and is not bound.
+        for code in [
+            KeyCode::BackTab,
+            KeyCode::Esc,
+            KeyCode::Char('q'),
+            KeyCode::Char(' '),
+            KeyCode::Enter,
+            KeyCode::Up,
+            KeyCode::Char('p'),
+        ] {
+            assert_ne!(
+                action_for(press(code), false),
+                Some(Action::ToggleFocus),
+                "{code:?} should not move focus"
+            );
+            assert_ne!(
+                action_for(press(code), true),
+                Some(Action::ToggleFocus),
+                "{code:?} should not move focus mid-pact"
+            );
+        }
     }
 
     #[test]
