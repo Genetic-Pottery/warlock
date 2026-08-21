@@ -13,8 +13,15 @@
 //! it: building a real tree is [`warlock_engine::load_tree`]'s job, and the
 //! front end learns about trees only through [`Tree`].
 //!
-//! The shape below is load-bearing — change it and the line-by-line
-//! assertions in `ui.rs` and the counts in `app.rs` change with it.
+//! There are two of them, and the second exists for one reason: a view that is
+//! re-seated on a freshly loaded tree can only be shown carrying anything if
+//! there are two trees to carry it between. [`tree_after_a_run`] is
+//! [`tree`] one load later, differing where a finished pact makes a directory
+//! differ and nowhere else, so a test that re-seats between them is asserting
+//! about the carrying rather than about two unrelated shapes.
+//!
+//! The shapes below are load-bearing — change them and the line-by-line
+//! assertions in `ui.rs` and the counts in `app.rs` change with them.
 
 use std::path::{Path, PathBuf};
 
@@ -85,6 +92,70 @@ pub(crate) fn tree() -> Tree {
     )
 }
 
+/// The same tree as [`tree`], as a second load would find it after a pact run
+/// over `warlock/crates` — the tree the front end is re-seated on.
+///
+/// One directory differs, and it differs the way a finished run makes a
+/// directory differ: `warlock/crates` had no `WARLOCK.md` and now has one, so it
+/// carries a document, it is pacted and fresh, and the file the run wrote is in
+/// its listing. Everything else — the shape, the order, the other four nodes and
+/// their files — is [`tree`]'s, because a re-seat has to be shown carrying a
+/// view across a tree that has changed *somewhere*, not across a tree that has
+/// been replaced.
+///
+/// ```text
+/// warlock                          document, pacted, stale
+/// │   README.md, WARLOCK.md
+/// ├── warlock/crates               document now, pacted, fresh
+/// │   │   WARLOCK.md               <- what the run wrote
+/// │   ├── warlock/crates/engine    document, pacted, fresh
+/// │   │       Cargo.toml, WARLOCK.md
+/// │   └── warlock/crates/tui       document, pacted, stale
+/// │           WARLOCK.md
+/// └── warlock/assets               document, unpacted
+///             WARLOCK.md, logo.svg
+/// ```
+///
+/// Written out rather than derived from [`tree`] by mutation: a fixture whose
+/// shape has to be worked out by reading a patch is a fixture the assertions
+/// against it cannot be read beside.
+pub(crate) fn tree_after_a_run() -> Tree {
+    Tree::new(
+        Node::new("warlock", "warlock/WARLOCK.md", NodeState::PactedStale)
+            .with_files(files("warlock", ["README.md", "WARLOCK.md"]))
+            .with_children([
+                // The run wrote this document and granted its hash, so the
+                // directory that was undocumented and unpacted is neither now.
+                Node::new(
+                    "warlock/crates",
+                    "warlock/crates/WARLOCK.md",
+                    NodeState::PactedFresh,
+                )
+                .with_files(files("warlock/crates", ["WARLOCK.md"]))
+                .with_children([
+                    Node::new(
+                        "warlock/crates/engine",
+                        "warlock/crates/engine/WARLOCK.md",
+                        NodeState::PactedFresh,
+                    )
+                    .with_files(files("warlock/crates/engine", ["Cargo.toml", "WARLOCK.md"])),
+                    Node::new(
+                        "warlock/crates/tui",
+                        "warlock/crates/tui/WARLOCK.md",
+                        NodeState::PactedStale,
+                    )
+                    .with_files(files("warlock/crates/tui", ["WARLOCK.md"])),
+                ]),
+                Node::new(
+                    "warlock/assets",
+                    "warlock/assets/WARLOCK.md",
+                    NodeState::Unpacted,
+                )
+                .with_files(files("warlock/assets", ["WARLOCK.md", "logo.svg"])),
+            ]),
+    )
+}
+
 /// The `names` as paths inside `directory`, which is how the loader spells a
 /// directory's file listing: whole paths, not bare names.
 fn files<'a>(
@@ -100,7 +171,7 @@ fn files<'a>(
 mod tests {
     use warlock_engine::NodeState;
 
-    use super::tree;
+    use super::{tree, tree_after_a_run};
 
     #[test]
     fn the_fixture_walks_in_a_fixed_depth_first_order() {
@@ -250,6 +321,38 @@ mod tests {
             .expect("the fixture has an engine node");
         assert!(!engine.files.is_empty());
         assert!(engine.is_leaf());
+    }
+
+    #[test]
+    fn the_second_fixture_is_the_first_one_with_a_document_the_run_wrote() {
+        let before = tree();
+        let after = tree_after_a_run();
+
+        // The same walk, in the same order: one load later, not another tree.
+        let paths = |tree: &super::Tree| -> Vec<String> {
+            tree.walk()
+                .map(|(node, _)| node.path.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(paths(&before), paths(&after));
+
+        // And exactly one node differs, in exactly the way a finished pact
+        // makes one differ: a document where there was none, and the file it
+        // was written in listed beside it.
+        let differing: Vec<String> = after
+            .walk()
+            .filter(|(node, _)| {
+                let was = before.find(&node.path).expect("the same walk");
+                was.document != node.document || was.state != node.state || was.files != node.files
+            })
+            .map(|(node, _)| node.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(differing, ["warlock/crates".to_owned()]);
+
+        let crates = after.find("warlock/crates").expect("the same walk");
+        assert!(crates.document.is_some());
+        assert_eq!(crates.state, NodeState::PactedFresh);
+        assert_eq!(crates.files.len(), 1);
     }
 
     #[test]

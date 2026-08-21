@@ -26,6 +26,20 @@
 //! here waits on the worker: the manifest, the tree and the message are updated
 //! from the events it sends, and the thread is never joined.
 //!
+//! What a run leaves behind is on disk rather than in the rows, and that is the
+//! other thing the shape of the loop is for. A pact writes a `WARLOCK.md` beside
+//! every directory it descends through, and those are rows the tree on screen
+//! has never had, so the moment a run ends the view is one load out of date. One
+//! rule covers it: [`apply_progress`] does its own arm's work first — the
+//! outcome applied, the manifest saved — and then [`reload_tree`] re-reads the
+//! tree from disk and re-seats the view on top of it, carrying the selection,
+//! the collapsed directories, the filters and the window across by path. The
+//! same single call ends all four ways a run can finish and an un-pact besides,
+//! it runs here on the loop's thread and never on the worker's, and a load that
+//! fails this late keeps the tree already drawn instead of ending the loop.
+//! Nothing else asks for a reload: a file written by something other than
+//! warlock still waits for a relaunch.
+//!
 //! A run that takes minutes has to be stoppable, and there are two ways to stop
 //! one, which this file keeps apart on purpose. Esc *cancels*: the descent ends
 //! between directories, the `claude` running right now is killed, and the worker
@@ -60,7 +74,9 @@ use warlock_engine::{
     PactObserver, PactProblem, PactedSubtree, Pacting, load_tree, pact_subtree, repository_root,
     unpact_subtree,
 };
-use warlock_tui::{Activities, Activity, App, Cancel, ClaudeAgent, PactToggle, draw, tree_height};
+use warlock_tui::{
+    Activities, Activity, App, Cancel, ClaudeAgent, PactToggle, draw, reseat_on, tree_height,
+};
 
 /// How long the loop waits for a keystroke before going round again.
 ///
@@ -100,6 +116,16 @@ const PACT_LOST: &str = "the pact stopped without saying how it went; nothing ne
 /// written is on disk and recorded, and the tree says which parts those are the
 /// next time it is loaded.
 const PACT_CANCELLED: &str = "the pact was cancelled; what it finished first is recorded";
+
+/// What the footer says when the reload after a run could not read the tree,
+/// ahead of the load's own reason for it.
+///
+/// It says what the reader lost, which is the refresh and nothing else: the run
+/// is over, its documents are on disk and its manifest is saved, and the rows
+/// under this line are the ones that were there before — true, only older than
+/// disk. Worded as a fact about the view rather than as a failure of the run,
+/// because the run did not fail.
+const NOT_REFRESHED: &str = "the view could not be refreshed and is the tree as it was";
 
 fn main() -> ExitCode {
     // Before anything touches the terminal: a panic during setup has to leave
@@ -145,13 +171,13 @@ fn main() -> ExitCode {
 /// from here without joining the worker — see [`spawn_pact`] for why that is
 /// safe — and the guard restores the terminal on the way out as it always did.
 fn run() -> Result<(), Error> {
-    let (mut app, repo_root) = load_app()?;
+    let (mut app, scope) = load_app()?;
     // Loaded before the terminal is touched, for the same reason the tree is:
     // a manifest that will not parse should say so on the normal screen. This
     // is a second read of the file the loader already parsed, which is cheap
     // and keeps the front end from reaching into the loader's internals for a
     // value it needs to keep and edit.
-    let mut manifest = load_manifest(&repo_root)?;
+    let mut manifest = load_manifest(&scope.repo_root)?;
     // The one thing in this binary that runs a model, built once because it is
     // a command line and a timeout rather than a connection: nothing is spawned
     // until a pact actually asks for a pass.
@@ -287,7 +313,7 @@ fn run() -> Result<(), Error> {
                         pact = Some(Running {
                             events: spawn_pact(
                                 &manifest,
-                                &repo_root,
+                                &scope.repo_root,
                                 &toggle,
                                 &agent,
                                 cancel.handle(),
@@ -304,8 +330,10 @@ fn run() -> Result<(), Error> {
 
         // Every frame, whether or not a key was pressed: this is the only place
         // anything the worker says reaches the screen, and it has to keep up
-        // with a thread that is not waiting for it.
-        apply_progress(&mut pact, &mut app, &mut manifest);
+        // with a thread that is not waiting for it. It is also the only place
+        // the tree is re-read after startup, which is why the scope the app was
+        // loaded at is handed to it — see [`reload_tree`].
+        apply_progress(&mut pact, &mut app, &mut manifest, &scope);
     }
 }
 
@@ -654,7 +682,22 @@ fn pact_press(app: &mut App, in_flight: bool) -> Option<PactToggle> {
 /// restored the terminal and printed what happened, this loop is still drawing,
 /// and the alternative — waiting for a message from a thread that no longer
 /// exists — would hang warlock on the one path where it can least afford to.
-fn apply_progress(pact: &mut Option<Running>, app: &mut App, manifest: &mut Manifest) {
+///
+/// However the run ended, the tree is then re-read from disk and the view put
+/// back on top of it ([`reload_tree`]). One reload, at the bottom, for all four
+/// endings and for an un-pact as much as for a pact: a run writes `WARLOCK.md`
+/// files that no amount of recolouring rows in place can conjure into the tree,
+/// and the only honest source for what is now on disk is disk. It runs *after*
+/// each arm has done its own work — after the manifest is saved and after the
+/// two restoring arms have put `running.before` back — so what the reload reads
+/// lands on top of the arm's result rather than under it, and a reload that
+/// fails leaves that result standing.
+fn apply_progress(
+    pact: &mut Option<Running>,
+    app: &mut App,
+    manifest: &mut Manifest,
+    scope: &Scope,
+) {
     let Some(running) = pact.as_ref() else {
         return;
     };
@@ -729,6 +772,84 @@ fn apply_progress(pact: &mut Option<Running>, app: &mut App, manifest: &mut Mani
             app.set_message(PACT_LOST);
         }
     }
+
+    // The run is over and everything it recorded is on disk, so the rows on
+    // screen are one load out of date whichever arm above ran.
+    reload_tree(app, scope);
+}
+
+/// Re-read the tree at `scope` from disk and put the view back on top of it.
+///
+/// Two calls and no judgement of its own: [`load_tree`] for what is on disk now,
+/// and [`reseat_on`] to carry the reader's selection, collapsed set, filters,
+/// window and footer across to it. The header is re-derived the way
+/// [`load_app`] derives it, from the repository root and the root the new tree
+/// came back rooted at, so the line at the top names the tree the engine just
+/// walked rather than the one it walked at startup.
+///
+/// Called on the event loop's thread and on no other. A worker thread must never
+/// reach in here: it would be reading a tree while the thread that draws it is
+/// drawing one, for a result only the drawing thread can use.
+///
+/// A load that fails is not an error out of the event loop, and this is the
+/// deliberate difference from [`load_app`], where the same failure is fatal.
+/// Warlock is up, the documents the run wrote are whole on disk and the manifest
+/// that records them is saved; quitting here would throw away a run that cost
+/// minutes and money, over nothing worse than a stale screen. So the tree
+/// already drawn is kept and the reader carries on with it — the one thing they
+/// lose is the refresh. Problems that did not stop the load are a different
+/// matter: the engine has already coloured each affected node conservatively, so
+/// a tree that has the new documents in it beats the stale one it would replace,
+/// and it is taken.
+///
+/// Either way there is a line to write — [`NOT_REFRESHED`] and the load's reason
+/// for one that failed, the problems' own wording and their count for one that
+/// did not — and it goes on the footer only when the run left the footer empty.
+/// The pact's message wins because it is the news: what a run made of the
+/// subtree the reader asked for is worth more than how the redraw after it went,
+/// and the footer is one line. Precedence, not merging: two sentences joined by
+/// a semicolon would be a line nobody reads to the end of.
+fn reload_tree(app: &mut App, scope: &Scope) {
+    let note = match load_tree(&scope.root) {
+        Ok(Loaded { tree, problems }) => {
+            *app = reseat_on(app, &tree).with_scope(&scope.repo_root, tree.root_path());
+            // The same count, in the same words, as the startup load that
+            // refuses to draw a tree with problems in it: one problem quoted
+            // and the rest counted. A node the engine could not hash is
+            // already stale on screen, so this line is the only place the
+            // number of them appears.
+            Error::from_problems(&problems).map(|counted| counted.to_string())
+        }
+        // Flattened for the same reason `Error` flattens it: a manifest that
+        // will not parse arrives as the TOML parser's several lines, and the
+        // footer is one.
+        Err(source) => Some(format!(
+            "{NOT_REFRESHED}: {}",
+            one_line(&source.to_string())
+        )),
+    };
+
+    if let Some(note) = note
+        && app.message().is_none()
+    {
+        app.set_message(note);
+    }
+}
+
+/// Where the tree on screen came from: the directory it is rooted at, and the
+/// repository root above that directory.
+///
+/// Both are resolved once, by [`load_app`], and kept for as long as warlock
+/// runs. The root is where a re-read starts, and the repository root is what the
+/// manifest is written under and what the header spells the root relative to —
+/// which is why they travel together rather than being guessed at again from a
+/// working directory that has since had a pact run over it.
+struct Scope {
+    /// The directory the tree is rooted at, as the load that built it came back
+    /// rooted — not the working directory as typed.
+    root: PathBuf,
+    /// The repository root above `root`: the nearest ancestor with a `.git/`.
+    repo_root: PathBuf,
 }
 
 /// What one press of the pact key came to, once the manifest it produced is on
@@ -856,12 +977,15 @@ fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
 }
 
 /// The app state for the directory warlock was invoked from, and the
-/// repository root it sits in.
+/// [`Scope`] it was loaded at.
 ///
-/// The root is handed back rather than dropped once the header is built,
-/// because it is also where the manifest lives: every pact written during the
-/// run is written relative to this path, and finding it is a walk up the
-/// filesystem that should happen once.
+/// The two paths are handed back rather than dropped once the header is built.
+/// The repository root is where the manifest lives: every pact written during
+/// the run is written relative to it, and finding it is a walk up the
+/// filesystem that should happen once. The tree's own root is where a re-read
+/// starts, and it is kept for the same reason — it is the path the engine came
+/// back rooted at, which is the one thing a later load must be given rather than
+/// guess.
 ///
 /// This is the whole of the front end's knowledge about scope, and it is
 /// section 12's modular invocation rule spelled out: the tree is rooted at the
@@ -873,8 +997,11 @@ fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
 /// A load that reported problems is refused rather than drawn. The problems
 /// are files Warlock could not read, so the nodes above them are coloured
 /// stale on no evidence; showing that as an ordinary tree would put a colour
-/// on screen that nothing on disk backs up.
-fn load_app() -> Result<(App, PathBuf), Error> {
+/// on screen that nothing on disk backs up. That is a startup rule and stays
+/// one: mid-session, with a tree already on screen and a run's documents
+/// already on disk, the same problems are taken rather than fatal — see
+/// [`reload_tree`].
+fn load_app() -> Result<(App, Scope), Error> {
     let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
     let Loaded { tree, problems } =
         load_tree(&working_dir).map_err(|source| Error::Load { source })?;
@@ -889,7 +1016,11 @@ fn load_app() -> Result<(App, PathBuf), Error> {
     let repo_root = repository_root(tree.root_path()).unwrap_or(working_dir);
 
     let app = App::from_tree(&tree).with_scope(&repo_root, tree.root_path());
-    Ok((app, repo_root))
+    let scope = Scope {
+        root: tree.root_path().to_path_buf(),
+        repo_root,
+    };
+    Ok((app, scope))
 }
 
 /// Everything that can stop warlock showing a tree.
@@ -1808,16 +1939,16 @@ mod tests {
         use std::{env, fs, process};
 
         use warlock_engine::{
-            Agent, AgentError, AgentRequest, AgentResponse, Manifest, Node, NodeState, PactEntry,
-            Tree, Unwatched, decide_state, subtree_hash,
+            Agent, AgentError, AgentRequest, AgentResponse, Loaded, Manifest, Node, NodeState,
+            PactEntry, Tree, Unwatched, decide_state, load_tree, repository_root, subtree_hash,
         };
         use warlock_tui::{Activities, Activity, App, ClaudeAgent, PactToggle};
 
         use warlock_tui::Cancel;
 
         use super::super::{
-            CancelGuard, PACT_CANCELLED, PACT_LOST, PactEvent, Running, Toggled, activity_port,
-            apply_progress, apply_toggle, pact_press, run_pact, spawn_pact,
+            CancelGuard, NOT_REFRESHED, PACT_CANCELLED, PACT_LOST, PactEvent, Running, Scope,
+            Toggled, activity_port, apply_progress, apply_toggle, pact_press, run_pact, spawn_pact,
         };
         use super::ROOT;
 
@@ -2008,6 +2139,109 @@ mod tests {
             let scratch = Scratch::new(name);
             scratch.write("crates/engine/src/lib.rs", "//! Core engine.\n");
             scratch
+        }
+
+        /// The same repository, with the `.git/` that makes the loader agree it
+        /// is one.
+        ///
+        /// [`one_crate`] is enough for the engine operations, which are given a
+        /// root; a *load* walks up looking for `.git/` and refuses without one.
+        /// The file inside it is neither read nor walked — hidden directories
+        /// are skipped, `.git/` among them — and is written only because
+        /// [`Scratch`] makes directories by writing files into them.
+        fn one_crate_to_load(name: &str) -> Scratch {
+            let scratch = one_crate(name);
+            scratch.write(".git/HEAD", "ref: refs/heads/main\n");
+            scratch
+        }
+
+        /// The app and the [`Scope`] the event loop would hold for `scratch`,
+        /// built the way `load_app` builds them.
+        fn load(scratch: &Scratch) -> (App, Scope) {
+            let Loaded { tree, .. } =
+                load_tree(&scratch.root).expect("a scratch repository with a `.git/` loads");
+            let repo_root =
+                repository_root(tree.root_path()).expect("the load found a repository root");
+            let app = App::from_tree(&tree).with_scope(&repo_root, tree.root_path());
+            let scope = Scope {
+                root: tree.root_path().to_path_buf(),
+                repo_root,
+            };
+            (app, scope)
+        }
+
+        /// A scope for a tree that is not on disk anywhere.
+        ///
+        /// What the tests built around synthetic paths hand to
+        /// [`apply_progress`]: a load from here fails, which is the case where
+        /// the tree already on screen is kept.
+        fn nowhere() -> Scope {
+            Scope {
+                root: PathBuf::from("/repo/crates"),
+                repo_root: PathBuf::from("/repo"),
+            }
+        }
+
+        /// The state the app is showing for the node at `path`, or `None` when
+        /// no row stands for it.
+        fn state_of(app: &App, path: &Path) -> Option<NodeState> {
+            app.rows()
+                .iter()
+                .find(|row| row.path == path)
+                .map(|row| row.state)
+        }
+
+        /// Every document row on screen, as paths relative to `scratch`.
+        fn documents(app: &App, scratch: &Scratch) -> Vec<PathBuf> {
+            app.rows()
+                .iter()
+                .filter(|row| {
+                    row.path
+                        .file_name()
+                        .is_some_and(|name| name == DOCUMENT_FILE)
+                })
+                .map(|row| {
+                    row.path
+                        .strip_prefix(&scratch.root)
+                        .unwrap_or(&row.path)
+                        .to_path_buf()
+                })
+                .collect()
+        }
+
+        /// Run the worker's body for `toggle` over `scratch` on this thread, and
+        /// let the event loop take everything it said off the channel.
+        ///
+        /// The two halves of a real run, joined by the real channel and with
+        /// nothing faked but the model: [`run_pact`] is what the worker thread
+        /// runs, and [`apply_progress`] is what the frame after it does.
+        fn run_and_apply(
+            scratch: &Scratch,
+            app: &mut App,
+            manifest: &mut Manifest,
+            scope: &Scope,
+            toggle: &PactToggle,
+            agent: &dyn Agent,
+        ) {
+            let before = app.clone();
+            let (events, received) = mpsc::channel();
+            run_pact(
+                manifest,
+                &scratch.root,
+                toggle,
+                agent,
+                &Cancel::new(),
+                &events,
+            );
+
+            let mut pact = Some(Running {
+                events: received,
+                cancel: CancelGuard::new(),
+                path: toggle.path.clone(),
+                before,
+            });
+            apply_progress(&mut pact, app, manifest, scope);
+            assert!(pact.is_none(), "the run reported its outcome and is over");
         }
 
         #[test]
@@ -2883,7 +3117,7 @@ mod tests {
             ] {
                 events.send(event).expect("the loop is still listening");
             }
-            apply_progress(&mut pact, &mut app, &mut manifest);
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
 
             assert!(pact.is_some(), "a run that is talking is still running");
             let mut in_flight = before.clone();
@@ -2901,11 +3135,19 @@ mod tests {
                     message: None,
                 })))
                 .expect("the loop is still listening");
-            apply_progress(&mut pact, &mut app, &mut manifest);
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
 
             assert!(pact.is_none(), "the run is over");
             assert!(app.pact_line().is_none(), "so nothing is being pacted now");
-            assert_eq!(app.message(), None, "and nothing went wrong");
+            // Nothing the run did is on the footer, because nothing went wrong
+            // in it. The line that is there belongs to the reload at the bottom
+            // of the call, which has no `/repo/crates` on disk to read.
+            assert!(
+                app.message()
+                    .is_some_and(|line| line.starts_with(NOT_REFRESHED)),
+                "the run reported something of its own: {:?}",
+                app.message()
+            );
         }
 
         #[test]
@@ -2939,7 +3181,7 @@ mod tests {
                     total: 1,
                 })
                 .expect("the loop is still listening");
-            apply_progress(&mut pact, &mut app, &mut manifest);
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
 
             assert!(pact.is_some(), "a run that has only started is still on");
             assert!(
@@ -2949,7 +3191,7 @@ mod tests {
 
             // The worker's end goes away with no `Finished` behind it.
             drop(events);
-            apply_progress(&mut pact, &mut app, &mut manifest);
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
 
             assert!(pact.is_none(), "the run is over, however it ended");
             assert!(
@@ -2971,6 +3213,367 @@ mod tests {
             assert_eq!(
                 app, restored,
                 "and the rows go back to matching the manifest"
+            );
+        }
+
+        #[test]
+        fn a_finished_pact_puts_the_documents_it_wrote_on_screen() {
+            // The whole point of the reload, in one test: a run writes
+            // `WARLOCK.md` into every directory of the subtree, and the app has
+            // no way to know that except by reading the tree again. No key is
+            // pressed here and nothing is relaunched — the frame after the
+            // outcome shows them.
+            let scratch = one_crate_to_load("reload-granted");
+            let (mut app, scope) = load(&scratch);
+            let mut manifest = Manifest::new();
+            let agent = Canned::new(&scratch, []);
+            let engine = scratch.path("crates/engine");
+
+            // Files on, so a document that appears is a row that appears.
+            app.toggle_files();
+            assert_eq!(
+                documents(&app, &scratch),
+                Vec::<PathBuf>::new(),
+                "nothing has been pacted yet, so there is nothing to show"
+            );
+            // What the pact key paints before the run starts: pacted, and not
+            // yet proven fresh.
+            app.set_subtree_state(&engine, NodeState::PactedStale);
+
+            run_and_apply(
+                &scratch,
+                &mut app,
+                &mut manifest,
+                &scope,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+            );
+
+            assert_eq!(
+                documents(&app, &scratch),
+                [
+                    PathBuf::from("crates/engine/WARLOCK.md"),
+                    PathBuf::from("crates/engine/src/WARLOCK.md"),
+                ],
+                "the documents the run wrote are rows in the tree"
+            );
+            // And they are green, because the tree they came back in was built
+            // from the manifest the run had already saved.
+            for relative in ["crates/engine", "crates/engine/src"] {
+                assert_eq!(
+                    state_of(&app, &scratch.path(relative)),
+                    Some(NodeState::PactedFresh),
+                    "{relative} did not come back fresh"
+                );
+            }
+            assert_eq!(app.message(), None, "and nothing went wrong to report");
+        }
+
+        #[test]
+        fn a_reload_leaves_the_reader_exactly_where_they_were() {
+            // A tree that collapses to the root and throws the selection to the
+            // top every time a pact ends is worse than one that never updates,
+            // so: collapse something, filter, scroll, select — then end a pact
+            // that really does change the tree, and none of the five moves.
+            let scratch = one_crate_to_load("reload-place");
+            scratch.write("crates/engine/tests/one.rs", "#[test] fn one() {}\n");
+            scratch.write("crates/tui/src/main.rs", "fn main() {}\n");
+            scratch.write("docs/adr/one.md", "# One\n");
+
+            // A pact that happened before this reader sat down, so there is
+            // something for the pacted-only filter to keep.
+            let agent = Canned::new(&scratch, []);
+            let Toggled { mut manifest, .. } = apply_toggle(
+                &Manifest::new(),
+                &scratch.root,
+                &toggle(&scratch, "crates", true),
+                &agent,
+                &mut Unwatched,
+            )
+            .expect("a subtree that walks and a manifest that writes");
+
+            let (mut app, scope) = load(&scratch);
+            app.set_viewport_height(4);
+            app.toggle_files();
+            app.toggle_pacted_only();
+            app = app.with_collapsed([scratch.path("crates/tui")]);
+            for _ in 0..5 {
+                app.select_next();
+            }
+
+            let selected = app
+                .selected_row()
+                .map(|row| row.path.clone())
+                .expect("a row is selected");
+            let collapsed = app.collapsed().clone();
+            let offset = app.scroll_offset();
+            assert!(offset > 0, "the reader scrolled off the first row");
+
+            // A pact over a subtree nothing has touched yet: the reload really
+            // does bring back a different tree, with `docs` pacted and two more
+            // documents in it.
+            run_and_apply(
+                &scratch,
+                &mut app,
+                &mut manifest,
+                &scope,
+                &toggle(&scratch, "docs", true),
+                &agent,
+            );
+
+            assert_eq!(
+                state_of(&app, &scratch.path("docs")),
+                Some(NodeState::PactedFresh),
+                "the tree that came back is the new one"
+            );
+            assert_eq!(
+                app.selected_row().map(|row| row.path.clone()),
+                Some(selected),
+                "the selection moved"
+            );
+            assert_eq!(app.collapsed(), &collapsed, "the collapsed set moved");
+            assert!(app.pacted_only(), "the filter was dropped");
+            assert!(app.show_files(), "the file toggle was dropped");
+            assert_eq!(app.scroll_offset(), offset, "the window moved");
+        }
+
+        #[test]
+        fn an_un_pact_reloads_the_tree_by_the_same_one_rule() {
+            // One rule for every ending, so an un-pact re-reads too. Nothing in
+            // `apply_progress`'s arms recolours anything for an un-pact — it
+            // grants nothing and has nothing to say — so a subtree that comes
+            // back unpacted here came back from disk.
+            let scratch = one_crate_to_load("reload-unpact");
+            let agent = Canned::new(&scratch, []);
+            let Toggled { mut manifest, .. } = apply_toggle(
+                &Manifest::new(),
+                &scratch.root,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+                &mut Unwatched,
+            )
+            .expect("a subtree that walks and a manifest that writes");
+
+            let (mut app, scope) = load(&scratch);
+            assert_eq!(
+                state_of(&app, &scratch.path("crates/engine")),
+                Some(NodeState::PactedFresh),
+                "the reader is looking at a pacted subtree"
+            );
+
+            run_and_apply(
+                &scratch,
+                &mut app,
+                &mut manifest,
+                &scope,
+                &toggle(&scratch, "crates/engine", false),
+                &agent,
+            );
+
+            assert!(
+                manifest.entries().is_empty(),
+                "the un-pact emptied the manifest"
+            );
+            for relative in ["crates/engine", "crates/engine/src"] {
+                assert_eq!(
+                    state_of(&app, &scratch.path(relative)),
+                    Some(NodeState::Unpacted),
+                    "{relative} is still coloured by a manifest that no longer says so"
+                );
+            }
+        }
+
+        #[test]
+        fn a_reload_that_will_not_load_keeps_the_tree_already_on_screen() {
+            // Mid-session, a load that fails is not fatal and never was going to
+            // be: warlock is up, the documents are on disk and the manifest is
+            // saved, so quitting would throw away a run that cost minutes and
+            // money. The arm's own result stands and the rows do not move.
+            let tree = Tree::new(Node::new(
+                "/repo/crates",
+                None::<PathBuf>,
+                NodeState::Unpacted,
+            ));
+            let before = App::from_tree(&tree);
+            let mut app = before.clone();
+            let mut manifest = Manifest::new();
+            let (events, received) = mpsc::channel();
+            let mut pact = Some(Running {
+                events: received,
+                cancel: CancelGuard::new(),
+                path: PathBuf::from("/repo/crates"),
+                before: before.clone(),
+            });
+
+            events
+                .send(PactEvent::Finished(Ok(Toggled {
+                    manifest: Manifest::new(),
+                    granted: true,
+                    message: None,
+                })))
+                .expect("the loop is still listening");
+            // There is no repository at `/repo/crates`, so the reload at the
+            // bottom of this call fails.
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+
+            assert!(pact.is_none(), "the run is over");
+            assert_eq!(
+                app.rows().len(),
+                before.rows().len(),
+                "the tree on screen was thrown away"
+            );
+            assert_eq!(
+                state_of(&app, Path::new("/repo/crates")),
+                Some(NodeState::PactedFresh),
+                "the outcome the run did report was undone by a load that failed"
+            );
+            // And the reader is told why the rows did not move, on the one line
+            // the footer has, with the load's own reason after it.
+            let message = app.message().expect("a refresh that failed says so");
+            assert!(
+                message.starts_with(NOT_REFRESHED),
+                "the footer says nothing about the refresh: {message}"
+            );
+            assert!(
+                message.len() > NOT_REFRESHED.len() + 2,
+                "the footer does not say why: {message}"
+            );
+            assert!(
+                !message.contains('\n'),
+                "a footer line that wraps is a footer line that hides a row: {message}"
+            );
+        }
+
+        #[test]
+        fn the_pacts_own_message_wins_over_the_reloads() {
+            // Both have something to say and there is one line to say it on. The
+            // run is the news — it is what the reader asked for, and it cost
+            // minutes — so the reload's line waits for a footer nobody else
+            // wanted. Both endings are driven here against the same failing
+            // reload, so the only difference between them is whether the pact
+            // left a message.
+            const REFUSED: &str = "the manifest would not save";
+
+            let ending = |message: Option<String>| {
+                let tree = Tree::new(Node::new(
+                    "/repo/crates",
+                    None::<PathBuf>,
+                    NodeState::Unpacted,
+                ));
+                let before = App::from_tree(&tree);
+                let mut app = before.clone();
+                let mut manifest = Manifest::new();
+                let (events, received) = mpsc::channel();
+                let mut pact = Some(Running {
+                    events: received,
+                    cancel: CancelGuard::new(),
+                    path: PathBuf::from("/repo/crates"),
+                    before,
+                });
+
+                events
+                    .send(PactEvent::Finished(Ok(Toggled {
+                        manifest: Manifest::new(),
+                        granted: true,
+                        message,
+                    })))
+                    .expect("the loop is still listening");
+                // Nothing is on disk at `/repo/crates`, so the reload has its
+                // own line to offer in both cases.
+                apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+                app.message().map(str::to_owned)
+            };
+
+            assert_eq!(
+                ending(Some(REFUSED.to_owned())).as_deref(),
+                Some(REFUSED),
+                "the reload talked over the run"
+            );
+            assert!(
+                ending(None).is_some_and(|line| line.starts_with(NOT_REFRESHED)),
+                "the reload said nothing into a footer nobody else was using"
+            );
+        }
+
+        /// Only on unix, because the only way to make a load report problems
+        /// rather than fail outright is a file the process may not read, and
+        /// `chmod` is how that is arranged.
+        #[cfg(unix)]
+        #[test]
+        fn a_reload_with_problems_takes_the_new_tree_and_counts_them() {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            // A `Problem` is a per-node fact the engine has already coloured
+            // conservatively — the node is stale and says so — so a tree with
+            // the run's documents in it beats the stale one it replaces, and it
+            // is taken. What the footer adds is the count, in the words the
+            // startup load already uses for it.
+            let scratch = one_crate_to_load("reload-problems");
+            let agent = Canned::new(&scratch, []);
+            let Toggled { mut manifest, .. } = apply_toggle(
+                &Manifest::new(),
+                &scratch.root,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+                &mut Unwatched,
+            )
+            .expect("a subtree that walks and a manifest that writes");
+
+            let (mut app, scope) = load(&scratch);
+            assert_eq!(
+                state_of(&app, &scratch.path("crates/engine")),
+                Some(NodeState::PactedFresh),
+                "the reader is looking at a pacted subtree"
+            );
+
+            // Something new on disk for the reload to find, and something it
+            // cannot read: `crates/engine` and `crates/engine/src` are both
+            // pacted, and neither can be hashed with an unreadable file under
+            // it, so there are two problems and one of them is counted.
+            scratch.write("docs/adr/one.md", "# One\n");
+            let unreadable = scratch.path("crates/engine/src/lib.rs");
+            fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmods");
+
+            let (events, received) = mpsc::channel();
+            let mut pact = Some(Running {
+                events: received,
+                cancel: CancelGuard::new(),
+                path: scratch.path("crates/engine"),
+                before: app.clone(),
+            });
+            events
+                .send(PactEvent::Finished(Ok(Toggled {
+                    manifest: manifest.clone(),
+                    granted: true,
+                    message: None,
+                })))
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &scope);
+
+            let message = app.message().expect("problems are reported").to_owned();
+            fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644))
+                .expect("chmods back");
+
+            assert!(
+                state_of(&app, &scratch.path("docs")).is_some(),
+                "the tree that came back is the old one, without the problems in it"
+            );
+            assert_eq!(
+                state_of(&app, &scratch.path("crates/engine")),
+                Some(NodeState::PactedStale),
+                "a node with no hash is coloured as if it had one"
+            );
+            assert!(
+                message.contains("could not be hashed"),
+                "the footer does not say what went wrong: {message}"
+            );
+            assert!(
+                message.contains("and 1 more like it"),
+                "the footer does not say how many there were: {message}"
+            );
+            assert!(
+                !message.contains('\n'),
+                "a footer line that wraps is a footer line that hides a row: {message}"
             );
         }
     }

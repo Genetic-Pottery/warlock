@@ -1203,6 +1203,73 @@ impl App {
     }
 }
 
+/// The view `view` is showing, re-seated on `tree`: the rows and the tally of
+/// the tree just handed over, under the selection, the collapsed set, the
+/// filters, the window and the footer the reader already had.
+///
+/// An [`App`] reads a tree exactly once, in [`App::from_tree`], and answers
+/// every later question from the rows that produced — so a tree that has
+/// changed since then can reach the screen only as a *new* app. Building that
+/// new app is the easy half. The half that matters is this one: a front end
+/// that built it and left it as [`App::from_tree`] made it would answer every
+/// re-read by expanding everything the reader had collapsed, dropping their
+/// filters, throwing the selection to the first row and scrolling to the top.
+/// That is worse than never re-reading at all, because it happens exactly when
+/// the reader was watching something.
+///
+/// So the view is carried and only the tree is replaced. What comes from
+/// `tree`: every row, every state on one, and [`App::counts`]. What comes from
+/// `view`: which node is selected, which directories are collapsed, the
+/// pacted-only and file flags, the scroll offset and the viewport height, the
+/// header, the focus, the message, and the pact in flight if there is one.
+///
+/// The selection and the collapsed set are carried by *path*, never by row
+/// index: an index names whichever node now sits at that position, which after
+/// a re-read is any node at all. A selected path the new tree no longer has
+/// falls back to its nearest surviving ancestor — the deepest part of the way
+/// to it that is still drawn, which is where the node the reader was looking at
+/// went — and only falls to the first row when not even an ancestor of it
+/// survived. A collapsed path the new tree has no node for is carried
+/// untouched and hides nothing, exactly as [`App::with_collapsed`] documents:
+/// a directory that goes and comes back should come back as the reader left it.
+///
+/// Nothing here knows why the tree was re-read. It is a function of two values
+/// — a view and a tree — so it runs no pact, waits on no thread, spawns
+/// nothing, reads no file and triggers no re-read of its own: whoever loaded
+/// `tree` decided when to, and this only puts the reader back on top of it.
+#[must_use]
+pub fn reseat_on(view: &App, tree: &Tree) -> App {
+    // Taken before anything is rebuilt, because it is the one fact about the
+    // old view that the new rows cannot be asked for.
+    let selected = view.selected_row().map(|row| row.path.clone());
+
+    let mut reseated = App::from_tree(tree);
+    reseated.collapsed.clone_from(&view.collapsed);
+    reseated.pacted_only = view.pacted_only;
+    reseated.show_files = view.show_files;
+    reseated.viewport_height = view.viewport_height;
+    reseated.header.clone_from(&view.header);
+    reseated.message.clone_from(&view.message);
+    reseated.in_flight.clone_from(&view.in_flight);
+    reseated.focus = view.focus;
+
+    // Re-filter first, so the selection is looked up in the rows that will
+    // actually be drawn rather than in the whole walk: what a hidden node falls
+    // back to depends on what is on screen around it.
+    reseated.reflow();
+    reseated.selected = selected
+        .and_then(|path| index_for(&reseated.rows, &path))
+        .unwrap_or(0);
+    // `reflow` has just scrolled the window to suit its own guess at the
+    // selection; the offset the reader left is the one the window rule is owed,
+    // so it goes back before that rule is applied to where the selection really
+    // landed. A window that still holds the selection does not move at all.
+    reseated.scroll_offset = view.scroll_offset;
+    reseated.rescroll();
+
+    reseated
+}
+
 /// Which of `all` stand for nodes: the walk with every file row dropped, which
 /// is what the view shows when the file toggle is off.
 ///
@@ -1450,7 +1517,7 @@ mod tests {
 
     use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
-    use super::{App, Focus, PactToggle, REPOSITORY_ROOT_LABEL, Row, scroll_offset_for};
+    use super::{App, Focus, PactToggle, REPOSITORY_ROOT_LABEL, Row, reseat_on, scroll_offset_for};
     use crate::fixture;
 
     /// How many rows the scrolling tests work with, and how tall the window
@@ -3601,5 +3668,192 @@ mod tests {
 
             assert_eq!(unfocused, focused, "{name} depends on the focus");
         }
+    }
+
+    /// The fixture's shape with `warlock/crates/tui` gone, and its files with
+    /// it: what a re-seat meets when the node the selection was sitting on is
+    /// not in the new tree at all.
+    ///
+    /// Hand-written rather than loaded, like every other tree these tests use,
+    /// so a re-seat is driven by two values and needs no repository, no pact and
+    /// no `claude` on the path.
+    fn tree_without_the_tui_crate() -> Tree {
+        Tree::new(
+            Node::new("warlock", "warlock/WARLOCK.md", NodeState::PactedStale).with_children([
+                Node::new("warlock/crates", None, NodeState::Unpacted).with_children([Node::new(
+                    "warlock/crates/engine",
+                    "warlock/crates/engine/WARLOCK.md",
+                    NodeState::PactedFresh,
+                )]),
+                Node::new(
+                    "warlock/assets",
+                    "warlock/assets/WARLOCK.md",
+                    NodeState::Unpacted,
+                ),
+            ]),
+        )
+    }
+
+    /// The path of the selected row, for the re-seat tests, which are about
+    /// which node the selection is on rather than which index it sits at.
+    fn selected_path(app: &App) -> Option<&Path> {
+        app.selected_row().map(|row| row.path.as_path())
+    }
+
+    #[test]
+    fn a_re_seat_takes_its_rows_its_states_and_its_tally_from_the_new_tree() {
+        let app = App::from_tree(&fixture::tree());
+
+        let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+
+        // The same five nodes, and the one the run worked on carrying the
+        // document it wrote, in the state the new tree gives it.
+        assert_eq!(drawn(&reseated), whole_fixture());
+        let crates = &reseated.rows()[1];
+        assert_eq!(crates.path, PathBuf::from("warlock/crates"));
+        assert_eq!(
+            crates.document,
+            Some(PathBuf::from("warlock/crates/WARLOCK.md")),
+            "the document the run wrote never reached the row"
+        );
+        assert_eq!(crates.state, NodeState::PactedFresh);
+        // The old app still says what it always said: a re-seat builds a new
+        // value rather than editing the one it was handed.
+        assert_eq!(app.rows()[1].document, None);
+        assert_eq!(app.rows()[1].state, NodeState::Unpacted);
+
+        assert_eq!(reseated.counts(), fixture::tree_after_a_run().counts());
+        assert_eq!(tally(&reseated), reseated.counts());
+    }
+
+    #[test]
+    fn a_file_the_new_tree_lists_and_the_old_one_did_not_gets_a_row() {
+        let mut app = App::from_tree(&fixture::tree());
+        app.toggle_files();
+        let written = "warlock/crates/WARLOCK.md".to_owned();
+        assert!(!drawn(&app).contains(&written));
+
+        let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+
+        assert!(reseated.show_files(), "the file toggle did not carry");
+        assert!(
+            drawn(&reseated).contains(&written),
+            "the WARLOCK.md the run wrote is on disk and nowhere on screen"
+        );
+    }
+
+    #[test]
+    fn a_re_seat_keeps_the_selection_on_the_node_it_was_on() {
+        let app = app_selecting("warlock/crates/tui");
+
+        let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+
+        assert_eq!(
+            selected_path(&reseated),
+            Some(Path::new("warlock/crates/tui"))
+        );
+    }
+
+    #[test]
+    fn a_selection_the_new_tree_lost_lands_on_its_nearest_surviving_ancestor() {
+        let app = app_selecting("warlock/crates/tui");
+
+        let reseated = reseat_on(&app, &tree_without_the_tui_crate());
+
+        // The directory the node was in, which is where it went — not the first
+        // row, which is a different part of the tree entirely.
+        assert_eq!(selected_path(&reseated), Some(Path::new("warlock/crates")));
+        assert_ne!(reseated.selected(), 0);
+
+        // The first row only when nothing on the way to the node survived at
+        // all, which is the honest answer rather than a shortcut to it.
+        let elsewhere = Tree::new(Node::new(
+            "elsewhere",
+            "elsewhere/WARLOCK.md",
+            NodeState::Unpacted,
+        ));
+        let reseated = reseat_on(&app, &elsewhere);
+
+        assert_eq!(reseated.selected(), 0);
+        assert_eq!(selected_path(&reseated), Some(Path::new("elsewhere")));
+    }
+
+    #[test]
+    fn a_re_seat_carries_the_collapsed_set_including_paths_the_new_tree_lacks() {
+        let app =
+            App::from_tree(&fixture::tree()).with_collapsed(["warlock/crates", "warlock/gone"]);
+
+        let reseated = reseat_on(&app, &tree_without_the_tui_crate());
+
+        // Both paths carried, the one the tree has no node for included: a
+        // directory that comes back should come back shut.
+        assert_eq!(reseated.collapsed(), app.collapsed());
+        assert!(reseated.is_collapsed("warlock/gone"));
+        // And it hides nothing, while the one the tree does have hides its
+        // subtree in the new tree exactly as it did in the old one.
+        assert_eq!(
+            drawn(&reseated),
+            ["warlock", "warlock/crates", "warlock/assets"]
+        );
+    }
+
+    #[test]
+    fn the_view_flags_and_the_window_survive_a_re_seat() {
+        let mut app = App::from_tree(&fixture::tree());
+        app.toggle_files();
+        app.toggle_pacted_only();
+        app.set_viewport_height(3);
+        let mut app = select(app, "warlock/crates/tui");
+        app.set_message("something from the last keystroke");
+        app.set_pact_in_flight("warlock/crates", 2, 5);
+        app.toggle_focus();
+
+        let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+
+        assert!(reseated.show_files());
+        assert!(reseated.pacted_only());
+        assert_eq!(reseated.viewport_height(), 3);
+        assert_eq!(reseated.focus(), Focus::Panel);
+        assert_eq!(
+            reseated.message(),
+            Some("something from the last keystroke")
+        );
+        assert_eq!(reseated.pact_line(), app.pact_line());
+        assert_eq!(selected_path(&reseated), selected_path(&app));
+        // The window may have had to move by the rows the new tree added above
+        // the selection, but never further than it had to, and never off the
+        // end of the rows there are.
+        assert!(window_is_in_range(&reseated));
+        assert!(selection_is_on_screen(&reseated));
+    }
+
+    #[test]
+    fn re_seating_on_a_tree_that_has_not_changed_leaves_the_view_exactly_as_it_was() {
+        let mut app = App::from_tree(&fixture::tree()).with_scope("/repo", "/repo/warlock");
+        app.toggle_files();
+        app.toggle_pacted_only();
+        let mut app = select(app, "warlock/crates");
+        app.toggle_collapsed();
+        app.set_viewport_height(3);
+        // Down to the bottom of the rows and back up into the middle of the
+        // window, so the offset is one the window rule would not arrive at from
+        // the top: a re-seat that rebuilt it instead of carrying it would put
+        // the reader somewhere else and still look tidy.
+        app.select_last();
+        app.select_previous();
+        app.select_previous();
+        app.set_message("something from the last keystroke");
+        app.set_pact_in_flight("warlock/crates", 2, 5);
+        app.toggle_focus();
+        // A view with something to lose in every field there is.
+        assert!(app.scroll_offset() > 0);
+        assert!(app.selected() < app.scroll_offset() + app.viewport_height() - 1);
+
+        // What the binary does when a load turns up a tree nothing has happened
+        // to: every field of the re-seated app is the field it carried, down to
+        // the header, the scroll offset and the pact still in flight.
+        let reseated = reseat_on(&app, &fixture::tree());
+
+        assert_eq!(reseated, app);
     }
 }
