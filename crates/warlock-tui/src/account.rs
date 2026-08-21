@@ -148,6 +148,15 @@ pub struct Section {
     /// When this section stopped being the live one, if it has. A closed
     /// section's last line is frozen here instead of ticking.
     closed: Option<Instant>,
+    /// Whether the outcome line is already under it.
+    ///
+    /// Not the same question as [`Section::is_closed`], and the difference is
+    /// the whole reason both are here: a section stops moving the moment the
+    /// next directory opens, which is long before the run says how that
+    /// directory went. So a section spends most of a run frozen and unworded,
+    /// and this is what [`Account::close_open_sections`] reads to find the ones
+    /// still owed an ending.
+    has_outcome: bool,
 }
 
 impl Section {
@@ -212,6 +221,31 @@ impl Section {
     fn freeze(&mut self, at: Instant) {
         self.closed.get_or_insert(at);
     }
+
+    /// Put `outcome`'s line under this section, and stop it moving.
+    ///
+    /// The outcome line is a line like any other and takes a clock like any
+    /// other, so a reader can see how long the pass took as well as how it went.
+    /// The instant it takes is the instant this section *stopped* rather than
+    /// the instant somebody got round to wording it: a section frozen when the
+    /// next directory opened ended there, and dating its last line at the end of
+    /// the whole run would say that a pass which took thirty seconds took nine
+    /// minutes. Only a section still live when it is worded takes `at`.
+    ///
+    /// Does nothing to a section that has an outcome already. The first ending
+    /// wins, because it is the one already on screen.
+    fn word(&mut self, outcome: &Outcome, at: Instant) {
+        if self.has_outcome {
+            return;
+        }
+        let at = self.closed.unwrap_or(at);
+        self.entries.push(Entry {
+            at,
+            text: outcome.line(self.cost),
+        });
+        self.has_outcome = true;
+        self.freeze(at);
+    }
 }
 
 /// One drawable row of an account.
@@ -254,7 +288,8 @@ pub enum Line {
 /// Built by four calls, all of which take the instant they happened at:
 /// [`Account::new`] when the run starts, [`Account::open_section`] as each
 /// directory comes up, [`Account::record`] for every activity the pass reports,
-/// and [`Account::close_section`] / [`Account::finish`] at the ends. Read back
+/// and [`Account::close_section`], [`Account::close_open_sections`] and
+/// [`Account::finish`] at the ends. Read back
 /// as rows with [`Account::lines`] or [`Account::window`], which take the `now`
 /// the newest clock is measured against.
 ///
@@ -322,6 +357,7 @@ impl Account {
             entries: Vec::new(),
             cost: None,
             closed: None,
+            has_outcome: false,
         });
     }
 
@@ -360,27 +396,57 @@ impl Account {
         }
     }
 
-    /// Close the live section at `at` with the line `outcome` makes.
+    /// Close the newest section at `at` with the line `outcome` makes.
     ///
     /// The outcome line is a line like any other and takes a clock like any
     /// other, so a reader can see how long the pass took as well as how it went.
     /// Closing also stops the section moving: this is the instant its last
     /// activity line freezes at.
     ///
-    /// Does nothing when there is no live section to close.
+    /// The newest section rather than any section, because it is the one a
+    /// caller can name without naming it — what stopped is what was running.
+    /// Every other section is closed by [`Account::close_open_sections`], which
+    /// is where a run that only learns per-directory outcomes at the end does
+    /// its wording.
+    ///
+    /// Does nothing when there is no section to close, or when the newest one
+    /// has an outcome already.
     pub fn close_section(&mut self, outcome: &Outcome, at: Instant) {
-        let Some(section) = self.sections.last_mut() else {
-            return;
-        };
-        if section.is_closed() {
-            return;
+        if let Some(section) = self.sections.last_mut() {
+            section.word(outcome, at);
         }
+    }
 
-        section.entries.push(Entry {
-            at,
-            text: outcome.line(section.cost),
-        });
-        section.freeze(at);
+    /// Close every section still owed an outcome, wording each with what
+    /// `outcome` says about it.
+    ///
+    /// A run does not report itself a directory at a time. The pass for one
+    /// directory is over the moment the next one starts, but *how* it went
+    /// arrives once, at the end, in a list of failures naming the directories
+    /// they are about — so at the end of a run every section is frozen and none
+    /// of them has an ending, and this is where they get one. Each is worded at
+    /// the instant it stopped rather than at `at`, so the clocks say how long
+    /// the passes took; `at` is what the section still live at the end takes.
+    ///
+    /// The outcome is a caller's judgement, per section, rather than anything
+    /// worked out here: what a directory's pass wrote, how big it is and why one
+    /// was refused are all facts about a filesystem and a run, and this module
+    /// holds neither.
+    ///
+    /// Sections closed already — the one a cancel worded, say — keep the ending
+    /// they have, and `outcome` is never asked about them.
+    pub fn close_open_sections(
+        &mut self,
+        at: Instant,
+        mut outcome: impl FnMut(&Section) -> Outcome,
+    ) {
+        for index in 0..self.sections.len() {
+            if self.sections[index].has_outcome {
+                continue;
+            }
+            let ending = outcome(&self.sections[index]);
+            self.sections[index].word(&ending, at);
+        }
     }
 
     /// End the run at `at` with the one line that describes the whole of it.
@@ -541,9 +607,10 @@ fn plural(count: usize, one: &str, many: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::time::{Duration, Instant};
 
-    use super::{Account, Line, Outcome, clock};
+    use super::{Account, Line, Outcome, Section, clock};
     use crate::claude::Activity;
 
     /// The instant `seconds` after `base`, so a whole run can be driven without
@@ -903,6 +970,83 @@ mod tests {
         assert_eq!(
             said(&account, at(base, 1)).last().map(String::as_str),
             Some("pact finished — 1 directory, 0:01, $0.00 (incomplete: 1 pass reported no cost)"),
+        );
+    }
+
+    #[test]
+    fn every_section_is_closed_at_the_end_with_what_is_said_about_it() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        // Two passes, one after the other, with nothing closing either of them
+        // at the time: how a directory went is not known until the run ends.
+        account.open_section("crates/engine", base);
+        account.record(&Activity::Thinking, at(base, 1));
+        account.open_section("crates/tui", at(base, 30));
+        account.record(&Activity::Thinking, at(base, 31));
+
+        account.close_open_sections(at(base, 90), |section| {
+            if section.directory() == Path::new("crates/engine") {
+                Outcome::Wrote {
+                    document: "crates/engine/WARLOCK.md".into(),
+                    bytes: 2_341,
+                }
+            } else {
+                Outcome::Refused {
+                    reason: "the model returned an empty document".to_owned(),
+                }
+            }
+        });
+
+        // The first section's ending is dated where that pass stopped — thirty
+        // seconds in, where the next directory opened — and the second's, being
+        // the one still live, is dated now.
+        assert_eq!(
+            said(&account, at(base, 900)),
+            vec![
+                "crates/engine".to_owned(),
+                "0:30 thinking".to_owned(),
+                "0:30 wrote crates/engine/WARLOCK.md — 2341 bytes, no cost reported".to_owned(),
+                "crates/tui".to_owned(),
+                "1:00 thinking".to_owned(),
+                "1:00 refused — the model returned an empty document".to_owned(),
+            ],
+        );
+        assert!(account.sections().iter().all(Section::is_closed));
+    }
+
+    #[test]
+    fn a_section_that_has_an_ending_already_is_not_asked_for_a_second_one() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        // How a cancelled run is worded: the section it was stopped in is
+        // closed on the spot, and the ones above it are closed with what the
+        // run went on to say about them.
+        account.open_section("crates/engine", base);
+        account.record(&Activity::Cost { usd: 0.21 }, at(base, 1));
+        account.open_section("crates/tui", at(base, 10));
+        account.record(&Activity::Cost { usd: 0.03 }, at(base, 11));
+        account.close_section(&Outcome::Cancelled, at(base, 20));
+
+        let mut asked = Vec::new();
+        account.close_open_sections(at(base, 20), |section| {
+            asked.push(section.directory().display().to_string());
+            Outcome::Wrote {
+                document: "WARLOCK.md".into(),
+                bytes: 12,
+            }
+        });
+
+        assert_eq!(asked, vec!["crates/engine".to_owned()]);
+        assert_eq!(
+            said(&account, at(base, 20)),
+            vec![
+                "crates/engine".to_owned(),
+                "0:10 wrote WARLOCK.md — 12 bytes, $0.21".to_owned(),
+                "crates/tui".to_owned(),
+                "0:10 cancelled — $0.03 spent".to_owned(),
+            ],
         );
     }
 
