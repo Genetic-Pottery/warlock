@@ -54,6 +54,12 @@ dbg_macro = "warn"
 # of error-prone boilerplate, and serde is the de facto standard every format
 # crate already speaks, including the one below.
 serde = { version = "1", features = ["derive"] }
+# The wire format the model pass is streamed in: `claude --output-format
+# stream-json` emits one JSON object per line, of a shape nothing here owns and
+# the vendor may extend at any time. Reading it through `Value` with defensive
+# field access is the only honest way to consume a schema written elsewhere, and
+# writing a tolerant JSON reader by hand is strictly worse than taking serde's.
+serde_json = { version = "1" }
 # The on-disk format for `.warlock/pacts.toml`: the manifest is committed to git
 # and hand-editable, so it needs a format people can read and diff, and `toml` is
 # the serde-native reader/writer for the one this repo already writes Cargo in.

@@ -20,8 +20,10 @@
 //! * **A chatty child fills a pipe.** A pipe holds something like 64KiB; a
 //!   child that writes more than that blocks until somebody drains it. Waiting
 //!   for exit *before* reading therefore hangs on exactly the passes worth
-//!   having — the long ones. So stdout and stderr are each drained by their own
-//!   thread, concurrently with the wait.
+//!   having — the long ones. So stdout and stderr are each read by their own
+//!   thread, concurrently with the wait: stderr drained whole, since nothing
+//!   reads it until the pass is judged, and stdout a line at a time, because
+//!   every line of it is news.
 //! * **A child waits for EOF.** `claude` reads its prompt from stdin until the
 //!   stream closes. The write happens on its own thread which then drops the
 //!   handle, so the child sees EOF whether or not the prompt is bigger than a
@@ -43,11 +45,34 @@
 //! the timeout path already holds, so cancelling reaches inside a pass that is
 //! in flight instead of waiting politely for it to end.
 //!
+//! A fifth thing it cannot do is *say what it is doing*. A pass is minutes of
+//! reading and writing that the person watching sees nothing of until it ends,
+//! which is why pressing the pact key looks like a hang. That is
+//! [`Activities`]: a port out of the transport, built exactly like [`Cancel`] —
+//! a clonable handle over an [`Arc`], attached by whoever wants to listen with
+//! [`with_activities`](ClaudeAgent::with_activities), and a no-op for an agent
+//! nobody attached one to. What goes out through it is [`Activity`]: the name of
+//! a tool and at most one argument, the bare fact of thinking, and what the pass
+//! cost. Never a tool's result, never the model's prose, never the content of a
+//! thought.
+//!
+//! That port is why stdout is read the way it is. The child is asked for
+//! `--output-format stream-json`, one JSON object per line, and the reader
+//! thread hands each line to [`stream::read_line`] and reports what it said the
+//! moment it says it — so an activity reaches the listener while the pass is
+//! still running, which is the entire point of having one. The reader keeps the
+//! document as it goes and gives it back when the stream ends; it is otherwise
+//! the same thread doing the same job it did when it drained stdout whole, and
+//! it is still not joined on the cancel and timeout paths, for the same reason
+//! as ever: a grandchild the kill did not reach can hold the pipe open, and
+//! waiting on that is the wait a cancel exists to end.
+//!
 //! Threads and channels, no async runtime, and no dependency: this crate's
 //! `Cargo.toml` gains nothing for any of it.
 
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read, Write};
+use std::fmt;
+use std::io::{self, BufRead, Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -79,15 +104,23 @@ pub const INVOCATION_TIMEOUT: Duration = Duration::from_mins(5);
 /// The command run when nothing else is asked for.
 const PROGRAM: &str = "claude";
 
-/// What `claude` is asked to do when nothing else is asked for: print mode,
-/// which is the non-interactive shape of "hand it a prompt, read its stdout".
+/// What `claude` is asked to do when nothing else is asked for: print mode, in
+/// the shape that narrates itself.
 ///
-/// Not a decision about invocation *mode* — headless per directory against one
-/// long session is a later slice's call, and section 11 of the design doc
-/// leaves it open. It is the minimum that makes a piped, terminal-less run work
-/// at all, and it lives in a field so that later slice can change it without
-/// touching a line of this file.
-const ARGS: [&str; 1] = ["--print"];
+/// `--print` is the non-interactive form — hand it a prompt, read its stdout —
+/// and is the minimum that makes a piped, terminal-less run work at all.
+/// `--output-format stream-json` changes only *how* that stdout arrives: one
+/// JSON object per line as the pass happens, instead of the finished document
+/// in one go at the end. The document is the same either way; what the stream
+/// adds is everything before it, which is what [`Activities`] carries. And
+/// `--verbose` is not a preference: the CLI refuses `stream-json` in print mode
+/// without it, so the three arguments are one decision, not three.
+///
+/// Still not a decision about invocation *mode* — headless per directory
+/// against one long session is a later slice's call, and section 11 of the
+/// design doc leaves it open. It lives in a field so that later slice can
+/// change it without touching a line of this file.
+const ARGS: [&str; 4] = ["--print", "--output-format", "stream-json", "--verbose"];
 
 /// How often the waiter thread asks whether the child has exited.
 ///
@@ -200,6 +233,160 @@ impl Cancel {
     }
 }
 
+/// One thing a pass was seen doing, in the fewest words it can be said in.
+///
+/// Facts, not prose. A pass produces a document, and the document is the
+/// product; this is the sign of life that runs alongside it, so every variant
+/// is something that fits on one line of a panel and is true without
+/// interpretation. What is *not* here is as deliberate as what is: no tool
+/// result, no assistant text, and no thought — only that thinking happened.
+/// Rendering a model's reasoning back at the user is prose, and prose is the
+/// thing this front end refuses to show.
+///
+/// ```
+/// use warlock_tui::Activity;
+///
+/// let read = Activity::Tool {
+///     name: "Read".to_owned(),
+///     detail: Some("src/lib.rs".to_owned()),
+/// };
+/// let unlisted = Activity::Tool {
+///     name: "WebFetch".to_owned(),
+///     detail: None,
+/// };
+///
+/// assert_ne!(read, unlisted);
+/// assert_eq!(Activity::Thinking, Activity::Thinking);
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub enum Activity {
+    /// The model called a tool.
+    Tool {
+        /// The tool's name exactly as the stream spells it: `Read`, `Bash`,
+        /// `Grep`, or whatever the vendor adds next.
+        name: String,
+        /// The one argument worth putting on a line, or `None` for a tool
+        /// nothing is known about.
+        ///
+        /// One, not some, and chosen per tool rather than taken from whatever
+        /// the call happened to carry: the alternative is an arbitrary input
+        /// dict on somebody's screen. A tool that is not on the whitelist is
+        /// shown by name alone, which is honest and short, and adding an entry
+        /// is a one-line change to be made when a real stream shows a tool
+        /// that matters.
+        detail: Option<String>,
+    },
+    /// The model thought.
+    ///
+    /// Carries nothing on purpose — see the type's docs. A stretch of thinking
+    /// is visible as a stretch of *this*, which is all a reader needs to know
+    /// the run is alive.
+    Thinking,
+    /// What the pass cost, in US dollars, as the pass itself reported it.
+    ///
+    /// The one number the transport keeps out of the run's own accounting, and
+    /// the reason it rides this port rather than the response: it is a fact
+    /// about the *pass*, not part of the document, and it arrives at the end of
+    /// the stream like everything else here.
+    Cost {
+        /// The cost of this one pass. Whatever the pass said it was — nothing
+        /// here checks it, converts it or adds it up.
+        usd: f64,
+    },
+}
+
+/// Where a pass says what it is doing, for whoever is not running it.
+///
+/// [`Cancel`]'s twin, pointing the other way: that one carries a stop *into* a
+/// pass from the thread drawing the screen, and this one carries facts *out* of
+/// a pass to it. Same construction, for the same reasons — one shared thing
+/// behind an [`Arc`], so cloning is a refcount bump and every clone reports to
+/// the same place, and [`Send`] + [`Sync`] because the pass runs on the pact
+/// worker's thread and the listener is somewhere else entirely.
+///
+/// The shared thing is a function rather than a channel, so that this file
+/// keeps its one job. A pact worker already owns a channel to the event loop;
+/// handing it a closure lets it forward an activity as one of its own events
+/// over the route it already has, instead of the transport inventing a second
+/// one and the loop growing a second thing to poll.
+///
+/// The default is a handle nobody listens to, which is what an agent gets when
+/// no caller attached one, so reporting is a no-op rather than a `None` every
+/// call site has to remember to check.
+///
+/// ```
+/// use std::sync::mpsc;
+///
+/// use warlock_tui::{Activities, Activity};
+///
+/// let (sender, received) = mpsc::channel();
+/// let activities = Activities::new(move |activity| {
+///     let _ = sender.send(activity);
+/// });
+///
+/// activities.report(Activity::Thinking);
+///
+/// assert_eq!(received.recv(), Ok(Activity::Thinking));
+///
+/// // And one nobody listens to swallows whatever it is told.
+/// Activities::none().report(Activity::Thinking);
+/// ```
+#[derive(Clone)]
+pub struct Activities {
+    /// Shared with every clone; the point of the type.
+    sink: Arc<dyn Fn(Activity) + Send + Sync>,
+}
+
+impl Activities {
+    /// A handle that hands every activity to `sink`.
+    ///
+    /// `sink` is called on whichever thread the pass is running on, in the
+    /// order the stream produced things, and it is called while the pass is
+    /// still going — that being the whole point. So it should be short: send
+    /// it somewhere and return.
+    #[must_use]
+    pub fn new(sink: impl Fn(Activity) + Send + Sync + 'static) -> Self {
+        Self {
+            sink: Arc::new(sink),
+        }
+    }
+
+    /// A handle nobody listens to.
+    ///
+    /// What an agent has until a caller attaches one with
+    /// [`with_activities`](ClaudeAgent::with_activities): reporting to it does
+    /// nothing, costs a call through a pointer, and changes no behaviour of the
+    /// pass at all.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::new(|_| {})
+    }
+
+    /// Say that the pass did `activity`.
+    ///
+    /// Safe to call from any thread and from any clone, and never fails: a
+    /// listener that has gone away is not a reason to fail a model pass, so
+    /// there is nothing here for a caller to handle.
+    pub fn report(&self, activity: Activity) {
+        (self.sink)(activity);
+    }
+}
+
+impl Default for Activities {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+impl fmt::Debug for Activities {
+    /// A closure has nothing to print, and a handle is not distinguishable from
+    /// another by looking at it; what a test failure needs from this is the
+    /// name.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Activities").finish_non_exhaustive()
+    }
+}
+
 /// An [`Agent`] that runs the `claude` CLI as a child process.
 ///
 /// Owns the child, its stdin, its stdout, its stderr, its exit status and its
@@ -235,11 +422,14 @@ pub struct ClaudeAgent {
     /// Whoever is allowed to say stop. Its own handle by default, which nobody
     /// else holds and so nothing ever cancels.
     cancel: Cancel,
+    /// Where the pass says what it is doing. A handle nobody listens to by
+    /// default, so an agent no caller wired up reports into nothing.
+    activities: Activities,
 }
 
 impl ClaudeAgent {
-    /// An agent that runs `claude --print` with the five-minute
-    /// [`INVOCATION_TIMEOUT`].
+    /// An agent that runs `claude --print --output-format stream-json
+    /// --verbose` with the five-minute [`INVOCATION_TIMEOUT`].
     ///
     /// ```
     /// use warlock_tui::{ClaudeAgent, INVOCATION_TIMEOUT};
@@ -253,6 +443,7 @@ impl ClaudeAgent {
             args: ARGS.iter().map(OsString::from).collect(),
             timeout: INVOCATION_TIMEOUT,
             cancel: Cancel::new(),
+            activities: Activities::none(),
         }
     }
 
@@ -307,10 +498,50 @@ impl ClaudeAgent {
         self
     }
 
+    /// The same agent, reporting what each pass does to `activities`.
+    ///
+    /// The mirror of [`with_cancel`](ClaudeAgent::with_cancel), and used the
+    /// same way: the caller keeps a clone, and what the pass does on the worker
+    /// thread reaches the thread drawing the screen. Without this an agent
+    /// still has a handle — one nobody listens to, so a pass runs exactly as it
+    /// did before and reporting costs nothing.
+    ///
+    /// ```
+    /// use std::sync::mpsc;
+    ///
+    /// use warlock_tui::{Activities, ClaudeAgent};
+    ///
+    /// let (sender, received) = mpsc::channel();
+    /// let agent = ClaudeAgent::new().with_activities(Activities::new(move |activity| {
+    ///     let _ = sender.send(activity);
+    /// }));
+    ///
+    /// // Nothing has run, so nothing has been reported.
+    /// assert!(received.try_recv().is_err());
+    /// # let _ = agent;
+    /// ```
+    #[must_use]
+    pub fn with_activities(mut self, activities: Activities) -> Self {
+        self.activities = activities;
+        self
+    }
+
     /// The command this agent runs.
     #[must_use]
     pub fn program(&self) -> &OsStr {
         &self.program
+    }
+
+    /// The arguments it is run with, before any prompt.
+    #[must_use]
+    pub fn args(&self) -> &[OsString] {
+        &self.args
+    }
+
+    /// Where this agent reports what a pass is doing.
+    #[must_use]
+    pub fn activities(&self) -> &Activities {
+        &self.activities
     }
 
     /// How long one invocation is given before it is killed.
@@ -387,9 +618,11 @@ impl Agent for ClaudeAgent {
             let _ = stdin.flush();
         });
 
-        // Drained concurrently with the wait, or a child that writes more than
-        // a pipeful blocks forever and so does this call.
-        let out = drain(stdout);
+        // Read concurrently with the wait, or a child that writes more than a
+        // pipeful blocks forever and so does this call. Stdout goes through
+        // [`read`], which reports as it reads; stderr is only ever looked at
+        // once the pass is over, so it is drained whole.
+        let out = read(stdout, self.activities.clone());
         let err = drain(stderr);
 
         let child = Arc::new(Mutex::new(child));
@@ -428,7 +661,7 @@ impl Agent for ClaudeAgent {
                 // clearing below, and an early return would leave a finished
                 // child registered for a later cancel to find.
                 match (collect(out), collect(err)) {
-                    (Ok(stdout), Ok(stderr)) => judge(status, &stdout, &stderr),
+                    (Ok(document), Ok(stderr)) => judge(status, document, &stderr),
                     (Err(error), _) | (_, Err(error)) => Err(error),
                 }
             }
@@ -495,31 +728,241 @@ fn cancelled() -> AgentError {
     }
 }
 
-/// What an exit status, its stdout and its stderr mean in the engine's
-/// vocabulary.
+/// What an exit status, the document its stdout carried and its stderr mean in
+/// the engine's vocabulary.
 ///
 /// Order matters: a non-zero exit is reported as a failure even if it printed
 /// something, and silence is only [`AgentError::EmptyOutput`] when the run
 /// itself went fine. Whitespace counts as silence — a document of blank lines
-/// is no document.
-fn judge(status: ExitStatus, stdout: &[u8], stderr: &[u8]) -> Result<AgentResponse, AgentError> {
+/// is no document, and so is a stream that never carried one.
+fn judge(status: ExitStatus, document: String, stderr: &[u8]) -> Result<AgentResponse, AgentError> {
     if !status.success() {
         return Err(AgentError::Failed {
             code: status.code(),
             stderr: String::from_utf8_lossy(stderr).into_owned(),
         });
     }
-    // Lossy rather than a decode error: a stray byte in a model's markdown is
-    // not worth failing a pass over, and the engine's vocabulary has no variant
-    // for it.
-    let text = String::from_utf8_lossy(stdout).into_owned();
-    if text.trim().is_empty() {
+    if document.trim().is_empty() {
         return Err(AgentError::EmptyOutput);
     }
-    Ok(AgentResponse::new(text))
+    // Moved, not copied or re-encoded: what the result line said is what the
+    // engine gets, byte for byte.
+    Ok(AgentResponse::new(document))
+}
+
+/// Reading the stream, and nothing to do with running anything.
+///
+/// Everything in here is a pure function over [`Value`]: a line of text goes
+/// in, a [`Reading`] comes out, and no part of it can spawn, block, fail or
+/// panic. That is deliberate and it is the whole design of this half — the
+/// process plumbing above has to be tested with stand-in programs and real
+/// pipes, while the schema of a vendor's JSON is tested from string literals
+/// in microseconds, and mixing the two would mean testing the second the
+/// expensive way forever.
+mod stream {
+    use serde_json::Value;
+
+    use super::Activity;
+
+    /// The tools whose one interesting argument is known, and which key holds
+    /// it.
+    ///
+    /// Six entries, copied verbatim from the same table in `forman.spawn`'s
+    /// `describe_activity`, and an abbreviation of nothing: a tool that is not
+    /// here is reported by name alone. The alternative — printing whatever the
+    /// call happened to carry — puts an arbitrary input dict on somebody's
+    /// screen, which is exactly the prose this front end refuses to show.
+    /// Adding a row is a one-line change, to be made when a real stream turns
+    /// up a tool that matters, not in advance of one.
+    ///
+    /// A list rather than a map because six pairs scanned linearly is faster
+    /// than hashing the name, and this reads as the table it is.
+    const DETAILS: [(&str, &str); 6] = [
+        ("Read", "file_path"),
+        ("Edit", "file_path"),
+        ("Write", "file_path"),
+        ("Glob", "pattern"),
+        ("Grep", "pattern"),
+        ("Bash", "command"),
+    ];
+
+    /// Everything one line of the stream had to say.
+    ///
+    /// A line is not one thing: an assistant message carries a list of content
+    /// blocks and so can be several activities at once, and the final line
+    /// carries both what the pass cost and the document it produced. So the
+    /// parse returns what it found rather than an enum of what it was, and a
+    /// line that meant nothing to us returns the default — empty, which is not
+    /// an error.
+    #[derive(Debug, Default, PartialEq)]
+    pub(super) struct Reading {
+        /// What the line said the pass was doing, in the order the line said
+        /// it.
+        pub(super) activities: Vec<Activity>,
+        /// The document, if this was the line that carried it.
+        pub(super) text: Option<String>,
+    }
+
+    /// What one line of `--output-format stream-json` means.
+    ///
+    /// Every level of every line is treated as optional, and nothing here can
+    /// fail: a line that is not JSON, or is JSON of a shape this code has
+    /// never seen, reads as [`Reading::default`] — no activities, no text, no
+    /// error. That is a deliberate posture rather than laziness. The stream's
+    /// schema belongs to a vendor who will add to it, and the cost of the two
+    /// mistakes is not symmetric: missing an activity costs a line of a panel
+    /// nobody was promised, while failing a pass over an unrecognised field
+    /// throws away minutes of work and a written document over a *decoration*.
+    /// Hence [`Value`] and `.get(...).and_then(...)` throughout, and no
+    /// `Deserialize` struct that would turn tomorrow's extra field into
+    /// today's hard error.
+    ///
+    /// Pure, and takes a `&str`: everything about reading the stream is
+    /// testable from a string literal, with no child process anywhere near it.
+    pub(super) fn read_line(line: &str) -> Reading {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            // Not JSON at all. `claude` is entitled to print a warning, and a
+            // warning is not a reason to fail a pass.
+            return Reading::default();
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("assistant") => Reading {
+                activities: read_activities(&value),
+                text: None,
+            },
+            Some("result") => read_result(&value),
+            // `system`, `user` — which is where tool results come back — and
+            // whatever is added next: all of it is somebody else's business.
+            _ => Reading::default(),
+        }
+    }
+
+    /// The activities in an assistant message's content blocks.
+    ///
+    /// Two of the block types say something worth showing and the rest say
+    /// nothing: a `tool_result` is the output of a command, which can be a
+    /// megabyte of file, and a `text` block is the model's prose. Neither is a
+    /// sign of life, both are unbounded, and so both come back as no activity
+    /// at all.
+    fn read_activities(value: &Value) -> Vec<Activity> {
+        value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .map(|blocks| blocks.iter().filter_map(read_block).collect())
+            .unwrap_or_default()
+    }
+
+    /// What one content block is doing, if it is doing anything.
+    fn read_block(block: &Value) -> Option<Activity> {
+        match block.get("type").and_then(Value::as_str)? {
+            "tool_use" => {
+                let name = block.get("name").and_then(Value::as_str)?;
+                Some(Activity::Tool {
+                    name: name.to_owned(),
+                    detail: read_detail(block, name),
+                })
+            }
+            // The bare fact, never the thought: see [`Activity::Thinking`].
+            "thinking" => Some(Activity::Thinking),
+            _ => None,
+        }
+    }
+
+    /// The one argument of `name`'s call worth putting on a line, if there is
+    /// one.
+    ///
+    /// `None` three ways, all of them ordinary: the tool is not in
+    /// [`DETAILS`], the call did not carry the key the table names, or what it
+    /// carried was not a string. A number or an object where a path was
+    /// expected is a tool whose shape has changed, and the honest answer to
+    /// that is the tool's name by itself.
+    fn read_detail(block: &Value, name: &str) -> Option<String> {
+        let (_, key) = DETAILS.iter().find(|(tool, _)| *tool == name)?;
+        block
+            .get("input")
+            .and_then(|input| input.get(key))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }
+
+    /// The document and the cost the final line carries.
+    ///
+    /// The text is the result line's own `result` field rather than the
+    /// assistant `text` blocks accumulated along the way, because that field
+    /// is *literally* what `--print` prints: same run, same field, so the
+    /// document is byte identical by construction instead of by a reassembly
+    /// this file would have to get right — joining blocks with the separator
+    /// the vendor happens to use, across as many assistant messages as the
+    /// pass took, minus the ones that were only a tool call. Nothing is gained
+    /// by rebuilding what the stream already hands over whole.
+    fn read_result(value: &Value) -> Reading {
+        let cost = value
+            .get("total_cost_usd")
+            .and_then(Value::as_f64)
+            .map(|usd| Activity::Cost { usd });
+        Reading {
+            activities: cost.into_iter().collect(),
+            text: value
+                .get("result")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }
+    }
+}
+
+/// Read the stream `source` is writing, a line at a time, on a thread of its
+/// own; report what each line says as it says it, and keep the document.
+///
+/// Incremental on purpose, and the reason this is not [`drain`]: reading to EOF
+/// and parsing afterwards would produce exactly the same document and exactly
+/// the same activities, all of them arriving after the only moment anybody
+/// wanted them. So each line is parsed and reported the moment its newline
+/// lands, which is the difference between a panel that shows a pass happening
+/// and one that shows a pass that happened.
+///
+/// The document is the `result` field of whichever result line arrived last,
+/// not the assistant `text` blocks accumulated along the way — see
+/// `stream::read_result` for why that is byte identical to `--print` by
+/// construction. A stream that never carried one leaves this empty, which
+/// [`judge`] reads as [`AgentError::EmptyOutput`], the same answer a silent
+/// child got before.
+///
+/// Lines are split on bytes and converted lossily rather than read through
+/// [`BufRead::lines`](io::BufRead::lines), which fails a whole read on invalid
+/// UTF-8: a stray byte in a model's markdown is not worth failing a pass over,
+/// and the engine's vocabulary has no variant for it. Nothing here bounds a
+/// line's length — a whole document arrives as one — so the buffer is reused
+/// rather than grown per line, and it is cleared as it goes.
+fn read<R: Read + Send + 'static>(
+    source: R,
+    activities: Activities,
+) -> JoinHandle<io::Result<String>> {
+    thread::spawn(move || {
+        let mut source = io::BufReader::new(source);
+        let mut line = Vec::new();
+        let mut document = String::new();
+        loop {
+            line.clear();
+            if source.read_until(b'\n', &mut line)? == 0 {
+                return Ok(document);
+            }
+            let reading = stream::read_line(&String::from_utf8_lossy(&line));
+            for activity in reading.activities {
+                activities.report(activity);
+            }
+            if let Some(text) = reading.text {
+                document = text;
+            }
+        }
+    })
 }
 
 /// Read everything `source` produces, on a thread of its own.
+///
+/// Stderr's reader, now that stdout has one of its own: nothing looks at stderr
+/// until the pass is over and its exit status is known, so there is nothing to
+/// be gained by reading it in pieces.
 fn drain<R: Read + Send + 'static>(source: R) -> JoinHandle<io::Result<Vec<u8>>> {
     thread::spawn(move || {
         let mut source = source;
@@ -529,12 +972,12 @@ fn drain<R: Read + Send + 'static>(source: R) -> JoinHandle<io::Result<Vec<u8>>>
     })
 }
 
-/// Wait for what [`drain`] read.
+/// Wait for what [`read`] or [`drain`] read.
 ///
 /// A panicked reader is a bug rather than a transport failure, but it is not
 /// worth panicking the caller over: it comes back as I/O like anything else
 /// that stopped the pass being read.
-fn collect(handle: JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>, AgentError> {
+fn collect<T>(handle: JoinHandle<io::Result<T>>) -> Result<T, AgentError> {
     match handle.join() {
         Ok(Ok(bytes)) => Ok(bytes),
         Ok(Err(source)) => Err(AgentError::Io { source }),
@@ -596,16 +1039,28 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
     use warlock_engine::{Agent, AgentError, AgentRequest};
 
-    use super::{Cancel, ClaudeAgent, INVOCATION_TIMEOUT};
+    use super::stream;
+    use super::{Activities, Activity, Cancel, ClaudeAgent, INVOCATION_TIMEOUT};
 
     /// A name no directory on `PATH` can hold, so the lookup is guaranteed to
     /// fail the way a machine without `claude` fails.
     const NOT_A_PROGRAM: &str = "warlock-test-no-such-program-8f3a1c";
+
+    /// `agent`'s arguments as plain strings, which is the shape a test can say
+    /// out loud.
+    fn args(agent: &ClaudeAgent) -> Vec<String> {
+        agent
+            .args()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
 
     #[test]
     fn the_defaults_are_the_real_thing() {
@@ -618,7 +1073,25 @@ mod tests {
             300,
             "five minutes, per invocation"
         );
+        // Exactly this, in this order: print mode, the streaming output format,
+        // and the `--verbose` the CLI insists on before it will stream at all.
+        assert_eq!(
+            args(&agent),
+            ["--print", "--output-format", "stream-json", "--verbose"]
+        );
+        assert_eq!(args(&ClaudeAgent::default()), args(&agent));
         assert_eq!(ClaudeAgent::default().timeout(), agent.timeout());
+    }
+
+    #[test]
+    fn the_arguments_are_a_field_a_caller_can_replace_outright() {
+        // Not appended to and not merged with: what a caller asks for is what
+        // is run, which is how every stand-in below works and how a later
+        // slice changes the invocation without touching this file.
+        let agent = ClaudeAgent::new().with_args(["-c", "echo hello"]);
+
+        assert_eq!(args(&agent), ["-c", "echo hello"]);
+        assert!(args(&ClaudeAgent::new().with_args(Vec::<&str>::new())).is_empty());
     }
 
     #[test]
@@ -661,6 +1134,294 @@ mod tests {
     }
 
     #[test]
+    fn a_port_nobody_listens_to_swallows_everything_reported_to_it() {
+        // What an agent has until a caller attaches one: reporting is a no-op,
+        // not a panic and not a failure, so the parsing side can report
+        // unconditionally.
+        for activities in [Activities::none(), Activities::default()] {
+            activities.report(Activity::Thinking);
+            activities.report(Activity::Tool {
+                name: "Read".to_owned(),
+                detail: Some("src/lib.rs".to_owned()),
+            });
+            activities.report(Activity::Cost { usd: 0.03 });
+        }
+
+        // And that is what an agent nobody wired up has.
+        ClaudeAgent::new().activities().report(Activity::Thinking);
+    }
+
+    #[test]
+    fn every_clone_of_a_port_reports_to_the_same_place() {
+        // The property the whole port rests on, and [`Cancel`]'s in reverse:
+        // the thread running the pass is never the thread listening to it.
+        fn held_across_threads<T: Send + Sync + 'static>(_: &T) {}
+
+        let (sender, received) = mpsc::channel();
+        let activities = Activities::new(move |activity| {
+            sender.send(activity).expect("the test is still listening");
+        });
+        held_across_threads(&activities);
+        let passing = activities.clone();
+
+        thread::spawn(move || {
+            passing.report(Activity::Thinking);
+            passing.report(Activity::Tool {
+                name: "Bash".to_owned(),
+                detail: Some("cargo test".to_owned()),
+            });
+            passing.report(Activity::Cost { usd: 0.25 });
+        })
+        .join()
+        .expect("the reporting thread ran");
+
+        // In the order they were reported, through the clone, from the other
+        // thread.
+        assert_eq!(received.recv(), Ok(Activity::Thinking));
+        assert_eq!(
+            received.recv(),
+            Ok(Activity::Tool {
+                name: "Bash".to_owned(),
+                detail: Some("cargo test".to_owned()),
+            })
+        );
+        assert_eq!(received.recv(), Ok(Activity::Cost { usd: 0.25 }));
+        // The original still reports to the same place after the clone is gone.
+        activities.report(Activity::Thinking);
+        assert_eq!(received.recv(), Ok(Activity::Thinking));
+    }
+
+    #[test]
+    fn an_attached_port_is_the_one_the_agent_reports_to() {
+        let (sender, received) = mpsc::channel();
+        let agent = ClaudeAgent::new().with_activities(Activities::new(move |activity| {
+            let _ = sender.send(activity);
+        }));
+
+        agent.activities().report(Activity::Thinking);
+
+        assert_eq!(received.recv(), Ok(Activity::Thinking));
+        // Attaching one changes nothing else about the agent.
+        assert_eq!(agent.program(), "claude");
+        assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+    }
+
+    /// One assistant line carrying `blocks` as its content, the shape a real
+    /// stream uses.
+    fn assistant(blocks: &str) -> String {
+        format!(r#"{{"type":"assistant","message":{{"role":"assistant","content":[{blocks}]}}}}"#)
+    }
+
+    #[test]
+    fn each_whitelisted_tool_carries_its_one_argument_and_the_rest_carry_none() {
+        // The table verbatim, and the point of the last row: a tool nobody
+        // wrote down is shown by name, not by dumping whatever its call
+        // carried.
+        let expected = [
+            ("Read", r#"{"file_path":"src/lib.rs"}"#, Some("src/lib.rs")),
+            (
+                "Edit",
+                r#"{"file_path":"src/main.rs"}"#,
+                Some("src/main.rs"),
+            ),
+            (
+                "Write",
+                r#"{"file_path":"docs/plan.md"}"#,
+                Some("docs/plan.md"),
+            ),
+            ("Glob", r#"{"pattern":"**/*.rs"}"#, Some("**/*.rs")),
+            ("Grep", r#"{"pattern":"fn main"}"#, Some("fn main")),
+            ("Bash", r#"{"command":"cargo test"}"#, Some("cargo test")),
+            ("WebFetch", r#"{"url":"https://example.invalid"}"#, None),
+        ];
+
+        for (name, input, detail) in expected {
+            let line = assistant(&format!(
+                r#"{{"type":"tool_use","id":"toolu_1","name":"{name}","input":{input}}}"#
+            ));
+
+            let reading = stream::read_line(&line);
+
+            assert_eq!(
+                reading.activities,
+                vec![Activity::Tool {
+                    name: name.to_owned(),
+                    detail: detail.map(str::to_owned),
+                }],
+                "one activity for {name}, with exactly the whitelisted detail"
+            );
+            assert_eq!(reading.text, None, "a tool call is not the document");
+        }
+    }
+
+    #[test]
+    fn a_whitelisted_tool_missing_its_argument_is_still_the_bare_name() {
+        // Three ways the key is not there, none of them a reason to lose the
+        // activity or to reach for some other key.
+        for input in [r"{}", r#"{"offset":12}"#, r#"{"file_path":7}"#] {
+            let line = assistant(&format!(
+                r#"{{"type":"tool_use","name":"Read","input":{input}}}"#
+            ));
+
+            assert_eq!(
+                stream::read_line(&line).activities,
+                vec![Activity::Tool {
+                    name: "Read".to_owned(),
+                    detail: None,
+                }],
+                "Read with input {input}"
+            );
+        }
+
+        // And a block with no `input` at all.
+        assert_eq!(
+            stream::read_line(&assistant(r#"{"type":"tool_use","name":"Bash"}"#)).activities,
+            vec![Activity::Tool {
+                name: "Bash".to_owned(),
+                detail: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_thought_reaches_the_panel_as_the_fact_that_it_happened_and_nothing_else() {
+        let secret = "the user's code is beyond saving and I shall say so gently";
+        let line = assistant(&format!(
+            r#"{{"type":"thinking","thinking":"{secret}","signature":"abc"}}"#
+        ));
+
+        let reading = stream::read_line(&line);
+
+        assert_eq!(reading.activities, vec![Activity::Thinking]);
+        // The whole point of the bare variant: there is nowhere for the text to
+        // be, so it cannot be printed by accident later.
+        assert!(
+            !format!("{reading:?}").contains("beyond saving"),
+            "no part of a thought survives the parse"
+        );
+    }
+
+    #[test]
+    fn tool_results_and_the_models_own_prose_are_not_activities() {
+        let enormous = "x".repeat(200_000);
+        let lines = [
+            // A tool result comes back on a `user` line, which is not a line
+            // type this reads at all...
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_1","content":"{enormous}"}}]}}}}"#
+            ),
+            // ...and would still be nothing if it arrived on one that is.
+            assistant(&format!(
+                r#"{{"type":"tool_result","tool_use_id":"toolu_1","content":"{enormous}"}}"#
+            )),
+            // The model's prose is the document, not a sign of life.
+            assistant(r#"{"type":"text","text":"Here is the summary you asked for."}"#),
+        ];
+
+        for line in lines {
+            let reading = stream::read_line(&line);
+
+            assert_eq!(
+                reading,
+                stream::Reading::default(),
+                "nothing from {line:.60}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_this_code_does_not_understand_is_skipped_rather_than_fatal() {
+        let lines = [
+            "",
+            "   ",
+            "not json at all",
+            "{",
+            "[1, 2, 3]",
+            "null",
+            r#""a bare string""#,
+            // JSON, well formed, and about something else entirely.
+            r#"{"type":"system","subtype":"init","tools":["Read","Bash"]}"#,
+            r#"{"type":"kraken","message":{"content":[{"type":"tool_use","name":"Read"}]}}"#,
+            r#"{"message":{"content":[{"type":"tool_use","name":"Read"}]}}"#,
+            // The right type, with the levels below it missing or the wrong
+            // shape.
+            r#"{"type":"assistant"}"#,
+            r#"{"type":"assistant","message":{"content":"not a list"}}"#,
+            &assistant(r#"{"type":"tool_use"}"#),
+            &assistant(r#"{"no":"type"}"#),
+        ];
+
+        for line in lines {
+            assert_eq!(
+                stream::read_line(line),
+                stream::Reading::default(),
+                "nothing, and no panic, from {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_final_line_carries_the_document_and_what_the_pass_cost() {
+        let line = r##"{"type":"result","subtype":"success","is_error":false,"duration_ms":8123,"result":"# Warlock\n\nThe freshness ledger.\n","total_cost_usd":0.0342,"usage":{"input_tokens":11}}"##;
+
+        let reading = stream::read_line(line);
+
+        assert_eq!(reading.activities, vec![Activity::Cost { usd: 0.0342 }]);
+        // Verbatim, including the trailing newline: this field is what
+        // `--print` prints.
+        assert_eq!(
+            reading.text.as_deref(),
+            Some("# Warlock\n\nThe freshness ledger.\n")
+        );
+    }
+
+    #[test]
+    fn a_result_line_missing_a_half_still_gives_up_the_other_one() {
+        let costless = stream::read_line(r#"{"type":"result","result":"a document"}"#);
+        assert_eq!(costless.activities, vec![]);
+        assert_eq!(costless.text.as_deref(), Some("a document"));
+
+        let textless = stream::read_line(r#"{"type":"result","total_cost_usd":1.5}"#);
+        assert_eq!(textless.activities, vec![Activity::Cost { usd: 1.5 }]);
+        assert_eq!(textless.text, None);
+
+        // A cost that is not a number is no cost, not a failed pass.
+        let nonsense = stream::read_line(r#"{"type":"result","total_cost_usd":"lots"}"#);
+        assert_eq!(nonsense, stream::Reading::default());
+    }
+
+    #[test]
+    fn one_line_of_several_blocks_is_several_activities_in_order() {
+        // What a real assistant message looks like when the model thinks, says
+        // something, then calls two tools.
+        let line = assistant(concat!(
+            r#"{"type":"thinking","thinking":"which file"},"#,
+            r#"{"type":"text","text":"Let me look."},"#,
+            r#"{"type":"tool_use","name":"Grep","input":{"pattern":"TODO","path":"src"}},"#,
+            r#"{"type":"tool_use","name":"Read","input":{"file_path":"src/app.rs"}}"#
+        ));
+
+        let reading = stream::read_line(&line);
+
+        assert_eq!(
+            reading.activities,
+            vec![
+                Activity::Thinking,
+                Activity::Tool {
+                    name: "Grep".to_owned(),
+                    // The whitelisted key, not the first key, and not both.
+                    detail: Some("TODO".to_owned()),
+                },
+                Activity::Tool {
+                    name: "Read".to_owned(),
+                    detail: Some("src/app.rs".to_owned()),
+                },
+            ]
+        );
+        assert_eq!(reading.text, None);
+    }
+
+    #[test]
     fn cancelling_with_no_pass_running_is_a_no_op_that_still_latches() {
         // No child registered, so there is nothing to kill; the flag is the
         // whole effect, and it is the half that stops the *next* pass.
@@ -681,12 +1442,13 @@ mod tests {
         use std::io::ErrorKind;
         use std::path::{Path, PathBuf};
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
         use std::time::{Duration, Instant};
         use std::{env, fs, process, thread};
 
         use warlock_engine::{Agent, AgentError, AgentRequest};
 
-        use super::super::{Cancel, ClaudeAgent};
+        use super::super::{Activities, Activity, Cancel, ClaudeAgent};
 
         /// How long a test waits for a child to announce itself before giving
         /// up and cancelling anyway. Generous, because it is only reached when
@@ -694,11 +1456,70 @@ mod tests {
         /// file appears.
         const AT_MOST: Duration = Duration::from_secs(5);
 
+        /// The lines of a pass, in miniature: the session's opening line, a
+        /// tool call, a thought and the model's own prose, then the result line
+        /// carrying the document and what the pass cost.
+        ///
+        /// The stand-in every test that wants a *plausible* pass runs, so that
+        /// what a real stream looks like is written down once. It is the shape
+        /// of the thing, not a transcript: four lines rather than four hundred,
+        /// and one of each kind that matters.
+        const PASS: [&str; 4] = [
+            r#"{"type":"system","subtype":"init","tools":["Read","Bash"]}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"src/lib.rs"}}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"a thought nobody is entitled to"},{"type":"text","text":"Here is the summary you asked for."}]}}"#,
+            r##"{"type":"result","subtype":"success","result":"# module\n\nWhat it does.\n","total_cost_usd":0.0342}"##,
+        ];
+
+        /// The document [`PASS`]'s result line carries, spelled the way Rust
+        /// spells it.
+        const DOCUMENT: &str = "# module\n\nWhat it does.\n";
+
+        /// What [`PASS`] reports, in order: the tool with its one whitelisted
+        /// argument, the bare fact of the thought, and the cost. Not the
+        /// thought's text, not the model's prose, and nothing from the `system`
+        /// line.
+        fn reported() -> Vec<Activity> {
+            vec![
+                Activity::Tool {
+                    name: "Read".to_owned(),
+                    detail: Some("src/lib.rs".to_owned()),
+                },
+                Activity::Thinking,
+                Activity::Cost { usd: 0.0342 },
+            ]
+        }
+
         /// An agent whose `claude` is `sh -c script`.
         fn stand_in(script: &str) -> ClaudeAgent {
             ClaudeAgent::new()
                 .with_program("/bin/sh")
                 .with_args(["-c", script])
+        }
+
+        /// A shell script that prints `lines`, one per line, and exits.
+        ///
+        /// `printf '%s\n' a b c` repeats its format once per argument, so this
+        /// is one process and no loop and every line arrives whole. Quoting is
+        /// single quotes around JSON that contains none, which is a property of
+        /// every canned line in this module and worth keeping.
+        fn printing(lines: &[&str]) -> String {
+            let arguments: Vec<String> = lines.iter().map(|line| format!("'{line}'")).collect();
+            format!("printf '%s\\n' {}", arguments.join(" "))
+        }
+
+        /// The same agent, reporting into a channel this test can read.
+        fn listening(agent: ClaudeAgent) -> (ClaudeAgent, mpsc::Receiver<Activity>) {
+            let (sender, received) = mpsc::channel();
+            let agent = agent.with_activities(Activities::new(move |activity| {
+                let _ = sender.send(activity);
+            }));
+            (agent, received)
+        }
+
+        /// Everything reported before the sender went away, in order.
+        fn drained(received: &mpsc::Receiver<Activity>) -> Vec<Activity> {
+            received.try_iter().collect()
         }
 
         /// Whether `error` is how a cancelled pass comes back: interrupted I/O
@@ -737,19 +1558,245 @@ mod tests {
         }
 
         #[test]
-        fn a_clean_run_comes_back_as_the_text_it_printed() {
-            // `cat` is the smallest possible model: it answers with the prompt
-            // it was given, which proves the prompt reached stdin *and* that
-            // stdin was closed — without EOF, `cat` would never return.
-            let agent = ClaudeAgent::new()
-                .with_program("/bin/cat")
-                .with_args(Vec::<&str>::new());
+        fn a_clean_run_comes_back_as_the_document_the_stream_carried() {
+            // `cat` is still the smallest possible model: it answers with the
+            // prompt it was given, which proves the prompt reached stdin *and*
+            // that stdin was closed — without EOF, `cat` would never return.
+            // What it is given is now the result line of a stream, so the same
+            // test also shows the parse working on bytes out of a real pipe
+            // rather than on a string literal.
+            let (agent, received) = listening(
+                ClaudeAgent::new()
+                    .with_program("/bin/cat")
+                    .with_args(Vec::<&str>::new()),
+            );
 
             let response = agent
-                .run(&AgentRequest::new("# module\n\nWhat it does.\n", "."))
+                .run(&AgentRequest::new(format!("{}\n", PASS[3]), "."))
                 .expect("cat exits cleanly and prints what it was given");
 
-            assert_eq!(response.text(), "# module\n\nWhat it does.\n");
+            assert_eq!(response.text(), DOCUMENT);
+            assert_eq!(drained(&received), vec![Activity::Cost { usd: 0.0342 }]);
+        }
+
+        #[test]
+        fn a_whole_pass_reports_what_it_did_and_returns_its_document() {
+            let (agent, received) = listening(stand_in(&printing(&PASS)));
+
+            let response = agent
+                .run(&AgentRequest::new("anything", "."))
+                .expect("the canned pass exits cleanly and prints a document");
+
+            // Byte for byte the result line's own field, newlines and all.
+            assert_eq!(response.text(), DOCUMENT);
+            let activities = drained(&received);
+            assert_eq!(activities, reported());
+            // Said once more, because it is the promise the port is for: none
+            // of the thought and none of the prose came with it.
+            let seen = format!("{activities:?}");
+            assert!(!seen.contains("entitled"), "{seen}");
+            assert!(!seen.contains("summary"), "{seen}");
+        }
+
+        #[test]
+        fn an_activity_reaches_the_port_while_the_pass_is_still_running() {
+            // The whole reason for reading a line at a time: the tool call is
+            // reported, and only then does the child get around to finishing.
+            // A drain-to-EOF reader passes every other test in this module and
+            // fails this one.
+            let script = format!(
+                "{}; sleep 1; {}",
+                printing(&PASS[..2]),
+                printing(&PASS[3..])
+            );
+            let (agent, received) = listening(stand_in(&script));
+
+            let started = Instant::now();
+            let pass = thread::spawn(move || agent.run(&AgentRequest::new("anything", ".")));
+            let first = received
+                .recv_timeout(AT_MOST)
+                .expect("the tool call is reported as it happens");
+            let reported_after = started.elapsed();
+            // Asked of the run itself rather than of the clock: the child is
+            // a second into its sleep at this point, so a thread that has
+            // already returned would mean the activity only turned up once
+            // the pass was over.
+            let still_running = !pass.is_finished();
+            let response = pass
+                .join()
+                .expect("the pass ran")
+                .expect("the canned pass exits cleanly");
+            let finished_after = started.elapsed();
+
+            assert_eq!(first, reported()[0]);
+            assert!(
+                still_running,
+                "the pass had already returned by the time its first activity \
+                 arrived: that is a drain, not a stream"
+            );
+            assert!(
+                reported_after + Duration::from_millis(300) < finished_after,
+                "the activity arrived at {reported_after:?} and the pass ended at \
+                 {finished_after:?}: that is not streaming"
+            );
+            assert_eq!(response.text(), DOCUMENT);
+        }
+
+        #[test]
+        fn garbage_in_the_stream_costs_neither_the_document_nor_an_activity() {
+            // A warning on stdout, a half-written line, and an event from a
+            // future version of the CLI. None of it is a reason to throw away
+            // minutes of work and a written document.
+            let lines = [
+                "Warning: something the CLI felt like mentioning",
+                PASS[1],
+                "{not json",
+                r#"{"type":"kraken","message":{"content":[{"type":"tool_use","name":"Read"}]}}"#,
+                PASS[2],
+                "",
+                PASS[3],
+            ];
+            let (agent, received) = listening(stand_in(&printing(&lines)));
+
+            let response = agent
+                .run(&AgentRequest::new("anything", "."))
+                .expect("a stream with junk in it still produced a document");
+
+            assert_eq!(response.text(), DOCUMENT);
+            assert_eq!(drained(&received), reported());
+        }
+
+        #[test]
+        fn nothing_from_a_tool_result_reaches_the_port_however_big_it_is() {
+            // What a tool *returned* is the one thing in the stream with no
+            // upper bound: a file, a build log, a screenful of grep. It is
+            // also no sign of life — the tool call above it already said what
+            // was happening — so it is worth proving that a quarter of a
+            // megabyte of it goes past the port without a byte getting out,
+            // in both places a block of that type can turn up.
+            //
+            // The payload is built by the shell rather than written here: a
+            // quarter of a megabyte inside `sh -c` would be a single argument
+            // past what the kernel will take, and this test would fail for a
+            // reason that has nothing to do with what it is about.
+            let payload = r"payload=$(yes gribbleflix | head -n 20000 | tr '\n' ' ')";
+            let returned = r#"printf '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"%s"}]}}\n' "$payload""#;
+            let misfiled = r#"printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"%s"}]}}\n' "$payload""#;
+            let script = [
+                payload,
+                &printing(&PASS[..2]),
+                returned,
+                misfiled,
+                &printing(&PASS[3..]),
+            ]
+            .join("; ");
+            let (agent, received) = listening(stand_in(&script));
+
+            let response = agent
+                .run(&AgentRequest::new("anything", "."))
+                .expect("a pass that read something still writes its document");
+
+            assert_eq!(response.text(), DOCUMENT);
+            let activities = drained(&received);
+            // Asked first, and asked by length rather than by printing what
+            // leaked: a failure here is half a megabyte wide, and a test that
+            // fails by filling somebody's terminal is a bad way to find out.
+            let seen = format!("{activities:?}");
+            assert!(
+                !seen.contains("gribbleflix"),
+                "a tool's output reached the port: {} bytes of activity",
+                seen.len()
+            );
+            // The call and the cost, and nothing in between: the result is
+            // not an activity, so it is not a line of a panel either.
+            assert_eq!(
+                activities,
+                vec![reported()[0].clone(), Activity::Cost { usd: 0.0342 }]
+            );
+        }
+
+        #[test]
+        fn a_thought_reaches_the_port_as_the_bare_fact_that_there_was_one() {
+            // Thinking is shown as *that it happened*, never as what it said.
+            // The text is the model reasoning with itself, and this front end
+            // does not put prose on the screen; the promise is only worth
+            // anything if the words never leave the transport at all.
+            let secret = "the person asking has misunderstood their own schema";
+            let thought = format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"thinking","thinking":"{secret}","signature":"abc123"}}]}}}}"#
+            );
+            let (agent, received) = listening(stand_in(&printing(&[thought.as_str(), PASS[3]])));
+
+            let response = agent
+                .run(&AgentRequest::new("anything", "."))
+                .expect("a pass that thought about it still writes its document");
+
+            assert_eq!(response.text(), DOCUMENT);
+            let activities = drained(&received);
+            assert_eq!(
+                activities,
+                vec![Activity::Thinking, Activity::Cost { usd: 0.0342 }]
+            );
+            let seen = format!("{activities:?}");
+            assert!(!seen.contains("misunderstood"), "{seen}");
+            assert!(!seen.contains("abc123"), "{seen}");
+        }
+
+        #[test]
+        fn what_the_pass_cost_comes_back_from_its_result_line() {
+            // The number the CLI totalled up, not one this crate works out:
+            // reported as it stands, after everything the pass did, because
+            // the result line is the last line there is.
+            let expensive = r##"{"type":"result","subtype":"success","result":"# module\n\nWhat it does.\n","total_cost_usd":1.25}"##;
+            let (agent, received) = listening(stand_in(&printing(&[PASS[1], expensive])));
+
+            let response = agent
+                .run(&AgentRequest::new("anything", "."))
+                .expect("the canned pass exits cleanly");
+
+            assert_eq!(response.text(), DOCUMENT);
+            assert_eq!(
+                drained(&received),
+                vec![reported()[0].clone(), Activity::Cost { usd: 1.25 }]
+            );
+        }
+
+        #[test]
+        fn a_pass_nobody_listens_to_runs_exactly_as_it_did_before() {
+            // The port is a side channel and must stay one. Every kind of
+            // ending this transport has — a document, a refusal, a silence,
+            // a stream that never got to a result, a directory that is not
+            // there — run twice, once through an agent with a port attached
+            // and once through one without, and the two are compared. A
+            // difference either way would mean listening had changed the run.
+            let elsewhere = "/warlock/no/such/directory";
+            let passes = [
+                (printing(&PASS), "."),
+                ("echo boom >&2; exit 3".to_owned(), "."),
+                ("exit 0".to_owned(), "."),
+                (printing(&PASS[..3]), "."),
+                ("true".to_owned(), elsewhere),
+            ];
+
+            for (script, directory) in passes {
+                let deaf = stand_in(&script).run(&AgentRequest::new("anything", directory));
+                let (agent, received) = listening(stand_in(&script));
+                let heard = agent.run(&AgentRequest::new("anything", directory));
+
+                // `AgentError` is not comparable — it carries an
+                // `io::Error` — so the two endings are compared as they are
+                // written down, which is what a caller would see of them.
+                assert_eq!(
+                    format!("{deaf:?}"),
+                    format!("{heard:?}"),
+                    "`{script}` in {directory} ended differently with somebody listening"
+                );
+                // And the reporting itself still happened, so this is not
+                // passing because the port was quietly disconnected.
+                if script == printing(&PASS) {
+                    assert_eq!(drained(&received), reported());
+                }
+            }
         }
 
         #[test]
@@ -757,9 +1804,11 @@ mod tests {
             let directory = scratch("cwd");
             fs::write(directory.join("marker.txt"), "here").expect("a file to look for");
 
-            let response = stand_in("ls")
-                .run(&AgentRequest::new("ignored", &directory))
-                .expect("ls exits cleanly and prints a name");
+            // `ls`, wrapped in the result line a pass would have wrapped it in.
+            let response =
+                stand_in(r#"printf '{"type":"result","result":"%s"}\n' "$(ls | tr '\n' ' ')""#)
+                    .run(&AgentRequest::new("ignored", &directory))
+                    .expect("ls exits cleanly and prints a name");
 
             assert!(
                 response.text().contains("marker.txt"),
@@ -786,8 +1835,20 @@ mod tests {
 
         #[test]
         fn a_clean_run_that_says_nothing_is_empty_output() {
-            for script in ["exit 0", "printf '\\n  \\n'"] {
-                let error = stand_in(script)
+            // Four ways to say nothing: no output at all, blank lines, a whole
+            // stream that never carried a result line, and a result line whose
+            // document is whitespace. The last two are new shapes of the same
+            // old answer — a document of blank lines is no document, and so is
+            // a pass that produced none.
+            let scripts = [
+                "exit 0".to_owned(),
+                "printf '\\n  \\n'".to_owned(),
+                printing(&PASS[..3]),
+                printing(&[r#"{"type":"result","result":"  \n\t"}"#]),
+            ];
+
+            for script in scripts {
+                let error = stand_in(&script)
                     .run(&AgentRequest::new("anything", "."))
                     .expect_err("there is no document in silence");
 
@@ -812,15 +1873,33 @@ mod tests {
         #[test]
         fn a_big_prompt_and_a_chatty_child_do_not_deadlock() {
             // Both directions past a pipe buffer at once: the prompt is bigger
-            // than one, and so is the answer. Draining on threads is what
-            // makes this return at all.
+            // than one, and so is the stream. Reading on a thread is what makes
+            // this return at all, and reading by line rather than to EOF must
+            // not have quietly reintroduced the block — a reader that stopped
+            // consuming would leave this child wedged on a full pipe forever.
             let prompt = "x".repeat(200_000);
+            let chatter = PASS[2];
+            let script = format!(
+                "cat > /dev/null; yes '{chatter}' | head -n 20000; {}",
+                printing(&PASS[3..])
+            );
 
-            let response = stand_in("cat > /dev/null; yes hello | head -n 20000")
+            let (agent, received) = listening(stand_in(&script));
+            let response = agent
                 .run(&AgentRequest::new(prompt, "."))
                 .expect("a chatty stand-in still exits cleanly");
 
-            assert_eq!(response.text().lines().count(), 20_000);
+            // Roughly two megabytes of stream, every line of it read and every
+            // thought in it reported, then the document at the end.
+            assert_eq!(response.text(), DOCUMENT);
+            let activities = drained(&received);
+            assert_eq!(activities.len(), 20_001);
+            assert!(
+                activities[..20_000]
+                    .iter()
+                    .all(|activity| *activity == Activity::Thinking)
+            );
+            assert_eq!(activities[20_000], Activity::Cost { usd: 0.0342 });
         }
 
         #[test]
@@ -1039,16 +2118,13 @@ mod tests {
         #[test]
         fn a_handle_nobody_cancels_leaves_the_run_exactly_as_it_was() {
             let cancel = Cancel::new();
-            let agent = ClaudeAgent::new()
-                .with_program("/bin/cat")
-                .with_args(Vec::<&str>::new())
-                .with_cancel(cancel.clone());
+            let agent = stand_in(&printing(&PASS)).with_cancel(cancel.clone());
 
             let response = agent
-                .run(&AgentRequest::new("# module\n\nWhat it does.\n", "."))
+                .run(&AgentRequest::new("anything", "."))
                 .expect("attaching a handle does not change a clean run");
 
-            assert_eq!(response.text(), "# module\n\nWhat it does.\n");
+            assert_eq!(response.text(), DOCUMENT);
             // The pass is over and the handle knows it: this reaches for a
             // child that is no longer registered, and returns rather than
             // killing whatever came next.

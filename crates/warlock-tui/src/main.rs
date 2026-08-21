@@ -60,7 +60,7 @@ use warlock_engine::{
     PactObserver, PactProblem, PactedSubtree, Pacting, load_tree, pact_subtree, repository_root,
     unpact_subtree,
 };
-use warlock_tui::{App, Cancel, ClaudeAgent, PactToggle, draw, tree_height};
+use warlock_tui::{Activities, Activity, App, Cancel, ClaudeAgent, PactToggle, draw, tree_height};
 
 /// How long the loop waits for a keystroke before going round again.
 ///
@@ -394,10 +394,17 @@ impl Drop for CancelGuard {
 
 /// What a worker thread has to say for itself.
 ///
-/// Two things, in this order: one [`PactEvent::Starting`] per directory as the
-/// run reaches it, and then exactly one [`PactEvent::Finished`]. Nothing else is
-/// sent, and nothing is sent after the outcome — the worker drops its end of the
-/// channel and stops.
+/// Three things, and the order of two of them is fixed: one
+/// [`PactEvent::Starting`] per directory as the run reaches it, any number of
+/// [`PactEvent::Doing`] from the pass that directory is running, and then
+/// exactly one [`PactEvent::Finished`]. Nothing else is sent, and nothing is
+/// sent after the outcome — the worker drops its end of the channel and stops.
+///
+/// Activities ride this channel rather than one of their own because there is
+/// nothing to gain from a second: they come from the same worker, they are read
+/// by the same thread, and a second receiver would be a second thing the event
+/// loop has to poll and a second way for the two streams to arrive out of the
+/// order the run produced them in.
 #[derive(Debug)]
 enum PactEvent {
     /// The pass for `directory` is about to run: directory `position` of
@@ -411,8 +418,47 @@ enum PactEvent {
         /// How many directories the whole run covers.
         total: usize,
     },
+    /// The pass running now was seen doing something: a tool call, a stretch of
+    /// thinking, or what it cost.
+    ///
+    /// Carries no directory, because it needs none to be delivered — the
+    /// [`Starting`](PactEvent::Starting) before it says which directory is being
+    /// worked, and anything more is the business of whoever draws these rather
+    /// than of the channel that carries them.
+    Doing(Activity),
     /// The run is over, however it went: exactly what [`apply_toggle`] returned.
     Finished(Result<Toggled, String>),
+}
+
+/// An activity port that forwards to `events`, for the agent of one run.
+///
+/// The other half of the shape [`spawn_pact`] already gives [`Cancel`]: a
+/// handle made per run, attached to that run's own copy of the agent, and
+/// spent when the run ends. That is not decoration. The event loop's long-lived
+/// [`ClaudeAgent`] keeps the port it was built with, which is one nobody
+/// listens to, so a pass that outlives the run that started it — a `claude`
+/// still writing to a pipe while the worker is being torn down — has no way to
+/// report into the run after it.
+///
+/// The closure is called on the worker's thread, from inside the pass, while
+/// the pass is still going, so it does the least it can: one send and back.
+/// A send that fails is ignored for the same reason [`Reporting`]'s are — a
+/// receiver that has gone away is an application that is quitting — and here
+/// there is the additional reason that this one is called from inside a model
+/// pass, where the only thing an error could do is fail work that is otherwise
+/// going fine for the sake of a screen nobody is looking at.
+///
+/// The port holds a clone of the sender, so this run's agent is one of the
+/// things keeping the channel open. That costs nothing on the real path — the
+/// agent lives in the worker's closure and dies when the worker's body returns,
+/// which is after the outcome has been sent — but it is why the loop's own
+/// long-lived agent must never be given one of these: a port on it would hold
+/// the channel of whichever run made it open for as long as warlock runs.
+fn activity_port(events: &Sender<PactEvent>) -> Activities {
+    let events = events.clone();
+    Activities::new(move |activity| {
+        let _ = events.send(PactEvent::Doing(activity));
+    })
 }
 
 /// The engine's progress port, wired to a channel and to the reader's Esc.
@@ -489,7 +535,14 @@ fn spawn_pact(
     // This run's copy of the agent, and the only one that answers to this run's
     // handle: the agent the event loop keeps has a handle of its own that nobody
     // else holds, so cancelling one run can never reach into the next.
-    let agent = agent.clone().with_cancel(cancel.clone());
+    //
+    // The activity port is attached the same way and for the same reason, in the
+    // same breath — see `activity_port`. Both are one-per-run, and both die with
+    // the copy of the agent this thread owns.
+    let agent = agent
+        .clone()
+        .with_cancel(cancel.clone())
+        .with_activities(activity_port(&events));
     thread::spawn(move || run_pact(&manifest, &repo_root, &toggle, &agent, &cancel, &events));
     received
 }
@@ -613,6 +666,16 @@ fn apply_progress(pact: &mut Option<Running>, app: &mut App, manifest: &mut Mani
                 position,
                 total,
             }) => app.set_pact_in_flight(directory, position, total),
+            // Taken off the channel and dropped, which is the whole of what this
+            // slice owes them: they have to be read or they would sit in the
+            // channel until the run ends, and there is nowhere for them to go
+            // yet. What a reader sees of them is a later slice's business;
+            // nothing is kept here, because keeping something is the first line
+            // of a panel and this is not the change that draws one. Bound rather
+            // than matched with `_` so that the activity a `PactEvent` carries
+            // counts as read on the way past — the alternative is an `allow` on
+            // the variant that would outlive its reason.
+            Ok(PactEvent::Doing(activity)) => drop(activity),
             Ok(PactEvent::Finished(outcome)) => break Some(outcome),
             // Still running, and nothing new to say.
             Err(TryRecvError::Empty) => return,
@@ -1748,13 +1811,13 @@ mod tests {
             Agent, AgentError, AgentRequest, AgentResponse, Manifest, Node, NodeState, PactEntry,
             Tree, Unwatched, decide_state, subtree_hash,
         };
-        use warlock_tui::{App, ClaudeAgent, PactToggle};
+        use warlock_tui::{Activities, Activity, App, ClaudeAgent, PactToggle};
 
         use warlock_tui::Cancel;
 
         use super::super::{
-            CancelGuard, PACT_CANCELLED, PACT_LOST, PactEvent, Running, Toggled, apply_progress,
-            apply_toggle, pact_press, run_pact,
+            CancelGuard, PACT_CANCELLED, PACT_LOST, PactEvent, Running, Toggled, activity_port,
+            apply_progress, apply_toggle, pact_press, run_pact, spawn_pact,
         };
         use super::ROOT;
 
@@ -1775,6 +1838,10 @@ mod tests {
             /// The directory whose pass the reader presses Esc during, and the
             /// handle they press it with, or `None` for a run nobody stops.
             cancel_at: Option<(&'static str, Cancel)>,
+            /// Where each pass says what it is doing. A handle nobody listens
+            /// to unless a test attached one, exactly as a real
+            /// [`ClaudeAgent`]'s is.
+            activities: Activities,
             /// One entry per request in call order: which directory it was for,
             /// and whether `.warlock/pacts.toml` existed at that moment.
             seen: RefCell<Vec<(PathBuf, bool)>>,
@@ -1788,8 +1855,21 @@ mod tests {
                     root: scratch.root.clone(),
                     refused: refused.into_iter().collect(),
                     cancel_at: None,
+                    activities: Activities::none(),
                     seen: RefCell::new(Vec::new()),
                 }
+            }
+
+            /// The same fake, saying what each pass is doing to `activities`.
+            ///
+            /// What it says is canned, like everything else here, and it is the
+            /// three kinds of thing a real pass reports: a tool call with a
+            /// detail, a stretch of thinking, and what the pass cost. The detail
+            /// is the directory being worked, so a test can tell one pass's
+            /// activities from the next one's.
+            fn reporting(mut self, activities: Activities) -> Self {
+                self.activities = activities;
+                self
             }
 
             /// The same fake, with somebody pressing Esc while `directory` is
@@ -1830,6 +1910,15 @@ mod tests {
                 self.seen
                     .borrow_mut()
                     .push((relative.clone(), saved(&self.root).is_some()));
+
+                // Reported before anything is answered, because that is when a
+                // real pass reports: while it is still running.
+                self.activities.report(Activity::Tool {
+                    name: "Read".to_owned(),
+                    detail: Some(relative.display().to_string()),
+                });
+                self.activities.report(Activity::Thinking);
+                self.activities.report(Activity::Cost { usd: 0.25 });
 
                 if let Some((at, cancel)) = &self.cancel_at
                     && Path::new(at) == relative
@@ -2280,7 +2369,7 @@ mod tests {
                             .unwrap_or(directory)
                             .to_path_buf(),
                     ),
-                    PactEvent::Finished(_) => None,
+                    PactEvent::Doing(_) | PactEvent::Finished(_) => None,
                 })
                 .collect()
         }
@@ -2346,6 +2435,191 @@ mod tests {
             assert_eq!(
                 &saved(&scratch.root).expect("the manifest was written"),
                 manifest
+            );
+        }
+
+        #[test]
+        fn what_each_pass_is_doing_arrives_between_its_directory_and_the_next() {
+            let scratch = one_crate("activities");
+            // The worker's own channel, made here so the fake can be given the
+            // very port `spawn_pact` gives this run's agent: one function, one
+            // route, and no second channel anywhere in the picture.
+            let (events, received) = mpsc::channel();
+            let agent = Canned::new(&scratch, []).reporting(activity_port(&events));
+
+            run_pact(
+                &Manifest::new(),
+                &scratch.root,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+                &Cancel::new(),
+                &events,
+            );
+            // Both ends the worker would have held: its own, and the one inside
+            // the port attached to its agent. The channel closes when the last
+            // of them goes, which on the real path is the worker's thread ending
+            // and here is these two lines.
+            drop(events);
+            drop(agent);
+            let events: Vec<PactEvent> = received.into_iter().collect();
+
+            // Both streams in one sequence, in the order the run produced them:
+            // a directory is announced, then what its pass did, then the next
+            // directory. The three kinds of activity arrive whole and unaltered
+            // — this channel carries them, it does not interpret them.
+            let [
+                PactEvent::Starting {
+                    directory: first,
+                    position: 1,
+                    total: 2,
+                },
+                PactEvent::Doing(Activity::Tool {
+                    name: first_tool,
+                    detail: Some(first_detail),
+                }),
+                PactEvent::Doing(Activity::Thinking),
+                PactEvent::Doing(Activity::Cost { usd: first_cost }),
+                PactEvent::Starting {
+                    directory: second,
+                    position: 2,
+                    total: 2,
+                },
+                PactEvent::Doing(Activity::Tool {
+                    detail: Some(second_detail),
+                    ..
+                }),
+                PactEvent::Doing(Activity::Thinking),
+                PactEvent::Doing(Activity::Cost { .. }),
+                PactEvent::Finished(Ok(Toggled { granted: true, .. })),
+            ] = events.as_slice()
+            else {
+                panic!("the worker said: {events:?}");
+            };
+
+            assert_eq!(first, &scratch.path("crates/engine/src"));
+            assert_eq!(second, &scratch.path("crates/engine"));
+            assert_eq!(first_tool, "Read");
+            // Carried, not computed with: what is asserted is that the number
+            // the fake reported is the number that came out the other end.
+            assert!(
+                (*first_cost - 0.25).abs() < f64::EPSILON,
+                "the cost arrives as the pass said it: {first_cost}"
+            );
+            assert_eq!(first_detail, "crates/engine/src");
+            assert_eq!(second_detail, "crates/engine");
+
+            // The rule activities do not get to break: one outcome, and it is
+            // the last thing on the channel. Everything the worker ever sent is
+            // in this vector — its end was dropped before a single event was
+            // read — so a stray activity after the outcome would be here.
+            let outcomes = events
+                .iter()
+                .filter(|event| matches!(event, PactEvent::Finished(_)))
+                .count();
+            assert_eq!(outcomes, 1, "exactly one outcome: {events:?}");
+            assert!(
+                matches!(events.last(), Some(PactEvent::Finished(_))),
+                "and nothing follows it: {events:?}"
+            );
+            // And the announcements are what they were before activities shared
+            // the channel with them.
+            assert_eq!(
+                announced(&events, &scratch),
+                [
+                    PathBuf::from("crates/engine/src"),
+                    PathBuf::from("crates/engine")
+                ]
+            );
+        }
+
+        /// A `claude` that prints one tool use and then a result line carrying
+        /// `document`, and exits.
+        ///
+        /// Quoting is single quotes around JSON that contains none, as in
+        /// `claude.rs`'s stand-ins, and `printf '%s\n' a b` is one process and
+        /// no loop, so every line arrives whole.
+        #[cfg(unix)]
+        fn stand_in(document: &str) -> String {
+            let tool = concat!(
+                r#"{"type":"assistant","message":{"role":"assistant","content":"#,
+                r#"[{"type":"tool_use","id":"toolu_1","name":"Read","#,
+                r#""input":{"file_path":"src/lib.rs"}}]}}"#,
+            );
+            let result = format!(
+                r#"{{"type":"result","subtype":"success","result":"{document}","total_cost_usd":0.5}}"#
+            );
+            format!("printf '%s\\n' '{tool}' '{result}'")
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_spawned_run_reports_what_its_passes_do_over_the_channel_it_hands_back() {
+            // The one thing `spawn_pact` does that driving `run_pact` cannot
+            // show: attaching the port. It goes on a `ClaudeAgent` and on
+            // nothing else, so this run has a real one, over a shell stand-in
+            // printing a stream a pass would print. Handing the fake a port the
+            // test made itself would prove only that the test can call
+            // `activity_port`.
+            let scratch = one_crate("spawned-activities");
+            // Long enough that the engine keeps what comes back:
+            // `MINIMUM_DOCUMENT_BYTES` is 200. `\n` inside the JSON string is
+            // the two characters JSON wants, not a newline in the shell's way.
+            let prose =
+                "What this directory is for, said at about the length a real document says it at. ";
+            let document = format!("# engine\\n\\n{prose}{prose}{prose}");
+            let script = stand_in(&document);
+            let agent = ClaudeAgent::new()
+                .with_program("/bin/sh")
+                .with_args(["-c", script.as_str()]);
+
+            let received = spawn_pact(
+                &Manifest::new(),
+                &scratch.root,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+                Cancel::new(),
+            );
+            // Blocks until every sender is gone, which is the worker's own end
+            // and the one inside the port on the agent it owns. That it returns
+            // at all is half the assertion: a port that outlived its run would
+            // hang this line rather than fail it.
+            let events: Vec<PactEvent> = received.into_iter().collect();
+
+            let activities: Vec<&Activity> = events
+                .iter()
+                .filter_map(|event| match event {
+                    PactEvent::Doing(activity) => Some(activity),
+                    _ => None,
+                })
+                .collect();
+            // Two directories, and each pass says the same two things: the tool
+            // it used, with its one whitelisted detail, and what it cost.
+            assert_eq!(
+                activities.len(),
+                4,
+                "both passes reported through the port `spawn_pact` attached: {events:?}"
+            );
+            assert!(
+                activities.iter().all(|activity| matches!(
+                    activity,
+                    Activity::Tool { name, detail: Some(detail) }
+                        if name == "Read" && detail == "src/lib.rs"
+                ) || matches!(activity, Activity::Cost { .. })),
+                "and said what the stream said: {activities:?}"
+            );
+
+            // The rule a real agent does not get to break either.
+            assert!(
+                matches!(events.last(), Some(PactEvent::Finished(Ok(_)))),
+                "one outcome, and it is the last thing on the channel: {events:?}"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, PactEvent::Finished(_)))
+                    .count(),
+                1,
+                "exactly one outcome: {events:?}"
             );
         }
 
@@ -2567,6 +2841,71 @@ mod tests {
                 watching.is_cancelled(),
                 "the run outlived the loop that started it"
             );
+        }
+
+        #[test]
+        fn the_loop_takes_activities_off_the_channel_and_carries_on_as_before() {
+            // Activities share the channel with the progress the footer draws,
+            // so the loop has to read them or they would sit in it until the run
+            // ends and hold up nothing but themselves. Reading them is all it
+            // does with them here: the app that comes out the far side is the
+            // one a run with no activities at all would have produced.
+            let tree = Tree::new(Node::new(
+                "/repo/crates",
+                None::<PathBuf>,
+                NodeState::Unpacted,
+            ));
+            let before = App::from_tree(&tree);
+            let mut app = before.clone();
+            let mut manifest = Manifest::new();
+            let (events, received) = mpsc::channel();
+            let mut pact = Some(Running {
+                events: received,
+                cancel: CancelGuard::new(),
+                path: PathBuf::from("/repo/crates"),
+                before: before.clone(),
+            });
+
+            // A directory, then a pass talking about it, in the order a worker
+            // sends them.
+            for event in [
+                PactEvent::Starting {
+                    directory: PathBuf::from("/repo/crates"),
+                    position: 1,
+                    total: 1,
+                },
+                PactEvent::Doing(Activity::Tool {
+                    name: "Bash".to_owned(),
+                    detail: Some("cargo test".to_owned()),
+                }),
+                PactEvent::Doing(Activity::Thinking),
+                PactEvent::Doing(Activity::Cost { usd: 1.5 }),
+            ] {
+                events.send(event).expect("the loop is still listening");
+            }
+            apply_progress(&mut pact, &mut app, &mut manifest);
+
+            assert!(pact.is_some(), "a run that is talking is still running");
+            let mut in_flight = before.clone();
+            in_flight.set_pact_in_flight("/repo/crates", 1, 1);
+            assert_eq!(
+                app, in_flight,
+                "the footer says what it would have said, and nothing else moved"
+            );
+
+            // And the outcome behind them lands exactly as it always did.
+            events
+                .send(PactEvent::Finished(Ok(Toggled {
+                    manifest: Manifest::new(),
+                    granted: true,
+                    message: None,
+                })))
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest);
+
+            assert!(pact.is_none(), "the run is over");
+            assert!(app.pact_line().is_none(), "so nothing is being pacted now");
+            assert_eq!(app.message(), None, "and nothing went wrong");
         }
 
         #[test]
