@@ -37,6 +37,9 @@ pub use app::Focus;
 pub use app::PactToggle;
 /// One line of the flattened tree.
 pub use app::Row;
+/// Put a view back on top of a tree that has just been read again: same
+/// selection, same collapsed directories, same filters, same window, new rows.
+pub use app::reseat_on;
 /// A handle for hearing what a model pass is doing, from another thread, while
 /// it is still running.
 pub use claude::Activities;
