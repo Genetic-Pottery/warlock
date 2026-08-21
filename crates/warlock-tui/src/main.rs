@@ -238,14 +238,15 @@ fn run() -> Result<(), Error> {
                     }
                 }
                 // Nothing but a bit of view state moves here, and deliberately
-                // so: focus decides which border the next frame lights and
-                // whether a movement key means anything, and both of those
-                // questions are answered where they are asked — by the renderer
-                // reading `App::focus`, and by the app's own movement methods,
-                // which return early when the tree is not the pane being driven
-                // (WAR-23.01). There is nothing for this arm to gate a second
-                // time, and no message: a key that changes what the *next* key
-                // means has nothing to report.
+                // so: focus decides which border the next frame lights and which
+                // pane a movement key is about, and both of those questions are
+                // answered where they are asked — by the renderer reading
+                // `App::focus`, and by the app's own movement methods, which
+                // move the tree's selection or scroll the panel's window
+                // depending on the pane being driven (WAR-26.02). There is
+                // nothing for this arm to gate a second time, and no message: a
+                // key that changes what the *next* key means has nothing to
+                // report.
                 Some(Action::ToggleFocus) => app.toggle_focus(),
                 Some(Action::SelectPrevious) => app.select_previous(),
                 Some(Action::SelectNext) => app.select_next(),

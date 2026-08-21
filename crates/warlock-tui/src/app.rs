@@ -58,6 +58,19 @@
 //! running whatever the reader presses, so the two are separate fields and
 //! movement clears only the one that belongs to a keystroke.
 //!
+//! What that pact has been *doing* is the same kind of thing again, held one
+//! field along: the [`Account`] of the run, or nothing at all before the first
+//! pact of the session. The account is the panel's contents and the panel's
+//! window onto it is view state exactly as the tree's is — a height set per
+//! frame, an offset, and one bit saying whether the window is following the
+//! newest line. Following is not a mode the app has to be reminded of on every
+//! appended line: while the flag is on, the offset *is* the end of the account,
+//! computed when it is asked for, so a line arriving during a redraw pins itself
+//! to the bottom by arithmetic rather than by a hook somebody could forget to
+//! call. Scrolling up turns the flag off and the window stops where the reader
+//! left it; scrolling back to the end turns it on again, because being at the
+//! end is the whole of what following means.
+//!
 //! Nothing here touches a terminal: it is a plain data structure with plain
 //! methods, so every rule about how the selection moves is testable with
 //! nothing attached to stdout.
@@ -65,8 +78,11 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use warlock_engine::{IntoDocument, NodeState, StateCounts, Tree, to_manifest_path};
+
+use crate::account::{Account, Line};
 
 /// What the header says when the tree is rooted at the repository root itself.
 ///
@@ -247,7 +263,7 @@ struct InFlight {
 /// It is deliberately not a general "which widget has the cursor" — nothing here
 /// is a widget and there is no cursor. It is one bit of view state, toggled by
 /// one key, read by the renderer to decide which border is lit and by [`App`] to
-/// decide whether a movement key means anything: see [`App::toggle_focus`] and
+/// decide which pane a movement key is about: see [`App::toggle_focus`] and
 /// [`App::focus`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Focus {
@@ -257,7 +273,9 @@ pub enum Focus {
     /// with yet.
     #[default]
     Tree,
-    /// The panel beside it.
+    /// The panel beside it. The same movement keys scroll the panel's window
+    /// over the account of the pact — see [`App::panel_scroll_offset`] — and the
+    /// tree's selection stays exactly where the reader left it.
     Panel,
 }
 
@@ -276,12 +294,13 @@ impl Focus {
         }
     }
 
-    /// Whether the movement keys mean anything: whether this focus is the one
-    /// that drives the tree's selection.
+    /// Whether a movement key moves the tree's selection: whether this focus is
+    /// the one driving the tree column.
     ///
     /// The single place the rule is written down, so every movement method asks
     /// the same question rather than each of them matching on the enum in its
-    /// own way.
+    /// own way. `false` does not mean the key does nothing — it means the key is
+    /// the panel's, and scrolls the panel's window instead. See `App::movement`.
     #[must_use]
     pub const fn drives_the_tree(self) -> bool {
         matches!(self, Self::Tree)
@@ -351,9 +370,30 @@ impl Focus {
 /// `focus` is which of the screen's two panes the keys are driving, and it is
 /// here rather than in the event loop for the reason everything else here is:
 /// it is view state that changes what a keystroke does, and the rule it decides
-/// — that the movement keys move nothing while the panel has focus — is a rule
-/// about this type's methods, testable with nothing attached to stdout. It
-/// starts on the tree, which is the pane warlock opens on. See [`Focus`].
+/// — that a movement key moves the tree's selection while the tree has the focus
+/// and scrolls the panel while the panel has it — is a rule about this type's
+/// methods, testable with nothing attached to stdout. It starts on the tree,
+/// which is the pane warlock opens on. See [`Focus`].
+///
+/// `account` is what the pact running now, or the last one to run, has been seen
+/// doing. It is `None` until the first pact of the session, which is not the
+/// same as an empty account: an app that has never run a pact has nothing to
+/// draw in the panel at all, not even a heading, and the difference between "no
+/// account" and "an account with no lines yet" is the difference between a blank
+/// panel and one that has started. [`App::start_account`] is what turns the one
+/// into the other, and a second pact starts a second account rather than
+/// appending to the first: one pact, one account.
+///
+/// `panel_height`, `panel_offset` and `panel_follows` are that account's window,
+/// and are to the panel what `viewport_height` and `scroll_offset` are to the
+/// tree — with one difference, which is the flag. The tree's window is dragged
+/// about by a selection; the panel has no selection, so its window is either
+/// pinned to the newest line or parked where the reader put it, and
+/// `panel_follows` says which. While it is set, `panel_offset` is not read at
+/// all: the offset is the end of the account, worked out from the line count at
+/// the moment it is asked for, so appending a line moves the window without
+/// anybody having to tell the window that a line was appended. See
+/// [`App::panel_scroll_offset`].
 ///
 /// `in_flight` is the pact running now, if one is, and is the one piece of state
 /// here that no keystroke touches: it is put there and taken away by whoever is
@@ -361,7 +401,9 @@ impl Focus {
 /// see a background thread and the thread cannot see a screen. It outlasts
 /// keystrokes for that reason, and takes the message line while it is there:
 /// see [`App::pact_line`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Holds an [`Account`], which holds an [`f64`] cost, so it is [`PartialEq`] and
+/// not [`Eq`].
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct App {
     all_rows: Vec<Row>,
     rows: Vec<Row>,
@@ -376,6 +418,10 @@ pub struct App {
     message: Option<String>,
     in_flight: Option<InFlight>,
     focus: Focus,
+    account: Option<Account>,
+    panel_height: usize,
+    panel_offset: usize,
+    panel_follows: bool,
 }
 
 impl App {
@@ -439,6 +485,12 @@ impl App {
     /// has nothing to say about one. See [`App::message`]. Nor is a pact in
     /// flight — nobody has started one — see [`App::set_pact_in_flight`].
     ///
+    /// And there is no account: no pact has run this session, so the panel has
+    /// nothing whatever to draw, which is a different state from a run that has
+    /// started and done nothing yet. See [`App::start_account`]. Its window
+    /// starts the way the tree's does — no height, no offset — since nothing has
+    /// been drawn.
+    ///
     /// The tree has the focus, so the movement keys move its selection from the
     /// first keystroke on. See [`App::focus`].
     ///
@@ -465,6 +517,10 @@ impl App {
             message: None,
             in_flight: None,
             focus: Focus::Tree,
+            account: None,
+            panel_height: 0,
+            panel_offset: 0,
+            panel_follows: false,
         };
         // The rows handed over may hold file rows, which the file toggle starts
         // off over, so the drawn list is derived rather than assumed even here.
@@ -636,6 +692,152 @@ impl App {
                 in_flight.total,
             )
         })
+    }
+
+    /// Begin the account of a pact starting at `at`, throwing away whatever the
+    /// last one left.
+    ///
+    /// One pact, one account. A second run does not append to the first: the
+    /// panel is a record of what is happening now, and a reader who has to
+    /// scroll past a finished run to find the live one has been handed a log
+    /// rather than a report. So this clears the sections, the lines and the
+    /// summary of the previous run outright, and puts the window back at the top
+    /// following the newest line — which for an account with nothing in it is
+    /// the same place.
+    ///
+    /// This is also the only way an app comes to have an account at all: before
+    /// the first call there is none, and the panel draws nothing whatever rather
+    /// than an empty frame around a run that has not happened. See
+    /// [`App::has_account`].
+    ///
+    /// Not a keystroke — the pact key reaches this by way of whoever starts the
+    /// run — so it neither says anything nor takes down what the last keystroke
+    /// said.
+    pub fn start_account(&mut self, at: Instant) {
+        self.account = Some(Account::new(at));
+        self.panel_offset = 0;
+        self.panel_follows = true;
+    }
+
+    /// Whether a pact has run this session, and so whether the panel has
+    /// anything at all to draw.
+    ///
+    /// `false` until [`App::start_account`], and `true` for ever after: an
+    /// account that has finished is still an account, and it stays on screen to
+    /// be read once the run that made it is over.
+    #[must_use]
+    pub const fn has_account(&self) -> bool {
+        self.account.is_some()
+    }
+
+    /// The account of the pact running now, or of the last one to run, or `None`
+    /// before the first pact of the session.
+    #[must_use]
+    pub const fn account(&self) -> Option<&Account> {
+        self.account.as_ref()
+    }
+
+    /// The same account, to record what the run has just been seen doing.
+    ///
+    /// The account words its own lines — see [`Account`] — so this hands it over
+    /// rather than wrapping each of its five mutators in a method here that
+    /// would only forward. Nothing needs doing afterwards: while the panel is
+    /// following, its window is the end of the account computed on demand, so a
+    /// line recorded through here is on screen at the bottom of the next frame
+    /// without this type being told about it.
+    ///
+    /// `None` before the first pact, where there is nothing to record against.
+    pub const fn account_mut(&mut self) -> Option<&mut Account> {
+        self.account.as_mut()
+    }
+
+    /// How many lines of account fit in the panel, as last set by
+    /// [`App::set_panel_height`].
+    #[must_use]
+    pub const fn panel_height(&self) -> usize {
+        self.panel_height
+    }
+
+    /// Tell the app how many lines of account fit in the panel.
+    ///
+    /// The panel's [`App::set_viewport_height`], and a field for the same reason:
+    /// only the layout knows the height, only the frame knows when it changed,
+    /// and a height passed per call would let two callers disagree about the size
+    /// of one window. Safe to call every frame.
+    ///
+    /// Nothing has to be brought back into line afterwards. The offset is
+    /// clamped when it is read, and a window that was following is still
+    /// following, so a terminal that has just been made shorter or taller still
+    /// shows the newest line at the bottom.
+    pub fn set_panel_height(&mut self, height: u16) {
+        self.panel_height = usize::from(height);
+    }
+
+    /// Whether the panel is following the newest line of the account.
+    ///
+    /// `true` while the window sits at the end, which is where a fresh account
+    /// starts and where the end-of-list movement key puts it back. `false` from
+    /// the moment the reader scrolls up, until they scroll back down to the end
+    /// or ask for it outright. See [`App::select_last`].
+    #[must_use]
+    pub const fn panel_follows(&self) -> bool {
+        self.panel_follows
+    }
+
+    /// Which line of the account is drawn at the top of the panel.
+    ///
+    /// Derived rather than stored while the panel is following: the answer is
+    /// then the end of the account, which changes every time a line is
+    /// appended, and computing it here is what keeps the newest line pinned to
+    /// the bottom without anything having to be recomputed as the run reports.
+    /// Parked, it is where the reader left the window, clamped to what the
+    /// account's length allows.
+    ///
+    /// `0` for an app with no account, and for a panel shorter than the account
+    /// it holds is the first line of the last screenful.
+    #[must_use]
+    pub fn panel_scroll_offset(&self) -> usize {
+        panel_offset_for(
+            self.account_line_count(),
+            self.panel_height,
+            self.panel_offset,
+            self.panel_follows,
+        )
+    }
+
+    /// The lines the panel draws now, with every clock measured against `now`.
+    ///
+    /// The window [`App::panel_scroll_offset`] describes, [`App::panel_height`]
+    /// lines of it, and empty for an app with no account. `now` is the caller's,
+    /// because the newest line of a live section counts up between events and the
+    /// only thing that knows what the time is when a frame is drawn is whoever is
+    /// drawing it.
+    #[must_use]
+    pub fn panel_lines(&self, now: Instant) -> Vec<Line> {
+        self.account.as_ref().map_or_else(Vec::new, |account| {
+            account.window(self.panel_scroll_offset(), self.panel_height, now)
+        })
+    }
+
+    /// How many lines of the account sit below the panel's window.
+    ///
+    /// `0` while the panel is showing the end of the account, which is what an
+    /// indicator saying how far back the reader has scrolled is switched off by,
+    /// and `0` for an app with no account at all. Independent of `now`: the
+    /// clocks move, the number of lines does not.
+    ///
+    /// A panel nobody has measured draws nothing, so the whole account is below
+    /// it — which no frame ever sees, since a frame that asks this has just told
+    /// the app how tall the panel it is drawing is.
+    #[must_use]
+    pub fn panel_lines_below(&self) -> usize {
+        self.account_line_count()
+            .saturating_sub(self.panel_scroll_offset() + self.panel_height)
+    }
+
+    /// How many lines the account draws as, or none where there is no account.
+    fn account_line_count(&self) -> usize {
+        self.account.as_ref().map_or(0, Account::line_count)
     }
 
     /// Every row that is drawn, in the order it is drawn: the engine's walk
@@ -858,102 +1060,160 @@ impl App {
         self.focus = self.focus.other();
     }
 
-    /// Move the selection one row up, stopping at the first row.
+    /// Move up one line: the selection while the tree has the focus, the
+    /// panel's window while the panel has it.
     ///
     /// It clamps rather than wrapping: an unnoticed wrap at the top of a long
     /// tree throws the reader to the bottom of it, and the arrow key is for
-    /// stepping, not teleporting. A no-op when there are no rows, and a no-op
-    /// while the panel has the focus.
+    /// stepping, not teleporting. A no-op when there are no rows, or — at the
+    /// panel — when the window is already at the top of the account.
     pub fn select_previous(&mut self) {
-        self.select(|app| app.selected.saturating_sub(1));
+        self.movement(
+            |app| app.selected.saturating_sub(1),
+            |_, offset| offset.saturating_sub(1),
+        );
     }
 
-    /// Move the selection one row down, stopping at the last row.
+    /// Move down one line: the selection at the tree, the panel's window at the
+    /// panel.
     ///
     /// Clamps for the same reason [`App::select_previous`] does. A no-op when
-    /// there are no rows, and a no-op while the panel has the focus.
+    /// there are no rows, or when the panel's window is already at the end —
+    /// where, being at the end, it goes back to following the newest line.
     pub fn select_next(&mut self) {
-        self.select(|app| {
-            let last = app.rows.len().saturating_sub(1);
-            app.selected.saturating_add(1).min(last)
-        });
+        self.movement(
+            |app| {
+                let last = app.rows.len().saturating_sub(1);
+                app.selected.saturating_add(1).min(last)
+            },
+            |_, offset| offset.saturating_add(1),
+        );
     }
 
-    /// Move the selection one screenful up, stopping at the first row.
+    /// Move one screenful up: the selection at the tree, the panel's window at
+    /// the panel.
     ///
-    /// A screenful is [`App::viewport_height`] rows, so the row that was at
-    /// the top of the window is roughly the one at the bottom afterwards:
-    /// paging by the window's own height is what makes reading a long tree a
-    /// sequence of screens rather than a slide.
+    /// A screenful is the focused pane's own height — [`App::viewport_height`]
+    /// or [`App::panel_height`] — so the row that was at the top of the window is
+    /// roughly the one at the bottom afterwards: paging by the window's own
+    /// height is what makes reading a long list a sequence of screens rather
+    /// than a slide.
     ///
-    /// An app that has never been drawn has no height to page by, and a key
+    /// A pane that has never been drawn has no height to page by, and a key
     /// that does nothing at all reads as a broken key, so the step never falls
-    /// below one row. A no-op when there are no rows, and a no-op while the
-    /// panel has the focus.
+    /// below one line.
     pub fn select_page_up(&mut self) {
-        self.select(|app| app.selected.saturating_sub(app.page()));
+        self.movement(
+            |app| app.selected.saturating_sub(app.page()),
+            |app, offset| offset.saturating_sub(app.panel_page()),
+        );
     }
 
-    /// Move the selection one screenful down, stopping at the last row.
+    /// Move one screenful down: the selection at the tree, the panel's window at
+    /// the panel.
     ///
-    /// The mirror of [`App::select_page_up`], down to the one-row floor for an
-    /// app that has not been drawn. A no-op when there are no rows, and a no-op
-    /// while the panel has the focus.
+    /// The mirror of [`App::select_page_up`], down to the one-line floor for a
+    /// pane that has not been drawn.
     pub fn select_page_down(&mut self) {
-        self.select(|app| {
-            let last = app.rows.len().saturating_sub(1);
-            app.selected.saturating_add(app.page()).min(last)
-        });
+        self.movement(
+            |app| {
+                let last = app.rows.len().saturating_sub(1);
+                app.selected.saturating_add(app.page()).min(last)
+            },
+            |app, offset| offset.saturating_add(app.panel_page()),
+        );
     }
 
-    /// Select the first row, scrolling the window back to the top of the tree.
+    /// Go to the beginning: the first row of the tree, or the first line of the
+    /// account.
     ///
-    /// A no-op when there are no rows, and a no-op while the panel has the
-    /// focus.
+    /// At the panel this is the start of the run, which for an account of any
+    /// length means the window is no longer following the newest line.
     pub fn select_first(&mut self) {
-        self.select(|_| 0);
+        self.movement(|_| 0, |_, _| 0);
     }
 
-    /// Select the last row, scrolling the window to the bottom of the tree.
+    /// Go to the end: the last row of the tree, or the newest line of the
+    /// account.
     ///
-    /// A no-op when there are no rows, and a no-op while the panel has the
-    /// focus.
+    /// At the panel this is what returns a scrolled-back reader to live. The
+    /// window goes to the end of the account *and* starts following again, so
+    /// the lines that arrive afterwards go on moving it — which is the whole
+    /// difference between the end of the account and the end of the account as
+    /// it stood when the key was pressed. It is the movement key the pane
+    /// already has rather than a key of its own: "go to the end" and "follow the
+    /// end" are the same instruction to a list that is still being written.
     pub fn select_last(&mut self) {
-        self.select(|app| app.rows.len().saturating_sub(1));
+        self.movement(|app| app.rows.len().saturating_sub(1), |_, _| usize::MAX);
     }
 
-    /// Put the selection wherever `to` says, unless the keys are not driving
-    /// the tree at all.
+    /// Carry out a movement key: `tree` says where the selection lands, `panel`
+    /// says where the panel's window lands, and the focus decides which of them
+    /// is asked.
     ///
     /// Every movement method goes through here, so the rule that a movement key
-    /// means nothing while the panel has the focus is written once rather than
-    /// six times — and so a seventh movement method cannot be added without it.
-    /// Each method hands over where the selection should land as a function of
-    /// the app, because that is the only part of a movement that differs between
-    /// them; the clamping is theirs, since what "one row up" clamps to is not
-    /// what "one screenful down" clamps to.
+    /// drives whichever pane has the focus is written once rather than six times
+    /// — and so a seventh movement method cannot be added without it. Each method
+    /// hands over where to land as a function of the app, because that is the
+    /// only part of a movement that differs between them; the clamping is
+    /// theirs, since what "one row up" clamps to is not what "one screenful
+    /// down" clamps to. The panel's is handed the offset as well as the app,
+    /// because the panel has no selection to work from and its window is
+    /// computed rather than stored.
     ///
-    /// A movement key pressed at the panel changes nothing at all — not the
-    /// selection, not the window, and not the last keystroke's message, which is
-    /// still the most recent thing the app had to say. That is the same reading
-    /// [`App::toggle_collapsed`] takes of a key pressed on a childless node: a
-    /// key that did nothing should not sweep away the line explaining what the
-    /// last key that did something did.
-    fn select(&mut self, to: impl FnOnce(&Self) -> usize) {
-        if !self.focus.drives_the_tree() {
-            return;
+    /// A movement at the tree clears the last keystroke's message, as every key
+    /// that does something does. A movement at the panel does not: nothing in
+    /// the tree column has moved, the reader is looking somewhere else entirely,
+    /// and sweeping away the line explaining what the last key did would be the
+    /// panel answering for the tree.
+    fn movement(
+        &mut self,
+        tree: impl FnOnce(&Self) -> usize,
+        panel: impl FnOnce(&Self, usize) -> usize,
+    ) {
+        if self.focus.drives_the_tree() {
+            self.selected = tree(self);
+            self.moved();
+        } else {
+            let offset = panel(self, self.panel_scroll_offset());
+            self.scroll_panel_to(offset);
         }
-        self.selected = to(self);
-        self.moved();
     }
 
-    /// How many rows one page key moves by: a windowful, or a single row for
-    /// an app whose window nobody has measured yet.
+    /// Park the panel's window at `offset`, or as near to it as the account
+    /// allows, and say whether that is still following.
+    ///
+    /// The one place the follow flag is decided by a keystroke, and it is
+    /// decided by where the window ended up rather than by which key was
+    /// pressed: following the newest line *is* sitting at the end of the
+    /// account, so scrolling up breaks it and scrolling back down restores it,
+    /// with no key having to mean "and start following again" as well as what it
+    /// already means.
+    fn scroll_panel_to(&mut self, offset: usize) {
+        // Where the end is, asked of the one function that decides it, so that
+        // "as far down as the account goes" means the same thing to a keystroke
+        // as it does to the frame being drawn.
+        let end = panel_offset_for(self.account_line_count(), self.panel_height, 0, true);
+        self.panel_offset = offset.min(end);
+        self.panel_follows = self.panel_offset == end;
+    }
+
+    /// How many rows one page key moves the tree by: a windowful, or a single
+    /// row for an app whose window nobody has measured yet.
     const fn page(&self) -> usize {
         if self.viewport_height == 0 {
             1
         } else {
             self.viewport_height
+        }
+    }
+
+    /// How many lines one page key moves the panel by, on the same rule.
+    const fn panel_page(&self) -> usize {
+        if self.panel_height == 0 {
+            1
+        } else {
+            self.panel_height
         }
     }
 
@@ -1221,7 +1481,13 @@ impl App {
 /// `tree`: every row, every state on one, and [`App::counts`]. What comes from
 /// `view`: which node is selected, which directories are collapsed, the
 /// pacted-only and file flags, the scroll offset and the viewport height, the
-/// header, the focus, the message, and the pact in flight if there is one.
+/// header, the focus, the message, the pact in flight if there is one, and the
+/// account of the pact with the panel's window onto it.
+///
+/// The account has to be carried for the plainest of reasons: the tree is read
+/// again *because* a pact has just finished, so a re-seat that dropped it would
+/// wipe the record of the run at the exact moment the run was over and the
+/// reader turned to read it.
 ///
 /// The selection and the collapsed set are carried by *path*, never by row
 /// index: an index names whichever node now sits at that position, which after
@@ -1252,6 +1518,10 @@ pub fn reseat_on(view: &App, tree: &Tree) -> App {
     reseated.message.clone_from(&view.message);
     reseated.in_flight.clone_from(&view.in_flight);
     reseated.focus = view.focus;
+    reseated.account.clone_from(&view.account);
+    reseated.panel_height = view.panel_height;
+    reseated.panel_offset = view.panel_offset;
+    reseated.panel_follows = view.panel_follows;
 
     // Re-filter first, so the selection is looked up in the rows that will
     // actually be drawn rather than in the whole walk: what a hidden node falls
@@ -1456,6 +1726,37 @@ fn scroll_offset_for(rows: usize, viewport: usize, selected: usize, offset: usiz
     }
 }
 
+/// Where the panel's window onto an account of `lines` lines should start, given
+/// a window `viewport` lines tall, a window parked at `offset`, and whether it is
+/// `following` the newest line.
+///
+/// The rule the tree's `scroll_offset_for` cannot be: the tree's window is
+/// dragged about by a selection and moves as little as it can, while the panel's
+/// is either at the end of a list that is still being written or exactly where
+/// the reader left it. So there is no minimum-movement case here, and no
+/// selection either — two inputs decide it. Following, the answer is the last
+/// screenful, whatever the account's length is *now*, which is what pins the
+/// newest line to the bottom row as lines arrive. Parked, the answer is the
+/// reader's own offset, clamped to what the account allows so that a window can
+/// never hang past the end.
+///
+/// A window at least as tall as the account has nothing to scroll: everything is
+/// on screen, so the top is the end and following it is standing still. A window
+/// no lines tall — which is what a panel nobody has drawn has — has no screen to
+/// scroll at all, and the honest offset for it is the top, exactly as the tree's
+/// rule says of a viewport of zero rows.
+///
+/// Pure, and deliberately free of [`App`]: it takes three numbers and a flag and
+/// returns one number, so every edge of it is testable with no account, no tree
+/// and no terminal.
+fn panel_offset_for(lines: usize, viewport: usize, offset: usize, following: bool) -> usize {
+    if viewport == 0 {
+        return 0;
+    }
+    let end = lines.saturating_sub(viewport);
+    if following { end } else { offset.min(end) }
+}
+
 /// What the app says when a subtree has just been un-pacted, naming the
 /// directory it was rooted at as `label`.
 ///
@@ -1514,10 +1815,15 @@ fn count_mut(counts: &mut StateCounts, state: NodeState) -> &mut usize {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
 
     use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
-    use super::{App, Focus, PactToggle, REPOSITORY_ROOT_LABEL, Row, reseat_on, scroll_offset_for};
+    use super::{
+        Account, App, Focus, Line, PactToggle, REPOSITORY_ROOT_LABEL, Row, panel_offset_for,
+        reseat_on, scroll_offset_for,
+    };
+    use crate::claude::Activity;
     use crate::fixture;
 
     /// How many rows the scrolling tests work with, and how tall the window
@@ -3528,7 +3834,8 @@ mod tests {
 
     /// Every method a movement key reaches, named so a failure says which one
     /// broke the rule. The same six [`every_movement_clears_a_message`] drives,
-    /// and the whole of what focus is allowed to switch off.
+    /// and the whole of what focus is allowed to redirect from the tree's
+    /// selection to the panel's window.
     const MOVEMENTS: [(&str, Movement); 6] = [
         ("select_previous", App::select_previous),
         ("select_next", App::select_next),
@@ -3567,7 +3874,7 @@ mod tests {
     }
 
     #[test]
-    fn no_movement_key_moves_anything_while_the_panel_has_the_focus() {
+    fn no_movement_key_moves_the_tree_while_the_panel_has_the_focus() {
         for (name, movement) in MOVEMENTS {
             let mut app = panel_focused();
             let (selected, offset) = (app.selected(), app.scroll_offset());
@@ -3582,8 +3889,9 @@ mod tests {
 
     #[test]
     fn a_movement_key_at_the_panel_leaves_the_last_keystrokes_message_up() {
-        // A key that did nothing has nothing to report, and sweeping the line
-        // away would take down the explanation of the last key that did.
+        // The key moved the panel's window, which is not the tree column and has
+        // nothing to report about the last keystroke; sweeping the line away
+        // would take down the explanation of the key that did something there.
         for (name, movement) in MOVEMENTS {
             let mut app = panel_focused();
             app.set_message("something to keep");
@@ -3668,6 +3976,295 @@ mod tests {
 
             assert_eq!(unfocused, focused, "{name} depends on the focus");
         }
+    }
+
+    /// How many lines of account the panel tests give the panel room for. Small
+    /// enough that an account of a dozen lines has a top and a bottom that are
+    /// nowhere near each other.
+    const PANEL: u16 = 3;
+
+    /// The instant `seconds` after `base`, so a run can be driven through an
+    /// account without anything reading a clock. The same helper
+    /// [`crate::account`]'s own tests use, for the same reason.
+    fn at(base: Instant, seconds: u64) -> Instant {
+        base + Duration::from_secs(seconds)
+    }
+
+    /// An app with the panel focused, [`PANEL`] lines of panel, and an account of
+    /// one section holding `lines` activity lines — so `lines + 1` drawable
+    /// lines, the heading included.
+    ///
+    /// The lines are numbered tool calls rather than bare thinking, so a test can
+    /// say which line it is looking at from the text alone.
+    fn app_pacting(lines: usize, base: Instant) -> App {
+        let mut app = App::from_rows(three_rows());
+        app.set_panel_height(PANEL);
+        app.toggle_focus();
+        app.start_account(base);
+
+        let account = app.account_mut().expect("a run has just started");
+        account.open_section("crates/engine", base);
+        for line in 0..lines {
+            account.record(
+                &Activity::Tool {
+                    name: "Read".to_owned(),
+                    detail: Some(format!("line {line}")),
+                },
+                at(base, line as u64 + 1),
+            );
+        }
+        app
+    }
+
+    /// What the panel is drawing, as plain text, so a test asserts on the window
+    /// a reader would see rather than on an offset.
+    fn panel_text(app: &App, now: Instant) -> Vec<String> {
+        app.panel_lines(now)
+            .into_iter()
+            .map(|line| match line {
+                Line::Directory { path } => path.display().to_string(),
+                Line::Clocked { text, .. } | Line::Summary { text } => text,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_app_that_has_run_no_pact_has_no_account_and_draws_no_panel() {
+        let now = Instant::now();
+
+        for app in [
+            App::default(),
+            App::from_rows(three_rows()),
+            App::from_tree(&fixture::tree()),
+        ] {
+            let mut app = app;
+            app.set_panel_height(PANEL);
+
+            assert!(!app.has_account());
+            assert_eq!(app.account(), None);
+            assert_eq!(app.panel_lines(now), Vec::new());
+            assert_eq!(app.panel_lines_below(), 0);
+            assert_eq!(app.panel_scroll_offset(), 0);
+
+            // Not even a movement key can make a panel with no account say
+            // something.
+            app.toggle_focus();
+            for (_, movement) in MOVEMENTS {
+                movement(&mut app);
+            }
+            assert!(!app.has_account());
+            assert_eq!(app.panel_lines(now), Vec::new());
+        }
+    }
+
+    #[test]
+    fn a_second_pact_starts_the_account_again_from_empty() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        assert_eq!(app.account().map(Account::line_count), Some(10));
+
+        app.start_account(at(base, 100));
+
+        assert!(app.has_account());
+        assert_eq!(app.account().map(Account::line_count), Some(0));
+        assert_eq!(app.panel_lines(at(base, 100)), Vec::new());
+        assert_eq!(app.panel_scroll_offset(), 0);
+        assert!(app.panel_follows());
+    }
+
+    #[test]
+    fn a_second_pact_puts_a_scrolled_back_panel_at_the_top_of_the_new_run() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        app.select_first();
+        assert!(!app.panel_follows());
+
+        app.start_account(at(base, 100));
+        app.account_mut()
+            .expect("a run has just started")
+            .open_section("crates/tui", at(base, 100));
+
+        assert!(app.panel_follows());
+        assert_eq!(panel_text(&app, at(base, 100)), ["crates/tui".to_owned()]);
+    }
+
+    #[test]
+    fn the_panel_keeps_the_newest_line_on_the_bottom_row_while_it_follows() {
+        let base = Instant::now();
+        let mut app = app_pacting(2, base);
+
+        // Shorter than the panel: everything is on screen and there is nothing
+        // to scroll.
+        assert_eq!(app.panel_scroll_offset(), 0);
+        assert_eq!(
+            panel_text(&app, at(base, 3)),
+            ["crates/engine", "Read line 0", "Read line 1"],
+        );
+
+        // Longer than the panel: the window is the last screenful, and moves as
+        // each line arrives without anybody telling it to.
+        for line in 2..6 {
+            app.account_mut()
+                .expect("a run is under way")
+                .record(&Activity::Thinking, at(base, line + 1));
+        }
+
+        assert!(app.panel_follows());
+        assert_eq!(app.panel_scroll_offset(), 7 - usize::from(PANEL));
+        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(
+            panel_text(&app, at(base, 7)),
+            ["thinking", "thinking", "thinking"],
+        );
+    }
+
+    #[test]
+    fn scrolling_up_in_the_panel_stops_it_following() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        assert_eq!(
+            panel_text(&app, at(base, 9)).first().unwrap(),
+            "Read line 6"
+        );
+
+        app.select_previous();
+
+        assert!(!app.panel_follows());
+        let parked = panel_text(&app, at(base, 9));
+        assert_eq!(parked, ["Read line 5", "Read line 6", "Read line 7"]);
+
+        // And the lines that arrive afterwards leave the window where it is.
+        for line in 9..20 {
+            app.account_mut()
+                .expect("a run is under way")
+                .record(&Activity::Thinking, at(base, line + 1));
+        }
+
+        assert_eq!(panel_text(&app, at(base, 30)), parked);
+        assert_eq!(app.panel_scroll_offset(), 6);
+    }
+
+    #[test]
+    fn the_end_of_list_key_puts_the_panel_back_on_live() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        app.select_first();
+        assert!(!app.panel_follows());
+        assert_eq!(app.panel_scroll_offset(), 0);
+
+        app.select_last();
+
+        assert!(app.panel_follows());
+        assert_eq!(
+            panel_text(&app, at(base, 9)),
+            ["Read line 6", "Read line 7", "Read line 8"],
+        );
+
+        // Live means live: the next line to arrive moves the window again.
+        app.account_mut()
+            .expect("a run is under way")
+            .record(&Activity::Thinking, at(base, 10));
+
+        assert_eq!(
+            panel_text(&app, at(base, 10)),
+            ["Read line 7", "Read line 8", "thinking"],
+        );
+    }
+
+    #[test]
+    fn scrolling_back_down_to_the_end_is_following_again() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+
+        app.select_page_up();
+        assert!(!app.panel_follows());
+
+        app.select_next();
+        app.select_next();
+        assert!(!app.panel_follows());
+
+        app.select_next();
+
+        assert!(app.panel_follows());
+        assert_eq!(app.panel_lines_below(), 0);
+    }
+
+    #[test]
+    fn the_panel_says_how_many_lines_are_below_the_view() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+
+        // Ten lines, three of them on screen at the end: nothing below.
+        assert_eq!(app.panel_lines_below(), 0);
+
+        app.select_first();
+        assert_eq!(app.panel_lines_below(), 10 - usize::from(PANEL));
+
+        app.select_next();
+        assert_eq!(app.panel_lines_below(), 10 - usize::from(PANEL) - 1);
+
+        app.select_last();
+        assert_eq!(app.panel_lines_below(), 0);
+    }
+
+    #[test]
+    fn a_panel_nobody_has_measured_has_nothing_to_scroll() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        app.set_panel_height(0);
+
+        // No height means no window: nothing is drawn, so the honest offset is
+        // the top however long the account is, and no movement key can push it
+        // off one — the same reading the tree's rule takes of a viewport of
+        // zero rows.
+        for (name, movement) in MOVEMENTS {
+            movement(&mut app);
+            assert_eq!(
+                app.panel_scroll_offset(),
+                0,
+                "{name} moved a panel of no height"
+            );
+            assert_eq!(app.panel_lines(at(base, 9)), Vec::new(), "{name}");
+            // Nothing is drawn, so the whole account is below what is drawn.
+            assert_eq!(app.panel_lines_below(), 10, "{name}");
+        }
+
+        // And the window is measurable again the moment somebody measures it.
+        app.set_panel_height(PANEL);
+        assert_eq!(app.panel_scroll_offset(), 10 - usize::from(PANEL));
+    }
+
+    #[test]
+    fn the_panel_window_rule_follows_the_end_or_stays_where_it_was_put() {
+        // Following: the last screenful, whatever the account's length.
+        assert_eq!(panel_offset_for(10, 3, 0, true), 7);
+        assert_eq!(panel_offset_for(11, 3, 99, true), 8);
+        // Parked: the reader's own offset, clamped to what is there.
+        assert_eq!(panel_offset_for(10, 3, 4, false), 4);
+        assert_eq!(panel_offset_for(10, 3, 99, false), 7);
+        // An account that fits, and a panel nobody has measured, are both the
+        // top — and following one is the same as being parked at it.
+        for following in [true, false] {
+            assert_eq!(panel_offset_for(3, 3, 2, following), 0);
+            assert_eq!(panel_offset_for(0, 3, 2, following), 0);
+            assert_eq!(panel_offset_for(10, 0, 2, following), 0);
+        }
+    }
+
+    #[test]
+    fn a_re_seat_carries_the_account_and_the_panels_window() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        app.select_first();
+        let before = panel_text(&app, at(base, 9));
+
+        let reseated = reseat_on(&app, &fixture::tree());
+
+        assert_eq!(reseated.account(), app.account());
+        assert_eq!(reseated.panel_height(), usize::from(PANEL));
+        assert_eq!(reseated.panel_scroll_offset(), 0);
+        assert!(!reseated.panel_follows());
+        assert_eq!(panel_text(&reseated, at(base, 9)), before);
     }
 
     /// The fixture's shape with `warlock/crates/tui` gone, and its files with
