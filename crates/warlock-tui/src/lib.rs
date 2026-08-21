@@ -31,6 +31,8 @@ mod ui;
 /// The front end's state: the flattened tree, which of it is collapsed, the
 /// selected row and the slice of rows on screen.
 pub use app::App;
+/// Which of the screen's two panes the keys are driving.
+pub use app::Focus;
 /// What a pact toggle changed, for whoever has to write it to the manifest.
 pub use app::PactToggle;
 /// One line of the flattened tree.

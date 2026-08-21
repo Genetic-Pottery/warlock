@@ -43,6 +43,12 @@
 //! it without knowing what happened and the key handler never has to explain
 //! itself.
 //!
+//! Which of the screen's two panes the keys drive is view state of the same
+//! kind, and lives here for the same reason: it is a fact about what the reader
+//! is looking at, it changes what a keystroke does, and a rule about keystrokes
+//! that only an event loop with a terminal attached could demonstrate is a rule
+//! nobody can test. See [`Focus`].
+//!
 //! A pact in flight is the same kind of thing said over a longer span. A subtree
 //! pact is minutes of work happening somewhere else, so the app holds which
 //! directory that work is on and how far down the list it has got — set and
@@ -231,6 +237,57 @@ struct InFlight {
     total: usize,
 }
 
+/// Which of the screen's two panes the keys are driving.
+///
+/// The screen is a tree column and a panel beside it, and a key that moves a
+/// selection has to be about one of them; this says which. Two variants and no
+/// third: the footer runs the width of the screen and is nobody's to drive, so
+/// there is nothing else focus could land on.
+///
+/// It is deliberately not a general "which widget has the cursor" — nothing here
+/// is a widget and there is no cursor. It is one bit of view state, toggled by
+/// one key, read by the renderer to decide which border is lit and by [`App`] to
+/// decide whether a movement key means anything: see [`App::toggle_focus`] and
+/// [`App::focus`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Focus {
+    /// The tree column. The movement keys move its selection, which is what
+    /// they have always done, and this is where a freshly built [`App`] starts:
+    /// the tree is what warlock opens on and the thing there is anything to do
+    /// with yet.
+    #[default]
+    Tree,
+    /// The panel beside it.
+    Panel,
+}
+
+impl Focus {
+    /// The other pane: what [`App::toggle_focus`] moves to.
+    ///
+    /// Written as a method on the two-variant enum rather than as a `!` on a
+    /// boolean somewhere, so that "focus is one of these places" stays the thing
+    /// the type says and a third pane would be a compile error here rather than
+    /// a silent wrong answer.
+    #[must_use]
+    pub const fn other(self) -> Self {
+        match self {
+            Self::Tree => Self::Panel,
+            Self::Panel => Self::Tree,
+        }
+    }
+
+    /// Whether the movement keys mean anything: whether this focus is the one
+    /// that drives the tree's selection.
+    ///
+    /// The single place the rule is written down, so every movement method asks
+    /// the same question rather than each of them matching on the enum in its
+    /// own way.
+    #[must_use]
+    pub const fn drives_the_tree(self) -> bool {
+        matches!(self, Self::Tree)
+    }
+}
+
 /// The front end's state: the flattened tree, which of it is collapsed, the
 /// selected row, the slice of rows on screen, the tally the footer shows and
 /// the header line naming what is being shown.
@@ -291,6 +348,13 @@ struct InFlight {
 /// the selection empties it, so a message lasts exactly until the next
 /// keystroke.
 ///
+/// `focus` is which of the screen's two panes the keys are driving, and it is
+/// here rather than in the event loop for the reason everything else here is:
+/// it is view state that changes what a keystroke does, and the rule it decides
+/// — that the movement keys move nothing while the panel has focus — is a rule
+/// about this type's methods, testable with nothing attached to stdout. It
+/// starts on the tree, which is the pane warlock opens on. See [`Focus`].
+///
 /// `in_flight` is the pact running now, if one is, and is the one piece of state
 /// here that no keystroke touches: it is put there and taken away by whoever is
 /// running the pact — see [`App::set_pact_in_flight`] — because the app cannot
@@ -311,6 +375,7 @@ pub struct App {
     header: String,
     message: Option<String>,
     in_flight: Option<InFlight>,
+    focus: Focus,
 }
 
 impl App {
@@ -374,6 +439,9 @@ impl App {
     /// has nothing to say about one. See [`App::message`]. Nor is a pact in
     /// flight — nobody has started one — see [`App::set_pact_in_flight`].
     ///
+    /// The tree has the focus, so the movement keys move its selection from the
+    /// first keystroke on. See [`App::focus`].
+    ///
     /// Nothing is collapsed and the pacted-only filter is off, so the rows
     /// handed over are exactly the rows drawn — unless some of them are file
     /// rows, which the file toggle starts off over. They are kept a second time
@@ -396,6 +464,7 @@ impl App {
             header: String::new(),
             message: None,
             in_flight: None,
+            focus: Focus::Tree,
         };
         // The rows handed over may hold file rows, which the file toggle starts
         // off over, so the drawn list is derived rather than assumed even here.
@@ -763,24 +832,51 @@ impl App {
         self.rescroll();
     }
 
+    /// Which pane the keys are driving: the tree column, or the panel beside
+    /// it.
+    ///
+    /// [`Focus::Tree`] for a freshly built app, which is the pane warlock opens
+    /// on. For the renderer, deciding which border to light, and for the
+    /// movement methods below, deciding whether they mean anything.
+    #[must_use]
+    pub const fn focus(&self) -> Focus {
+        self.focus
+    }
+
+    /// Move the focus to the other pane.
+    ///
+    /// The whole of what the focus key does. It is a toggle rather than a pair
+    /// of "focus the tree" / "focus the panel" calls because there are two panes
+    /// and one key, and a toggle cannot be asked for a third.
+    ///
+    /// Nothing else moves: the selection stays on the row it was on, the window
+    /// stays where it was, and the last keystroke's message stays up. Focus
+    /// changes what the *next* key means and says nothing itself, so there is
+    /// nothing here for a message to report and nothing that would make a
+    /// message stale.
+    pub const fn toggle_focus(&mut self) {
+        self.focus = self.focus.other();
+    }
+
     /// Move the selection one row up, stopping at the first row.
     ///
     /// It clamps rather than wrapping: an unnoticed wrap at the top of a long
     /// tree throws the reader to the bottom of it, and the arrow key is for
-    /// stepping, not teleporting. A no-op when there are no rows.
+    /// stepping, not teleporting. A no-op when there are no rows, and a no-op
+    /// while the panel has the focus.
     pub fn select_previous(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-        self.moved();
+        self.select(|app| app.selected.saturating_sub(1));
     }
 
     /// Move the selection one row down, stopping at the last row.
     ///
     /// Clamps for the same reason [`App::select_previous`] does. A no-op when
-    /// there are no rows.
+    /// there are no rows, and a no-op while the panel has the focus.
     pub fn select_next(&mut self) {
-        let last = self.rows.len().saturating_sub(1);
-        self.selected = self.selected.saturating_add(1).min(last);
-        self.moved();
+        self.select(|app| {
+            let last = app.rows.len().saturating_sub(1);
+            app.selected.saturating_add(1).min(last)
+        });
     }
 
     /// Move the selection one screenful up, stopping at the first row.
@@ -792,35 +888,62 @@ impl App {
     ///
     /// An app that has never been drawn has no height to page by, and a key
     /// that does nothing at all reads as a broken key, so the step never falls
-    /// below one row. A no-op when there are no rows.
+    /// below one row. A no-op when there are no rows, and a no-op while the
+    /// panel has the focus.
     pub fn select_page_up(&mut self) {
-        self.selected = self.selected.saturating_sub(self.page());
-        self.moved();
+        self.select(|app| app.selected.saturating_sub(app.page()));
     }
 
     /// Move the selection one screenful down, stopping at the last row.
     ///
     /// The mirror of [`App::select_page_up`], down to the one-row floor for an
-    /// app that has not been drawn. A no-op when there are no rows.
+    /// app that has not been drawn. A no-op when there are no rows, and a no-op
+    /// while the panel has the focus.
     pub fn select_page_down(&mut self) {
-        let last = self.rows.len().saturating_sub(1);
-        self.selected = self.selected.saturating_add(self.page()).min(last);
-        self.moved();
+        self.select(|app| {
+            let last = app.rows.len().saturating_sub(1);
+            app.selected.saturating_add(app.page()).min(last)
+        });
     }
 
     /// Select the first row, scrolling the window back to the top of the tree.
     ///
-    /// A no-op when there are no rows.
+    /// A no-op when there are no rows, and a no-op while the panel has the
+    /// focus.
     pub fn select_first(&mut self) {
-        self.selected = 0;
-        self.moved();
+        self.select(|_| 0);
     }
 
     /// Select the last row, scrolling the window to the bottom of the tree.
     ///
-    /// A no-op when there are no rows.
+    /// A no-op when there are no rows, and a no-op while the panel has the
+    /// focus.
     pub fn select_last(&mut self) {
-        self.selected = self.rows.len().saturating_sub(1);
+        self.select(|app| app.rows.len().saturating_sub(1));
+    }
+
+    /// Put the selection wherever `to` says, unless the keys are not driving
+    /// the tree at all.
+    ///
+    /// Every movement method goes through here, so the rule that a movement key
+    /// means nothing while the panel has the focus is written once rather than
+    /// six times — and so a seventh movement method cannot be added without it.
+    /// Each method hands over where the selection should land as a function of
+    /// the app, because that is the only part of a movement that differs between
+    /// them; the clamping is theirs, since what "one row up" clamps to is not
+    /// what "one screenful down" clamps to.
+    ///
+    /// A movement key pressed at the panel changes nothing at all — not the
+    /// selection, not the window, and not the last keystroke's message, which is
+    /// still the most recent thing the app had to say. That is the same reading
+    /// [`App::toggle_collapsed`] takes of a key pressed on a childless node: a
+    /// key that did nothing should not sweep away the line explaining what the
+    /// last key that did something did.
+    fn select(&mut self, to: impl FnOnce(&Self) -> usize) {
+        if !self.focus.drives_the_tree() {
+            return;
+        }
+        self.selected = to(self);
         self.moved();
     }
 
@@ -1327,7 +1450,7 @@ mod tests {
 
     use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
-    use super::{App, PactToggle, REPOSITORY_ROOT_LABEL, Row, scroll_offset_for};
+    use super::{App, Focus, PactToggle, REPOSITORY_ROOT_LABEL, Row, scroll_offset_for};
     use crate::fixture;
 
     /// How many rows the scrolling tests work with, and how tall the window
@@ -3334,5 +3457,149 @@ mod tests {
 
         assert!(window_is_in_range(&app));
         assert!(selection_is_on_screen(&app));
+    }
+
+    /// Every method a movement key reaches, named so a failure says which one
+    /// broke the rule. The same six [`every_movement_clears_a_message`] drives,
+    /// and the whole of what focus is allowed to switch off.
+    const MOVEMENTS: [(&str, Movement); 6] = [
+        ("select_previous", App::select_previous),
+        ("select_next", App::select_next),
+        ("select_page_up", App::select_page_up),
+        ("select_page_down", App::select_page_down),
+        ("select_first", App::select_first),
+        ("select_last", App::select_last),
+    ];
+
+    /// An app of [`MANY`] rows scrolled to the middle of them, with the panel
+    /// focused. Mid-tree on purpose: a selection at either end could sit still
+    /// under half the movement keys for reasons that have nothing to do with
+    /// focus.
+    fn panel_focused() -> App {
+        let mut app = scrolled_to(MANY / 2);
+        app.toggle_focus();
+        app
+    }
+
+    #[test]
+    fn a_fresh_app_has_the_tree_focused() {
+        assert_eq!(App::from_rows(three_rows()).focus(), Focus::Tree);
+        assert_eq!(App::from_tree(&fixture::tree()).focus(), Focus::Tree);
+        assert_eq!(App::default().focus(), Focus::Tree);
+    }
+
+    #[test]
+    fn the_focus_key_moves_to_the_panel_and_back() {
+        let mut app = App::from_rows(three_rows());
+
+        app.toggle_focus();
+        assert_eq!(app.focus(), Focus::Panel);
+
+        app.toggle_focus();
+        assert_eq!(app.focus(), Focus::Tree);
+    }
+
+    #[test]
+    fn no_movement_key_moves_anything_while_the_panel_has_the_focus() {
+        for (name, movement) in MOVEMENTS {
+            let mut app = panel_focused();
+            let (selected, offset) = (app.selected(), app.scroll_offset());
+
+            movement(&mut app);
+
+            assert_eq!(app.selected(), selected, "{name} moved the selection");
+            assert_eq!(app.scroll_offset(), offset, "{name} moved the window");
+            assert_eq!(app.focus(), Focus::Panel, "{name} moved the focus");
+        }
+    }
+
+    #[test]
+    fn a_movement_key_at_the_panel_leaves_the_last_keystrokes_message_up() {
+        // A key that did nothing has nothing to report, and sweeping the line
+        // away would take down the explanation of the last key that did.
+        for (name, movement) in MOVEMENTS {
+            let mut app = panel_focused();
+            app.set_message("something to keep");
+
+            movement(&mut app);
+
+            assert_eq!(app.message(), Some("something to keep"), "{name} said it");
+        }
+    }
+
+    #[test]
+    fn the_movement_keys_move_again_once_the_tree_has_the_focus_back() {
+        for (name, movement) in MOVEMENTS {
+            let mut app = panel_focused();
+            let mut expected = scrolled_to(MANY / 2);
+            movement(&mut expected);
+
+            movement(&mut app);
+            app.toggle_focus();
+            movement(&mut app);
+
+            assert_eq!(app.selected(), expected.selected(), "{name} moved oddly");
+            assert_eq!(app.scroll_offset(), expected.scroll_offset(), "{name}");
+        }
+    }
+
+    #[test]
+    fn moving_the_focus_moves_nothing_else() {
+        let mut app = scrolled_to(MANY / 2);
+        app.set_message("something to keep");
+        let before = app.clone();
+
+        app.toggle_focus();
+
+        assert_eq!(app.selected(), before.selected());
+        assert_eq!(app.scroll_offset(), before.scroll_offset());
+        assert_eq!(app.message(), Some("something to keep"));
+        app.toggle_focus();
+        assert_eq!(app, before, "the focus key changed something else");
+    }
+
+    /// Everything that is not a movement key, run over an app with each focus in
+    /// turn: the two apps must end up as one, focus aside.
+    ///
+    /// Each case is a name and something to do to an app. Written as one list
+    /// rather than a test each, because what is being asserted is the same
+    /// sentence six times over — focus decides what the *movement* keys mean and
+    /// nothing else about this type.
+    #[test]
+    fn nothing_but_a_movement_key_cares_which_pane_has_the_focus() {
+        type Change = fn(&mut App);
+        let changes: [(&str, Change); 8] = [
+            ("toggle_collapsed", App::toggle_collapsed),
+            ("toggle_pacted_only", App::toggle_pacted_only),
+            ("toggle_files", App::toggle_files),
+            ("toggle_pact", |app| {
+                app.toggle_pact();
+            }),
+            ("set_pact_in_flight", |app| {
+                app.set_pact_in_flight("warlock/crates", 2, 5);
+            }),
+            ("clear_pact_in_flight", |app| {
+                app.set_pact_in_flight("warlock/crates", 2, 5);
+                app.clear_pact_in_flight();
+            }),
+            ("set_subtree_state", |app| {
+                app.set_subtree_state("warlock/crates", NodeState::PactedFresh);
+            }),
+            ("set_viewport_height", |app| app.set_viewport_height(2)),
+        ];
+
+        for (name, change) in changes {
+            let mut focused = app_selecting("warlock/crates");
+            let mut unfocused = app_selecting("warlock/crates");
+            unfocused.toggle_focus();
+
+            change(&mut focused);
+            change(&mut unfocused);
+            // Put the focus back rather than exempting the field, so the
+            // comparison covers every other field there is.
+            unfocused.toggle_focus();
+
+            assert_eq!(unfocused, focused, "{name} depends on the focus");
+        }
     }
 }
