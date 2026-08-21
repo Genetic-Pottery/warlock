@@ -43,10 +43,22 @@
 //! the timeout path already holds, so cancelling reaches inside a pass that is
 //! in flight instead of waiting politely for it to end.
 //!
+//! A fifth thing it cannot do is *say what it is doing*. A pass is minutes of
+//! reading and writing that the person watching sees nothing of until it ends,
+//! which is why pressing the pact key looks like a hang. That is
+//! [`Activities`]: a port out of the transport, built exactly like [`Cancel`] —
+//! a clonable handle over an [`Arc`], attached by whoever wants to listen with
+//! [`with_activities`](ClaudeAgent::with_activities), and a no-op for an agent
+//! nobody attached one to. What goes out through it is [`Activity`]: the name of
+//! a tool and at most one argument, the bare fact of thinking, and what the pass
+//! cost. Never a tool's result, never the model's prose, never the content of a
+//! thought.
+//!
 //! Threads and channels, no async runtime, and no dependency: this crate's
 //! `Cargo.toml` gains nothing for any of it.
 
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -200,6 +212,160 @@ impl Cancel {
     }
 }
 
+/// One thing a pass was seen doing, in the fewest words it can be said in.
+///
+/// Facts, not prose. A pass produces a document, and the document is the
+/// product; this is the sign of life that runs alongside it, so every variant
+/// is something that fits on one line of a panel and is true without
+/// interpretation. What is *not* here is as deliberate as what is: no tool
+/// result, no assistant text, and no thought — only that thinking happened.
+/// Rendering a model's reasoning back at the user is prose, and prose is the
+/// thing this front end refuses to show.
+///
+/// ```
+/// use warlock_tui::Activity;
+///
+/// let read = Activity::Tool {
+///     name: "Read".to_owned(),
+///     detail: Some("src/lib.rs".to_owned()),
+/// };
+/// let unlisted = Activity::Tool {
+///     name: "WebFetch".to_owned(),
+///     detail: None,
+/// };
+///
+/// assert_ne!(read, unlisted);
+/// assert_eq!(Activity::Thinking, Activity::Thinking);
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub enum Activity {
+    /// The model called a tool.
+    Tool {
+        /// The tool's name exactly as the stream spells it: `Read`, `Bash`,
+        /// `Grep`, or whatever the vendor adds next.
+        name: String,
+        /// The one argument worth putting on a line, or `None` for a tool
+        /// nothing is known about.
+        ///
+        /// One, not some, and chosen per tool rather than taken from whatever
+        /// the call happened to carry: the alternative is an arbitrary input
+        /// dict on somebody's screen. A tool that is not on the whitelist is
+        /// shown by name alone, which is honest and short, and adding an entry
+        /// is a one-line change to be made when a real stream shows a tool
+        /// that matters.
+        detail: Option<String>,
+    },
+    /// The model thought.
+    ///
+    /// Carries nothing on purpose — see the type's docs. A stretch of thinking
+    /// is visible as a stretch of *this*, which is all a reader needs to know
+    /// the run is alive.
+    Thinking,
+    /// What the pass cost, in US dollars, as the pass itself reported it.
+    ///
+    /// The one number the transport keeps out of the run's own accounting, and
+    /// the reason it rides this port rather than the response: it is a fact
+    /// about the *pass*, not part of the document, and it arrives at the end of
+    /// the stream like everything else here.
+    Cost {
+        /// The cost of this one pass. Whatever the pass said it was — nothing
+        /// here checks it, converts it or adds it up.
+        usd: f64,
+    },
+}
+
+/// Where a pass says what it is doing, for whoever is not running it.
+///
+/// [`Cancel`]'s twin, pointing the other way: that one carries a stop *into* a
+/// pass from the thread drawing the screen, and this one carries facts *out* of
+/// a pass to it. Same construction, for the same reasons — one shared thing
+/// behind an [`Arc`], so cloning is a refcount bump and every clone reports to
+/// the same place, and [`Send`] + [`Sync`] because the pass runs on the pact
+/// worker's thread and the listener is somewhere else entirely.
+///
+/// The shared thing is a function rather than a channel, so that this file
+/// keeps its one job. A pact worker already owns a channel to the event loop;
+/// handing it a closure lets it forward an activity as one of its own events
+/// over the route it already has, instead of the transport inventing a second
+/// one and the loop growing a second thing to poll.
+///
+/// The default is a handle nobody listens to, which is what an agent gets when
+/// no caller attached one, so reporting is a no-op rather than a `None` every
+/// call site has to remember to check.
+///
+/// ```
+/// use std::sync::mpsc;
+///
+/// use warlock_tui::{Activities, Activity};
+///
+/// let (sender, received) = mpsc::channel();
+/// let activities = Activities::new(move |activity| {
+///     let _ = sender.send(activity);
+/// });
+///
+/// activities.report(Activity::Thinking);
+///
+/// assert_eq!(received.recv(), Ok(Activity::Thinking));
+///
+/// // And one nobody listens to swallows whatever it is told.
+/// Activities::none().report(Activity::Thinking);
+/// ```
+#[derive(Clone)]
+pub struct Activities {
+    /// Shared with every clone; the point of the type.
+    sink: Arc<dyn Fn(Activity) + Send + Sync>,
+}
+
+impl Activities {
+    /// A handle that hands every activity to `sink`.
+    ///
+    /// `sink` is called on whichever thread the pass is running on, in the
+    /// order the stream produced things, and it is called while the pass is
+    /// still going — that being the whole point. So it should be short: send
+    /// it somewhere and return.
+    #[must_use]
+    pub fn new(sink: impl Fn(Activity) + Send + Sync + 'static) -> Self {
+        Self {
+            sink: Arc::new(sink),
+        }
+    }
+
+    /// A handle nobody listens to.
+    ///
+    /// What an agent has until a caller attaches one with
+    /// [`with_activities`](ClaudeAgent::with_activities): reporting to it does
+    /// nothing, costs a call through a pointer, and changes no behaviour of the
+    /// pass at all.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::new(|_| {})
+    }
+
+    /// Say that the pass did `activity`.
+    ///
+    /// Safe to call from any thread and from any clone, and never fails: a
+    /// listener that has gone away is not a reason to fail a model pass, so
+    /// there is nothing here for a caller to handle.
+    pub fn report(&self, activity: Activity) {
+        (self.sink)(activity);
+    }
+}
+
+impl Default for Activities {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+impl fmt::Debug for Activities {
+    /// A closure has nothing to print, and a handle is not distinguishable from
+    /// another by looking at it; what a test failure needs from this is the
+    /// name.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Activities").finish_non_exhaustive()
+    }
+}
+
 /// An [`Agent`] that runs the `claude` CLI as a child process.
 ///
 /// Owns the child, its stdin, its stdout, its stderr, its exit status and its
@@ -235,6 +401,9 @@ pub struct ClaudeAgent {
     /// Whoever is allowed to say stop. Its own handle by default, which nobody
     /// else holds and so nothing ever cancels.
     cancel: Cancel,
+    /// Where the pass says what it is doing. A handle nobody listens to by
+    /// default, so an agent no caller wired up reports into nothing.
+    activities: Activities,
 }
 
 impl ClaudeAgent {
@@ -253,6 +422,7 @@ impl ClaudeAgent {
             args: ARGS.iter().map(OsString::from).collect(),
             timeout: INVOCATION_TIMEOUT,
             cancel: Cancel::new(),
+            activities: Activities::none(),
         }
     }
 
@@ -307,10 +477,44 @@ impl ClaudeAgent {
         self
     }
 
+    /// The same agent, reporting what each pass does to `activities`.
+    ///
+    /// The mirror of [`with_cancel`](ClaudeAgent::with_cancel), and used the
+    /// same way: the caller keeps a clone, and what the pass does on the worker
+    /// thread reaches the thread drawing the screen. Without this an agent
+    /// still has a handle — one nobody listens to, so a pass runs exactly as it
+    /// did before and reporting costs nothing.
+    ///
+    /// ```
+    /// use std::sync::mpsc;
+    ///
+    /// use warlock_tui::{Activities, ClaudeAgent};
+    ///
+    /// let (sender, received) = mpsc::channel();
+    /// let agent = ClaudeAgent::new().with_activities(Activities::new(move |activity| {
+    ///     let _ = sender.send(activity);
+    /// }));
+    ///
+    /// // Nothing has run, so nothing has been reported.
+    /// assert!(received.try_recv().is_err());
+    /// # let _ = agent;
+    /// ```
+    #[must_use]
+    pub fn with_activities(mut self, activities: Activities) -> Self {
+        self.activities = activities;
+        self
+    }
+
     /// The command this agent runs.
     #[must_use]
     pub fn program(&self) -> &OsStr {
         &self.program
+    }
+
+    /// Where this agent reports what a pass is doing.
+    #[must_use]
+    pub fn activities(&self) -> &Activities {
+        &self.activities
     }
 
     /// How long one invocation is given before it is killed.
@@ -596,12 +800,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
     use warlock_engine::{Agent, AgentError, AgentRequest};
 
-    use super::{Cancel, ClaudeAgent, INVOCATION_TIMEOUT};
+    use super::{Activities, Activity, Cancel, ClaudeAgent, INVOCATION_TIMEOUT};
 
     /// A name no directory on `PATH` can hold, so the lookup is guaranteed to
     /// fail the way a machine without `claude` fails.
@@ -658,6 +863,79 @@ mod tests {
         .expect("the cancelling thread ran");
 
         assert!(cancel.is_cancelled());
+    }
+
+    #[test]
+    fn a_port_nobody_listens_to_swallows_everything_reported_to_it() {
+        // What an agent has until a caller attaches one: reporting is a no-op,
+        // not a panic and not a failure, so the parsing side can report
+        // unconditionally.
+        for activities in [Activities::none(), Activities::default()] {
+            activities.report(Activity::Thinking);
+            activities.report(Activity::Tool {
+                name: "Read".to_owned(),
+                detail: Some("src/lib.rs".to_owned()),
+            });
+            activities.report(Activity::Cost { usd: 0.03 });
+        }
+
+        // And that is what an agent nobody wired up has.
+        ClaudeAgent::new().activities().report(Activity::Thinking);
+    }
+
+    #[test]
+    fn every_clone_of_a_port_reports_to_the_same_place() {
+        // The property the whole port rests on, and [`Cancel`]'s in reverse:
+        // the thread running the pass is never the thread listening to it.
+        fn held_across_threads<T: Send + Sync + 'static>(_: &T) {}
+
+        let (sender, received) = mpsc::channel();
+        let activities = Activities::new(move |activity| {
+            sender.send(activity).expect("the test is still listening");
+        });
+        held_across_threads(&activities);
+        let passing = activities.clone();
+
+        thread::spawn(move || {
+            passing.report(Activity::Thinking);
+            passing.report(Activity::Tool {
+                name: "Bash".to_owned(),
+                detail: Some("cargo test".to_owned()),
+            });
+            passing.report(Activity::Cost { usd: 0.25 });
+        })
+        .join()
+        .expect("the reporting thread ran");
+
+        // In the order they were reported, through the clone, from the other
+        // thread.
+        assert_eq!(received.recv(), Ok(Activity::Thinking));
+        assert_eq!(
+            received.recv(),
+            Ok(Activity::Tool {
+                name: "Bash".to_owned(),
+                detail: Some("cargo test".to_owned()),
+            })
+        );
+        assert_eq!(received.recv(), Ok(Activity::Cost { usd: 0.25 }));
+        // The original still reports to the same place after the clone is gone.
+        activities.report(Activity::Thinking);
+        assert_eq!(received.recv(), Ok(Activity::Thinking));
+    }
+
+    #[test]
+    fn an_attached_port_is_the_one_the_agent_reports_to() {
+        let (sender, received) = mpsc::channel();
+        let agent = ClaudeAgent::new().with_activities(Activities::new(move |activity| {
+            let _ = sender.send(activity);
+        }));
+
+        agent.activities().report(Activity::Thinking);
+
+        assert_eq!(received.recv(), Ok(Activity::Thinking));
+        // Attaching one changes nothing else about the agent.
+        assert_eq!(agent.program(), "claude");
+        assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
     }
 
     #[test]

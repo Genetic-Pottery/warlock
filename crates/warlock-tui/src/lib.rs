@@ -37,6 +37,12 @@ pub use app::Focus;
 pub use app::PactToggle;
 /// One line of the flattened tree.
 pub use app::Row;
+/// A handle for hearing what a model pass is doing, from another thread, while
+/// it is still running.
+pub use claude::Activities;
+/// One thing a model pass was seen doing: a tool call, a stretch of thinking, or
+/// what the pass cost.
+pub use claude::Activity;
 /// A handle for stopping a model pass from another thread: it kills the child
 /// running now and refuses to start another.
 pub use claude::Cancel;
