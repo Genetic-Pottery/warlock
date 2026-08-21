@@ -103,6 +103,16 @@ const PACT_LOST: &str = "the pact stopped without saying how it went; nothing ne
 /// next time it is loaded.
 const PACT_CANCELLED: &str = "the pact was cancelled; what it finished first is recorded";
 
+/// What the footer says when the reload after a run could not read the tree,
+/// ahead of the load's own reason for it.
+///
+/// It says what the reader lost, which is the refresh and nothing else: the run
+/// is over, its documents are on disk and its manifest is saved, and the rows
+/// under this line are the ones that were there before — true, only older than
+/// disk. Worded as a fact about the view rather than as a failure of the run,
+/// because the run did not fail.
+const NOT_REFRESHED: &str = "the view could not be refreshed and is the tree as it was";
+
 fn main() -> ExitCode {
     // Before anything touches the terminal: a panic during setup has to leave
     // the terminal usable too.
@@ -777,12 +787,39 @@ fn apply_progress(
 /// matter: the engine has already coloured each affected node conservatively, so
 /// a tree that has the new documents in it beats the stale one it would replace,
 /// and it is taken.
+///
+/// Either way there is a line to write — [`NOT_REFRESHED`] and the load's reason
+/// for one that failed, the problems' own wording and their count for one that
+/// did not — and it goes on the footer only when the run left the footer empty.
+/// The pact's message wins because it is the news: what a run made of the
+/// subtree the reader asked for is worth more than how the redraw after it went,
+/// and the footer is one line. Precedence, not merging: two sentences joined by
+/// a semicolon would be a line nobody reads to the end of.
 fn reload_tree(app: &mut App, scope: &Scope) {
-    let Ok(Loaded { tree, .. }) = load_tree(&scope.root) else {
-        return;
+    let note = match load_tree(&scope.root) {
+        Ok(Loaded { tree, problems }) => {
+            *app = reseat_on(app, &tree).with_scope(&scope.repo_root, tree.root_path());
+            // The same count, in the same words, as the startup load that
+            // refuses to draw a tree with problems in it: one problem quoted
+            // and the rest counted. A node the engine could not hash is
+            // already stale on screen, so this line is the only place the
+            // number of them appears.
+            Error::from_problems(&problems).map(|counted| counted.to_string())
+        }
+        // Flattened for the same reason `Error` flattens it: a manifest that
+        // will not parse arrives as the TOML parser's several lines, and the
+        // footer is one.
+        Err(source) => Some(format!(
+            "{NOT_REFRESHED}: {}",
+            one_line(&source.to_string())
+        )),
     };
 
-    *app = reseat_on(app, &tree).with_scope(&scope.repo_root, tree.root_path());
+    if let Some(note) = note
+        && app.message().is_none()
+    {
+        app.set_message(note);
+    }
 }
 
 /// Where the tree on screen came from: the directory it is rooted at, and the
@@ -1896,8 +1933,8 @@ mod tests {
         use warlock_tui::Cancel;
 
         use super::super::{
-            CancelGuard, PACT_CANCELLED, PACT_LOST, PactEvent, Running, Scope, Toggled,
-            activity_port, apply_progress, apply_toggle, pact_press, run_pact, spawn_pact,
+            CancelGuard, NOT_REFRESHED, PACT_CANCELLED, PACT_LOST, PactEvent, Running, Scope,
+            Toggled, activity_port, apply_progress, apply_toggle, pact_press, run_pact, spawn_pact,
         };
         use super::ROOT;
 
@@ -3088,7 +3125,15 @@ mod tests {
 
             assert!(pact.is_none(), "the run is over");
             assert!(app.pact_line().is_none(), "so nothing is being pacted now");
-            assert_eq!(app.message(), None, "and nothing went wrong");
+            // Nothing the run did is on the footer, because nothing went wrong
+            // in it. The line that is there belongs to the reload at the bottom
+            // of the call, which has no `/repo/crates` on disk to read.
+            assert!(
+                app.message()
+                    .is_some_and(|line| line.starts_with(NOT_REFRESHED)),
+                "the run reported something of its own: {:?}",
+                app.message()
+            );
         }
 
         #[test]
@@ -3367,6 +3412,154 @@ mod tests {
                 state_of(&app, Path::new("/repo/crates")),
                 Some(NodeState::PactedFresh),
                 "the outcome the run did report was undone by a load that failed"
+            );
+            // And the reader is told why the rows did not move, on the one line
+            // the footer has, with the load's own reason after it.
+            let message = app.message().expect("a refresh that failed says so");
+            assert!(
+                message.starts_with(NOT_REFRESHED),
+                "the footer says nothing about the refresh: {message}"
+            );
+            assert!(
+                message.len() > NOT_REFRESHED.len() + 2,
+                "the footer does not say why: {message}"
+            );
+            assert!(
+                !message.contains('\n'),
+                "a footer line that wraps is a footer line that hides a row: {message}"
+            );
+        }
+
+        #[test]
+        fn the_pacts_own_message_wins_over_the_reloads() {
+            // Both have something to say and there is one line to say it on. The
+            // run is the news — it is what the reader asked for, and it cost
+            // minutes — so the reload's line waits for a footer nobody else
+            // wanted. Both endings are driven here against the same failing
+            // reload, so the only difference between them is whether the pact
+            // left a message.
+            const REFUSED: &str = "the manifest would not save";
+
+            let ending = |message: Option<String>| {
+                let tree = Tree::new(Node::new(
+                    "/repo/crates",
+                    None::<PathBuf>,
+                    NodeState::Unpacted,
+                ));
+                let before = App::from_tree(&tree);
+                let mut app = before.clone();
+                let mut manifest = Manifest::new();
+                let (events, received) = mpsc::channel();
+                let mut pact = Some(Running {
+                    events: received,
+                    cancel: CancelGuard::new(),
+                    path: PathBuf::from("/repo/crates"),
+                    before,
+                });
+
+                events
+                    .send(PactEvent::Finished(Ok(Toggled {
+                        manifest: Manifest::new(),
+                        granted: true,
+                        message,
+                    })))
+                    .expect("the loop is still listening");
+                // Nothing is on disk at `/repo/crates`, so the reload has its
+                // own line to offer in both cases.
+                apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+                app.message().map(str::to_owned)
+            };
+
+            assert_eq!(
+                ending(Some(REFUSED.to_owned())).as_deref(),
+                Some(REFUSED),
+                "the reload talked over the run"
+            );
+            assert!(
+                ending(None).is_some_and(|line| line.starts_with(NOT_REFRESHED)),
+                "the reload said nothing into a footer nobody else was using"
+            );
+        }
+
+        /// Only on unix, because the only way to make a load report problems
+        /// rather than fail outright is a file the process may not read, and
+        /// `chmod` is how that is arranged.
+        #[cfg(unix)]
+        #[test]
+        fn a_reload_with_problems_takes_the_new_tree_and_counts_them() {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            // A `Problem` is a per-node fact the engine has already coloured
+            // conservatively — the node is stale and says so — so a tree with
+            // the run's documents in it beats the stale one it replaces, and it
+            // is taken. What the footer adds is the count, in the words the
+            // startup load already uses for it.
+            let scratch = one_crate_to_load("reload-problems");
+            let agent = Canned::new(&scratch, []);
+            let Toggled { mut manifest, .. } = apply_toggle(
+                &Manifest::new(),
+                &scratch.root,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+                &mut Unwatched,
+            )
+            .expect("a subtree that walks and a manifest that writes");
+
+            let (mut app, scope) = load(&scratch);
+            assert_eq!(
+                state_of(&app, &scratch.path("crates/engine")),
+                Some(NodeState::PactedFresh),
+                "the reader is looking at a pacted subtree"
+            );
+
+            // Something new on disk for the reload to find, and something it
+            // cannot read: `crates/engine` and `crates/engine/src` are both
+            // pacted, and neither can be hashed with an unreadable file under
+            // it, so there are two problems and one of them is counted.
+            scratch.write("docs/adr/one.md", "# One\n");
+            let unreadable = scratch.path("crates/engine/src/lib.rs");
+            fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmods");
+
+            let (events, received) = mpsc::channel();
+            let mut pact = Some(Running {
+                events: received,
+                cancel: CancelGuard::new(),
+                path: scratch.path("crates/engine"),
+                before: app.clone(),
+            });
+            events
+                .send(PactEvent::Finished(Ok(Toggled {
+                    manifest: manifest.clone(),
+                    granted: true,
+                    message: None,
+                })))
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &scope);
+
+            let message = app.message().expect("problems are reported").to_owned();
+            fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644))
+                .expect("chmods back");
+
+            assert!(
+                state_of(&app, &scratch.path("docs")).is_some(),
+                "the tree that came back is the old one, without the problems in it"
+            );
+            assert_eq!(
+                state_of(&app, &scratch.path("crates/engine")),
+                Some(NodeState::PactedStale),
+                "a node with no hash is coloured as if it had one"
+            );
+            assert!(
+                message.contains("could not be hashed"),
+                "the footer does not say what went wrong: {message}"
+            );
+            assert!(
+                message.contains("and 1 more like it"),
+                "the footer does not say how many there were: {message}"
+            );
+            assert!(
+                !message.contains('\n'),
+                "a footer line that wraps is a footer line that hides a row: {message}"
             );
         }
     }
