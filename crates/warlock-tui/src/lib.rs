@@ -16,6 +16,13 @@
 //! where they were rather than at the top. It reads no disk and asks for no
 //! reload of its own — *when* a tree is read again is the binary's business.
 //!
+//! What a run is *doing* while it runs is data of the same kind. [`Account`] is
+//! one pact's own record of itself — a section per directory, a line per thing a
+//! pass was seen doing, an elapsed clock on every line — and it holds no clock of
+//! its own: the instant a line is measured against is handed in by whoever is
+//! drawing the frame, so a whole minutes-long run can be driven through it in a
+//! test with nothing attached to stdout and no time passing at all.
+//!
 //! The one exception is [`ClaudeAgent`], which owns a child process: it
 //! implements the engine's [`Agent`](warlock_engine::Agent) port by running the
 //! `claude` CLI, because the engine spawns nothing and something has to. Its
@@ -27,6 +34,7 @@
 //! The dependency edge runs TUI -> engine: this crate knows the engine's
 //! vocabulary, and the engine knows nothing about terminals.
 
+mod account;
 mod app;
 mod claude;
 mod colour;
@@ -37,6 +45,16 @@ mod colour;
 mod fixture;
 mod ui;
 
+/// Everything one pact did, in the order it did it: a section per directory, a
+/// line per thing a pass was seen doing, and a clock on every line.
+pub use account::Account;
+/// One drawable row of an [`Account`]: a section heading, a clocked line, or the
+/// run's closing summary.
+pub use account::Line;
+/// How a directory's pass ended, in the words it ends its section with.
+pub use account::Outcome;
+/// One directory's pass inside an [`Account`].
+pub use account::Section;
 /// The front end's state: the flattened tree, which of it is collapsed, the
 /// selected row and the slice of rows on screen.
 pub use app::App;
