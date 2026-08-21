@@ -4,7 +4,9 @@ The core library crate of warlock. It owns the domain logic — the state
 vocabulary, the tree of work, the record of which modules are pacted, and the
 rules that move it forward. What exists today is the vocabulary, the shape of
 the tree, the on-disk manifest, the subtree hash and the staleness decision it
-feeds, and a loader that builds a coloured tree out of a real directory:
+feeds, a loader that builds a coloured tree out of a real directory, the seam a
+model pass is reached through, and the pact that writes a subtree's documents
+and grants the hashes that make it green:
 
 - `NodeState`, the three-state model from section 5 of the design doc —
   unpacted, pacted-and-stale, pacted-and-fresh, with no "unknown" fourth state
@@ -39,6 +41,18 @@ feeds, and a loader that builds a coloured tree out of a real directory:
   `repository_root` for the upward walk that finds that manifest, `LoadError`
   for everything that can stop the load and `LoadProblem` for everything that
   merely spoiled one node of it. See [the loader](#the-loader-load_tree) below.
+- `Agent`, the port one model pass runs through — with `AgentRequest`,
+  `AgentResponse` and `AgentError` — which this crate defines and never
+  implements: running a model means running the `claude` CLI, and that
+  subprocess belongs to the binary on the far side of the seam.
+- `pact_subtree`, the operation a keystroke runs: write a `WARLOCK.md` for every
+  directory at and below the selected one, children first, then hash each of
+  them and grant it the hash just computed — with `pact_directory` for one
+  directory, `gather_request` for the context one pass is scoped to,
+  `unpact_subtree` for the reverse, and `PactObserver` / `Pacting` for saying
+  where a pact has got to and stopping it. See [a completed pact grants
+  freshness](#a-completed-pact-grants-freshness) below for what that means for
+  green.
 
 There is no hard-coded tree behind any of this. Every `Tree` is either built by
 a caller node by node with `Node::new` / `Tree::new`, or loaded from a real
@@ -72,16 +86,19 @@ lives at `.warlock/pacts.toml`, and `Manifest::save` / `Manifest::load` take
 the repository root and read and write `<root>/.warlock/pacts.toml` under it —
 the path `manifest_path` spells out.
 
-The crate reaches the filesystem in three ways and no others. It reads and
+The crate reaches the filesystem in four ways and no others. It reads and
 writes that manifest; it *walks* directories — via the `ignore` crate, so
 `.gitignore` at every level is respected, hidden directories such as `.git/` are
 skipped and a `target/` the repository ignores never appears, all without a
-hand-maintained list and never following a symlink; and it *reads the bytes* of
-the files under a pacted directory, in order to hash them. It reads
-those bytes and does not interpret them: no document is parsed, and the only
-thing that ever comes back out is a digest. That is the whole capability
-boundary: it still depends on no terminal crate, opens no sockets, spawns no
-subprocesses and contains no `unsafe`.
+hand-maintained list and never following a symlink; it *reads the bytes* of
+the files under a pacted directory, in order to hash them or to put them in a
+request; and it *writes a `WARLOCK.md`* for a directory a pact covered, verbatim
+from what came back, through the same write-beside-and-rename its manifest goes
+through. It reads those bytes and does not interpret them: no document is
+parsed, and the only thing a hash ever gives back is a digest. That is the whole
+capability boundary: it still depends on no terminal crate, opens no sockets,
+spawns no subprocesses — the `claude` child belongs to whoever implements
+`Agent`, which is never this crate — and contains no `unsafe`.
 
 ## Files are a listing, not children
 
@@ -119,9 +136,9 @@ under the repository root, and it is **committed to git** — a pact is a fact
 about the repository, not about one developer's checkout, so `.warlock` must
 never be added to `.gitignore`. One file rather than one file per module means
 a single read and a single atomic write, and a file that can be read as a
-document. The accepted cost is merge conflicts when two branches pact or
-refresh different modules; a conflict between two opaque hashes is resolved by
-re-running a refresh.
+document. The accepted cost is merge conflicts when two branches pact
+different modules; a conflict between two opaque hashes is resolved by pacting
+the module again.
 
 It is TOML because of section 9 of the design doc: the escape hatch. Whatever
 Warlock records has to be something a human can open, read, diff and hand-edit
@@ -215,10 +232,10 @@ comparing is `decide_state`'s. It is read from and written to a root the caller
 supplies: finding that root is the loader's job (`repository_root`), not the
 manifest's. There is no directory scan to discover modules, no file watching,
 no locking protocol and no migration tooling beyond rejecting versions it does
-not know. Nor does anything **write** a `granted_hash`: `Manifest::save` can,
-if a caller hands it an entry carrying one, but nothing outside this crate's own
-tests ever hands it one — see [nothing here grants
-freshness](#nothing-here-grants-freshness).
+not know. Nor does it **decide** a `granted_hash`: `Manifest::save` writes
+whatever grant an entry carries, and the one thing that ever puts one there is a
+finished subtree pact — see [a completed pact grants
+freshness](#a-completed-pact-grants-freshness).
 
 ## The subtree hash: `subtree_hash`
 
@@ -323,15 +340,28 @@ mechanical and needs nobody's opinion; freshness has to be granted. Hence the
 asymmetry — every path through this function returns stale except the single
 one where a recorded hash equals a computed one, compared as plain strings.
 
-### Nothing here grants freshness
+### A completed pact grants freshness
 
-There is no refresh pass in this workspace, no `claude` invocation, no
-prompting, no context scoping, and nothing but a test that ever writes a
-`granted_hash` into `.warlock/pacts.toml`. `NodeState::PactedFresh` is
-therefore reachable today **only by a human hand-writing a granted hash into
-the manifest** — which is exactly how the tests that cover the fresh case reach
-it. A repository used normally will show green nowhere until the granting half
-of the product exists.
+`decide_state` compares; it grants nothing. Granting happens in exactly one
+place — `pact_subtree`, in its second phase, once every document the pact was
+going to write is on disk: each directory it covered is hashed, and the entry
+built for it is granted the hash just computed. That is the only code in this
+workspace that writes a `granted_hash`, and it is what makes
+`NodeState::PactedFresh` reachable through the product rather than only by hand.
+A directory whose own document failed gets no entry at all, and its ancestors
+inside the pact get an entry with no grant, so nothing goes green that a pass
+did not actually describe.
+
+What is still missing is the other direction: **nothing re-grants a node that
+has gone stale.** Edit a file at or below a pacted directory and its hash moves,
+so it and every ancestor go yellow — and the only way back to green today is to
+pact the subtree again from scratch. A refresh pass that judges what changed and
+re-grants only what deserves it is the next project, and no part of it is in
+this crate yet.
+
+The crate's own tests still reach the fresh case the other way, by writing a
+granted hash into an entry by hand, because what they are exercising is the
+comparison and not where either side of it came from.
 
 ## The loader: `load_tree`
 
@@ -425,8 +455,9 @@ manifest, and:
   the colour is whatever `decide_state` makes of (entry, hash), by [the
   four-case rule](#the-decision-rule-decide_state) above.
 
-So a granted hash somebody wrote by hand, still matching what is on disk, now
-loads as `NodeState::PactedFresh`. A repository whose `.warlock/` holds no
+So a granted hash — one a pact recorded, or one somebody wrote by hand — that
+still matches what is on disk loads as `NodeState::PactedFresh`, and a directory
+edited since its pact loads yellow. A repository whose `.warlock/` holds no
 manifest, or an empty one, loads with every node `Unpacted`; a manifest that
 exists but cannot be understood is an error, not a silent empty one.
 
