@@ -58,7 +58,7 @@ use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, fmt, panic, thread};
 
 use ratatui::Terminal;
@@ -75,7 +75,8 @@ use warlock_engine::{
     unpact_subtree,
 };
 use warlock_tui::{
-    Activities, Activity, App, Cancel, ClaudeAgent, PactToggle, draw, reseat_on, tree_height,
+    Activities, Activity, App, Cancel, ClaudeAgent, PactToggle, draw, panel_height, reseat_on,
+    tree_height,
 };
 
 /// How long the loop waits for a keystroke before going round again.
@@ -195,8 +196,20 @@ fn run() -> Result<(), Error> {
         // frame is cut by. A terminal resized between frames is handled by that
         // alone — the next frame measures again, and the next frame is at most
         // one `POLL_INTERVAL` away.
-        app.set_viewport_height(tree_height(guard.terminal.size()?));
-        guard.terminal.draw(|frame| draw(frame, &app))?;
+        let size = guard.terminal.size()?;
+        app.set_viewport_height(tree_height(size));
+        // The panel's window is measured the same way and for the same reason,
+        // off the same size: `panel_height` and `tree_height` are two answers
+        // from the one layout, so both panes are scrolled by the height this
+        // frame is about to give them.
+        app.set_panel_height(panel_height(size));
+        // The instant this frame is being drawn at, read once and handed to the
+        // renderer: the panel's newest clock counts up against it, so a frame
+        // drawn with no event waiting still shows a run that is moving. See
+        // `draw`.
+        guard
+            .terminal
+            .draw(|frame| draw(frame, &app, Instant::now()))?;
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
         // sits here, so the wait has to end whether or not anybody presses

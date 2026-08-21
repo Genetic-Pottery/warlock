@@ -86,5 +86,8 @@ pub use claude::INVOCATION_TIMEOUT;
 pub use colour::colour_for;
 /// Draw one frame of the app.
 pub use ui::draw;
+/// How many lines of the pact's account a terminal of a given size has room for
+/// in the panel.
+pub use ui::panel_height;
 /// How many rows of tree a terminal of a given size has room for.
 pub use ui::tree_height;
