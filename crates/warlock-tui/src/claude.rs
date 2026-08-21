@@ -723,6 +723,173 @@ fn judge(status: ExitStatus, stdout: &[u8], stderr: &[u8]) -> Result<AgentRespon
     Ok(AgentResponse::new(text))
 }
 
+/// Reading the stream, and nothing to do with running anything.
+///
+/// Everything in here is a pure function over [`Value`]: a line of text goes
+/// in, a [`Reading`] comes out, and no part of it can spawn, block, fail or
+/// panic. That is deliberate and it is the whole design of this half — the
+/// process plumbing above has to be tested with stand-in programs and real
+/// pipes, while the schema of a vendor's JSON is tested from string literals
+/// in microseconds, and mixing the two would mean testing the second the
+/// expensive way forever.
+mod stream {
+    // Nothing above calls into here yet: the next slice replaces the drain of
+    // stdout with a reader that hands each line to [`read_line`]. The tests
+    // below do use all of it, so this attribute covers the plain library build
+    // only, and it goes when the wiring lands.
+    #![allow(dead_code)]
+
+    use serde_json::Value;
+
+    use super::Activity;
+
+    /// The tools whose one interesting argument is known, and which key holds
+    /// it.
+    ///
+    /// Six entries, copied verbatim from the same table in `forman.spawn`'s
+    /// `describe_activity`, and an abbreviation of nothing: a tool that is not
+    /// here is reported by name alone. The alternative — printing whatever the
+    /// call happened to carry — puts an arbitrary input dict on somebody's
+    /// screen, which is exactly the prose this front end refuses to show.
+    /// Adding a row is a one-line change, to be made when a real stream turns
+    /// up a tool that matters, not in advance of one.
+    ///
+    /// A list rather than a map because six pairs scanned linearly is faster
+    /// than hashing the name, and this reads as the table it is.
+    const DETAILS: [(&str, &str); 6] = [
+        ("Read", "file_path"),
+        ("Edit", "file_path"),
+        ("Write", "file_path"),
+        ("Glob", "pattern"),
+        ("Grep", "pattern"),
+        ("Bash", "command"),
+    ];
+
+    /// Everything one line of the stream had to say.
+    ///
+    /// A line is not one thing: an assistant message carries a list of content
+    /// blocks and so can be several activities at once, and the final line
+    /// carries both what the pass cost and the document it produced. So the
+    /// parse returns what it found rather than an enum of what it was, and a
+    /// line that meant nothing to us returns the default — empty, which is not
+    /// an error.
+    #[derive(Debug, Default, PartialEq)]
+    pub(super) struct Reading {
+        /// What the line said the pass was doing, in the order the line said
+        /// it.
+        pub(super) activities: Vec<Activity>,
+        /// The document, if this was the line that carried it.
+        pub(super) text: Option<String>,
+    }
+
+    /// What one line of `--output-format stream-json` means.
+    ///
+    /// Every level of every line is treated as optional, and nothing here can
+    /// fail: a line that is not JSON, or is JSON of a shape this code has
+    /// never seen, reads as [`Reading::default`] — no activities, no text, no
+    /// error. That is a deliberate posture rather than laziness. The stream's
+    /// schema belongs to a vendor who will add to it, and the cost of the two
+    /// mistakes is not symmetric: missing an activity costs a line of a panel
+    /// nobody was promised, while failing a pass over an unrecognised field
+    /// throws away minutes of work and a written document over a *decoration*.
+    /// Hence [`Value`] and `.get(...).and_then(...)` throughout, and no
+    /// `Deserialize` struct that would turn tomorrow's extra field into
+    /// today's hard error.
+    ///
+    /// Pure, and takes a `&str`: everything about reading the stream is
+    /// testable from a string literal, with no child process anywhere near it.
+    pub(super) fn read_line(line: &str) -> Reading {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            // Not JSON at all. `claude` is entitled to print a warning, and a
+            // warning is not a reason to fail a pass.
+            return Reading::default();
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("assistant") => Reading {
+                activities: read_activities(&value),
+                text: None,
+            },
+            Some("result") => read_result(&value),
+            // `system`, `user` — which is where tool results come back — and
+            // whatever is added next: all of it is somebody else's business.
+            _ => Reading::default(),
+        }
+    }
+
+    /// The activities in an assistant message's content blocks.
+    ///
+    /// Two of the block types say something worth showing and the rest say
+    /// nothing: a `tool_result` is the output of a command, which can be a
+    /// megabyte of file, and a `text` block is the model's prose. Neither is a
+    /// sign of life, both are unbounded, and so both come back as no activity
+    /// at all.
+    fn read_activities(value: &Value) -> Vec<Activity> {
+        value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .map(|blocks| blocks.iter().filter_map(read_block).collect())
+            .unwrap_or_default()
+    }
+
+    /// What one content block is doing, if it is doing anything.
+    fn read_block(block: &Value) -> Option<Activity> {
+        match block.get("type").and_then(Value::as_str)? {
+            "tool_use" => {
+                let name = block.get("name").and_then(Value::as_str)?;
+                Some(Activity::Tool {
+                    name: name.to_owned(),
+                    detail: read_detail(block, name),
+                })
+            }
+            // The bare fact, never the thought: see [`Activity::Thinking`].
+            "thinking" => Some(Activity::Thinking),
+            _ => None,
+        }
+    }
+
+    /// The one argument of `name`'s call worth putting on a line, if there is
+    /// one.
+    ///
+    /// `None` three ways, all of them ordinary: the tool is not in
+    /// [`DETAILS`], the call did not carry the key the table names, or what it
+    /// carried was not a string. A number or an object where a path was
+    /// expected is a tool whose shape has changed, and the honest answer to
+    /// that is the tool's name by itself.
+    fn read_detail(block: &Value, name: &str) -> Option<String> {
+        let (_, key) = DETAILS.iter().find(|(tool, _)| *tool == name)?;
+        block
+            .get("input")
+            .and_then(|input| input.get(key))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }
+
+    /// The document and the cost the final line carries.
+    ///
+    /// The text is the result line's own `result` field rather than the
+    /// assistant `text` blocks accumulated along the way, because that field
+    /// is *literally* what `--print` prints: same run, same field, so the
+    /// document is byte identical by construction instead of by a reassembly
+    /// this file would have to get right — joining blocks with the separator
+    /// the vendor happens to use, across as many assistant messages as the
+    /// pass took, minus the ones that were only a tool call. Nothing is gained
+    /// by rebuilding what the stream already hands over whole.
+    fn read_result(value: &Value) -> Reading {
+        let cost = value
+            .get("total_cost_usd")
+            .and_then(Value::as_f64)
+            .map(|usd| Activity::Cost { usd });
+        Reading {
+            activities: cost.into_iter().collect(),
+            text: value
+                .get("result")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }
+    }
+}
+
 /// Read everything `source` produces, on a thread of its own.
 fn drain<R: Read + Send + 'static>(source: R) -> JoinHandle<io::Result<Vec<u8>>> {
     thread::spawn(move || {
@@ -806,6 +973,7 @@ mod tests {
 
     use warlock_engine::{Agent, AgentError, AgentRequest};
 
+    use super::stream;
     use super::{Activities, Activity, Cancel, ClaudeAgent, INVOCATION_TIMEOUT};
 
     /// A name no directory on `PATH` can hold, so the lookup is guaranteed to
@@ -936,6 +1104,221 @@ mod tests {
         // Attaching one changes nothing else about the agent.
         assert_eq!(agent.program(), "claude");
         assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+    }
+
+    /// One assistant line carrying `blocks` as its content, the shape a real
+    /// stream uses.
+    fn assistant(blocks: &str) -> String {
+        format!(r#"{{"type":"assistant","message":{{"role":"assistant","content":[{blocks}]}}}}"#)
+    }
+
+    #[test]
+    fn each_whitelisted_tool_carries_its_one_argument_and_the_rest_carry_none() {
+        // The table verbatim, and the point of the last row: a tool nobody
+        // wrote down is shown by name, not by dumping whatever its call
+        // carried.
+        let expected = [
+            ("Read", r#"{"file_path":"src/lib.rs"}"#, Some("src/lib.rs")),
+            (
+                "Edit",
+                r#"{"file_path":"src/main.rs"}"#,
+                Some("src/main.rs"),
+            ),
+            (
+                "Write",
+                r#"{"file_path":"docs/plan.md"}"#,
+                Some("docs/plan.md"),
+            ),
+            ("Glob", r#"{"pattern":"**/*.rs"}"#, Some("**/*.rs")),
+            ("Grep", r#"{"pattern":"fn main"}"#, Some("fn main")),
+            ("Bash", r#"{"command":"cargo test"}"#, Some("cargo test")),
+            ("WebFetch", r#"{"url":"https://example.invalid"}"#, None),
+        ];
+
+        for (name, input, detail) in expected {
+            let line = assistant(&format!(
+                r#"{{"type":"tool_use","id":"toolu_1","name":"{name}","input":{input}}}"#
+            ));
+
+            let reading = stream::read_line(&line);
+
+            assert_eq!(
+                reading.activities,
+                vec![Activity::Tool {
+                    name: name.to_owned(),
+                    detail: detail.map(str::to_owned),
+                }],
+                "one activity for {name}, with exactly the whitelisted detail"
+            );
+            assert_eq!(reading.text, None, "a tool call is not the document");
+        }
+    }
+
+    #[test]
+    fn a_whitelisted_tool_missing_its_argument_is_still_the_bare_name() {
+        // Three ways the key is not there, none of them a reason to lose the
+        // activity or to reach for some other key.
+        for input in [r"{}", r#"{"offset":12}"#, r#"{"file_path":7}"#] {
+            let line = assistant(&format!(
+                r#"{{"type":"tool_use","name":"Read","input":{input}}}"#
+            ));
+
+            assert_eq!(
+                stream::read_line(&line).activities,
+                vec![Activity::Tool {
+                    name: "Read".to_owned(),
+                    detail: None,
+                }],
+                "Read with input {input}"
+            );
+        }
+
+        // And a block with no `input` at all.
+        assert_eq!(
+            stream::read_line(&assistant(r#"{"type":"tool_use","name":"Bash"}"#)).activities,
+            vec![Activity::Tool {
+                name: "Bash".to_owned(),
+                detail: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_thought_reaches_the_panel_as_the_fact_that_it_happened_and_nothing_else() {
+        let secret = "the user's code is beyond saving and I shall say so gently";
+        let line = assistant(&format!(
+            r#"{{"type":"thinking","thinking":"{secret}","signature":"abc"}}"#
+        ));
+
+        let reading = stream::read_line(&line);
+
+        assert_eq!(reading.activities, vec![Activity::Thinking]);
+        // The whole point of the bare variant: there is nowhere for the text to
+        // be, so it cannot be printed by accident later.
+        assert!(
+            !format!("{reading:?}").contains("beyond saving"),
+            "no part of a thought survives the parse"
+        );
+    }
+
+    #[test]
+    fn tool_results_and_the_models_own_prose_are_not_activities() {
+        let enormous = "x".repeat(200_000);
+        let lines = [
+            // A tool result comes back on a `user` line, which is not a line
+            // type this reads at all...
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_1","content":"{enormous}"}}]}}}}"#
+            ),
+            // ...and would still be nothing if it arrived on one that is.
+            assistant(&format!(
+                r#"{{"type":"tool_result","tool_use_id":"toolu_1","content":"{enormous}"}}"#
+            )),
+            // The model's prose is the document, not a sign of life.
+            assistant(r#"{"type":"text","text":"Here is the summary you asked for."}"#),
+        ];
+
+        for line in lines {
+            let reading = stream::read_line(&line);
+
+            assert_eq!(
+                reading,
+                stream::Reading::default(),
+                "nothing from {line:.60}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_this_code_does_not_understand_is_skipped_rather_than_fatal() {
+        let lines = [
+            "",
+            "   ",
+            "not json at all",
+            "{",
+            "[1, 2, 3]",
+            "null",
+            r#""a bare string""#,
+            // JSON, well formed, and about something else entirely.
+            r#"{"type":"system","subtype":"init","tools":["Read","Bash"]}"#,
+            r#"{"type":"kraken","message":{"content":[{"type":"tool_use","name":"Read"}]}}"#,
+            r#"{"message":{"content":[{"type":"tool_use","name":"Read"}]}}"#,
+            // The right type, with the levels below it missing or the wrong
+            // shape.
+            r#"{"type":"assistant"}"#,
+            r#"{"type":"assistant","message":{"content":"not a list"}}"#,
+            &assistant(r#"{"type":"tool_use"}"#),
+            &assistant(r#"{"no":"type"}"#),
+        ];
+
+        for line in lines {
+            assert_eq!(
+                stream::read_line(line),
+                stream::Reading::default(),
+                "nothing, and no panic, from {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_final_line_carries_the_document_and_what_the_pass_cost() {
+        let line = r##"{"type":"result","subtype":"success","is_error":false,"duration_ms":8123,"result":"# Warlock\n\nThe freshness ledger.\n","total_cost_usd":0.0342,"usage":{"input_tokens":11}}"##;
+
+        let reading = stream::read_line(line);
+
+        assert_eq!(reading.activities, vec![Activity::Cost { usd: 0.0342 }]);
+        // Verbatim, including the trailing newline: this field is what
+        // `--print` prints.
+        assert_eq!(
+            reading.text.as_deref(),
+            Some("# Warlock\n\nThe freshness ledger.\n")
+        );
+    }
+
+    #[test]
+    fn a_result_line_missing_a_half_still_gives_up_the_other_one() {
+        let costless = stream::read_line(r#"{"type":"result","result":"a document"}"#);
+        assert_eq!(costless.activities, vec![]);
+        assert_eq!(costless.text.as_deref(), Some("a document"));
+
+        let textless = stream::read_line(r#"{"type":"result","total_cost_usd":1.5}"#);
+        assert_eq!(textless.activities, vec![Activity::Cost { usd: 1.5 }]);
+        assert_eq!(textless.text, None);
+
+        // A cost that is not a number is no cost, not a failed pass.
+        let nonsense = stream::read_line(r#"{"type":"result","total_cost_usd":"lots"}"#);
+        assert_eq!(nonsense, stream::Reading::default());
+    }
+
+    #[test]
+    fn one_line_of_several_blocks_is_several_activities_in_order() {
+        // What a real assistant message looks like when the model thinks, says
+        // something, then calls two tools.
+        let line = assistant(concat!(
+            r#"{"type":"thinking","thinking":"which file"},"#,
+            r#"{"type":"text","text":"Let me look."},"#,
+            r#"{"type":"tool_use","name":"Grep","input":{"pattern":"TODO","path":"src"}},"#,
+            r#"{"type":"tool_use","name":"Read","input":{"file_path":"src/app.rs"}}"#
+        ));
+
+        let reading = stream::read_line(&line);
+
+        assert_eq!(
+            reading.activities,
+            vec![
+                Activity::Thinking,
+                Activity::Tool {
+                    name: "Grep".to_owned(),
+                    // The whitelisted key, not the first key, and not both.
+                    detail: Some("TODO".to_owned()),
+                },
+                Activity::Tool {
+                    name: "Read".to_owned(),
+                    detail: Some("src/app.rs".to_owned()),
+                },
+            ]
+        );
+        assert_eq!(reading.text, None);
     }
 
     #[test]
