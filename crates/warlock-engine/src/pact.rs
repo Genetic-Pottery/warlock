@@ -71,7 +71,11 @@
 //! not reformatted, no sections looked for. Warlock does not read `WARLOCK.md`
 //! — it cares that one exists and what its bytes hash to — and section 17's
 //! question about a document skeleton is open, so this module writes the
-//! answer rather than an opinion about the answer.
+//! answer rather than an opinion about the answer. It is written the way
+//! [`Manifest::save`] writes a manifest, through the same two helpers: to a
+//! hidden temporary beside it, then renamed over the document. A pact is long
+//! enough to be worth cancelling, so a front end has to be free to kill the
+//! pass and quit at any moment without leaving half a `WARLOCK.md` on disk.
 //!
 //! A response is turned down in exactly two cases: the [`Agent`] came back with
 //! an [`AgentError`] instead of an answer, or the answer is shorter than
@@ -108,6 +112,32 @@
 //! rule is pacted and stale, i.e. yellow. That is what the manifest's optional
 //! grant was for, so partial completion needs no new state and no new field.
 //!
+//! # Saying where a pact is, and stopping it
+//!
+//! A subtree pact is minutes of model passes, so [`pact_subtree`] takes an
+//! [`Observer`]: before each directory it says which one is next, what number it
+//! is out of how many, and it listens to the answer. [`Pacting::Stop`] ends the
+//! descent there and then, and [`Unwatched`] is the answer for a caller with
+//! nothing to show and nothing to cancel.
+//!
+//! Two things this deliberately is not. It is not a *progress channel* — the
+//! engine hands a borrowed path to a caller-supplied trait object, with no
+//! [`Send`], no [`Sync`], no queue and no opinion about which thread a pact runs
+//! on; a front end that wants those wraps them around this. And it is not a
+//! *kill switch* for the pass in flight: the question is asked **between**
+//! directories only, because the running `claude` belongs to whoever spawned it
+//! (see the crate docs on the [`Agent`] seam) and this crate has no way to reach
+//! it. The longest a cancel can take, then, is one directory's pass.
+//!
+//! Cancelling is not failing. A stopped pact is a pact that covered fewer
+//! directories, so it reports no [`Failure`] of its own, and phase two runs on
+//! exactly what phase one got written: the directories reached keep their
+//! documents and earn their entries by the rule above, and the ones never
+//! reached are simply undocumented — no entry, gray. Since the walk is children
+//! before parents, stopping part way always stops before the ancestors of what
+//! is left, so a cancel takes out whole prefixes of the order rather than
+//! punching holes in it.
+//!
 //! # Un-pacting keeps the documents
 //!
 //! [`unpact_subtree`] is the reverse, and it is deliberately not symmetric: it
@@ -128,6 +158,7 @@ use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
 
+use crate::manifest::{temp_file_name, write_and_sync};
 use crate::{
     Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, HashError, Manifest,
     ManifestError, PactEntry, now_rfc3339, subtree_hash, to_manifest_path,
@@ -254,8 +285,9 @@ level-one Markdown heading naming the directory.";
 ///
 /// The operation a keystroke runs. `directory` is the selected directory,
 /// `root` is the repository root the manifest's paths are relative to,
-/// `manifest` is what `.warlock/pacts.toml` says today, and what comes back is
-/// what it should say tomorrow — **this function saves nothing**. A pact writes
+/// `manifest` is what `.warlock/pacts.toml` says today, `observer` is told where
+/// the pact has got to and may stop it, and what comes back is what the manifest
+/// should say tomorrow — **this function saves nothing**. A pact writes
 /// its manifest once, at the end, through [`Manifest::save`], and doing that is
 /// the caller's business for the same reason [`pact_directory`] records
 /// nothing: the code that owns the file is the code that decides when it is
@@ -266,7 +298,10 @@ level-one Markdown heading naming the directory.";
 /// **Phase one writes.** [`pact_directory`] runs over every directory
 /// [`pactable_directories`] found, children before parents, so each parent's
 /// pass is handed the documents its children have just written. Nothing is
-/// hashed and nothing is recorded here.
+/// hashed and nothing is recorded here. Before each directory `observer` is
+/// told which one is about to be pacted, its position — 1-based, so the first
+/// directory is 1 of `total` — and how many there are altogether; a total that
+/// never changes over one call.
 ///
 /// **Phase two hashes and grants**, and only starts once phase one has
 /// finished for every directory. A directory's [`subtree_hash`] covers its
@@ -296,11 +331,24 @@ level-one Markdown heading naming the directory.";
 ///   written and there is no hash to grant against, so the entry goes in
 ///   ungranted rather than the pact falling over.
 ///
+/// # Stopping part way
+///
+/// An `observer` that answers [`Pacting::Stop`] ends phase one there: the
+/// directory it was just offered is not pacted, nor is any directory after it,
+/// and phase two runs immediately over what phase one did write. So a cancelled
+/// pact comes back as a smaller pact rather than as an error — no [`Failure`] is
+/// invented for a directory nobody asked for — and the manifest it hands back is
+/// the ordinary one for a subtree that is documented in part: entries, hashed
+/// and granted, for the directories that finished, and no entry at all for the
+/// ones never reached. The question is asked between directories only; the pass
+/// already running is not interrupted, because the process behind it is the
+/// caller's ([`Agent`]) and not this crate's.
+///
 /// ```
 /// use std::fs;
 /// use warlock_engine::{
 ///     Agent, AgentError, AgentRequest, AgentResponse, Manifest, NodeState, PactedSubtree,
-///     decide_state, pact_subtree, subtree_hash,
+///     Unwatched, decide_state, pact_subtree, subtree_hash,
 /// };
 ///
 /// /// The engine's own tests reach a model exactly like this: they don't.
@@ -318,8 +366,9 @@ level-one Markdown heading naming the directory.";
 /// fs::write(engine.join("src").join("lib.rs"), "//! Core engine.\n")?;
 /// let markdown = format!("# engine\n\n{}\n", "Core engine for warlock. ".repeat(20));
 ///
+/// // `Unwatched` is the caller with nothing to report and nothing to cancel.
 /// let PactedSubtree { manifest, failures, .. } =
-///     pact_subtree(&engine, repo.path(), &Manifest::new(), &Canned(markdown))?;
+///     pact_subtree(&engine, repo.path(), &Manifest::new(), &Canned(markdown), &mut Unwatched)?;
 ///
 /// assert!(failures.is_empty());
 /// assert_eq!(manifest.entries().len(), 2, "the directory, and the one below it");
@@ -339,12 +388,13 @@ level-one Markdown heading naming the directory.";
 /// half a walk would silently leave directories out. Everything that goes wrong
 /// after that goes wrong for one directory, and comes back as a [`Failure`] in
 /// [`PactedSubtree::failures`] alongside the manifest the rest of the subtree
-/// earned.
+/// earned. A cancelled pact is not an error either — see above.
 pub fn pact_subtree(
     directory: impl AsRef<Path>,
     root: impl AsRef<Path>,
     manifest: &Manifest,
     agent: &dyn Agent,
+    observer: &mut dyn Observer,
 ) -> Result<PactedSubtree, Error> {
     let (directory, root) = (directory.as_ref(), root.as_ref());
     let directories = pactable_directories(directory)?;
@@ -355,9 +405,22 @@ pub fn pact_subtree(
     // Phase one: every document, children before parents, and nothing else.
     // `documents` is what got written and `undocumented` is what did not; both
     // are read in phase two and neither is acted on before it.
+    let total = directories.len();
     let mut documents = BTreeMap::new();
     let mut undocumented = Vec::new();
-    for pacted in &directories {
+    for (index, pacted) in directories.iter().enumerate() {
+        // Asked before the pass, not after it, so a front end names the
+        // directory that is being worked rather than the one that just
+        // finished — and so a cancel arriving now costs no pass at all.
+        if observer.starting(pacted, index + 1, total) == Pacting::Stop {
+            // Everything from here down is undocumented by this run, this
+            // directory included: it was offered and turned down. Recorded the
+            // same way a failure is, so phase two's partial rule needs to know
+            // nothing about cancellation — but with no `Failure` beside it,
+            // because nobody asked for these and nothing went wrong.
+            undocumented.extend(directories[index..].iter().cloned());
+            break;
+        }
         match pact_directory(pacted, agent) {
             Ok(Pacted {
                 document,
@@ -559,6 +622,14 @@ fn at_or_below(module: &str, selected: &str) -> bool {
 /// directory's files, and it is overwritten here as the ordinary outcome of a
 /// pass that was asked to write one.
 ///
+/// The write is **atomic**: the bytes go to a hidden temporary file in the same
+/// directory and are renamed over `WARLOCK.md`, so `WARLOCK.md` holds the whole
+/// old document or the whole new one and never a prefix of either — not even if
+/// the process is killed in the middle of a pact. The temporary is never
+/// visible to this crate's walks (hidden entries are skipped, so it reaches no
+/// tree, no [`subtree_hash`] and no request) and is left behind on neither the
+/// success nor the failure path.
+///
 /// Nothing is recorded. No manifest entry, no subtree hash, no grant: this is
 /// one request, one response, one file, and a caller that wants the directory
 /// to go green does that afterwards with what it knows about the rest of the
@@ -610,10 +681,10 @@ fn at_or_below(module: &str, selected: &str) -> bool {
 ///   [`MINIMUM_DOCUMENT_BYTES`] trimmed. **Nothing is written on this path**:
 ///   a directory with no document still has none, and an existing document is
 ///   byte-identical to what it was before.
-/// * [`Error::Write`] if the document could not be written. A different kind of
+/// * [`Error::Write`] if the document could not be written, whether the
+///   temporary file or the rename over it was what failed. A different kind of
 ///   failure from a refusal — the answer was good and the disk said no — and
-///   the only one that can leave the filesystem in a state the caller did not
-///   ask for.
+///   either way `WARLOCK.md` is byte for byte what it was before.
 pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<Pacted, Error> {
     let directory = directory.as_ref();
     let Gathered { request, problems } = gather_request(PROMPT, directory)?;
@@ -635,16 +706,29 @@ pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<
         });
     }
 
-    // A plain overwrite, where `Manifest::save` writes a temporary file and
-    // renames it. The idiom is not copied here on purpose: a torn manifest is a
-    // data file Warlock reads back and would misread, while a torn `WARLOCK.md`
-    // is documentation nobody parses that the next pass overwrites whole. The
-    // temporary file, meanwhile, would land in the very directory just
-    // described — a file in the tree, in the next subtree hash, and in the next
-    // request — which is a worse thing to risk than the tear it prevents.
+    // Written beside and renamed over, the same idiom as `Manifest::save` and
+    // through the same two helpers. A pact is minutes of model passes that a
+    // user is invited to cancel, and a front end that quits mid-pact — killing
+    // the pass, restoring the terminal, and never waiting for this function to
+    // come back — must not be able to leave half a document behind. A rename is
+    // the only way to make that safe: the file is the old document or the new
+    // one, never a prefix of either. The temporary lands in the directory just
+    // described, which is exactly why it is named with a leading dot: hidden
+    // entries are skipped by every [`ignore`] walk in this crate, so it is in no
+    // tree, no subtree hash and no request for the moment it exists, and it is
+    // removed on both ways out.
     let document = directory.join(DOCUMENT_FILE);
-    if let Err(source) = fs::write(&document, &text) {
+    let temp = directory.join(temp_file_name(DOCUMENT_FILE));
+    let write = write_and_sync(&temp, text.as_bytes()).and_then(|()| fs::rename(&temp, &document));
+    if let Err(source) = write {
+        // Best effort, and nothing to report if it fails: the caller is already
+        // being told the document was not written, and a stray dot file is
+        // invisible to everything this crate does.
+        drop(fs::remove_file(&temp));
         return Err(Error::Write {
+            // The document, not the temporary: the caller asked for
+            // `WARLOCK.md` and the mechanics of how it is written are this
+            // function's business, not something to name in an error.
             directory: directory.to_path_buf(),
             path: document,
             source,
@@ -982,6 +1066,89 @@ fn byte_count(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
+/// Where a subtree pact has got to, and whether it should carry on: the port a
+/// front end shows progress through and cancels through.
+///
+/// [`pact_subtree`] calls [`starting`](Observer::starting) once per directory,
+/// just before that directory's pass, in the order the pact reaches them —
+/// children before parents. The engine asks; what is done with the answer is
+/// entirely the caller's: draw a line, send it down a channel, count it, ignore
+/// it.
+///
+/// # What this trait is careful not to require
+///
+/// **No [`Send`], no [`Sync`], no `'static`.** The engine does not decide which
+/// thread a pact runs on, so it asks for nothing that would decide it. A front
+/// end that runs the pact on a worker thread already owns that choice and can
+/// give its observer whatever bounds *it* needs; one that pacts on the thread it
+/// is already on can hand over a plain `&mut` to something on its own stack.
+///
+/// **Nothing about the pass in flight.** Cancellation is a question asked
+/// between directories, so [`Pacting::Stop`] never interrupts a model pass that
+/// is already running — killing a subprocess is the business of whoever spawned
+/// it, which by the [`Agent`] seam is never this crate. Answering `Stop` while a
+/// pass runs means the pact ends when that pass comes back.
+///
+/// ```
+/// use std::path::{Path, PathBuf};
+/// use warlock_engine::{Pacting, PactObserver};
+///
+/// /// Remembers where the pact got to, and gives up after two directories.
+/// struct Impatient(Vec<PathBuf>);
+///
+/// impl PactObserver for Impatient {
+///     fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
+///         assert!((1..=total).contains(&position), "1-based, and inside the total");
+///         self.0.push(directory.to_path_buf());
+///         if position > 2 { Pacting::Stop } else { Pacting::Continue }
+///     }
+/// }
+/// ```
+pub trait Observer {
+    /// `directory` is about to be pacted: it is number `position` of `total`,
+    /// counting from one.
+    ///
+    /// `total` is every directory the pact covers and is the same on every call
+    /// of one pact, so `position` of `total` is a fraction that only goes
+    /// forwards. The answer decides whether `directory` is pacted at all:
+    /// [`Pacting::Continue`] runs its pass, [`Pacting::Stop`] ends the pact
+    /// before it, leaving `directory` and everything after it undocumented.
+    fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting;
+}
+
+/// What an [`Observer`] says about the directory it was just offered: pact it,
+/// or stop here.
+///
+/// Two variants and a name for each, rather than a `bool`: a call site reading
+/// `Pacting::Stop` needs nothing explained to it, and `false` at the end of a
+/// progress callback could as easily mean "nothing to report".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pacting {
+    /// Pact this directory, and go on to ask about the next one.
+    Continue,
+    /// Stop: leave this directory unpacted, pact nothing after it, and finish
+    /// the pact with the documents already written. Not a failure — see
+    /// [`pact_subtree`] for what the manifest then says.
+    Stop,
+}
+
+/// The [`Observer`] for a caller that has nothing to show and nothing to
+/// cancel: it watches every directory go past and always answers
+/// [`Pacting::Continue`].
+///
+/// A pact through `&mut Unwatched` is the pact this function had before there
+/// was an observer at all, which is what makes it worth a name: an example, a
+/// test or a script says `&mut Unwatched` and the reader can stop thinking about
+/// progress there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Unwatched;
+
+impl Observer for Unwatched {
+    fn starting(&mut self, _directory: &Path, _position: usize, _total: usize) -> Pacting {
+        Pacting::Continue
+    }
+}
+
 /// What a subtree pact produced: the manifest to save, and everything that went
 /// wrong on the way without stopping it.
 ///
@@ -1237,10 +1404,16 @@ pub enum Error {
     /// failure with a different answer: nothing is wrong with the model, the
     /// disk is full or the directory is read-only, and a caller retrying the
     /// pass is retrying the expensive half of something that already worked.
+    ///
+    /// The write is atomic, so this is also the variant that says the document
+    /// on disk is untouched: whatever `WARLOCK.md` held before the pass, it
+    /// still holds.
     Write {
         /// The directory that was being pacted.
         directory: PathBuf,
-        /// The document that could not be written.
+        /// The document that could not be written: `<directory>/WARLOCK.md`,
+        /// never the temporary the write went through — that is a mechanism,
+        /// not something a user asked for or can act on.
         path: PathBuf,
         /// What the filesystem said.
         source: std::io::Error,
@@ -1404,9 +1577,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        DOCUMENT_FILE, Failure, Gathered, MINIMUM_DOCUMENT_BYTES, Omission, PER_FILE_BYTE_CAP,
-        Pacted, PactedSubtree, Problem, REQUEST_BYTE_CAP, Refusal, gather_request, pact_directory,
-        pact_subtree, pactable_directories, unpact_subtree,
+        DOCUMENT_FILE, Failure, Gathered, MINIMUM_DOCUMENT_BYTES, Observer, Omission,
+        PER_FILE_BYTE_CAP, Pacted, PactedSubtree, Pacting, Problem, REQUEST_BYTE_CAP, Refusal,
+        Unwatched, gather_request, pact_directory, pact_subtree, pactable_directories,
+        unpact_subtree,
     };
     use crate::{
         Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, AgentResponse, Loaded,
@@ -1990,6 +2164,95 @@ mod tests {
     }
 
     #[test]
+    fn how_the_document_is_written_is_invisible_to_a_subtree_hash() {
+        // Two identical directories, one written through the pact's rename and
+        // one written by hand. The digests have to agree: the temporary the
+        // pact goes through is hidden, so it is in no walk, and nothing about
+        // the mechanism can reach a hash or a request.
+        let answer = document(300);
+        let (pacted, plain) = (
+            tempfile::tempdir().expect("a temporary directory"),
+            tempfile::tempdir().expect("a temporary directory"),
+        );
+        for dir in [pacted.path(), plain.path()] {
+            write(dir, "lib.rs", "//! Core engine.\n");
+        }
+
+        pact_directory(pacted.path(), &Canned::new(&answer)).expect("pacts");
+        write(plain.path(), DOCUMENT_FILE, &answer);
+
+        assert_eq!(
+            subtree_hash(pacted.path()).expect("hashes"),
+            subtree_hash(plain.path()).expect("hashes"),
+        );
+        assert!(
+            file_paths(&request_for(pacted.path())).contains(&DOCUMENT_FILE),
+            "and the next request carries the document, and only the document",
+        );
+        assert_eq!(
+            file_paths(&request_for(pacted.path())),
+            ["WARLOCK.md", "lib.rs"]
+        );
+    }
+
+    /// Only on unix, because there is no portable way to make a directory
+    /// unwritable. What is under test — that a document the filesystem refuses
+    /// is [`Error::Write`], naming the document — is not platform-specific.
+    #[cfg(unix)]
+    #[test]
+    fn a_document_that_cannot_be_written_names_itself_and_leaves_the_old_one() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let before = "# engine\n\nWhat it used to say.\n";
+        write(dir.path(), DOCUMENT_FILE, before);
+        // Readable and listable, so the gather still works, but nothing new can
+        // be created in it — neither the temporary nor a rename over the
+        // document.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).expect("chmods");
+        if fs::write(dir.path().join("probe"), "").is_ok() {
+            // Running as root: no directory is unwritable, so there is nothing
+            // here to assert against.
+            fs::remove_file(dir.path().join("probe")).expect("removes the probe");
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755))
+                .expect("chmods back");
+            return;
+        }
+
+        let error = pact_directory(dir.path(), &Canned::new(document(300)))
+            .expect_err("a read-only directory takes no document");
+
+        match &error {
+            super::Error::Write { path, .. } => {
+                assert_eq!(
+                    path,
+                    &dir.path().join(DOCUMENT_FILE),
+                    "the document, not the temporary"
+                );
+            }
+            other => panic!("expected a write failure, got {other:?}"),
+        }
+        assert_eq!(error.directory(), dir.path());
+        assert_eq!(
+            written(dir.path()).as_deref(),
+            Some(before.as_bytes()),
+            "the write is atomic, so a failure leaves the old document whole",
+        );
+
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).expect("chmods back");
+        let mut left = fs::read_dir(dir.path())
+            .expect("lists")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(
+            left,
+            [DOCUMENT_FILE],
+            "and no temporary behind on the failure path"
+        );
+    }
+
+    #[test]
     fn an_existing_document_is_overwritten_unconditionally() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         write(
@@ -2511,6 +2774,67 @@ mod tests {
         }
     }
 
+    /// The whole front-end side of a pact with no front end in it: an observer
+    /// that writes down every call and can stop the descent.
+    struct Watching {
+        /// How many directories are let through before the next one offered is
+        /// turned down, or `None` for an observer that never cancels.
+        stop_after: Option<usize>,
+        /// Every call, in order: the directory offered, its position and the
+        /// total it was one of.
+        calls: Vec<(PathBuf, usize, usize)>,
+    }
+
+    impl Watching {
+        /// An observer that only watches: every directory is pacted.
+        fn patient() -> Self {
+            Self {
+                stop_after: None,
+                calls: Vec::new(),
+            }
+        }
+
+        /// An observer that lets `directories` directories be pacted and stops
+        /// the pact at the next one it is offered.
+        fn stopping_after(directories: usize) -> Self {
+            Self {
+                stop_after: Some(directories),
+                calls: Vec::new(),
+            }
+        }
+
+        /// What it was told, with each directory named relative to `root`.
+        fn calls(&self, root: &Path) -> Vec<(String, usize, usize)> {
+            self.calls
+                .iter()
+                .map(|(directory, position, total)| {
+                    let named = relative_to(root, std::slice::from_ref(directory))
+                        .pop()
+                        .expect("one directory in, one name out");
+                    (named, *position, *total)
+                })
+                .collect()
+        }
+
+        /// The directories it was offered, in the order they were offered.
+        fn offered(&self) -> Vec<PathBuf> {
+            self.calls
+                .iter()
+                .map(|(directory, ..)| directory.clone())
+                .collect()
+        }
+    }
+
+    impl Observer for Watching {
+        fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
+            self.calls.push((directory.to_path_buf(), position, total));
+            match self.stop_after {
+                Some(limit) if position > limit => Pacting::Stop,
+                _ => Pacting::Continue,
+            }
+        }
+    }
+
     /// A repository with files in it, so that the directories below have
     /// something to hash and something to be described from.
     ///
@@ -2562,7 +2886,14 @@ mod tests {
         let engine = repo.path().join("crates/engine");
         let agent = Canned::new(document(300));
 
-        pact_subtree(&engine, repo.path(), &Manifest::new(), &agent).expect("pacts");
+        pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("pacts");
 
         let seen: Vec<PathBuf> = agent
             .seen
@@ -2624,6 +2955,7 @@ mod tests {
             repo.path(),
             &Manifest::new(),
             &Canned::new(document(300)),
+            &mut Unwatched,
         )
         .expect("pacts");
 
@@ -2686,9 +3018,14 @@ mod tests {
         .with_grant("0".repeat(64), "2020-01-01T00:00:00Z");
         let before = Manifest::with_entries([outside.clone(), inside]);
 
-        let PactedSubtree { manifest, .. } =
-            pact_subtree(&engine, repo.path(), &before, &Canned::new(document(300)))
-                .expect("pacts");
+        let PactedSubtree { manifest, .. } = pact_subtree(
+            &engine,
+            repo.path(),
+            &before,
+            &Canned::new(document(300)),
+            &mut Unwatched,
+        )
+        .expect("pacts");
 
         assert_eq!(
             modules(&manifest),
@@ -2757,8 +3094,14 @@ mod tests {
 
         let PactedSubtree {
             manifest, failures, ..
-        } = pact_subtree(&engine, repo.path(), &Manifest::new(), &agent)
-            .expect("one directory failing is not the pact failing");
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("one directory failing is not the pact failing");
 
         assert!(
             manifest.entry("crates/engine/src/inner").is_none(),
@@ -2825,6 +3168,7 @@ mod tests {
             repo.path(),
             &Manifest::new(),
             &Canned::new(document(300)),
+            &mut Unwatched,
         )
         .expect("pacts");
 
@@ -2887,6 +3231,7 @@ mod tests {
             repo.path(),
             &Manifest::new(),
             &Canned::new(document(300)),
+            &mut Unwatched,
         )
         .expect("a file nobody can read never fails the pact");
 
@@ -2922,6 +3267,210 @@ mod tests {
         );
 
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).expect("chmods back");
+    }
+
+    // Progress and cancellation: the observer port.
+
+    #[test]
+    fn every_directory_is_announced_once_before_it_is_pacted() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let agent = Canned::new(document(300));
+        let mut observer = Watching::patient();
+
+        let PactedSubtree { failures, .. } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &agent,
+            &mut observer,
+        )
+        .expect("pacts");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            observer.calls(repo.path()),
+            [
+                ("crates/engine/tests".to_owned(), 1, 4),
+                ("crates/engine/src/inner".to_owned(), 2, 4),
+                ("crates/engine/src".to_owned(), 3, 4),
+                ("crates/engine".to_owned(), 4, 4),
+            ],
+            "once per directory, in the pact's own order, 1-based, out of a \
+             total that does not move while the pact runs",
+        );
+        assert_eq!(
+            observer.offered(),
+            agent
+                .seen
+                .borrow()
+                .iter()
+                .map(|request| request.directory().to_path_buf())
+                .collect::<Vec<_>>(),
+            "and each one names the directory whose pass runs next, not the one \
+             that has just finished",
+        );
+    }
+
+    #[test]
+    fn a_cancelled_pact_stops_between_directories_and_keeps_what_it_wrote() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let mut observer = Watching::stopping_after(2);
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &Canned::new(document(300)),
+            &mut observer,
+        )
+        .expect("a pact somebody stopped is not a pact that failed");
+
+        assert_eq!(
+            observer.calls(repo.path()).len(),
+            3,
+            "the third directory was offered and turned down, and there was no \
+             fourth question: {:?}",
+            observer.calls(repo.path()),
+        );
+        assert!(
+            failures.is_empty(),
+            "nothing went wrong — fewer directories were asked for: {failures:?}",
+        );
+
+        for documented in ["crates/engine/tests", "crates/engine/src/inner"] {
+            let directory = from_manifest_path(repo.path(), documented);
+            assert!(
+                written(&directory).is_some(),
+                "`{documented}` was pacted before the cancel, so its document stays on disk",
+            );
+        }
+        for untouched in ["crates/engine/src", "crates/engine"] {
+            let directory = from_manifest_path(repo.path(), untouched);
+            assert_eq!(
+                written(&directory),
+                None,
+                "`{untouched}` is at or past the cancel, so no pass ran for it",
+            );
+        }
+
+        assert_eq!(
+            modules(&manifest),
+            ["crates/engine/src/inner", "crates/engine/tests"],
+            "a directory the pact never reached is undocumented by this run, \
+             and an undocumented directory gets no entry",
+        );
+        for module in modules(&manifest) {
+            assert_eq!(
+                state(&manifest, repo.path(), module),
+                NodeState::PactedFresh,
+                "`{module}` is a whole subtree this run documented, so it is \
+                 granted like any other",
+            );
+        }
+    }
+
+    #[test]
+    fn a_cancel_leaves_a_documented_ancestor_of_a_failure_pacted_without_a_grant() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let failing = engine.join("src").join("inner");
+        let agent = FailsFor {
+            directory: failing.clone(),
+            text: document(300),
+        };
+        // Everything but the selected directory itself, so the run holds all
+        // three cases at once: `crates/engine/tests` finished, `crates/engine/src`
+        // is documented above a directory that is not, and `crates/engine` is
+        // never reached.
+        let mut observer = Watching::stopping_after(3);
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &agent,
+            &mut observer,
+        )
+        .expect("neither a failure nor a cancel fails the pact");
+
+        assert!(
+            manifest.entry("crates/engine/src/inner").is_none(),
+            "no document, no entry — the cancel changes none of that rule",
+        );
+        let src = manifest
+            .entry("crates/engine/src")
+            .expect("documented, so pacted");
+        assert_eq!(
+            src.granted_hash(),
+            None,
+            "it has an undocumented descendant, so it earned no grant",
+        );
+        assert_eq!(
+            state(&manifest, repo.path(), "crates/engine/src"),
+            NodeState::PactedStale,
+            "which renders yellow, by the existing freshness rule",
+        );
+        assert!(
+            manifest.entry("crates/engine").is_none(),
+            "and the directory the cancel landed on was never pacted at all",
+        );
+
+        let finished = manifest
+            .entry("crates/engine/tests")
+            .expect("a completed subtree is still pacted");
+        assert_eq!(
+            finished.granted_hash(),
+            Some(subtree_hash(engine.join("tests")).expect("hashes").as_str()),
+        );
+        assert_eq!(
+            state(&manifest, repo.path(), "crates/engine/tests"),
+            NodeState::PactedFresh,
+            "what finished before the cancel keeps what it earned",
+        );
+
+        assert_eq!(
+            failures.len(),
+            1,
+            "the directory that failed is reported; the ones nobody asked for \
+             are not: {failures:?}",
+        );
+        assert_eq!(failures[0].directory(), failing);
+    }
+
+    #[test]
+    fn an_unwatched_pact_is_the_pact_that_never_stops() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &Canned::new(document(300)),
+            &mut Unwatched,
+        )
+        .expect("pacts");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            modules(&manifest),
+            [
+                "crates/engine",
+                "crates/engine/src",
+                "crates/engine/src/inner",
+                "crates/engine/tests",
+            ],
+            "the caller that watches nothing gets every directory pacted",
+        );
+        assert_eq!(Unwatched.starting(&engine, 1, 4), Pacting::Continue);
     }
 
     // Un-pacting: dropping the entries and keeping the documents.
@@ -3079,6 +3628,7 @@ mod tests {
             repo.path(),
             &pacted(&["crates/tui"]),
             &Canned::new(document(300)),
+            &mut Unwatched,
         )
         .expect("pacts");
         assert_eq!(

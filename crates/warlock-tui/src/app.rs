@@ -43,6 +43,15 @@
 //! it without knowing what happened and the key handler never has to explain
 //! itself.
 //!
+//! A pact in flight is the same kind of thing said over a longer span. A subtree
+//! pact is minutes of work happening somewhere else, so the app holds which
+//! directory that work is on and how far down the list it has got — set and
+//! cleared by whoever is running it, since only they know — and the renderer
+//! draws a line from it. It is deliberately not a message: a message belongs to
+//! the last keystroke and the next keystroke takes it down, while a pact goes on
+//! running whatever the reader presses, so the two are separate fields and
+//! movement clears only the one that belongs to a keystroke.
+//!
 //! Nothing here touches a terminal: it is a plain data structure with plain
 //! methods, so every rule about how the selection moves is testable with
 //! nothing attached to stdout.
@@ -200,6 +209,28 @@ pub struct PactToggle {
     pub pacted: bool,
 }
 
+/// A pact running somewhere else, as far as the screen is concerned: the
+/// directory being worked now, and where it sits in the run.
+///
+/// The directory is kept as the path the caller was handed, not as finished
+/// text, so the label is spelled relative to the root of the tree *on screen*
+/// when it is drawn — see [`App::pact_line`]. `position` is one-based and
+/// counts directories, so it reads as `(3/12)` beside a `total` that does not
+/// move for the length of the run.
+///
+/// Private, and no accessor gives it out: what a caller can do with it is put it
+/// there, take it away, and ask for the line it makes. Handing the parts back
+/// would be a second place the wording could be decided.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct InFlight {
+    /// The directory the pact is working now.
+    path: PathBuf,
+    /// Which directory of the run this is, counting from one.
+    position: usize,
+    /// How many directories the whole run covers.
+    total: usize,
+}
+
 /// The front end's state: the flattened tree, which of it is collapsed, the
 /// selected row, the slice of rows on screen, the tally the footer shows and
 /// the header line naming what is being shown.
@@ -259,6 +290,13 @@ pub struct PactToggle {
 /// around it: the renderer draws whatever is in it, and every method that moves
 /// the selection empties it, so a message lasts exactly until the next
 /// keystroke.
+///
+/// `in_flight` is the pact running now, if one is, and is the one piece of state
+/// here that no keystroke touches: it is put there and taken away by whoever is
+/// running the pact — see [`App::set_pact_in_flight`] — because the app cannot
+/// see a background thread and the thread cannot see a screen. It outlasts
+/// keystrokes for that reason, and takes the message line while it is there:
+/// see [`App::pact_line`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct App {
     all_rows: Vec<Row>,
@@ -272,6 +310,7 @@ pub struct App {
     counts: StateCounts,
     header: String,
     message: Option<String>,
+    in_flight: Option<InFlight>,
 }
 
 impl App {
@@ -332,7 +371,8 @@ impl App {
     /// [`App::set_viewport_height`].
     ///
     /// There is no message either: an app that has answered no keystroke yet
-    /// has nothing to say about one. See [`App::message`].
+    /// has nothing to say about one. See [`App::message`]. Nor is a pact in
+    /// flight — nobody has started one — see [`App::set_pact_in_flight`].
     ///
     /// Nothing is collapsed and the pacted-only filter is off, so the rows
     /// handed over are exactly the rows drawn — unless some of them are file
@@ -355,6 +395,7 @@ impl App {
             counts: StateCounts::default(),
             header: String::new(),
             message: None,
+            in_flight: None,
         };
         // The rows handed over may hold file rows, which the file toggle starts
         // off over, so the drawn list is derived rather than assumed even here.
@@ -449,6 +490,83 @@ impl App {
     /// latest keystroke has anything to report.
     pub fn set_message(&mut self, message: impl Into<String>) {
         self.message = Some(message.into());
+    }
+
+    /// Say that a pact is working the directory at `path`, which is directory
+    /// `position` of `total`.
+    ///
+    /// The app runs no pact and can see none: a subtree pact happens on another
+    /// thread, over minutes, and the only thing here that could know how it is
+    /// going is whoever started it. So this is the caller's to set as the run
+    /// advances — once per directory, with the same `total` throughout — and the
+    /// caller's to take away with [`App::clear_pact_in_flight`] when the run
+    /// ends, however it ends.
+    ///
+    /// What lands on screen is [`App::pact_line`]; `position` counts from one,
+    /// because the line is read by a person rather than indexed.
+    ///
+    /// Not a keystroke, so it says nothing and takes nothing down: the message
+    /// the last keystroke left is still the last keystroke's, and is still there
+    /// when the pact is over. Movement does not undo this either — a pact
+    /// carries on being in flight however much the reader scrolls.
+    pub fn set_pact_in_flight(&mut self, path: impl Into<PathBuf>, position: usize, total: usize) {
+        self.in_flight = Some(InFlight {
+            path: path.into(),
+            position,
+            total,
+        });
+    }
+
+    /// Say that no pact is running any more.
+    ///
+    /// The other half of [`App::set_pact_in_flight`], for the end of a run
+    /// whether it finished, failed or was cancelled: the line describes work
+    /// happening now, so it has to go when the work stops, and only the caller
+    /// knows that it has. Leaves the message alone, so whatever the caller says
+    /// about how the run went is on screen the moment the progress line is off
+    /// it.
+    ///
+    /// A no-op when no pact was in flight.
+    pub fn clear_pact_in_flight(&mut self) {
+        self.in_flight = None;
+    }
+
+    /// Whether a pact is running now, as last set by
+    /// [`App::set_pact_in_flight`].
+    ///
+    /// For a renderer deciding which keys to advertise, and for a key handler
+    /// deciding what Esc means. It is display state and nothing more: it is
+    /// whatever the caller last said, not something the app went and checked.
+    #[must_use]
+    pub const fn is_pacting(&self) -> bool {
+        self.in_flight.is_some()
+    }
+
+    /// The line describing the pact in flight — `pacting crates/engine (3/12)` —
+    /// or `None` when no pact is running.
+    ///
+    /// The directory is named relative to the root of the tree on screen, in the
+    /// engine's own manifest spelling, for the reason every other label here is:
+    /// an absolute path spends the footer on the part the reader already knows.
+    /// It is worded here rather than by the caller so that the app is the one
+    /// place a footer line is decided, and spelled at draw time rather than when
+    /// it was set so that it is spelled against the tree that is on screen now.
+    ///
+    /// This takes the message line when there is one to take: while a pact runs,
+    /// what is happening to the reader's repository right now outranks a
+    /// sentence about a keystroke, and the run is the thing Esc is about to act
+    /// on. The message underneath is not thrown away — [`App::message`] still
+    /// holds it, and it appears when the run ends — which is what makes the
+    /// precedence a display rule rather than a loss of state.
+    #[must_use]
+    pub fn pact_line(&self) -> Option<String> {
+        self.in_flight.as_ref().map(|in_flight| {
+            pacting_message(
+                &self.label_for(&in_flight.path),
+                in_flight.position,
+                in_flight.total,
+            )
+        })
     }
 
     /// Every row that is drawn, in the order it is drawn: the engine's walk
@@ -1164,6 +1282,18 @@ fn left_on_disk_message(label: &str) -> String {
     )
 }
 
+/// What the app says while a pact is working the directory named `label`, which
+/// is directory `position` of `total`.
+///
+/// A present participle and a fraction, and nothing else. The verb is the one
+/// the product's own key is named after, so the line reads as the `p` key still
+/// going rather than as a report about something; the fraction is what turns a
+/// screen that has not changed in two minutes from a hung Warlock into a working
+/// one, which is the whole reason the line exists.
+fn pacting_message(label: &str, position: usize, total: usize) -> String {
+    format!("pacting {label} ({position}/{total})")
+}
+
 /// What the app says when the pact key is pressed on a file, naming it as
 /// `label`.
 ///
@@ -1228,6 +1358,32 @@ mod tests {
                 "repo/assets",
                 "repo/assets/WARLOCK.md",
                 NodeState::Unpacted,
+            ),
+        ]
+    }
+
+    /// Three rows rooted at an absolute path, for the tests about how a
+    /// directory is named on the footer.
+    ///
+    /// [`three_rows`] and the shared fixture are both rooted at relative paths,
+    /// which the engine's manifest spelling takes to be relative to the root
+    /// already and hands straight back — so neither of them can show that a
+    /// label really is cut down to its place under the tree's root.
+    fn rooted_rows() -> Vec<Row> {
+        vec![
+            Row::new(0, "/repo", "/repo/WARLOCK.md", NodeState::PactedStale).with_child_count(1),
+            Row::new(
+                1,
+                "/repo/crates",
+                "/repo/crates/WARLOCK.md",
+                NodeState::PactedStale,
+            )
+            .with_child_count(1),
+            Row::new(
+                2,
+                "/repo/crates/warlock-engine",
+                "/repo/crates/warlock-engine/WARLOCK.md",
+                NodeState::PactedFresh,
             ),
         ]
     }
@@ -2102,6 +2258,136 @@ mod tests {
         assert_eq!(app.message(), Some("could not write the pact manifest"));
         app.select_next();
         assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn a_pact_in_flight_names_the_directory_relative_to_the_root_with_its_place() {
+        let mut app = App::from_rows(rooted_rows());
+
+        app.set_pact_in_flight(
+            Path::new("/repo").join("crates").join("warlock-engine"),
+            3,
+            12,
+        );
+
+        assert!(app.is_pacting());
+        // Relative to the tree's own root, in the engine's forward-slash
+        // manifest spelling whatever the platform's separator is, with a
+        // one-based place in the run beside it.
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting crates/warlock-engine (3/12)")
+        );
+    }
+
+    #[test]
+    fn the_root_of_the_tree_is_named_as_it_stands_in_a_pact_line() {
+        let mut app = App::from_rows(rooted_rows());
+
+        app.set_pact_in_flight("/repo", 1, 5);
+
+        // The root cannot be named relative to itself, so it is named as it
+        // stands rather than as the `"."` relative spelling would give — the
+        // same rule every other label here follows.
+        assert_eq!(app.pact_line().as_deref(), Some("pacting /repo (1/5)"));
+    }
+
+    #[test]
+    fn the_pact_line_moves_as_the_caller_advances_the_run() {
+        let mut app = App::from_rows(rooted_rows());
+        let mut said = Vec::new();
+
+        for (position, path) in ["/repo", "/repo/crates", "/repo/crates/warlock-engine"]
+            .into_iter()
+            .enumerate()
+        {
+            app.set_pact_in_flight(path, position + 1, 3);
+            said.push(app.pact_line().expect("a pact is in flight"));
+        }
+
+        assert_eq!(
+            said,
+            [
+                "pacting /repo (1/3)",
+                "pacting crates (2/3)",
+                "pacting crates/warlock-engine (3/3)",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_app_with_no_pact_running_has_no_pact_line() {
+        let mut app = App::from_tree(&fixture::tree());
+        assert!(!app.is_pacting());
+        assert_eq!(app.pact_line(), None);
+        assert_eq!(App::from_rows(three_rows()).pact_line(), None);
+
+        app.set_pact_in_flight("warlock/crates", 2, 4);
+        app.clear_pact_in_flight();
+
+        // And the run being over is the caller's to say, whichever way it ended.
+        assert!(!app.is_pacting());
+        assert_eq!(app.pact_line(), None);
+        // Clearing one that was never there changes nothing.
+        app.clear_pact_in_flight();
+        assert_eq!(app.pact_line(), None);
+    }
+
+    #[test]
+    fn a_pact_in_flight_takes_the_message_line_and_hands_it_back() {
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_message("something the caller said");
+
+        app.set_pact_in_flight("warlock/crates", 2, 4);
+
+        // The progress line outranks the message while the run is on, and the
+        // message is kept rather than dropped: starting a pact is not a
+        // keystroke, so it neither says anything nor takes anything down.
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting warlock/crates (2/4)")
+        );
+        assert_eq!(app.message(), Some("something the caller said"));
+
+        app.clear_pact_in_flight();
+
+        assert_eq!(app.pact_line(), None);
+        assert_eq!(app.message(), Some("something the caller said"));
+    }
+
+    #[test]
+    fn a_keystroke_clears_a_message_and_leaves_the_pact_in_flight_alone() {
+        let keystrokes: [(&str, Movement); 9] = [
+            ("select_next", App::select_next),
+            ("select_previous", App::select_previous),
+            ("select_page_down", App::select_page_down),
+            ("select_page_up", App::select_page_up),
+            ("select_first", App::select_first),
+            ("select_last", App::select_last),
+            ("toggle_collapsed", App::toggle_collapsed),
+            ("toggle_pacted_only", App::toggle_pacted_only),
+            ("toggle_files", App::toggle_files),
+        ];
+
+        for (name, keystroke) in keystrokes {
+            // `warlock/crates` has children, so the collapse key is a keystroke
+            // that does something here rather than a no-op.
+            let mut app = app_selecting("warlock/crates");
+            app.set_message("something to forget");
+            app.set_pact_in_flight("warlock/crates/engine", 3, 12);
+
+            keystroke(&mut app);
+
+            assert_eq!(app.message(), None, "{name} left the message behind");
+            // The pact goes on running however much the reader scrolls, so the
+            // line describing it goes on being true.
+            assert!(app.is_pacting(), "{name} stopped the pact");
+            assert_eq!(
+                app.pact_line().as_deref(),
+                Some("pacting warlock/crates/engine (3/12)"),
+                "{name} blanked the line for a pact that is still running"
+            );
+        }
     }
 
     #[test]

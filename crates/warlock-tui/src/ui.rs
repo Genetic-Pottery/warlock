@@ -2,11 +2,13 @@
 //!
 //! The whole screen is three things stacked: a header naming which tree is on
 //! screen, the flattened tree itself, one node per line, and a footer carrying
-//! the tally, the keys and whatever the app has to say about the last
-//! keystroke. [`draw`] takes the app state and a frame and nothing else — no
-//! terminal setup, no globals, no reaching back into the engine — so what
-//! appears on screen is a pure function of what the app state says, and a test
-//! can assert it against an in-memory buffer with no tty attached.
+//! the tally, the keys and whatever the app has to say about the last keystroke
+//! — or about the pact it is running, which takes that line and changes the one
+//! above it for as long as it runs. [`draw`] takes the app state and a frame
+//! and nothing else — no terminal setup, no globals, no reaching back into the
+//! engine — so what appears on screen is a pure function of what the app state
+//! says, and a test can assert it against an in-memory buffer with no tty
+//! attached.
 //!
 //! The tree area is a window onto the flattened rows: it draws the slice
 //! starting at the app's scroll offset and running for as many rows as the area
@@ -77,6 +79,22 @@ const HEADER_HEIGHT: u16 = 1;
 const KEYS: &str = "up/down k/j: move    PgUp/PgDn: page    g/G: first/last    \
                     space: collapse    o: pacted    f: files    p: pact    \
                     q/Esc/Ctrl-C: quit";
+
+/// The keys line while a pact is running: the same line's job, for the mode the
+/// app is in while it works.
+///
+/// Esc is why this line exists. It means quit on [`KEYS`] and cancel here, and a
+/// key that means two things has to say which one it means now; a run that
+/// cannot be stopped by anyone who does not already know how is a run the reader
+/// waits out.
+///
+/// Much shorter than [`KEYS`], and short on purpose. It names what a reader
+/// reaches for while waiting — a look around the tree, a way to stop, a way out
+/// — and leaves out the rest rather than restating a line they have been reading
+/// since launch. Short also means it survives a narrow terminal whole, which
+/// matters more here than there: this is the line that answers "how do I stop
+/// this?", and an answer truncated off the right-hand edge is no answer.
+const PACTING_KEYS: &str = "up/down k/j: move    space: collapse    Esc: cancel    q/Ctrl-C: quit";
 
 /// The tally line, the keys line and the message line.
 ///
@@ -232,6 +250,14 @@ fn line(row: &Row, collapsed: bool) -> Line<'static> {
 /// every colour on this screen already means a node state, and a sentence about
 /// a keystroke is not a node. With no message the line is drawn blank rather
 /// than skipped — see [`FOOTER_HEIGHT`].
+///
+/// A pact in flight takes both of the lower two lines and adds neither: the
+/// progress line goes on the message line ahead of any message (the precedence
+/// is [`App::pact_line`]'s, decided with the rest of the display state rather
+/// than here) and the keys line becomes [`PACTING_KEYS`]. Same three lines,
+/// same heights, same places — a footer that grew while a pact ran would reflow
+/// the tree under it on a keystroke that changed nothing about the tree, and
+/// would do it in the middle of the one operation the reader is watching.
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let counts = app.counts();
     let mut tally = Vec::new();
@@ -245,9 +271,13 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ));
     }
 
-    let keys = Line::from(KEYS).dim();
+    let keys = Line::from(if app.is_pacting() { PACTING_KEYS } else { KEYS }).dim();
 
-    let message = Line::from(app.message().unwrap_or_default().to_owned()).dim();
+    let message = Line::from(
+        app.pact_line()
+            .unwrap_or_else(|| app.message().unwrap_or_default().to_owned()),
+    )
+    .dim();
     frame.render_widget(Paragraph::new(vec![Line::from(tally), keys, message]), area);
 }
 
@@ -276,7 +306,8 @@ mod tests {
     use warlock_engine::NodeState;
 
     use super::{
-        FOOTER_HEIGHT, HEADER_HEIGHT, INDENT, KEYS, NO_MARKER, SELECTION_MARKER, draw, tree_height,
+        FOOTER_HEIGHT, HEADER_HEIGHT, INDENT, KEYS, NO_MARKER, PACTING_KEYS, SELECTION_MARKER,
+        draw, tree_height,
     };
     use crate::app::{App, Row};
     use crate::colour::colour_for;
@@ -807,6 +838,82 @@ mod tests {
         let buffer = render(&app, 120, height);
         assert_eq!(app.message(), None);
         assert_eq!(row_text(&buffer, height - 1), "");
+    }
+
+    #[test]
+    fn a_pact_in_flight_names_its_directory_on_the_footers_last_line() {
+        let mut app = App::from_tree(&fixture::tree());
+        let height = 10;
+        let before = render(&app, KEYS_WIDTH, height);
+
+        app.set_pact_in_flight("warlock/crates/engine", 3, 12);
+        let buffer = render(&app, KEYS_WIDTH, height);
+
+        // On the last row of the footer, which is the last row of the screen.
+        // The fixture's paths are relative, and the engine's manifest spelling
+        // takes a relative path to be relative to the root already; the app
+        // tests cover the cutting-down an absolutely-rooted tree gets.
+        assert_eq!(
+            row_text(&buffer, height - 1),
+            "pacting warlock/crates/engine (3/12)"
+        );
+        // The tally has not moved, and no fourth line grew under the footer:
+        // the progress line took the message line rather than adding one.
+        assert_eq!(
+            row_text(&buffer, height - FOOTER_HEIGHT),
+            row_text(&before, height - FOOTER_HEIGHT)
+        );
+        assert_eq!(buffer.area.height, height);
+        // And the tree above the footer is untouched: nothing marks the
+        // directory being worked.
+        assert_eq!(tree_rows(&buffer), tree_rows(&before));
+
+        // It moves with the run.
+        app.set_pact_in_flight("warlock/assets", 4, 12);
+        let buffer = render(&app, KEYS_WIDTH, height);
+        assert_eq!(
+            row_text(&buffer, height - 1),
+            "pacting warlock/assets (4/12)"
+        );
+
+        // And goes when the run does, leaving the line as blank as it started.
+        app.clear_pact_in_flight();
+        assert_eq!(
+            rows_text(&render(&app, KEYS_WIDTH, height)),
+            rows_text(&before)
+        );
+    }
+
+    #[test]
+    fn the_keys_line_advertises_esc_as_cancel_while_a_pact_runs_and_says_quit_otherwise() {
+        let mut app = App::from_tree(&fixture::tree());
+        let height = 10;
+        let y = height - FOOTER_HEIGHT + 1;
+
+        let idle = render(&app, KEYS_WIDTH, height);
+        app.set_pact_in_flight("warlock/crates/engine", 3, 12);
+        let pacting = render(&app, KEYS_WIDTH, height);
+
+        // Byte for byte today's line with no pact running, and the pacting line
+        // whole while one is: equality, so a line that outgrew the terminal it
+        // is drawn on fails here rather than losing its right-hand end quietly.
+        assert_eq!(row_text(&idle, y), KEYS);
+        assert_eq!(row_text(&pacting, y), PACTING_KEYS);
+        // Esc means two things, and the line says which one it means now.
+        let said = row_text(&pacting, y);
+        assert!(said.contains("Esc: cancel"), "{said:?}");
+        assert!(!said.contains("Esc/Ctrl-C: quit"), "{said:?}");
+        assert!(KEYS.contains("Esc/Ctrl-C: quit"));
+
+        // The line is short enough to survive the narrow terminal the other
+        // footer tests draw on, because it is the line that answers "how do I
+        // stop this?".
+        let narrow = render(&app, 120, height);
+        assert_eq!(row_text(&narrow, y), PACTING_KEYS);
+
+        // And the run ending puts today's line back, exactly.
+        app.clear_pact_in_flight();
+        assert_eq!(row_text(&render(&app, KEYS_WIDTH, height), y), KEYS);
     }
 
     #[test]

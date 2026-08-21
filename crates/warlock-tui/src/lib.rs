@@ -35,6 +35,9 @@ pub use app::App;
 pub use app::PactToggle;
 /// One line of the flattened tree.
 pub use app::Row;
+/// A handle for stopping a model pass from another thread: it kills the child
+/// running now and refuses to start another.
+pub use claude::Cancel;
 /// The engine's model-pass port, implemented by running the `claude` CLI as a
 /// child process.
 pub use claude::ClaudeAgent;

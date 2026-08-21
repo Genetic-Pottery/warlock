@@ -36,12 +36,20 @@
 //!   [`recv_timeout`](std::sync::mpsc::Receiver::recv_timeout) and still has a
 //!   handle to kill with.
 //!
+//! A fourth thing the obvious code cannot do is *stop*. A pact is minutes of
+//! passes driven from a worker thread, and the person watching it has to be
+//! able to say "enough" from the thread drawing the screen. That is
+//! [`Cancel`]: a clonable handle over the same [`Mutex<Child>`](std::sync::Mutex)
+//! the timeout path already holds, so cancelling reaches inside a pass that is
+//! in flight instead of waiting politely for it to end.
+//!
 //! Threads and channels, no async runtime, and no dependency: this crate's
 //! `Cargo.toml` gains nothing for any of it.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -89,6 +97,109 @@ const ARGS: [&str; 1] = ["--print"];
 /// to a pass measured in seconds and costs a few hundred wakeups a minute.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// A say-when handle for whoever is not running the pass.
+///
+/// One flag and one slot for the pass in flight, behind an [`Arc`], so cloning
+/// is a refcount bump and every clone speaks for the same run: the worker
+/// thread gives its [`ClaudeAgent`] one with
+/// [`with_cancel`](ClaudeAgent::with_cancel) and the event loop keeps another,
+/// which is the whole reason this is [`Send`] + [`Sync`] and not a `&mut bool`.
+///
+/// [`cancel`](Cancel::cancel) is final and does two things at once: it latches
+/// the flag, so a pass started afterwards spawns nothing at all, and it kills
+/// and reaps whatever child is running right now, so the answer arrives in
+/// milliseconds rather than at the end of a five-minute
+/// [`INVOCATION_TIMEOUT`]. There is no un-cancel — a run that was stopped is
+/// over, and the next one gets a fresh handle.
+///
+/// The slot holds *one* child, because one agent runs one pass at a time: a
+/// pact is a sequence of passes, not a fan-out. Two passes sharing a handle
+/// concurrently would leave the first unreachable, so don't.
+///
+/// ```
+/// use warlock_tui::Cancel;
+///
+/// let cancel = Cancel::new();
+/// let watcher = cancel.clone();
+/// assert!(!cancel.is_cancelled());
+///
+/// // Whoever holds a clone can stop the run, from any thread.
+/// std::thread::spawn(move || watcher.cancel()).join().expect("the thread ran");
+///
+/// assert!(cancel.is_cancelled());
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct Cancel {
+    /// Shared with every clone; the point of the type.
+    state: Arc<State>,
+}
+
+/// What a [`Cancel`] and its clones share.
+#[derive(Debug, Default)]
+struct State {
+    /// Latched once and never cleared: has somebody said stop?
+    cancelled: AtomicBool,
+    /// The child of the pass in flight, or `None` between passes.
+    ///
+    /// Registered before the wait and cleared after it, so a cancel can only
+    /// ever kill the pass that is actually running — a stale handle left here
+    /// would let a late cancel kill an unrelated later pass.
+    running: Mutex<Option<Arc<Mutex<Child>>>>,
+}
+
+impl Cancel {
+    /// A handle nobody has cancelled yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Stop the run: latch the flag, and kill and reap the child of any pass
+    /// in flight.
+    ///
+    /// Safe to call from any thread, more than once, and with no pass running.
+    pub fn cancel(&self) {
+        // The flag is set *before* the slot is read, and
+        // [`Cancel::register`] reads the flag while holding the slot. Between
+        // them there is no interleaving where a child is both registered after
+        // this read and started before this write: either this call finds the
+        // child in the slot and kills it, or the registering call sees the
+        // flag and refuses.
+        self.state.cancelled.store(true, Ordering::SeqCst);
+        let running = lock(&self.state.running).clone();
+        if let Some(child) = running {
+            kill_and_reap(&child);
+        }
+    }
+
+    /// Whether anybody has cancelled.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.state.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Offer `child` up to be killed, unless the run is already cancelled.
+    ///
+    /// `false` means the caller lost the race and owns a child nobody else
+    /// will ever stop, so the caller has to.
+    fn register(&self, child: &Arc<Mutex<Child>>) -> bool {
+        // Taken before the flag is read, so a concurrent `cancel` either
+        // already stored `true` (and this refuses) or blocks here and finds
+        // the child (and kills it).
+        let mut running = lock(&self.state.running);
+        if self.is_cancelled() {
+            return false;
+        }
+        *running = Some(Arc::clone(child));
+        true
+    }
+
+    /// The pass is over; there is nothing left to kill.
+    fn finished(&self) {
+        *lock(&self.state.running) = None;
+    }
+}
+
 /// An [`Agent`] that runs the `claude` CLI as a child process.
 ///
 /// Owns the child, its stdin, its stdout, its stderr, its exit status and its
@@ -121,6 +232,9 @@ pub struct ClaudeAgent {
     args: Vec<OsString>,
     /// How long a single invocation gets before it is killed.
     timeout: Duration,
+    /// Whoever is allowed to say stop. Its own handle by default, which nobody
+    /// else holds and so nothing ever cancels.
+    cancel: Cancel,
 }
 
 impl ClaudeAgent {
@@ -138,6 +252,7 @@ impl ClaudeAgent {
             program: OsString::from(PROGRAM),
             args: ARGS.iter().map(OsString::from).collect(),
             timeout: INVOCATION_TIMEOUT,
+            cancel: Cancel::new(),
         }
     }
 
@@ -166,6 +281,29 @@ impl ClaudeAgent {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// The same agent, answering to `cancel`.
+    ///
+    /// The caller keeps a clone: that is how a pass running on a worker thread
+    /// is stopped from the thread reading the keyboard. Without this, an agent
+    /// still has a handle — its own, which nobody else holds, so nothing can
+    /// ever cancel it.
+    ///
+    /// ```
+    /// use warlock_tui::{Cancel, ClaudeAgent};
+    ///
+    /// let cancel = Cancel::new();
+    /// let agent = ClaudeAgent::new().with_cancel(cancel.clone());
+    ///
+    /// // Nothing has been asked to stop yet.
+    /// assert!(!cancel.is_cancelled());
+    /// # let _ = agent;
+    /// ```
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: Cancel) -> Self {
+        self.cancel = cancel;
         self
     }
 
@@ -220,6 +358,13 @@ impl Default for ClaudeAgent {
 
 impl Agent for ClaudeAgent {
     fn run(&self, request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+        // Asked before anything is started: a pass begun after the cancel is a
+        // process the user already said they did not want, and the cheapest
+        // way not to kill it is not to spawn it.
+        if self.cancel.is_cancelled() {
+            return Err(cancelled());
+        }
+
         let mut child = self.spawn(request)?;
 
         // Configured as pipes just above, so all three are `Some`; taking them
@@ -248,18 +393,44 @@ impl Agent for ClaudeAgent {
         let err = drain(stderr);
 
         let child = Arc::new(Mutex::new(child));
+        // Registered before the wait and cleared after it, so a cancel arriving
+        // now reaches this child and one arriving later reaches nothing rather
+        // than a pass that has moved on.
+        if !self.cancel.register(&child) {
+            kill_and_reap(&child);
+            return Err(cancelled());
+        }
         let (waiter, exited) = watch(&child);
 
-        match exited.recv_timeout(self.timeout) {
+        let outcome = match exited.recv_timeout(self.timeout) {
+            Ok(Ok(status)) if !status.success() && self.cancel.is_cancelled() => {
+                // The exit a cancel caused. Its output is not read, for the
+                // same reason the timeout arm below does not read it: the
+                // child is gone, but a grandchild the kill did not reach can
+                // still hold the pipes open, and a join here would sit out
+                // whatever that grandchild is doing — the very wait the cancel
+                // was pressed to end. There is nothing in that output worth
+                // waiting for anyway, because a pass killed mid-word has no
+                // document to judge, and the rewrite below is what this
+                // failure would come back as regardless.
+                let _ = waiter.join();
+                Err(cancelled())
+            }
             Ok(Ok(status)) => {
+                // Exited on its own — including the pass that beat a cancel by
+                // a hair, which is why success is not read as a cancel above.
                 // The child is gone, so every pipe it held is closed and each
                 // join returns: the readers with what they read, the writer
                 // with nothing.
                 let _ = waiter.join();
                 let _ = writer.join();
-                let stdout = collect(out)?;
-                let stderr = collect(err)?;
-                judge(status, &stdout, &stderr)
+                // Not `?`: every way out of this wait has to reach the
+                // clearing below, and an early return would leave a finished
+                // child registered for a later cancel to find.
+                match (collect(out), collect(err)) {
+                    (Ok(stdout), Ok(stderr)) => judge(status, &stdout, &stderr),
+                    (Err(error), _) | (_, Err(error)) => Err(error),
+                }
             }
             // The waiter could not tell whether it had exited; treat it like
             // any other I/O failure, but not before cleaning up after it.
@@ -291,7 +462,36 @@ impl Agent for ClaudeAgent {
                     source: io::Error::other("the process waiter stopped without an exit status"),
                 })
             }
+        };
+        self.cancel.finished();
+
+        match outcome {
+            // A cancel kills the child, so the wait above ends the ordinary
+            // way and judges a signalled exit — which would go back as
+            // [`AgentError::Failed`], blaming the model for a run the user
+            // stopped. Only a failed outcome is rewritten: a pass that beat
+            // the cancel by a hair produced a real document, and throwing it
+            // away would be a lie in the other direction.
+            Err(_) if self.cancel.is_cancelled() => Err(cancelled()),
+            outcome => outcome,
         }
+    }
+}
+
+/// What a cancelled pass comes back as.
+///
+/// No variant of its own, because [`AgentError`] is the engine's vocabulary and
+/// the engine has no opinion about people pressing Esc: a run that was
+/// interrupted before it could produce a document is exactly
+/// [`AgentError::Io`], and [`ErrorKind::Interrupted`](io::ErrorKind::Interrupted)
+/// is what that is called. The message is what a footer shows, so it says who
+/// stopped it rather than what a signal was.
+fn cancelled() -> AgentError {
+    AgentError::Io {
+        source: io::Error::new(
+            io::ErrorKind::Interrupted,
+            "the model pass was cancelled before it finished",
+        ),
     }
 }
 
@@ -396,11 +596,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
     use std::time::{Duration, Instant};
 
     use warlock_engine::{Agent, AgentError, AgentRequest};
 
-    use super::{ClaudeAgent, INVOCATION_TIMEOUT};
+    use super::{Cancel, ClaudeAgent, INVOCATION_TIMEOUT};
 
     /// A name no directory on `PATH` can hold, so the lookup is guaranteed to
     /// fail the way a machine without `claude` fails.
@@ -436,6 +637,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_cancel_handle_is_one_flag_shared_by_every_clone() {
+        // The property the whole mechanism rests on: the thread that cancels
+        // is never the thread that is running the pass.
+        fn held_across_threads<T: Send + Sync + 'static>(_: &T) {}
+
+        let cancel = Cancel::new();
+        held_across_threads(&cancel);
+        let watcher = cancel.clone();
+        assert!(!cancel.is_cancelled());
+        assert!(!Cancel::default().is_cancelled(), "and a fresh one is live");
+
+        thread::spawn(move || {
+            watcher.cancel();
+            // Latched, not toggled, and saying it twice is not an error.
+            watcher.cancel();
+        })
+        .join()
+        .expect("the cancelling thread ran");
+
+        assert!(cancel.is_cancelled());
+    }
+
+    #[test]
+    fn cancelling_with_no_pass_running_is_a_no_op_that_still_latches() {
+        // No child registered, so there is nothing to kill; the flag is the
+        // whole effect, and it is the half that stops the *next* pass.
+        let cancel = Cancel::new();
+
+        cancel.cancel();
+
+        assert!(cancel.is_cancelled());
+    }
+
     /// Everything below runs a real child, and the stand-ins it runs are shell
     /// scripts, so the whole module is Unix-only. What is being tested — the
     /// pipes, the timeout, the kill — is not, but a portable stand-in would
@@ -443,6 +678,7 @@ mod tests {
     /// coverage it adds.
     #[cfg(unix)]
     mod unix {
+        use std::io::ErrorKind;
         use std::path::{Path, PathBuf};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::{Duration, Instant};
@@ -450,13 +686,36 @@ mod tests {
 
         use warlock_engine::{Agent, AgentError, AgentRequest};
 
-        use super::super::ClaudeAgent;
+        use super::super::{Cancel, ClaudeAgent};
+
+        /// How long a test waits for a child to announce itself before giving
+        /// up and cancelling anyway. Generous, because it is only reached when
+        /// something is already wrong; the wait itself ends as soon as the pid
+        /// file appears.
+        const AT_MOST: Duration = Duration::from_secs(5);
 
         /// An agent whose `claude` is `sh -c script`.
         fn stand_in(script: &str) -> ClaudeAgent {
             ClaudeAgent::new()
                 .with_program("/bin/sh")
                 .with_args(["-c", script])
+        }
+
+        /// Whether `error` is how a cancelled pass comes back: interrupted I/O
+        /// in the engine's vocabulary, and not a model that refused.
+        fn is_cancelled(error: &AgentError) -> bool {
+            matches!(error, AgentError::Io { source } if source.kind() == ErrorKind::Interrupted)
+        }
+
+        /// The pid a stand-in wrote, once it has written one.
+        ///
+        /// `None` while the file is missing or still empty, which is how a
+        /// test waits for a child to be genuinely running rather than guessing
+        /// at a sleep.
+        fn pid(path: &Path) -> Option<String> {
+            let text = fs::read_to_string(path).ok()?;
+            let pid = text.trim().to_owned();
+            (!pid.is_empty()).then_some(pid)
         }
 
         /// A directory of this test's own, removed at the end of the test that
@@ -628,6 +887,173 @@ mod tests {
                 "process {pid} is still in the table: killed but never reaped"
             );
             clean_up(&directory);
+        }
+
+        #[test]
+        fn a_cancel_from_another_thread_ends_the_pass_promptly() {
+            let directory = scratch("cancel");
+            let pid_file = directory.join("pid");
+            let cancel = Cancel::new();
+            // The real five-minute timeout: the only thing that can end this
+            // call in time is the cancel.
+            let agent = stand_in("echo $$ > pid; sleep 30").with_cancel(cancel.clone());
+
+            let stopper = {
+                let pid_file = pid_file.clone();
+                thread::spawn(move || {
+                    // Stopped once it is genuinely running, which it says by
+                    // writing its pid — a sleep here would be a race dressed
+                    // up as a delay.
+                    let waited = Instant::now();
+                    while pid(&pid_file).is_none() && waited.elapsed() < AT_MOST {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    cancel.cancel();
+                })
+            };
+
+            let started = Instant::now();
+            let error = agent
+                .run(&AgentRequest::new("anything", &directory))
+                .expect_err("a cancelled pass has no document");
+            let elapsed = started.elapsed();
+            stopper.join().expect("the cancelling thread ran");
+
+            assert!(is_cancelled(&error), "{error:?}");
+            assert!(
+                elapsed < Duration::from_secs(20),
+                "the call sat out the sleep it was told to cut short: {elapsed:?}"
+            );
+            clean_up(&directory);
+        }
+
+        /// A cancel ends the call even when something the kill did not reach
+        /// is still holding the child's pipes open.
+        ///
+        /// The stand-ins above are at the mercy of whichever `/bin/sh` the
+        /// machine has: `sh -c "echo $$ > pid; sleep 30"` is one process under
+        /// a shell that execs its last command, and two under one that forks,
+        /// and only in the second case does anything outlive the kill. This
+        /// one forks on purpose — `wait` is a builtin, so no shell can exec
+        /// away — and pins the behaviour on both. It is the shape a real
+        /// `claude` has: a tool subprocess of its own, inheriting the pipes it
+        /// was given.
+        #[test]
+        fn a_cancel_does_not_wait_on_output_a_survivor_still_holds() {
+            let directory = scratch("cancel-survivor");
+            let pid_file = directory.join("pid");
+            let survivor_file = directory.join("survivor");
+            let cancel = Cancel::new();
+            let agent = stand_in("sleep 30 & echo $! > survivor; echo $$ > pid; wait")
+                .with_cancel(cancel.clone());
+
+            let stopper = {
+                let pid_file = pid_file.clone();
+                thread::spawn(move || {
+                    let waited = Instant::now();
+                    while pid(&pid_file).is_none() && waited.elapsed() < AT_MOST {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    cancel.cancel();
+                })
+            };
+
+            let started = Instant::now();
+            let error = agent
+                .run(&AgentRequest::new("anything", &directory))
+                .expect_err("a cancelled pass has no document");
+            let elapsed = started.elapsed();
+            stopper.join().expect("the cancelling thread ran");
+
+            assert!(is_cancelled(&error), "{error:?}");
+            assert!(
+                elapsed < Duration::from_secs(20),
+                "the call waited on output the survivor was still holding: {elapsed:?}"
+            );
+            // The survivor is the point of the test, so it is this test's to
+            // clear up. Nothing else can: the kill reaches the child, and this
+            // one was never the child.
+            if let Some(survivor) = pid(&survivor_file) {
+                let _ = process::Command::new("/bin/kill").arg(survivor).status();
+            }
+            clean_up(&directory);
+        }
+
+        /// Killing is half of it here too: see
+        /// [`a_timed_out_child_is_reaped_not_left_a_zombie`], which is
+        /// Linux-only for the same reason — `/proc` is where the process table
+        /// is visible.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_cancelled_childs_process_is_gone_afterwards() {
+            let directory = scratch("cancel-reap");
+            let pid_file = directory.join("pid");
+            let cancel = Cancel::new();
+            let agent = stand_in("echo $$ > pid; sleep 30").with_cancel(cancel.clone());
+
+            let stopper = {
+                let pid_file = pid_file.clone();
+                thread::spawn(move || {
+                    let waited = Instant::now();
+                    while pid(&pid_file).is_none() && waited.elapsed() < AT_MOST {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    cancel.cancel();
+                })
+            };
+
+            let error = agent
+                .run(&AgentRequest::new("anything", &directory))
+                .expect_err("a cancelled pass has no document");
+            stopper.join().expect("the cancelling thread ran");
+
+            assert!(is_cancelled(&error), "{error:?}");
+            let pid = pid(&pid_file).expect("the child wrote its pid before it was stopped");
+            assert!(
+                !Path::new(&format!("/proc/{pid}")).exists(),
+                "process {pid} survived the cancel, or was killed and never reaped"
+            );
+            clean_up(&directory);
+        }
+
+        #[test]
+        fn a_pass_started_after_a_cancel_spawns_nothing_at_all() {
+            let directory = scratch("never-started");
+            let marker = directory.join("marker");
+            let cancel = Cancel::new();
+            cancel.cancel();
+            // Anything that ran would leave a file behind, and the call only
+            // returns once its child has exited — so a missing marker is a
+            // child that never existed, not one that has not got there yet.
+            let agent = stand_in("touch marker").with_cancel(cancel);
+
+            let error = agent
+                .run(&AgentRequest::new("anything", &directory))
+                .expect_err("a cancelled agent runs nothing");
+
+            assert!(is_cancelled(&error), "{error:?}");
+            assert!(!marker.exists(), "a cancelled agent spawned a child anyway");
+            clean_up(&directory);
+        }
+
+        #[test]
+        fn a_handle_nobody_cancels_leaves_the_run_exactly_as_it_was() {
+            let cancel = Cancel::new();
+            let agent = ClaudeAgent::new()
+                .with_program("/bin/cat")
+                .with_args(Vec::<&str>::new())
+                .with_cancel(cancel.clone());
+
+            let response = agent
+                .run(&AgentRequest::new("# module\n\nWhat it does.\n", "."))
+                .expect("attaching a handle does not change a clean run");
+
+            assert_eq!(response.text(), "# module\n\nWhat it does.\n");
+            // The pass is over and the handle knows it: this reaches for a
+            // child that is no longer registered, and returns rather than
+            // killing whatever came next.
+            cancel.cancel();
+            assert!(cancel.is_cancelled());
         }
     }
 
