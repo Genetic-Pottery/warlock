@@ -1659,8 +1659,8 @@ mod tests {
         use warlock_tui::Cancel;
 
         use super::super::{
-            CancelGuard, PACT_CANCELLED, PactEvent, Running, Toggled, apply_toggle, pact_press,
-            run_pact,
+            CancelGuard, PACT_CANCELLED, PACT_LOST, PactEvent, Running, Toggled, apply_progress,
+            apply_toggle, pact_press, run_pact,
         };
         use super::ROOT;
 
@@ -2472,6 +2472,72 @@ mod tests {
             assert!(
                 watching.is_cancelled(),
                 "the run outlived the loop that started it"
+            );
+        }
+
+        #[test]
+        fn a_worker_that_says_nothing_more_ends_the_run_rather_than_hanging() {
+            // The one way the channel closes without an outcome: the worker
+            // reports on every path it takes itself, so a silence is a panic in
+            // it. The hook has already put the terminal back and printed what
+            // happened; what is left to this thread is to stop describing a run
+            // that is over, and above all not to wait for a thread that no
+            // longer exists.
+            let tree = Tree::new(Node::new(
+                "/repo/crates",
+                None::<PathBuf>,
+                NodeState::Unpacted,
+            ));
+            let before = App::from_tree(&tree);
+            let mut app = before.clone();
+            let mut manifest = Manifest::new();
+            let (events, received) = mpsc::channel();
+            let mut pact = Some(Running {
+                events: received,
+                cancel: CancelGuard::new(),
+                path: PathBuf::from("/repo/crates"),
+                before: before.clone(),
+            });
+
+            events
+                .send(PactEvent::Starting {
+                    directory: PathBuf::from("/repo/crates"),
+                    position: 1,
+                    total: 1,
+                })
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest);
+
+            assert!(pact.is_some(), "a run that has only started is still on");
+            assert!(
+                app.pact_line().is_some(),
+                "and the footer says where it has got to"
+            );
+
+            // The worker's end goes away with no `Finished` behind it.
+            drop(events);
+            apply_progress(&mut pact, &mut app, &mut manifest);
+
+            assert!(pact.is_none(), "the run is over, however it ended");
+            assert!(
+                app.pact_line().is_none(),
+                "so nothing is being pacted now: {:?}",
+                app.pact_line()
+            );
+            assert_eq!(app.message(), Some(PACT_LOST), "and the footer says so");
+            assert_eq!(
+                manifest,
+                Manifest::new(),
+                "nothing new was recorded, because nothing came back to record"
+            );
+            // The rows are the ones the keystroke painted over, put back: the
+            // same app, down to the message that is the only thing this path
+            // adds to it.
+            let mut restored = before;
+            restored.set_message(PACT_LOST);
+            assert_eq!(
+                app, restored,
+                "and the rows go back to matching the manifest"
             );
         }
     }
