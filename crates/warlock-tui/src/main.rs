@@ -26,6 +26,17 @@
 //! here waits on the worker: the manifest, the tree and the message are updated
 //! from the events it sends, and the thread is never joined.
 //!
+//! Those events are also what fills the panel. The press that really starts a
+//! run opens an [`warlock_tui::Account`] on the app — one pact, one account, so
+//! the next run clears the last one — each directory the worker names opens a
+//! section of it, and everything a pass is seen doing lands under the section it
+//! belongs to. Both halves are [`apply_progress`], which is handed the instant
+//! it is called at rather than reading a clock, and so is the draw above it: the
+//! newest line of the live section counts up against that instant, which is what
+//! makes a pass that thinks for a minute look like something is happening. The
+//! loop's existing hundred-millisecond round is the whole of the tick — there is
+//! no timer, no second thread and no redraw on a schedule of its own.
+//!
 //! What a run leaves behind is on disk rather than in the rows, and that is the
 //! other thing the shape of the loop is for. A pact writes a `WARLOCK.md` beside
 //! every directory it descends through, and those are rows the tree on screen
@@ -58,8 +69,8 @@ use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::time::Duration;
-use std::{env, fmt, panic, thread};
+use std::time::{Duration, Instant};
+use std::{env, fmt, fs, panic, thread};
 
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -72,10 +83,11 @@ use ratatui::crossterm::terminal::{
 use warlock_engine::{
     Agent, LoadError, LoadProblem, Loaded, Manifest, ManifestError, NodeState, PactFailure,
     PactObserver, PactProblem, PactedSubtree, Pacting, load_tree, pact_subtree, repository_root,
-    unpact_subtree,
+    to_manifest_path, unpact_subtree,
 };
 use warlock_tui::{
-    Activities, Activity, App, Cancel, ClaudeAgent, PactToggle, draw, reseat_on, tree_height,
+    Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactToggle, Section, draw,
+    panel_height, reseat_on, tree_height,
 };
 
 /// How long the loop waits for a keystroke before going round again.
@@ -195,8 +207,20 @@ fn run() -> Result<(), Error> {
         // frame is cut by. A terminal resized between frames is handled by that
         // alone — the next frame measures again, and the next frame is at most
         // one `POLL_INTERVAL` away.
-        app.set_viewport_height(tree_height(guard.terminal.size()?));
-        guard.terminal.draw(|frame| draw(frame, &app))?;
+        let size = guard.terminal.size()?;
+        app.set_viewport_height(tree_height(size));
+        // The panel's window is measured the same way and for the same reason,
+        // off the same size: `panel_height` and `tree_height` are two answers
+        // from the one layout, so both panes are scrolled by the height this
+        // frame is about to give them.
+        app.set_panel_height(panel_height(size));
+        // The instant this frame is being drawn at, read once and handed to the
+        // renderer: the panel's newest clock counts up against it, so a frame
+        // drawn with no event waiting still shows a run that is moving. See
+        // `draw`.
+        guard
+            .terminal
+            .draw(|frame| draw(frame, &app, Instant::now()))?;
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
         // sits here, so the wait has to end whether or not anybody presses
@@ -238,14 +262,15 @@ fn run() -> Result<(), Error> {
                     }
                 }
                 // Nothing but a bit of view state moves here, and deliberately
-                // so: focus decides which border the next frame lights and
-                // whether a movement key means anything, and both of those
-                // questions are answered where they are asked — by the renderer
-                // reading `App::focus`, and by the app's own movement methods,
-                // which return early when the tree is not the pane being driven
-                // (WAR-23.01). There is nothing for this arm to gate a second
-                // time, and no message: a key that changes what the *next* key
-                // means has nothing to report.
+                // so: focus decides which border the next frame lights and which
+                // pane a movement key is about, and both of those questions are
+                // answered where they are asked — by the renderer reading
+                // `App::focus`, and by the app's own movement methods, which
+                // move the tree's selection or scroll the panel's window
+                // depending on the pane being driven (WAR-26.02). There is
+                // nothing for this arm to gate a second time, and no message: a
+                // key that changes what the *next* key means has nothing to
+                // report.
                 Some(Action::ToggleFocus) => app.toggle_focus(),
                 Some(Action::SelectPrevious) => app.select_previous(),
                 Some(Action::SelectNext) => app.select_next(),
@@ -305,7 +330,11 @@ fn run() -> Result<(), Error> {
                     // all the same one. The copy is a list of rows and a tally,
                     // and it is taken once per press of one key.
                     let before = app.clone();
-                    if let Some(toggle) = pact_press(&mut app, pact.is_some()) {
+                    // The instant the key was pressed is the instant the run
+                    // starts, and the account counts its clocks from it: a run
+                    // is as old as the keystroke that asked for it, not as old
+                    // as the first thing the model got round to saying.
+                    if let Some(toggle) = pact_press(&mut app, pact.is_some(), Instant::now()) {
                         // One handle per run, and never reused: a cancel is
                         // final, so the run after a cancelled one has to start
                         // with a handle nobody has said stop to.
@@ -333,7 +362,13 @@ fn run() -> Result<(), Error> {
         // with a thread that is not waiting for it. It is also the only place
         // the tree is re-read after startup, which is why the scope the app was
         // loaded at is handed to it — see [`reload_tree`].
-        apply_progress(&mut pact, &mut app, &mut manifest, &scope);
+        //
+        // The clock is read here rather than down there for the same reason it
+        // is read before the draw: this file owns the clock and everything
+        // below it is a function of the instant it is handed. What that instant
+        // means is when the events being drained now landed on screen, which is
+        // within one `POLL_INTERVAL` of when the worker sent them.
+        apply_progress(&mut pact, &mut app, &mut manifest, &scope, Instant::now());
     }
 }
 
@@ -406,6 +441,19 @@ impl CancelGuard {
     /// in flight.
     fn cancel(&self) {
         self.cancel.cancel();
+    }
+
+    /// Whether somebody said stop to this run.
+    ///
+    /// Asked once, when the run's outcome comes back, and only so that the
+    /// panel's last section can say the run was stopped rather than that its
+    /// pass went wrong. The footer already has this fact by another road — the
+    /// worker rewords a cancelled outcome before sending it ([`cancelled`]) —
+    /// but that wording is one line about the whole run, and what the panel
+    /// needs is which directory it happened in, which only the thread holding
+    /// the sections knows.
+    fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
     }
 }
 
@@ -655,11 +703,30 @@ fn cancelled(toggled: Toggled) -> Toggled {
 /// A function rather than a guard in the match arm so that "a second press
 /// changes nothing" is a property a test can hold the app up against, rather
 /// than something only an event loop with a terminal attached could show.
-fn pact_press(app: &mut App, in_flight: bool) -> Option<PactToggle> {
+///
+/// A press that really does start a run is also where the panel's account
+/// begins, at `at`: one pact, one account, so a new run clears whatever the last
+/// one left rather than appending to it. It happens here rather than in the
+/// event loop so that "the account a press starts is empty" is a property of the
+/// same function, and it happens on this path only — a press turned down for a
+/// file row, and a press while a run is in flight, leave the last run's account
+/// on screen because neither of them started anything.
+///
+/// An un-pact does not start one either, and that is the one case where the
+/// keystroke does something and the panel does not move. Un-pacting is manifest
+/// arithmetic that is over before the next frame: it runs no pass, reports no
+/// activity and has nothing to account for, so wiping the record of the run that
+/// wrote those documents would be spending the panel on a keystroke with nothing
+/// to say.
+fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PactToggle> {
     if in_flight {
         return None;
     }
-    app.toggle_pact()
+    let toggle = app.toggle_pact()?;
+    if toggle.pacted {
+        app.start_account(at);
+    }
+    Some(toggle)
 }
 
 /// Apply everything the worker has said since the last frame, and take the pact
@@ -683,7 +750,13 @@ fn pact_press(app: &mut App, in_flight: bool) -> Option<PactToggle> {
 /// and the alternative — waiting for a message from a thread that no longer
 /// exists — would hang warlock on the one path where it can least afford to.
 ///
-/// However the run ended, the tree is then re-read from disk and the view put
+/// However the run ended, the panel's account is then closed off
+/// ([`close_account`]): every section gets the ending belonging to its own
+/// directory and the run gets its one summary line. Outside the arms rather than
+/// inside them, because an account that is never closed is a finished run whose
+/// newest line goes on counting up for as long as warlock is open.
+///
+/// The tree is then re-read from disk and the view put
 /// back on top of it ([`reload_tree`]). One reload, at the bottom, for all four
 /// endings and for an un-pact as much as for a pact: a run writes `WARLOCK.md`
 /// files that no amount of recolouring rows in place can conjure into the tree,
@@ -692,11 +765,19 @@ fn pact_press(app: &mut App, in_flight: bool) -> Option<PactToggle> {
 /// two restoring arms have put `running.before` back — so what the reload reads
 /// lands on top of the arm's result rather than under it, and a reload that
 /// fails leaves that result standing.
+///
+/// `now` is the caller's clock, and this function reads none of its own: every
+/// event drained here is filed under it, so a run is drivable from a base
+/// instant in a test exactly as the account below it is. All the events of one
+/// frame share it, which is the truth to a tenth of a second — the loop is the
+/// only thing that hears the worker, so an event's arrival is when the loop got
+/// round to it.
 fn apply_progress(
     pact: &mut Option<Running>,
     app: &mut App,
     manifest: &mut Manifest,
     scope: &Scope,
+    now: Instant,
 ) {
     let Some(running) = pact.as_ref() else {
         return;
@@ -708,17 +789,36 @@ fn apply_progress(
                 directory,
                 position,
                 total,
-            }) => app.set_pact_in_flight(directory, position, total),
-            // Taken off the channel and dropped, which is the whole of what this
-            // slice owes them: they have to be read or they would sit in the
-            // channel until the run ends, and there is nowhere for them to go
-            // yet. What a reader sees of them is a later slice's business;
-            // nothing is kept here, because keeping something is the first line
-            // of a panel and this is not the change that draws one. Bound rather
-            // than matched with `_` so that the activity a `PactEvent` carries
-            // counts as read on the way past — the alternative is an `allow` on
-            // the variant that would outlive its reason.
-            Ok(PactEvent::Doing(activity)) => drop(activity),
+            }) => {
+                // Two places, one fact, and they are two because they are read
+                // at two different speeds: the footer says which directory of
+                // how many is being worked *now* and replaces itself every time,
+                // while the panel keeps a section per directory for as long as
+                // the run lasts. The section is opened first so that the
+                // activities drained after it — which may be in this same batch
+                // — land under the directory they belong to.
+                if let Some(account) = app.account_mut() {
+                    account.open_section(section_label(&scope.root, &directory), now);
+                }
+                app.set_pact_in_flight(directory, position, total);
+            }
+            // Filed under whichever directory is open, which is the one the
+            // `Starting` before it named: an activity carries no directory
+            // because it needs none, and the account's live section is the
+            // answer. An account is always there during a run — the press that
+            // started it made one — so `None` is a run nobody started this way,
+            // which is a test driving the events directly; dropping the line is
+            // the honest thing to do with it either way.
+            //
+            // What each activity comes to is the account's business and not this
+            // file's: a tool is its name and its one detail, thinking is the
+            // word `thinking`, and a cost is added to the section's spend rather
+            // than drawn as a line of its own. See `Account::record`.
+            Ok(PactEvent::Doing(activity)) => {
+                if let Some(account) = app.account_mut() {
+                    account.record(&activity, now);
+                }
+            }
             Ok(PactEvent::Finished(outcome)) => break Some(outcome),
             // Still running, and nothing new to say.
             Err(TryRecvError::Empty) => return,
@@ -730,11 +830,16 @@ fn apply_progress(
         .take()
         .expect("the pact drained just above is still here");
     app.clear_pact_in_flight();
-    match outcome {
+    // Read before the outcome is taken apart, because one arm below moves the
+    // rest of the run out from under it: whether the reader stopped this run is
+    // what decides how the panel's last section ends.
+    let cancelled = running.cancel.is_cancelled();
+    let refusals = match outcome {
         Some(Ok(Toggled {
             manifest: next,
             granted,
             message,
+            refusals,
         })) => {
             *manifest = next;
             // The app painted the subtree stale when the key was pressed,
@@ -753,6 +858,9 @@ fn apply_progress(
             if let Some(message) = message {
                 app.set_message(message);
             }
+            // Kept for the panel, which is the only place they can be said one
+            // directory at a time.
+            refusals
         }
         // Nothing was recorded: either the subtree could not be listed, or the
         // manifest would not save. Documents may well be on disk in the second
@@ -761,21 +869,158 @@ fn apply_progress(
         // reason goes on the app's line — the same one a refused toggle uses —
         // rather than out of the loop, which would take the screen with it.
         Some(Err(message)) => {
-            *app = running.before;
-            app.set_message(message);
+            restore(app, running.before, message);
+            Vec::new()
         }
         // The worker died with the manifest in this thread's hand untouched, so
         // the rows go back to matching it exactly as they do for a run that
         // recorded nothing, and the footer says the run is over.
         None => {
-            *app = running.before;
-            app.set_message(PACT_LOST);
+            restore(app, running.before, PACT_LOST);
+            Vec::new()
         }
-    }
+    };
+
+    // Every section gets its ending and the run gets its summary, whichever arm
+    // above ran and whatever the run had to say for itself. After the arms
+    // rather than inside them, because two of them put a different app on
+    // screen and the account belongs to whichever one survives — and because a
+    // run that ends without its clocks stopped is a finished run whose newest
+    // line goes on counting up for as long as warlock is open.
+    close_account(app, scope, &refusals, cancelled, now);
 
     // The run is over and everything it recorded is on disk, so the rows on
     // screen are one load out of date whichever arm above ran.
     reload_tree(app, scope);
+}
+
+/// The file each pacted directory's document is written to, as the engine writes
+/// it (WAR-21.01): beside the directory, and renamed over.
+///
+/// Spelled out here because the engine's observer port says only which directory
+/// is starting — nothing on the way back names the document — so the one thing
+/// the panel can do is look for it where it is always written. Reading it is a
+/// `stat` on the event loop's own thread, which is a filesystem call this file
+/// already makes several of.
+const DOCUMENT_FILE: &str = "WARLOCK.md";
+
+/// Close every section of the panel's account and end it with the run's summary.
+///
+/// Where the panel stops describing work and starts describing what came of it,
+/// and it happens here, once, when the run's outcome lands — because that is
+/// when the run says how each directory went. The engine's failures name their
+/// own directories, so each section is closed with the reason belonging to *its*
+/// directory rather than with the one line the footer took.
+///
+/// A section no failure mentions wrote a document, and the two things worth
+/// saying about that document — what it is and how big it is — are read off disk
+/// here, on this thread, at `<directory>/WARLOCK.md`. There is nowhere else to
+/// read them from: the port the run reports over says only which directory is
+/// starting.
+///
+/// `cancelled` closes the section the run was stopped in before anything else is
+/// worded, so it says the reader stopped it rather than that its pass failed —
+/// which is what a killed `claude` otherwise comes back as. The sections above
+/// it are worded exactly as they would have been, because they finished.
+///
+/// Does nothing when there is no account, which is a run nobody started through
+/// the pact key: a test driving the events straight down the channel.
+fn close_account(
+    app: &mut App,
+    scope: &Scope,
+    refusals: &[Refusal],
+    cancelled: bool,
+    now: Instant,
+) {
+    let Some(account) = app.account_mut() else {
+        return;
+    };
+    if cancelled {
+        account.close_section(&Outcome::Cancelled, now);
+    }
+    account.close_open_sections(now, |section| {
+        section_outcome(section, refusals, &scope.root)
+    });
+    account.finish(now);
+}
+
+/// How the section for one directory ends: the document it wrote, or the reason
+/// it has none.
+///
+/// The refusal is looked for by name, and the name it is looked for under is the
+/// one [`section_label`] gave the heading — the same function on both sides, so a
+/// failure and a section agree about which directory they are about by
+/// construction rather than by two spellings happening to match.
+///
+/// Failing that, the document is `stat`ed where the engine writes it. It is named
+/// relative to the tree on screen, like the heading above it, because a panel
+/// column is narrow and the absolute prefix is the part the reader already knows.
+///
+/// A directory with neither a failure nor a document is the odd case, and it is
+/// said rather than smoothed over: a run whose worker died half way through a
+/// pass leaves exactly this, and `wrote … — 0 bytes` would be a claim about a
+/// file that is not there.
+fn section_outcome(section: &Section, refusals: &[Refusal], root: &Path) -> Outcome {
+    let refused = refusals
+        .iter()
+        .find(|refusal| Path::new(&section_label(root, &refusal.directory)) == section.directory());
+    if let Some(refusal) = refused {
+        return Outcome::Refused {
+            reason: refusal.reason.clone(),
+        };
+    }
+
+    // The heading's own spelling with the document's name under it, and the
+    // absolute path to go and look at it: the label is relative to the root, so
+    // joining it back on is what the run walked.
+    let document = section.directory().join(DOCUMENT_FILE);
+    match fs::metadata(root.join(&document)) {
+        Ok(written) => Outcome::Wrote {
+            document,
+            bytes: written.len(),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Outcome::Refused {
+            reason: "no document was written".to_owned(),
+        },
+        Err(error) => Outcome::Refused {
+            reason: format!("its document could not be read: {error}"),
+        },
+    }
+}
+
+/// Put the view back to `before` and say `message`, keeping the account of the
+/// run that is ending.
+///
+/// The copy taken when the key was pressed is the tree as it stood before the
+/// toggle painted it, and that is all it is good for: it was taken before the
+/// run started, so it has none of what the run then did. The account does not go
+/// back with the rows, because it is not a claim about the tree — it is the
+/// record of a run that really happened, and a reader whose pact died half way
+/// through wants to see where it got to more than a reader of any other run
+/// does. So the rows, the colours and the selection go back to what the manifest
+/// on disk still says, and the panel keeps its account.
+fn restore(app: &mut App, mut before: App, message: impl Into<String>) {
+    before.take_account_from(app);
+    *app = before;
+    app.set_message(message);
+}
+
+/// How the panel names `directory`: relative to `root`, which is the root of the
+/// tree on screen.
+///
+/// The same spelling the footer's progress line uses, for the same reason. A
+/// heading that begins with the part of the path every row on screen shares
+/// spends a narrow panel on what the reader already knows, and the truncation
+/// that follows then eats the part they do not — the panel cuts a long line at
+/// its right-hand end. A directory that cannot be spelled relative to the root —
+/// including the root itself, whose relative spelling is `"."` — is named as it
+/// stands, because a heading that says something odd beats one that says
+/// nothing.
+fn section_label(root: &Path, directory: &Path) -> String {
+    match to_manifest_path(root, directory) {
+        Ok(relative) if relative != "." => relative,
+        _ => directory.display().to_string(),
+    }
 }
 
 /// Re-read the tree at `scope` from disk and put the view back on top of it.
@@ -867,6 +1112,44 @@ struct Toggled {
     /// Never a reason to throw the manifest away: everything it can say is
     /// about part of a subtree, and the rest of it earned what it got.
     message: Option<String>,
+    /// The directories that came back with no document, and why, one entry per
+    /// directory.
+    ///
+    /// The same failures `message` says one of, kept apart from it because they
+    /// are read at two different widths: the footer is one line about the run
+    /// and the panel is a section per directory, and a section can only say why
+    /// *its* pass was refused if the reason arrives attached to a directory.
+    /// A run where nothing was refused carries none.
+    refusals: Vec<Refusal>,
+}
+
+/// Why one directory's pass produced no document.
+///
+/// A [`PactFailure`] flattened to the two things the panel needs: which
+/// directory it is about, which the engine's failures already name, and the
+/// sentence the failure worded itself as. Flattened at the point the failures
+/// are in hand rather than carried whole, so that what travels back to the event
+/// loop is a plain pair of a path and a line — and so that the panel's wording
+/// is the engine's own rather than a second opinion about what went wrong.
+#[derive(Debug)]
+struct Refusal {
+    /// The directory that got no document, as the engine named it: absolute,
+    /// and spelled relative to the tree on screen by whoever draws it.
+    directory: PathBuf,
+    /// The failure's own sentence, on one line.
+    reason: String,
+}
+
+impl From<&PactFailure> for Refusal {
+    fn from(failure: &PactFailure) -> Self {
+        Self {
+            directory: failure.directory().to_path_buf(),
+            // Flattened for the same reason every other line here is: a failure
+            // can carry a manifest error, which carries the TOML parser's
+            // several lines, and a panel row is one row.
+            reason: one_line(&failure.to_string()),
+        }
+    }
 }
 
 /// Carry `toggle` out — pact the subtree, or take it out of the manifest — and
@@ -905,7 +1188,7 @@ fn apply_toggle(
     agent: &dyn Agent,
     observer: &mut dyn PactObserver,
 ) -> Result<Toggled, String> {
-    let (next, granted, message) = if toggle.pacted {
+    let (next, granted, message, refusals) = if toggle.pacted {
         let PactedSubtree {
             manifest,
             failures,
@@ -917,7 +1200,16 @@ fn apply_toggle(
         // and a grant. They are still worth a line, which is why the two travel
         // separately from here on.
         let granted = failures.is_empty();
-        (manifest, granted, pact_message(&failures, &problems))
+        // And the same failures a second time, per directory: the footer takes
+        // one of them and the panel takes all of them, because the panel has a
+        // section for each and can say which is which.
+        let refusals = failures.iter().map(Refusal::from).collect();
+        (
+            manifest,
+            granted,
+            pact_message(&failures, &problems),
+            refusals,
+        )
     } else {
         // Un-pacting is pure manifest editing — no walk, no pass, no hash, and
         // every `WARLOCK.md` left where it is — so the only thing it can refuse
@@ -925,7 +1217,7 @@ fn apply_toggle(
         // what un-pacting leaves behind, and nothing here talks over it.
         let next = unpact_subtree(&toggle.path, repo_root, manifest)
             .map_err(|source| Error::Manifest { source }.to_string())?;
-        (next, false, None)
+        (next, false, None, Vec::new())
     };
 
     next.save(repo_root)
@@ -934,6 +1226,7 @@ fn apply_toggle(
         manifest: next,
         granted,
         message,
+        refusals,
     })
 }
 
@@ -1934,15 +2227,18 @@ mod tests {
     mod pacting {
         use std::cell::RefCell;
         use std::path::{Path, PathBuf};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::mpsc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::mpsc::{self, Sender};
+        use std::time::{Duration, Instant};
         use std::{env, fs, process};
 
         use warlock_engine::{
             Agent, AgentError, AgentRequest, AgentResponse, Loaded, Manifest, Node, NodeState,
             PactEntry, Tree, Unwatched, decide_state, load_tree, repository_root, subtree_hash,
         };
-        use warlock_tui::{Activities, Activity, App, ClaudeAgent, PactToggle};
+        use warlock_tui::{
+            Account, Activities, Activity, App, ClaudeAgent, Line, PactToggle, Section,
+        };
 
         use warlock_tui::Cancel;
 
@@ -2170,6 +2466,32 @@ mod tests {
             (app, scope)
         }
 
+        /// `base` plus `seconds`, so a run's whole timeline is one instant and
+        /// some arithmetic rather than a sleep.
+        fn at(base: Instant, seconds: u64) -> Instant {
+            base + Duration::from_secs(seconds)
+        }
+
+        /// What the panel would draw for `app` at `now`, as plain strings: a
+        /// heading is its path, a clocked line is its clock and its text, and
+        /// the summary is its own line.
+        ///
+        /// The whole account rather than the window onto it, because what these
+        /// tests are about is what the run put into the panel and not how much
+        /// of it fits.
+        fn panel_text(app: &App, now: Instant) -> Vec<String> {
+            app.account()
+                .map(|account| account.lines(now))
+                .unwrap_or_default()
+                .iter()
+                .map(|line| match line {
+                    Line::Directory { path } => path.display().to_string(),
+                    Line::Clocked { clock, text } => format!("{clock} {text}"),
+                    Line::Summary { text } => text.clone(),
+                })
+                .collect()
+        }
+
         /// A scope for a tree that is not on disk anywhere.
         ///
         /// What the tests built around synthetic paths hand to
@@ -2240,7 +2562,7 @@ mod tests {
                 path: toggle.path.clone(),
                 before,
             });
-            apply_progress(&mut pact, app, manifest, scope);
+            apply_progress(&mut pact, app, manifest, scope, Instant::now());
             assert!(pact.is_none(), "the run reported its outcome and is over");
         }
 
@@ -2253,6 +2575,7 @@ mod tests {
                 manifest,
                 granted,
                 message,
+                ..
             } = apply_toggle(
                 &Manifest::new(),
                 &scratch.root,
@@ -2365,6 +2688,7 @@ mod tests {
                 manifest,
                 granted,
                 message,
+                ..
             } = apply_toggle(
                 &Manifest::new(),
                 &scratch.root,
@@ -2448,6 +2772,7 @@ mod tests {
                 manifest,
                 granted,
                 message,
+                ..
             } = apply_toggle(
                 &pacted,
                 &scratch.root,
@@ -2655,6 +2980,7 @@ mod tests {
                     manifest,
                     granted: true,
                     message: None,
+                    ..
                 })),
             ] = events.as_slice()
             else {
@@ -2902,18 +3228,68 @@ mod tests {
             let mut app = App::from_tree(&tree);
             let before = app.clone();
 
-            assert_eq!(pact_press(&mut app, true), None, "no second pact");
+            assert_eq!(
+                pact_press(&mut app, true, Instant::now()),
+                None,
+                "no second pact"
+            );
             assert_eq!(
                 app, before,
-                "and no colour, no message and no selection moved"
+                "and no colour, no message, no selection moved and no account started"
             );
 
             // The same press, with nothing running, is the press that starts a
             // pact: same key, same app, different answer.
-            let toggle = pact_press(&mut app, false).expect("a directory can be pacted");
+            let toggle =
+                pact_press(&mut app, false, Instant::now()).expect("a directory can be pacted");
             assert_eq!(toggle.path, PathBuf::from("/repo/crates"));
             assert!(toggle.pacted);
             assert_ne!(app, before, "the subtree it covers is painted");
+        }
+
+        #[test]
+        fn the_press_that_starts_a_run_starts_an_account_and_an_un_pact_leaves_it_alone() {
+            // One directory and three presses of the same key: a pact, the
+            // un-pact that undoes it, and a second pact. No filesystem, because
+            // what is under test is what a press does to the app.
+            let tree = Tree::new(Node::new(
+                "/repo/crates",
+                None::<PathBuf>,
+                NodeState::Unpacted,
+            ));
+            let mut app = App::from_tree(&tree);
+            let base = Instant::now();
+
+            assert!(!app.has_account(), "no pact has run this session");
+
+            // The pact, and a line of the run it started.
+            let toggle = pact_press(&mut app, false, base).expect("a directory can be pacted");
+            assert!(toggle.pacted);
+            let account = app.account_mut().expect("the press started an account");
+            account.open_section("crates", base);
+            account.record(&Activity::Thinking, at(base, 1));
+            assert_eq!(app.account().map(Account::line_count), Some(2));
+
+            // The un-pact. It runs no pass and reports nothing, so wiping the
+            // record of the run that wrote the documents it is removing would
+            // cost the reader the only account they have for no news at all.
+            let toggle = pact_press(&mut app, false, at(base, 2)).expect("it is pacted now");
+            assert!(!toggle.pacted, "the second press takes the pact off");
+            assert_eq!(
+                app.account().map(Account::line_count),
+                Some(2),
+                "the last run's account is still on screen"
+            );
+
+            // The second pact. One pact, one account: this one starts empty
+            // rather than under the last one.
+            let toggle = pact_press(&mut app, false, at(base, 3)).expect("it can be pacted again");
+            assert!(toggle.pacted);
+            assert_eq!(
+                app.account().map(Account::line_count),
+                Some(0),
+                "a new run starts from nothing"
+            );
         }
 
         #[test]
@@ -2947,6 +3323,7 @@ mod tests {
                 manifest,
                 granted,
                 message,
+                ..
             }) = outcome_of(&events)
             else {
                 panic!("a cancelled pact still saves what it finished: {events:?}");
@@ -3012,6 +3389,7 @@ mod tests {
                 manifest,
                 granted,
                 message,
+                ..
             }) = outcome_of(&events)
             else {
                 panic!("a cancelled pact still saves what it finished: {events:?}");
@@ -3077,13 +3455,19 @@ mod tests {
             );
         }
 
-        #[test]
-        fn the_loop_takes_activities_off_the_channel_and_carries_on_as_before() {
-            // Activities share the channel with the progress the footer draws,
-            // so the loop has to read them or they would sit in it until the run
-            // ends and hold up nothing but themselves. Reading them is all it
-            // does with them here: the app that comes out the far side is the
-            // one a run with no activities at all would have produced.
+        /// Everything the event loop holds one moment after the pact key
+        /// started a run over `/repo/crates` at `base`: the app with the account
+        /// that press opened, the copy of it taken before the toggle painted,
+        /// the manifest on disk, the end of the channel a worker would talk
+        /// down, and the run itself.
+        ///
+        /// The copy comes back because the footer's wording is asserted against
+        /// it: what the progress line says during a run is what it has always
+        /// said, and the way to show that is to say it on an app this slice
+        /// never touched.
+        fn a_run_in_flight(
+            base: Instant,
+        ) -> (App, App, Manifest, mpsc::Sender<PactEvent>, Running) {
             let tree = Tree::new(Node::new(
                 "/repo/crates",
                 None::<PathBuf>,
@@ -3091,40 +3475,161 @@ mod tests {
             ));
             let before = App::from_tree(&tree);
             let mut app = before.clone();
-            let mut manifest = Manifest::new();
+            app.start_account(base);
             let (events, received) = mpsc::channel();
-            let mut pact = Some(Running {
+            let running = Running {
                 events: received,
                 cancel: CancelGuard::new(),
                 path: PathBuf::from("/repo/crates"),
                 before: before.clone(),
-            });
+            };
+            (app, before, Manifest::new(), events, running)
+        }
 
-            // A directory, then a pass talking about it, in the order a worker
-            // sends them.
-            for event in [
-                PactEvent::Starting {
-                    directory: PathBuf::from("/repo/crates"),
+        #[test]
+        fn a_pass_fills_the_panel_under_the_directory_it_is_working_on() {
+            // The directory the worker names opens a section, everything the
+            // pass is then seen doing lands under it one line at a time, a cost
+            // is money rather than a line, and the footer goes on saying exactly
+            // what it always said.
+            let base = Instant::now();
+            let (mut app, before, mut manifest, events, running) = a_run_in_flight(base);
+            let mut pact = Some(running);
+
+            // The first directory, on its own: the run has reached it and the
+            // pass has not said anything yet.
+            events
+                .send(PactEvent::Starting {
+                    directory: PathBuf::from("/repo/crates/engine"),
                     position: 1,
-                    total: 1,
-                },
+                    total: 2,
+                })
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+
+            assert!(pact.is_some(), "a run that is talking is still running");
+            assert_eq!(
+                panel_text(&app, base),
+                ["engine"],
+                "the section is open and empty"
+            );
+            let mut in_flight = before.clone();
+            in_flight.set_pact_in_flight("/repo/crates/engine", 1, 2);
+            assert_eq!(
+                app.pact_line(),
+                in_flight.pact_line(),
+                "and the footer's progress line says what it always said"
+            );
+            assert_eq!(
+                app.message(),
+                in_flight.message(),
+                "with no message of its own"
+            );
+
+            // Then what the pass is doing, four seconds in.
+            for event in [
                 PactEvent::Doing(Activity::Tool {
                     name: "Bash".to_owned(),
                     detail: Some("cargo test".to_owned()),
                 }),
                 PactEvent::Doing(Activity::Thinking),
-                PactEvent::Doing(Activity::Cost { usd: 1.5 }),
             ] {
                 events.send(event).expect("the loop is still listening");
             }
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 4));
 
-            assert!(pact.is_some(), "a run that is talking is still running");
-            let mut in_flight = before.clone();
-            in_flight.set_pact_in_flight("/repo/crates", 1, 1);
             assert_eq!(
-                app, in_flight,
-                "the footer says what it would have said, and nothing else moved"
+                panel_text(&app, at(base, 4)),
+                ["engine", "0:04 Bash cargo test", "0:04 thinking"],
+                "one line per activity, under the directory that reported it"
+            );
+
+            // A cost is not a thing the pass did, so it draws no line — it is
+            // added to what this directory spent.
+            events
+                .send(PactEvent::Doing(Activity::Cost { usd: 0.21 }))
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 6));
+
+            assert_eq!(
+                panel_text(&app, at(base, 6)).len(),
+                3,
+                "the cost added no line: {:?}",
+                panel_text(&app, at(base, 6))
+            );
+            assert_eq!(
+                app.account()
+                    .expect("a run is under way")
+                    .sections()
+                    .first()
+                    .and_then(Section::cost),
+                Some(0.21),
+                "it was counted instead",
+            );
+
+            // The newest line counts up on its own, with nothing arriving: the
+            // same app, a later instant, a moving clock. This is what the loop's
+            // hundred-millisecond round does for a pass that thinks for a
+            // minute.
+            assert_eq!(
+                panel_text(&app, at(base, 65)),
+                ["engine", "0:04 Bash cargo test", "1:05 thinking"],
+                "the line beneath the newest one is frozen and the newest is not"
+            );
+        }
+
+        #[test]
+        fn a_subtree_pact_reads_as_a_section_per_directory_in_walk_order() {
+            // A pass each for two directories: the second heading opens under
+            // the first section rather than over it, its clock starts again at
+            // nothing, and the account is still whole once the run is over.
+            let base = Instant::now();
+            let (mut app, before, mut manifest, events, running) = a_run_in_flight(base);
+            let mut pact = Some(running);
+
+            events
+                .send(PactEvent::Starting {
+                    directory: PathBuf::from("/repo/crates/engine"),
+                    position: 1,
+                    total: 2,
+                })
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+            events
+                .send(PactEvent::Doing(Activity::Tool {
+                    name: "Bash".to_owned(),
+                    detail: Some("cargo test".to_owned()),
+                }))
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 4));
+
+            // The next directory. Its clock starts again at nothing, and the
+            // section above it stops where the run left it — seventy seconds in,
+            // which is where its last line stays however long the run goes on.
+            events
+                .send(PactEvent::Starting {
+                    directory: PathBuf::from("/repo/crates/tui"),
+                    position: 2,
+                    total: 2,
+                })
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 70));
+            events
+                .send(PactEvent::Doing(Activity::Thinking))
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 71));
+
+            assert_eq!(
+                panel_text(&app, at(base, 100)),
+                ["engine", "1:10 Bash cargo test", "tui", "0:30 thinking"],
+                "the sections are in walk order and each clock counts from its own start"
+            );
+            let mut in_flight = before.clone();
+            in_flight.set_pact_in_flight("/repo/crates/tui", 2, 2);
+            assert_eq!(
+                app.pact_line(),
+                in_flight.pact_line(),
+                "and the footer is still the footer"
             );
 
             // And the outcome behind them lands exactly as it always did.
@@ -3133,9 +3638,16 @@ mod tests {
                     manifest: Manifest::new(),
                     granted: true,
                     message: None,
+                    refusals: Vec::new(),
                 })))
                 .expect("the loop is still listening");
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+            apply_progress(
+                &mut pact,
+                &mut app,
+                &mut manifest,
+                &nowhere(),
+                at(base, 120),
+            );
 
             assert!(pact.is_none(), "the run is over");
             assert!(app.pact_line().is_none(), "so nothing is being pacted now");
@@ -3147,6 +3659,519 @@ mod tests {
                     .is_some_and(|line| line.starts_with(NOT_REFRESHED)),
                 "the run reported something of its own: {:?}",
                 app.message()
+            );
+            // The footer stops describing a run that is over; the panel does
+            // not. Everything the run said is still there to be read, with each
+            // section ended and the run summed up under them. Nothing is on
+            // disk at `/repo/crates`, so neither directory has a document to
+            // point at and both sections say so rather than claim one.
+            assert_eq!(
+                panel_text(&app, at(base, 200)),
+                [
+                    "engine",
+                    "1:10 Bash cargo test",
+                    "1:10 refused — no document was written",
+                    "tui",
+                    "0:50 thinking",
+                    "0:50 refused — no document was written",
+                    "pact finished — 2 directories, 2:00, $0.00 \
+                     (incomplete: 2 passes reported no cost)",
+                ],
+                "the account of a finished run stays whole and is closed off"
+            );
+        }
+
+        #[test]
+        fn the_reader_keeps_the_tree_while_the_panel_fills_up() {
+            // The run writes to the panel and to nothing else. The reader moves,
+            // collapses and filters throughout, and the selection stays where
+            // they left it rather than chasing the directory being pacted.
+            // Everything is pacted, so the pacted-only filter keeps every row
+            // and what it does to the selection is nothing at all.
+            let pacted = NodeState::PactedFresh;
+            let tree = Tree::new(Node::new("/repo", None::<PathBuf>, pacted).with_children([
+                Node::new("/repo/crates", None::<PathBuf>, pacted).with_children([
+                    Node::new("/repo/crates/engine", None::<PathBuf>, pacted),
+                    Node::new("/repo/crates/tui", None::<PathBuf>, pacted),
+                ]),
+                Node::new("/repo/docs", None::<PathBuf>, pacted).with_children([Node::new(
+                    "/repo/docs/adr",
+                    None::<PathBuf>,
+                    pacted,
+                )]),
+            ]));
+            let mut app = App::from_tree(&tree);
+            let base = Instant::now();
+            app.set_viewport_height(10);
+            app.start_account(base);
+            let mut manifest = Manifest::new();
+            let (events, received) = mpsc::channel();
+            let mut pact = Some(Running {
+                events: received,
+                cancel: CancelGuard::new(),
+                path: PathBuf::from("/repo/crates"),
+                before: app.clone(),
+            });
+
+            // The reader parks on `docs`, which is nowhere near the subtree
+            // being pacted.
+            app.select_last();
+            app.select_previous();
+            let parked = app
+                .selected_row()
+                .map(|row| row.path.clone())
+                .expect("a row is selected");
+            assert_eq!(parked, PathBuf::from("/repo/docs"));
+
+            // The first directory, and then the three keys that shape the tree.
+            let mut round = |now: Instant, directory: &str, position: usize, app: &mut App| {
+                events
+                    .send(PactEvent::Starting {
+                        directory: PathBuf::from(directory),
+                        position,
+                        total: 2,
+                    })
+                    .expect("the loop is still listening");
+                events
+                    .send(PactEvent::Doing(Activity::Thinking))
+                    .expect("the loop is still listening");
+                apply_progress(&mut pact, app, &mut manifest, &nowhere(), now);
+            };
+
+            round(base, "/repo/crates/engine", 1, &mut app);
+            app.toggle_collapsed();
+            app.toggle_pacted_only();
+            app.toggle_files();
+
+            // The second, and then the movement keys, which end where they
+            // started because the reader put them back.
+            round(at(base, 10), "/repo/crates/tui", 2, &mut app);
+            app.select_previous();
+            app.select_next();
+
+            assert!(pact.is_some(), "the run is still going");
+            assert_eq!(
+                panel_text(&app, at(base, 10)),
+                ["engine", "0:10 thinking", "tui", "0:00 thinking"],
+                "the run filled the panel and nothing else"
+            );
+            assert_eq!(
+                app.selected_row().map(|row| row.path.clone()),
+                Some(parked),
+                "the selection followed the run"
+            );
+            assert!(app.pacted_only(), "the filter key did nothing");
+            assert!(app.show_files(), "the file key did nothing");
+            assert!(
+                app.is_collapsed("/repo/docs"),
+                "the collapse key did nothing"
+            );
+        }
+
+        #[test]
+        fn a_run_that_dies_leaves_the_account_of_what_it_managed_on_screen() {
+            // Putting the tree back where it was is the undo for a run that
+            // recorded nothing, and it is taken from a copy older than the run
+            // itself. The account is not part of that undo: the lines are the
+            // record of a pass that really did happen, and this is the run whose
+            // reader most wants to see where it got to.
+            let tree = Tree::new(Node::new(
+                "/repo/crates",
+                None::<PathBuf>,
+                NodeState::Unpacted,
+            ));
+            let before = App::from_tree(&tree);
+            let mut app = before.clone();
+            let base = Instant::now();
+            app.start_account(base);
+            let mut manifest = Manifest::new();
+            let (events, received) = mpsc::channel();
+            let mut pact = Some(Running {
+                events: received,
+                cancel: CancelGuard::new(),
+                path: PathBuf::from("/repo/crates"),
+                before: before.clone(),
+            });
+
+            events
+                .send(PactEvent::Starting {
+                    directory: PathBuf::from("/repo/crates/engine"),
+                    position: 1,
+                    total: 2,
+                })
+                .expect("the loop is still listening");
+            events
+                .send(PactEvent::Doing(Activity::Thinking))
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+
+            // The worker goes away without an outcome behind it.
+            drop(events);
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 5));
+
+            assert!(pact.is_none(), "the run is over, however it ended");
+            assert_eq!(app.message(), Some(PACT_LOST), "and the footer says so");
+            assert_eq!(app.rows(), before.rows(), "the rows match the manifest");
+            assert_eq!(
+                panel_text(&app, at(base, 5)),
+                [
+                    "engine",
+                    "0:05 thinking",
+                    "0:05 refused — no document was written",
+                    "pact finished — 1 directory, 0:05, $0.00 \
+                     (incomplete: 1 pass reported no cost)",
+                ],
+                "and the panel still holds what the run said before it died"
+            );
+            assert_eq!(
+                panel_text(&app, at(base, 500)),
+                panel_text(&app, at(base, 5)),
+                "with its clocks stopped where the run stopped"
+            );
+        }
+
+        /// How long a frame lasts in the replayed runs below, in seconds.
+        ///
+        /// Ten rather than one so the clocks read as something a reader of the
+        /// test can check by counting frames, and so a section's lines are told
+        /// apart by their clocks rather than all reading `0:00`.
+        const FRAME: u64 = 10;
+
+        /// Everything one whole run has to say, from the worker's own body run
+        /// on this thread over `scratch`.
+        ///
+        /// The announcements, whatever the passes report, and the outcome, in
+        /// the order a real run produces them: `agent` is handed the very sender
+        /// the run reports on, so the port it puts on its fake is the one
+        /// [`spawn_pact`] would put on a real agent, over the one channel.
+        fn recorded(
+            scratch: &Scratch,
+            relative: &str,
+            cancel: &Cancel,
+            agent: impl FnOnce(&Sender<PactEvent>) -> Canned,
+        ) -> Vec<PactEvent> {
+            let (events, received) = mpsc::channel();
+            let agent = agent(&events);
+            run_pact(
+                &Manifest::new(),
+                &scratch.root,
+                &toggle(scratch, relative, true),
+                &agent,
+                cancel,
+                &events,
+            );
+            // Both ends the worker would have held: its own, and the one inside
+            // the port attached to its agent.
+            drop(events);
+            drop(agent);
+            received.into_iter().collect()
+        }
+
+        /// Play `said` back at the event loop a frame at a time, ten seconds a
+        /// frame, and leave the app holding what the run put in the panel.
+        ///
+        /// One event per frame because a run collected in a millisecond and
+        /// drained in a single call would be one instant with every clock
+        /// reading `0:00`, and what each section's clock says is half of what
+        /// the panel is for. The other half is the outcome under each section,
+        /// which lands in the last frame of all — the one carrying
+        /// [`PactEvent::Finished`].
+        fn replay(
+            app: &mut App,
+            manifest: &mut Manifest,
+            scope: &Scope,
+            cancel: CancelGuard,
+            said: Vec<PactEvent>,
+            base: Instant,
+        ) {
+            let (events, received) = mpsc::channel();
+            let mut pact = Some(Running {
+                events: received,
+                cancel,
+                path: scope.root.clone(),
+                before: app.clone(),
+            });
+            for (frame, event) in said.into_iter().enumerate() {
+                let frame = u64::try_from(frame).expect("a run of fewer than 2^64 events");
+                events.send(event).expect("the loop is still listening");
+                apply_progress(&mut pact, app, manifest, scope, at(base, frame * FRAME));
+            }
+            assert!(pact.is_none(), "the run reported its outcome and is over");
+        }
+
+        /// How big the document under `relative` is, read the way the panel
+        /// reads it: off disk, where the engine wrote it.
+        fn document_bytes(scratch: &Scratch, relative: &str) -> u64 {
+            fs::metadata(scratch.path(relative).join(DOCUMENT_FILE))
+                .expect("the pass wrote a document")
+                .len()
+        }
+
+        #[test]
+        fn each_section_ends_with_the_document_that_pass_wrote_and_what_it_cost() {
+            // A whole run, from the worker's body to the panel: two directories,
+            // each with a pass that reads something, thinks, and says what it
+            // spent. What closes each section is a fact about disk — the
+            // document at `<directory>/WARLOCK.md` and its size — and a fact
+            // about the pass, which is the cost the activity port carried.
+            let scratch = one_crate_to_load("outcomes");
+            let (mut app, scope) = load(&scratch);
+            let mut manifest = Manifest::new();
+            let base = Instant::now();
+            app.start_account(base);
+
+            let said = recorded(&scratch, "crates/engine", &Cancel::new(), |events| {
+                Canned::new(&scratch, []).reporting(activity_port(events))
+            });
+            replay(
+                &mut app,
+                &mut manifest,
+                &scope,
+                CancelGuard::new(),
+                said,
+                base,
+            );
+
+            // Read long after the run ended, which is also how it is shown that
+            // every clock stopped: a finished account says the same thing for
+            // ever.
+            assert_eq!(
+                panel_text(&app, at(base, 10_000)),
+                [
+                    "crates/engine/src".to_owned(),
+                    "0:20 Read crates/engine/src".to_owned(),
+                    "0:40 thinking".to_owned(),
+                    format!(
+                        "0:40 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.25",
+                        document_bytes(&scratch, "crates/engine/src")
+                    ),
+                    "crates/engine".to_owned(),
+                    "0:20 Read crates/engine".to_owned(),
+                    "0:40 thinking".to_owned(),
+                    format!(
+                        "0:40 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                        document_bytes(&scratch, "crates/engine")
+                    ),
+                    // Nine frames of ten seconds: the run started with the first
+                    // and ended with the ninth. The total is the two passes
+                    // added up, and there is no `incomplete` on it because both
+                    // of them said what they cost.
+                    "pact finished — 2 directories, 1:20, $0.50".to_owned(),
+                ],
+                "each section is closed with its own document and its own cost"
+            );
+
+            // And the account of a run that is over is still all there and still
+            // all reachable: three lines of panel, and the reader can walk the
+            // nine the run wrote a screenful at a time.
+            app.toggle_focus();
+            app.set_panel_height(3);
+            app.select_first();
+            let mut walked = Vec::new();
+            loop {
+                walked.extend(app.panel_lines(at(base, 10_000)));
+                if app.panel_lines_below() == 0 {
+                    break;
+                }
+                app.select_page_down();
+            }
+            assert_eq!(
+                walked,
+                app.account()
+                    .expect("the run left one")
+                    .lines(at(base, 10_000)),
+                "every line of the run is still reachable through a short panel"
+            );
+        }
+
+        #[test]
+        fn a_directory_the_run_refused_ends_with_the_reason_it_was_refused() {
+            // One directory of the two comes back with an answer the engine will
+            // not take. The section for that directory says why, in the words of
+            // the failure that named it, and the directory that did write a
+            // document is untouched by its neighbour going wrong.
+            let scratch = one_crate_to_load("refused-in-the-panel");
+            let (mut app, scope) = load(&scratch);
+            let mut manifest = Manifest::new();
+            let base = Instant::now();
+            app.start_account(base);
+
+            let said = recorded(&scratch, "crates/engine", &Cancel::new(), |events| {
+                Canned::new(&scratch, ["crates/engine/src"]).reporting(activity_port(events))
+            });
+            replay(
+                &mut app,
+                &mut manifest,
+                &scope,
+                CancelGuard::new(),
+                said,
+                base,
+            );
+
+            let lines = panel_text(&app, at(base, 10_000));
+            let [first, _, _, refused, second, _, _, wrote, summary] = lines.as_slice() else {
+                panic!("a two-directory run reads as two sections and a summary: {lines:?}");
+            };
+            assert_eq!(first, "crates/engine/src");
+            assert_eq!(second, "crates/engine");
+
+            let reason = refused
+                .strip_prefix("0:40 refused — ")
+                .unwrap_or_else(|| panic!("the section says why it was refused: {refused}"));
+            assert!(
+                reason.contains("crates/engine/src"),
+                "and the reason is about that directory: {reason}"
+            );
+            // The engine's own sentence rather than a second opinion worded
+            // here: the footer quotes the same failure, and this is the way to
+            // say that the two came out of one place.
+            let message = app.message().expect("a partial run reports it");
+            assert!(
+                message.contains(reason),
+                "the panel's reason is the failure's own: {message} / {reason}"
+            );
+
+            // Nothing was refused about the parent, which was documented over
+            // its failing child, and its section says so in the ordinary way.
+            assert_eq!(
+                wrote,
+                &format!(
+                    "0:40 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                    document_bytes(&scratch, "crates/engine")
+                )
+            );
+            assert!(
+                !scratch
+                    .path("crates/engine/src")
+                    .join(DOCUMENT_FILE)
+                    .exists(),
+                "the refused directory really has no document"
+            );
+            assert_eq!(summary, "pact finished — 2 directories, 1:20, $0.50");
+        }
+
+        #[test]
+        fn a_cancelled_run_says_so_in_the_section_it_was_stopped_in() {
+            // Esc during the fourth pass of five. The section being worked when
+            // it landed says the run was stopped and what it had spent by then —
+            // whatever that pass got as far as answering, because a real cancel
+            // kills the `claude` it was waiting on — and the three sections
+            // above it keep the endings they earned.
+            let scratch = two_crates("cancelled-in-the-panel");
+            scratch.write(".git/HEAD", "ref: refs/heads/main\n");
+            let (mut app, scope) = load(&scratch);
+            let mut manifest = Manifest::new();
+            let base = Instant::now();
+            app.start_account(base);
+
+            // The event loop's own handle, and the clone the run answers to:
+            // exactly the pair `spawn_pact` makes, so what the panel reads at
+            // the end is the flag the reader's key latched.
+            let guard = CancelGuard::new();
+            let cancel = guard.handle();
+            let said = recorded(&scratch, "crates", &cancel, |events| {
+                Canned::new(&scratch, [])
+                    .reporting(activity_port(events))
+                    .cancelling_at("crates/alpha", cancel.clone())
+            });
+            assert!(cancel.is_cancelled(), "the reader stopped this run");
+            replay(&mut app, &mut manifest, &scope, guard, said, base);
+
+            let lines = panel_text(&app, at(base, 10_000));
+            assert_eq!(
+                lines.len(),
+                17,
+                "four sections of four lines and a summary: {lines:?}"
+            );
+            assert_eq!(
+                &lines[12..],
+                [
+                    "crates/alpha".to_owned(),
+                    "0:20 Read crates/alpha".to_owned(),
+                    "0:40 thinking".to_owned(),
+                    "0:40 cancelled — $0.25 spent".to_owned(),
+                    // Four directories and not the five the subtree holds: the
+                    // descent stopped, and the account counts what it reached.
+                    "pact finished — 4 directories, 2:40, $1.00".to_owned(),
+                ],
+                "the cancel is recorded in the section it happened in"
+            );
+            // Everything above it is exactly what a finished pass leaves.
+            for (index, directory) in ["crates/beta/src", "crates/beta", "crates/alpha/src"]
+                .into_iter()
+                .enumerate()
+            {
+                assert_eq!(&lines[index * 4], directory);
+                assert_eq!(
+                    lines[index * 4 + 3],
+                    format!(
+                        "0:40 wrote {directory}/WARLOCK.md — {} bytes, $0.25",
+                        document_bytes(&scratch, directory)
+                    ),
+                    "a section above the cancel keeps the ending it earned"
+                );
+            }
+            // And the footer says what it has always said about a stopped run.
+            assert_eq!(app.message(), Some(PACT_CANCELLED));
+        }
+
+        #[test]
+        fn a_pass_that_never_said_what_it_cost_leaves_the_total_incomplete() {
+            // The first pass's result line carries no cost — WAR-24 reports none
+            // rather than a zero — and the port drops it on the floor exactly as
+            // a result line without the field would. What the run spent is then
+            // one pass's worth and the total says so, rather than adding a zero
+            // that was never measured and under-reporting the run.
+            let scratch = one_crate_to_load("no-cost");
+            let (mut app, scope) = load(&scratch);
+            let mut manifest = Manifest::new();
+            let base = Instant::now();
+            app.start_account(base);
+
+            let said = recorded(&scratch, "crates/engine", &Cancel::new(), |events| {
+                let events = events.clone();
+                let swallowed = AtomicBool::new(false);
+                let port = Activities::new(move |activity| {
+                    if matches!(activity, Activity::Cost { .. })
+                        && !swallowed.swap(true, Ordering::Relaxed)
+                    {
+                        return;
+                    }
+                    let _ = events.send(PactEvent::Doing(activity));
+                });
+                Canned::new(&scratch, []).reporting(port)
+            });
+            replay(
+                &mut app,
+                &mut manifest,
+                &scope,
+                CancelGuard::new(),
+                said,
+                base,
+            );
+
+            assert_eq!(
+                panel_text(&app, at(base, 10_000)),
+                [
+                    "crates/engine/src".to_owned(),
+                    "0:20 Read crates/engine/src".to_owned(),
+                    "0:30 thinking".to_owned(),
+                    format!(
+                        "0:30 wrote crates/engine/src/WARLOCK.md — {} bytes, no cost reported",
+                        document_bytes(&scratch, "crates/engine/src")
+                    ),
+                    "crates/engine".to_owned(),
+                    "0:20 Read crates/engine".to_owned(),
+                    "0:40 thinking".to_owned(),
+                    format!(
+                        "0:40 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                        document_bytes(&scratch, "crates/engine")
+                    ),
+                    "pact finished — 2 directories, 1:10, \
+                     $0.25 (incomplete: 1 pass reported no cost)"
+                        .to_owned(),
+                ],
+                "a pass that reported nothing is missing rather than free"
             );
         }
 
@@ -3181,7 +4206,13 @@ mod tests {
                     total: 1,
                 })
                 .expect("the loop is still listening");
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+            apply_progress(
+                &mut pact,
+                &mut app,
+                &mut manifest,
+                &nowhere(),
+                Instant::now(),
+            );
 
             assert!(pact.is_some(), "a run that has only started is still on");
             assert!(
@@ -3191,7 +4222,13 @@ mod tests {
 
             // The worker's end goes away with no `Finished` behind it.
             drop(events);
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+            apply_progress(
+                &mut pact,
+                &mut app,
+                &mut manifest,
+                &nowhere(),
+                Instant::now(),
+            );
 
             assert!(pact.is_none(), "the run is over, however it ended");
             assert!(
@@ -3410,11 +4447,18 @@ mod tests {
                     manifest: Manifest::new(),
                     granted: true,
                     message: None,
+                    refusals: Vec::new(),
                 })))
                 .expect("the loop is still listening");
             // There is no repository at `/repo/crates`, so the reload at the
             // bottom of this call fails.
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+            apply_progress(
+                &mut pact,
+                &mut app,
+                &mut manifest,
+                &nowhere(),
+                Instant::now(),
+            );
 
             assert!(pact.is_none(), "the run is over");
             assert_eq!(
@@ -3476,11 +4520,18 @@ mod tests {
                         manifest: Manifest::new(),
                         granted: true,
                         message,
+                        refusals: Vec::new(),
                     })))
                     .expect("the loop is still listening");
                 // Nothing is on disk at `/repo/crates`, so the reload has its
                 // own line to offer in both cases.
-                apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+                apply_progress(
+                    &mut pact,
+                    &mut app,
+                    &mut manifest,
+                    &nowhere(),
+                    Instant::now(),
+                );
                 app.message().map(str::to_owned)
             };
 
@@ -3546,9 +4597,10 @@ mod tests {
                     manifest: manifest.clone(),
                     granted: true,
                     message: None,
+                    refusals: Vec::new(),
                 })))
                 .expect("the loop is still listening");
-            apply_progress(&mut pact, &mut app, &mut manifest, &scope);
+            apply_progress(&mut pact, &mut app, &mut manifest, &scope, Instant::now());
 
             let message = app.message().expect("problems are reported").to_owned();
             fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644))

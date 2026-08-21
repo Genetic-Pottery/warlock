@@ -6,15 +6,20 @@
 //! footer runs the full width under both of them with the tally, the keys and
 //! whatever the app has to say about the last keystroke — or about the pact it
 //! is running, which takes that line and changes the one above it for as long as
-//! it runs. [`draw`] takes the app state and a frame and nothing else — no
-//! terminal setup, no globals, no reaching back into the engine — so what
-//! appears on screen is a pure function of what the app state says, and a test
-//! can assert it against an in-memory buffer with no tty attached.
+//! it runs. [`draw`] takes a frame, the app state and the instant the frame is
+//! being drawn at, and nothing else — no terminal setup, no globals, no clock of
+//! its own, no reaching back into the engine — so what appears on screen is a
+//! pure function of what the app state says and what time the caller says it is,
+//! and a test can assert it against an in-memory buffer with no tty attached.
 //!
-//! The panel is empty on purpose: it draws a border and not one glyph inside it.
-//! It is the surface the live account of a pact will be drawn into, and until
-//! there is something true to put there, placeholder text would be something the
-//! screen said that was not so.
+//! The panel is the account of the pact that is running, or of the last one to
+//! run: a heading naming each directory and, under it, one row per thing that
+//! pass was seen doing, each with the elapsed clock of its own section. Before
+//! the first pact of the session it draws a border and not one glyph inside it —
+//! there is nothing true to put there, and placeholder text would be something
+//! the screen said that was not so. Every row is exactly one row: a path longer
+//! than the panel is cut with an ellipsis rather than wrapped, so the number of
+//! rows on screen is the number of things that happened. See [`draw_panel`].
 //!
 //! The tree area is a window onto the flattened rows: it draws the slice
 //! starting at the app's scroll offset and running for as many rows as the area
@@ -25,6 +30,8 @@
 //! app holds are the rows drawn — this module only says which of them is
 //! collapsed, with a marker on the line. There is deliberately no mouse.
 
+use std::time::Instant;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect, Size};
 use ratatui::style::{Modifier, Style, Stylize};
@@ -32,6 +39,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use warlock_engine::NodeState;
 
+// Renamed on the way in: `Line` here is ratatui's, the thing a row is drawn as,
+// and the account's `Line` is what a row says. Both names are right where they
+// live, and this module is the one place both are in scope.
+use crate::account::Line as Entry;
 use crate::app::{App, Focus, Row};
 use crate::colour::{FOCUS_COLOUR, colour_for};
 
@@ -66,6 +77,36 @@ const NO_MARKER: &str = "  ";
 
 /// The one line naming the tree's root.
 const HEADER_HEIGHT: u16 = 1;
+
+/// Drawn on the left of every panel line that sits under a section heading, so a
+/// directory and the pass under it read as one block rather than as a list with
+/// a path in the middle of it.
+///
+/// The tree's [`INDENT`] happens to be the same two columns and deliberately is
+/// not reused: that one is a unit of a walk's depth, this one is a fixed inset
+/// under a heading, and a change to either has nothing to say about the other.
+const PANEL_INDENT: &str = "  ";
+
+/// What a truncated panel line ends with, in place of what was cut off.
+///
+/// One column rather than three dots, because the columns it takes are columns
+/// taken off the text it is there to make room for. Unicode, like the scrollback
+/// indicator's arrow: a terminal that cannot draw this cannot draw the panel's
+/// arrow either, and the ASCII the tree's markers are held to is about a screen
+/// full of them rather than about the odd line that ran long.
+const ELLIPSIS: &str = "…";
+
+/// The arrow the scrollback indicator leads with: down, because what it counts
+/// is below the view.
+const SCROLLBACK_ARROW: &str = "↓";
+
+/// The key the scrollback indicator names, which is the one that returns a
+/// scrolled-back panel to the newest line.
+///
+/// `G` and not a key of its own: it is the focused pane's ordinary end-of-list
+/// movement, already on [`KEYS`], and a run that needed a new binding to get
+/// back to live would be a run with a mode in it.
+const LIVE_KEY: &str = "G";
 
 /// The keys line of the footer: every key that does something, in one line.
 ///
@@ -143,14 +184,20 @@ const BORDER_THICKNESS: u16 = 1;
 /// the terminal is short: on a screen with no room for everything, which nodes
 /// are off the bottom matters less than still being told the tally and how to
 /// get out.
-pub fn draw(frame: &mut Frame<'_>, app: &App) {
+///
+/// `now` is the instant this frame is being drawn at, and it is the caller's
+/// rather than read here: the newest line of the panel's live section counts up
+/// against it, and a renderer that called [`Instant::now`] itself would be a
+/// second clock for a test to fight. The event loop already redraws on a tick,
+/// so handing it the instant it woke up at is all the ticking there is.
+pub fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     let Areas {
         panel,
         tree,
         footer,
     } = areas(frame.area());
 
-    draw_panel(frame, panel, app.focus());
+    draw_panel(frame, panel, app, now);
     draw_tree_pane(frame, tree, app);
     draw_footer(frame, footer, app);
 }
@@ -268,6 +315,18 @@ pub fn tree_height(size: Size) -> u16 {
     tree_rows_area(areas(Rect::from(size)).tree).height
 }
 
+/// How many lines of account a terminal of `size` has room for in the panel,
+/// once the footer and the panel's own border have taken theirs.
+///
+/// [`tree_height`]'s counterpart, public for the same reason and measured the
+/// same way: off the very [`areas`] call the frame is cut by, so the height the
+/// app scrolls the panel's window by is the height the next frame draws it at.
+/// The panel has no header of its own, so it keeps everything inside its border.
+#[must_use]
+pub fn panel_height(size: Size) -> u16 {
+    pane_inner(areas(Rect::from(size)).panel).height
+}
+
 /// The border a pane is drawn in, lit if it has the focus and dim if it has not.
 ///
 /// A border and nothing else: no title, no padding. The lit border takes
@@ -286,15 +345,133 @@ fn pane_block(focused: bool) -> Block<'static> {
     Block::bordered().border_style(style)
 }
 
-/// Draw the panel: its border, and nothing inside it.
+/// Draw the panel: the window onto the account of the pact, one row per line,
+/// inside its border.
 ///
-/// Deliberately empty. This is the surface a pact's live account will be drawn
-/// into by a later slice; until there is something true to say there, anything
-/// written here would be a screenful of words about nothing. It takes `focus`
-/// rather than the whole app because the border is the only thing it draws and
-/// which pane has the focus is the only thing that changes it.
-fn draw_panel(frame: &mut Frame<'_>, area: Rect, focus: Focus) {
-    frame.render_widget(pane_block(focus == Focus::Panel), area);
+/// Before the first pact there is no account and this draws the border and
+/// nothing else — not a heading, not a title, not a word of welcome. A screen
+/// that said something before anything had happened would be saying it about
+/// nothing.
+///
+/// With an account, every row is one line of it: a section heading naming a
+/// directory, or one thing that pass was seen doing with the elapsed clock of
+/// its own section in front of it, or the line the run finished with. Which
+/// lines those are is [`App::panel_lines`]'s answer, window and all — the app
+/// owns the scrolling, exactly as it owns the tree's — and this only words them
+/// and cuts them to the width.
+///
+/// A [`Paragraph`] with no [`Wrap`](ratatui::widgets::Wrap): every row is one
+/// row, whatever is on it. A line that wrapped would put one activity on two
+/// rows, which makes the count of rows on screen stop being the count of things
+/// that happened and moves every row beneath it for a reason that has nothing to
+/// do with the run.
+///
+/// While the window is scrolled back, the bottom edge of the border says how
+/// much is below it and which key returns to live. It goes on the border rather
+/// than on a row of its own, because a row of its own would be a row taken off
+/// the account by the act of looking at it — and it goes away the moment the
+/// panel is back at the end, since an indicator that always says `0 more` is
+/// furniture rather than information.
+///
+/// No colour anywhere in here. The three node-state colours are the tree's and
+/// [`FOCUS_COLOUR`] is the border's; a fourth meaning for colour would cost both
+/// of those their meaning. Bold, which is not a colour, is all the headings get.
+fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
+    let below = app.panel_lines_below();
+    let mut block = pane_block(app.focus() == Focus::Panel);
+    if below > 0 {
+        block = block.title_bottom(Line::from(scrollback(below)).right_aligned().dim());
+    }
+
+    let inner = pane_inner(area);
+    frame.render_widget(block, area);
+
+    let rows: Vec<Line<'static>> = app
+        .panel_lines(now)
+        .iter()
+        .map(|line| panel_row(line, inner.width))
+        .collect();
+    frame.render_widget(Paragraph::new(rows), inner);
+}
+
+/// What the bottom edge of a scrolled-back panel says: how many lines are below
+/// the view, and the key back to the newest one.
+///
+/// `↓ 214 more (G)`, padded a column each side so it does not sit against the
+/// border's corner. Counted in lines rather than in screenfuls or in a
+/// percentage, because a line is the thing the reader is scrolling past.
+fn scrollback(below: usize) -> String {
+    format!(" {SCROLLBACK_ARROW} {below} more ({LIVE_KEY}) ")
+}
+
+/// One line of the account as one row of the panel, cut to `width`.
+///
+/// A heading is the directory's path, bold and flush left; a clocked line is its
+/// elapsed time and what happened, indented under the heading it belongs to; the
+/// summary is the run's last word, flush left and bold like a heading because it
+/// is about the whole run rather than about any one directory.
+///
+/// The row is built whole and cut once, rather than assembled from a styled
+/// clock and a styled text: the width is a fact about the row, and two spans
+/// each guessing at their share of it is how a line ends up one column too wide.
+fn panel_row(line: &Entry, width: u16) -> Line<'static> {
+    let width = usize::from(width);
+    match line {
+        Entry::Directory { path } => {
+            Line::from(truncated(&path.display().to_string(), width)).bold()
+        }
+        Entry::Clocked { clock, text } => {
+            Line::from(truncated(&format!("{PANEL_INDENT}{clock} {text}"), width))
+        }
+        Entry::Summary { text } => Line::from(truncated(text, width)).bold(),
+    }
+}
+
+/// `text`, cut to `width` columns with an [`ELLIPSIS`] where it was cut.
+///
+/// Columns, not bytes and not characters: a path with an accent in it takes
+/// fewer columns than bytes and a CJK name takes more columns than characters,
+/// and a row measured in either of the wrong ones is a row that overflows into
+/// its neighbour or stops short of the edge. Measured with [`Line::width`],
+/// which is the same measurement the terminal backend lays the row out with, so
+/// what is cut here fits there exactly.
+///
+/// Cut on a character boundary, so this can never panic on a multi-byte path;
+/// a character that is part of a longer grapheme cluster can still be separated
+/// from what follows it, which costs a glyph its accent in the worst case and
+/// never costs a row its shape.
+fn truncated(text: &str, width: usize) -> String {
+    if display_width(text) <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+
+    let budget = width.saturating_sub(display_width(ELLIPSIS));
+    let mut taken = 0;
+    let mut end = 0;
+    for (index, character) in text.char_indices() {
+        let next = index + character.len_utf8();
+        let columns = display_width(&text[index..next]);
+        if taken + columns > budget {
+            break;
+        }
+        taken += columns;
+        end = next;
+    }
+
+    format!("{}{ELLIPSIS}", &text[..end])
+}
+
+/// How many columns `text` takes on screen.
+///
+/// Asked of ratatui rather than worked out here, and asked of a borrowed span so
+/// that measuring costs no allocation: the renderer's own measurement is the one
+/// that decides whether a row fits, so a second opinion about it would only ever
+/// be wrong.
+fn display_width(text: &str) -> usize {
+    Span::raw(text).width()
 }
 
 /// Draw the tree pane: its border, the header naming the tree inside the top of
@@ -457,6 +634,7 @@ const fn noun(state: NodeState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::time::{Duration, Instant};
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -466,11 +644,14 @@ mod tests {
     use warlock_engine::NodeState;
 
     use super::{
-        BORDER_THICKNESS, FOOTER_HEIGHT, HEADER_HEIGHT, INDENT, KEYS, NO_MARKER, PACTING_KEYS,
-        SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas, draw, pane_inner, tree_height,
-        tree_rows_area, tree_width,
+        BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, HEADER_HEIGHT, INDENT, KEYS, LIVE_KEY,
+        NO_MARKER, PACTING_KEYS, PANEL_INDENT, SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH,
+        TREE_PERCENT, areas, display_width, draw, pane_inner, panel_height, tree_height,
+        tree_rows_area, tree_width, truncated,
     };
+    use crate::account::Outcome;
     use crate::app::{App, Row};
+    use crate::claude::Activity;
     use crate::colour::{FOCUS_COLOUR, colour_for};
     use crate::fixture;
 
@@ -536,6 +717,51 @@ mod tests {
             app.select_next();
         }
         app
+    }
+
+    /// The instant `seconds` after `base`, so a run can be drawn at an instant
+    /// the test chose and its clocks asserted for equality.
+    fn at(base: Instant, seconds: u64) -> Instant {
+        base + Duration::from_secs(seconds)
+    }
+
+    /// An app with the fixture's tree and an account of a pact that started at
+    /// `base`, measured for a `width`×`height` terminal exactly the way the
+    /// binary measures one.
+    ///
+    /// Nothing has happened in the run yet: the caller opens the sections and
+    /// records the activities it wants, at the instants it wants, so that what
+    /// is on screen is what a run put there rather than something a fixture
+    /// arranged.
+    fn pacting_app(base: Instant, width: u16, height: u16) -> App {
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_viewport_height(tree_height(Size::new(width, height)));
+        app.set_panel_height(panel_height(Size::new(width, height)));
+        app.start_account(base);
+        app
+    }
+
+    /// Where the panel's lines land in a buffer of this size: inside the
+    /// panel's border, which is the whole of the pane — the panel has no header.
+    fn panel_area(buffer: &Buffer) -> Rect {
+        pane_inner(areas(buffer.area).panel)
+    }
+
+    /// The rows of `buffer` the panel is drawn into, as text, without the tree
+    /// pane's border on the end of them.
+    fn panel_rows(buffer: &Buffer) -> Vec<String> {
+        let area = panel_area(buffer);
+        (0..area.height)
+            .map(|index| text_in(buffer, area, area.y + index))
+            .collect()
+    }
+
+    /// The panel's bottom border row, as text: the edge the scrollback
+    /// indicator is written on, border glyphs and all.
+    fn panel_bottom_edge(buffer: &Buffer) -> String {
+        let panel = areas(buffer.area).panel;
+
+        text_in(buffer, panel, panel.y + panel.height - 1)
     }
 
     /// Where the tree's rows land in a buffer of this size: inside the tree
@@ -606,11 +832,21 @@ mod tests {
 
     /// Draw `app` onto an in-memory terminal of the given size and hand back
     /// the buffer. No tty is involved, so this runs anywhere `cargo test` does.
+    ///
+    /// Drawn at this moment, which every test that is not about the panel's
+    /// clocks can ignore: an app with no account draws the same frame whatever
+    /// instant it is handed. The ones that do care use [`render_at`].
     fn render(app: &App, width: u16, height: u16) -> Buffer {
+        render_at(app, width, height, Instant::now())
+    }
+
+    /// [`render`], at an instant the test chose, so a clock on screen can be
+    /// asserted for equality rather than for looking about right.
+    fn render_at(app: &App, width: u16, height: u16, now: Instant) -> Buffer {
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("test backend never fails");
         terminal
-            .draw(|frame| draw(frame, app))
+            .draw(|frame| draw(frame, app, now))
             .expect("test backend never fails");
         terminal.backend().buffer().clone()
     }
@@ -1284,10 +1520,11 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_draws_a_border_and_nothing_whatever_inside_it() {
+    fn the_panel_draws_a_border_and_nothing_whatever_inside_it_before_the_first_pact() {
         // Both focus states and a tree with something in it: whatever the app is
-        // doing, the panel has nothing to say about it yet.
+        // doing, the panel has nothing to say until a pact says it.
         let mut app = App::from_tree(&fixture::tree());
+        assert!(!app.has_account());
         for _ in 0..2 {
             let buffer = render(&app, WIDTH, FIXTURE_HEIGHT);
 
@@ -1305,14 +1542,256 @@ mod tests {
                     );
                 }
             }
-            // And its border really is there, on all four sides.
+            // And its border really is there, on all four sides, carrying
+            // nothing of its own: no title, and no scrollback indicator on a
+            // panel with nothing to scroll.
             assert_ne!(buffer[(panel.x, panel.y)].symbol(), " ");
             assert_ne!(
                 buffer[(panel.x + panel.width - 1, panel.y + panel.height - 1)].symbol(),
                 " "
             );
+            let edge = panel_bottom_edge(&buffer);
+            assert!(!edge.contains(SCROLLBACK_ARROW), "{edge:?}");
+            assert!(!edge.contains("more"), "{edge:?}");
 
             app.toggle_focus();
+        }
+    }
+
+    #[test]
+    fn every_line_of_the_account_gets_one_row_under_the_directory_it_happened_in() {
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section("crates/engine", base);
+        account.record(&Activity::Thinking, at(base, 2));
+        account.record(
+            &Activity::Tool {
+                name: "Read".to_owned(),
+                detail: Some("src/lib.rs".to_owned()),
+            },
+            at(base, 9),
+        );
+        account.close_section(
+            &Outcome::Wrote {
+                document: "crates/engine/WARLOCK.md".into(),
+                bytes: 2_341,
+            },
+            at(base, 30),
+        );
+        account.open_section("crates/tui", at(base, 31));
+        account.record(&Activity::Thinking, at(base, 33));
+
+        let buffer = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 40));
+
+        // A heading per directory, in the order the run reached them, and under
+        // each one a row per thing that pass was seen doing, clock first. The
+        // second section's clock starts again at zero, and its newest line is
+        // still counting up towards the instant this frame was drawn at.
+        let drawn: Vec<String> = panel_rows(&buffer)
+            .into_iter()
+            .take(app.panel_lines(at(base, 40)).len())
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                "crates/engine".to_owned(),
+                format!("{PANEL_INDENT}0:09 thinking"),
+                format!("{PANEL_INDENT}0:30 Read src/lib.rs"),
+                format!(
+                    "{PANEL_INDENT}0:30 wrote crates/engine/WARLOCK.md — 2341 bytes, no cost reported"
+                ),
+                "crates/tui".to_owned(),
+                format!("{PANEL_INDENT}0:09 thinking"),
+            ],
+        );
+        // Which is one row per line of the account and not one more: nothing
+        // wrapped, and nothing was drawn that the account does not hold.
+        assert_eq!(drawn.len(), app.account().expect("a pact").line_count());
+        for (index, row) in panel_rows(&buffer).iter().enumerate().skip(drawn.len()) {
+            assert_eq!(row, "", "panel row {index} should be blank");
+        }
+    }
+
+    #[test]
+    fn the_newest_lines_clock_counts_up_between_frames_with_no_event_arriving() {
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section("crates/engine", base);
+        account.record(&Activity::Thinking, at(base, 1));
+
+        // Same app, same account, nothing recorded in between: the only thing
+        // that changed is what time the caller says it is.
+        let early = panel_rows(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9)));
+        let later = panel_rows(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 65)));
+
+        assert_eq!(early[1], format!("{PANEL_INDENT}0:09 thinking"));
+        assert_eq!(later[1], format!("{PANEL_INDENT}1:05 thinking"));
+        assert_eq!(early[0], later[0], "the heading should not move");
+    }
+
+    #[test]
+    fn a_line_too_long_for_the_panel_is_cut_with_an_ellipsis_and_never_wrapped() {
+        // Narrow enough that both lines run off the end: the panel gets half of
+        // forty columns, less its border.
+        let narrow = 40;
+        let base = Instant::now();
+        let mut app = pacting_app(base, narrow, FIXTURE_HEIGHT);
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section("crates/warlock-engine", base);
+        account.record(
+            &Activity::Tool {
+                name: "Read".to_owned(),
+                detail: Some("crates/warlock-engine/src/pact.rs".to_owned()),
+            },
+            at(base, 1),
+        );
+        account.record(&Activity::Thinking, at(base, 2));
+
+        let buffer = render_at(&app, narrow, FIXTURE_HEIGHT, at(base, 2));
+
+        let inner = panel_area(&buffer);
+        assert_eq!(inner.width, 18, "the terminal is the narrow one");
+        let drawn = panel_rows(&buffer);
+        // Cut, with the ellipsis in place of what was cut, and the row that
+        // fits left alone. Three lines, three rows: what did not fit is gone
+        // rather than pushed onto a row of its own.
+        assert_eq!(
+            drawn[..3],
+            [
+                format!("crates/warlock-en{ELLIPSIS}"),
+                format!("{PANEL_INDENT}0:02 Read crate{ELLIPSIS}"),
+                format!("{PANEL_INDENT}0:02 thinking"),
+            ],
+        );
+        for row in &drawn {
+            assert!(
+                display_width(row) <= usize::from(inner.width),
+                "row {row:?} is wider than the panel"
+            );
+        }
+        // And nothing spilled onto the tree pane's border beside it.
+        let border = inner.x + inner.width;
+        for y in inner.y..inner.y + inner.height {
+            assert_eq!(buffer[(border, y)].symbol(), "│", "at row {y}");
+        }
+    }
+
+    #[test]
+    fn truncation_counts_columns_rather_than_bytes_or_characters() {
+        // A plain path, one with a multi-byte character in it, and one whose
+        // characters are two columns wide apiece: cut on a character boundary
+        // in every case, and never wider than it was asked for.
+        for text in [
+            "crates/warlock-engine/src/pact.rs",
+            "crates/naïve/données/résumé.rs",
+            "crates/日本語/モジュール.rs",
+        ] {
+            for width in 0..=display_width(text) + 2 {
+                let cut = truncated(text, width);
+
+                assert!(
+                    display_width(&cut) <= width,
+                    "{cut:?} is wider than {width} columns"
+                );
+                if display_width(text) <= width {
+                    assert_eq!(cut, text, "at {width} columns");
+                } else if width > 0 {
+                    assert!(cut.ends_with(ELLIPSIS), "{cut:?} at {width} columns");
+                    assert!(text.starts_with(cut.trim_end_matches(ELLIPSIS)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_scrolled_back_panel_says_what_is_below_it_and_the_key_back_to_live() {
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, HEIGHT);
+        let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT)));
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section("crates/engine", base);
+        for line in 0..height * 3 {
+            account.record(&Activity::Thinking, at(base, line as u64 + 1));
+        }
+
+        // Following the newest line: there is nothing below the view, so the
+        // edge says nothing.
+        let live = render_at(&app, WIDTH, HEIGHT, at(base, 99));
+        assert_eq!(app.panel_lines_below(), 0);
+        assert!(
+            !panel_bottom_edge(&live).contains(SCROLLBACK_ARROW),
+            "{:?}",
+            panel_bottom_edge(&live)
+        );
+
+        // Scrolled back — with the panel focused, by the ordinary movement keys
+        // — it says how far from the end it is and which key returns.
+        app.toggle_focus();
+        app.select_first();
+        let buffer = render_at(&app, WIDTH, HEIGHT, at(base, 99));
+
+        let below = app.panel_lines_below();
+        assert_eq!(below, height * 3 + 1 - height);
+        let edge = panel_bottom_edge(&buffer);
+        assert!(
+            edge.contains(&format!("{SCROLLBACK_ARROW} {below} more ({LIVE_KEY})")),
+            "{edge:?}"
+        );
+        // On the border, not on a row of the account: the panel is still
+        // drawing a full windowful of lines.
+        assert_eq!(panel_rows(&buffer).len(), height);
+        assert!(
+            panel_rows(&buffer)
+                .iter()
+                .all(|row| !row.contains(SCROLLBACK_ARROW)),
+            "the indicator took a row of the account"
+        );
+
+        // And the end-of-list key puts it back on live, which takes the
+        // indicator away again: the frame is what it was before anyone
+        // scrolled.
+        app.select_last();
+        let back = render_at(&app, WIDTH, HEIGHT, at(base, 99));
+        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(rows_text(&back), rows_text(&live));
+    }
+
+    #[test]
+    fn the_panel_height_the_app_is_told_is_the_height_the_frame_gives_the_panel() {
+        // A terminal with room for a single line of account and three more on
+        // the way up, and the two the other tests draw at.
+        let chrome = FOOTER_HEIGHT + 2 * BORDER_THICKNESS;
+        for height in [chrome + 1, chrome + 2, HEIGHT, FIXTURE_HEIGHT, 24] {
+            let measured = panel_height(Size::new(WIDTH, height));
+            let base = Instant::now();
+            let mut app = pacting_app(base, WIDTH, height);
+            let account = app.account_mut().expect("a pact has started");
+            account.open_section("crates/engine", base);
+            for line in 0..usize::from(measured) * 2 {
+                account.record(&Activity::Thinking, at(base, line as u64 + 1));
+            }
+
+            let buffer = render_at(&app, WIDTH, height, at(base, 99));
+
+            assert_eq!(measured, height - chrome);
+            let drawn = panel_rows(&buffer);
+            assert_eq!(drawn.len(), usize::from(measured), "in {height} rows");
+            assert!(
+                drawn.iter().all(|row| !row.is_empty()),
+                "a longer account left blank rows in {height}: {drawn:?}"
+            );
+        }
+
+        // And a terminal with no room for a line of account is measured at none
+        // rather than underflowing.
+        for height in 0..=chrome {
+            assert_eq!(
+                panel_height(Size::new(WIDTH, height)),
+                0,
+                "in {height} rows"
+            );
         }
     }
 
