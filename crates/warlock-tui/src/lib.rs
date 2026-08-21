@@ -7,6 +7,15 @@
 //! in-memory buffer, the rest against plain values. Raw mode, the alternate
 //! screen and the event loop belong to the binary in `src/main.rs`.
 //!
+//! A view here outlives the tree it was built on, because a run writes documents
+//! and the tree has to be read again to show them. [`reseat_on`] is that move,
+//! and it is a function over two values like everything else: rows, states and
+//! the tally come from the new tree, while the selection, the collapsed
+//! directories, the filters and the window come from the old view and are
+//! carried by path rather than by row number, so a reload leaves the reader
+//! where they were rather than at the top. It reads no disk and asks for no
+//! reload of its own — *when* a tree is read again is the binary's business.
+//!
 //! The one exception is [`ClaudeAgent`], which owns a child process: it
 //! implements the engine's [`Agent`](warlock_engine::Agent) port by running the
 //! `claude` CLI, because the engine spawns nothing and something has to. Its

@@ -26,6 +26,20 @@
 //! here waits on the worker: the manifest, the tree and the message are updated
 //! from the events it sends, and the thread is never joined.
 //!
+//! What a run leaves behind is on disk rather than in the rows, and that is the
+//! other thing the shape of the loop is for. A pact writes a `WARLOCK.md` beside
+//! every directory it descends through, and those are rows the tree on screen
+//! has never had, so the moment a run ends the view is one load out of date. One
+//! rule covers it: [`apply_progress`] does its own arm's work first — the
+//! outcome applied, the manifest saved — and then [`reload_tree`] re-reads the
+//! tree from disk and re-seats the view on top of it, carrying the selection,
+//! the collapsed directories, the filters and the window across by path. The
+//! same single call ends all four ways a run can finish and an un-pact besides,
+//! it runs here on the loop's thread and never on the worker's, and a load that
+//! fails this late keeps the tree already drawn instead of ending the loop.
+//! Nothing else asks for a reload: a file written by something other than
+//! warlock still waits for a relaunch.
+//!
 //! A run that takes minutes has to be stoppable, and there are two ways to stop
 //! one, which this file keeps apart on purpose. Esc *cancels*: the descent ends
 //! between directories, the `claude` running right now is killed, and the worker
