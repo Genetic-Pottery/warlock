@@ -26,6 +26,17 @@
 //! here waits on the worker: the manifest, the tree and the message are updated
 //! from the events it sends, and the thread is never joined.
 //!
+//! Those events are also what fills the panel. The press that really starts a
+//! run opens an [`warlock_tui::Account`] on the app — one pact, one account, so
+//! the next run clears the last one — each directory the worker names opens a
+//! section of it, and everything a pass is seen doing lands under the section it
+//! belongs to. Both halves are [`apply_progress`], which is handed the instant
+//! it is called at rather than reading a clock, and so is the draw above it: the
+//! newest line of the live section counts up against that instant, which is what
+//! makes a pass that thinks for a minute look like something is happening. The
+//! loop's existing hundred-millisecond round is the whole of the tick — there is
+//! no timer, no second thread and no redraw on a schedule of its own.
+//!
 //! What a run leaves behind is on disk rather than in the rows, and that is the
 //! other thing the shape of the loop is for. A pact writes a `WARLOCK.md` beside
 //! every directory it descends through, and those are rows the tree on screen
@@ -72,7 +83,7 @@ use ratatui::crossterm::terminal::{
 use warlock_engine::{
     Agent, LoadError, LoadProblem, Loaded, Manifest, ManifestError, NodeState, PactFailure,
     PactObserver, PactProblem, PactedSubtree, Pacting, load_tree, pact_subtree, repository_root,
-    unpact_subtree,
+    to_manifest_path, unpact_subtree,
 };
 use warlock_tui::{
     Activities, Activity, App, Cancel, ClaudeAgent, PactToggle, draw, panel_height, reseat_on,
@@ -319,7 +330,11 @@ fn run() -> Result<(), Error> {
                     // all the same one. The copy is a list of rows and a tally,
                     // and it is taken once per press of one key.
                     let before = app.clone();
-                    if let Some(toggle) = pact_press(&mut app, pact.is_some()) {
+                    // The instant the key was pressed is the instant the run
+                    // starts, and the account counts its clocks from it: a run
+                    // is as old as the keystroke that asked for it, not as old
+                    // as the first thing the model got round to saying.
+                    if let Some(toggle) = pact_press(&mut app, pact.is_some(), Instant::now()) {
                         // One handle per run, and never reused: a cancel is
                         // final, so the run after a cancelled one has to start
                         // with a handle nobody has said stop to.
@@ -347,7 +362,13 @@ fn run() -> Result<(), Error> {
         // with a thread that is not waiting for it. It is also the only place
         // the tree is re-read after startup, which is why the scope the app was
         // loaded at is handed to it — see [`reload_tree`].
-        apply_progress(&mut pact, &mut app, &mut manifest, &scope);
+        //
+        // The clock is read here rather than down there for the same reason it
+        // is read before the draw: this file owns the clock and everything
+        // below it is a function of the instant it is handed. What that instant
+        // means is when the events being drained now landed on screen, which is
+        // within one `POLL_INTERVAL` of when the worker sent them.
+        apply_progress(&mut pact, &mut app, &mut manifest, &scope, Instant::now());
     }
 }
 
@@ -669,11 +690,30 @@ fn cancelled(toggled: Toggled) -> Toggled {
 /// A function rather than a guard in the match arm so that "a second press
 /// changes nothing" is a property a test can hold the app up against, rather
 /// than something only an event loop with a terminal attached could show.
-fn pact_press(app: &mut App, in_flight: bool) -> Option<PactToggle> {
+///
+/// A press that really does start a run is also where the panel's account
+/// begins, at `at`: one pact, one account, so a new run clears whatever the last
+/// one left rather than appending to it. It happens here rather than in the
+/// event loop so that "the account a press starts is empty" is a property of the
+/// same function, and it happens on this path only — a press turned down for a
+/// file row, and a press while a run is in flight, leave the last run's account
+/// on screen because neither of them started anything.
+///
+/// An un-pact does not start one either, and that is the one case where the
+/// keystroke does something and the panel does not move. Un-pacting is manifest
+/// arithmetic that is over before the next frame: it runs no pass, reports no
+/// activity and has nothing to account for, so wiping the record of the run that
+/// wrote those documents would be spending the panel on a keystroke with nothing
+/// to say.
+fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PactToggle> {
     if in_flight {
         return None;
     }
-    app.toggle_pact()
+    let toggle = app.toggle_pact()?;
+    if toggle.pacted {
+        app.start_account(at);
+    }
+    Some(toggle)
 }
 
 /// Apply everything the worker has said since the last frame, and take the pact
@@ -706,11 +746,19 @@ fn pact_press(app: &mut App, in_flight: bool) -> Option<PactToggle> {
 /// two restoring arms have put `running.before` back — so what the reload reads
 /// lands on top of the arm's result rather than under it, and a reload that
 /// fails leaves that result standing.
+///
+/// `now` is the caller's clock, and this function reads none of its own: every
+/// event drained here is filed under it, so a run is drivable from a base
+/// instant in a test exactly as the account below it is. All the events of one
+/// frame share it, which is the truth to a tenth of a second — the loop is the
+/// only thing that hears the worker, so an event's arrival is when the loop got
+/// round to it.
 fn apply_progress(
     pact: &mut Option<Running>,
     app: &mut App,
     manifest: &mut Manifest,
     scope: &Scope,
+    now: Instant,
 ) {
     let Some(running) = pact.as_ref() else {
         return;
@@ -722,17 +770,36 @@ fn apply_progress(
                 directory,
                 position,
                 total,
-            }) => app.set_pact_in_flight(directory, position, total),
-            // Taken off the channel and dropped, which is the whole of what this
-            // slice owes them: they have to be read or they would sit in the
-            // channel until the run ends, and there is nowhere for them to go
-            // yet. What a reader sees of them is a later slice's business;
-            // nothing is kept here, because keeping something is the first line
-            // of a panel and this is not the change that draws one. Bound rather
-            // than matched with `_` so that the activity a `PactEvent` carries
-            // counts as read on the way past — the alternative is an `allow` on
-            // the variant that would outlive its reason.
-            Ok(PactEvent::Doing(activity)) => drop(activity),
+            }) => {
+                // Two places, one fact, and they are two because they are read
+                // at two different speeds: the footer says which directory of
+                // how many is being worked *now* and replaces itself every time,
+                // while the panel keeps a section per directory for as long as
+                // the run lasts. The section is opened first so that the
+                // activities drained after it — which may be in this same batch
+                // — land under the directory they belong to.
+                if let Some(account) = app.account_mut() {
+                    account.open_section(section_label(&scope.root, &directory), now);
+                }
+                app.set_pact_in_flight(directory, position, total);
+            }
+            // Filed under whichever directory is open, which is the one the
+            // `Starting` before it named: an activity carries no directory
+            // because it needs none, and the account's live section is the
+            // answer. An account is always there during a run — the press that
+            // started it made one — so `None` is a run nobody started this way,
+            // which is a test driving the events directly; dropping the line is
+            // the honest thing to do with it either way.
+            //
+            // What each activity comes to is the account's business and not this
+            // file's: a tool is its name and its one detail, thinking is the
+            // word `thinking`, and a cost is added to the section's spend rather
+            // than drawn as a line of its own. See `Account::record`.
+            Ok(PactEvent::Doing(activity)) => {
+                if let Some(account) = app.account_mut() {
+                    account.record(&activity, now);
+                }
+            }
             Ok(PactEvent::Finished(outcome)) => break Some(outcome),
             // Still running, and nothing new to say.
             Err(TryRecvError::Empty) => return,
@@ -774,22 +841,51 @@ fn apply_progress(
         // says what it said before, so the rows go back to matching it and the
         // reason goes on the app's line — the same one a refused toggle uses —
         // rather than out of the loop, which would take the screen with it.
-        Some(Err(message)) => {
-            *app = running.before;
-            app.set_message(message);
-        }
+        Some(Err(message)) => restore(app, running.before, message),
         // The worker died with the manifest in this thread's hand untouched, so
         // the rows go back to matching it exactly as they do for a run that
         // recorded nothing, and the footer says the run is over.
-        None => {
-            *app = running.before;
-            app.set_message(PACT_LOST);
-        }
+        None => restore(app, running.before, PACT_LOST),
     }
 
     // The run is over and everything it recorded is on disk, so the rows on
     // screen are one load out of date whichever arm above ran.
     reload_tree(app, scope);
+}
+
+/// Put the view back to `before` and say `message`, keeping the account of the
+/// run that is ending.
+///
+/// The copy taken when the key was pressed is the tree as it stood before the
+/// toggle painted it, and that is all it is good for: it was taken before the
+/// run started, so it has none of what the run then did. The account does not go
+/// back with the rows, because it is not a claim about the tree — it is the
+/// record of a run that really happened, and a reader whose pact died half way
+/// through wants to see where it got to more than a reader of any other run
+/// does. So the rows, the colours and the selection go back to what the manifest
+/// on disk still says, and the panel keeps its account.
+fn restore(app: &mut App, mut before: App, message: impl Into<String>) {
+    before.take_account_from(app);
+    *app = before;
+    app.set_message(message);
+}
+
+/// How the panel names `directory`: relative to `root`, which is the root of the
+/// tree on screen.
+///
+/// The same spelling the footer's progress line uses, for the same reason. A
+/// heading that begins with the part of the path every row on screen shares
+/// spends a narrow panel on what the reader already knows, and the truncation
+/// that follows then eats the part they do not — the panel cuts a long line at
+/// its right-hand end. A directory that cannot be spelled relative to the root —
+/// including the root itself, whose relative spelling is `"."` — is named as it
+/// stands, because a heading that says something odd beats one that says
+/// nothing.
+fn section_label(root: &Path, directory: &Path) -> String {
+    match to_manifest_path(root, directory) {
+        Ok(relative) if relative != "." => relative,
+        _ => directory.display().to_string(),
+    }
 }
 
 /// Re-read the tree at `scope` from disk and put the view back on top of it.
@@ -1950,13 +2046,16 @@ mod tests {
         use std::path::{Path, PathBuf};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::mpsc;
+        use std::time::{Duration, Instant};
         use std::{env, fs, process};
 
         use warlock_engine::{
             Agent, AgentError, AgentRequest, AgentResponse, Loaded, Manifest, Node, NodeState,
             PactEntry, Tree, Unwatched, decide_state, load_tree, repository_root, subtree_hash,
         };
-        use warlock_tui::{Activities, Activity, App, ClaudeAgent, PactToggle};
+        use warlock_tui::{
+            Account, Activities, Activity, App, ClaudeAgent, Line, PactToggle, Section,
+        };
 
         use warlock_tui::Cancel;
 
@@ -2184,6 +2283,32 @@ mod tests {
             (app, scope)
         }
 
+        /// `base` plus `seconds`, so a run's whole timeline is one instant and
+        /// some arithmetic rather than a sleep.
+        fn at(base: Instant, seconds: u64) -> Instant {
+            base + Duration::from_secs(seconds)
+        }
+
+        /// What the panel would draw for `app` at `now`, as plain strings: a
+        /// heading is its path, a clocked line is its clock and its text, and
+        /// the summary is its own line.
+        ///
+        /// The whole account rather than the window onto it, because what these
+        /// tests are about is what the run put into the panel and not how much
+        /// of it fits.
+        fn panel_text(app: &App, now: Instant) -> Vec<String> {
+            app.account()
+                .map(|account| account.lines(now))
+                .unwrap_or_default()
+                .iter()
+                .map(|line| match line {
+                    Line::Directory { path } => path.display().to_string(),
+                    Line::Clocked { clock, text } => format!("{clock} {text}"),
+                    Line::Summary { text } => text.clone(),
+                })
+                .collect()
+        }
+
         /// A scope for a tree that is not on disk anywhere.
         ///
         /// What the tests built around synthetic paths hand to
@@ -2254,7 +2379,7 @@ mod tests {
                 path: toggle.path.clone(),
                 before,
             });
-            apply_progress(&mut pact, app, manifest, scope);
+            apply_progress(&mut pact, app, manifest, scope, Instant::now());
             assert!(pact.is_none(), "the run reported its outcome and is over");
         }
 
@@ -2916,18 +3041,68 @@ mod tests {
             let mut app = App::from_tree(&tree);
             let before = app.clone();
 
-            assert_eq!(pact_press(&mut app, true), None, "no second pact");
+            assert_eq!(
+                pact_press(&mut app, true, Instant::now()),
+                None,
+                "no second pact"
+            );
             assert_eq!(
                 app, before,
-                "and no colour, no message and no selection moved"
+                "and no colour, no message, no selection moved and no account started"
             );
 
             // The same press, with nothing running, is the press that starts a
             // pact: same key, same app, different answer.
-            let toggle = pact_press(&mut app, false).expect("a directory can be pacted");
+            let toggle =
+                pact_press(&mut app, false, Instant::now()).expect("a directory can be pacted");
             assert_eq!(toggle.path, PathBuf::from("/repo/crates"));
             assert!(toggle.pacted);
             assert_ne!(app, before, "the subtree it covers is painted");
+        }
+
+        #[test]
+        fn the_press_that_starts_a_run_starts_an_account_and_an_un_pact_leaves_it_alone() {
+            // One directory and three presses of the same key: a pact, the
+            // un-pact that undoes it, and a second pact. No filesystem, because
+            // what is under test is what a press does to the app.
+            let tree = Tree::new(Node::new(
+                "/repo/crates",
+                None::<PathBuf>,
+                NodeState::Unpacted,
+            ));
+            let mut app = App::from_tree(&tree);
+            let base = Instant::now();
+
+            assert!(!app.has_account(), "no pact has run this session");
+
+            // The pact, and a line of the run it started.
+            let toggle = pact_press(&mut app, false, base).expect("a directory can be pacted");
+            assert!(toggle.pacted);
+            let account = app.account_mut().expect("the press started an account");
+            account.open_section("crates", base);
+            account.record(&Activity::Thinking, at(base, 1));
+            assert_eq!(app.account().map(Account::line_count), Some(2));
+
+            // The un-pact. It runs no pass and reports nothing, so wiping the
+            // record of the run that wrote the documents it is removing would
+            // cost the reader the only account they have for no news at all.
+            let toggle = pact_press(&mut app, false, at(base, 2)).expect("it is pacted now");
+            assert!(!toggle.pacted, "the second press takes the pact off");
+            assert_eq!(
+                app.account().map(Account::line_count),
+                Some(2),
+                "the last run's account is still on screen"
+            );
+
+            // The second pact. One pact, one account: this one starts empty
+            // rather than under the last one.
+            let toggle = pact_press(&mut app, false, at(base, 3)).expect("it can be pacted again");
+            assert!(toggle.pacted);
+            assert_eq!(
+                app.account().map(Account::line_count),
+                Some(0),
+                "a new run starts from nothing"
+            );
         }
 
         #[test]
@@ -3091,13 +3266,19 @@ mod tests {
             );
         }
 
-        #[test]
-        fn the_loop_takes_activities_off_the_channel_and_carries_on_as_before() {
-            // Activities share the channel with the progress the footer draws,
-            // so the loop has to read them or they would sit in it until the run
-            // ends and hold up nothing but themselves. Reading them is all it
-            // does with them here: the app that comes out the far side is the
-            // one a run with no activities at all would have produced.
+        /// Everything the event loop holds one moment after the pact key
+        /// started a run over `/repo/crates` at `base`: the app with the account
+        /// that press opened, the copy of it taken before the toggle painted,
+        /// the manifest on disk, the end of the channel a worker would talk
+        /// down, and the run itself.
+        ///
+        /// The copy comes back because the footer's wording is asserted against
+        /// it: what the progress line says during a run is what it has always
+        /// said, and the way to show that is to say it on an app this slice
+        /// never touched.
+        fn a_run_in_flight(
+            base: Instant,
+        ) -> (App, App, Manifest, mpsc::Sender<PactEvent>, Running) {
             let tree = Tree::new(Node::new(
                 "/repo/crates",
                 None::<PathBuf>,
@@ -3105,40 +3286,161 @@ mod tests {
             ));
             let before = App::from_tree(&tree);
             let mut app = before.clone();
-            let mut manifest = Manifest::new();
+            app.start_account(base);
             let (events, received) = mpsc::channel();
-            let mut pact = Some(Running {
+            let running = Running {
                 events: received,
                 cancel: CancelGuard::new(),
                 path: PathBuf::from("/repo/crates"),
                 before: before.clone(),
-            });
+            };
+            (app, before, Manifest::new(), events, running)
+        }
 
-            // A directory, then a pass talking about it, in the order a worker
-            // sends them.
-            for event in [
-                PactEvent::Starting {
-                    directory: PathBuf::from("/repo/crates"),
+        #[test]
+        fn a_pass_fills_the_panel_under_the_directory_it_is_working_on() {
+            // The directory the worker names opens a section, everything the
+            // pass is then seen doing lands under it one line at a time, a cost
+            // is money rather than a line, and the footer goes on saying exactly
+            // what it always said.
+            let base = Instant::now();
+            let (mut app, before, mut manifest, events, running) = a_run_in_flight(base);
+            let mut pact = Some(running);
+
+            // The first directory, on its own: the run has reached it and the
+            // pass has not said anything yet.
+            events
+                .send(PactEvent::Starting {
+                    directory: PathBuf::from("/repo/crates/engine"),
                     position: 1,
-                    total: 1,
-                },
+                    total: 2,
+                })
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+
+            assert!(pact.is_some(), "a run that is talking is still running");
+            assert_eq!(
+                panel_text(&app, base),
+                ["engine"],
+                "the section is open and empty"
+            );
+            let mut in_flight = before.clone();
+            in_flight.set_pact_in_flight("/repo/crates/engine", 1, 2);
+            assert_eq!(
+                app.pact_line(),
+                in_flight.pact_line(),
+                "and the footer's progress line says what it always said"
+            );
+            assert_eq!(
+                app.message(),
+                in_flight.message(),
+                "with no message of its own"
+            );
+
+            // Then what the pass is doing, four seconds in.
+            for event in [
                 PactEvent::Doing(Activity::Tool {
                     name: "Bash".to_owned(),
                     detail: Some("cargo test".to_owned()),
                 }),
                 PactEvent::Doing(Activity::Thinking),
-                PactEvent::Doing(Activity::Cost { usd: 1.5 }),
             ] {
                 events.send(event).expect("the loop is still listening");
             }
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 4));
 
-            assert!(pact.is_some(), "a run that is talking is still running");
-            let mut in_flight = before.clone();
-            in_flight.set_pact_in_flight("/repo/crates", 1, 1);
             assert_eq!(
-                app, in_flight,
-                "the footer says what it would have said, and nothing else moved"
+                panel_text(&app, at(base, 4)),
+                ["engine", "0:04 Bash cargo test", "0:04 thinking"],
+                "one line per activity, under the directory that reported it"
+            );
+
+            // A cost is not a thing the pass did, so it draws no line — it is
+            // added to what this directory spent.
+            events
+                .send(PactEvent::Doing(Activity::Cost { usd: 0.21 }))
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 6));
+
+            assert_eq!(
+                panel_text(&app, at(base, 6)).len(),
+                3,
+                "the cost added no line: {:?}",
+                panel_text(&app, at(base, 6))
+            );
+            assert_eq!(
+                app.account()
+                    .expect("a run is under way")
+                    .sections()
+                    .first()
+                    .and_then(Section::cost),
+                Some(0.21),
+                "it was counted instead",
+            );
+
+            // The newest line counts up on its own, with nothing arriving: the
+            // same app, a later instant, a moving clock. This is what the loop's
+            // hundred-millisecond round does for a pass that thinks for a
+            // minute.
+            assert_eq!(
+                panel_text(&app, at(base, 65)),
+                ["engine", "0:04 Bash cargo test", "1:05 thinking"],
+                "the line beneath the newest one is frozen and the newest is not"
+            );
+        }
+
+        #[test]
+        fn a_subtree_pact_reads_as_a_section_per_directory_in_walk_order() {
+            // A pass each for two directories: the second heading opens under
+            // the first section rather than over it, its clock starts again at
+            // nothing, and the account is still whole once the run is over.
+            let base = Instant::now();
+            let (mut app, before, mut manifest, events, running) = a_run_in_flight(base);
+            let mut pact = Some(running);
+
+            events
+                .send(PactEvent::Starting {
+                    directory: PathBuf::from("/repo/crates/engine"),
+                    position: 1,
+                    total: 2,
+                })
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+            events
+                .send(PactEvent::Doing(Activity::Tool {
+                    name: "Bash".to_owned(),
+                    detail: Some("cargo test".to_owned()),
+                }))
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 4));
+
+            // The next directory. Its clock starts again at nothing, and the
+            // section above it stops where the run left it — seventy seconds in,
+            // which is where its last line stays however long the run goes on.
+            events
+                .send(PactEvent::Starting {
+                    directory: PathBuf::from("/repo/crates/tui"),
+                    position: 2,
+                    total: 2,
+                })
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 70));
+            events
+                .send(PactEvent::Doing(Activity::Thinking))
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 71));
+
+            assert_eq!(
+                panel_text(&app, at(base, 100)),
+                ["engine", "1:10 Bash cargo test", "tui", "0:30 thinking"],
+                "the sections are in walk order and each clock counts from its own start"
+            );
+            let mut in_flight = before.clone();
+            in_flight.set_pact_in_flight("/repo/crates/tui", 2, 2);
+            assert_eq!(
+                app.pact_line(),
+                in_flight.pact_line(),
+                "and the footer is still the footer"
             );
 
             // And the outcome behind them lands exactly as it always did.
@@ -3149,7 +3451,13 @@ mod tests {
                     message: None,
                 })))
                 .expect("the loop is still listening");
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+            apply_progress(
+                &mut pact,
+                &mut app,
+                &mut manifest,
+                &nowhere(),
+                at(base, 120),
+            );
 
             assert!(pact.is_none(), "the run is over");
             assert!(app.pact_line().is_none(), "so nothing is being pacted now");
@@ -3161,6 +3469,154 @@ mod tests {
                     .is_some_and(|line| line.starts_with(NOT_REFRESHED)),
                 "the run reported something of its own: {:?}",
                 app.message()
+            );
+            // The footer stops describing a run that is over; the panel does
+            // not. Everything the run said is still there to be read.
+            // The clocks are left alone here: what closes the last section and
+            // words the run's summary is the outcome, which is the next slice's.
+            assert_eq!(
+                panel_text(&app, at(base, 200)).len(),
+                4,
+                "the account of a finished run stays whole: {:?}",
+                panel_text(&app, at(base, 200))
+            );
+        }
+
+        #[test]
+        fn the_reader_keeps_the_tree_while_the_panel_fills_up() {
+            // The run writes to the panel and to nothing else. The reader moves,
+            // collapses and filters throughout, and the selection stays where
+            // they left it rather than chasing the directory being pacted.
+            // Everything is pacted, so the pacted-only filter keeps every row
+            // and what it does to the selection is nothing at all.
+            let pacted = NodeState::PactedFresh;
+            let tree = Tree::new(Node::new("/repo", None::<PathBuf>, pacted).with_children([
+                Node::new("/repo/crates", None::<PathBuf>, pacted).with_children([
+                    Node::new("/repo/crates/engine", None::<PathBuf>, pacted),
+                    Node::new("/repo/crates/tui", None::<PathBuf>, pacted),
+                ]),
+                Node::new("/repo/docs", None::<PathBuf>, pacted).with_children([Node::new(
+                    "/repo/docs/adr",
+                    None::<PathBuf>,
+                    pacted,
+                )]),
+            ]));
+            let mut app = App::from_tree(&tree);
+            let base = Instant::now();
+            app.set_viewport_height(10);
+            app.start_account(base);
+            let mut manifest = Manifest::new();
+            let (events, received) = mpsc::channel();
+            let mut pact = Some(Running {
+                events: received,
+                cancel: CancelGuard::new(),
+                path: PathBuf::from("/repo/crates"),
+                before: app.clone(),
+            });
+
+            // The reader parks on `docs`, which is nowhere near the subtree
+            // being pacted.
+            app.select_last();
+            app.select_previous();
+            let parked = app
+                .selected_row()
+                .map(|row| row.path.clone())
+                .expect("a row is selected");
+            assert_eq!(parked, PathBuf::from("/repo/docs"));
+
+            // The first directory, and then the three keys that shape the tree.
+            let mut round = |now: Instant, directory: &str, position: usize, app: &mut App| {
+                events
+                    .send(PactEvent::Starting {
+                        directory: PathBuf::from(directory),
+                        position,
+                        total: 2,
+                    })
+                    .expect("the loop is still listening");
+                events
+                    .send(PactEvent::Doing(Activity::Thinking))
+                    .expect("the loop is still listening");
+                apply_progress(&mut pact, app, &mut manifest, &nowhere(), now);
+            };
+
+            round(base, "/repo/crates/engine", 1, &mut app);
+            app.toggle_collapsed();
+            app.toggle_pacted_only();
+            app.toggle_files();
+
+            // The second, and then the movement keys, which end where they
+            // started because the reader put them back.
+            round(at(base, 10), "/repo/crates/tui", 2, &mut app);
+            app.select_previous();
+            app.select_next();
+
+            assert!(pact.is_some(), "the run is still going");
+            assert_eq!(
+                panel_text(&app, at(base, 10)),
+                ["engine", "0:10 thinking", "tui", "0:00 thinking"],
+                "the run filled the panel and nothing else"
+            );
+            assert_eq!(
+                app.selected_row().map(|row| row.path.clone()),
+                Some(parked),
+                "the selection followed the run"
+            );
+            assert!(app.pacted_only(), "the filter key did nothing");
+            assert!(app.show_files(), "the file key did nothing");
+            assert!(
+                app.is_collapsed("/repo/docs"),
+                "the collapse key did nothing"
+            );
+        }
+
+        #[test]
+        fn a_run_that_dies_leaves_the_account_of_what_it_managed_on_screen() {
+            // Putting the tree back where it was is the undo for a run that
+            // recorded nothing, and it is taken from a copy older than the run
+            // itself. The account is not part of that undo: the lines are the
+            // record of a pass that really did happen, and this is the run whose
+            // reader most wants to see where it got to.
+            let tree = Tree::new(Node::new(
+                "/repo/crates",
+                None::<PathBuf>,
+                NodeState::Unpacted,
+            ));
+            let before = App::from_tree(&tree);
+            let mut app = before.clone();
+            let base = Instant::now();
+            app.start_account(base);
+            let mut manifest = Manifest::new();
+            let (events, received) = mpsc::channel();
+            let mut pact = Some(Running {
+                events: received,
+                cancel: CancelGuard::new(),
+                path: PathBuf::from("/repo/crates"),
+                before: before.clone(),
+            });
+
+            events
+                .send(PactEvent::Starting {
+                    directory: PathBuf::from("/repo/crates/engine"),
+                    position: 1,
+                    total: 2,
+                })
+                .expect("the loop is still listening");
+            events
+                .send(PactEvent::Doing(Activity::Thinking))
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+
+            // The worker goes away without an outcome behind it.
+            drop(events);
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 5));
+
+            assert!(pact.is_none(), "the run is over, however it ended");
+            assert_eq!(app.message(), Some(PACT_LOST), "and the footer says so");
+            assert_eq!(app.rows(), before.rows(), "the rows match the manifest");
+            assert_eq!(
+                panel_text(&app, at(base, 5)),
+                ["engine", "0:05 thinking"],
+                "and the panel still holds what the run said before it died"
             );
         }
 
@@ -3195,7 +3651,13 @@ mod tests {
                     total: 1,
                 })
                 .expect("the loop is still listening");
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+            apply_progress(
+                &mut pact,
+                &mut app,
+                &mut manifest,
+                &nowhere(),
+                Instant::now(),
+            );
 
             assert!(pact.is_some(), "a run that has only started is still on");
             assert!(
@@ -3205,7 +3667,13 @@ mod tests {
 
             // The worker's end goes away with no `Finished` behind it.
             drop(events);
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+            apply_progress(
+                &mut pact,
+                &mut app,
+                &mut manifest,
+                &nowhere(),
+                Instant::now(),
+            );
 
             assert!(pact.is_none(), "the run is over, however it ended");
             assert!(
@@ -3428,7 +3896,13 @@ mod tests {
                 .expect("the loop is still listening");
             // There is no repository at `/repo/crates`, so the reload at the
             // bottom of this call fails.
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+            apply_progress(
+                &mut pact,
+                &mut app,
+                &mut manifest,
+                &nowhere(),
+                Instant::now(),
+            );
 
             assert!(pact.is_none(), "the run is over");
             assert_eq!(
@@ -3494,7 +3968,13 @@ mod tests {
                     .expect("the loop is still listening");
                 // Nothing is on disk at `/repo/crates`, so the reload has its
                 // own line to offer in both cases.
-                apply_progress(&mut pact, &mut app, &mut manifest, &nowhere());
+                apply_progress(
+                    &mut pact,
+                    &mut app,
+                    &mut manifest,
+                    &nowhere(),
+                    Instant::now(),
+                );
                 app.message().map(str::to_owned)
             };
 
@@ -3562,7 +4042,7 @@ mod tests {
                     message: None,
                 })))
                 .expect("the loop is still listening");
-            apply_progress(&mut pact, &mut app, &mut manifest, &scope);
+            apply_progress(&mut pact, &mut app, &mut manifest, &scope, Instant::now());
 
             let message = app.message().expect("problems are reported").to_owned();
             fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644))

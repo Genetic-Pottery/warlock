@@ -751,6 +751,28 @@ impl App {
         self.account.as_mut()
     }
 
+    /// Take `view`'s account and the panel's window over from it, leaving `view`
+    /// with none.
+    ///
+    /// For the one caller that puts an older copy of the app back in place of
+    /// the live one: a run that ended with nothing recorded restores the rows,
+    /// the colours and the selection to what the manifest on disk still says,
+    /// and that copy was taken before the run started, so it knows nothing of
+    /// what the run then did. The account is not a claim about the tree and has
+    /// no business being rolled back with it — it is the record of a run that
+    /// really happened, and the run that ends this way is exactly the one a
+    /// reader most wants to see the end of.
+    ///
+    /// Moved rather than copied because the app it comes from is on its way out;
+    /// an account is every line of a run that may have taken minutes, and there
+    /// is no reason to duplicate it on the way past.
+    pub fn take_account_from(&mut self, view: &mut Self) {
+        self.account = view.account.take();
+        self.panel_height = view.panel_height;
+        self.panel_offset = view.panel_offset;
+        self.panel_follows = view.panel_follows;
+    }
+
     /// How many lines of account fit in the panel, as last set by
     /// [`App::set_panel_height`].
     #[must_use]
