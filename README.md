@@ -24,8 +24,10 @@ structure, no shared context, no record. The pretending is the waste.
 
 Warlock admits what the game is. The interface is not your filesystem, it is
 your project rendered as the AI understands it: a tree of module documents,
-coloured by whether that understanding is still true. You can still open files
-and read them. That is no longer the main event.
+coloured by whether that understanding is still true. That document is a
+`WARLOCK.md`, one per directory, written by the AI and committed alongside the
+code it describes. You can still open files and read them. That is no longer the
+main event.
 
 ## How the work flows
 
@@ -38,6 +40,14 @@ Later, you or someone else pulls a ticket and works it, with the boundary
 already agreed and the context already written down. The tree goes yellow where
 the code moved. A refresh sends the AI back over its own diff to update what it
 understands, and yellow goes green. That is the loop.
+
+What puts a module in that loop is a pact. You point at a directory and pact it,
+and the pact is taken over the whole subtree beneath it: every directory in it
+gets a `WARLOCK.md` and comes under Warlock's care in one act, rather than being
+adopted one folder at a time. Un-pacting is the exact inverse and is safe to
+reach for: it drops the pact over that subtree and Warlock stops tracking it,
+but the documents stay on disk. Pacting something to see what it says, then
+un-pacting it, costs you nothing but the run.
 
 The conversation is not overhead in front of the work. It is the work. Eight
 minutes of genuine back and forth, spent acting as your own PM and
@@ -63,10 +73,12 @@ nothing about them is lost afterwards.
   exists, the doc exists, and both are one-sentence husks. Warlock's artifacts
   are real by construction, because the work runs through them rather than
   around them.
-- **Your subscription, your leverage.** Warlock holds no credentials and
-  resells no inference. It drives the `claude` CLI you are already paying for,
-  and its job is to spend that spend well by feeding it exactly the right slice
-  of the project.
+- **Your subscription, your leverage.** Warlock holds no credentials of its own
+  and resells no inference. It drives the `claude` CLI you are already paying
+  for, which has to be on your `PATH` and logged in before Warlock can do
+  anything with a model; the account, the plan and the limits stay yours.
+  Warlock's job is to spend that spend well by feeding it exactly the right
+  slice of the project.
 
 ## What it is not
 
@@ -83,6 +95,10 @@ nothing about them is lost afterwards.
 - **Not an editor.** You can hand-edit anything, and the next refresh will
   notice and reconcile. But the tool is not optimised for living in a file, and
   anyone who wants to is not the customer.
+- **Not a squatter in your docs.** The only files Warlock writes are its own
+  `WARLOCK.md` files and its state under `.warlock/`. Your project's `README.md`
+  files are yours: Warlock never writes to one, and pacting a directory that has
+  a `README.md` leaves it exactly as it was.
 
 What it is: the same game you are already playing, given a shape. You were
 already directing an AI. This makes that legible, structured, and durable enough
