@@ -25,6 +25,20 @@
 //! and the run lands on screen the moment the worker is done with it. Nothing
 //! here waits on the worker: the manifest, the tree and the message are updated
 //! from the events it sends, and the thread is never joined.
+//!
+//! A run that takes minutes has to be stoppable, and there are two ways to stop
+//! one, which this file keeps apart on purpose. Esc *cancels*: the descent ends
+//! between directories, the `claude` running right now is killed, and the worker
+//! still finishes — it hashes and grants what it did write and saves the
+//! manifest, so the record on disk is what actually completed. `q` and Ctrl-C
+//! *quit*: the same handle kills the same child, but nothing waits for the
+//! worker to tidy up, so the manifest is simply never rewritten. Either way the
+//! documents already written are whole, because each of them is written beside
+//! its directory and renamed over (WAR-21.01), and the manifest is written once
+//! by a rename too — so there is no half-state for an abandoned worker to leave.
+//! Both roads run through one [`Cancel`], which the run's [`Running`] owns and
+//! drops through, which is why every way out of the loop — a quit, an error, a
+//! `?` in the middle of a frame — takes the child with it.
 
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
@@ -46,7 +60,7 @@ use warlock_engine::{
     PactObserver, PactProblem, PactedSubtree, Pacting, load_tree, pact_subtree, repository_root,
     unpact_subtree,
 };
-use warlock_tui::{App, ClaudeAgent, PactToggle, draw, tree_height};
+use warlock_tui::{App, Cancel, ClaudeAgent, PactToggle, draw, tree_height};
 
 /// How long the loop waits for a keystroke before going round again.
 ///
@@ -74,6 +88,18 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// pacted did not move. Documents the worker had already written are still on
 /// disk, and the next load will find them.
 const PACT_LOST: &str = "the pact stopped without saying how it went; nothing new was recorded";
+
+/// What the footer says about a run the reader stopped with Esc.
+///
+/// It replaces whatever [`pact_message`] would have said, and that is the point
+/// of it. A cancel kills the pass in flight, so the directory it was working
+/// comes back as a failure, and every directory after it was never offered a
+/// pass at all; reporting any of that as something that *went wrong* would put a
+/// directory's name on the footer as if the reader had to go and look at it,
+/// when the only thing that happened is that they pressed Esc. What did get
+/// written is on disk and recorded, and the tree says which parts those are the
+/// next time it is loaded.
+const PACT_CANCELLED: &str = "the pact was cancelled; what it finished first is recorded";
 
 fn main() -> ExitCode {
     // Before anything touches the terminal: a panic during setup has to leave
@@ -154,8 +180,37 @@ fn run() -> Result<(), Error> {
         if event::poll(POLL_INTERVAL)?
             && let Event::Key(key) = event::read()?
         {
-            match action_for(key) {
+            // The mode is passed in rather than read out of the app because
+            // there is exactly one key it changes the meaning of — Esc, which
+            // cancels a run when there is one and quits when there is not. See
+            // [`action_for`].
+            match action_for(key, pact.is_some()) {
+                // Returning is the whole of quitting, and it is enough even
+                // with a pact in flight. `pact` drops on the way out, which
+                // cancels the run and kills the `claude` it was waiting on
+                // (see [`Running`]); the guard drops after it and puts the
+                // terminal back. Nothing joins the worker: it is left to be
+                // ended by the process, having written whole documents or none,
+                // and the manifest it never got to rewrite still says what it
+                // said before.
                 Some(Action::Quit) => return Ok(()),
+                // Esc with a run in flight. The handle does both halves at once
+                // — it latches, so the descent stops at the next directory
+                // instead of starting a pass for it, and it kills the `claude`
+                // running right now, so that stop happens in milliseconds
+                // rather than at the end of a five-minute pass.
+                //
+                // The pact is deliberately *not* taken down here. The worker is
+                // still going to hash what it wrote, save the manifest and
+                // report, and all of that arrives at the bottom of this loop
+                // like any other outcome; forgetting about it now would leave
+                // the footer's progress line up for a run nobody was listening
+                // to any more.
+                Some(Action::CancelPact) => {
+                    if let Some(running) = pact.as_ref() {
+                        running.cancel.cancel();
+                    }
+                }
                 Some(Action::SelectPrevious) => app.select_previous(),
                 Some(Action::SelectNext) => app.select_next(),
                 // No height is passed: the app was told the viewport's height
@@ -215,8 +270,19 @@ fn run() -> Result<(), Error> {
                     // and it is taken once per press of one key.
                     let before = app.clone();
                     if let Some(toggle) = pact_press(&mut app, pact.is_some()) {
+                        // One handle per run, and never reused: a cancel is
+                        // final, so the run after a cancelled one has to start
+                        // with a handle nobody has said stop to.
+                        let cancel = CancelGuard::new();
                         pact = Some(Running {
-                            events: spawn_pact(&manifest, &repo_root, &toggle, &agent),
+                            events: spawn_pact(
+                                &manifest,
+                                &repo_root,
+                                &toggle,
+                                &agent,
+                                cancel.handle(),
+                            ),
+                            cancel,
                             path: toggle.path,
                             before,
                         });
@@ -236,9 +302,9 @@ fn run() -> Result<(), Error> {
 /// A pact being run by a worker thread, from the point of view of the thread
 /// drawing the screen.
 ///
-/// Three things, and no handle to join: what the worker has to say, which
-/// subtree it was started on, and what the tree looked like before the keystroke
-/// painted that subtree yellow.
+/// Four things, and no handle to join: what the worker has to say, how to tell
+/// it to stop, which subtree it was started on, and what the tree looked like
+/// before the keystroke painted that subtree yellow.
 ///
 /// The path is kept here rather than read back off the app because it is the
 /// subtree the *run* covers, which is a fact about the run and not about
@@ -251,14 +317,69 @@ fn run() -> Result<(), Error> {
 /// in the tree on a path that only a failed walk or an unwritable manifest
 /// reaches. That is the same restoration the blocking version did, kept as one
 /// code path rather than split into "the rows, but not the selection".
+///
+/// The say-when is a [`CancelGuard`] rather than a bare handle, so that every
+/// way out of the event loop takes the running `claude` with it whether or not
+/// it remembered to; see that type for the bargain.
 struct Running {
     /// Progress and, once, the outcome. Closed by the worker dropping its end,
     /// which is how a panicked worker is noticed.
     events: Receiver<PactEvent>,
+    /// Say-when for the worker: the flag its observer reads between directories
+    /// and the kill switch for the `claude` it is waiting on.
+    cancel: CancelGuard,
     /// The directory the pact key was pressed on, whose subtree the run covers.
     path: PathBuf,
     /// The app as it stood before the toggle painted the subtree.
     before: App,
+}
+
+/// A [`Cancel`] that is spent when it goes out of scope.
+///
+/// The same bargain [`TerminalGuard`] strikes with the terminal, for the same
+/// reason: a quit, an error bubbling up through a `?` in the middle of a frame
+/// and a panic unwinding past here are all ways out of the event loop, and each
+/// of them would otherwise have to remember to stop the run — which is to say,
+/// one of them eventually would not, and would leave a `claude` burning the
+/// user's subscription with nobody left to read what it says.
+///
+/// A type of its own rather than a `Drop` on [`Running`], so that the outcome
+/// path can still move the app it kept out of it: a struct that implements
+/// `Drop` cannot be taken apart, and this one has nothing anybody wants to take.
+struct CancelGuard {
+    /// The handle every clone of which speaks for this run.
+    cancel: Cancel,
+}
+
+impl CancelGuard {
+    /// A handle nobody has said stop to yet.
+    fn new() -> Self {
+        Self {
+            cancel: Cancel::new(),
+        }
+    }
+
+    /// A clone for the worker to give its agent and its observer.
+    fn handle(&self) -> Cancel {
+        self.cancel.clone()
+    }
+
+    /// Stop the run: latch the flag the descent reads, and kill the `claude`
+    /// in flight.
+    fn cancel(&self) {
+        self.cancel.cancel();
+    }
+}
+
+impl Drop for CancelGuard {
+    /// Whatever ended the run, no child outlives it.
+    ///
+    /// Idempotent, and on the ordinary path a no-op: a run that reported its
+    /// outcome has no pass left to kill, and the latched flag dies here with the
+    /// last handle holding it.
+    fn drop(&mut self) {
+        self.cancel();
+    }
 }
 
 /// What a worker thread has to say for itself.
@@ -284,12 +405,20 @@ enum PactEvent {
     Finished(Result<Toggled, String>),
 }
 
-/// The engine's progress port, wired to a channel.
+/// The engine's progress port, wired to a channel and to the reader's Esc.
 ///
 /// The one adapter between an operation that knows which directory it is on and
-/// a thread that can draw. It answers [`Pacting::Continue`] always: stopping a
-/// pact is a decision made by a person at a keyboard, and there is nobody at
-/// this end of the channel to make it.
+/// a thread that can draw. Both directions of the port go through it: the
+/// directory about to be worked goes out over the channel, and the answer comes
+/// back off the cancel handle the event loop kept a clone of, which is the only
+/// place a stop can come from — nobody but a person at a keyboard decides that a
+/// pact has gone on long enough.
+///
+/// The handle is read before anything is sent, so a cancelled run neither
+/// announces a directory it will not work nor works it. The engine's rule that
+/// the answer is asked for between directories is what bounds how long a cancel
+/// takes; killing the pass in flight, which [`Cancel`] does in the same breath
+/// as latching, is what makes that bound milliseconds rather than a pass.
 ///
 /// A send that fails means the event loop has dropped its receiver, which means
 /// warlock is on its way out. It is deliberately ignored rather than turned into
@@ -298,10 +427,15 @@ enum PactEvent {
 struct Reporting<'a> {
     /// The event loop's end of the channel.
     events: &'a Sender<PactEvent>,
+    /// The reader's say-when, cloned from the one the event loop holds.
+    cancel: &'a Cancel,
 }
 
 impl PactObserver for Reporting<'_> {
     fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
+        if self.cancel.is_cancelled() {
+            return Pacting::Stop;
+        }
         let _ = self.events.send(PactEvent::Starting {
             directory: directory.to_path_buf(),
             position,
@@ -316,7 +450,12 @@ impl PactObserver for Reporting<'_> {
 /// The worker owns everything it touches — its own manifest, its own root, its
 /// own toggle, its own [`ClaudeAgent`], which is a command line and a timeout
 /// and so is cheap to clone — so nothing is shared with the event loop but the
-/// channel. That is what makes the thread safe to abandon: the loop can return
+/// channel and `cancel`. The handle is the exception that proves the rule: it is
+/// a flag and a slot for one child, written by whoever says stop and read
+/// between directories, and it is what the agent given to this run answers to,
+/// so the pass in flight is killed by the same call that ends the descent.
+///
+/// That ownership is what makes the thread safe to abandon: the loop can return
 /// and the process exit at any moment without waiting for it, because there is
 /// no state the two of them are half way through agreeing on. Each `WARLOCK.md`
 /// is written beside and renamed over (WAR-21.01), so an abandoned worker leaves
@@ -333,15 +472,15 @@ fn spawn_pact(
     repo_root: &Path,
     toggle: &PactToggle,
     agent: &ClaudeAgent,
+    cancel: Cancel,
 ) -> Receiver<PactEvent> {
     let (events, received) = mpsc::channel();
-    let (manifest, repo_root, toggle, agent) = (
-        manifest.clone(),
-        repo_root.to_path_buf(),
-        toggle.clone(),
-        agent.clone(),
-    );
-    thread::spawn(move || run_pact(&manifest, &repo_root, &toggle, &agent, &events));
+    let (manifest, repo_root, toggle) = (manifest.clone(), repo_root.to_path_buf(), toggle.clone());
+    // This run's copy of the agent, and the only one that answers to this run's
+    // handle: the agent the event loop keeps has a handle of its own that nobody
+    // else holds, so cancelling one run can never reach into the next.
+    let agent = agent.clone().with_cancel(cancel.clone());
+    thread::spawn(move || run_pact(&manifest, &repo_root, &toggle, &agent, &cancel, &events));
     received
 }
 
@@ -356,12 +495,16 @@ fn spawn_pact(
 /// Exactly one [`PactEvent::Finished`] is sent, always, and it is the last thing
 /// this function does. A failure is an outcome like any other: the footer's line
 /// about a manifest that would not save travels down the same channel as the
-/// news that everything worked.
+/// news that everything worked. So is a cancel — a run the reader stopped still
+/// hashes what it wrote, still saves, and still reports, which is what puts the
+/// completed part of the subtree in `.warlock/pacts.toml` instead of losing it.
+/// The one thing a cancel changes is how that outcome reads: see [`cancelled`].
 fn run_pact(
     manifest: &Manifest,
     repo_root: &Path,
     toggle: &PactToggle,
     agent: &dyn Agent,
+    cancel: &Cancel,
     events: &Sender<PactEvent>,
 ) {
     let outcome = apply_toggle(
@@ -369,11 +512,42 @@ fn run_pact(
         repo_root,
         toggle,
         agent,
-        &mut Reporting { events },
+        &mut Reporting { events, cancel },
     );
+    // Only a pact is cancellable. An un-pact is manifest arithmetic that is over
+    // before a key can be read, so a handle latched while one ran would be
+    // describing something else entirely.
+    let outcome = match outcome {
+        Ok(toggled) if toggle.pacted && cancel.is_cancelled() => Ok(cancelled(toggled)),
+        outcome => outcome,
+    };
     // Ignored for the same reason `Reporting`'s sends are: a receiver that has
     // gone away is an application that is quitting.
     let _ = events.send(PactEvent::Finished(outcome));
+}
+
+/// `toggled` as the outcome of a run the reader stopped.
+///
+/// Two changes, and the manifest is not one of them: what the run recorded is
+/// what it finished, and it is already on disk.
+///
+/// Nothing is granted, whatever the failures say. A cancel usually lands between
+/// directories, where no pass has failed at all, and the subtree is still full of
+/// directories that were never offered one — so the run's own "nothing went
+/// wrong" would otherwise paint a subtree green that is mostly undocumented. The
+/// manifest is the honest account: the parts that finished have grants and draw
+/// green from the next load, the rest do not.
+///
+/// And the line is [`PACT_CANCELLED`] rather than the first thing that went
+/// wrong, because after a cancel there is nothing here that went *wrong* in a
+/// sense the reader can act on — the killed pass and the directories after it are
+/// all the same fact, which is that they pressed Esc.
+fn cancelled(toggled: Toggled) -> Toggled {
+    Toggled {
+        granted: false,
+        message: Some(PACT_CANCELLED.to_owned()),
+        ..toggled
+    }
 }
 
 /// What one press of the pact key comes to, given whether a pact is running
@@ -791,6 +965,8 @@ impl From<io::Error> for Error {
 enum Action {
     /// Leave the app.
     Quit,
+    /// Stop the pact that is running, and stay.
+    CancelPact,
     /// Move the selection one row up.
     SelectPrevious,
     /// Move the selection one row down.
@@ -816,7 +992,24 @@ enum Action {
     TogglePact,
 }
 
-/// The action `key` asks for, or `None` for a key that means nothing here.
+/// The action `key` asks for with a pact `in_flight` or without one, or `None`
+/// for a key that means nothing here.
+///
+/// One key reads two ways, and it is Esc. With nothing running it quits, which
+/// is what it has always done and what the footer has always said. With a pact
+/// running it cancels *that* — because the run is the thing in front of the
+/// reader, because stopping it is the only thing they can want from a key that
+/// means "not this", and because quitting outright on the key nearest to hand
+/// would be the one keystroke that costs minutes of somebody else's model time
+/// by mistake. Quitting during a run is still one keystroke away, spelled `q` or
+/// Ctrl-C, which say what they mean and are not what a hand reaches for to stop
+/// something.
+///
+/// The mode is a parameter rather than something looked up, so this stays a pure
+/// function of a key and a situation and both readings are one assertion each.
+/// Nothing else in here consults it: every other key means exactly what it meant
+/// before, mid-pact included, which is what keeps the tree usable while a run
+/// works.
 ///
 /// Only presses count. Crossterm reports key releases and auto-repeats on some
 /// platforms (Windows, and on terminals that speak the Kitty keyboard
@@ -827,8 +1020,9 @@ enum Action {
 ///
 /// Ctrl-C is a key event, not a signal: raw mode is exactly the mode in which
 /// the terminal stops turning it into `SIGINT`, so if this function does not
-/// handle it, nothing does.
-fn action_for(key: KeyEvent) -> Option<Action> {
+/// handle it, nothing does — including during a pact, where it is one of the two
+/// ways out that also has to take the running `claude` with it.
+fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
@@ -840,6 +1034,10 @@ fn action_for(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('c' | 'C') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(Action::Quit)
         }
+        // Before the quit arm below, and the only thing in here the mode
+        // touches: `q` and Ctrl-C keep meaning quit while a pact runs, and Esc
+        // stops being a way out for as long as there is a run to stop.
+        KeyCode::Esc if in_flight => Some(Action::CancelPact),
         KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
         KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectPrevious),
         KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
@@ -1071,17 +1269,67 @@ mod tests {
     }
 
     #[test]
-    fn q_and_esc_quit() {
-        assert_eq!(action_for(press(KeyCode::Char('q'))), Some(Action::Quit));
-        assert_eq!(action_for(press(KeyCode::Esc)), Some(Action::Quit));
+    fn q_and_esc_quit_with_no_pact_running() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('q')), false),
+            Some(Action::Quit)
+        );
+        assert_eq!(action_for(press(KeyCode::Esc), false), Some(Action::Quit));
+    }
+
+    #[test]
+    fn esc_cancels_the_pact_in_flight_while_q_and_ctrl_c_still_quit() {
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            action_for(press(KeyCode::Esc), true),
+            Some(Action::CancelPact),
+            "Esc during a pact stops the pact, not warlock"
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('q')), true),
+            Some(Action::Quit),
+            "and the ways out are still the ways out"
+        );
+        assert_eq!(action_for(ctrl_c, true), Some(Action::Quit));
+    }
+
+    #[test]
+    fn esc_is_the_only_key_a_pact_in_flight_changes_the_meaning_of() {
+        // Everything else the tree answers to keeps working while a run works,
+        // which is the point of running it on a thread at all.
+        let codes = [
+            KeyCode::Char('q'),
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Char('k'),
+            KeyCode::Char('j'),
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Char('g'),
+            KeyCode::Char('G'),
+            KeyCode::Char(' '),
+            KeyCode::Char('o'),
+            KeyCode::Char('f'),
+            KeyCode::Char('p'),
+            KeyCode::Char('x'),
+        ];
+
+        for code in codes {
+            assert_eq!(
+                action_for(press(code), true),
+                action_for(press(code), false),
+                "{code:?} means something different mid-pact"
+            );
+        }
     }
 
     #[test]
     fn ctrl_c_quits_but_a_bare_c_does_not() {
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
 
-        assert_eq!(action_for(ctrl_c), Some(Action::Quit));
-        assert_eq!(action_for(press(KeyCode::Char('c'))), None);
+        assert_eq!(action_for(ctrl_c, false), Some(Action::Quit));
+        assert_eq!(action_for(press(KeyCode::Char('c')), false), None);
     }
 
     #[test]
@@ -1093,23 +1341,29 @@ mod tests {
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         );
 
-        assert_eq!(action_for(ctrl_shift_c), Some(Action::Quit));
+        assert_eq!(action_for(ctrl_shift_c, false), Some(Action::Quit));
     }
 
     #[test]
     fn up_and_k_move_the_selection_up() {
-        assert_eq!(action_for(press(KeyCode::Up)), Some(Action::SelectPrevious));
         assert_eq!(
-            action_for(press(KeyCode::Char('k'))),
+            action_for(press(KeyCode::Up), false),
+            Some(Action::SelectPrevious)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('k')), false),
             Some(Action::SelectPrevious)
         );
     }
 
     #[test]
     fn down_and_j_move_the_selection_down() {
-        assert_eq!(action_for(press(KeyCode::Down)), Some(Action::SelectNext));
         assert_eq!(
-            action_for(press(KeyCode::Char('j'))),
+            action_for(press(KeyCode::Down), false),
+            Some(Action::SelectNext)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('j')), false),
             Some(Action::SelectNext)
         );
     }
@@ -1117,11 +1371,11 @@ mod tests {
     #[test]
     fn page_up_and_page_down_move_the_selection_by_a_screenful() {
         assert_eq!(
-            action_for(press(KeyCode::PageUp)),
+            action_for(press(KeyCode::PageUp), false),
             Some(Action::SelectPageUp)
         );
         assert_eq!(
-            action_for(press(KeyCode::PageDown)),
+            action_for(press(KeyCode::PageDown), false),
             Some(Action::SelectPageDown)
         );
     }
@@ -1129,11 +1383,11 @@ mod tests {
     #[test]
     fn lower_g_jumps_to_the_first_row_and_upper_g_to_the_last() {
         assert_eq!(
-            action_for(press(KeyCode::Char('g'))),
+            action_for(press(KeyCode::Char('g')), false),
             Some(Action::SelectFirst)
         );
         assert_eq!(
-            action_for(press(KeyCode::Char('G'))),
+            action_for(press(KeyCode::Char('G')), false),
             Some(Action::SelectLast)
         );
     }
@@ -1144,7 +1398,7 @@ mod tests {
         // upper-case letter; both spellings are the same keystroke.
         let shift_g = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
 
-        assert_eq!(action_for(shift_g), Some(Action::SelectLast));
+        assert_eq!(action_for(shift_g, false), Some(Action::SelectLast));
     }
 
     #[test]
@@ -1166,7 +1420,7 @@ mod tests {
                 );
 
                 assert_eq!(
-                    action_for(event),
+                    action_for(event, false),
                     None,
                     "{kind:?} of {code:?} should not move anything"
                 );
@@ -1177,7 +1431,7 @@ mod tests {
     #[test]
     fn space_toggles_the_collapse_of_the_selected_directory() {
         assert_eq!(
-            action_for(press(KeyCode::Char(' '))),
+            action_for(press(KeyCode::Char(' ')), false),
             Some(Action::ToggleCollapsed)
         );
     }
@@ -1196,7 +1450,7 @@ mod tests {
             );
 
             assert_eq!(
-                action_for(event),
+                action_for(event, false),
                 None,
                 "{kind:?} of space should not collapse anything"
             );
@@ -1215,7 +1469,7 @@ mod tests {
             KeyCode::Char('g'),
         ] {
             assert_ne!(
-                action_for(press(code)),
+                action_for(press(code), false),
                 Some(Action::ToggleCollapsed),
                 "{code:?} should not collapse anything"
             );
@@ -1225,7 +1479,7 @@ mod tests {
     #[test]
     fn o_toggles_the_pacted_only_filter() {
         assert_eq!(
-            action_for(press(KeyCode::Char('o'))),
+            action_for(press(KeyCode::Char('o')), false),
             Some(Action::TogglePactedOnly)
         );
     }
@@ -1244,7 +1498,7 @@ mod tests {
             );
 
             assert_eq!(
-                action_for(event),
+                action_for(event, false),
                 None,
                 "{kind:?} of o should not filter anything"
             );
@@ -1265,7 +1519,7 @@ mod tests {
             KeyCode::Char(' '),
         ] {
             assert_ne!(
-                action_for(press(code)),
+                action_for(press(code), false),
                 Some(Action::TogglePactedOnly),
                 "{code:?} should not filter anything"
             );
@@ -1275,7 +1529,7 @@ mod tests {
     #[test]
     fn f_toggles_the_files_inside_each_directory() {
         assert_eq!(
-            action_for(press(KeyCode::Char('f'))),
+            action_for(press(KeyCode::Char('f')), false),
             Some(Action::ToggleFiles)
         );
     }
@@ -1294,7 +1548,7 @@ mod tests {
             );
 
             assert_eq!(
-                action_for(event),
+                action_for(event, false),
                 None,
                 "{kind:?} of f should not show anything"
             );
@@ -1316,7 +1570,7 @@ mod tests {
             KeyCode::Char(' '),
         ] {
             assert_ne!(
-                action_for(press(code)),
+                action_for(press(code), false),
                 Some(Action::ToggleFiles),
                 "{code:?} should not show any files"
             );
@@ -1326,7 +1580,7 @@ mod tests {
     #[test]
     fn p_toggles_the_pact_on_the_selected_node() {
         assert_eq!(
-            action_for(press(KeyCode::Char('p'))),
+            action_for(press(KeyCode::Char('p')), false),
             Some(Action::TogglePact)
         );
     }
@@ -1345,7 +1599,7 @@ mod tests {
             );
 
             assert_eq!(
-                action_for(event),
+                action_for(event, false),
                 None,
                 "{kind:?} should not write anything"
             );
@@ -1354,9 +1608,9 @@ mod tests {
 
     #[test]
     fn keys_with_no_meaning_here_are_ignored() {
-        assert_eq!(action_for(press(KeyCode::Char('x'))), None);
-        assert_eq!(action_for(press(KeyCode::Enter)), None);
-        assert_eq!(action_for(press(KeyCode::Left)), None);
+        assert_eq!(action_for(press(KeyCode::Char('x')), false), None);
+        assert_eq!(action_for(press(KeyCode::Enter), false), None);
+        assert_eq!(action_for(press(KeyCode::Left), false), None);
     }
 
     #[test]
@@ -1369,7 +1623,11 @@ mod tests {
                 KeyEventState::NONE,
             );
 
-            assert_eq!(action_for(event), None, "{kind:?} should not move anything");
+            assert_eq!(
+                action_for(event, false),
+                None,
+                "{kind:?} should not move anything"
+            );
         }
     }
 
@@ -1398,7 +1656,12 @@ mod tests {
         };
         use warlock_tui::{App, ClaudeAgent, PactToggle};
 
-        use super::super::{PactEvent, Toggled, apply_toggle, pact_press, run_pact};
+        use warlock_tui::Cancel;
+
+        use super::super::{
+            CancelGuard, PACT_CANCELLED, PactEvent, Running, Toggled, apply_toggle, pact_press,
+            run_pact,
+        };
         use super::ROOT;
 
         /// The file every pacted directory is documented in, as the engine
@@ -1415,6 +1678,9 @@ mod tests {
             /// Directories, relative to the root, whose pass comes back with an
             /// answer too short for the engine to accept.
             refused: Vec<&'static str>,
+            /// The directory whose pass the reader presses Esc during, and the
+            /// handle they press it with, or `None` for a run nobody stops.
+            cancel_at: Option<(&'static str, Cancel)>,
             /// One entry per request in call order: which directory it was for,
             /// and whether `.warlock/pacts.toml` existed at that moment.
             seen: RefCell<Vec<(PathBuf, bool)>>,
@@ -1427,8 +1693,22 @@ mod tests {
                 Self {
                     root: scratch.root.clone(),
                     refused: refused.into_iter().collect(),
+                    cancel_at: None,
                     seen: RefCell::new(Vec::new()),
                 }
+            }
+
+            /// The same fake, with somebody pressing Esc while `directory` is
+            /// being worked.
+            ///
+            /// The pass still answers, which is the ordinary way a cancel lands:
+            /// the reader's key beats the engine to the *next* directory rather
+            /// than to this one's answer. The pass that is killed under a real
+            /// cancel comes back as a failure instead, and a failure is what
+            /// `refused` already produces — see the test that uses both.
+            fn cancelling_at(mut self, directory: &'static str, cancel: Cancel) -> Self {
+                self.cancel_at = Some((directory, cancel));
+                self
             }
 
             /// The directories a pass ran for, in call order.
@@ -1457,6 +1737,11 @@ mod tests {
                     .borrow_mut()
                     .push((relative.clone(), saved(&self.root).is_some()));
 
+                if let Some((at, cancel)) = &self.cancel_at
+                    && Path::new(at) == relative
+                {
+                    cancel.cancel();
+                }
                 if self.refused.iter().any(|name| Path::new(name) == relative) {
                     // Short enough that the engine turns it down: the cheapest
                     // way to fail one directory of a pact for real, rather than
@@ -1861,17 +2146,66 @@ mod tests {
         }
 
         /// Everything the worker had to say about a run of `toggle` over
-        /// `scratch` with `agent`, in the order the event loop would have
-        /// drained it.
+        /// `scratch` with `agent`, answering to `cancel`, in the order the event
+        /// loop would have drained it.
         ///
         /// The worker's body runs here, on the test's own thread, and its end of
         /// the channel is dropped before anything is read: what comes back is
         /// the whole sequence a real run sends, with none of the timing of one.
-        fn events_of(scratch: &Scratch, toggle: &PactToggle, agent: &dyn Agent) -> Vec<PactEvent> {
+        /// The handle stands in for the one the event loop keeps: a fresh one
+        /// nobody touches is a run nobody stops, and a fake that latches it
+        /// half way through is somebody pressing Esc.
+        fn events_of(
+            scratch: &Scratch,
+            toggle: &PactToggle,
+            agent: &dyn Agent,
+            cancel: &Cancel,
+        ) -> Vec<PactEvent> {
             let (events, received) = mpsc::channel();
-            run_pact(&Manifest::new(), &scratch.root, toggle, agent, &events);
+            run_pact(
+                &Manifest::new(),
+                &scratch.root,
+                toggle,
+                agent,
+                cancel,
+                &events,
+            );
             drop(events);
             received.into_iter().collect()
+        }
+
+        /// The directories a run announced, in the order it announced them,
+        /// spelled relative to `scratch`'s root.
+        fn announced(events: &[PactEvent], scratch: &Scratch) -> Vec<PathBuf> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    PactEvent::Starting { directory, .. } => Some(
+                        directory
+                            .strip_prefix(&scratch.root)
+                            .unwrap_or(directory)
+                            .to_path_buf(),
+                    ),
+                    PactEvent::Finished(_) => None,
+                })
+                .collect()
+        }
+
+        /// The one outcome a run ends with.
+        fn outcome_of(events: &[PactEvent]) -> &Result<Toggled, String> {
+            match events.last() {
+                Some(PactEvent::Finished(outcome)) => outcome,
+                _ => panic!("the worker said: {events:?}"),
+            }
+        }
+
+        /// A repository with two crates in it, so a cancel can land with one
+        /// subtree finished and the other not.
+        fn two_crates(name: &str) -> Scratch {
+            let scratch = Scratch::new(name);
+            scratch.write("crates/alpha/src/lib.rs", "//! Alpha.\n");
+            scratch.write("crates/beta/src/lib.rs", "//! Beta.\n");
+            scratch
         }
 
         #[test]
@@ -1879,7 +2213,12 @@ mod tests {
             let scratch = one_crate("progress");
             let agent = Canned::new(&scratch, []);
 
-            let events = events_of(&scratch, &toggle(&scratch, "crates/engine", true), &agent);
+            let events = events_of(
+                &scratch,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+                &Cancel::new(),
+            );
 
             // One announcement per directory, in the order the passes run —
             // children before parents — counted from one against a total that
@@ -1926,7 +2265,12 @@ mod tests {
             let missing = "warlock-claude-that-is-not-installed";
             let agent = ClaudeAgent::new().with_program(missing);
 
-            let events = events_of(&scratch, &toggle(&scratch, "crates/engine", true), &agent);
+            let events = events_of(
+                &scratch,
+                &toggle(&scratch, "crates/engine", true),
+                &agent,
+                &Cancel::new(),
+            );
 
             let Some(PactEvent::Finished(Ok(Toggled {
                 granted, message, ..
@@ -1968,6 +2312,167 @@ mod tests {
             assert_eq!(toggle.path, PathBuf::from("/repo/crates"));
             assert!(toggle.pacted);
             assert_ne!(app, before, "the subtree it covers is painted");
+        }
+
+        #[test]
+        fn a_cancel_stops_the_descent_and_records_only_what_finished() {
+            let scratch = two_crates("cancelled");
+            let cancel = Cancel::new();
+            // One directory that goes wrong on its own, and one that the reader
+            // stops the run during: `alpha/src` is refused the way a pass that
+            // fails always is, and Esc is pressed while `alpha` is being worked.
+            // The engine walks in reverse path order, so `beta` comes before
+            // `alpha` and the pact's own root comes last of all.
+            let agent = Canned::new(&scratch, ["crates/alpha/src"])
+                .cancelling_at("crates/alpha", cancel.clone());
+
+            let events = events_of(&scratch, &toggle(&scratch, "crates", true), &agent, &cancel);
+
+            // Four directories offered a pass out of five, and the fifth — the
+            // root of the pact, worked last because parents come after their
+            // children — never announced and never run: the descent stopped
+            // between directories rather than part way through one.
+            let worked = [
+                PathBuf::from("crates/beta/src"),
+                PathBuf::from("crates/beta"),
+                PathBuf::from("crates/alpha/src"),
+                PathBuf::from("crates/alpha"),
+            ];
+            assert_eq!(announced(&events, &scratch), worked);
+            assert_eq!(agent.directories(), worked);
+
+            let Ok(Toggled {
+                manifest,
+                granted,
+                message,
+            }) = outcome_of(&events)
+            else {
+                panic!("a cancelled pact still saves what it finished: {events:?}");
+            };
+            assert!(!granted, "a run that was stopped has proved nothing fresh");
+            // The refusal above is in this run's failures, and the footer says
+            // none of it: what happened is that somebody pressed Esc.
+            assert_eq!(message.as_deref(), Some(PACT_CANCELLED));
+
+            // What is on disk is what finished, and nothing else. `beta` was
+            // documented with nothing missing under it, so it earned a grant and
+            // draws green; `alpha` was documented over a child that failed, so it
+            // has an entry with no grant and draws yellow; everything the run
+            // never reached has no entry at all.
+            assert_eq!(
+                &saved(&scratch.root).expect("the manifest was written"),
+                manifest
+            );
+            for module in ["crates/beta", "crates/beta/src"] {
+                let hash = subtree_hash(scratch.path(module)).expect("it hashes");
+                assert_eq!(
+                    decide_state(manifest.entry(module), &hash),
+                    NodeState::PactedFresh,
+                    "a subtree that finished is green: {manifest:?}"
+                );
+            }
+            let hash = subtree_hash(scratch.path("crates/alpha")).expect("it hashes");
+            assert_eq!(
+                decide_state(manifest.entry("crates/alpha"), &hash),
+                NodeState::PactedStale,
+                "a directory with an unfinished descendant is yellow: {manifest:?}"
+            );
+            for module in ["crates/alpha/src", "crates"] {
+                assert_eq!(
+                    manifest.entry(module),
+                    None,
+                    "`{module}` was never documented, so it is not recorded"
+                );
+            }
+
+            // And every document written before the cancel is still there.
+            for module in ["crates/alpha", "crates/beta", "crates/beta/src"] {
+                assert!(
+                    scratch.path(module).join(DOCUMENT_FILE).is_file(),
+                    "`{module}`'s document did not survive the cancel"
+                );
+            }
+        }
+
+        #[test]
+        fn a_cancel_grants_nothing_even_when_no_pass_went_wrong() {
+            let scratch = two_crates("cancelled-clean");
+            let cancel = Cancel::new();
+            // Nothing refused this time: the run is stopped with every pass it
+            // ran having worked, which is what a cancel usually looks like. Esc
+            // lands on the last directory before the pact's own root, which the
+            // engine works last of all.
+            let agent = Canned::new(&scratch, []).cancelling_at("crates/alpha", cancel.clone());
+
+            let events = events_of(&scratch, &toggle(&scratch, "crates", true), &agent, &cancel);
+
+            let Ok(Toggled {
+                manifest,
+                granted,
+                message,
+            }) = outcome_of(&events)
+            else {
+                panic!("a cancelled pact still saves what it finished: {events:?}");
+            };
+            // Not a failure in sight, and still not fresh: the subtree's own
+            // root was never documented, so painting the whole of it green —
+            // which is all `granted` is for — would be a claim about
+            // directories this run never opened.
+            assert!(
+                !granted,
+                "a stopped run grants nothing, whatever it did not trip over"
+            );
+            assert_eq!(message.as_deref(), Some(PACT_CANCELLED));
+            assert_eq!(manifest.entry("crates"), None);
+            assert!(
+                !scratch.path("crates").join(DOCUMENT_FILE).exists(),
+                "the root of the pact was never worked"
+            );
+            // The crates that did finish kept everything they earned.
+            for module in [
+                "crates/alpha",
+                "crates/alpha/src",
+                "crates/beta",
+                "crates/beta/src",
+            ] {
+                let hash = subtree_hash(scratch.path(module)).expect("it hashes");
+                assert_eq!(
+                    decide_state(manifest.entry(module), &hash),
+                    NodeState::PactedFresh,
+                    "`{module}` finished before the cancel: {manifest:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_run_that_goes_out_of_scope_takes_its_claude_with_it() {
+            // What quitting mid-pact comes to: `q` and Ctrl-C return from the
+            // event loop, the run goes out of scope with them, and the child it
+            // was waiting on is killed on the way — no join, and no `claude`
+            // left running against a terminal nobody is looking at any more.
+            let tree = Tree::new(Node::new(
+                "/repo/crates",
+                None::<PathBuf>,
+                NodeState::Unpacted,
+            ));
+            let cancel = CancelGuard::new();
+            let watching = cancel.handle();
+            let (_events, received) = mpsc::channel();
+            let running = Running {
+                events: received,
+                cancel,
+                path: PathBuf::from("/repo/crates"),
+                before: App::from_tree(&tree),
+            };
+
+            assert!(!watching.is_cancelled(), "a run in flight is not cancelled");
+
+            drop(running);
+
+            assert!(
+                watching.is_cancelled(),
+                "the run outlived the loop that started it"
+            );
         }
     }
 }
