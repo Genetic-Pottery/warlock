@@ -359,7 +359,7 @@ pact the subtree again from scratch. A refresh pass that judges what changed and
 re-grants only what deserves it is the next project, and no part of it is in
 this crate yet.
 
-The crate's own tests still reach the fresh case a third way, by writing a
+The crate's own tests still reach the fresh case the other way, by writing a
 granted hash into an entry by hand, because what they are exercising is the
 comparison and not where either side of it came from.
 

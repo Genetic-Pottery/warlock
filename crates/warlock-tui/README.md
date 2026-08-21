@@ -175,11 +175,11 @@ There is **one manifest per repository**, at `.warlock/pacts.toml` under the
 repository root — the nearest ancestor of the working directory holding a
 `.git/` directory. The manifest's place under that root has not moved; only
 what marks the root has. A repository with no `.warlock/` yet opens fine, all
-unpacted, and the first pact creates the directory. It is **committed to git**: a pact is a fact about the
-repository, not about one developer's checkout, so `.warlock` does not belong
-in `.gitignore`. Launching from a subdirectory therefore scopes the *tree* to
-that subdirectory while the pacts still come from, and go to, the one manifest
-above it.
+unpacted, and the first pact creates the directory. It is **committed to
+git**: a pact is a fact about the repository, not about one developer's
+checkout, so `.warlock` does not belong in `.gitignore`. Launching from a
+subdirectory therefore scopes the *tree* to that subdirectory while the pacts
+still come from, and go to, the one manifest above it.
 
 It holds one entry per pacted module. An entry names the pacted **directory**,
 the **document** that describes it (held separately, because the file name is
@@ -253,9 +253,9 @@ and the scroll offset — the tally, the one line the footer has to say and the
 pact in flight it gives way to, and whose `toggle_pact` paints the selected
 subtree and hands back what carrying the toggle out needs (which directory, and
 which way it went) without touching a file; `colour_for`, a function from state
-to colour and nothing else; `draw`,
-which turns an app and a frame into a picture; and `tree_height`, which answers
-from the same layout `draw` uses how many rows of tree a terminal has room for.
+to colour and nothing else; `draw`, which turns an app and a frame into a
+picture; and `tree_height`, which answers from the same layout `draw` uses how
+many rows of tree a terminal has room for.
 Those are covered by ordinary unit tests, the draw path against Ratatui's
 in-memory `TestBackend`, so `cargo test --workspace` needs no terminal attached.
 
@@ -272,10 +272,10 @@ The binary (`src/main.rs`) is the impure remainder: raw mode, the alternate
 screen, the event loop, the mapping from key event to action, the worker thread
 a subtree pact runs on, and the manifest that a toggle edits and saves. The loop
 waits on a keystroke rather than blocking for one, so a pact's progress reaches
-the screen without anybody pressing anything. Its
-one job beyond wiring is that the terminal is restored on *every* way out — a
-normal quit, an error returned to `main`, or a panic — because raw mode left
-switched on hands the user back a shell that no longer echoes what they type.
+the screen without anybody pressing anything. Its one job beyond wiring is that
+the terminal is restored on *every* way out — a normal quit, an error returned
+to `main`, or a panic — because raw mode left switched on hands the user back a
+shell that no longer echoes what they type.
 An RAII guard covers the first two and a chained panic hook, installed before
 raw mode is entered, covers the third.
 
