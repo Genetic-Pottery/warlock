@@ -1617,6 +1617,11 @@ mod tests {
                 .recv_timeout(AT_MOST)
                 .expect("the tool call is reported as it happens");
             let reported_after = started.elapsed();
+            // Asked of the run itself rather than of the clock: the child is
+            // a second into its sleep at this point, so a thread that has
+            // already returned would mean the activity only turned up once
+            // the pass was over.
+            let still_running = !pass.is_finished();
             let response = pass
                 .join()
                 .expect("the pass ran")
@@ -1624,6 +1629,11 @@ mod tests {
             let finished_after = started.elapsed();
 
             assert_eq!(first, reported()[0]);
+            assert!(
+                still_running,
+                "the pass had already returned by the time its first activity \
+                 arrived: that is a drain, not a stream"
+            );
             assert!(
                 reported_after + Duration::from_millis(300) < finished_after,
                 "the activity arrived at {reported_after:?} and the pass ended at \
@@ -1654,6 +1664,139 @@ mod tests {
 
             assert_eq!(response.text(), DOCUMENT);
             assert_eq!(drained(&received), reported());
+        }
+
+        #[test]
+        fn nothing_from_a_tool_result_reaches_the_port_however_big_it_is() {
+            // What a tool *returned* is the one thing in the stream with no
+            // upper bound: a file, a build log, a screenful of grep. It is
+            // also no sign of life — the tool call above it already said what
+            // was happening — so it is worth proving that a quarter of a
+            // megabyte of it goes past the port without a byte getting out,
+            // in both places a block of that type can turn up.
+            //
+            // The payload is built by the shell rather than written here: a
+            // quarter of a megabyte inside `sh -c` would be a single argument
+            // past what the kernel will take, and this test would fail for a
+            // reason that has nothing to do with what it is about.
+            let payload = r"payload=$(yes gribbleflix | head -n 20000 | tr '\n' ' ')";
+            let returned = r#"printf '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"%s"}]}}\n' "$payload""#;
+            let misfiled = r#"printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"%s"}]}}\n' "$payload""#;
+            let script = [
+                payload,
+                &printing(&PASS[..2]),
+                returned,
+                misfiled,
+                &printing(&PASS[3..]),
+            ]
+            .join("; ");
+            let (agent, received) = listening(stand_in(&script));
+
+            let response = agent
+                .run(&AgentRequest::new("anything", "."))
+                .expect("a pass that read something still writes its document");
+
+            assert_eq!(response.text(), DOCUMENT);
+            let activities = drained(&received);
+            // Asked first, and asked by length rather than by printing what
+            // leaked: a failure here is half a megabyte wide, and a test that
+            // fails by filling somebody's terminal is a bad way to find out.
+            let seen = format!("{activities:?}");
+            assert!(
+                !seen.contains("gribbleflix"),
+                "a tool's output reached the port: {} bytes of activity",
+                seen.len()
+            );
+            // The call and the cost, and nothing in between: the result is
+            // not an activity, so it is not a line of a panel either.
+            assert_eq!(
+                activities,
+                vec![reported()[0].clone(), Activity::Cost { usd: 0.0342 }]
+            );
+        }
+
+        #[test]
+        fn a_thought_reaches_the_port_as_the_bare_fact_that_there_was_one() {
+            // Thinking is shown as *that it happened*, never as what it said.
+            // The text is the model reasoning with itself, and this front end
+            // does not put prose on the screen; the promise is only worth
+            // anything if the words never leave the transport at all.
+            let secret = "the person asking has misunderstood their own schema";
+            let thought = format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"thinking","thinking":"{secret}","signature":"abc123"}}]}}}}"#
+            );
+            let (agent, received) = listening(stand_in(&printing(&[thought.as_str(), PASS[3]])));
+
+            let response = agent
+                .run(&AgentRequest::new("anything", "."))
+                .expect("a pass that thought about it still writes its document");
+
+            assert_eq!(response.text(), DOCUMENT);
+            let activities = drained(&received);
+            assert_eq!(
+                activities,
+                vec![Activity::Thinking, Activity::Cost { usd: 0.0342 }]
+            );
+            let seen = format!("{activities:?}");
+            assert!(!seen.contains("misunderstood"), "{seen}");
+            assert!(!seen.contains("abc123"), "{seen}");
+        }
+
+        #[test]
+        fn what_the_pass_cost_comes_back_from_its_result_line() {
+            // The number the CLI totalled up, not one this crate works out:
+            // reported as it stands, after everything the pass did, because
+            // the result line is the last line there is.
+            let expensive = r##"{"type":"result","subtype":"success","result":"# module\n\nWhat it does.\n","total_cost_usd":1.25}"##;
+            let (agent, received) = listening(stand_in(&printing(&[PASS[1], expensive])));
+
+            let response = agent
+                .run(&AgentRequest::new("anything", "."))
+                .expect("the canned pass exits cleanly");
+
+            assert_eq!(response.text(), DOCUMENT);
+            assert_eq!(
+                drained(&received),
+                vec![reported()[0].clone(), Activity::Cost { usd: 1.25 }]
+            );
+        }
+
+        #[test]
+        fn a_pass_nobody_listens_to_runs_exactly_as_it_did_before() {
+            // The port is a side channel and must stay one. Every kind of
+            // ending this transport has — a document, a refusal, a silence,
+            // a stream that never got to a result, a directory that is not
+            // there — run twice, once through an agent with a port attached
+            // and once through one without, and the two are compared. A
+            // difference either way would mean listening had changed the run.
+            let elsewhere = "/warlock/no/such/directory";
+            let passes = [
+                (printing(&PASS), "."),
+                ("echo boom >&2; exit 3".to_owned(), "."),
+                ("exit 0".to_owned(), "."),
+                (printing(&PASS[..3]), "."),
+                ("true".to_owned(), elsewhere),
+            ];
+
+            for (script, directory) in passes {
+                let deaf = stand_in(&script).run(&AgentRequest::new("anything", directory));
+                let (agent, received) = listening(stand_in(&script));
+                let heard = agent.run(&AgentRequest::new("anything", directory));
+
+                // `AgentError` is not comparable — it carries an
+                // `io::Error` — so the two endings are compared as they are
+                // written down, which is what a caller would see of them.
+                assert_eq!(
+                    format!("{deaf:?}"),
+                    format!("{heard:?}"),
+                    "`{script}` in {directory} ended differently with somebody listening"
+                );
+                // And the reporting itself still happened, so this is not
+                // passing because the port was quietly disconnected.
+                if script == printing(&PASS) {
+                    assert_eq!(drained(&received), reported());
+                }
+            }
         }
 
         #[test]
