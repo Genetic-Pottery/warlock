@@ -487,6 +487,28 @@ impl Account {
         &self.sections
     }
 
+    /// When the section that is still being worked started, or `None` when none
+    /// is.
+    ///
+    /// The open section is the last one, and only while it is un-frozen: a
+    /// section stops being live the moment the next one opens or the run ends
+    /// (see [`Section::is_closed`]), so a finished run has no open section even
+    /// though its last section still remembers when it started.
+    ///
+    /// This is the one instant a caller needs to say how long the directory
+    /// being worked right now has been going — a renderer measuring `now -
+    /// started` for something that has to move while the pass runs. It is an
+    /// instant and not a duration on purpose: this file reads no clock, and
+    /// handing back a duration would mean picking a `now` here rather than
+    /// taking the caller's.
+    #[must_use]
+    pub fn open_section_started(&self) -> Option<Instant> {
+        self.sections
+            .last()
+            .filter(|section| !section.is_closed())
+            .map(|section| section.started)
+    }
+
     /// How many rows the whole account draws as.
     ///
     /// A heading per section, a line per thing that happened under it, and the
@@ -1109,5 +1131,61 @@ mod tests {
             said(&account, base).last().map(String::as_str),
             Some("pact finished — 1 directory, 0:00, $0.00 (incomplete: 1 pass reported no cost)"),
         );
+    }
+
+    #[test]
+    fn the_open_section_hands_back_the_instant_it_started() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        // Nothing has opened yet, so there is nothing being worked.
+        assert_eq!(account.open_section_started(), None);
+
+        account.open_section("crates/engine", at(base, 10));
+        assert_eq!(account.open_section_started(), Some(at(base, 10)));
+
+        // Lines under it do not move the start: the section began when it began.
+        account.record(&Activity::Thinking, at(base, 12));
+        assert_eq!(account.open_section_started(), Some(at(base, 10)));
+    }
+
+    #[test]
+    fn the_start_moves_to_the_second_section_the_moment_it_opens() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        account.open_section("crates/engine", at(base, 10));
+        account.open_section("crates/tui", at(base, 70));
+
+        // The first section froze when the second opened, so the answer is the
+        // second's start and the handover is one step rather than a fade.
+        assert_eq!(account.open_section_started(), Some(at(base, 70)));
+        assert!(account.sections()[0].is_closed());
+        assert!(!account.sections()[1].is_closed());
+    }
+
+    #[test]
+    fn a_closed_section_is_not_an_open_one() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        account.open_section("crates/engine", at(base, 10));
+        account.close_section(
+            &Outcome::Refused {
+                reason: "no".into(),
+            },
+            at(base, 30),
+        );
+
+        // Closed with an outcome: the directory is done, so nothing is being
+        // worked even though the section is still the last one there is.
+        assert_eq!(account.open_section_started(), None);
+
+        // And a run that ended freezes whatever was still live, so a finished
+        // run has no open section either.
+        account.open_section("crates/tui", at(base, 40));
+        assert_eq!(account.open_section_started(), Some(at(base, 40)));
+        account.finish(at(base, 90));
+        assert_eq!(account.open_section_started(), None);
     }
 }
