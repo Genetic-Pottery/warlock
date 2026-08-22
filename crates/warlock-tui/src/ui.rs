@@ -684,6 +684,13 @@ fn pulse_colour(app: &App, now: Instant) -> Option<Color> {
 /// same heights, same places — a footer that grew while a pact ran would reflow
 /// the tree under it on a keystroke that changed nothing about the tree, and
 /// would do it in the middle of the one operation the reader is watching.
+///
+/// The `Paragraph` is given no `.wrap`, deliberately: a line too long for the
+/// terminal is cut at the right-hand edge rather than folded onto the line
+/// below, so the footer is three lines whatever the app has put on them and it
+/// is always the end of a line that is lost. Which end is worth losing is the
+/// app's business and not decided here — [`App::pact_line`] puts the part that
+/// answers a keystroke last for exactly this reason.
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let counts = app.counts();
     let mut tally = Vec::new();
@@ -1661,6 +1668,91 @@ mod tests {
         assert_eq!(
             rows_text(&render(&app, KEYS_WIDTH, height)),
             rows_text(&before)
+        );
+    }
+
+    #[test]
+    fn a_refused_pact_press_re_words_the_progress_line_and_moves_nothing_else() {
+        let mut app = App::from_tree(&fixture::tree());
+        let height = 10;
+
+        app.set_pact_in_flight("warlock/crates/engine", 3, 12);
+        let quiet = render(&app, KEYS_WIDTH, height);
+        app.set_pact_refused();
+        let buffer = render(&app, KEYS_WIDTH, height);
+
+        // The refusal is on the progress line, on the end of it, and the
+        // progress line is where it has always been: the last row of the
+        // screen, which is the last row of the footer.
+        assert_eq!(
+            row_text(&buffer, height - 1),
+            "pacting warlock/crates/engine (3/12) — already running"
+        );
+        // The keys line is still the pacting one: a press that started nothing
+        // does not change what the keys do, and Esc still says cancel.
+        assert_eq!(row_text(&buffer, height - FOOTER_HEIGHT + 1), PACTING_KEYS);
+        // The tally is untouched, on the first line of the footer.
+        assert_eq!(
+            row_text(&buffer, height - FOOTER_HEIGHT),
+            row_text(&quiet, height - FOOTER_HEIGHT)
+        );
+        // And the footer is still exactly `FOOTER_HEIGHT` lines: no fourth line
+        // grew under it, and nothing above it moved up to make room — every row
+        // over the footer is the row it was before the press, tree included.
+        assert_eq!(buffer.area.height, height);
+        for y in 0..height - FOOTER_HEIGHT {
+            assert_eq!(row_text(&buffer, y), row_text(&quiet, y), "row {y}");
+        }
+        assert_eq!(tree_rows(&buffer), tree_rows(&quiet));
+    }
+
+    #[test]
+    fn a_terminal_too_narrow_for_the_refusal_cuts_the_suffix_and_keeps_the_fraction() {
+        let mut app = App::from_tree(&fixture::tree());
+        let height = 10;
+        app.set_pact_in_flight("warlock/crates/engine", 3, 12);
+        app.set_pact_refused();
+
+        // The two halves of the line, so the test can be drawn at a width that
+        // fits one and not the other.
+        let progress = "pacting warlock/crates/engine (3/12)";
+        let suffix = " — already running";
+        assert_eq!(
+            app.pact_line().expect("a pact is in flight"),
+            format!("{progress}{suffix}"),
+            "the app words the line; this test only measures it"
+        );
+        let fits =
+            u16::try_from(display_width(progress)).expect("a footer line's worth of columns");
+
+        // Drawn exactly as wide as the fraction and not a column more: the
+        // fraction survives whole and the suffix is the part that is gone.
+        let buffer = render(&app, fits, height);
+        assert_eq!(row_text(&buffer, height - 1), progress);
+        // Gone rather than moved: an unwrapped line is cut at the right edge,
+        // so no part of the suffix turns up on a line of its own, and the
+        // footer is still three lines with the keys on the middle one.
+        for y in 0..height - 1 {
+            assert!(
+                !row_text(&buffer, y).contains("already"),
+                "the suffix wrapped onto row {y}"
+            );
+        }
+        assert!(row_text(&buffer, height - FOOTER_HEIGHT + 1).starts_with("up/down"));
+        assert_eq!(buffer.area.height, height);
+
+        // The cut is at the right edge and column by column: two columns wider
+        // and the first of the suffix is back, with the fraction still whole in
+        // front of it rather than shortened to make room for it.
+        let wider = render(&app, fits + 2, height);
+        assert_eq!(row_text(&wider, height - 1), format!("{progress} —"));
+
+        // And a terminal wide enough for the whole of it draws the whole of it.
+        let whole = u16::try_from(display_width(&format!("{progress}{suffix}")))
+            .expect("a footer line's worth of columns");
+        assert_eq!(
+            row_text(&render(&app, whole, height), height - 1),
+            format!("{progress}{suffix}")
         );
     }
 

@@ -406,9 +406,27 @@ impl Focus {
 /// see a background thread and the thread cannot see a screen. It outlasts
 /// keystrokes for that reason, and takes the message line while it is there:
 /// see [`App::pact_line`].
+///
+/// `pact_refused` is the one keystroke that has nowhere else to go: the pact key
+/// pressed while `in_flight` is already there. It is a flag rather than a
+/// message because the message line is exactly what a pact in flight has taken —
+/// a sentence put in `message` would be the one sentence nobody could read — and
+/// it is a flag rather than a fourth footer line because the footer is a fixed
+/// three. So it is a bit that changes how `in_flight` is worded, and nothing
+/// more: see [`App::set_pact_refused`] and [`App::pact_line`]. It belongs to the
+/// keystroke that set it, so it goes the way `message` does, on the next one.
 /// Holds an [`Account`], which holds an [`f64`] cost, so it is [`PartialEq`] and
 /// not [`Eq`].
 #[derive(Debug, Clone, Default, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the four flags here are independent facts about the view — files \
+              shown, pacted-only, panel following, pact refused — and every one \
+              of the sixteen combinations is a state the screen can honestly be \
+              in. Folding them into a state machine would invent an ordering \
+              between things that have none, and cost the derives a bool keeps \
+              free"
+)]
 pub struct App {
     all_rows: Vec<Row>,
     rows: Vec<Row>,
@@ -422,6 +440,7 @@ pub struct App {
     header: String,
     message: Option<String>,
     in_flight: Option<InFlight>,
+    pact_refused: bool,
     focus: Focus,
     account: Option<Account>,
     panel_height: usize,
@@ -488,7 +507,9 @@ impl App {
     ///
     /// There is no message either: an app that has answered no keystroke yet
     /// has nothing to say about one. See [`App::message`]. Nor is a pact in
-    /// flight — nobody has started one — see [`App::set_pact_in_flight`].
+    /// flight — nobody has started one — see [`App::set_pact_in_flight`] — and
+    /// so nothing has been refused for one running either, see
+    /// [`App::set_pact_refused`].
     ///
     /// And there is no account: no pact has run this session, so the panel has
     /// nothing whatever to draw, which is a different state from a run that has
@@ -521,6 +542,7 @@ impl App {
             header: String::new(),
             message: None,
             in_flight: None,
+            pact_refused: false,
             focus: Focus::Tree,
             account: None,
             panel_height: 0,
@@ -661,6 +683,32 @@ impl App {
         self.in_flight = None;
     }
 
+    /// Say that the pact key was pressed while a pact was already running, so
+    /// that the press is answered rather than swallowed.
+    ///
+    /// The caller refuses the press — nothing starts, nothing toggles — and
+    /// says here that it did. Deliberately not [`App::set_message`]: the
+    /// message line is the very thing a pact in flight has taken (see
+    /// [`App::pact_line`]), so a sentence left there would be the one sentence
+    /// the reader could not see, and it would then turn up minutes later when
+    /// the run ended, long after the key that earned it. Deliberately not a
+    /// fourth footer line either — the footer is three lines at fixed heights.
+    /// What it does instead is re-word the line the reader is already watching,
+    /// as a suffix on [`App::pact_line`].
+    ///
+    /// A flag and not a count: a second, third or fourth press says the same
+    /// thing, so setting this again changes nothing. It says nothing at all
+    /// while no pact is in flight, since there is no line for it to be a suffix
+    /// on and no press it could have refused.
+    ///
+    /// This one *is* a keystroke, so it goes the way a message goes: the next
+    /// keystroke takes it down. Progress events do not — a tick landing a
+    /// fraction of a second after the press would otherwise wipe the answer
+    /// before it was read.
+    pub fn set_pact_refused(&mut self) {
+        self.pact_refused = true;
+    }
+
     /// Whether a pact is running now, as last set by
     /// [`App::set_pact_in_flight`].
     ///
@@ -705,14 +753,28 @@ impl App {
     /// on. The message underneath is not thrown away — [`App::message`] still
     /// holds it, and it appears when the run ends — which is what makes the
     /// precedence a display rule rather than a loss of state.
+    ///
+    /// A press of the pact key refused because this run is already going adds
+    /// `— already running` to the end of it, rather than taking a line of its
+    /// own: see [`App::set_pact_refused`]. It is a suffix and goes last so that
+    /// a narrow terminal cuts the answer to a key just pressed rather than the
+    /// fraction, which is the part that says Warlock has not hung. The line is
+    /// rebuilt every frame, so a progress event arriving after the press
+    /// re-words it around the new directory and position and carries the suffix
+    /// along.
     #[must_use]
     pub fn pact_line(&self) -> Option<String> {
         self.in_flight.as_ref().map(|in_flight| {
-            pacting_message(
+            let line = pacting_message(
                 &self.label_for(&in_flight.path),
                 in_flight.position,
                 in_flight.total,
-            )
+            );
+            if self.pact_refused {
+                already_running_message(&line)
+            } else {
+                line
+            }
         })
     }
 
@@ -957,7 +1019,7 @@ impl App {
     /// something.
     pub fn toggle_pacted_only(&mut self) {
         self.pacted_only = !self.pacted_only;
-        self.message = None;
+        self.forget_last_keystroke();
         self.reflow();
     }
 
@@ -999,7 +1061,7 @@ impl App {
     /// something.
     pub fn toggle_files(&mut self) {
         self.show_files = !self.show_files;
-        self.message = None;
+        self.forget_last_keystroke();
         self.reflow();
     }
 
@@ -1331,8 +1393,23 @@ impl App {
     /// rescrolls on every frame, including the frame that is about to draw the
     /// message.
     fn moved(&mut self) {
-        self.message = None;
+        self.forget_last_keystroke();
         self.rescroll();
+    }
+
+    /// A keystroke has just done something: forget what the one before it left
+    /// on the footer, whether that was a message or a refusal.
+    ///
+    /// The two go together because they are one thing said two ways — what the
+    /// app has to say about the key just pressed — and a reader who has moved on
+    /// to the next key is owed neither. Which is why the refusal recorded by
+    /// [`App::set_pact_refused`] is taken down here rather than by the next
+    /// progress event: the run advancing is not a keystroke, and a tick arriving
+    /// a fraction of a second after the press would wipe the answer before it
+    /// could be read.
+    fn forget_last_keystroke(&mut self) {
+        self.message = None;
+        self.pact_refused = false;
     }
 
     /// How to name `path` in a message: relative to the root of the tree on
@@ -1388,7 +1465,7 @@ impl App {
         if !self.collapsed.remove(&path) {
             self.collapsed.insert(path);
         }
-        self.message = None;
+        self.forget_last_keystroke();
         self.reflow();
     }
 
@@ -1561,6 +1638,11 @@ pub fn reseat_on(view: &App, tree: &Tree) -> App {
     reseated.header.clone_from(&view.header);
     reseated.message.clone_from(&view.message);
     reseated.in_flight.clone_from(&view.in_flight);
+    // Carried, like the message beside it and for the same reason: a tree being
+    // re-read is not a keystroke, so it is not the thing that answers one. A
+    // reader whose press was refused a frame ago should still be reading the
+    // answer, and the run it refers to has been carried over too.
+    reseated.pact_refused = view.pact_refused;
     reseated.focus = view.focus;
     reseated.account.clone_from(&view.account);
     reseated.panel_height = view.panel_height;
@@ -1827,6 +1909,20 @@ fn left_on_disk_message(label: &str) -> String {
 /// one, which is the whole reason the line exists.
 fn pacting_message(label: &str, position: usize, total: usize) -> String {
     format!("pacting {label} ({position}/{total})")
+}
+
+/// What the app says when the pact key is pressed while `pacting` — a line from
+/// [`pacting_message`] — is already on the footer: that same line with
+/// `— already running` on the end.
+///
+/// The answer to the press is worded as a suffix rather than as a line of its
+/// own because the run's line is where the reader is already looking, and
+/// because it answers the press in the run's own terms: the reason nothing
+/// started is the thing the rest of the line is describing. It goes last so that
+/// a terminal too narrow for the whole of it cuts the answer and keeps the
+/// fraction.
+fn already_running_message(pacting: &str) -> String {
+    format!("{pacting} — already running")
 }
 
 /// What the app says when the pact key is pressed on a file, naming it as
@@ -2965,6 +3061,113 @@ mod tests {
                 "{name} blanked the line for a pact that is still running"
             );
         }
+    }
+
+    #[test]
+    fn a_press_refused_by_a_running_pact_is_said_on_the_end_of_the_pact_line() {
+        let mut app = app_selecting("warlock/crates");
+        app.set_pact_in_flight("warlock/crates/engine", 3, 12);
+
+        app.set_pact_refused();
+
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting warlock/crates/engine (3/12) — already running")
+        );
+
+        // A second, third and fourth press say the same thing, because there is
+        // nothing further to say.
+        let after_one = app.clone();
+        app.set_pact_refused();
+        app.set_pact_refused();
+        app.set_pact_refused();
+        assert_eq!(app, after_one, "pressing again changed something");
+    }
+
+    #[test]
+    fn the_run_moving_on_re_words_the_refusal_and_keeps_it() {
+        let mut app = app_selecting("warlock/crates");
+        app.set_pact_in_flight("warlock/crates/engine", 3, 12);
+        app.set_pact_refused();
+
+        // The tick that lands a moment after the press: it says where the run is
+        // now, and says nothing about the keystroke either way.
+        app.set_pact_in_flight("warlock/crates/tui", 4, 12);
+
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting warlock/crates/tui (4/12) — already running")
+        );
+    }
+
+    #[test]
+    fn a_keystroke_takes_the_refusal_down_the_way_it_takes_a_message_down() {
+        let keystrokes: [(&str, Movement); 9] = [
+            ("select_next", App::select_next),
+            ("select_previous", App::select_previous),
+            ("select_page_down", App::select_page_down),
+            ("select_page_up", App::select_page_up),
+            ("select_first", App::select_first),
+            ("select_last", App::select_last),
+            ("toggle_collapsed", App::toggle_collapsed),
+            ("toggle_pacted_only", App::toggle_pacted_only),
+            ("toggle_files", App::toggle_files),
+        ];
+
+        for (name, keystroke) in keystrokes {
+            let mut app = app_selecting("warlock/crates");
+            app.set_pact_in_flight("warlock/crates/engine", 3, 12);
+            app.set_pact_refused();
+
+            keystroke(&mut app);
+
+            // The refusal belonged to the key that earned it; the run it was
+            // about goes on, and its line goes back to being about the run.
+            assert_eq!(
+                app.pact_line().as_deref(),
+                Some("pacting warlock/crates/engine (3/12)"),
+                "{name} left the refusal on the line"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_press_leaves_the_message_where_it_was() {
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_message("something the caller said");
+        app.set_pact_in_flight("warlock/crates", 2, 4);
+
+        app.set_pact_refused();
+
+        // The refusal is a bit of wording on the progress line and nothing else:
+        // it is not routed through the message, so the message is still the last
+        // keystroke's.
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting warlock/crates (2/4) — already running")
+        );
+        assert_eq!(app.message(), Some("something the caller said"));
+
+        app.clear_pact_in_flight();
+
+        // And when the run ends the message is handed back untouched, with no
+        // sign of the refusal anywhere: the run it was about is over.
+        assert_eq!(app.pact_line(), None);
+        assert_eq!(app.message(), Some("something the caller said"));
+    }
+
+    #[test]
+    fn a_refusal_says_nothing_while_no_pact_is_running() {
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_message("something the caller said");
+
+        app.set_pact_refused();
+
+        // Nothing to be a suffix on, so nothing is said — and the pact key with
+        // no run in flight goes on refusing the way it always did, through the
+        // message.
+        assert_eq!(app.pact_line(), None);
+        assert_eq!(app.message(), Some("something the caller said"));
     }
 
     #[test]
