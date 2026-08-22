@@ -4,7 +4,8 @@ A tree that notices. Warlock reads the filesystem once, at startup, and never
 again — so a file created, edited or deleted while it is open is invisible until
 it is relaunched, and a directory that has gone stale carries on claiming it is
 fresh. This project makes the tree follow the disk, makes a running pact obvious
-on the row it is working on, and makes the three colours readable.
+on the row it is working on, makes the three colours readable, answers the
+mouse, and puts warlock's own mark in the empty panel.
 
 Read `docs/warlock-design-doc.md` before drafting, section 5 in particular: the
 three colours, the rule that files take their directory's colour and have no
@@ -39,6 +40,15 @@ running rather than doing nothing at all.
 
 And the yellow that carries all of this is a colour you can actually read.
 
+Reach for the mouse and it answers. The wheel scrolls whichever pane the pointer
+is over. A click selects the row under it and hands that pane the keys, and
+clicking the directory already selected opens or closes it. Nothing that was a
+key stops being one.
+
+Launch warlock in a repository nothing has been pacted in yet and the panel is
+not a blank rectangle: warlock's mark sits in it, quiet, and goes the moment
+there is an account to put there.
+
 ## Success criteria
 
 - With warlock open, saving a file in a pacted directory turns that directory
@@ -62,6 +72,17 @@ And the yellow that carries all of this is a colour you can actually read.
 - The three colours are distinguishable from each other and readable on both
   dark and light terminal backgrounds, and yellow in particular is legible
   rather than washed out.
+- The wheel scrolls the pane the pointer is over, whichever pane has focus. A
+  click selects the row under it and focuses the pane it landed in; clicking the
+  already-selected directory opens or closes it.
+- Every action the mouse reaches is still reachable by key, and warlock is still
+  fully usable on a terminal that reports no mouse at all.
+- Mouse reporting is off in the shell warlock came back to, however it left —
+  quit, `Ctrl-C`, error or panic — and a key turns capture off mid-session so
+  the terminal's own text selection can be used without leaving.
+- Before the first pact the panel shows the mark, centred and quiet; a panel too
+  narrow for it shows the empty border instead of a fragment; the first line of
+  account replaces it and it does not come back.
 - `warlock-engine` still opens no sockets and spawns no subprocesses, and its
   tests still run with no terminal, no network and no `claude` binary present.
 - The gate — `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
@@ -93,19 +114,29 @@ And the yellow that carries all of this is a colour you can actually read.
   gitignore semantics.
 - Movement, collapse and filter keys keep working during a pact, and the
   selection never follows the run. True since WAR-21.05, not revisited here.
+- **The mouse is an addition and never a requirement.** Everything it reaches
+  stays reachable by key. A terminal that reports no mouse, or a user who turns
+  capture off, loses nothing but the pointer.
+- **Mouse capture is undone by the path raw mode is undone by** — the terminal
+  guard and its restore function, so the panic hook covers it as well. Reporting
+  left on hands back a shell that prints escape sequences every time the pointer
+  crosses it, which outlives whatever went wrong.
+- **The mark is not a message.** No version, no tagline, no key hints, no
+  welcome. It is what an empty pane looks like, and it yields to the account.
 
 ## Out of scope
 
 **The refresh pass**, as above. Brief 07 at the earliest.
 
-**Mouse support.** Wheel scrolling, click to select and expand, hover
-highlighting. Cheap once the layout has settled, not what this project is about,
-and carrying a decision of its own — mouse capture takes the terminal's own text
-selection away — that deserves separate thinking.
+**Hover highlighting**, though the rest of the mouse is in. crossterm's capture
+turns motion reporting on whether it is wanted or not, so a highlight that
+follows the pointer costs a redraw on every mouse move in order to say what the
+selection already says. Named here so it is a decision rather than an omission.
 
 **Reading a file's contents anywhere in the UI**, `WARLOCK.md` included. Fifth
 brief running. The panel brief 05 built shows the model's work and stays that
-way.
+way. The mark in slice 5 is not an exception to this: it is what an empty pane
+looks like, not something read off the disk.
 
 **Any watcher-driven action other than reloading the tree.** No auto-pact on
 change, no auto-refresh, no background model calls. The watcher's entire job is
@@ -248,3 +279,77 @@ Box-drawing characters down the tree make depth readable at a glance.
 Keep them quiet. Guides as bright as the rows they sit beside compete with the
 state colours for attention; drawn dim, they disappear until looked at, which is
 what a guide is for.
+
+### 4. Answer the mouse
+
+depends_on: []
+
+Nothing on this screen answers a pointer. The event loop matches `Event::Key`
+and drops everything else, so on a terminal already reporting them, mouse events
+are read and thrown away.
+
+This is here rather than in brief 05 because hit-testing wants to be written
+once, against a layout that has stopped moving, and now it has. `areas` in
+`crates/warlock-tui/src/ui.rs` already cuts the frame into the panel, the tree
+column and the footer, and `pane_inner`, `tree_rows_area`, `tree_height` and
+`panel_height` already say how many rows each of them holds. Turning a screen
+coordinate into "row twelve of the tree" belongs beside them, in the one module
+that knows where anything is. If this slice finds itself working out a layout,
+that layout already exists.
+
+Crossterm comes through ratatui's re-export, as everything else in this crate
+does, so `EnableMouseCapture` costs no new dependency.
+
+Three behaviours and no fourth:
+
+- **The wheel scrolls the pane under the pointer**, not the focused pane.
+  Pointing at something and turning the wheel is already a complete instruction;
+  making it also require a Tab first is a correctness nobody asked for.
+- **A click selects the row under it** and gives that pane the keys — Tab's job,
+  done by pointing.
+- **Clicking the directory that is already selected opens or closes it**, which
+  is what space does. Select and expand on one button, and no double-click,
+  whose timing warlock would then have to own.
+
+Hover highlighting is out, for the reason given above.
+
+**Mouse capture takes the terminal's own text selection away.** That is the real
+cost of this slice, and it is why the slice owes a way out: a key — `m`, on the
+footer with the others — turns reporting off and back on for the session. Many
+terminals also bypass capture while Shift is held, but that is the terminal's
+behaviour rather than warlock's and it is not true everywhere, so it is not the
+answer here.
+
+And it has to be turned off on the way out. `EnableMouseCapture` goes in
+`TerminalGuard::enter` beside `EnterAlternateScreen`; `DisableMouseCapture` goes
+in `restore_terminal` beside `LeaveAlternateScreen`. Then quitting, failing and
+panicking all undo it by the path that already undoes raw mode, which is the
+whole reason that path is shaped the way it is.
+
+### 5. Put warlock's mark in the empty panel
+
+depends_on: []
+
+Before the first pact the panel draws its border and nothing inside it, and
+`draw_panel` says why in its own words: a screen that said something before
+anything had happened would be saying it about nothing. That is right about a
+*message*. It says nothing about the program's name.
+
+Draw the warlock mark in that space, in characters. `assets/warlock-logo.png` is
+what it comes from — it is what the README opens with, and the two should be
+recognisably the same thing. Centred in the panel, drawn quiet, and gone the
+instant there is a first line of account to put there.
+
+It has to survive a small terminal. The panel takes the majority of the width,
+but the floor is real — at 40 columns it is 20 wide — so the art needs a size
+below which it is simply not drawn. Half a logo is worse than an empty
+rectangle, and an empty rectangle is exactly what this replaces, so falling back
+to it costs nothing.
+
+Keep it to plain ASCII, or as near as the shape allows. Slice 3's box-drawing
+guides are the ceiling on what warlock assumes a terminal can render, and this
+is the pane with the least reason to test that ceiling.
+
+The earlier call was to live with the empty space before committing to art. It
+has now been lived with. If what gets drawn reads as clutter rather than as
+identity, the answer is to cut it rather than to shrink it.
