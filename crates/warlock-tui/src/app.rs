@@ -49,6 +49,17 @@
 //! that only an event loop with a terminal attached could demonstrate is a rule
 //! nobody can test. See [`Focus`].
 //!
+//! A pointer asks for the same moves in a different grammar, and gets methods of
+//! its own rather than a mode on the keys': it names a row instead of a
+//! direction, and it names the pane it is over instead of accepting whichever
+//! pane the keys are driving. So [`App::select_row`], [`App::select_next_by`],
+//! [`App::select_previous_by`], [`App::scroll_panel_down`] and
+//! [`App::scroll_panel_up`] never consult the focus, while landing in the same
+//! places the keys land — a wheel notch over the tree is three presses of the
+//! down key, a wheel notch over the panel is three of them at the panel, follow
+//! rule and all. Which pointer landed where is somebody else's arithmetic; this
+//! type is told the answer.
+//!
 //! A pact in flight is the same kind of thing said over a longer span. A subtree
 //! pact is minutes of work happening somewhere else, so the app holds which
 //! directory that work is on and how far down the list it has got — set and
@@ -1166,6 +1177,22 @@ impl App {
         self.focus = self.focus.other();
     }
 
+    /// Put the focus on `focus`, wherever it was.
+    ///
+    /// What a pointer can ask for and a key cannot. The focus key knows only
+    /// "the other one", which is the whole of what one key over two panes can
+    /// mean; a click names the pane it landed in, and naming the pane that
+    /// already has the focus has to leave it there rather than toggle away from
+    /// it — which is exactly what assigning the value it already holds does.
+    ///
+    /// Nothing else moves, for the reason [`App::toggle_focus`] moves nothing
+    /// else: focus changes what the *next* movement means and says nothing
+    /// itself, so the selection, both windows and the last keystroke's message
+    /// are none of its business.
+    pub const fn set_focus(&mut self, focus: Focus) {
+        self.focus = focus;
+    }
+
     /// Move up one line: the selection while the tree has the focus, the
     /// panel's window while the panel has it.
     ///
@@ -1251,6 +1278,95 @@ impl App {
     /// end" are the same instruction to a list that is still being written.
     pub fn select_last(&mut self) {
         self.movement(|app| app.rows.len().saturating_sub(1), |_, _| usize::MAX);
+    }
+
+    /// Select the row at `index` in [`App::rows`], wherever the focus is.
+    ///
+    /// What a click on a tree row asks for. A key names a direction and lets
+    /// the app work out where that lands; a pointer names the row outright, and
+    /// this is the only way to say so. It goes through the same path an
+    /// ordinary movement key goes through all the same — the last keystroke's
+    /// message comes down and the window is brought back into line with the
+    /// selection — because a row reached by pointer is the same selection as a
+    /// row reached by pressing `j` at it, and everything downstream should be
+    /// unable to tell which one happened.
+    ///
+    /// An `index` no row stands for is refused outright rather than clamped to
+    /// the nearest one: what counts rows here is a layout answering a screen
+    /// point, and a point below the last row of a half-full tree is a point on
+    /// nothing at all — not a roundabout way of asking for the last row. So this
+    /// is a complete no-op there, message included, and on an app with no rows.
+    ///
+    /// The focus is neither read nor written. Which pane the keys are driving
+    /// says nothing about which row a pointer landed on, and a caller that wants
+    /// the click to move the focus as well says so with [`App::set_focus`].
+    pub fn select_row(&mut self, index: usize) {
+        if index >= self.rows.len() {
+            return;
+        }
+        self.selected = index;
+        self.moved();
+    }
+
+    /// Move the selection `rows` rows down the tree, wherever the focus is.
+    ///
+    /// Exactly where `rows` presses of [`App::select_next`] at a focused tree
+    /// would leave it, clamped at the last row, reached by arithmetic rather
+    /// than by a loop. The wheel's, and the reason it does not go through
+    /// `movement` the way the keys do: the pointer is over the tree column, so
+    /// the tree column is what moves, however the keys happen to be pointed at
+    /// the time.
+    ///
+    /// It scrolls nothing on its own. The tree pane has no window of its own to
+    /// scroll — the window is derived from the selection by `rescroll`, as it is
+    /// for every key — so a notch of the wheel here is three rows of selection
+    /// and the window comes along behind it.
+    ///
+    /// A no-op on an app with no rows, and clears the last keystroke's message
+    /// exactly as the key it stands in for does.
+    pub fn select_next_by(&mut self, rows: usize) {
+        let last = self.rows.len().saturating_sub(1);
+        self.selected = self.selected.saturating_add(rows).min(last);
+        self.moved();
+    }
+
+    /// Move the selection `rows` rows up the tree, wherever the focus is.
+    ///
+    /// The mirror of [`App::select_next_by`], clamping at the first row: what
+    /// `rows` presses of [`App::select_previous`] at a focused tree would leave
+    /// behind.
+    pub fn select_previous_by(&mut self, rows: usize) {
+        self.selected = self.selected.saturating_sub(rows);
+        self.moved();
+    }
+
+    /// Scroll the panel's window `lines` lines towards the newest line of the
+    /// account, wherever the focus is.
+    ///
+    /// The panel's half of the same wheel, and focus-free for the same reason:
+    /// the pointer is over the panel, so it is the panel that scrolls. Where it
+    /// lands is `scroll_panel_to`'s to decide, which is what keeps one rule
+    /// about the end of the account rather than two — the window stops at the
+    /// end however many lines were asked for, and a window that has arrived at
+    /// the end is following the newest line again, with nothing here having to
+    /// mean "and go live" as well as what it already means.
+    ///
+    /// Says nothing and takes nothing down. Nothing in the tree column has
+    /// moved, and the line explaining the last keystroke belongs to the tree —
+    /// the same reading a movement key at the panel takes, see `movement`.
+    pub fn scroll_panel_down(&mut self, lines: usize) {
+        self.scroll_panel_to(self.panel_scroll_offset().saturating_add(lines));
+    }
+
+    /// Scroll the panel's window `lines` lines back towards the start of the
+    /// account, wherever the focus is.
+    ///
+    /// The mirror of [`App::scroll_panel_down`], stopping at the first line. Any
+    /// movement off the end stops the panel following the newest line, so the
+    /// lines that arrive afterwards leave the window where the reader put it —
+    /// which is the whole of what scrolling back through a live log is for.
+    pub fn scroll_panel_up(&mut self, lines: usize) {
+        self.scroll_panel_to(self.panel_scroll_offset().saturating_sub(lines));
     }
 
     /// Carry out a movement key: `tree` says where the selection lands, `panel`
@@ -4533,6 +4649,307 @@ mod tests {
             assert_eq!(panel_offset_for(0, 3, 2, following), 0);
             assert_eq!(panel_offset_for(10, 0, 2, following), 0);
         }
+    }
+
+    /// How many rows or lines the tests below move by where they stand in for
+    /// one notch of the wheel. Nothing in this module decides that number —
+    /// whoever reads the pointer does — but a step of more than one is what
+    /// makes clamping worth asserting on, and three is what will be asked for.
+    const NOTCH: usize = 3;
+
+    #[test]
+    fn selecting_a_row_lands_exactly_where_stepping_to_it_lands() {
+        // Every row of the tree, reached both ways from the middle: a pointer
+        // that landed on a row and a key pressed until it got there are the same
+        // selection, the same window, and the same everything else.
+        for index in 0..MANY {
+            let mut stepped = scrolled_to(MANY / 2);
+            while stepped.selected() < index {
+                stepped.select_next();
+            }
+            while stepped.selected() > index {
+                stepped.select_previous();
+            }
+
+            let mut picked = scrolled_to(MANY / 2);
+            picked.select_row(index);
+
+            assert_eq!(picked.selected(), index, "row {index} was not selected");
+            assert_eq!(picked, stepped, "row {index} landed somewhere else");
+        }
+    }
+
+    #[test]
+    fn selecting_a_row_clears_the_last_keystrokes_message() {
+        let mut app = scrolled_to(MANY / 2);
+        app.set_message("something to sweep away");
+
+        app.select_row(2);
+
+        assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn a_row_the_tree_has_not_got_is_not_selected_at_all() {
+        // A point below the last row of a half-full tree is a point on nothing,
+        // so it is refused rather than clamped to the last row — message
+        // included, since a key that did nothing explains nothing.
+        let mut app = scrolled_to(MANY / 2);
+        app.set_message("something to keep");
+        let before = app.clone();
+
+        for index in [MANY, MANY + 1, usize::MAX] {
+            app.select_row(index);
+            assert_eq!(app, before, "row {index} moved something");
+        }
+
+        let mut empty = App::from_rows(Vec::new());
+        empty.set_viewport_height(WINDOW);
+        empty.set_message("something to keep");
+        let before = empty.clone();
+
+        for index in [0, 1, usize::MAX] {
+            empty.select_row(index);
+            assert_eq!(empty, before, "row {index} moved an empty app");
+        }
+    }
+
+    #[test]
+    fn scrolling_the_tree_is_exactly_that_many_presses_of_the_movement_key() {
+        for rows in [0, 1, NOTCH, usize::from(WINDOW), MANY, MANY * 2] {
+            for start in [0, NOTCH, MANY / 2, MANY - 1] {
+                let mut stepped = scrolled_to(start);
+                let mut wheeled = scrolled_to(start);
+                for _ in 0..rows {
+                    stepped.select_next();
+                }
+                wheeled.select_next_by(rows);
+                assert_eq!(wheeled, stepped, "{rows} down from {start}");
+
+                let mut stepped = scrolled_to(start);
+                let mut wheeled = scrolled_to(start);
+                for _ in 0..rows {
+                    stepped.select_previous();
+                }
+                wheeled.select_previous_by(rows);
+                assert_eq!(wheeled, stepped, "{rows} up from {start}");
+            }
+        }
+    }
+
+    #[test]
+    fn scrolling_the_tree_past_either_end_stops_there() {
+        let mut app = scrolled_to(MANY / 2);
+
+        app.select_next_by(MANY * 2);
+        assert_eq!(app.selected(), MANY - 1);
+        assert_eq!(app.scroll_offset(), MANY - usize::from(WINDOW));
+
+        // And a notch past the end is the end again rather than a wrap.
+        app.select_next_by(NOTCH);
+        assert_eq!(app.selected(), MANY - 1);
+        assert_eq!(app.scroll_offset(), MANY - usize::from(WINDOW));
+
+        app.select_previous_by(MANY * 2);
+        assert_eq!(app.selected(), 0);
+        assert_eq!(app.scroll_offset(), 0);
+
+        app.select_previous_by(NOTCH);
+        assert_eq!(app.selected(), 0);
+        assert_eq!(app.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn scrolling_a_tree_with_no_rows_is_a_no_op() {
+        let mut app = App::from_rows(Vec::new());
+        app.set_viewport_height(WINDOW);
+
+        for rows in [0, 1, NOTCH, MANY] {
+            app.select_next_by(rows);
+            assert!(app.is_empty());
+            assert_eq!(app.selected_row(), None);
+            assert_eq!(app.selected(), 0, "{rows} down moved an empty app");
+            assert_eq!(app.scroll_offset(), 0, "{rows} down scrolled it");
+
+            app.select_previous_by(rows);
+            assert_eq!(app.selected(), 0, "{rows} up moved an empty app");
+            assert_eq!(app.scroll_offset(), 0, "{rows} up scrolled it");
+        }
+    }
+
+    #[test]
+    fn the_wheel_over_the_tree_does_not_consult_the_focus() {
+        // The pointer is over the tree, so the tree moves — however the keys
+        // happen to be pointed, and without the wheel taking the keys with it.
+        for focus in [Focus::Tree, Focus::Panel] {
+            let mut app = scrolled_to(MANY / 2);
+            app.set_focus(focus);
+
+            app.select_next_by(NOTCH);
+            assert_eq!(app.selected(), MANY / 2 + NOTCH, "{focus:?} held it back");
+
+            app.select_previous_by(NOTCH);
+            assert_eq!(app.selected(), MANY / 2, "{focus:?} held it back");
+
+            app.select_row(1);
+            assert_eq!(app.selected(), 1, "{focus:?} refused the click");
+
+            assert_eq!(app.focus(), focus, "the wheel moved the focus");
+        }
+    }
+
+    #[test]
+    fn the_wheel_over_the_panel_is_exactly_that_many_presses_at_the_panel() {
+        let base = Instant::now();
+
+        for lines in [0, 1, NOTCH, usize::from(PANEL), MANY] {
+            // `app_pacting` leaves the panel focused, so the keys reach it; the
+            // wheel is asked of an app whose keys are pointed at the tree.
+            let mut stepped = app_pacting(9, base);
+            let mut wheeled = app_pacting(9, base);
+            wheeled.set_focus(Focus::Tree);
+            for _ in 0..lines {
+                stepped.select_previous();
+            }
+            wheeled.scroll_panel_up(lines);
+            assert_eq!(
+                wheeled.panel_scroll_offset(),
+                stepped.panel_scroll_offset(),
+                "{lines} up"
+            );
+            assert_eq!(
+                wheeled.panel_follows(),
+                stepped.panel_follows(),
+                "{lines} up"
+            );
+
+            for _ in 0..lines {
+                stepped.select_next();
+            }
+            wheeled.scroll_panel_down(lines);
+            assert_eq!(
+                wheeled.panel_scroll_offset(),
+                stepped.panel_scroll_offset(),
+                "{lines} back down"
+            );
+            assert_eq!(
+                wheeled.panel_follows(),
+                stepped.panel_follows(),
+                "{lines} back down"
+            );
+        }
+    }
+
+    #[test]
+    fn the_wheel_over_the_panel_breaks_follow_and_scrolling_back_restores_it() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        // The keys are pointed at the tree throughout: the pointer is over the
+        // panel, and that is the whole of what decides which pane scrolls.
+        app.set_focus(Focus::Tree);
+        let selected = app.selected();
+        assert!(app.panel_follows());
+
+        app.scroll_panel_up(NOTCH);
+
+        assert!(!app.panel_follows());
+        assert_eq!(
+            panel_text(&app, at(base, 9)),
+            ["Read line 3", "Read line 4", "Read line 5"],
+        );
+
+        // Parked means parked: the lines that arrive next leave it where it is.
+        app.account_mut()
+            .expect("a run is under way")
+            .record(&Activity::Thinking, at(base, 10));
+        assert_eq!(app.panel_scroll_offset(), 10 - usize::from(PANEL) - NOTCH);
+        assert!(!app.panel_follows());
+
+        // And scrolling back to the end is live again, with nothing having to
+        // say so.
+        app.scroll_panel_down(MANY);
+
+        assert!(app.panel_follows());
+        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(
+            panel_text(&app, at(base, 10)),
+            ["Read line 7", "Read line 8", "thinking"],
+        );
+        assert_eq!(app.selected(), selected, "the panel moved the tree");
+        assert_eq!(app.focus(), Focus::Tree, "the panel took the keys");
+    }
+
+    #[test]
+    fn the_wheel_over_the_panel_leaves_the_last_keystrokes_message_up() {
+        // The same reading a movement key at the panel takes: the line belongs
+        // to the tree column, and nothing there has moved.
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        app.set_focus(Focus::Tree);
+        app.set_message("something to keep");
+
+        app.scroll_panel_up(NOTCH);
+        app.scroll_panel_down(1);
+
+        assert_eq!(app.message(), Some("something to keep"));
+    }
+
+    #[test]
+    fn setting_the_focus_to_the_pane_that_has_it_changes_nothing() {
+        for focus in [Focus::Tree, Focus::Panel] {
+            let mut app = scrolled_to(MANY / 2);
+            app.set_message("something to keep");
+            app.set_focus(focus);
+            let before = app.clone();
+
+            app.set_focus(focus);
+
+            assert_eq!(app, before, "{focus:?} again moved something");
+        }
+    }
+
+    #[test]
+    fn setting_the_focus_moves_nothing_but_the_focus() {
+        let mut app = scrolled_to(MANY / 2);
+        app.set_message("something to keep");
+        let before = app.clone();
+
+        app.set_focus(Focus::Panel);
+
+        assert_eq!(app.focus(), Focus::Panel);
+        assert_eq!(app.selected(), before.selected());
+        assert_eq!(app.scroll_offset(), before.scroll_offset());
+        assert_eq!(app.message(), Some("something to keep"));
+
+        // Put it back rather than exempting the field, so the comparison covers
+        // every other field there is.
+        app.set_focus(Focus::Tree);
+        assert_eq!(app, before, "setting the focus changed something else");
+    }
+
+    #[test]
+    fn none_of_the_pointers_moves_touches_the_tree_or_the_collapsed_set() {
+        let mut app = app_selecting("warlock/crates");
+        app.toggle_collapsed();
+        let rows = drawn(&app);
+        let collapsed = app.collapsed().clone();
+        let counts = app.counts();
+
+        app.select_row(0);
+        app.select_next_by(NOTCH);
+        app.select_previous_by(NOTCH);
+        app.scroll_panel_up(NOTCH);
+        app.scroll_panel_down(NOTCH);
+        app.set_focus(Focus::Panel);
+        app.set_focus(Focus::Tree);
+
+        assert_eq!(drawn(&app), rows, "the pointer reshaped the tree");
+        assert_eq!(
+            app.collapsed(),
+            &collapsed,
+            "the pointer collapsed something"
+        );
+        assert_eq!(app.counts(), counts, "the pointer moved the tally");
     }
 
     #[test]

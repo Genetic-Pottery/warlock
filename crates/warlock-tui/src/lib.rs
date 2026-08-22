@@ -71,9 +71,12 @@ pub use account::Outcome;
 /// One directory's pass inside an [`Account`].
 pub use account::Section;
 /// The front end's state: the flattened tree, which of it is collapsed, the
-/// selected row and the slice of rows on screen.
+/// selected row and the slice of rows on screen — moved by the keys, which
+/// drive whichever pane has the focus, or by a pointer, which names the row and
+/// the pane it landed on and so consults no focus at all.
 pub use app::App;
-/// Which of the screen's two panes the keys are driving.
+/// Which of the screen's two panes the keys are driving: toggled by the focus
+/// key, or set outright by a click naming a pane.
 pub use app::Focus;
 /// What a pact toggle changed, for whoever has to write it to the manifest.
 pub use app::PactToggle;
