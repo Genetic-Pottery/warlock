@@ -411,6 +411,15 @@ impl Focus {
 /// anybody having to tell the window that a line was appended. See
 /// [`App::panel_scroll_offset`].
 ///
+/// `mouse_captured` is whether the terminal is reporting its mouse, and it is the
+/// one field here that is not the app's own: the terminal is the binary's to
+/// switch, so the loop that switches it tells the app what it did, every frame,
+/// the way it tells it the two window heights. It is here for the footer's sake
+/// alone — the keys line names the `m` key by what the *next* press of it does,
+/// so it has to know what this press left behind — and nothing in this type reads
+/// it. `false` for a freshly built app, which is the truth about one nobody has
+/// put on a terminal yet. See [`App::set_mouse_captured`].
+///
 /// `in_flight` is the pact running now, if one is, and is the one piece of state
 /// here that no keystroke touches: it is put there and taken away by whoever is
 /// running the pact — see [`App::set_pact_in_flight`] — because the app cannot
@@ -431,12 +440,12 @@ impl Focus {
 #[derive(Debug, Clone, Default, PartialEq)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "the four flags here are independent facts about the view — files \
-              shown, pacted-only, panel following, pact refused — and every one \
-              of the sixteen combinations is a state the screen can honestly be \
-              in. Folding them into a state machine would invent an ordering \
-              between things that have none, and cost the derives a bool keeps \
-              free"
+    reason = "the five flags here are independent facts about the view — files \
+              shown, pacted-only, panel following, pact refused, mouse captured \
+              — and every one of the thirty-two combinations is a state the \
+              screen can honestly be in. Folding them into a state machine would \
+              invent an ordering between things that have none, and cost the \
+              derives a bool keeps free"
 )]
 pub struct App {
     all_rows: Vec<Row>,
@@ -457,6 +466,7 @@ pub struct App {
     panel_height: usize,
     panel_offset: usize,
     panel_follows: bool,
+    mouse_captured: bool,
 }
 
 impl App {
@@ -531,6 +541,11 @@ impl App {
     /// The tree has the focus, so the movement keys move its selection from the
     /// first keystroke on. See [`App::focus`].
     ///
+    /// The mouse is not captured, which is what is true of an app that is on no
+    /// terminal: whoever puts one under it says so, every frame, and until they
+    /// do the footer names the `m` key by what it does on a terminal reporting
+    /// nothing. See [`App::set_mouse_captured`].
+    ///
     /// Nothing is collapsed and the pacted-only filter is off, so the rows
     /// handed over are exactly the rows drawn — unless some of them are file
     /// rows, which the file toggle starts off over. They are kept a second time
@@ -559,6 +574,7 @@ impl App {
             panel_height: 0,
             panel_offset: 0,
             panel_follows: false,
+            mouse_captured: false,
         };
         // The rows handed over may hold file rows, which the file toggle starts
         // off over, so the drawn list is derived rather than assumed even here.
@@ -1149,6 +1165,31 @@ impl App {
     pub fn set_viewport_height(&mut self, height: u16) {
         self.viewport_height = usize::from(height);
         self.rescroll();
+    }
+
+    /// Whether the terminal is reporting its mouse, as last set by
+    /// [`App::set_mouse_captured`].
+    ///
+    /// For the footer and nobody else: the keys line names the `m` key by what
+    /// the next press of it will do, which is the one thing on screen that
+    /// depends on this. Nothing in here gates on it — while capture is off the
+    /// pointer's events never arrive, so there is no second door to lock.
+    #[must_use]
+    pub const fn mouse_captured(&self) -> bool {
+        self.mouse_captured
+    }
+
+    /// Tell the app whether the terminal is reporting its mouse.
+    ///
+    /// A mirror rather than a switch: turning capture on and off is the
+    /// binary's, because it is a sequence written to a terminal this type cannot
+    /// see, and the app is told what was done so the footer can say it. Safe to
+    /// call every frame, and meant to be — told the same way the two window
+    /// heights are, from the one place that knows, so a copy of the app taken
+    /// before a pact and put back after one cannot leave the keys line naming a
+    /// state the terminal is no longer in.
+    pub const fn set_mouse_captured(&mut self, captured: bool) {
+        self.mouse_captured = captured;
     }
 
     /// Which pane the keys are driving: the tree column, or the panel beside

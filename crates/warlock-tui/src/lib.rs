@@ -73,7 +73,9 @@ pub use account::Section;
 /// The front end's state: the flattened tree, which of it is collapsed, the
 /// selected row and the slice of rows on screen — moved by the keys, which
 /// drive whichever pane has the focus, or by a pointer, which names the row and
-/// the pane it landed on and so consults no focus at all.
+/// the pane it landed on and so consults no focus at all. It also carries what
+/// the binary has told it about the terminal's mouse capture, which the footer
+/// names the key that changes it by.
 pub use app::App;
 /// Which of the screen's two panes the keys are driving: toggled by the focus
 /// key, or set outright by a click naming a pane.

@@ -129,7 +129,9 @@ const SCROLLBACK_ARROW: &str = "↓";
 /// back to live would be a run with a mode in it.
 const LIVE_KEY: &str = "G";
 
-/// The keys line of the footer: every key that does something, in one line.
+/// The keys line of the footer, up to the one key whose name depends on what it
+/// would do next: every key that does something, in one line, and assembled by
+/// [`keys_line`].
 ///
 /// The movement keys first and together, in the order a reader reaches for
 /// them: one row, one screen, the whole tree. Then the three keys that move
@@ -145,8 +147,54 @@ const LIVE_KEY: &str = "G";
 /// sentence about filtering, and `f` with what it shows rather than with a
 /// sentence about a toggle.
 const KEYS: &str = "up/down k/j: move    PgUp/PgDn: page    g/G: first/last    \
-                    space: collapse    o: pacted    f: files    p: pact    \
-                    q/Esc/Ctrl-C: quit";
+                    space: collapse    o: pacted    f: files    p: pact";
+
+/// What separates one key's name from the next on the keys line.
+///
+/// Wide enough that two names read as two keys rather than as one phrase, and
+/// the same gap between every pair — including the two [`keys_line`] adds, which
+/// are part of the same line and not an afterthought tacked onto the end of it.
+const KEY_GAP: &str = "    ";
+
+/// The `m` key's name while the terminal is reporting its mouse: what the next
+/// press does, which is stop it.
+///
+/// Named by its effect rather than by its state — `m: mouse off` and not
+/// `mouse: on` — because a line of keys is a line of things to press, and every
+/// other name on it says what pressing does. It is short for the reason every
+/// name here is short, and it sits next to quit rather than beside `f` and `o`:
+/// those change what warlock draws, this changes what the terminal does with the
+/// pointer, which is the same kind of fact as how to leave.
+const MOUSE_OFF_KEY: &str = "m: mouse off";
+
+/// The `m` key's name while capture is off: what the next press does, which is
+/// start it again. See [`MOUSE_OFF_KEY`].
+///
+/// This is the wording that has to be right. Capture off is the state a reader
+/// can be surprised by — the wheel does nothing, and the only way back is a key
+/// whose name is the one thing on screen that says so.
+const MOUSE_ON_KEY: &str = "m: mouse on";
+
+/// The way out, last on the keys line because it is the last thing anybody needs
+/// and the first thing they have to be able to find.
+const QUIT_KEY: &str = "q/Esc/Ctrl-C: quit";
+
+/// The whole keys line for a terminal that is reporting its mouse or one that is
+/// not.
+///
+/// The only thing that varies is the `m` key's name, and it varies the way
+/// [`KEYS`] and [`PACTING_KEYS`] do: the line says what the next press will do,
+/// so the state capture is in is read off the key that changes it rather than
+/// announced on the message line — which the next keystroke would wipe, while
+/// capture stays off until somebody presses `m` again.
+fn keys_line(mouse_captured: bool) -> String {
+    let mouse = if mouse_captured {
+        MOUSE_OFF_KEY
+    } else {
+        MOUSE_ON_KEY
+    };
+    format!("{KEYS}{KEY_GAP}{mouse}{KEY_GAP}{QUIT_KEY}")
+}
 
 /// The keys line while a pact is running: the same line's job, for the mode the
 /// app is in while it works.
@@ -838,6 +886,12 @@ fn pulse_colour(app: &App, now: Instant) -> Option<Color> {
 /// the tree under it on a keystroke that changed nothing about the tree, and
 /// would do it in the middle of the one operation the reader is watching.
 ///
+/// The keys line is also where the terminal's mouse capture is reported, by
+/// naming the key that changes it with what the next press of it will do: see
+/// [`keys_line`] and [`App::mouse_captured`]. Not on the message line, because
+/// capture being off outlasts the keystroke that turned it off while a message
+/// lasts until the next one.
+///
 /// The `Paragraph` is given no `.wrap`, deliberately: a line too long for the
 /// terminal is cut at the right-hand edge rather than folded onto the line
 /// below, so the footer is three lines whatever the app has put on them and it
@@ -857,7 +911,12 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ));
     }
 
-    let keys = Line::from(if app.is_pacting() { PACTING_KEYS } else { KEYS }).dim();
+    let keys = Line::from(if app.is_pacting() {
+        PACTING_KEYS.to_owned()
+    } else {
+        keys_line(app.mouse_captured())
+    })
+    .dim();
 
     let message = Line::from(
         app.pact_line()
@@ -893,10 +952,10 @@ mod tests {
     use warlock_engine::NodeState;
 
     use super::{
-        BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, GUIDE, HEADER_HEIGHT, Hit, INDENT, KEYS,
-        LIVE_KEY, NO_MARKER, PACTING_KEYS, PANEL_INDENT, SCROLLBACK_ARROW, SELECTION_MARKER,
-        TREE_MIN_WIDTH, TREE_PERCENT, areas, display_width, draw, hit_test, pane_inner,
-        panel_height, tree_height, tree_rows_area, tree_width, truncated,
+        BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, GUIDE, HEADER_HEIGHT, Hit, INDENT, LIVE_KEY,
+        MOUSE_OFF_KEY, MOUSE_ON_KEY, NO_MARKER, PACTING_KEYS, PANEL_INDENT, SCROLLBACK_ARROW,
+        SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas, display_width, draw, hit_test,
+        keys_line, pane_inner, panel_height, tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::account::Outcome;
     use crate::app::{App, Row};
@@ -923,9 +982,9 @@ mod tests {
     /// footer, the tree pane's border top and bottom, and its header.
     const CHROME_HEIGHT: u16 = FOOTER_HEIGHT + 2 * BORDER_THICKNESS + HEADER_HEIGHT;
 
-    /// A terminal wide enough for the whole of [`KEYS`], whatever it grows to:
-    /// the footer test asserts that line for equality, and a line drawn onto a
-    /// narrower terminal than it needs would be compared against its own
+    /// A terminal wide enough for the whole of [`keys_line`], whatever it grows
+    /// to: the footer test asserts that line for equality, and a line drawn onto
+    /// a narrower terminal than it needs would be compared against its own
     /// truncation.
     const KEYS_WIDTH: u16 = 160;
 
@@ -1833,7 +1892,7 @@ mod tests {
         // Every key, in full: equality rather than a bag of substrings, so a
         // line that has grown past the width it is drawn at fails here instead
         // of quietly losing whatever sat on the right-hand end of it.
-        assert_eq!(keys, KEYS);
+        assert_eq!(keys, keys_line(app.mouse_captured()));
         // "p: pact" and not the bare "p", which "up/down" would satisfy.
         for key in [
             "up/down",
@@ -1849,6 +1908,10 @@ mod tests {
             "o: pacted",
             "f: files",
             "p: pact",
+            // The mouse key, named by what pressing it does next rather than by
+            // the state it is in: see
+            // `the_keys_line_names_the_mouse_key_by_what_the_next_press_does`.
+            "m: mouse",
             "q",
             "Esc",
             "Ctrl-C",
@@ -2057,13 +2120,13 @@ mod tests {
         // Byte for byte today's line with no pact running, and the pacting line
         // whole while one is: equality, so a line that outgrew the terminal it
         // is drawn on fails here rather than losing its right-hand end quietly.
-        assert_eq!(row_text(&idle, y), KEYS);
+        assert_eq!(row_text(&idle, y), keys_line(app.mouse_captured()));
         assert_eq!(row_text(&pacting, y), PACTING_KEYS);
         // Esc means two things, and the line says which one it means now.
         let said = row_text(&pacting, y);
         assert!(said.contains("Esc: cancel"), "{said:?}");
         assert!(!said.contains("Esc/Ctrl-C: quit"), "{said:?}");
-        assert!(KEYS.contains("Esc/Ctrl-C: quit"));
+        assert!(keys_line(true).contains("Esc/Ctrl-C: quit"));
 
         // The line is short enough to survive the narrow terminal the other
         // footer tests draw on, because it is the line that answers "how do I
@@ -2073,7 +2136,59 @@ mod tests {
 
         // And the run ending puts today's line back, exactly.
         app.clear_pact_in_flight();
-        assert_eq!(row_text(&render(&app, KEYS_WIDTH, height), y), KEYS);
+        assert_eq!(
+            row_text(&render(&app, KEYS_WIDTH, height), y),
+            keys_line(app.mouse_captured())
+        );
+    }
+
+    #[test]
+    fn the_keys_line_names_the_mouse_key_by_what_the_next_press_does() {
+        let mut app = App::from_tree(&fixture::tree());
+        let height = 10;
+        let y = height - FOOTER_HEIGHT + 1;
+
+        // Reporting its mouse, which is how warlock starts: the key on offer is
+        // the one that stops it.
+        app.set_mouse_captured(true);
+        let capturing = render(&app, KEYS_WIDTH, height);
+        let keys = row_text(&capturing, y);
+        assert_eq!(keys, keys_line(true));
+        assert!(keys.contains(MOUSE_OFF_KEY), "{keys:?}");
+        assert!(!keys.contains(MOUSE_ON_KEY), "{keys:?}");
+
+        // And with capture off, the same key named by what it does now: turn it
+        // back on. This is the wording that matters — it is the only thing on
+        // screen that says the wheel is the terminal's for the moment.
+        app.set_mouse_captured(false);
+        let released = render(&app, KEYS_WIDTH, height);
+        let keys = row_text(&released, y);
+        assert_eq!(keys, keys_line(false));
+        assert!(keys.contains(MOUSE_ON_KEY), "{keys:?}");
+        assert!(!keys.contains(MOUSE_OFF_KEY), "{keys:?}");
+
+        // Nothing else on the screen moved: the toggle is a fact about the
+        // terminal, not about the tree, and it is not announced on the message
+        // line either — that line is blank in both frames, and every row above
+        // the keys line is the row it was.
+        assert_eq!(row_text(&capturing, height - 1), "");
+        assert_eq!(row_text(&released, height - 1), "");
+        for row in 0..y {
+            assert_eq!(
+                row_text(&capturing, row),
+                row_text(&released, row),
+                "row {row}"
+            );
+        }
+
+        // A pact in flight takes the line whichever way the toggle is left: the
+        // short line that answers "how do I stop this?" is not the place for a
+        // key about the pointer, and `PACTING_KEYS` says so by not naming it.
+        app.set_pact_in_flight("warlock/crates/engine", 3, 12);
+        assert_eq!(row_text(&render(&app, KEYS_WIDTH, height), y), PACTING_KEYS);
+        app.set_mouse_captured(true);
+        assert_eq!(row_text(&render(&app, KEYS_WIDTH, height), y), PACTING_KEYS);
+        assert!(!PACTING_KEYS.contains("mouse"));
     }
 
     #[test]

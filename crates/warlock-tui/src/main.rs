@@ -92,6 +92,15 @@
 //! everything else a mouse can send is read and dropped, so a pointer swept
 //! across the screen changes nothing and costs no more than the round it
 //! arrived in.
+//!
+//! The reader can hand the pointer back. `m` turns the terminal's reporting off
+//! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
+//! off the terminal keeps its own text selection and no `Event::Mouse` arrives
+//! at all, so nothing here needs a second gate. Whether it is on is this
+//! thread's to know — the app is handed a copy of it every round so the footer
+//! can name the key by what the next press does — and every way out still goes
+//! through [`restore_terminal`], which turns reporting off whichever state the
+//! toggle was left in.
 
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
@@ -259,6 +268,13 @@ fn run() -> Result<(), Error> {
         note(&mut app, line);
     }
     let mut guard = TerminalGuard::enter()?;
+    // Whether the terminal is reporting its mouse, and the only record of it:
+    // the guard has just asked it to, and `m` is the one thing that changes the
+    // answer. It lives here rather than on the app because it is a fact about a
+    // terminal — the app is handed a copy of it every frame for the footer's
+    // sake, and copies of the app are taken and put back around a pact, which a
+    // source of truth must survive.
+    let mut mouse_captured = true;
     // The pact running somewhere else, when one is: everything this thread
     // needs to keep about a run it is not performing. `None` is the ordinary
     // state, and it is what the pact key checks before starting anything.
@@ -278,6 +294,13 @@ fn run() -> Result<(), Error> {
         // from the one layout, so both panes are scrolled by the height this
         // frame is about to give them.
         app.set_panel_height(panel_height(size));
+        // And told what the terminal is doing with the pointer, for the same
+        // reason and in the same place: the footer names the `m` key by what the
+        // next press of it will do, and the app cannot see a terminal. Every
+        // frame rather than at the keystroke, so a view restored from the copy
+        // taken before a pact — which is a copy of a flag that may have been
+        // toggled since — is put right before it is drawn.
+        app.set_mouse_captured(mouse_captured);
         // The instant this frame is being drawn at, read once and handed to the
         // renderer: the panel's newest clock counts up against it, so a frame
         // drawn with no event waiting still shows a run that is moving. See
@@ -416,6 +439,28 @@ fn run() -> Result<(), Error> {
                                 before,
                             });
                         }
+                    }
+                    // The one key that answers to the terminal rather than to
+                    // the app. The sequence is written first and the flag moved
+                    // only if it went out, so what this thread believes about
+                    // the terminal is what it last successfully told it; a write
+                    // that fails takes the whole loop down through the guard,
+                    // which turns capture off on the way past whatever state it
+                    // was left in.
+                    //
+                    // Nothing else happens: no focus moves, no row is selected,
+                    // nothing is redrawn here — the top of the loop draws every
+                    // round, and it is where the footer picks the new wording up.
+                    // With capture off the terminal keeps the pointer to itself,
+                    // so `Event::Mouse` simply stops arriving and the mouse
+                    // handler needs no gate of its own.
+                    Some(Action::ToggleMouseCapture) => {
+                        if mouse_captured {
+                            execute!(io::stdout(), DisableMouseCapture)?;
+                        } else {
+                            execute!(io::stdout(), EnableMouseCapture)?;
+                        }
+                        mouse_captured = !mouse_captured;
                     }
                     None => {}
                 },
@@ -1789,6 +1834,16 @@ enum Action {
     ToggleFiles,
     /// Pact the selected node, or unpact it if it is pacted already.
     TogglePact,
+    /// Stop the terminal reporting its mouse, or ask it to start again if it has
+    /// been stopped.
+    ///
+    /// The one action here that is not about the app at all: what it changes is
+    /// what the terminal sends, which is why the loop answers it with an escape
+    /// sequence rather than with a method on [`App`]. With capture off the
+    /// terminal keeps its own selection — dragging over the screen copies text,
+    /// the way it does in any other program — and warlock hears no pointer at
+    /// all until the next press.
+    ToggleMouseCapture,
 }
 
 /// The action `key` asks for with a pact `in_flight` or without one, or `None`
@@ -1876,6 +1931,12 @@ fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
         // product's own word (pact, §15), and the action is its own undo —
         // pressing it again removes what it wrote.
         KeyCode::Char('p') => Some(Action::TogglePact),
+        // Lower case only, like the three above it. The mnemonic is "mouse",
+        // and the key means the same thing whether or not a pact is in flight:
+        // giving the terminal its own text selection back is exactly the thing a
+        // reader wants during a long run, when there is output on screen worth
+        // copying. It moves nothing, selects nothing and writes nothing.
+        KeyCode::Char('m') => Some(Action::ToggleMouseCapture),
         _ => None,
     }
 }
@@ -2641,6 +2702,95 @@ mod tests {
                 action_for(event, false),
                 None,
                 "{kind:?} should not write anything"
+            );
+        }
+    }
+
+    #[test]
+    fn m_toggles_the_mouse_with_a_pact_in_flight_or_without_one() {
+        // The one key here that is about the terminal rather than the tree, and
+        // it reads the same way in both situations — like everything but Esc.
+        // Mid-run is in fact when a reader most wants it: the panel is filling
+        // up with output worth copying, and copying it means handing the pointer
+        // back to the terminal for a moment.
+        for in_flight in [false, true] {
+            assert_eq!(
+                action_for(press(KeyCode::Char('m')), in_flight),
+                Some(Action::ToggleMouseCapture),
+                "m should toggle capture with a pact in flight = {in_flight}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_mouse_key_neither_quits_nor_moves_anything() {
+        // Said against every other action by name, because what the key must not
+        // do is the interesting half of it: it does not leave, it does not stop a
+        // run, it does not move the keys to the other pane and it does not touch
+        // a row. One variant is all it can come to, and the list below is the
+        // rest of them.
+        for in_flight in [false, true] {
+            let action = action_for(press(KeyCode::Char('m')), in_flight);
+            for other in [
+                Action::Quit,
+                Action::CancelPact,
+                Action::ToggleFocus,
+                Action::SelectPrevious,
+                Action::SelectNext,
+                Action::SelectPageUp,
+                Action::SelectPageDown,
+                Action::SelectFirst,
+                Action::SelectLast,
+                Action::ToggleCollapsed,
+                Action::TogglePactedOnly,
+                Action::ToggleFiles,
+                Action::TogglePact,
+            ] {
+                assert_ne!(action, Some(other), "m should not mean {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn m_is_the_only_key_that_touches_the_mouse() {
+        // Its neighbours in the match arms above, the letter beside it on the
+        // keyboard, and its upper-case self, which this binding does not answer
+        // to any more than `o`, `f` and `p` answer to theirs.
+        for code in [
+            KeyCode::Char('n'),
+            KeyCode::Char('o'),
+            KeyCode::Char('f'),
+            KeyCode::Char('p'),
+            KeyCode::Char('M'),
+            KeyCode::Char(' '),
+            KeyCode::Enter,
+        ] {
+            assert_ne!(
+                action_for(press(code), false),
+                Some(Action::ToggleMouseCapture),
+                "{code:?} should not touch the mouse"
+            );
+        }
+    }
+
+    #[test]
+    fn releases_and_repeats_of_m_toggle_nothing() {
+        // The same rule as the keys above, and here it is the difference between
+        // a working key and none: a release acted on would turn capture straight
+        // back on after the press turned it off, and a held `m` would flip the
+        // terminal's reporting as fast as it repeats.
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                KeyCode::Char('m'),
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                action_for(event, false),
+                None,
+                "{kind:?} of m should not toggle anything"
             );
         }
     }
