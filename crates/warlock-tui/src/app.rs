@@ -95,13 +95,6 @@ use warlock_engine::{IntoDocument, NodeState, StateCounts, Tree, to_manifest_pat
 
 use crate::account::{Account, Line};
 
-/// What the header says when the tree is rooted at the repository root itself.
-///
-/// The relative path of the root against itself is `"."`, which reads as
-/// nothing much on a header line, and an empty line reads as a bug. The
-/// brackets keep it from being mistaken for a directory of that name.
-const REPOSITORY_ROOT_LABEL: &str = "(repository root)";
-
 /// One line of the flattened tree: what to draw, how far to indent it, and
 /// which colour it takes.
 ///
@@ -137,9 +130,14 @@ pub struct Row {
     pub document: Option<PathBuf>,
     /// What Warlock knows about the node, which is what colours the row.
     pub state: NodeState,
-    /// How many children the node has in the tree — not how many are drawn,
-    /// which is none of them while the node is collapsed. `0` for a leaf, and
-    /// a leaf is what [`App::toggle_collapsed`] refuses to toggle.
+    /// How many child *nodes* the node has in the tree — not how many are
+    /// drawn, which is none of them while the node is collapsed, and not how
+    /// many rows hang under it, which counts the files it lists as well.
+    ///
+    /// A fact about the tree, and only that. Whether collapsing this row would
+    /// hide anything is a question about the view — the file toggle and the
+    /// pacted-only filter both change the answer without the tree moving — so it
+    /// is [`App::can_collapse`] that decides it, not this.
     pub children: usize,
     /// Whether the row stands for a file rather than a node. See [`Row::file`],
     /// and ask it with [`Row::is_file`] rather than reading this: what the flag
@@ -204,8 +202,13 @@ impl Row {
         self
     }
 
-    /// Whether the node has children, and so whether collapsing it would hide
-    /// anything.
+    /// Whether the node has child nodes in the tree.
+    ///
+    /// Not the question the collapse key asks — see [`App::can_collapse`]. A
+    /// directory holding nothing but files has no children by this and still
+    /// has rows under it when the file toggle is on; a directory whose children
+    /// the pacted-only filter has taken away has children by this and nothing
+    /// under it on screen.
     #[must_use]
     pub const fn has_children(&self) -> bool {
         self.children > 0
@@ -427,6 +430,14 @@ impl Focus {
 /// keystrokes for that reason, and takes the message line while it is there:
 /// see [`App::pact_line`].
 ///
+/// `collapsible` is the paths of the rows that have something under them *in
+/// this view* — which is not what the tree says, because the file toggle and the
+/// pacted-only filter both change what a row holds without the tree moving. It
+/// is derived beside `rows`, in the one pass that already knows: see
+/// [`drawn_rows`], and [`App::can_collapse`] for what reads it. Kept as paths
+/// rather than as a flag on [`Row`] so that a row stays a fact about the tree
+/// and two rows for the same node compare equal whatever is filtered.
+///
 /// `pact_refused` is the one keystroke that has nowhere else to go: the pact key
 /// pressed while `in_flight` is already there. It is a flag rather than a
 /// message because the message line is exactly what a pact in flight has taken —
@@ -451,6 +462,7 @@ pub struct App {
     all_rows: Vec<Row>,
     rows: Vec<Row>,
     collapsed: BTreeSet<PathBuf>,
+    collapsible: BTreeSet<PathBuf>,
     pacted_only: bool,
     show_files: bool,
     selected: usize,
@@ -559,6 +571,7 @@ impl App {
             rows: rows.clone(),
             all_rows: rows,
             collapsed: BTreeSet::new(),
+            collapsible: BTreeSet::new(),
             pacted_only: false,
             show_files: false,
             selected: 0,
@@ -621,9 +634,15 @@ impl App {
     ///
     /// The text is `root` relative to `repo_root` in forward slashes — the
     /// engine's own manifest spelling, so the header and the manifest name a
-    /// module the same way on every platform — except that `repo_root` itself
-    /// is named `(repository root)` rather than left as the bare `"."` that
-    /// relative spelling would give.
+    /// module the same way on every platform.
+    ///
+    /// A tree rooted at `repo_root` itself gets no header at all. The line is
+    /// there to say *which part* of the repository is on screen, which is a
+    /// thing worth saying only when it is not the whole of it: at the root there
+    /// is no part, the relative spelling would be a bare `"."`, and any wording
+    /// for it says out loud what the root row underneath already shows. So the
+    /// line goes blank and keeps its row, because a header that appeared and
+    /// disappeared would move every tree row up and down with it.
     ///
     /// The caller resolving the pair is where the filesystem is touched; this
     /// only formats what it was handed, which keeps the header a pure function
@@ -635,7 +654,7 @@ impl App {
     pub fn with_scope(mut self, repo_root: impl AsRef<Path>, root: impl AsRef<Path>) -> Self {
         let root = root.as_ref();
         self.header = match to_manifest_path(repo_root, root) {
-            Ok(relative) if relative == "." => REPOSITORY_ROOT_LABEL.to_owned(),
+            Ok(relative) if relative == "." => String::new(),
             Ok(relative) => relative,
             Err(_) => root.display().to_string(),
         };
@@ -997,14 +1016,36 @@ impl App {
 
     /// Whether the node at `path` is collapsed.
     ///
-    /// Answers for a node with no children too, where it means only that the
-    /// key was pressed on it: there was nothing to hide, so nothing is hidden.
-    /// A renderer deciding which marker to draw wants this *and*
-    /// [`Row::has_children`] — collapsed, expanded-with-children and childless
-    /// are three cases, and this answers one bit of them.
+    /// Answers for a node holding nothing too, where it means only that the path
+    /// is in the set: there is nothing to hide, so nothing is hidden. A renderer
+    /// deciding which marker to draw wants this *and* [`App::can_collapse`] —
+    /// collapsed, expanded-over-something and holding-nothing are three cases,
+    /// and this answers one bit of them.
     #[must_use]
     pub fn is_collapsed(&self, path: impl AsRef<Path>) -> bool {
         self.collapsed.contains(path.as_ref())
+    }
+
+    /// Whether the row at `index` in [`App::rows`] has anything under it in the
+    /// view as it stands, and so whether collapsing it would hide something.
+    ///
+    /// This is the question the collapse key asks, and it is a question about
+    /// the view rather than about the tree. A directory holding nothing but
+    /// files has no children in the tree and has rows under it whenever the file
+    /// toggle is on; a directory whose children the pacted-only filter has taken
+    /// away has children in the tree and nothing under it on screen. Asking
+    /// [`Row::children`] instead gets both of those wrong, in opposite
+    /// directions — the first as a key that silently does nothing, the second as
+    /// a marker promising something to unfold.
+    ///
+    /// Answered from the set `reflow` derived beside the rows, so it costs a
+    /// lookup and it is the same answer the drawn rows were filtered with. An
+    /// `index` past the end is not a row and holds nothing.
+    #[must_use]
+    pub fn can_collapse(&self, index: usize) -> bool {
+        self.rows
+            .get(index)
+            .is_some_and(|row| self.collapsible.contains(&row.path))
     }
 
     /// Whether the view is narrowed to the pacted part of the tree.
@@ -1533,7 +1574,7 @@ impl App {
         } else {
             kept
         };
-        self.rows = drawn_rows(&kept, &self.collapsed);
+        (self.rows, self.collapsible) = drawn_rows(&kept, &self.collapsed);
         self.selected = selected
             .and_then(|path| index_for(&self.rows, &path))
             .unwrap_or(0);
@@ -1596,10 +1637,12 @@ impl App {
     /// depths — because they were never thrown away: expanding re-filters the
     /// walk this app was built from rather than reconstructing anything.
     ///
-    /// A no-op, and deliberately a *complete* no-op, on a node with no
-    /// children: nothing to hide means nothing collapses, nothing is recorded,
-    /// and last keystroke's message is left on screen rather than swept away by
-    /// a key that did nothing. A no-op on an app with no rows too.
+    /// A no-op, and deliberately a *complete* no-op, on a row with nothing under
+    /// it in this view — see [`App::can_collapse`], which is the question, and
+    /// not the tree's child count, which is not. Nothing to hide means nothing
+    /// collapses, nothing is recorded, and last keystroke's message is left on
+    /// screen rather than swept away by a key that did nothing. A no-op on an
+    /// app with no rows too.
     ///
     /// Collapsing a directory the selection sits inside moves the selection
     /// onto that directory — see `reflow` — because a selection on a row that
@@ -1611,12 +1654,12 @@ impl App {
     /// what is recorded is the state of that node, and it takes effect when the
     /// node is on screen to take effect on.
     pub fn toggle_collapsed(&mut self) {
+        if !self.can_collapse(self.selected) {
+            return;
+        }
         let Some(row) = self.rows.get(self.selected) else {
             return;
         };
-        if !row.has_children() {
-            return;
-        }
 
         let path = row.path.clone();
         if !self.collapsed.remove(&path) {
@@ -1880,26 +1923,43 @@ fn in_subtree(path: &Path, root: &Path) -> bool {
 /// nothing, which is the only reading that lets the collapsed set be carried
 /// whole across a reload.
 ///
-/// A collapsed node with no children hides nothing. It cannot arrive through
-/// [`App::toggle_collapsed`], which refuses such a node, but it can arrive
-/// through [`App::with_collapsed`] carrying a set from a tree whose shape has
-/// since changed.
+/// A collapsed node with nothing under it hides nothing. It cannot arrive
+/// through [`App::toggle_collapsed`], which refuses such a node, but it can
+/// arrive through [`App::with_collapsed`] carrying a set from a tree whose shape
+/// has since changed, or through the file toggle taking away the only rows a
+/// directory had.
 ///
-/// Pure, and deliberately free of [`App`]: rows in, rows out.
-fn drawn_rows(all: &[Row], collapsed: &BTreeSet<PathBuf>) -> Vec<Row> {
+/// The second value out is the other half of the same reading: the paths of the
+/// rows that hold something *here*, collapsed or not. `all` is this view with
+/// nothing collapsed, so a row holds something exactly when the row after it is
+/// deeper than it — the same depth comparison the skipping runs on, asked one
+/// row ahead instead of one row behind. It is worked out in this pass because
+/// this is the only point where it can be: before it the answer is the tree's
+/// rather than the view's, and after it a collapsed row's descendants are gone
+/// and nothing is left to count.
+///
+/// Pure, and deliberately free of [`App`]: rows in, rows and paths out.
+fn drawn_rows(all: &[Row], collapsed: &BTreeSet<PathBuf>) -> (Vec<Row>, BTreeSet<PathBuf>) {
     let mut drawn = Vec::with_capacity(all.len());
+    let mut collapsible = BTreeSet::new();
     // The depth of the collapsed node whose descendants are being skipped, if
     // any are.
     let mut hiding: Option<usize> = None;
 
-    for row in all {
+    for (index, row) in all.iter().enumerate() {
+        let holds = all
+            .get(index + 1)
+            .is_some_and(|next| next.depth > row.depth);
+        if holds {
+            collapsible.insert(row.path.clone());
+        }
         if hiding.is_some_and(|depth| row.depth > depth) {
             continue;
         }
-        hiding = (row.has_children() && collapsed.contains(&row.path)).then_some(row.depth);
+        hiding = (holds && collapsed.contains(&row.path)).then_some(row.depth);
         drawn.push(row.clone());
     }
-    drawn
+    (drawn, collapsible)
 }
 
 /// Which of `all` the pacted-only view keeps: every pacted node, plus every
@@ -2117,8 +2177,7 @@ mod tests {
     use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
     use super::{
-        Account, App, Focus, Line, PactToggle, REPOSITORY_ROOT_LABEL, Row, panel_offset_for,
-        reseat_on, scroll_offset_for,
+        Account, App, Focus, Line, PactToggle, Row, panel_offset_for, reseat_on, scroll_offset_for,
     };
     use crate::claude::Activity;
     use crate::fixture;
@@ -2389,12 +2448,15 @@ mod tests {
     }
 
     #[test]
-    fn the_repository_root_itself_is_named_rather_than_left_as_a_dot() {
+    fn the_repository_root_itself_gets_no_header_rather_than_a_dot_or_a_label() {
         let app = App::from_rows(three_rows()).with_scope("/repo", "/repo");
 
-        assert_eq!(app.header(), REPOSITORY_ROOT_LABEL);
+        // The header says which part of the repository is on screen. The whole
+        // of it is not a part, so there is nothing for the line to say — and the
+        // bare "." the relative spelling would give is not an answer, it is the
+        // question left unanswered.
+        assert_eq!(app.header(), "");
         assert_ne!(app.header(), ".");
-        assert!(!app.header().is_empty());
     }
 
     #[test]
@@ -4122,8 +4184,28 @@ mod tests {
 
         leaf.toggle_collapsed();
 
-        // `assets` has files and no child directories, so there is nothing to
-        // collapse and nothing is hidden: files are a listing, not children.
+        // `assets` has no child directories, and with the file toggle on it has
+        // rows under it all the same. The key hides exactly those: what
+        // collapsing asks is what is drawn under the row, not what the tree
+        // calls a child.
+        assert_eq!(
+            drawn(&leaf),
+            [
+                "warlock",
+                "warlock/README.md",
+                "warlock/WARLOCK.md",
+                "warlock/crates",
+                "warlock/crates/engine",
+                "warlock/crates/engine/Cargo.toml",
+                "warlock/crates/engine/WARLOCK.md",
+                "warlock/crates/tui",
+                "warlock/crates/tui/WARLOCK.md",
+                "warlock/assets",
+            ]
+        );
+        assert_eq!(leaf.collapsed().len(), 1);
+
+        leaf.toggle_collapsed();
         assert_eq!(drawn(&leaf), whole_fixture_with_files());
         assert!(leaf.collapsed().is_empty());
 
@@ -4151,6 +4233,59 @@ mod tests {
         // Byte for byte what was there before: same rows, same order, same
         // depths, same states.
         assert_eq!(app.rows(), before);
+    }
+
+    #[test]
+    fn a_directory_holding_only_files_collapses_exactly_when_the_files_are_shown() {
+        // `warlock/assets` has no child directories and lists two files, so
+        // whether anything is under it is the file toggle's answer and not the
+        // tree's. Asking the tree — `Row::children`, which is 0 here — is what
+        // used to leave the key doing nothing at all on such a row.
+        let mut app = select(App::from_tree(&fixture::tree()), "warlock/assets");
+        let selected = app.selected();
+
+        assert!(!app.can_collapse(selected), "nothing is drawn under it");
+        assert!(app.selected_row().is_some_and(|row| !row.has_children()));
+
+        app.toggle_collapsed();
+        assert!(app.collapsed().is_empty(), "and the key refuses it");
+
+        app.toggle_files();
+        let selected = app.selected();
+
+        assert!(app.can_collapse(selected), "now two file rows are");
+        app.toggle_collapsed();
+        assert_eq!(
+            app.collapsed().len(),
+            1,
+            "and the key hides them, on a row the tree still calls childless"
+        );
+    }
+
+    #[test]
+    fn a_directory_the_filter_has_emptied_does_not_collapse() {
+        // The mirror of the case above: `repo/crates` has a child in the tree,
+        // and the pacted-only view takes it away. A row with nothing under it is
+        // a row with nothing to hide, whichever filter emptied it.
+        let mut app = App::from_rows(vec![
+            Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale).with_child_count(1),
+            Row::new(1, "repo/crates", None, NodeState::Unpacted).with_child_count(1),
+            Row::new(2, "repo/crates/tui", None, NodeState::Unpacted),
+        ]);
+
+        assert!(app.can_collapse(0), "the whole walk is drawn");
+
+        app.toggle_pacted_only();
+
+        assert_eq!(drawn(&app), ["repo"], "the unpacted pair is filtered out");
+        assert!(!app.can_collapse(0), "so the root holds nothing");
+        assert!(
+            app.selected_row().is_some_and(Row::has_children),
+            "though the tree still says it has a child"
+        );
+
+        app.toggle_collapsed();
+        assert!(app.collapsed().is_empty());
     }
 
     #[test]

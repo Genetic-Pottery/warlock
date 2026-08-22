@@ -2938,9 +2938,11 @@ mod tests {
             ];
             for n in 0..24 {
                 let directory = format!("/repo/d{n:02}");
-                rows.push(
-                    Row::new(1, directory.clone(), None, NodeState::Unpacted).with_child_count(1),
-                );
+                // No child count: the row under each of these is the file below,
+                // and a file is not a child. What makes them collapsible is the
+                // file toggle being on, which is `App::can_collapse`'s answer
+                // and not the tree's.
+                rows.push(Row::new(1, directory.clone(), None, NodeState::Unpacted));
                 rows.push(Row::file(
                     2,
                     format!("{directory}/lib.rs"),
@@ -3153,6 +3155,10 @@ mod tests {
         #[test]
         fn a_second_click_on_a_directory_row_opens_and_closes_it() {
             let mut app = app_on_screen();
+            // Files shown, so the directory clicked has a row under it to hide.
+            // Without them it holds nothing on screen and the collapse refuses,
+            // which is what the test below this one is about.
+            app.toggle_files();
             // The row under the pointer is selected first, by a click of its
             // own: the second click is the one that collapses, and it is the
             // same point twice.

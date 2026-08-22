@@ -16,11 +16,12 @@
 //! run: a heading naming each directory and, under it, one row per thing that
 //! pass was seen doing, each with the elapsed clock of its own section. Before
 //! the first pact of the session there is no account, and what it holds instead
-//! is warlock's mark: the gothic `W` of the logo, compiled in as ASCII, centred
+//! is warlock's mark: the program's name in shaded blocks, compiled in, centred
 //! and dim, and gone for good the moment a pact starts. Not a word of text goes
 //! with it — a screen saying something before anything has happened would be
 //! saying it about nothing, where a mark only says whose screen this is. A panel
-//! with no room for the whole mark draws the bare border. Every row is exactly
+//! with no room for the whole mark draws the bare border, which on a narrow
+//! terminal is every panel there is. Every row is exactly
 //! one row: a path longer
 //! than the panel is cut with an ellipsis rather than wrapped, so the number of
 //! rows on screen is the number of things that happened. See [`draw_panel`].
@@ -32,7 +33,8 @@
 //! see [`draw_tree`]. Which rows exist at all is the app's too: collapsing a
 //! directory takes its descendants out of [`App::rows`], and whatever rows the
 //! app holds are the rows drawn — this module only says which of them is
-//! collapsed, with a marker on the line.
+//! collapsed, with a marker on the line, and leads each one in with the guides
+//! [`guide_prefixes`] works out for the window.
 //!
 //! A pointer is answered by measuring, not by remembering: [`hit_test`] takes a
 //! screen column and row and says which of these areas they landed on — the
@@ -62,17 +64,36 @@ use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
 /// One level of nesting, per unit of the depth the engine's walk yields.
 const INDENT: &str = "  ";
 
-/// The stroke an indent guide is drawn with: one per level of nesting a row
-/// sits under, in the first of that level's [`INDENT`] columns.
+/// The stroke a guide is drawn with where the branch it stands for carries on
+/// below this row: one per level of nesting, in the first of that level's
+/// [`INDENT`] columns.
 ///
-/// A plain vertical every level down, with no corners, tees or last-sibling
-/// detection: which rows have children is already said by the `+`/`-`/no-marker
-/// glyphs, and a second voice saying it would be one more thing to read on a
-/// screen whose job is three colours. Unicode where the markers are held to
-/// ASCII, because ratatui already draws this pane's border in box-drawing
-/// characters — a terminal that cannot manage this one is already drawing a
-/// mess of the frame around it.
+/// Unicode where the markers are held to ASCII, because ratatui already draws
+/// this pane's border in box-drawing characters — a terminal that cannot manage
+/// this one is already drawing a mess of the frame around it.
 const GUIDE: &str = "│";
+
+/// The guide on the row itself, where the directory holding it has more rows
+/// under it after this one.
+///
+/// The tee and [`GUIDE_LAST`] are what make the guides say something the
+/// verticals alone could not: where a subtree stops. Reading down a column of
+/// plain bars, the eye has to count indents to find out whether the next row is
+/// a sibling or an aunt; the corner says it in the glyph. Costing a
+/// last-sibling pass to work out, which is why it is worked out once for the
+/// drawn rows rather than asked per row — see [`guide_prefixes`].
+///
+/// Nothing reaches from the corner across to the row it belongs to, and the
+/// horizontal that would is deliberately not drawn. [`EXPANDED_MARKER`] is a
+/// hyphen sitting at the same height as such a line and two columns along from
+/// it, so an arm would run into the marker on a directory row and stop short on
+/// a file row — leaving the right-hand end of the line jumping a column back and
+/// forth down a column of siblings. The rest of that level stays blank: nothing
+/// can merge with a space.
+const GUIDE_BRANCH: &str = "├";
+
+/// The guide on the last row a directory holds, where the branch stops.
+const GUIDE_LAST: &str = "└";
 
 /// Drawn to the left of the selected row. The reversed highlight already says
 /// where the selection is on any terminal with colour; the marker says it
@@ -100,30 +121,45 @@ const EXPANDED_MARKER: &str = "- ";
 /// one parent at two different indents and undo what the indent is for.
 const NO_MARKER: &str = "  ";
 
-/// Warlock's mark: the gothic `W` of `assets/warlock-logo.png`, one row per
-/// line, drawn in the panel while there is no account to put there.
+/// Warlock's mark: the program's name set in shaded blocks, one row per line,
+/// drawn in the panel while there is no account to put there.
 ///
-/// Drawn by hand from that image and compiled in as text. Nothing is read off
-/// the disk to draw it: an image on disk would be a file the program had to
-/// find, a decoder to read it with and a terminal that could show it, and the
-/// mark is the one thing on screen that must be there before anything has
-/// happened. Being a constant also means it is the same mark in a test buffer
-/// as on a terminal, which is how [`mod@crate::ui`] asserts anything at all.
+/// The name rather than the logo of `assets/warlock-logo.png`. A `W` alone asks
+/// the reader to already know whose `W` it is, and the panel it sits in is the
+/// first thing a new reader looks at; the word answers the question the mark is
+/// there to answer.
 ///
-/// Plain ASCII, and held there for the same reason [`SELECTION_MARKER`] and
-/// [`COLLAPSED_MARKER`] are: the ceiling on what this crate assumes a terminal
-/// can draw is the box-drawing characters ratatui already puts in the panes'
-/// borders and in [`GUIDE`], and a mark that came out as a row of boxes would
-/// say less about the program than a blank panel does. The shape is the
-/// letterform's: two arms falling to a point each, and the apex between them
-/// dropping the long central spike the logo's `W` hangs below its shoulders.
+/// Compiled in as text. Nothing is read off the disk to draw it: an image on
+/// disk would be a file the program had to find, a decoder to read it with and a
+/// terminal that could show it, and the mark is the one thing on screen that
+/// must be there before anything has happened. Being a constant also means it is
+/// the same mark in a test buffer as on a terminal, which is how
+/// [`mod@crate::ui`] asserts anything at all.
+///
+/// Block elements rather than plain ASCII, which is a raised ceiling and a
+/// deliberate one. Everywhere else this crate holds itself to what
+/// [`SELECTION_MARKER`] and [`COLLAPSED_MARKER`] are held to, and the highest it
+/// goes is the box drawing ratatui already puts in the panes' borders and in
+/// [`GUIDE`]. `█` and `▒` are one block along from that in Unicode and rather
+/// older in practice — both are in the original IBM PC character set — so a
+/// terminal that can draw a border can draw these. The shading is what the mark
+/// is: a solid face with a lighter one falling away behind it, which is a
+/// letterform no single-weight character set can carry.
+///
+/// A hundred columns wide, which is the size the shape needs and is wider than
+/// this panel is on an ordinary terminal. It is drawn on a wide one and not on a
+/// narrow one — see [`mark_area`], which draws it whole or not at all — and that
+/// is the trade taken knowingly: warlock puts a file tree beside this panel, so
+/// the terminal it is run in is a wide one or the tree has nowhere to be either.
 const MARK: &[&str] = &[
-    r"\\            //\\            //",
-    r"  \\        // || \\        //",
-    r"    \\    //   ||   \\    //",
-    r"      \\//     ||     \\//",
-    r"       \/      ||      \/",
-    r"               \/",
+    " █████   ███   █████   █████████   ███████████   █████          ███████      █████████  █████   ████",
+    "▒▒███   ▒███  ▒▒███   ███▒▒▒▒▒███ ▒▒███▒▒▒▒▒███ ▒▒███         ███▒▒▒▒▒███   ███▒▒▒▒▒███▒▒███   ███▒",
+    " ▒███   ▒███   ▒███  ▒███    ▒███  ▒███    ▒███  ▒███        ███     ▒▒███ ███     ▒▒▒  ▒███  ███",
+    " ▒███   ▒███   ▒███  ▒███████████  ▒██████████   ▒███       ▒███      ▒███▒███          ▒███████",
+    " ▒▒███  █████  ███   ▒███▒▒▒▒▒███  ▒███▒▒▒▒▒███  ▒███       ▒███      ▒███▒███          ▒███▒▒███",
+    "  ▒▒▒█████▒█████▒    ▒███    ▒███  ▒███    ▒███  ▒███      █▒▒███     ███ ▒▒███     ███ ▒███ ▒▒███",
+    "    ▒▒███ ▒▒███      █████   █████ █████   █████ ███████████ ▒▒▒███████▒   ▒▒█████████  █████ ▒▒████",
+    "     ▒▒▒   ▒▒▒      ▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒      ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒   ▒▒▒▒",
 ];
 
 /// The clear space the mark wants on either side of it, and the least the panel
@@ -677,7 +713,13 @@ fn draw_mark(frame: &mut Frame<'_>, inner: Rect) {
 ///
 /// All of the art or none of it: there is no scaled variant and no second
 /// smaller mark, because a mark that changed shape with the terminal would be
-/// two marks and neither of them the one on the README.
+/// two marks and a reader would have to learn that both are warlock.
+///
+/// [`MARK`] is wide enough that "none of it" is the answer on an ordinary
+/// terminal — see the size note there. This function is not where that is
+/// decided and does not soften it: what it owns is that the panel falls back to
+/// the bare border it drew before there was a mark at all, which is a panel with
+/// nothing missing from it rather than a mark with something missing from it.
 fn mark_area(inner: Rect) -> Option<Rect> {
     let width = MARK.iter().copied().map(display_width).max().unwrap_or(0);
     let width = u16::try_from(width).ok()?;
@@ -829,12 +871,16 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     let first = app.scroll_offset().min(app.rows().len());
     let height = usize::from(area.height);
     let pulse = pulse_colour(app, now);
+    let guides = guide_prefixes(app.rows(), first, height);
     let items: Vec<ListItem<'_>> = app.rows()[first..]
         .iter()
         .take(height)
-        .map(|row| {
+        .enumerate()
+        .map(|(offset, row)| {
             ListItem::new(line(
                 row,
+                &guides[offset],
+                app.can_collapse(first + offset),
                 app.is_collapsed(&row.path),
                 pulse.filter(|_| app.is_in_flight(&row.path)),
             ))
@@ -871,11 +917,13 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
 /// off the row: which nodes are collapsed is view state the app owns, and a
 /// [`Row`] describes the tree, which knows nothing about it.
 ///
-/// Two spans, and only two. The first is the indent: one [`GUIDE`] stroke per
-/// level of nesting the row sits under, each in the columns an [`INDENT`] took,
-/// so the marker column and the first column of every name are exactly where
-/// they were before the guides arrived. A depth-0 row draws no guide at all and
-/// its span is empty. The second span is the marker and the name, which take the
+/// Two spans, and only two. The first is `guides`, worked out for the whole
+/// window by [`guide_prefixes`] because it is the one thing about a row that
+/// cannot be read off the row: it takes the rows after this one to know whether
+/// a branch carries on. It is one [`INDENT`]-wide unit per level of nesting, so
+/// the marker column and the first column of every name are exactly where they
+/// were before the guides arrived. A depth-0 row draws no guide at all and its
+/// span is empty. The second span is the marker and the name, which take the
 /// row's state colour together: colour on this screen means node state and
 /// nothing else, so a marker in a colour of its own would be a second thing
 /// colour meant.
@@ -897,37 +945,132 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
 /// `List` applies over the whole row, guides included — reads exactly the same on
 /// a pulsing row as on any other, and the pulse cannot move it.
 ///
+/// `collapsible` is whether the row has anything under it *in this view*, which
+/// is [`App::can_collapse`]'s answer and not the tree's child count. The marker
+/// and the collapse key have to agree — a `+` on a row space refuses to open is
+/// the screen making a promise the keyboard then breaks — so both ask the one
+/// question, and neither asks [`Row::children`], which is a fact about the tree
+/// that the file toggle and the pacted-only filter can each make untrue of the
+/// screen.
+///
 /// A file row needs no case of its own here and deliberately does not get one.
-/// It carries no children, so it falls into [`NO_MARKER`] like any other
-/// childless row — there is nothing under a file to collapse — and its depth is
-/// already one deeper than its directory's, so it indents under it. Its colour
-/// is its directory's state, copied onto the row when the tree was flattened
-/// (see [`Row::file`]), which is how the design doc's rule that a file takes its
-/// module's colour arrives here as an ordinary row with an ordinary colour.
-fn line(row: &Row, collapsed: bool, pulse: Option<Color>) -> Line<'static> {
+/// Nothing is ever under a file, so it falls into [`NO_MARKER`] like any other
+/// row holding nothing, and its depth is already one deeper than its
+/// directory's, so it indents under it. Its colour is its directory's state,
+/// copied onto the row when the tree was flattened (see [`Row::file`]), which is
+/// how the design doc's rule that a file takes its module's colour arrives here
+/// as an ordinary row with an ordinary colour.
+fn line(
+    row: &Row,
+    guides: &str,
+    collapsible: bool,
+    collapsed: bool,
+    pulse: Option<Color>,
+) -> Line<'static> {
     let name = row
         .path
         .file_name()
         .unwrap_or(row.path.as_os_str())
         .to_string_lossy();
-    let marker = match (row.has_children(), collapsed) {
+    let marker = match (collapsible, collapsed) {
         (false, _) => NO_MARKER,
         (true, true) => COLLAPSED_MARKER,
         (true, false) => EXPANDED_MARKER,
     };
 
-    // The stroke goes in the first of the level's columns and the rest of the
-    // level is left blank, so a guide unit is an `INDENT` with a line drawn down
-    // it rather than a width of its own to keep in step.
-    let guides = INDENT.replacen(' ', GUIDE, 1).repeat(row.depth);
-
     Line::from(vec![
-        Span::styled(guides, GUIDE_COLOUR),
+        Span::styled(guides.to_owned(), GUIDE_COLOUR),
         Span::styled(
             format!("{marker}{name}"),
             pulse.unwrap_or(colour_for(row.state)),
         ),
     ])
+}
+
+/// The guide prefix for each of the `height` rows of `all` starting at `first`,
+/// one string per drawn row, each [`INDENT`] wide per level of nesting.
+///
+/// A row's own guide is [`GUIDE_BRANCH`] or [`GUIDE_LAST`] according to whether
+/// the directory holding it has another row after this one, and the levels
+/// above it are [`GUIDE`] where that ancestor's branch carries on below and
+/// blank where it has ended. Blank is the whole point of the exercise: a column
+/// of unbroken verticals says a subtree is still open long after it has closed,
+/// and the reader has to count indents to find out otherwise.
+///
+/// Sibling here means *drawn* sibling. The rows handed in are the window's own
+/// list, after the collapse, the file toggle and the pacted-only filter have had
+/// it, so a guide describes the tree on screen rather than the tree on disk —
+/// which is the only one the reader can check it against. A walk is depth first
+/// and parents come before children, so a row's next sibling is the next row at
+/// its depth before any row shallower than it, and no path comparisons are
+/// needed for any of this.
+///
+/// Two passes and no per-row search. The first runs backwards over everything
+/// from the end to `first`, and is what makes this a function over the list
+/// rather than a method on a row: whether a branch carries on is a fact about
+/// the rows *after* it, and a row cannot answer it alone. The second runs
+/// forwards from the root, carrying a stack of which ancestors are still open,
+/// and starts at the root rather than at `first` because the row at the top of a
+/// scrolled window inherits its verticals from ancestors above the window.
+fn guide_prefixes(all: &[Row], first: usize, height: usize) -> Vec<String> {
+    let last = all.len().min(first.saturating_add(height));
+    if first >= last {
+        return Vec::new();
+    }
+
+    // Backwards: a row is its parent's last drawn row unless a row at its own
+    // depth follows it before anything shallower does. `open` says a depth has
+    // been seen since the last row shallower than it, and a row shallower than a
+    // depth closes it — every row under that depth belongs to a different parent.
+    let mut open: Vec<bool> = Vec::new();
+    let mut continues = vec![false; last];
+    for (index, row) in all.iter().enumerate().rev() {
+        if row.depth >= open.len() {
+            open.resize(row.depth + 1, false);
+        }
+        if index < last {
+            continues[index] = open[row.depth];
+        }
+        open.truncate(row.depth + 1);
+        open[row.depth] = true;
+    }
+
+    // Forwards: `stack[level]` is whether the ancestor sitting at that level has
+    // rows of its own still to come, which is the vertical the levels above a
+    // row are drawn with.
+    let mut stack: Vec<bool> = Vec::new();
+    let mut prefixes = Vec::with_capacity(last - first);
+    for (index, row) in all.iter().enumerate().take(last) {
+        stack.truncate(row.depth);
+        stack.resize(row.depth, false);
+        if index >= first {
+            // The root's own column is never drawn — a depth-0 row carries no
+            // guide — so the verticals start one level in, and the row's own
+            // level is the corner rather than a vertical.
+            //
+            // Every unit is one `INDENT` wide: a glyph in the first column and
+            // blanks for the rest of the level, whichever glyph it is. Built
+            // from `INDENT` rather than from two literal columns so that the
+            // guides keep step with the indent if it ever changes width.
+            let level = INDENT.chars().count();
+            let mut prefix = String::new();
+            for open in stack.iter().skip(1) {
+                prefix.push_str(if *open { GUIDE } else { " " });
+                prefix.push_str(&" ".repeat(level - 1));
+            }
+            if row.depth > 0 {
+                prefix.push_str(if continues[index] {
+                    GUIDE_BRANCH
+                } else {
+                    GUIDE_LAST
+                });
+                prefix.push_str(&" ".repeat(level - 1));
+            }
+            prefixes.push(prefix);
+        }
+        stack.push(continues[index]);
+    }
+    prefixes
 }
 
 /// The colour the row of the directory in flight takes this frame, or `None`
@@ -1057,11 +1200,11 @@ mod tests {
     use warlock_engine::NodeState;
 
     use super::{
-        BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, GUIDE, HEADER_HEIGHT, Hit, INDENT, LIVE_KEY,
-        MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY, NO_MARKER, PACTING_KEYS,
-        PANEL_INDENT, SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas,
-        display_width, draw, hit_test, keys_line, mark_area, pane_inner, panel_height, tree_height,
-        tree_rows_area, tree_width, truncated,
+        BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_HEIGHT,
+        Hit, INDENT, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY,
+        NO_MARKER, PACTING_KEYS, PANEL_INDENT, SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH,
+        TREE_PERCENT, areas, display_width, draw, guide_prefixes, hit_test, keys_line, mark_area,
+        pane_inner, panel_height, tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::account::Outcome;
     use crate::app::{App, Row};
@@ -1103,27 +1246,39 @@ mod tests {
     /// included: five rows and then some.
     const FIXTURE_HEIGHT: u16 = 12;
 
-    /// The narrowest terminal the mark is drawn on: sixty-eight columns leaves
-    /// the tree its floor of thirty and the panel thirty-eight, whose inside is
-    /// thirty-six — the art's thirty-two columns and [`MARK_MARGIN`] either
-    /// side of it, exactly and not a column over.
-    const MARK_WIDTH: u16 = 68;
+    /// The narrowest terminal the mark is drawn on: a hundred and fifty-one
+    /// columns gives the tree forty-five and the panel a hundred and six, whose
+    /// inside is a hundred and four — the art's hundred columns and
+    /// [`MARK_MARGIN`] either side of it, exactly and not a column over.
+    ///
+    /// A wide terminal, and knowingly: see [`MARK`]. What this constant is for
+    /// is that the threshold is a number in a test rather than something
+    /// discovered by resizing a window.
+    const MARK_WIDTH: u16 = 151;
 
-    /// One column narrower than [`MARK_WIDTH`]: the tree still takes its floor
-    /// of thirty, so the whole of the missing column comes off the panel and
+    /// One column narrower than [`MARK_WIDTH`]: the tree takes forty-five at
+    /// both widths, so the whole of the missing column comes off the panel and
     /// its inside is a column short of the art and its margins.
     const BELOW_MARK_WIDTH: u16 = MARK_WIDTH - 1;
 
-    /// The shortest terminal the mark is drawn on: twelve rows less the footer
-    /// and the panel's border leaves seven, the art's six and the
-    /// [`MARK_MARGIN_ROWS`] row it wants clear. Which is [`FIXTURE_HEIGHT`],
-    /// named again here because what matters about it is the mark's threshold
-    /// rather than the fixture's rows.
-    const MARK_HEIGHT: u16 = FIXTURE_HEIGHT;
+    /// The shortest terminal the mark is drawn on: fourteen rows less the footer
+    /// and the panel's border leaves nine, the art's eight and the
+    /// [`MARK_MARGIN_ROWS`] row it wants clear.
+    const MARK_HEIGHT: u16 = 14;
 
     /// One row shorter than [`MARK_HEIGHT`], leaving the panel's inside the
-    /// art's own six rows with none to spare.
+    /// art's own eight rows with none to spare.
     const BELOW_MARK_HEIGHT: u16 = MARK_HEIGHT - 1;
+
+    /// A terminal with room to spare for the mark in both directions, for the
+    /// tests that are about something else happening on a frame the mark is on —
+    /// where drawing at the threshold would make a failure read as a rounding
+    /// error rather than as the thing under test.
+    const MARK_ROOM_WIDTH: u16 = 170;
+
+    /// The height half of [`MARK_ROOM_WIDTH`], with rows to spare over the art
+    /// and its margin.
+    const MARK_ROOM_HEIGHT: u16 = 20;
 
     /// The 80-column terminal, where the tree takes its floor of thirty and the
     /// panel the other fifty: the width the mark has to survive to be drawn on
@@ -1279,14 +1434,21 @@ mod tests {
     /// selected row: the selection marker's gutter, the one level of depth's
     /// guide in the columns an indent takes, the blank a childless row carries
     /// where a collapse marker would go, then the name.
-    fn drawn_row(index: usize, selected: usize) -> String {
+    ///
+    /// [`many_rows`] is a flat run of siblings, so every one of them is a branch
+    /// except the last, which is the corner. `count` is what says which that is.
+    fn drawn_row(index: usize, selected: usize, count: usize) -> String {
         let gutter = if index == selected {
             SELECTION_MARKER.to_owned()
         } else {
             " ".repeat(SELECTION_MARKER.chars().count())
         };
-        let guide = INDENT.replacen(' ', GUIDE, 1);
-        format!("{gutter}{guide}{NO_MARKER}module{index}")
+        let corner = if index + 1 == count {
+            GUIDE_LAST
+        } else {
+            GUIDE_BRANCH
+        };
+        format!("{gutter}{corner} {NO_MARKER}module{index}")
     }
 
     /// Draw `app` onto an in-memory terminal of the given size and hand back
@@ -1332,6 +1494,13 @@ mod tests {
             .collect()
     }
 
+    /// Every glyph a guide is drawn with: the verticals and the two corners.
+    ///
+    /// Named once here so that the helpers below ask "is this a guide?" rather
+    /// than listing the three constants each time and drifting apart when a
+    /// fourth arrives.
+    const GUIDE_GLYPHS: [&str; 3] = [GUIDE, GUIDE_BRANCH, GUIDE_LAST];
+
     /// The foreground colour of tree row `index`'s first glyph of *text*:
     /// its marker, or the first letter of its name when it carries none.
     ///
@@ -1345,7 +1514,7 @@ mod tests {
         let gutter = u16::try_from(SELECTION_MARKER.chars().count()).expect("a two-char marker");
         (area.x + gutter..area.x + area.width)
             .map(|x| &buffer[(x, area.y + index)])
-            .find(|cell| !cell.symbol().trim().is_empty() && cell.symbol() != GUIDE)
+            .find(|cell| !cell.symbol().trim().is_empty() && !GUIDE_GLYPHS.contains(&cell.symbol()))
             .expect("row has a glyph on it")
             .fg
     }
@@ -1373,7 +1542,9 @@ mod tests {
     fn guide_columns(buffer: &Buffer, index: u16) -> Vec<u16> {
         let area = rows_area(buffer);
         (0..area.width)
-            .filter(|column| buffer[(area.x + column, area.y + index)].symbol() == GUIDE)
+            .filter(|column| {
+                GUIDE_GLYPHS.contains(&buffer[(area.x + column, area.y + index)].symbol())
+            })
             .collect()
     }
 
@@ -1538,10 +1709,10 @@ mod tests {
             drawn,
             [
                 "> - warlock",
-                "  │ - crates",
-                "  │ │   engine",
-                "  │ │   tui",
-                "  │   assets",
+                "  ├ - crates",
+                "  │ ├   engine",
+                "  │ └   tui",
+                "  └   assets",
             ]
         );
     }
@@ -1558,18 +1729,58 @@ mod tests {
             "a depth-0 row should draw no guide: {:?}",
             tree_row(&buffer, 0)
         );
-        // `crates`, one level down: one guide, in the first column past the
-        // gutter the selection marker lives in.
+        // `crates`, one level down: one guide — its own corner — in the first
+        // column past the gutter the selection marker lives in, and the rest of
+        // the level blank.
         let gutter = u16::try_from(SELECTION_MARKER.chars().count()).expect("a two-char marker");
         let level = u16::try_from(INDENT.chars().count()).expect("a two-column indent");
         assert_eq!(guide_columns(&buffer, 1), [gutter]);
-        // `engine`, two levels down: two guides, one level apart, and its name
+        // `engine`, two levels down: two guides, one level apart — the vertical
+        // carrying `crates` on past it and then its own corner — and its name
         // still starts one marker past the last of them.
         assert_eq!(guide_columns(&buffer, 2), [gutter, gutter + level]);
         assert_eq!(
             column_of(&tree_row(&buffer, 2), "engine"),
             usize::from(gutter + 2 * level) + NO_MARKER.chars().count()
         );
+    }
+
+    #[test]
+    fn the_guides_of_a_scrolled_window_are_the_ones_the_rows_above_it_earned() {
+        // Two directories, each holding two files, and a window onto the middle
+        // of it. The first row of the window is `a/two`, whose vertical comes
+        // from `a` — a row above the window — and whose corner says it is the
+        // last of `a`'s. Neither fact is on the row itself.
+        let rows = vec![
+            Row::new(0, "repo", None, NodeState::Unpacted).with_child_count(2),
+            Row::new(1, "repo/a", None, NodeState::Unpacted),
+            Row::file(2, "repo/a/one", NodeState::Unpacted),
+            Row::file(2, "repo/a/two", NodeState::Unpacted),
+            Row::new(1, "repo/b", None, NodeState::Unpacted),
+            Row::file(2, "repo/b/one", NodeState::Unpacted),
+            Row::file(2, "repo/b/two", NodeState::Unpacted),
+        ];
+
+        let whole = guide_prefixes(&rows, 0, rows.len());
+        assert_eq!(
+            whole,
+            [
+                String::new(),
+                format!("{GUIDE_BRANCH} "),
+                format!("{GUIDE} {GUIDE_BRANCH} "),
+                format!("{GUIDE} {GUIDE_LAST} "),
+                format!("{GUIDE_LAST} "),
+                format!("  {GUIDE_BRANCH} "),
+                format!("  {GUIDE_LAST} "),
+            ]
+        );
+
+        // The window's rows are exactly what the whole list gave them, so a
+        // scrolled tree draws the same guides an unscrolled one does.
+        assert_eq!(guide_prefixes(&rows, 3, 2), whole[3..5]);
+        // And a window past the end asks for nothing rather than panicking.
+        assert!(guide_prefixes(&rows, rows.len(), 4).is_empty());
+        assert_eq!(guide_prefixes(&rows, 5, 99), whole[5..]);
     }
 
     #[test]
@@ -1659,15 +1870,15 @@ mod tests {
 
         // Same directory, same indent, same name, and the one thing that
         // differs is the marker saying whether anything is under it.
-        assert_eq!(tree_row(&before, 1), "  │ - crates");
-        assert_eq!(tree_row(&after, 1), "  │ + crates");
+        assert_eq!(tree_row(&before, 1), "  ├ - crates");
+        assert_eq!(tree_row(&after, 1), "  ├ + crates");
         // And what it was hiding is gone from the screen, leaving the root's
         // other child where the children were.
         let drawn: Vec<String> = tree_rows(&after)
             .into_iter()
             .take(collapsed.rows().len())
             .collect();
-        assert_eq!(drawn, ["> - warlock", "  │ + crates", "  │   assets"]);
+        assert_eq!(drawn, ["> - warlock", "  ├ + crates", "  └   assets"]);
     }
 
     #[test]
@@ -1680,7 +1891,7 @@ mod tests {
         // says so by carrying no marker — while still lining its name up with
         // the marked rows at its own depth.
         let leaf = tree_row(&buffer, 4);
-        assert_eq!(leaf, "  │   assets");
+        assert_eq!(leaf, "  └   assets");
         assert!(!leaf.contains('+') && !leaf.contains('-'), "{leaf:?}");
         assert_eq!(
             column_of(&leaf, "assets"),
@@ -1952,22 +2163,26 @@ mod tests {
             .collect();
         // Every file under the directory that lists it, one indent further in
         // than that directory, carrying neither collapse marker: there is
-        // nothing under a file to hide.
+        // nothing under a file to hide. The directories listing them carry one,
+        // including the three with no child directory of their own — with the
+        // files drawn there is something under those rows to hide, and the
+        // marker says what the collapse key will do rather than what the tree
+        // is shaped like.
         assert_eq!(
             drawn,
             [
                 "> - warlock",
-                "  │   README.md",
-                "  │   WARLOCK.md",
-                "  │ - crates",
-                "  │ │   engine",
-                "  │ │ │   Cargo.toml",
-                "  │ │ │   WARLOCK.md",
-                "  │ │   tui",
-                "  │ │ │   WARLOCK.md",
-                "  │   assets",
-                "  │ │   WARLOCK.md",
-                "  │ │   logo.svg",
+                "  ├   README.md",
+                "  ├   WARLOCK.md",
+                "  ├ - crates",
+                "  │ ├ - engine",
+                "  │ │ ├   Cargo.toml",
+                "  │ │ └   WARLOCK.md",
+                "  │ └ - tui",
+                "  │   └   WARLOCK.md",
+                "  └ - assets",
+                "    ├   WARLOCK.md",
+                "    └   logo.svg",
             ]
         );
         assert!(
@@ -2004,7 +2219,7 @@ mod tests {
         let buffer = render(&app, WIDTH, FIXTURE_HEIGHT);
 
         assert!(!tree_row(&buffer, 0).starts_with(SELECTION_MARKER));
-        assert_eq!(tree_row(&buffer, 1), "> │ - crates");
+        assert_eq!(tree_row(&buffer, 1), "> ├ - crates");
     }
 
     #[test]
@@ -2022,14 +2237,14 @@ mod tests {
 
             let drawn = tree_rows(&buffer);
             let expected: Vec<String> = (first..first + window)
-                .map(|index| drawn_row(index, selected))
+                .map(|index| drawn_row(index, selected, MANY))
                 .collect();
             // Exactly a windowful, and exactly the window the app says.
             assert_eq!(drawn.len(), window, "selection {selected}");
             assert_eq!(drawn, expected, "selection {selected}");
             // Which contains the selected row, marked and highlighted, once.
             assert!(
-                drawn.contains(&drawn_row(selected, selected)),
+                drawn.contains(&drawn_row(selected, selected, MANY)),
                 "row {selected} is off screen: {drawn:?}"
             );
             assert_eq!(
@@ -2477,12 +2692,19 @@ mod tests {
     }
 
     #[test]
-    fn a_tree_rooted_at_the_repository_root_gets_a_named_header_not_a_blank_one() {
+    fn a_tree_rooted_at_the_repository_root_draws_a_blank_header_and_keeps_its_row() {
         let app = App::from_tree(&fixture::tree()).with_scope("/repo", "/repo");
 
         let buffer = render(&app, WIDTH, HEIGHT);
 
-        assert_eq!(header_text(&buffer), "(repository root)");
+        // Nothing to say — the whole repository is not a part of itself — and
+        // the root row below already names the directory.
+        assert_eq!(header_text(&buffer), "");
+        // The row is still the header's, though, so the tree starts where it
+        // starts whether or not there is a name on the line above it.
+        assert_eq!(header_area(&buffer).height, HEADER_HEIGHT);
+        assert_eq!(rows_area(&buffer).y, header_area(&buffer).y + HEADER_HEIGHT);
+        assert!(tree_row(&buffer, 0).contains("warlock"));
     }
 
     #[test]
@@ -2646,7 +2868,7 @@ mod tests {
             );
             assert_eq!(
                 tree_row(&buffer, offset),
-                drawn_row(usize::from(offset), 0),
+                drawn_row(usize::from(offset), 0, MANY),
                 "row {offset} of the window"
             );
         }
@@ -2785,7 +3007,7 @@ mod tests {
         let mut app = App::from_tree(&fixture::tree());
         assert!(!app.has_account());
         for _ in 0..2 {
-            let buffer = render(&app, WIDTH, FIXTURE_HEIGHT);
+            let buffer = render(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT);
 
             assert_mark_drawn(&buffer);
             // And its border really is there, on all four sides, carrying
@@ -2865,15 +3087,18 @@ mod tests {
     }
 
     #[test]
-    fn an_eighty_column_terminal_draws_the_whole_mark() {
-        // The width the mark had to fit: fifty columns of panel, forty-eight
-        // inside its border.
+    fn an_eighty_column_terminal_is_too_narrow_for_the_mark_and_draws_the_bare_border() {
+        // Fifty columns of panel, forty-eight inside its border, against a mark
+        // that wants a hundred and four. The ordinary terminal is on the wrong
+        // side of the threshold and that is the deliberate part: the mark is
+        // sized for the wide window warlock's two panes ask for, and every
+        // narrower one gets the panel exactly as it was before there was a mark.
         let app = App::from_tree(&fixture::tree());
 
         let buffer = render(&app, STANDARD_WIDTH, MARK_HEIGHT);
 
         assert_eq!(areas(buffer.area).panel.width, 50);
-        assert_mark_drawn(&buffer);
+        assert_bare_panel(&buffer);
     }
 
     #[test]
@@ -2881,17 +3106,22 @@ mod tests {
         // Drawn at a size with all the room in the world for the mark, so what
         // keeps it off the screen is the account and never the width.
         let base = Instant::now();
-        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        let mut app = pacting_app(base, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT);
         assert!(app.has_account());
         assert!(
-            mark_area(panel_area(&render(&app, WIDTH, FIXTURE_HEIGHT))).is_some(),
+            mark_area(panel_area(&render(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT))).is_some(),
             "this size has room for the mark"
         );
 
         // A pact under way with nothing recorded yet is still a pact: the panel
         // is empty, and empty is not the same as free.
         assert!(app.panel_lines(at(base, 1)).is_empty());
-        assert_bare_panel(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 1)));
+        assert_bare_panel(&render_at(
+            &app,
+            MARK_ROOM_WIDTH,
+            MARK_ROOM_HEIGHT,
+            at(base, 1),
+        ));
 
         // With lines in it, the account has the rows and the mark none of them.
         let account = app.account_mut().expect("a pact has started");
@@ -2899,7 +3129,7 @@ mod tests {
         for line in 0..MANY {
             account.record(&Activity::Thinking, at(base, line as u64 + 1));
         }
-        let buffer = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 99));
+        let buffer = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 99));
         assert!(!panel_rows(&buffer)[0].is_empty());
         assert_no_mark(&buffer);
 
@@ -2907,7 +3137,7 @@ mod tests {
         // rows rather than at none.
         app.toggle_focus();
         app.select_first();
-        let scrolled = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 99));
+        let scrolled = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 99));
         assert!(app.panel_lines_below() > 0);
         assert!(!panel_rows(&scrolled)[0].is_empty());
         assert_no_mark(&scrolled);
@@ -2917,7 +3147,12 @@ mod tests {
         // is the first case again and still not a screen for the mark.
         app.start_account(at(base, 100));
         assert!(app.panel_lines(at(base, 101)).is_empty());
-        assert_bare_panel(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 101)));
+        assert_bare_panel(&render_at(
+            &app,
+            MARK_ROOM_WIDTH,
+            MARK_ROOM_HEIGHT,
+            at(base, 101),
+        ));
     }
 
     #[test]

@@ -10,16 +10,20 @@ tree the engine loads from the **real working directory** the binary was
 launched in — every directory that walk reached, documented or not, and nothing
 that git ignores:
 
-- A header naming which tree is on screen: the walk's root, spelled relative to
-  the repository root it sits in, or `(repository root)` when they are the same
-  directory.
+- A header naming which *part* of the repository is on screen: the walk's root,
+  spelled relative to the repository root it sits in. Blank when they are the
+  same directory, since the whole of a repository is not a part of it and the
+  root row below already names the directory.
 - The tree, drawn as an indented list on the alternate screen: one node per
   line, indented by the depth the engine's depth-first walk reports, coloured
   by state (gray unpacted, yellow stale, green fresh) via `colour_for`, with
-  exactly one row highlighted as the selection. A directory carries `+` when
-  its children are hidden and `-` when they are on screen; a row with nothing
-  under it carries neither, in the same two columns, so sibling names line up
-  whatever marker they do or do not have.
+  exactly one row highlighted as the selection, and led in by guides: a `│`
+  down every level whose branch carries on below, and `├` or `└` on the row
+  itself according to whether its directory holds anything after it. A
+  directory carries `+` when what it holds is hidden and `-` when it is on
+  screen; a row with nothing under it *in the view as it stands* carries
+  neither, in the same two columns, so sibling names line up whatever marker
+  they do or do not have.
 - A window, not the whole list: the tree area draws the slice of rows starting
   at the app's scroll offset and running for as many lines as the area is
   tall, so a tree taller than the terminal scrolls under a header and a footer
