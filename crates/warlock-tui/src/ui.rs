@@ -1058,10 +1058,10 @@ mod tests {
 
     use super::{
         BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, GUIDE, HEADER_HEIGHT, Hit, INDENT, LIVE_KEY,
-        MARK, MOUSE_OFF_KEY, MOUSE_ON_KEY, NO_MARKER, PACTING_KEYS, PANEL_INDENT, SCROLLBACK_ARROW,
-        SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas, display_width, draw, hit_test,
-        keys_line, mark_area, pane_inner, panel_height, tree_height, tree_rows_area, tree_width,
-        truncated,
+        MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY, NO_MARKER, PACTING_KEYS,
+        PANEL_INDENT, SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas,
+        display_width, draw, hit_test, keys_line, mark_area, pane_inner, panel_height, tree_height,
+        tree_rows_area, tree_width, truncated,
     };
     use crate::account::Outcome;
     use crate::app::{App, Row};
@@ -1102,6 +1102,38 @@ mod tests {
     /// Tall enough for the whole fixture's directories on screen, chrome
     /// included: five rows and then some.
     const FIXTURE_HEIGHT: u16 = 12;
+
+    /// The narrowest terminal the mark is drawn on: sixty-eight columns leaves
+    /// the tree its floor of thirty and the panel thirty-eight, whose inside is
+    /// thirty-six — the art's thirty-two columns and [`MARK_MARGIN`] either
+    /// side of it, exactly and not a column over.
+    const MARK_WIDTH: u16 = 68;
+
+    /// One column narrower than [`MARK_WIDTH`]: the tree still takes its floor
+    /// of thirty, so the whole of the missing column comes off the panel and
+    /// its inside is a column short of the art and its margins.
+    const BELOW_MARK_WIDTH: u16 = MARK_WIDTH - 1;
+
+    /// The shortest terminal the mark is drawn on: twelve rows less the footer
+    /// and the panel's border leaves seven, the art's six and the
+    /// [`MARK_MARGIN_ROWS`] row it wants clear. Which is [`FIXTURE_HEIGHT`],
+    /// named again here because what matters about it is the mark's threshold
+    /// rather than the fixture's rows.
+    const MARK_HEIGHT: u16 = FIXTURE_HEIGHT;
+
+    /// One row shorter than [`MARK_HEIGHT`], leaving the panel's inside the
+    /// art's own six rows with none to spare.
+    const BELOW_MARK_HEIGHT: u16 = MARK_HEIGHT - 1;
+
+    /// The 80-column terminal, where the tree takes its floor of thirty and the
+    /// panel the other fifty: the width the mark has to survive to be drawn on
+    /// an ordinary terminal at all.
+    const STANDARD_WIDTH: u16 = 80;
+
+    /// The 40-column terminal, where the two panes halve the width and the
+    /// panel is twenty columns: too narrow for the mark by a long way, and the
+    /// size that pins what the panel does instead.
+    const NARROW_WIDTH: u16 = 40;
 
     /// How far apart the pulse tests draw their frames: one phase, after which
     /// the row in flight should have changed colour, and the two phases that
@@ -1373,6 +1405,123 @@ mod tests {
         (0..buffer.area.height)
             .filter(|&y| buffer[(x, y)].modifier.contains(Modifier::REVERSED))
             .collect()
+    }
+
+    /// How wide [`MARK`] is drawn: the widest of its rows, in columns.
+    fn mark_width() -> usize {
+        MARK.iter()
+            .copied()
+            .map(display_width)
+            .max()
+            .expect("the art has rows")
+    }
+
+    /// Assert that the panel of `buffer` is the whole of [`MARK`] and nothing
+    /// else: the art centred inside the border, dim, in no colour of its own,
+    /// on otherwise blank rows.
+    ///
+    /// Where the art lands is worked out here from [`MARK`] and the panel's
+    /// inner area rather than asked of [`mark_area`], so that a mark which
+    /// moved or was redrawn fails here rather than agreeing with itself. The
+    /// art is compared against the constant for the same reason: a copy of it
+    /// written out in a test would go on passing after the mark changed.
+    fn assert_mark_drawn(buffer: &Buffer) {
+        let inner = panel_area(buffer);
+        let left = (usize::from(inner.width) - mark_width()) / 2;
+        let top = (usize::from(inner.height) - MARK.len()) / 2;
+
+        // One row of the art per row of the panel, indented to the middle, and
+        // blank rows above and below it.
+        let rows = panel_rows(buffer);
+        let expected: Vec<String> = (0..rows.len())
+            .map(
+                |index| match index.checked_sub(top).and_then(|row| MARK.get(row)) {
+                    Some(line) => format!("{}{line}", " ".repeat(left)),
+                    None => String::new(),
+                },
+            )
+            .collect();
+        assert_eq!(rows, expected);
+
+        // Sitting a hair high: the row an uneven split leaves over falls under
+        // the mark rather than above it.
+        let below = rows.len() - top - MARK.len();
+        assert!(
+            below >= top,
+            "the mark has {top} rows above it and {below} below"
+        );
+
+        // And every cell of it is dim and uncoloured. Colour in this crate says
+        // what state a node is in; the mark is not a node.
+        for (row, line) in MARK.iter().enumerate() {
+            let y = inner.y + u16::try_from(top + row).expect("a panel shorter than u16::MAX");
+            for (column, glyph) in line.chars().enumerate() {
+                let x =
+                    inner.x + u16::try_from(left + column).expect("a panel narrower than u16::MAX");
+                let cell = &buffer[(x, y)];
+                assert_eq!(cell.symbol(), glyph.to_string(), "at ({x}, {y})");
+                assert!(
+                    cell.modifier.contains(Modifier::DIM),
+                    "({x}, {y}) is not dim"
+                );
+                assert_eq!(cell.fg, Color::Reset, "({x}, {y}) carries a colour");
+            }
+        }
+    }
+
+    /// Assert that the panel of `buffer` is the bare border it drew before
+    /// there was a mark: every cell inside it a space, the border whole on all
+    /// four sides, and nothing on its bottom edge.
+    fn assert_bare_panel(buffer: &Buffer) {
+        let panel = areas(buffer.area).panel;
+        let inner = pane_inner(panel);
+        assert!(inner.width > 0 && inner.height > 0, "{inner:?}");
+
+        for y in inner.y..inner.y + inner.height {
+            for x in inner.x..inner.x + inner.width {
+                assert_eq!(
+                    buffer[(x, y)].symbol(),
+                    " ",
+                    "the panel drew something at ({x}, {y})"
+                );
+            }
+        }
+
+        // The border is still there, on all four sides, carrying nothing of its
+        // own: no title, and no scrollback indicator on a panel with nothing to
+        // scroll.
+        for x in panel.x..panel.x + panel.width {
+            assert_ne!(buffer[(x, panel.y)].symbol(), " ", "the top edge at {x}");
+            assert_ne!(
+                buffer[(x, panel.y + panel.height - 1)].symbol(),
+                " ",
+                "the bottom edge at {x}"
+            );
+        }
+        for y in panel.y..panel.y + panel.height {
+            assert_ne!(buffer[(panel.x, y)].symbol(), " ", "the left edge at {y}");
+            assert_ne!(
+                buffer[(panel.x + panel.width - 1, y)].symbol(),
+                " ",
+                "the right edge at {y}"
+            );
+        }
+        let edge = panel_bottom_edge(buffer);
+        assert!(!edge.contains(SCROLLBACK_ARROW), "{edge:?}");
+        assert!(!edge.contains("more"), "{edge:?}");
+    }
+
+    /// Assert that no row of `buffer`'s panel carries any part of [`MARK`],
+    /// however much else is drawn there.
+    fn assert_no_mark(buffer: &Buffer) {
+        for row in panel_rows(buffer) {
+            for line in MARK {
+                assert!(
+                    !row.contains(line.trim()),
+                    "the panel drew {row:?}, which carries the mark"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2638,27 +2787,11 @@ mod tests {
         for _ in 0..2 {
             let buffer = render(&app, WIDTH, FIXTURE_HEIGHT);
 
-            let panel = areas(buffer.area).panel;
-            let inner = pane_inner(panel);
-            assert!(inner.width > 0 && inner.height > 0, "{inner:?}");
-            let art = mark_area(inner).expect("room for the mark at this size");
-            for (index, row) in panel_rows(&buffer).iter().enumerate() {
-                let y = inner.y + u16::try_from(index).expect("a panel shorter than u16::MAX");
-                let expected = if (art.y..art.y + art.height).contains(&y) {
-                    let line = MARK[usize::from(y - art.y)];
-                    format!("{}{line}", " ".repeat(usize::from(art.x - inner.x)))
-                } else {
-                    String::new()
-                };
-                assert_eq!(
-                    row.trim_end(),
-                    expected,
-                    "the panel drew {row:?} as row {index}"
-                );
-            }
+            assert_mark_drawn(&buffer);
             // And its border really is there, on all four sides, carrying
             // nothing of its own: no title, and no scrollback indicator on a
             // panel with nothing to scroll.
+            let panel = areas(buffer.area).panel;
             assert_ne!(buffer[(panel.x, panel.y)].symbol(), " ");
             assert_ne!(
                 buffer[(panel.x + panel.width - 1, panel.y + panel.height - 1)].symbol(),
@@ -2670,6 +2803,121 @@ mod tests {
 
             app.toggle_focus();
         }
+    }
+
+    #[test]
+    fn the_mark_is_drawn_dim_and_uncoloured_in_the_middle_of_a_panel_with_the_room_for_it() {
+        let app = App::from_tree(&fixture::tree());
+
+        let buffer = render(&app, MARK_WIDTH, MARK_HEIGHT);
+
+        // The threshold size itself: the panel's inside is the art plus its
+        // margins and nothing more, so this pins the smallest frame the mark is
+        // drawn on as well as how it is drawn.
+        let inner = panel_area(&buffer);
+        assert_eq!(
+            usize::from(inner.width),
+            mark_width() + 2 * usize::from(MARK_MARGIN)
+        );
+        assert_eq!(
+            usize::from(inner.height),
+            MARK.len() + usize::from(MARK_MARGIN_ROWS)
+        );
+        assert!(
+            mark_area(inner).is_some(),
+            "{inner:?} is the threshold size"
+        );
+        assert_mark_drawn(&buffer);
+    }
+
+    #[test]
+    fn a_panel_a_column_or_a_row_short_of_the_mark_draws_the_bare_border() {
+        let app = App::from_tree(&fixture::tree());
+
+        // A column short, a row short, and short of both: whole or nothing, so
+        // every one of them draws what the panel drew before there was a mark.
+        for (width, height) in [
+            (BELOW_MARK_WIDTH, MARK_HEIGHT),
+            (MARK_WIDTH, BELOW_MARK_HEIGHT),
+            (BELOW_MARK_WIDTH, BELOW_MARK_HEIGHT),
+        ] {
+            let buffer = render(&app, width, height);
+
+            let inner = panel_area(&buffer);
+            assert!(
+                mark_area(inner).is_none(),
+                "{inner:?} of {width}x{height} claims room for the mark"
+            );
+            assert_bare_panel(&buffer);
+        }
+    }
+
+    #[test]
+    fn a_forty_column_terminal_draws_the_empty_panel_border_and_no_mark() {
+        // Tall enough that height is not what stops it: at this width the panel
+        // is twenty columns, and the mark is not drawn narrower to fit.
+        let app = App::from_tree(&fixture::tree());
+
+        let buffer = render(&app, NARROW_WIDTH, FILES_HEIGHT);
+
+        assert_eq!(areas(buffer.area).panel.width, 20);
+        assert_bare_panel(&buffer);
+    }
+
+    #[test]
+    fn an_eighty_column_terminal_draws_the_whole_mark() {
+        // The width the mark had to fit: fifty columns of panel, forty-eight
+        // inside its border.
+        let app = App::from_tree(&fixture::tree());
+
+        let buffer = render(&app, STANDARD_WIDTH, MARK_HEIGHT);
+
+        assert_eq!(areas(buffer.area).panel.width, 50);
+        assert_mark_drawn(&buffer);
+    }
+
+    #[test]
+    fn the_mark_does_not_come_back_once_a_pact_has_started() {
+        // Drawn at a size with all the room in the world for the mark, so what
+        // keeps it off the screen is the account and never the width.
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        assert!(app.has_account());
+        assert!(
+            mark_area(panel_area(&render(&app, WIDTH, FIXTURE_HEIGHT))).is_some(),
+            "this size has room for the mark"
+        );
+
+        // A pact under way with nothing recorded yet is still a pact: the panel
+        // is empty, and empty is not the same as free.
+        assert!(app.panel_lines(at(base, 1)).is_empty());
+        assert_bare_panel(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 1)));
+
+        // With lines in it, the account has the rows and the mark none of them.
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section("crates/engine", base);
+        for line in 0..MANY {
+            account.record(&Activity::Thinking, at(base, line as u64 + 1));
+        }
+        let buffer = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 99));
+        assert!(!panel_rows(&buffer)[0].is_empty());
+        assert_no_mark(&buffer);
+
+        // Scrolled back off the newest line, where the panel is looking at old
+        // rows rather than at none.
+        app.toggle_focus();
+        app.select_first();
+        let scrolled = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 99));
+        assert!(app.panel_lines_below() > 0);
+        assert!(!panel_rows(&scrolled)[0].is_empty());
+        assert_no_mark(&scrolled);
+        app.toggle_focus();
+
+        // And a second pact starts a fresh account with no lines in it, which
+        // is the first case again and still not a screen for the mark.
+        app.start_account(at(base, 100));
+        assert!(app.panel_lines(at(base, 101)).is_empty());
+        assert_bare_panel(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 101)));
     }
 
     #[test]
