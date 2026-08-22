@@ -48,8 +48,23 @@
 //! same single call ends all four ways a run can finish and an un-pact besides,
 //! it runs here on the loop's thread and never on the worker's, and a load that
 //! fails this late keeps the tree already drawn instead of ending the loop.
-//! Nothing else asks for a reload: a file written by something other than
-//! warlock still waits for a relaunch.
+//!
+//! The third and last reason to reload is that the disk moved without anybody
+//! here pressing a key, and it is what [`Watched`] is for. A watcher started
+//! beside the first load reports every path that changes under the tree's root
+//! and at `.warlock/pacts.toml`; the loop drains it once a round, holds each
+//! path against the directories the last successful load produced — the walk is
+//! the whole filter, so a `cargo build` writing into a directory no walk
+//! produced costs one comparison a path and nothing else — and asks a
+//! [`WatchPolicy`] whether the tree is owed a reload yet. When it is, the same
+//! [`reload_tree`] runs, on this thread, and the tree it hands back becomes the
+//! filter the next round holds paths against. So a file saved in another window
+//! turns its directory yellow with no keystroke instead of waiting for a
+//! relaunch. Two things this reason gives way to: a pact in flight, whose
+//! documents set off events the run's own end-of-run reload already answers, so
+//! the trigger is remembered and nothing is read twice; and warlock itself,
+//! since a watcher that will not start is one line on the footer rather than a
+//! way out of [`run`] — warlock with no live updates is warlock as it was.
 //!
 //! A run that takes minutes has to be stoppable, and there are two ways to stop
 //! one, which this file keeps apart on purpose. Esc *cancels*: the descent ends
@@ -82,12 +97,12 @@ use ratatui::crossterm::terminal::{
 };
 use warlock_engine::{
     Agent, LoadError, LoadProblem, Loaded, Manifest, ManifestError, NodeState, PactFailure,
-    PactObserver, PactProblem, PactedSubtree, Pacting, load_tree, pact_subtree, repository_root,
-    to_manifest_path, unpact_subtree,
+    PactObserver, PactProblem, PactedSubtree, Pacting, Tree, load_tree, manifest_path,
+    pact_subtree, repository_root, to_manifest_path, unpact_subtree,
 };
 use warlock_tui::{
-    Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactToggle, Section, draw,
-    panel_height, reseat_on, tree_height,
+    Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactToggle, Section, Watch,
+    WatchPolicy, Watching, draw, panel_height, reseat_on, tree_height,
 };
 
 /// How long the loop waits for a keystroke before going round again.
@@ -139,6 +154,21 @@ const PACT_CANCELLED: &str = "the pact was cancelled; what it finished first is 
 /// because the run did not fail.
 const NOT_REFRESHED: &str = "the view could not be refreshed and is the tree as it was";
 
+/// What the footer says when no watcher could be started, ahead of the
+/// operating system's own reason for it.
+///
+/// It says what the reader lost, which is the noticing and nothing else: every
+/// key still works, a pact still re-reads the tree when its run ends, and the
+/// rows under this line are the ones the load produced — true, and true for as
+/// long as nothing else writes to the repository. What will not happen is a row
+/// appearing because somebody saved a file in another window.
+///
+/// Worded as a fact about this session rather than as a failure, because
+/// nothing the reader asked for failed, and said once when the watcher is asked
+/// for rather than on every frame: a line that is re-set ten times a second is a
+/// line that talks over everything else the footer has to say.
+const NOT_WATCHING: &str = "live updates are off; the tree is the one loaded at startup";
+
 fn main() -> ExitCode {
     // Before anything touches the terminal: a panic during setup has to leave
     // the terminal usable too.
@@ -182,8 +212,14 @@ fn main() -> ExitCode {
 /// keystroke pressed with nothing running. Quitting while a pact runs returns
 /// from here without joining the worker — see [`spawn_pact`] for why that is
 /// safe — and the guard restores the terminal on the way out as it always did.
+///
+/// The round has a third thing in it now: what the disk did while the loop was
+/// waiting on a keystroke. [`Watched`] is drained and asked once a round, after
+/// a run that ended has had its own reload, and a watcher that could not be
+/// started is a line put on the footer here — once, before the loop — and never
+/// an error out of this function.
 fn run() -> Result<(), Error> {
-    let (mut app, scope) = load_app()?;
+    let (mut app, scope, tree) = load_app()?;
     // Loaded before the terminal is touched, for the same reason the tree is:
     // a manifest that will not parse should say so on the normal screen. This
     // is a second read of the file the loader already parsed, which is cheap
@@ -194,6 +230,17 @@ fn run() -> Result<(), Error> {
     // a command line and a timeout rather than a connection: nothing is spawned
     // until a pact actually asks for a pass.
     let agent = ClaudeAgent::new();
+    // Asked for once, over the tree the load just produced, and kept for as
+    // long as warlock runs — dropping it stops the watch. Whether it was
+    // granted is a fact for the footer and nothing more, which is why this is
+    // not a `?`: warlock with no live updates is warlock as it was.
+    let mut watched = Watched::start(&scope, &tree);
+    // Said here rather than in the loop, so it is one line said once and not a
+    // line re-set ten times a second. It gives way to anything the app already
+    // has to say, exactly as the reload's own line does — see [`note`].
+    if let Some(line) = watched.off_note() {
+        note(&mut app, line);
+    }
     let mut guard = TerminalGuard::enter()?;
     // The pact running somewhere else, when one is: everything this thread
     // needs to keep about a run it is not performing. `None` is the ordinary
@@ -357,18 +404,35 @@ fn run() -> Result<(), Error> {
             }
         }
 
+        // The clock is read here rather than inside the two calls below for the
+        // same reason it is read before the draw: this file owns the clock and
+        // everything under it is a function of the instant it is handed. What
+        // that instant means is when the events being drained now landed on
+        // screen, which is within one `POLL_INTERVAL` of when they were sent.
+        let now = Instant::now();
+
+        // Read before the drain, because the drain is what ends a run: a pact
+        // that is `Some` here and `None` below finished in this round, and its
+        // own reload has already read the tree.
+        let running = pact.is_some();
         // Every frame, whether or not a key was pressed: this is the only place
         // anything the worker says reaches the screen, and it has to keep up
-        // with a thread that is not waiting for it. It is also the only place
-        // the tree is re-read after startup, which is why the scope the app was
-        // loaded at is handed to it — see [`reload_tree`].
-        //
-        // The clock is read here rather than down there for the same reason it
-        // is read before the draw: this file owns the clock and everything
-        // below it is a function of the instant it is handed. What that instant
-        // means is when the events being drained now landed on screen, which is
-        // within one `POLL_INTERVAL` of when the worker sent them.
-        apply_progress(&mut pact, &mut app, &mut manifest, &scope, Instant::now());
+        // with a thread that is not waiting for it. The scope the app was
+        // loaded at is handed to it because the end of a run re-reads the tree
+        // — see [`reload_tree`].
+        let reloaded = apply_progress(&mut pact, &mut app, &mut manifest, &scope, now);
+        if running && pact.is_none() {
+            // The run's documents are exactly the sort of thing the watcher
+            // reports, so the events it set off are already sitting in the
+            // policy. They are answered by the reload that just happened rather
+            // than by one of their own, and the tree it read becomes the filter.
+            watched.caught_up(reloaded.as_ref(), now);
+        }
+        // And then what everything else did to the disk. Nothing is read again
+        // while a pact is in flight — the trigger keeps until the run's own
+        // reload above — and nothing at all is read when the disk has been
+        // still, which is almost every round.
+        watched.round(&mut app, &scope, pact.is_some(), now);
     }
 }
 
@@ -766,6 +830,11 @@ fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PactToggle>
 /// lands on top of the arm's result rather than under it, and a reload that
 /// fails leaves that result standing.
 ///
+/// What comes back is the tree that reload read, when a run ended and the load
+/// succeeded, and `None` otherwise: it is the whole of what the caller needs to
+/// keep the watcher's filter on the tree that is now on screen, since this is
+/// one of the two places the tree is ever re-read. See [`Watched::caught_up`].
+///
 /// `now` is the caller's clock, and this function reads none of its own: every
 /// event drained here is filed under it, so a run is drivable from a base
 /// instant in a test exactly as the account below it is. All the events of one
@@ -778,10 +847,10 @@ fn apply_progress(
     manifest: &mut Manifest,
     scope: &Scope,
     now: Instant,
-) {
-    let Some(running) = pact.as_ref() else {
-        return;
-    };
+) -> Option<Tree> {
+    // No run, nothing drained, nothing reloaded — which is what almost every
+    // frame of warlock's life does here.
+    let running = pact.as_ref()?;
 
     let outcome = loop {
         match running.events.try_recv() {
@@ -821,7 +890,7 @@ fn apply_progress(
             }
             Ok(PactEvent::Finished(outcome)) => break Some(outcome),
             // Still running, and nothing new to say.
-            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => break None,
         }
     };
@@ -891,7 +960,7 @@ fn apply_progress(
 
     // The run is over and everything it recorded is on disk, so the rows on
     // screen are one load out of date whichever arm above ran.
-    reload_tree(app, scope);
+    reload_tree(app, scope)
 }
 
 /// The file each pacted directory's document is written to, as the engine writes
@@ -1054,8 +1123,15 @@ fn section_label(root: &Path, directory: &Path) -> String {
 /// subtree the reader asked for is worth more than how the redraw after it went,
 /// and the footer is one line. Precedence, not merging: two sentences joined by
 /// a semicolon would be a line nobody reads to the end of.
-fn reload_tree(app: &mut App, scope: &Scope) {
-    let note = match load_tree(&scope.root) {
+///
+/// The tree that was read comes back with it, and `None` when none was. It is
+/// what the watcher's filter is rebuilt from — the directories of the walk that
+/// produced what is now on screen — and it is handed back rather than looked up
+/// again because this function is the only thing that has it. Nothing else about
+/// the view is in it: the re-seating above is the whole of the restoration, here
+/// as it is after a pact.
+fn reload_tree(app: &mut App, scope: &Scope) -> Option<Tree> {
+    match load_tree(&scope.root) {
         Ok(Loaded { tree, problems }) => {
             *app = reseat_on(app, &tree).with_scope(&scope.repo_root, tree.root_path());
             // The same count, in the same words, as the startup load that
@@ -1063,21 +1139,37 @@ fn reload_tree(app: &mut App, scope: &Scope) {
             // and the rest counted. A node the engine could not hash is
             // already stale on screen, so this line is the only place the
             // number of them appears.
-            Error::from_problems(&problems).map(|counted| counted.to_string())
+            if let Some(counted) = Error::from_problems(&problems) {
+                note(app, counted.to_string());
+            }
+            Some(tree)
         }
         // Flattened for the same reason `Error` flattens it: a manifest that
         // will not parse arrives as the TOML parser's several lines, and the
         // footer is one.
-        Err(source) => Some(format!(
-            "{NOT_REFRESHED}: {}",
-            one_line(&source.to_string())
-        )),
-    };
+        Err(source) => {
+            note(
+                app,
+                format!("{NOT_REFRESHED}: {}", one_line(&source.to_string())),
+            );
+            None
+        }
+    }
+}
 
-    if let Some(note) = note
-        && app.message().is_none()
-    {
-        app.set_message(note);
+/// Say `line` on the footer, unless something is already saying something
+/// there.
+///
+/// The footer's precedence in one place, because there are now two lines that
+/// have it: how the redraw went ([`reload_tree`]) and whether the disk is being
+/// watched at all ([`NOT_WATCHING`]). Both give way to whatever else is on the
+/// line, which in practice means a pact's own message: what a run made of the
+/// subtree the reader asked for is the news, and how warlock is keeping itself
+/// up to date is housekeeping. Precedence, not merging — two sentences joined by
+/// a semicolon would be a line nobody reads to the end of.
+fn note(app: &mut App, line: impl Into<String>) {
+    if app.message().is_none() {
+        app.set_message(line);
     }
 }
 
@@ -1095,6 +1187,125 @@ struct Scope {
     root: PathBuf,
     /// The repository root above `root`: the nearest ancestor with a `.git/`.
     repo_root: PathBuf,
+}
+
+/// Everything the loop keeps about the disk moving under it.
+///
+/// Three things, and no thread of its own: a [`Watching`] — which is a watcher
+/// or the reason there is none — the [`WatchPolicy`] that decides what the paths
+/// it reports are worth, and the manifest's path, which is the one path that
+/// counts without any walk ever having produced it.
+///
+/// Nothing here decides *which* paths matter or *when* to act on them; both of
+/// those are the library's questions — [`WatchPolicy`] answers them as values,
+/// with no clock and no disk. What this type adds is the one thing that has to
+/// happen on
+/// this thread: reading the tree again, through the same [`reload_tree`] a pact
+/// ends with, and handing the tree it read back to the policy so the next
+/// round's filter is the walk that produced what is on screen.
+struct Watched {
+    /// The watcher, or the reason the operating system would not start one.
+    watching: Watching,
+    /// The filter and the timing rules, over the last successful load's walk.
+    policy: WatchPolicy,
+    /// `.warlock/pacts.toml`, resolved once. It is hidden, so no walk produces
+    /// it and [`NodeSet`](warlock_tui::NodeSet) rejects it — and yet a pact
+    /// granted or dropped in another window changes the colour of every row on
+    /// screen while nothing inside the tree has moved. So it is compared for by
+    /// name here, which is the only rule of this file's own about a path, and it
+    /// is a path rather than a pattern.
+    manifest: PathBuf,
+}
+
+impl Watched {
+    /// Start watching `scope`, filtering against the walk `tree` came from.
+    ///
+    /// The watcher is over [`Scope::root`] — the path the load came back rooted
+    /// at, so warlock run in a subdirectory hears about that subdirectory and
+    /// not about a build in a sibling crate — and over the manifest under
+    /// [`Scope::repo_root`]. Whether it started is not asked here: the answer is
+    /// kept as a value and said once, on the footer, by whoever is drawing.
+    fn start(scope: &Scope, tree: &Tree) -> Self {
+        Self {
+            watching: Watch::start(&scope.root, &scope.repo_root),
+            policy: WatchPolicy::new(tree),
+            manifest: manifest_path(&scope.repo_root),
+        }
+    }
+
+    /// The one line the footer owes when nothing is being watched, or `None`
+    /// when something is.
+    ///
+    /// Asked once, before the loop starts. It is a question about how warlock
+    /// was started rather than about anything happening now, so asking it every
+    /// frame would be re-answering a fact that cannot change and re-writing a
+    /// line the reader has already read past.
+    fn off_note(&self) -> Option<String> {
+        match &self.watching {
+            Watching::Live(_) => None,
+            // Flattened for the same reason the reload's line is: what the
+            // operating system says can run to several lines, and the footer is
+            // one.
+            Watching::Off(reason) => Some(format!("{NOT_WATCHING}: {}", one_line(reason))),
+        }
+    }
+
+    /// One round of the event loop's watching: hear what the disk did, and read
+    /// the tree again if that is now owed. Answers whether it read it.
+    ///
+    /// Every path drained is offered to the policy, which rejects the ones no
+    /// walk produced — the whole of the cost of a `cargo build` under a watched
+    /// root, thousands of paths compared against a set and dropped. The manifest
+    /// is the exception it cannot see for itself, and it is the only one.
+    ///
+    /// `in_flight` is a pact running somewhere else, and it does not stop the
+    /// draining, only the reloading: the events a run's own documents set off
+    /// are remembered by the policy and answered by the reload at the end of the
+    /// run ([`caught_up`](Watched::caught_up)), so a run whose documents moved
+    /// the disk reads the tree once, at the end, rather than twice. Reloading
+    /// under a run would also be reloading a tree the run is still writing to.
+    fn round(&mut self, app: &mut App, scope: &Scope, in_flight: bool, now: Instant) -> bool {
+        if let Watching::Live(watch) = &mut self.watching {
+            for path in watch.drain() {
+                if !self.policy.saw(&path, now) && path == self.manifest {
+                    self.policy.accepted(now);
+                }
+            }
+        }
+
+        if in_flight || !self.policy.due(now) {
+            return false;
+        }
+        let tree = reload_tree(app, scope);
+        // The clock is read again, and this is the one place in the loop that
+        // does: everything else in a round is over in microseconds, while the
+        // load between these two lines is a walk and a hash per pacted subtree.
+        // What the policy measures from here is the quiet period owed to
+        // anything that moved *during* that load, and measuring it from before
+        // the load would be starting the wait before the events it is waiting
+        // for could arrive.
+        self.caught_up(tree.as_ref(), Instant::now());
+        true
+    }
+
+    /// Somebody else read the tree, at `at`: the reload at the end of a run.
+    ///
+    /// Two things, and the second is why this exists at all. The policy is told
+    /// that a reload happened, which discharges whatever it was owed — an event
+    /// from a pact's own documents is answered by the reload that came after it
+    /// — and it is re-seated on the tree that reload produced, so the next
+    /// round's filter is the walk behind what is on screen rather than the walk
+    /// behind what used to be. A load that failed hands over `None`: the burst
+    /// is still discharged, because the tree was read and this is as fresh as
+    /// the view is going to get, and the filter stays on the last walk that
+    /// worked, which is the one the rows still come from.
+    fn caught_up(&mut self, tree: Option<&Tree>, at: Instant) {
+        self.policy.reload_started();
+        if let Some(tree) = tree {
+            self.policy.follow(tree);
+        }
+        self.policy.reload_finished(at);
+    }
 }
 
 /// What one press of the pact key came to, once the manifest it produced is on
@@ -1269,8 +1480,13 @@ fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
     }
 }
 
-/// The app state for the directory warlock was invoked from, and the
-/// [`Scope`] it was loaded at.
+/// The app state for the directory warlock was invoked from, the [`Scope`] it
+/// was loaded at, and the tree it was built from.
+///
+/// The tree comes back as well as the app because the app is not a tree: its
+/// rows are filtered by what the reader has toggled, and the directories one
+/// walk produced are what the watcher's filter is ([`Watched`]). Handing it over
+/// here is what keeps that filter and the rows on screen born of the same walk.
 ///
 /// The two paths are handed back rather than dropped once the header is built.
 /// The repository root is where the manifest lives: every pact written during
@@ -1294,7 +1510,7 @@ fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
 /// one: mid-session, with a tree already on screen and a run's documents
 /// already on disk, the same problems are taken rather than fatal — see
 /// [`reload_tree`].
-fn load_app() -> Result<(App, Scope), Error> {
+fn load_app() -> Result<(App, Scope, Tree), Error> {
     let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
     let Loaded { tree, problems } =
         load_tree(&working_dir).map_err(|source| Error::Load { source })?;
@@ -1313,7 +1529,7 @@ fn load_app() -> Result<(App, Scope), Error> {
         root: tree.root_path().to_path_buf(),
         repo_root,
     };
-    Ok((app, scope))
+    Ok((app, scope, tree))
 }
 
 /// Everything that can stop warlock showing a tree.
@@ -4627,6 +4843,288 @@ mod tests {
                 !message.contains('\n'),
                 "a footer line that wraps is a footer line that hides a row: {message}"
             );
+        }
+
+        /// What the loop does when the disk moves under it: the reload a
+        /// watcher earns, the one it holds back while a pact is running, and
+        /// the one line it says when there is no watcher at all.
+        ///
+        /// No real watcher in any of these, and nothing waits on one. Which
+        /// paths are Warlock's business and when a burst has settled are
+        /// `watch.rs`'s two questions, answered there against instants nobody
+        /// had to live through; what is left for here is the loop's own half —
+        /// that a reload really happens, that it leaves the reader where they
+        /// were, and that a run in flight defers it. So the policy is told an
+        /// event was accepted rather than being handed one by an operating
+        /// system, and [`Watching::Off`] stands in for the half that talks to
+        /// one.
+        mod watching {
+            use std::time::{Duration, Instant};
+
+            use warlock_engine::manifest_path;
+            use warlock_tui::{QUIET_PERIOD, RELOAD_CEILING, WatchPolicy, Watching};
+
+            use super::super::super::{NOT_WATCHING, POLL_INTERVAL, Watched, note};
+            use super::{
+                CancelGuard, Canned, Loaded, Manifest, NodeState, PactEvent, Running, Scope,
+                Toggled, Unwatched, apply_progress, apply_toggle, load, load_tree, mpsc,
+                one_crate_to_load, state_of, toggle,
+            };
+
+            /// A [`Watched`] with no watcher behind it, filtering against the
+            /// tree that is on disk at `scope`.
+            ///
+            /// [`Watching::Off`] rather than a real watcher, so nothing here
+            /// turns on an operating system deciding when to mention a write:
+            /// what a drain would have handed the policy is handed to it
+            /// directly instead, which is the same call the drain makes.
+            fn unwatched(scope: &Scope) -> Watched {
+                let Loaded { tree, .. } =
+                    load_tree(&scope.root).expect("a scratch repository with a `.git/` loads");
+                Watched {
+                    watching: Watching::Off("no watcher in a test".to_owned()),
+                    policy: WatchPolicy::new(&tree),
+                    manifest: manifest_path(&scope.repo_root),
+                }
+            }
+
+            #[test]
+            fn a_watcher_driven_reload_leaves_the_reader_exactly_where_they_were() {
+                // The same five things a post-pact reload keeps, kept by the
+                // same one reload: nobody pressed anything this time, so a
+                // tree that threw the reader back to the top here would do it
+                // while they were reading, which is worse than a tree that
+                // never updates at all.
+                let scratch = one_crate_to_load("watch-place");
+                scratch.write("crates/engine/tests/one.rs", "#[test] fn one() {}\n");
+                scratch.write("crates/tui/src/main.rs", "fn main() {}\n");
+                scratch.write("docs/adr/one.md", "# One\n");
+
+                // A pact from before this reader sat down, so the pacted-only
+                // filter has something to keep and the reload has a colour to
+                // change.
+                let agent = Canned::new(&scratch, []);
+                apply_toggle(
+                    &Manifest::new(),
+                    &scratch.root,
+                    &toggle(&scratch, "crates", true),
+                    &agent,
+                    &mut Unwatched,
+                )
+                .expect("a subtree that walks and a manifest that writes");
+
+                let (mut app, scope) = load(&scratch);
+                let mut watched = unwatched(&scope);
+                app.set_viewport_height(4);
+                app.toggle_files();
+                app.toggle_pacted_only();
+                app = app.with_collapsed([scratch.path("crates/tui")]);
+                for _ in 0..5 {
+                    app.select_next();
+                }
+
+                let selected = app
+                    .selected_row()
+                    .map(|row| row.path.clone())
+                    .expect("a row is selected");
+                let collapsed = app.collapsed().clone();
+                let offset = app.scroll_offset();
+                let header = app.header().to_owned();
+                assert!(offset > 0, "the reader scrolled off the first row");
+                assert_eq!(
+                    state_of(&app, &scratch.path("crates/engine")),
+                    Some(NodeState::PactedFresh),
+                    "the reader is looking at a subtree that was fresh when they sat down"
+                );
+
+                // Somebody else saves a file in a directory the last walk
+                // produced. Nothing is pressed here and nothing is pressed
+                // below: what stands in for the drain is the policy being told
+                // the path was accepted.
+                scratch.write("crates/engine/src/extra.rs", "//! Late arrival.\n");
+                let saved_at = Instant::now();
+                watched.policy.accepted(saved_at);
+
+                assert!(
+                    !watched.round(&mut app, &scope, false, saved_at),
+                    "read the tree before the disk had gone quiet"
+                );
+                assert!(
+                    watched.round(&mut app, &scope, false, saved_at + QUIET_PERIOD),
+                    "the disk went quiet and the tree was never read"
+                );
+
+                assert_eq!(
+                    state_of(&app, &scratch.path("crates/engine")),
+                    Some(NodeState::PactedStale),
+                    "a directory that went stale under the reader is still drawn green"
+                );
+                assert_eq!(
+                    app.selected_row().map(|row| row.path.clone()),
+                    Some(selected),
+                    "the selection moved"
+                );
+                assert_eq!(app.collapsed(), &collapsed, "the collapsed set moved");
+                assert!(app.pacted_only(), "the filter was dropped");
+                assert!(app.show_files(), "the file toggle was dropped");
+                assert_eq!(app.scroll_offset(), offset, "the window moved");
+                assert_eq!(app.header(), header, "the header was rewritten");
+                assert_eq!(app.message(), None, "and nothing went wrong to report");
+            }
+
+            #[test]
+            fn a_trigger_during_a_pact_waits_for_the_runs_own_reload() {
+                // A run writes documents, the documents are events, and the
+                // run ends by re-reading the tree anyway. So the trigger is
+                // remembered rather than acted on: one reload at the end, not
+                // one during the run and another after it — and none at all
+                // over a tree the run is still writing into.
+
+                /// How many quiet periods of rounds the run is given: enough
+                /// that the last of them is past the ceiling as well, so what
+                /// they prove is that neither deadline fires under a run.
+                const ROUNDS: u32 = 12;
+
+                let scratch = one_crate_to_load("watch-in-flight");
+                let (mut app, scope) = load(&scratch);
+                let mut manifest = Manifest::new();
+                let mut watched = unwatched(&scope);
+
+                // What the run put on disk while it was running.
+                scratch.write("docs/adr/one.md", "# One\n");
+                let base = Instant::now();
+                watched.policy.accepted(base);
+
+                // Round after round with the pact in flight, long past the
+                // quiet period and past the ceiling too: neither deadline is a
+                // reason to read a tree out from under a run.
+                for round in 1..=ROUNDS {
+                    let at = base + QUIET_PERIOD * round;
+                    assert!(
+                        !watched.round(&mut app, &scope, true, at),
+                        "the tree was read under a run in flight, {at:?} in"
+                    );
+                }
+                assert!(
+                    QUIET_PERIOD * ROUNDS > RELOAD_CEILING,
+                    "the rounds above stopped short of the ceiling, so they proved nothing about it"
+                );
+                assert!(
+                    state_of(&app, &scratch.path("docs")).is_none(),
+                    "the tree moved while the run was still going"
+                );
+                assert!(
+                    watched.policy.owes_reload(),
+                    "the trigger was dropped rather than remembered"
+                );
+
+                // The run ends the way every run ends — one reload at the
+                // bottom of `apply_progress` — and the tree it read is what
+                // the loop hands back to the policy.
+                let (events, received) = mpsc::channel();
+                let mut pact = Some(Running {
+                    events: received,
+                    cancel: CancelGuard::new(),
+                    path: scratch.path("crates/engine"),
+                    before: app.clone(),
+                });
+                events
+                    .send(PactEvent::Finished(Ok(Toggled {
+                        manifest: manifest.clone(),
+                        granted: true,
+                        message: None,
+                        refusals: Vec::new(),
+                    })))
+                    .expect("the loop is still listening");
+                let ended = base + Duration::from_secs(3);
+                let reloaded = apply_progress(&mut pact, &mut app, &mut manifest, &scope, ended);
+                assert!(pact.is_none(), "the run is over");
+                assert!(reloaded.is_some(), "the run's own reload read the tree");
+                watched.caught_up(reloaded.as_ref(), ended);
+
+                assert!(
+                    state_of(&app, &scratch.path("docs")).is_some(),
+                    "the run's reload did not bring back what moved during it"
+                );
+                assert!(
+                    !watched.policy.owes_reload(),
+                    "the trigger outlived the reload that answered it"
+                );
+                assert!(
+                    !watched.round(
+                        &mut app,
+                        &scope,
+                        false,
+                        ended + RELOAD_CEILING + QUIET_PERIOD
+                    ),
+                    "the run reloaded twice: once at its end and once for the events it caused"
+                );
+            }
+
+            #[test]
+            fn the_line_saying_live_updates_are_off_is_said_once_and_gives_way() {
+                // A watcher that would not start costs the noticing and
+                // nothing else, so it is one line, said where the watcher was
+                // asked for, and it never talks over anything the reader
+                // actually asked for.
+                const REFUSED: &str = "the manifest would not save";
+
+                let scratch = one_crate_to_load("watch-off");
+                let (mut app, scope) = load(&scratch);
+                let mut watched = unwatched(&scope);
+
+                let line = watched
+                    .off_note()
+                    .expect("a watcher that would not start says so");
+                assert!(
+                    line.starts_with(NOT_WATCHING),
+                    "the footer says nothing about live updates: {line}"
+                );
+                assert!(
+                    line.len() > NOT_WATCHING.len() + 2,
+                    "the footer does not say why: {line}"
+                );
+                assert!(
+                    !line.contains('\n'),
+                    "a footer line that wraps is a footer line that hides a row: {line}"
+                );
+
+                // Said once, before the first frame, into a footer nobody else
+                // was using.
+                note(&mut app, line.clone());
+                assert_eq!(app.message(), Some(line.as_str()));
+
+                // And then a pact has something to say, which is the news: the
+                // rounds after it are rounds of a loop that is not watching
+                // anything, and not one of them says this again.
+                app.set_message(REFUSED);
+                let base = Instant::now();
+                for round in 0..20 {
+                    watched.round(&mut app, &scope, false, base + POLL_INTERVAL * round);
+                }
+                assert_eq!(
+                    app.message(),
+                    Some(REFUSED),
+                    "the line said itself again, over a run's own message"
+                );
+                note(&mut app, line);
+                assert_eq!(
+                    app.message(),
+                    Some(REFUSED),
+                    "the footer's precedence is the other way round for this line"
+                );
+
+                // And a watcher that did start says nothing at all. A real one
+                // this time, over the scratch repository — started and asked,
+                // with nothing waited for, since when this operating system
+                // reports a write is not what is being asserted.
+                let Loaded { tree, .. } = load_tree(&scope.root).expect("the scratch repository");
+                assert_eq!(
+                    Watched::start(&scope, &tree).off_note(),
+                    None,
+                    "a working watcher put a line on the footer"
+                );
+            }
         }
     }
 }
