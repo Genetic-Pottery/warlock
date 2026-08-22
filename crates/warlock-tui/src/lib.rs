@@ -99,8 +99,14 @@ pub use claude::ClaudeAgent;
 pub use claude::INVOCATION_TIMEOUT;
 /// The colour a node state is drawn in.
 pub use colour::colour_for;
+/// What is drawn where a pointer landed: the footer, a border, the tree's
+/// header, a row of the tree's window, a line of the panel's.
+pub use ui::Hit;
 /// Draw one frame of the app.
 pub use ui::draw;
+/// Which part of the frame a screen point falls on, measured off the layout the
+/// frame is cut by.
+pub use ui::hit_test;
 /// How many lines of the pact's account a terminal of a given size has room for
 /// in the panel.
 pub use ui::panel_height;

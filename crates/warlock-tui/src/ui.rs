@@ -28,12 +28,21 @@
 //! see [`draw_tree`]. Which rows exist at all is the app's too: collapsing a
 //! directory takes its descendants out of [`App::rows`], and whatever rows the
 //! app holds are the rows drawn — this module only says which of them is
-//! collapsed, with a marker on the line. There is deliberately no mouse.
+//! collapsed, with a marker on the line.
+//!
+//! A pointer is answered by measuring, not by remembering: [`hit_test`] takes a
+//! screen column and row and says which of these areas they landed on — the
+//! footer, a border, the header, a row of the tree's window, a line of the
+//! panel's — off the very [`areas`] call the frame is cut by, so a click lands
+//! on what the reader saw there. It is a function of three numbers and knows
+//! nothing about the tree, the selection or the window's contents: what a row
+//! offset means is the app's to say. Nothing here follows the pointer around,
+//! and there is deliberately no hover.
 
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect, Size};
+use ratatui::layout::{Constraint, Layout, Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
@@ -356,6 +365,116 @@ pub fn tree_height(size: Size) -> u16 {
 #[must_use]
 pub fn panel_height(size: Size) -> u16 {
     pane_inner(areas(Rect::from(size)).panel).height
+}
+
+/// What is drawn at the point [`hit_test`] was asked about.
+///
+/// One variant per thing a pointer can be over, because the answers are acted on
+/// differently and a caller that had to work out which was which from a pair of
+/// numbers would be doing the layout's arithmetic a second time. The two that
+/// carry an offset carry it from the top of their own window, not from the top
+/// of the screen: what is *at* that offset is the app's business, since the app
+/// owns both windows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Hit {
+    /// A point warlock does not draw: past the terminal's last column or last
+    /// row. Nothing reports such a point, and a total answer beats an assumption
+    /// that nothing ever will.
+    Offscreen,
+    /// The footer, whichever of its three lines. It is nobody's pane and takes
+    /// no focus.
+    Footer,
+    /// A pane's border, either pane's, corners included — the columns and rows
+    /// between the two panes' insides, which belong to neither.
+    Border,
+    /// The one line naming the tree, inside the tree pane's border and above its
+    /// rows.
+    TreeHeader,
+    /// A row of the tree's window: `offset` rows below the first one on screen.
+    ///
+    /// A window offset and not a row of the tree. The app adds
+    /// [`App::scroll_offset`] to get the row it means, and the app is also the
+    /// one that knows whether it has that many rows: a window can be taller than
+    /// the tree in it, and this says where the pointer is rather than what is
+    /// under it.
+    TreeRow {
+        /// How many rows below the top of the tree's window the point is.
+        offset: u16,
+    },
+    /// Inside the tree pane, below every row the window has room for.
+    ///
+    /// Asked of the layout rather than assumed away: the rows currently take
+    /// everything the header leaves, so nothing lands here today, and a pane
+    /// that ever grew a line of its own along the bottom would put points here
+    /// rather than quietly hand out a row offset the tree's window does not
+    /// have.
+    TreeBelowRows,
+    /// A line of the panel's window: `offset` lines below the first one on
+    /// screen. The whole inside of the panel answers this, drawn on or not — the
+    /// panel has no selection, so a point in it is a point in the panel.
+    PanelLine {
+        /// How many lines below the top of the panel's window the point is.
+        offset: u16,
+    },
+}
+
+/// What is drawn at column `column`, row `row` of a terminal of `size`.
+///
+/// The one place a screen point is turned into something warlock has a name
+/// for, and the mouse's counterpart to [`tree_height`] and [`panel_height`]:
+/// measured off the same [`areas`] call [`draw`] cuts the frame by, so what a
+/// click lands on is what the reader saw at that point rather than what a second
+/// opinion about the layout thinks is there.
+///
+/// A function of three numbers. No frame, no app state, no terminal — which is
+/// what lets the event loop's answer to a click be tested with nothing attached
+/// to stdout, and what keeps this file from needing to know what a row of the
+/// tree is.
+///
+/// Every case is asked of a [`Rect`] the layout produced, so a terminal too
+/// short for a tree row, too short for a header, or too short for anything but a
+/// footer answers what it has rather than underflowing its way to a row that is
+/// not there.
+#[must_use]
+pub fn hit_test(column: u16, row: u16, size: Size) -> Hit {
+    let point = Position::new(column, row);
+    let screen = Rect::from(size);
+    if !screen.contains(point) {
+        return Hit::Offscreen;
+    }
+
+    let Areas {
+        panel,
+        tree,
+        footer,
+    } = areas(screen);
+    if footer.contains(point) {
+        return Hit::Footer;
+    }
+
+    let inside = pane_inner(panel);
+    if inside.contains(point) {
+        return Hit::PanelLine {
+            offset: row.saturating_sub(inside.y),
+        };
+    }
+
+    let inside = pane_inner(tree);
+    if inside.contains(point) {
+        let rows = tree_rows_area(tree);
+        if row < rows.y {
+            return Hit::TreeHeader;
+        }
+        return if rows.contains(point) {
+            Hit::TreeRow {
+                offset: row.saturating_sub(rows.y),
+            }
+        } else {
+            Hit::TreeBelowRows
+        };
+    }
+
+    Hit::Border
 }
 
 /// The border a pane is drawn in, lit if it has the focus and dim if it has not.
@@ -774,10 +893,10 @@ mod tests {
     use warlock_engine::NodeState;
 
     use super::{
-        BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, GUIDE, HEADER_HEIGHT, INDENT, KEYS, LIVE_KEY,
-        NO_MARKER, PACTING_KEYS, PANEL_INDENT, SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH,
-        TREE_PERCENT, areas, display_width, draw, pane_inner, panel_height, tree_height,
-        tree_rows_area, tree_width, truncated,
+        BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, GUIDE, HEADER_HEIGHT, Hit, INDENT, KEYS,
+        LIVE_KEY, NO_MARKER, PACTING_KEYS, PANEL_INDENT, SCROLLBACK_ARROW, SELECTION_MARKER,
+        TREE_MIN_WIDTH, TREE_PERCENT, areas, display_width, draw, hit_test, pane_inner,
+        panel_height, tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::account::Outcome;
     use crate::app::{App, Row};
@@ -2082,6 +2201,209 @@ mod tests {
                 tree <= TREE_MIN_WIDTH.max(width * TREE_PERCENT / 100),
                 "the tree column took {tree} of {width}"
             );
+        }
+    }
+
+    #[test]
+    fn a_point_is_answered_with_whatever_the_frame_draws_at_it() {
+        let size = Size::new(WIDTH, HEIGHT);
+        let panes = areas(Rect::from(size));
+        let hit = |x, y| hit_test(x, y, size);
+
+        // The footer runs the full width, all three of its lines, and belongs
+        // to neither pane.
+        for y in panes.footer.y..panes.footer.y + panes.footer.height {
+            for x in [0, WIDTH / 2, WIDTH - 1] {
+                assert_eq!(hit(x, y), Hit::Footer, "at ({x}, {y})");
+            }
+        }
+
+        // Every edge of both panes is border, corners included — the column
+        // between the two panes is two borders and no pane's inside.
+        for pane in [panes.panel, panes.tree] {
+            for y in pane.y..pane.y + pane.height {
+                for x in [pane.x, pane.x + pane.width - 1] {
+                    assert_eq!(hit(x, y), Hit::Border, "at ({x}, {y})");
+                }
+            }
+            for x in pane.x..pane.x + pane.width {
+                for y in [pane.y, pane.y + pane.height - 1] {
+                    assert_eq!(hit(x, y), Hit::Border, "at ({x}, {y})");
+                }
+            }
+        }
+
+        // Inside the tree pane: one header line, and a row of the window per
+        // row under it, counted from the top of the window rather than of the
+        // screen.
+        let inside = pane_inner(panes.tree);
+        let rows = tree_rows_area(panes.tree);
+        assert_eq!(rows.height, tree_height(size));
+        for x in inside.x..inside.x + inside.width {
+            assert_eq!(hit(x, inside.y), Hit::TreeHeader, "at column {x}");
+        }
+        for offset in 0..rows.height {
+            for x in [rows.x, rows.x + rows.width - 1] {
+                assert_eq!(hit(x, rows.y + offset), Hit::TreeRow { offset });
+            }
+        }
+
+        // And the whole inside of the panel is a line of its window, drawn on
+        // or not: the panel has no selection for a point to land on.
+        let inside = pane_inner(panes.panel);
+        assert_eq!(inside.height, panel_height(size));
+        for offset in 0..inside.height {
+            for x in [inside.x, inside.x + inside.width - 1] {
+                assert_eq!(hit(x, inside.y + offset), Hit::PanelLine { offset });
+            }
+        }
+    }
+
+    #[test]
+    fn the_row_a_point_lands_on_is_the_row_the_frame_drew_there() {
+        // Measured against a frame rather than against the layout twice over:
+        // what a click lands on has to be what the reader saw at that point.
+        let app = tall_app(0);
+        let size = Size::new(WIDTH, HEIGHT);
+        let buffer = render(&app, WIDTH, HEIGHT);
+
+        let rows = rows_area(&buffer);
+        assert!(rows.height > 1, "the window should hold more than one row");
+        for offset in 0..rows.height {
+            assert_eq!(
+                hit_test(rows.x, rows.y + offset, size),
+                Hit::TreeRow { offset }
+            );
+            assert_eq!(
+                tree_row(&buffer, offset),
+                drawn_row(usize::from(offset), 0),
+                "row {offset} of the window"
+            );
+        }
+        // The header is the line the frame drew the tree's name on, not a row.
+        let header = header_area(&buffer);
+        assert_eq!(hit_test(header.x, header.y, size), Hit::TreeHeader);
+        assert_eq!(header_text(&buffer), app.header());
+    }
+
+    #[test]
+    fn a_terminal_too_short_for_a_tree_row_answers_no_row_rather_than_underflowing() {
+        for height in 0..=CHROME_HEIGHT {
+            let size = Size::new(WIDTH, height);
+            assert_eq!(tree_height(size), 0, "in {height} rows");
+
+            for y in 0..height {
+                for x in 0..WIDTH {
+                    let hit = hit_test(x, y, size);
+                    assert!(
+                        !matches!(hit, Hit::TreeRow { .. }),
+                        "({x}, {y}) of {height} rows answered {hit:?}"
+                    );
+                }
+            }
+        }
+
+        // The tallest of those has room for the header and nothing under it,
+        // and says so; a screen with no room even for that is all footer and
+        // border.
+        let header = Size::new(WIDTH, CHROME_HEIGHT);
+        let inside = pane_inner(areas(Rect::from(header)).tree);
+        assert_eq!(inside.height, HEADER_HEIGHT);
+        assert_eq!(hit_test(inside.x, inside.y, header), Hit::TreeHeader);
+        for height in 0..CHROME_HEIGHT - HEADER_HEIGHT {
+            let size = Size::new(WIDTH, height);
+            for y in 0..height {
+                for x in 0..WIDTH {
+                    let hit = hit_test(x, y, size);
+                    assert!(
+                        matches!(hit, Hit::Footer | Hit::Border),
+                        "({x}, {y}) of {height} rows answered {hit:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_terminal_narrow_enough_to_halve_still_tells_the_two_panes_apart() {
+        // The branch of `areas` where the tree column's floor is given up and
+        // the two panes split what there is: the point is that hit-testing asks
+        // the layout where the panes are rather than working it out from the
+        // rule.
+        for width in [40, 41, TREE_MIN_WIDTH * 2 - 1] {
+            let size = Size::new(width, FIXTURE_HEIGHT);
+            let panes = areas(Rect::from(size));
+            assert_eq!(
+                panes.tree.width,
+                width / 2,
+                "at {width} columns the floor should have given way"
+            );
+
+            let inside = pane_inner(panes.panel);
+            let rows = tree_rows_area(panes.tree);
+            assert_eq!(
+                hit_test(inside.x, inside.y, size),
+                Hit::PanelLine { offset: 0 },
+                "at {width} columns"
+            );
+            assert_eq!(
+                hit_test(
+                    inside.x + inside.width - 1,
+                    inside.y + inside.height - 1,
+                    size
+                ),
+                Hit::PanelLine {
+                    offset: inside.height - 1
+                },
+                "at {width} columns"
+            );
+            assert_eq!(
+                hit_test(rows.x, rows.y, size),
+                Hit::TreeRow { offset: 0 },
+                "at {width} columns"
+            );
+            // The two columns between the panes' insides are border on both
+            // sides of the join, whichever pane owns which.
+            for x in [inside.x + inside.width, rows.x - 1] {
+                assert_eq!(hit_test(x, rows.y, size), Hit::Border, "at {width} columns");
+            }
+        }
+    }
+
+    #[test]
+    fn no_point_is_answered_with_an_offset_its_window_has_no_room_for() {
+        for (width, height) in [
+            (WIDTH, HEIGHT),
+            (KEYS_WIDTH, 24),
+            (40, FIXTURE_HEIGHT),
+            (TREE_MIN_WIDTH * 2 - 1, FILES_HEIGHT),
+            (1, 1),
+            (0, 0),
+        ] {
+            let size = Size::new(width, height);
+            for y in 0..height {
+                for x in 0..width {
+                    match hit_test(x, y, size) {
+                        Hit::TreeRow { offset } => assert!(
+                            offset < tree_height(size),
+                            "({x}, {y}) of {width}x{height} is row {offset} of a window {} tall",
+                            tree_height(size)
+                        ),
+                        Hit::PanelLine { offset } => assert!(
+                            offset < panel_height(size),
+                            "({x}, {y}) of {width}x{height} is line {offset} of a window {} tall",
+                            panel_height(size)
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+
+            // And a point off the end of the frame is nothing warlock drew,
+            // rather than the nearest thing it did draw.
+            assert_eq!(hit_test(width, 0, size), Hit::Offscreen);
+            assert_eq!(hit_test(0, height, size), Hit::Offscreen);
+            assert_eq!(hit_test(u16::MAX, u16::MAX, size), Hit::Offscreen);
         }
     }
 
