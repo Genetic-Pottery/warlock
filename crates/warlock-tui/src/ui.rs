@@ -44,10 +44,22 @@ use warlock_engine::NodeState;
 // live, and this module is the one place both are in scope.
 use crate::account::{Account, Line as Entry};
 use crate::app::{App, Focus, Row};
-use crate::colour::{FOCUS_COLOUR, colour_for};
+use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
 
 /// One level of nesting, per unit of the depth the engine's walk yields.
 const INDENT: &str = "  ";
+
+/// The stroke an indent guide is drawn with: one per level of nesting a row
+/// sits under, in the first of that level's [`INDENT`] columns.
+///
+/// A plain vertical every level down, with no corners, tees or last-sibling
+/// detection: which rows have children is already said by the `+`/`-`/no-marker
+/// glyphs, and a second voice saying it would be one more thing to read on a
+/// screen whose job is three colours. Unicode where the markers are held to
+/// ASCII, because ratatui already draws this pane's border in box-drawing
+/// characters — a terminal that cannot manage this one is already drawing a
+/// mess of the frame around it.
+const GUIDE: &str = "│";
 
 /// Drawn to the left of the selected row. The reversed highlight already says
 /// where the selection is on any terminal with colour; the marker says it
@@ -587,17 +599,31 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
 /// off the row: which nodes are collapsed is view state the app owns, and a
 /// [`Row`] describes the tree, which knows nothing about it.
 ///
-/// The whole line takes one style, the row's state colour, marker included:
-/// colour on this screen means node state and nothing else, so a marker in a
-/// colour of its own would be a second thing colour meant.
+/// Two spans, and only two. The first is the indent: one [`GUIDE`] stroke per
+/// level of nesting the row sits under, each in the columns an [`INDENT`] took,
+/// so the marker column and the first column of every name are exactly where
+/// they were before the guides arrived. A depth-0 row draws no guide at all and
+/// its span is empty. The second span is the marker and the name, which take the
+/// row's state colour together: colour on this screen means node state and
+/// nothing else, so a marker in a colour of its own would be a second thing
+/// colour meant.
 ///
-/// `pulse` is that one style overridden for this frame, and is `Some` for at most
-/// one row of the tree: the directory a pact is working right now, which alternates
-/// between the two pacted colours rather than sitting in the stale one for the
-/// whole run (see [`pulse_colour`]). It is still a foreground colour and still the
-/// only style on the line, so the selection — a `REVERSED`/`BOLD` modifier the
-/// `List` applies on top — reads exactly the same on a pulsing row as on any
-/// other, and the pulse cannot move it.
+/// The guides take [`GUIDE_COLOUR`] and no modifier — not `DIM`, which is the
+/// obvious way to ask for a quieter line. `DIM` is honoured inconsistently
+/// across terminals, and a guide that vanishes on one and shouts on another is
+/// worse than one dim colour everywhere, so the dimness is pinned into the
+/// colour itself. They are a span of their own rather than part of the row's
+/// text because they are not state: a guide in the row's colour would make depth
+/// look like something the engine had decided.
+///
+/// `pulse` is the marker-and-name style overridden for this frame, and is `Some`
+/// for at most one row of the tree: the directory a pact is working right now,
+/// which alternates between the two pacted colours rather than sitting in the
+/// stale one for the whole run (see [`pulse_colour`]). It never reaches the
+/// guides, which say depth and have nothing to report about a run. It is still
+/// only a foreground colour, so the selection — a `REVERSED`/`BOLD` modifier the
+/// `List` applies over the whole row, guides included — reads exactly the same on
+/// a pulsing row as on any other, and the pulse cannot move it.
 ///
 /// A file row needs no case of its own here and deliberately does not get one.
 /// It carries no children, so it falls into [`NO_MARKER`] like any other
@@ -618,10 +644,18 @@ fn line(row: &Row, collapsed: bool, pulse: Option<Color>) -> Line<'static> {
         (true, false) => EXPANDED_MARKER,
     };
 
-    Line::styled(
-        format!("{}{marker}{name}", INDENT.repeat(row.depth)),
-        pulse.unwrap_or(colour_for(row.state)),
-    )
+    // The stroke goes in the first of the level's columns and the rest of the
+    // level is left blank, so a guide unit is an `INDENT` with a line drawn down
+    // it rather than a width of its own to keep in step.
+    let guides = INDENT.replacen(' ', GUIDE, 1).repeat(row.depth);
+
+    Line::from(vec![
+        Span::styled(guides, GUIDE_COLOUR),
+        Span::styled(
+            format!("{marker}{name}"),
+            pulse.unwrap_or(colour_for(row.state)),
+        ),
+    ])
 }
 
 /// The colour the row of the directory in flight takes this frame, or `None`
@@ -740,7 +774,7 @@ mod tests {
     use warlock_engine::NodeState;
 
     use super::{
-        BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, HEADER_HEIGHT, INDENT, KEYS, LIVE_KEY,
+        BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, GUIDE, HEADER_HEIGHT, INDENT, KEYS, LIVE_KEY,
         NO_MARKER, PACTING_KEYS, PANEL_INDENT, SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH,
         TREE_PERCENT, areas, display_width, draw, pane_inner, panel_height, tree_height,
         tree_rows_area, tree_width, truncated,
@@ -748,7 +782,7 @@ mod tests {
     use crate::account::Outcome;
     use crate::app::{App, Row};
     use crate::claude::Activity;
-    use crate::colour::{FOCUS_COLOUR, colour_for};
+    use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
     use crate::fixture;
 
     /// How many rows the window tests work with: comfortably more than fit on
@@ -926,16 +960,17 @@ mod tests {
     }
 
     /// The line row `index` of [`many_rows`] is drawn as when `selected` is the
-    /// selected row: the selection marker's gutter, the depth's indent, the
-    /// blank a childless row carries where a collapse marker would go, then the
-    /// name.
+    /// selected row: the selection marker's gutter, the one level of depth's
+    /// guide in the columns an indent takes, the blank a childless row carries
+    /// where a collapse marker would go, then the name.
     fn drawn_row(index: usize, selected: usize) -> String {
         let gutter = if index == selected {
             SELECTION_MARKER.to_owned()
         } else {
             " ".repeat(SELECTION_MARKER.chars().count())
         };
-        format!("{gutter}{INDENT}{NO_MARKER}module{index}")
+        let guide = INDENT.replacen(' ', GUIDE, 1);
+        format!("{gutter}{guide}{NO_MARKER}module{index}")
     }
 
     /// Draw `app` onto an in-memory terminal of the given size and hand back
@@ -981,18 +1016,49 @@ mod tests {
             .collect()
     }
 
-    /// The foreground colour of tree row `index`'s first glyph, ignoring the
-    /// gutter the selection marker lives in: that gutter is drawn by the list
-    /// itself and takes no state colour, while everything to the right of it is
-    /// the row's own text, however far it is indented.
+    /// The foreground colour of tree row `index`'s first glyph of *text*:
+    /// its marker, or the first letter of its name when it carries none.
+    ///
+    /// Two things to the left of that are skipped, and neither is the row's
+    /// text. The gutter the selection marker lives in is drawn by the list
+    /// itself and takes no state colour; the indent guides are drawn in
+    /// [`GUIDE_COLOUR`] and say depth, not state, which is what
+    /// [`guide_columns`] is for.
     fn first_glyph_colour(buffer: &Buffer, index: u16) -> Color {
         let area = rows_area(buffer);
         let gutter = u16::try_from(SELECTION_MARKER.chars().count()).expect("a two-char marker");
         (area.x + gutter..area.x + area.width)
             .map(|x| &buffer[(x, area.y + index)])
-            .find(|cell| !cell.symbol().trim().is_empty())
+            .find(|cell| !cell.symbol().trim().is_empty() && cell.symbol() != GUIDE)
             .expect("row has a glyph on it")
             .fg
+    }
+
+    /// Which column of `line` `needle` starts in, counted in characters rather
+    /// than bytes.
+    ///
+    /// [`GUIDE`] is three bytes and one column, so a byte offset compared across
+    /// two rows of different depths says nothing about what lines up with what
+    /// on screen.
+    fn column_of(line: &str, needle: &str) -> usize {
+        let byte = line
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} is not on {line:?}"));
+
+        line[..byte].chars().count()
+    }
+
+    /// The columns of tree row `index` that carry a guide stroke, counted from
+    /// the left-hand edge of the tree's rows, the gutter included.
+    ///
+    /// Read off the buffer a column at a time rather than out of the row's text,
+    /// because [`GUIDE`] is three bytes and a byte offset into a string is not a
+    /// column on screen.
+    fn guide_columns(buffer: &Buffer, index: u16) -> Vec<u16> {
+        let area = rows_area(buffer);
+        (0..area.width)
+            .filter(|column| buffer[(area.x + column, area.y + index)].symbol() == GUIDE)
+            .collect()
     }
 
     /// Which drawn row of `app` stands for `path`, as an index into the window
@@ -1039,12 +1105,115 @@ mod tests {
             drawn,
             [
                 "> - warlock",
-                "    - crates",
-                "        engine",
-                "        tui",
-                "      assets",
+                "  │ - crates",
+                "  │ │   engine",
+                "  │ │   tui",
+                "  │   assets",
             ]
         );
+    }
+
+    #[test]
+    fn a_nested_row_carries_one_guide_per_level_it_sits_under_and_a_root_row_none() {
+        let app = App::from_tree(&fixture::tree());
+
+        let buffer = render(&app, WIDTH, FIXTURE_HEIGHT);
+
+        // The root is at depth 0, so there is nothing above it to lead it in.
+        assert!(
+            guide_columns(&buffer, 0).is_empty(),
+            "a depth-0 row should draw no guide: {:?}",
+            tree_row(&buffer, 0)
+        );
+        // `crates`, one level down: one guide, in the first column past the
+        // gutter the selection marker lives in.
+        let gutter = u16::try_from(SELECTION_MARKER.chars().count()).expect("a two-char marker");
+        let level = u16::try_from(INDENT.chars().count()).expect("a two-column indent");
+        assert_eq!(guide_columns(&buffer, 1), [gutter]);
+        // `engine`, two levels down: two guides, one level apart, and its name
+        // still starts one marker past the last of them.
+        assert_eq!(guide_columns(&buffer, 2), [gutter, gutter + level]);
+        assert_eq!(
+            column_of(&tree_row(&buffer, 2), "engine"),
+            usize::from(gutter + 2 * level) + NO_MARKER.chars().count()
+        );
+    }
+
+    #[test]
+    fn the_guides_are_drawn_in_the_guide_colour_and_the_row_keeps_its_states() {
+        let app = App::from_tree(&fixture::tree());
+
+        let buffer = render(&app, WIDTH, FIXTURE_HEIGHT);
+
+        let area = rows_area(&buffer);
+        let index = row_index(&app, "warlock/crates/engine");
+        let columns = guide_columns(&buffer, index);
+        assert_eq!(columns.len(), 2, "the fixture's engine sits at depth 2");
+        for column in columns {
+            let cell = &buffer[(area.x + column, area.y + index)];
+            assert_eq!(cell.fg, GUIDE_COLOUR, "column {column}");
+            // No `DIM` and no modifier of any other kind: the dimness is in the
+            // colour, because `DIM` is honoured inconsistently.
+            assert_eq!(cell.modifier, Modifier::empty(), "column {column}");
+        }
+        // And the row's own text is still its state's colour, guides or no.
+        let state = app.rows()[usize::from(index)].state;
+        assert_eq!(first_glyph_colour(&buffer, index), colour_for(state));
+    }
+
+    #[test]
+    fn the_pulse_takes_the_row_in_flight_and_leaves_its_guides_alone() {
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        app.select_next();
+        assert!(app.toggle_pact().is_some(), "the crates row takes a pact");
+        app.account_mut()
+            .expect("a pact has started")
+            .open_section("crates/engine", base);
+        app.set_pact_in_flight("warlock/crates/engine", 1, 2);
+
+        let stale = render_at(&app, WIDTH, FIXTURE_HEIGHT, base);
+        let fresh = render_at(&app, WIDTH, FIXTURE_HEIGHT, base + PHASE);
+
+        // The marker and name change colour from one frame to the next...
+        let index = row_index(&app, "warlock/crates/engine");
+        assert_ne!(
+            first_glyph_colour(&stale, index),
+            first_glyph_colour(&fresh, index)
+        );
+        // ...and the guides in front of them sit still: depth has nothing to
+        // report about a run.
+        for buffer in [&stale, &fresh] {
+            let area = rows_area(buffer);
+            let columns = guide_columns(buffer, index);
+            assert_eq!(columns.len(), 2, "the fixture's engine sits at depth 2");
+            for column in columns {
+                assert_eq!(buffer[(area.x + column, area.y + index)].fg, GUIDE_COLOUR);
+            }
+        }
+    }
+
+    #[test]
+    fn the_selections_highlight_covers_the_guides_in_front_of_the_selected_row() {
+        let mut app = App::from_tree(&fixture::tree());
+        // Down onto `crates`, which is one level in and so has a guide in front
+        // of it for the highlight to reach over.
+        app.select_next();
+
+        let buffer = render(&app, WIDTH, FIXTURE_HEIGHT);
+
+        let area = rows_area(&buffer);
+        let columns = guide_columns(&buffer, 1);
+        assert_eq!(columns.len(), 1, "the fixture's crates sits at depth 1");
+        for column in columns {
+            let cell = &buffer[(area.x + column, area.y + 1)];
+            assert!(
+                cell.modifier.contains(Modifier::REVERSED),
+                "the highlight stops short of the guides: {cell:?}"
+            );
+            // Still the guide's own colour underneath the highlight.
+            assert_eq!(cell.fg, GUIDE_COLOUR);
+        }
     }
 
     #[test]
@@ -1057,15 +1226,15 @@ mod tests {
 
         // Same directory, same indent, same name, and the one thing that
         // differs is the marker saying whether anything is under it.
-        assert_eq!(tree_row(&before, 1), "    - crates");
-        assert_eq!(tree_row(&after, 1), "    + crates");
+        assert_eq!(tree_row(&before, 1), "  │ - crates");
+        assert_eq!(tree_row(&after, 1), "  │ + crates");
         // And what it was hiding is gone from the screen, leaving the root's
         // other child where the children were.
         let drawn: Vec<String> = tree_rows(&after)
             .into_iter()
             .take(collapsed.rows().len())
             .collect();
-        assert_eq!(drawn, ["> - warlock", "    + crates", "      assets"]);
+        assert_eq!(drawn, ["> - warlock", "  │ + crates", "  │   assets"]);
     }
 
     #[test]
@@ -1078,11 +1247,11 @@ mod tests {
         // says so by carrying no marker — while still lining its name up with
         // the marked rows at its own depth.
         let leaf = tree_row(&buffer, 4);
-        assert_eq!(leaf, "      assets");
+        assert_eq!(leaf, "  │   assets");
         assert!(!leaf.contains('+') && !leaf.contains('-'), "{leaf:?}");
         assert_eq!(
-            leaf.find("assets"),
-            tree_row(&buffer, 1).find("crates"),
+            column_of(&leaf, "assets"),
+            column_of(&tree_row(&buffer, 1), "crates"),
             "a leaf's name should start where a sibling directory's does"
         );
         // Pressing space on it changes nothing on screen: nothing to hide.
@@ -1355,21 +1524,21 @@ mod tests {
             drawn,
             [
                 "> - warlock",
-                "      README.md",
-                "      WARLOCK.md",
-                "    - crates",
-                "        engine",
-                "          Cargo.toml",
-                "          WARLOCK.md",
-                "        tui",
-                "          WARLOCK.md",
-                "      assets",
-                "        WARLOCK.md",
-                "        logo.svg",
+                "  │   README.md",
+                "  │   WARLOCK.md",
+                "  │ - crates",
+                "  │ │   engine",
+                "  │ │ │   Cargo.toml",
+                "  │ │ │   WARLOCK.md",
+                "  │ │   tui",
+                "  │ │ │   WARLOCK.md",
+                "  │   assets",
+                "  │ │   WARLOCK.md",
+                "  │ │   logo.svg",
             ]
         );
         assert!(
-            drawn[1].find("README.md") > drawn[0].find("warlock"),
+            column_of(&drawn[1], "README.md") > column_of(&drawn[0], "warlock"),
             "a file should indent past its directory's name: {drawn:?}"
         );
         // And pressing the key again draws what was on screen before it, to
@@ -1402,7 +1571,7 @@ mod tests {
         let buffer = render(&app, WIDTH, FIXTURE_HEIGHT);
 
         assert!(!tree_row(&buffer, 0).starts_with(SELECTION_MARKER));
-        assert_eq!(tree_row(&buffer, 1), ">   - crates");
+        assert_eq!(tree_row(&buffer, 1), "> │ - crates");
     }
 
     #[test]

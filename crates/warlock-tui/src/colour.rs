@@ -67,12 +67,31 @@ pub const fn colour_for(state: NodeState) -> Color {
 /// front of it.
 pub(crate) const FOCUS_COLOUR: Color = Color::Indexed(45);
 
+/// The colour the tree's vertical indent guides are drawn in.
+///
+/// A flat 256-colour index (240) and no modifier. `DIM` is the obvious way to
+/// ask for a quieter line and it is not taken, because it is honoured
+/// inconsistently: some terminals render it as a real half-brightness, some
+/// ignore it outright, and some map it onto a palette entry of their own. A
+/// guide that vanishes on one terminal and shouts on another is worse than one
+/// dim colour everywhere, so the dimness is pinned into the value itself and
+/// each guide is drawn in exactly what this says, on every terminal.
+///
+/// 240 against unpacted gray 245 is deliberate, and the small gap is the whole
+/// point: the guides are structure, not state, and they sit a few steps below
+/// the quietest thing that *is* state so they read as scaffolding behind an
+/// unpacted row rather than as another row beside it. Far enough down to recede
+/// under all three state colours; not so far as to disappear on a light
+/// background. It is none of the four colours above, so the tests below can hold
+/// every colour on the screen apart from every other.
+pub(crate) const GUIDE_COLOUR: Color = Color::Indexed(240);
+
 #[cfg(test)]
 mod tests {
     use ratatui::style::Color;
     use warlock_engine::NodeState;
 
-    use super::{FOCUS_COLOUR, colour_for};
+    use super::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
 
     #[test]
     fn unpacted_is_gray() {
@@ -98,6 +117,30 @@ mod tests {
                 "the focused border shares {state:?}'s colour"
             );
         }
+    }
+
+    #[test]
+    fn the_guide_colour_is_a_flat_indexed_gray() {
+        assert_eq!(GUIDE_COLOUR, Color::Indexed(240));
+    }
+
+    #[test]
+    fn the_guide_colour_is_no_states_colour() {
+        for state in NodeState::ALL {
+            assert_ne!(
+                GUIDE_COLOUR,
+                colour_for(state),
+                "the indent guides share {state:?}'s colour"
+            );
+        }
+    }
+
+    #[test]
+    fn the_guide_colour_is_not_the_focus_colour() {
+        assert_ne!(
+            GUIDE_COLOUR, FOCUS_COLOUR,
+            "the indent guides share the focused border's colour"
+        );
     }
 
     #[test]
