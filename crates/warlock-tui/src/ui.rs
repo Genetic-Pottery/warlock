@@ -30,11 +30,11 @@
 //! app holds are the rows drawn — this module only says which of them is
 //! collapsed, with a marker on the line. There is deliberately no mouse.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect, Size};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use warlock_engine::NodeState;
@@ -42,7 +42,7 @@ use warlock_engine::NodeState;
 // Renamed on the way in: `Line` here is ratatui's, the thing a row is drawn as,
 // and the account's `Line` is what a row says. Both names are right where they
 // live, and this module is the one place both are in scope.
-use crate::account::Line as Entry;
+use crate::account::{Account, Line as Entry};
 use crate::app::{App, Focus, Row};
 use crate::colour::{FOCUS_COLOUR, colour_for};
 
@@ -174,6 +174,24 @@ const TREE_MIN_WIDTH: u16 = 30;
 /// to take it off the terminal's height as well as the header and the footer.
 const BORDER_THICKNESS: u16 = 1;
 
+/// How long the row of the directory a pact is working right now holds each of
+/// its two colours before taking the other: half a second stale, half a second
+/// fresh, over and over for as long as that pass runs. See [`pulse_colour`].
+///
+/// Half a second because of what it is measured against at either end. The event
+/// loop wakes every 100 ms (`POLL_INTERVAL`), so a phase this long is redrawn
+/// about five times before it turns over: the change lands within a tenth of a
+/// second of when it is due, and the pulse never depends on a wakeup arriving at
+/// a particular moment. Much shorter and it would start to alias against that
+/// tick — a phase of two or three wakeups reads as a flicker whose rate depends
+/// on how busy the loop was — and a row flashing several times a second beside
+/// text somebody is reading is the kind of movement that has to be looked away
+/// from. Much longer and it stops reading as movement at all: a row that holds
+/// one colour for two seconds looks like a row that has settled on it, which is
+/// the one thing this must not say. Half a second is slow enough to be calm and
+/// fast enough that a pass of even a few seconds visibly pulses more than once.
+const PULSE_PHASE: Duration = Duration::from_millis(500);
+
 /// Draw the whole frame: the panel on the left, the tree column on the right,
 /// the footer full width beneath both.
 ///
@@ -187,8 +205,9 @@ const BORDER_THICKNESS: u16 = 1;
 ///
 /// `now` is the instant this frame is being drawn at, and it is the caller's
 /// rather than read here: the newest line of the panel's live section counts up
-/// against it, and a renderer that called [`Instant::now`] itself would be a
-/// second clock for a test to fight. The event loop already redraws on a tick,
+/// against it, the row of the directory a pact is working pulses against it (see
+/// [`pulse_colour`]), and a renderer that called [`Instant::now`] itself would be
+/// a second clock for a test to fight. The event loop already redraws on a tick,
 /// so handing it the instant it woke up at is all the ticking there is.
 pub fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     let Areas {
@@ -198,7 +217,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     } = areas(frame.area());
 
     draw_panel(frame, panel, app, now);
-    draw_tree_pane(frame, tree, app);
+    draw_tree_pane(frame, tree, app, now);
     draw_footer(frame, footer, app);
 }
 
@@ -476,14 +495,17 @@ fn display_width(text: &str) -> usize {
 
 /// Draw the tree pane: its border, the header naming the tree inside the top of
 /// it, and the window onto the rows under that.
-fn draw_tree_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
+///
+/// `now` is only passed through: nothing about the border or the header moves
+/// with the clock, and the rows under them do — see [`draw_tree`].
+fn draw_tree_pane(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     let inner = pane_inner(area);
     frame.render_widget(pane_block(app.focus() == Focus::Tree), area);
 
     let [header_area, rows_area] =
         Layout::vertical([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)]).areas(inner);
     draw_header(frame, header_area, app);
-    draw_tree(frame, rows_area, app);
+    draw_tree(frame, rows_area, app, now);
 }
 
 /// Draw the header: which tree this is, as the app state already words it.
@@ -511,13 +533,28 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// A selection outside that window cannot happen for an app told the height
 /// this frame was laid out with, but if it ever does, nothing is highlighted
 /// rather than the wrong row.
-fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App) {
+///
+/// While a pact is running, one row of the window is drawn in the pulsing colour
+/// [`pulse_colour`] works out for this frame instead of its own state colour: the
+/// row whose path is the directory the run is inside right now. The colour is
+/// computed once for the frame and then offered to exactly the row the app says
+/// is in flight — [`App::is_in_flight`] is an exact-path question, so ancestors,
+/// siblings, descendants and the file rows under that directory are never
+/// offered it and keep the colour the keypress painted.
+fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     let first = app.scroll_offset().min(app.rows().len());
     let height = usize::from(area.height);
+    let pulse = pulse_colour(app, now);
     let items: Vec<ListItem<'_>> = app.rows()[first..]
         .iter()
         .take(height)
-        .map(|row| ListItem::new(line(row, app.is_collapsed(&row.path))))
+        .map(|row| {
+            ListItem::new(line(
+                row,
+                app.is_collapsed(&row.path),
+                pulse.filter(|_| app.is_in_flight(&row.path)),
+            ))
+        })
         .collect();
     let list = List::new(items)
         .highlight_symbol(SELECTION_MARKER)
@@ -554,6 +591,14 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// colour on this screen means node state and nothing else, so a marker in a
 /// colour of its own would be a second thing colour meant.
 ///
+/// `pulse` is that one style overridden for this frame, and is `Some` for at most
+/// one row of the tree: the directory a pact is working right now, which alternates
+/// between the two pacted colours rather than sitting in the stale one for the
+/// whole run (see [`pulse_colour`]). It is still a foreground colour and still the
+/// only style on the line, so the selection — a `REVERSED`/`BOLD` modifier the
+/// `List` applies on top — reads exactly the same on a pulsing row as on any
+/// other, and the pulse cannot move it.
+///
 /// A file row needs no case of its own here and deliberately does not get one.
 /// It carries no children, so it falls into [`NO_MARKER`] like any other
 /// childless row — there is nothing under a file to collapse — and its depth is
@@ -561,7 +606,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// is its directory's state, copied onto the row when the tree was flattened
 /// (see [`Row::file`]), which is how the design doc's rule that a file takes its
 /// module's colour arrives here as an ordinary row with an ordinary colour.
-fn line(row: &Row, collapsed: bool) -> Line<'static> {
+fn line(row: &Row, collapsed: bool, pulse: Option<Color>) -> Line<'static> {
     let name = row
         .path
         .file_name()
@@ -575,8 +620,52 @@ fn line(row: &Row, collapsed: bool) -> Line<'static> {
 
     Line::styled(
         format!("{}{marker}{name}", INDENT.repeat(row.depth)),
-        colour_for(row.state),
+        pulse.unwrap_or(colour_for(row.state)),
     )
+}
+
+/// The colour the row of the directory in flight takes this frame, or `None`
+/// when no pact is running and every row is simply its own state's colour.
+///
+/// The pulse is not stored anywhere and nothing is stepped: it is a function of
+/// how long the pass on screen has been going, so the phase is worked out afresh
+/// on every frame from `now` and the instant the account's open section was
+/// opened at. Whole [`PULSE_PHASE`]s since that instant, even or odd: even is
+/// stale, odd is fresh. Measuring it against the *section*'s start rather than
+/// the run's is what makes each directory's pulse begin on stale — the account
+/// opens a section as each pass starts, so the phase resets under every
+/// directory and the handover from one to the next is visible as a colour that
+/// goes back to yellow.
+///
+/// Both colours come from [`colour_for`], the one place a state's colour is
+/// decided, so a change to the palette moves the pulse with it and this file
+/// names no colour of its own.
+///
+/// A pact in flight with no open section — the moment between the keypress and
+/// the first progress event, or a run whose account was closed while the app
+/// still thinks something is in flight — draws steady stale. That is the colour
+/// the keypress already painted the subtree in, so such a row is never blank and
+/// never unstyled; it simply sits in the colour it would have had anyway until
+/// its section opens and the pulse has a start to measure from.
+fn pulse_colour(app: &App, now: Instant) -> Option<Color> {
+    if !app.is_pacting() {
+        return None;
+    }
+
+    let fresh = app
+        .account()
+        .and_then(Account::open_section_started)
+        .is_some_and(|started| {
+            let phases =
+                now.saturating_duration_since(started).as_millis() / PULSE_PHASE.as_millis();
+            phases % 2 == 1
+        });
+
+    Some(colour_for(if fresh {
+        NodeState::PactedFresh
+    } else {
+        NodeState::PactedStale
+    }))
 }
 
 /// Draw the tally of nodes by state, the keys that do something, and the one
