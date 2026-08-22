@@ -31,15 +31,19 @@
 //! produced, and three timing rules that turn one editor save into one reload
 //! and a long burst into a handful. It watches nothing and reloads nothing, and
 //! it holds no clock either — the instant it compares against is handed in, so a
-//! ten-second burst is driven through it in a test in microseconds.
+//! ten-second burst is driven through it in a test in microseconds. Hearing that
+//! the disk moved at all is the one impure thing in that module and is kept
+//! apart from every decision made about it: [`Watch`] owns the watcher handle,
+//! hands on the paths it is given unfiltered, and comes back as [`Watching`] —
+//! a value — when no watcher could be started, because warlock without live
+//! updates is still warlock.
 //!
-//! The one exception is [`ClaudeAgent`], which owns a child process: it
+//! The other exception is [`ClaudeAgent`], which owns a child process: it
 //! implements the engine's [`Agent`](warlock_engine::Agent) port by running the
 //! `claude` CLI, because the engine spawns nothing and something has to. Its
-//! module is the only
-//! module in this crate that runs anything, it decides nothing about what a
-//! prompt says, and it needs no terminal either — its tests point it at
-//! stand-ins and pass on a machine with no `claude` installed.
+//! module is the only module in this crate that runs anything, it decides
+//! nothing about what a prompt says, and it needs no terminal either — its tests
+//! point it at stand-ins and pass on a machine with no `claude` installed.
 //!
 //! The dependency edge runs TUI -> engine: this crate knows the engine's
 //! vocabulary, and the engine knows nothing about terminals.
@@ -112,6 +116,12 @@ pub use watch::NodeSet;
 pub use watch::QUIET_PERIOD;
 /// The longest a reload is put off while events keep arriving — the ceiling.
 pub use watch::RELOAD_CEILING;
+/// A running filesystem watcher over the tree's root and the manifest: it
+/// hands on the paths it hears about and decides nothing.
+pub use watch::Watch;
 /// Told what moved on disk and when, it answers whether the tree is owed a
 /// reload right now — and reloads nothing itself.
 pub use watch::WatchPolicy;
+/// What came of asking for a watcher: one that is running, or one line saying
+/// why there is none.
+pub use watch::Watching;

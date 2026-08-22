@@ -78,6 +78,13 @@ ignore = { version = "0.4" }
 # tree hash, so the same bytes give the same digest on any machine and any
 # build, which is exactly what a grant recorded in a committed manifest needs.
 blake3 = { version = "1" }
+# Filesystem watching, which is a different API on every operating system —
+# inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows — and no
+# API at all in std. Warlock only ever asks it one question, "did anything under
+# here move", and the alternative to taking the crate that already speaks all
+# three is polling the tree on a timer, which is the re-walk this watching exists
+# to avoid doing when nothing has changed.
+notify = { version = "8" }
 # Dev-only: round-trips a value through serde's own token stream, so the derives
 # can be tested in memory, independently of how any one format spells them.
 serde_test = { version = "1" }

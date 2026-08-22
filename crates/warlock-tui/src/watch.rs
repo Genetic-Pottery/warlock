@@ -1,9 +1,11 @@
-//! When the disk moves, and what to do about it — as values, with no watcher.
+//! When the disk moves, and what to do about it.
 //!
 //! Warlock's tree is read from disk, and the disk keeps moving after it has
 //! been read: a file is saved in another window, a branch is checked out, a
-//! build writes ten thousand object files. Two questions follow, and this
-//! module answers both without opening a watcher, a terminal or a file.
+//! build writes ten thousand object files. Hearing about that is one small
+//! impure thing — a [`Watch`], which owns a `notify` watcher and passes on the
+//! paths it reports — and everything done with what it hears is two questions
+//! answered as values, with no watcher, no terminal and no file.
 //!
 //! The first is *which* movements are Warlock's business. The answer is the
 //! last walk itself: an event counts only when its immediate parent is a
@@ -23,7 +25,17 @@
 //! three rules that are three named constants: [`QUIET_PERIOD`],
 //! [`RELOAD_CEILING`] and [`COALESCED_RELOADS`].
 //!
-//! # It holds no clock
+//! # The watcher hears; it does not decide
+//!
+//! [`Watch`] is the whole of the impure half: it starts a watcher over the
+//! tree's root and the manifest, keeps the handle alive, and hands on every path
+//! it is told about, in the order it was told, unfiltered. It answers neither
+//! question above, so nothing that matters rests on a real disk having moved in
+//! a test. Not being able to start one is a value too — [`Watching::Off`] — for
+//! the same reason: warlock without live updates is warlock as it was, and
+//! failing to launch over a watcher would be the tail wagging the dog.
+//!
+//! # The rest holds no clock
 //!
 //! [`Instant::now`] is never called in this file. Every instant the policy
 //! reasons about is handed in by whoever is driving the event loop — which
@@ -34,18 +46,25 @@
 //!
 //! # What is not here
 //!
-//! No watcher: nothing in this module subscribes to anything, and no `notify`
-//! type appears in its signatures. Nothing reloads either — the policy says
-//! *that* a reload is owed and never performs one, because reading the tree
-//! again is the binary's business and has to happen on the thread that draws.
+//! No `notify` type in any signature: what comes out of [`Watch`] is
+//! [`PathBuf`]s and what a failure to start comes out as is a [`String`], so the
+//! crate that hears about the disk stops at this file's edge. Nothing reloads
+//! either — the policy says *that* a reload is owed and never performs one,
+//! because reading the tree again is the binary's business and has to happen on
+//! the thread that draws. No debouncing by anybody else: the timing rules are
+//! [`WatchPolicy`]'s, which is why no debouncer crate is anywhere near this.
 //! And no state outlives a process: a [`NodeSet`] is thrown away and rebuilt by
-//! every successful load, which is exactly why it is replaceable.
+//! every successful load, which is exactly why it is replaceable, and a
+//! [`Watch`] stops watching the moment it is dropped.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use warlock_engine::Tree;
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
+use warlock_engine::{Tree, manifest_path};
 
 /// How long the disk has to be quiet before a reload — the debounce.
 ///
@@ -353,6 +372,176 @@ impl WatchPolicy {
     #[must_use]
     pub fn owes_reload(&self) -> bool {
         self.burst_began.is_some() || self.moved_during_reload
+    }
+}
+
+/// What came of asking the operating system to watch the tree.
+///
+/// A value rather than a `Result`, because there is nothing here for a caller
+/// to fail over: warlock without a watcher is warlock as it was before this
+/// existed — it draws, pacts, navigates and quits, and only reloads when
+/// something asks it to. So the two cases are two variants a caller matches on
+/// and carries on from, and the failure carries the one line it would put on
+/// the footer rather than an error type nobody upstream can act on.
+#[derive(Debug)]
+pub enum Watching {
+    /// The operating system is watching; the loop calls [`Watch::drain`] once a
+    /// turn to hear what it said.
+    Live(Watch),
+    /// Nothing is being watched, and why, in the operating system's own words.
+    ///
+    /// The words are the error's, unwrapped to a plain [`String`] so no `notify`
+    /// type leaves this module; framing it as a sentence and fitting it to one
+    /// line is the caller's, which is where the house style for footer wording
+    /// lives.
+    Off(String),
+}
+
+/// A running filesystem watcher and the events it has produced: the impure half
+/// of watching, and the only part of this module that talks to the operating
+/// system.
+///
+/// It decides nothing. Every path it hears about is passed on exactly as it
+/// arrived, because *which* paths matter is [`NodeSet`]'s question and *when* to
+/// act on them is [`WatchPolicy`]'s; a filter here would be a second one, in the
+/// half that cannot be tested without a real disk. What it does own is the
+/// watcher handle, and owning it is the point: dropping the handle stops the
+/// watch, so it lives in this struct for as long as warlock does.
+///
+/// Events reach the loop over an [`mpsc`](std::sync::mpsc) channel, drained with
+/// [`try_recv`](Receiver::try_recv) and never with a blocking receive: the
+/// thread that drains is the thread that draws, and a frame is not worth waiting
+/// on a quiet disk for.
+pub struct Watch {
+    /// The watcher itself, held only to keep it alive — `notify` stops watching
+    /// when the handle is dropped, and everything it has to say arrives on the
+    /// channel below rather than through this field.
+    _handle: RecommendedWatcher,
+    /// Every path the watcher has reported and nobody has drained yet, one entry
+    /// per path of each event.
+    events: Receiver<PathBuf>,
+    /// Whether the channel is still connected. False once the watcher's end has
+    /// gone, which is a watcher that died mid-session: nothing further will
+    /// arrive, and nothing about that is fatal.
+    live: bool,
+}
+
+impl Watch {
+    /// Start watching `root` recursively and the manifest under `repo_root`.
+    ///
+    /// `root` is the tree's own root — the path the load came back rooted at —
+    /// and never the repository root standing in for it: warlock run from a
+    /// subdirectory shows that subdirectory, and watching the repository above
+    /// it would hear about a build in a sibling crate that is not on screen.
+    ///
+    /// `.warlock/pacts.toml` is watched as well, because a pact granted or
+    /// dropped in another window changes what every node's colour should be
+    /// while nothing inside the tree has moved at all. The manifest is often
+    /// absent — no pact has been made yet — and a path that is not there cannot
+    /// be watched, so `.warlock/` itself is the fallback and no watch at all is
+    /// the last resort: the tree is what live updates are mostly about, and
+    /// losing the manifest watch is not worth losing that.
+    ///
+    /// Returns [`Watching`], never a `Result`. A watcher is a nicety; warlock
+    /// runs without one.
+    #[must_use]
+    pub fn start(root: impl AsRef<Path>, repo_root: impl AsRef<Path>) -> Watching {
+        let (sender, events) = mpsc::channel();
+        // The closure runs on `notify`'s own thread. It unwraps each event into
+        // the paths it was about and sends them on; an error from the watcher
+        // and a send to a receiver nobody holds any more are both dropped,
+        // since there is no one on that thread to tell and nothing it could do.
+        let handler = move |event: notify::Result<Event>| {
+            if let Ok(event) = event {
+                for path in event.paths {
+                    let _ = sender.send(path);
+                }
+            }
+        };
+
+        let mut handle = match notify::recommended_watcher(handler) {
+            Ok(handle) => handle,
+            Err(error) => return Watching::Off(error.to_string()),
+        };
+        if let Err(error) = handle.watch(root.as_ref(), RecursiveMode::Recursive) {
+            return Watching::Off(error.to_string());
+        }
+        watch_manifest(&mut handle, repo_root.as_ref());
+
+        Watching::Live(Self {
+            _handle: handle,
+            events,
+            live: true,
+        })
+    }
+
+    /// Every path reported since the last drain, in the order it arrived, and
+    /// without blocking.
+    ///
+    /// Raw paths, unfiltered and undeduplicated: a single save arrives as
+    /// several, and a `cargo build` arrives as thousands that
+    /// [`NodeSet::accepts`] will reject for nothing. That is the division of
+    /// labour — this half hears, the other half decides.
+    ///
+    /// A watcher that has died takes the channel down with it, which shows up
+    /// here as an empty drain and [`live`](Watch::live) going false. It is not
+    /// an error and never a reason to stop: warlock carries on with no live
+    /// updates, exactly as it does when none could be started.
+    pub fn drain(&mut self) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        loop {
+            match self.events.try_recv() {
+                Ok(path) => paths.push(path),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.live = false;
+                    break;
+                }
+            }
+        }
+        paths
+    }
+
+    /// Whether anything is still expected to arrive: false once the watcher has
+    /// gone. A drain is what notices, since nothing else here touches the
+    /// channel.
+    #[must_use]
+    pub fn live(&self) -> bool {
+        self.live
+    }
+}
+
+impl fmt::Debug for Watch {
+    /// The handle is a platform type with nothing readable in it, and the
+    /// channel's contents cannot be looked at without taking them, so what a
+    /// failure prints is what can be said honestly: whether it is still alive.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Watch")
+            .field("live", &self.live)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Add the manifest to what `handle` is watching, if it can be added at all.
+///
+/// Three attempts, weakest last: the file, the `.warlock/` directory it lives
+/// in — which catches the manifest being created for the first time, and is
+/// where a write-then-rename lands — and then nothing. Non-recursive in both
+/// cases: `.warlock/` holds the manifest and the temporary file it is renamed
+/// from, and nothing under it is worth a subtree watch.
+///
+/// Whether it worked is not reported anywhere, because there is nothing to
+/// report it to: a caller offered the news could only carry on regardless, and
+/// the difference is one reload that happens at the end of a pact instead of
+/// during it.
+fn watch_manifest(handle: &mut RecommendedWatcher, repo_root: &Path) {
+    let manifest = manifest_path(repo_root);
+    if handle.watch(&manifest, RecursiveMode::NonRecursive).is_ok() {
+        return;
+    }
+    if let Some(directory) = manifest.parent() {
+        let _ = handle.watch(directory, RecursiveMode::NonRecursive);
     }
 }
 
@@ -707,5 +896,75 @@ mod tests {
         policy.accepted(base);
         assert!(!policy.due(base));
         assert!(policy.due(base + QUIET_PERIOD));
+    }
+
+    /// The two tests that touch a real watcher, and the only ones in this file
+    /// that touch a disk at all.
+    ///
+    /// Neither waits for an event. Whether the operating system reports a save
+    /// in ten milliseconds or three hundred is not this module's business — the
+    /// timing rules above are tested against instants nobody had to wait for —
+    /// so what is asserted here is only what is true the instant a watcher is
+    /// asked for: that it started, or that not starting came back as a value.
+    mod live {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::{env, fs, process};
+
+        use super::super::{Watch, Watching};
+
+        /// A directory of this test's own, removed at the end of the test that
+        /// made it. Hand-rolled in the style `claude.rs` already uses here,
+        /// rather than adding this crate's first dev-dependency for two tests.
+        fn scratch(name: &str) -> std::path::PathBuf {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+            let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+            let directory =
+                env::temp_dir().join(format!("warlock-watch-{}-{name}-{unique}", process::id()));
+            fs::create_dir_all(&directory).expect("a scratch directory under the temp directory");
+            directory
+        }
+
+        #[test]
+        fn a_watcher_that_cannot_be_started_is_a_value_and_not_an_error() {
+            // A root that is not there is the cheapest way to be refused by the
+            // operating system, and it stands in for every other way — no
+            // inotify instances left, a filesystem that reports nothing, a
+            // platform with no backend at all. What matters is the shape of the
+            // answer, which is a variant rather than a `Result`: nothing above
+            // has to handle it, and warlock keeps running.
+            let directory = scratch("missing");
+            let missing = directory.join("gone");
+
+            match Watch::start(&missing, &missing) {
+                Watching::Off(reason) => assert!(!reason.is_empty(), "says why, in one line"),
+                Watching::Live(_) => panic!("a watcher over a path that is not there"),
+            }
+
+            // Best effort: a leftover under `/tmp` is untidy, not a failure.
+            let _ = fs::remove_dir_all(&directory);
+        }
+
+        #[test]
+        fn a_watcher_over_a_real_directory_starts_and_has_nothing_to_say_yet() {
+            // No `.warlock/` in it either, which is the ordinary case before the
+            // first pact: the manifest cannot be watched, and that is not
+            // allowed to cost the tree its watch.
+            let root = scratch("root");
+
+            let Watching::Live(mut watch) = Watch::start(&root, &root) else {
+                panic!("a watcher over a directory that exists");
+            };
+
+            assert!(watch.live());
+            // Nothing has written anything, so this is a fact about a quiet
+            // disk and not a race with one: the drain never blocks, and there
+            // is nothing for it to have picked up.
+            assert!(watch.drain().is_empty());
+            assert!(watch.live(), "an empty drain is not a dead watcher");
+
+            // Best effort: a leftover under `/tmp` is untidy, not a failure.
+            let _ = fs::remove_dir_all(&root);
+        }
     }
 }
