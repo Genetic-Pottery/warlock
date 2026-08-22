@@ -71,9 +71,14 @@ pub use account::Outcome;
 /// One directory's pass inside an [`Account`].
 pub use account::Section;
 /// The front end's state: the flattened tree, which of it is collapsed, the
-/// selected row and the slice of rows on screen.
+/// selected row and the slice of rows on screen — moved by the keys, which
+/// drive whichever pane has the focus, or by a pointer, which names the row and
+/// the pane it landed on and so consults no focus at all. It also carries what
+/// the binary has told it about the terminal's mouse capture, which the footer
+/// names the key that changes it by.
 pub use app::App;
-/// Which of the screen's two panes the keys are driving.
+/// Which of the screen's two panes the keys are driving: toggled by the focus
+/// key, or set outright by a click naming a pane.
 pub use app::Focus;
 /// What a pact toggle changed, for whoever has to write it to the manifest.
 pub use app::PactToggle;
@@ -99,8 +104,14 @@ pub use claude::ClaudeAgent;
 pub use claude::INVOCATION_TIMEOUT;
 /// The colour a node state is drawn in.
 pub use colour::colour_for;
+/// What is drawn where a pointer landed: the footer, a border, the tree's
+/// header, a row of the tree's window, a line of the panel's.
+pub use ui::Hit;
 /// Draw one frame of the app.
 pub use ui::draw;
+/// Which part of the frame a screen point falls on, measured off the layout the
+/// frame is cut by.
+pub use ui::hit_test;
 /// How many lines of the pact's account a terminal of a given size has room for
 /// in the panel.
 pub use ui::panel_height;

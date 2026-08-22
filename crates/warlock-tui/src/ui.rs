@@ -28,12 +28,21 @@
 //! see [`draw_tree`]. Which rows exist at all is the app's too: collapsing a
 //! directory takes its descendants out of [`App::rows`], and whatever rows the
 //! app holds are the rows drawn — this module only says which of them is
-//! collapsed, with a marker on the line. There is deliberately no mouse.
+//! collapsed, with a marker on the line.
+//!
+//! A pointer is answered by measuring, not by remembering: [`hit_test`] takes a
+//! screen column and row and says which of these areas they landed on — the
+//! footer, a border, the header, a row of the tree's window, a line of the
+//! panel's — off the very [`areas`] call the frame is cut by, so a click lands
+//! on what the reader saw there. It is a function of three numbers and knows
+//! nothing about the tree, the selection or the window's contents: what a row
+//! offset means is the app's to say. Nothing here follows the pointer around,
+//! and there is deliberately no hover.
 
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect, Size};
+use ratatui::layout::{Constraint, Layout, Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
@@ -120,7 +129,9 @@ const SCROLLBACK_ARROW: &str = "↓";
 /// back to live would be a run with a mode in it.
 const LIVE_KEY: &str = "G";
 
-/// The keys line of the footer: every key that does something, in one line.
+/// The keys line of the footer, up to the one key whose name depends on what it
+/// would do next: every key that does something, in one line, and assembled by
+/// [`keys_line`].
 ///
 /// The movement keys first and together, in the order a reader reaches for
 /// them: one row, one screen, the whole tree. Then the three keys that move
@@ -136,8 +147,54 @@ const LIVE_KEY: &str = "G";
 /// sentence about filtering, and `f` with what it shows rather than with a
 /// sentence about a toggle.
 const KEYS: &str = "up/down k/j: move    PgUp/PgDn: page    g/G: first/last    \
-                    space: collapse    o: pacted    f: files    p: pact    \
-                    q/Esc/Ctrl-C: quit";
+                    space: collapse    o: pacted    f: files    p: pact";
+
+/// What separates one key's name from the next on the keys line.
+///
+/// Wide enough that two names read as two keys rather than as one phrase, and
+/// the same gap between every pair — including the two [`keys_line`] adds, which
+/// are part of the same line and not an afterthought tacked onto the end of it.
+const KEY_GAP: &str = "    ";
+
+/// The `m` key's name while the terminal is reporting its mouse: what the next
+/// press does, which is stop it.
+///
+/// Named by its effect rather than by its state — `m: mouse off` and not
+/// `mouse: on` — because a line of keys is a line of things to press, and every
+/// other name on it says what pressing does. It is short for the reason every
+/// name here is short, and it sits next to quit rather than beside `f` and `o`:
+/// those change what warlock draws, this changes what the terminal does with the
+/// pointer, which is the same kind of fact as how to leave.
+const MOUSE_OFF_KEY: &str = "m: mouse off";
+
+/// The `m` key's name while capture is off: what the next press does, which is
+/// start it again. See [`MOUSE_OFF_KEY`].
+///
+/// This is the wording that has to be right. Capture off is the state a reader
+/// can be surprised by — the wheel does nothing, and the only way back is a key
+/// whose name is the one thing on screen that says so.
+const MOUSE_ON_KEY: &str = "m: mouse on";
+
+/// The way out, last on the keys line because it is the last thing anybody needs
+/// and the first thing they have to be able to find.
+const QUIT_KEY: &str = "q/Esc/Ctrl-C: quit";
+
+/// The whole keys line for a terminal that is reporting its mouse or one that is
+/// not.
+///
+/// The only thing that varies is the `m` key's name, and it varies the way
+/// [`KEYS`] and [`PACTING_KEYS`] do: the line says what the next press will do,
+/// so the state capture is in is read off the key that changes it rather than
+/// announced on the message line — which the next keystroke would wipe, while
+/// capture stays off until somebody presses `m` again.
+fn keys_line(mouse_captured: bool) -> String {
+    let mouse = if mouse_captured {
+        MOUSE_OFF_KEY
+    } else {
+        MOUSE_ON_KEY
+    };
+    format!("{KEYS}{KEY_GAP}{mouse}{KEY_GAP}{QUIT_KEY}")
+}
 
 /// The keys line while a pact is running: the same line's job, for the mode the
 /// app is in while it works.
@@ -356,6 +413,116 @@ pub fn tree_height(size: Size) -> u16 {
 #[must_use]
 pub fn panel_height(size: Size) -> u16 {
     pane_inner(areas(Rect::from(size)).panel).height
+}
+
+/// What is drawn at the point [`hit_test`] was asked about.
+///
+/// One variant per thing a pointer can be over, because the answers are acted on
+/// differently and a caller that had to work out which was which from a pair of
+/// numbers would be doing the layout's arithmetic a second time. The two that
+/// carry an offset carry it from the top of their own window, not from the top
+/// of the screen: what is *at* that offset is the app's business, since the app
+/// owns both windows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Hit {
+    /// A point warlock does not draw: past the terminal's last column or last
+    /// row. Nothing reports such a point, and a total answer beats an assumption
+    /// that nothing ever will.
+    Offscreen,
+    /// The footer, whichever of its three lines. It is nobody's pane and takes
+    /// no focus.
+    Footer,
+    /// A pane's border, either pane's, corners included — the columns and rows
+    /// between the two panes' insides, which belong to neither.
+    Border,
+    /// The one line naming the tree, inside the tree pane's border and above its
+    /// rows.
+    TreeHeader,
+    /// A row of the tree's window: `offset` rows below the first one on screen.
+    ///
+    /// A window offset and not a row of the tree. The app adds
+    /// [`App::scroll_offset`] to get the row it means, and the app is also the
+    /// one that knows whether it has that many rows: a window can be taller than
+    /// the tree in it, and this says where the pointer is rather than what is
+    /// under it.
+    TreeRow {
+        /// How many rows below the top of the tree's window the point is.
+        offset: u16,
+    },
+    /// Inside the tree pane, below every row the window has room for.
+    ///
+    /// Asked of the layout rather than assumed away: the rows currently take
+    /// everything the header leaves, so nothing lands here today, and a pane
+    /// that ever grew a line of its own along the bottom would put points here
+    /// rather than quietly hand out a row offset the tree's window does not
+    /// have.
+    TreeBelowRows,
+    /// A line of the panel's window: `offset` lines below the first one on
+    /// screen. The whole inside of the panel answers this, drawn on or not — the
+    /// panel has no selection, so a point in it is a point in the panel.
+    PanelLine {
+        /// How many lines below the top of the panel's window the point is.
+        offset: u16,
+    },
+}
+
+/// What is drawn at column `column`, row `row` of a terminal of `size`.
+///
+/// The one place a screen point is turned into something warlock has a name
+/// for, and the mouse's counterpart to [`tree_height`] and [`panel_height`]:
+/// measured off the same [`areas`] call [`draw`] cuts the frame by, so what a
+/// click lands on is what the reader saw at that point rather than what a second
+/// opinion about the layout thinks is there.
+///
+/// A function of three numbers. No frame, no app state, no terminal — which is
+/// what lets the event loop's answer to a click be tested with nothing attached
+/// to stdout, and what keeps this file from needing to know what a row of the
+/// tree is.
+///
+/// Every case is asked of a [`Rect`] the layout produced, so a terminal too
+/// short for a tree row, too short for a header, or too short for anything but a
+/// footer answers what it has rather than underflowing its way to a row that is
+/// not there.
+#[must_use]
+pub fn hit_test(column: u16, row: u16, size: Size) -> Hit {
+    let point = Position::new(column, row);
+    let screen = Rect::from(size);
+    if !screen.contains(point) {
+        return Hit::Offscreen;
+    }
+
+    let Areas {
+        panel,
+        tree,
+        footer,
+    } = areas(screen);
+    if footer.contains(point) {
+        return Hit::Footer;
+    }
+
+    let inside = pane_inner(panel);
+    if inside.contains(point) {
+        return Hit::PanelLine {
+            offset: row.saturating_sub(inside.y),
+        };
+    }
+
+    let inside = pane_inner(tree);
+    if inside.contains(point) {
+        let rows = tree_rows_area(tree);
+        if row < rows.y {
+            return Hit::TreeHeader;
+        }
+        return if rows.contains(point) {
+            Hit::TreeRow {
+                offset: row.saturating_sub(rows.y),
+            }
+        } else {
+            Hit::TreeBelowRows
+        };
+    }
+
+    Hit::Border
 }
 
 /// The border a pane is drawn in, lit if it has the focus and dim if it has not.
@@ -719,6 +886,12 @@ fn pulse_colour(app: &App, now: Instant) -> Option<Color> {
 /// the tree under it on a keystroke that changed nothing about the tree, and
 /// would do it in the middle of the one operation the reader is watching.
 ///
+/// The keys line is also where the terminal's mouse capture is reported, by
+/// naming the key that changes it with what the next press of it will do: see
+/// [`keys_line`] and [`App::mouse_captured`]. Not on the message line, because
+/// capture being off outlasts the keystroke that turned it off while a message
+/// lasts until the next one.
+///
 /// The `Paragraph` is given no `.wrap`, deliberately: a line too long for the
 /// terminal is cut at the right-hand edge rather than folded onto the line
 /// below, so the footer is three lines whatever the app has put on them and it
@@ -738,7 +911,12 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ));
     }
 
-    let keys = Line::from(if app.is_pacting() { PACTING_KEYS } else { KEYS }).dim();
+    let keys = Line::from(if app.is_pacting() {
+        PACTING_KEYS.to_owned()
+    } else {
+        keys_line(app.mouse_captured())
+    })
+    .dim();
 
     let message = Line::from(
         app.pact_line()
@@ -774,10 +952,10 @@ mod tests {
     use warlock_engine::NodeState;
 
     use super::{
-        BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, GUIDE, HEADER_HEIGHT, INDENT, KEYS, LIVE_KEY,
-        NO_MARKER, PACTING_KEYS, PANEL_INDENT, SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH,
-        TREE_PERCENT, areas, display_width, draw, pane_inner, panel_height, tree_height,
-        tree_rows_area, tree_width, truncated,
+        BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, GUIDE, HEADER_HEIGHT, Hit, INDENT, LIVE_KEY,
+        MOUSE_OFF_KEY, MOUSE_ON_KEY, NO_MARKER, PACTING_KEYS, PANEL_INDENT, SCROLLBACK_ARROW,
+        SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas, display_width, draw, hit_test,
+        keys_line, pane_inner, panel_height, tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::account::Outcome;
     use crate::app::{App, Row};
@@ -804,9 +982,9 @@ mod tests {
     /// footer, the tree pane's border top and bottom, and its header.
     const CHROME_HEIGHT: u16 = FOOTER_HEIGHT + 2 * BORDER_THICKNESS + HEADER_HEIGHT;
 
-    /// A terminal wide enough for the whole of [`KEYS`], whatever it grows to:
-    /// the footer test asserts that line for equality, and a line drawn onto a
-    /// narrower terminal than it needs would be compared against its own
+    /// A terminal wide enough for the whole of [`keys_line`], whatever it grows
+    /// to: the footer test asserts that line for equality, and a line drawn onto
+    /// a narrower terminal than it needs would be compared against its own
     /// truncation.
     const KEYS_WIDTH: u16 = 160;
 
@@ -1714,7 +1892,7 @@ mod tests {
         // Every key, in full: equality rather than a bag of substrings, so a
         // line that has grown past the width it is drawn at fails here instead
         // of quietly losing whatever sat on the right-hand end of it.
-        assert_eq!(keys, KEYS);
+        assert_eq!(keys, keys_line(app.mouse_captured()));
         // "p: pact" and not the bare "p", which "up/down" would satisfy.
         for key in [
             "up/down",
@@ -1730,6 +1908,10 @@ mod tests {
             "o: pacted",
             "f: files",
             "p: pact",
+            // The mouse key, named by what pressing it does next rather than by
+            // the state it is in: see
+            // `the_keys_line_names_the_mouse_key_by_what_the_next_press_does`.
+            "m: mouse",
             "q",
             "Esc",
             "Ctrl-C",
@@ -1938,13 +2120,13 @@ mod tests {
         // Byte for byte today's line with no pact running, and the pacting line
         // whole while one is: equality, so a line that outgrew the terminal it
         // is drawn on fails here rather than losing its right-hand end quietly.
-        assert_eq!(row_text(&idle, y), KEYS);
+        assert_eq!(row_text(&idle, y), keys_line(app.mouse_captured()));
         assert_eq!(row_text(&pacting, y), PACTING_KEYS);
         // Esc means two things, and the line says which one it means now.
         let said = row_text(&pacting, y);
         assert!(said.contains("Esc: cancel"), "{said:?}");
         assert!(!said.contains("Esc/Ctrl-C: quit"), "{said:?}");
-        assert!(KEYS.contains("Esc/Ctrl-C: quit"));
+        assert!(keys_line(true).contains("Esc/Ctrl-C: quit"));
 
         // The line is short enough to survive the narrow terminal the other
         // footer tests draw on, because it is the line that answers "how do I
@@ -1954,7 +2136,59 @@ mod tests {
 
         // And the run ending puts today's line back, exactly.
         app.clear_pact_in_flight();
-        assert_eq!(row_text(&render(&app, KEYS_WIDTH, height), y), KEYS);
+        assert_eq!(
+            row_text(&render(&app, KEYS_WIDTH, height), y),
+            keys_line(app.mouse_captured())
+        );
+    }
+
+    #[test]
+    fn the_keys_line_names_the_mouse_key_by_what_the_next_press_does() {
+        let mut app = App::from_tree(&fixture::tree());
+        let height = 10;
+        let y = height - FOOTER_HEIGHT + 1;
+
+        // Reporting its mouse, which is how warlock starts: the key on offer is
+        // the one that stops it.
+        app.set_mouse_captured(true);
+        let capturing = render(&app, KEYS_WIDTH, height);
+        let keys = row_text(&capturing, y);
+        assert_eq!(keys, keys_line(true));
+        assert!(keys.contains(MOUSE_OFF_KEY), "{keys:?}");
+        assert!(!keys.contains(MOUSE_ON_KEY), "{keys:?}");
+
+        // And with capture off, the same key named by what it does now: turn it
+        // back on. This is the wording that matters — it is the only thing on
+        // screen that says the wheel is the terminal's for the moment.
+        app.set_mouse_captured(false);
+        let released = render(&app, KEYS_WIDTH, height);
+        let keys = row_text(&released, y);
+        assert_eq!(keys, keys_line(false));
+        assert!(keys.contains(MOUSE_ON_KEY), "{keys:?}");
+        assert!(!keys.contains(MOUSE_OFF_KEY), "{keys:?}");
+
+        // Nothing else on the screen moved: the toggle is a fact about the
+        // terminal, not about the tree, and it is not announced on the message
+        // line either — that line is blank in both frames, and every row above
+        // the keys line is the row it was.
+        assert_eq!(row_text(&capturing, height - 1), "");
+        assert_eq!(row_text(&released, height - 1), "");
+        for row in 0..y {
+            assert_eq!(
+                row_text(&capturing, row),
+                row_text(&released, row),
+                "row {row}"
+            );
+        }
+
+        // A pact in flight takes the line whichever way the toggle is left: the
+        // short line that answers "how do I stop this?" is not the place for a
+        // key about the pointer, and `PACTING_KEYS` says so by not naming it.
+        app.set_pact_in_flight("warlock/crates/engine", 3, 12);
+        assert_eq!(row_text(&render(&app, KEYS_WIDTH, height), y), PACTING_KEYS);
+        app.set_mouse_captured(true);
+        assert_eq!(row_text(&render(&app, KEYS_WIDTH, height), y), PACTING_KEYS);
+        assert!(!PACTING_KEYS.contains("mouse"));
     }
 
     #[test]
@@ -2082,6 +2316,209 @@ mod tests {
                 tree <= TREE_MIN_WIDTH.max(width * TREE_PERCENT / 100),
                 "the tree column took {tree} of {width}"
             );
+        }
+    }
+
+    #[test]
+    fn a_point_is_answered_with_whatever_the_frame_draws_at_it() {
+        let size = Size::new(WIDTH, HEIGHT);
+        let panes = areas(Rect::from(size));
+        let hit = |x, y| hit_test(x, y, size);
+
+        // The footer runs the full width, all three of its lines, and belongs
+        // to neither pane.
+        for y in panes.footer.y..panes.footer.y + panes.footer.height {
+            for x in [0, WIDTH / 2, WIDTH - 1] {
+                assert_eq!(hit(x, y), Hit::Footer, "at ({x}, {y})");
+            }
+        }
+
+        // Every edge of both panes is border, corners included — the column
+        // between the two panes is two borders and no pane's inside.
+        for pane in [panes.panel, panes.tree] {
+            for y in pane.y..pane.y + pane.height {
+                for x in [pane.x, pane.x + pane.width - 1] {
+                    assert_eq!(hit(x, y), Hit::Border, "at ({x}, {y})");
+                }
+            }
+            for x in pane.x..pane.x + pane.width {
+                for y in [pane.y, pane.y + pane.height - 1] {
+                    assert_eq!(hit(x, y), Hit::Border, "at ({x}, {y})");
+                }
+            }
+        }
+
+        // Inside the tree pane: one header line, and a row of the window per
+        // row under it, counted from the top of the window rather than of the
+        // screen.
+        let inside = pane_inner(panes.tree);
+        let rows = tree_rows_area(panes.tree);
+        assert_eq!(rows.height, tree_height(size));
+        for x in inside.x..inside.x + inside.width {
+            assert_eq!(hit(x, inside.y), Hit::TreeHeader, "at column {x}");
+        }
+        for offset in 0..rows.height {
+            for x in [rows.x, rows.x + rows.width - 1] {
+                assert_eq!(hit(x, rows.y + offset), Hit::TreeRow { offset });
+            }
+        }
+
+        // And the whole inside of the panel is a line of its window, drawn on
+        // or not: the panel has no selection for a point to land on.
+        let inside = pane_inner(panes.panel);
+        assert_eq!(inside.height, panel_height(size));
+        for offset in 0..inside.height {
+            for x in [inside.x, inside.x + inside.width - 1] {
+                assert_eq!(hit(x, inside.y + offset), Hit::PanelLine { offset });
+            }
+        }
+    }
+
+    #[test]
+    fn the_row_a_point_lands_on_is_the_row_the_frame_drew_there() {
+        // Measured against a frame rather than against the layout twice over:
+        // what a click lands on has to be what the reader saw at that point.
+        let app = tall_app(0);
+        let size = Size::new(WIDTH, HEIGHT);
+        let buffer = render(&app, WIDTH, HEIGHT);
+
+        let rows = rows_area(&buffer);
+        assert!(rows.height > 1, "the window should hold more than one row");
+        for offset in 0..rows.height {
+            assert_eq!(
+                hit_test(rows.x, rows.y + offset, size),
+                Hit::TreeRow { offset }
+            );
+            assert_eq!(
+                tree_row(&buffer, offset),
+                drawn_row(usize::from(offset), 0),
+                "row {offset} of the window"
+            );
+        }
+        // The header is the line the frame drew the tree's name on, not a row.
+        let header = header_area(&buffer);
+        assert_eq!(hit_test(header.x, header.y, size), Hit::TreeHeader);
+        assert_eq!(header_text(&buffer), app.header());
+    }
+
+    #[test]
+    fn a_terminal_too_short_for_a_tree_row_answers_no_row_rather_than_underflowing() {
+        for height in 0..=CHROME_HEIGHT {
+            let size = Size::new(WIDTH, height);
+            assert_eq!(tree_height(size), 0, "in {height} rows");
+
+            for y in 0..height {
+                for x in 0..WIDTH {
+                    let hit = hit_test(x, y, size);
+                    assert!(
+                        !matches!(hit, Hit::TreeRow { .. }),
+                        "({x}, {y}) of {height} rows answered {hit:?}"
+                    );
+                }
+            }
+        }
+
+        // The tallest of those has room for the header and nothing under it,
+        // and says so; a screen with no room even for that is all footer and
+        // border.
+        let header = Size::new(WIDTH, CHROME_HEIGHT);
+        let inside = pane_inner(areas(Rect::from(header)).tree);
+        assert_eq!(inside.height, HEADER_HEIGHT);
+        assert_eq!(hit_test(inside.x, inside.y, header), Hit::TreeHeader);
+        for height in 0..CHROME_HEIGHT - HEADER_HEIGHT {
+            let size = Size::new(WIDTH, height);
+            for y in 0..height {
+                for x in 0..WIDTH {
+                    let hit = hit_test(x, y, size);
+                    assert!(
+                        matches!(hit, Hit::Footer | Hit::Border),
+                        "({x}, {y}) of {height} rows answered {hit:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_terminal_narrow_enough_to_halve_still_tells_the_two_panes_apart() {
+        // The branch of `areas` where the tree column's floor is given up and
+        // the two panes split what there is: the point is that hit-testing asks
+        // the layout where the panes are rather than working it out from the
+        // rule.
+        for width in [40, 41, TREE_MIN_WIDTH * 2 - 1] {
+            let size = Size::new(width, FIXTURE_HEIGHT);
+            let panes = areas(Rect::from(size));
+            assert_eq!(
+                panes.tree.width,
+                width / 2,
+                "at {width} columns the floor should have given way"
+            );
+
+            let inside = pane_inner(panes.panel);
+            let rows = tree_rows_area(panes.tree);
+            assert_eq!(
+                hit_test(inside.x, inside.y, size),
+                Hit::PanelLine { offset: 0 },
+                "at {width} columns"
+            );
+            assert_eq!(
+                hit_test(
+                    inside.x + inside.width - 1,
+                    inside.y + inside.height - 1,
+                    size
+                ),
+                Hit::PanelLine {
+                    offset: inside.height - 1
+                },
+                "at {width} columns"
+            );
+            assert_eq!(
+                hit_test(rows.x, rows.y, size),
+                Hit::TreeRow { offset: 0 },
+                "at {width} columns"
+            );
+            // The two columns between the panes' insides are border on both
+            // sides of the join, whichever pane owns which.
+            for x in [inside.x + inside.width, rows.x - 1] {
+                assert_eq!(hit_test(x, rows.y, size), Hit::Border, "at {width} columns");
+            }
+        }
+    }
+
+    #[test]
+    fn no_point_is_answered_with_an_offset_its_window_has_no_room_for() {
+        for (width, height) in [
+            (WIDTH, HEIGHT),
+            (KEYS_WIDTH, 24),
+            (40, FIXTURE_HEIGHT),
+            (TREE_MIN_WIDTH * 2 - 1, FILES_HEIGHT),
+            (1, 1),
+            (0, 0),
+        ] {
+            let size = Size::new(width, height);
+            for y in 0..height {
+                for x in 0..width {
+                    match hit_test(x, y, size) {
+                        Hit::TreeRow { offset } => assert!(
+                            offset < tree_height(size),
+                            "({x}, {y}) of {width}x{height} is row {offset} of a window {} tall",
+                            tree_height(size)
+                        ),
+                        Hit::PanelLine { offset } => assert!(
+                            offset < panel_height(size),
+                            "({x}, {y}) of {width}x{height} is line {offset} of a window {} tall",
+                            panel_height(size)
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+
+            // And a point off the end of the frame is nothing warlock drew,
+            // rather than the nearest thing it did draw.
+            assert_eq!(hit_test(width, 0, size), Hit::Offscreen);
+            assert_eq!(hit_test(0, height, size), Hit::Offscreen);
+            assert_eq!(hit_test(u16::MAX, u16::MAX, size), Hit::Offscreen);
         }
     }
 
