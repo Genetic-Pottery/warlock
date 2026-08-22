@@ -23,6 +23,16 @@
 //! drawing the frame, so a whole minutes-long run can be driven through it in a
 //! test with nothing attached to stdout and no time passing at all.
 //!
+//! *When* the tree is read again is decided the same way. The disk keeps moving
+//! after a load — a file saved in another window, a branch checked out, a build
+//! writing thousands of files nobody wants to hear about — and [`WatchPolicy`]
+//! is what that movement is weighed by: a filter that is the last walk itself,
+//! so an event counts only when its immediate parent is a directory the load
+//! produced, and three timing rules that turn one editor save into one reload
+//! and a long burst into a handful. It watches nothing and reloads nothing, and
+//! it holds no clock either — the instant it compares against is handed in, so a
+//! ten-second burst is driven through it in a test in microseconds.
+//!
 //! The one exception is [`ClaudeAgent`], which owns a child process: it
 //! implements the engine's [`Agent`](warlock_engine::Agent) port by running the
 //! `claude` CLI, because the engine spawns nothing and something has to. Its
@@ -44,6 +54,7 @@ mod colour;
 #[cfg(test)]
 mod fixture;
 mod ui;
+mod watch;
 
 /// Everything one pact did, in the order it did it: a section per directory, a
 /// line per thing a pass was seen doing, and a clock on every line.
@@ -91,3 +102,16 @@ pub use ui::draw;
 pub use ui::panel_height;
 /// How many rows of tree a terminal of a given size has room for.
 pub use ui::tree_height;
+/// How many further reloads the events arriving during a reload are worth: one,
+/// however many of them there were.
+pub use watch::COALESCED_RELOADS;
+/// The directories the last successful load produced: the filter every
+/// filesystem event is held against.
+pub use watch::NodeSet;
+/// How long the disk has to be quiet before a reload — the debounce.
+pub use watch::QUIET_PERIOD;
+/// The longest a reload is put off while events keep arriving — the ceiling.
+pub use watch::RELOAD_CEILING;
+/// Told what moved on disk and when, it answers whether the tree is owed a
+/// reload right now — and reloads nothing itself.
+pub use watch::WatchPolicy;
