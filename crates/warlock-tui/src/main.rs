@@ -362,14 +362,15 @@ fn run() -> Result<(), Error> {
                 // a time and finally as an outcome, and until it does the loop
                 // goes round as usual — drawing, scrolling, filtering.
                 //
-                // `None` needs nothing done about it, and it now covers two
-                // cases that are alike in exactly this way. A refused toggle has
-                // already put its own sentence in `App::message`, which the next
-                // frame draws; a press while a pact is in flight has changed
-                // nothing at all, because a second pact over a tree the first
-                // one is still writing to would be two runs racing for the same
-                // documents and the same manifest. Neither is this arm's to
-                // explain — see `pact_press`.
+                // `None` needs nothing done about it, and it covers two cases
+                // that are alike in exactly this way: both have already said
+                // their piece on the app, and the next frame draws it. A refused
+                // toggle put its sentence in `App::message`; a press while a
+                // pact is in flight started nothing — a second pact over a tree
+                // the first one is still writing to would be two runs racing for
+                // the same documents and the same manifest — and said so by
+                // setting the flag that words `App::pact_line` as already
+                // running. Neither is this arm's to explain — see `pact_press`.
                 Some(Action::TogglePact) => {
                     // Copied before the toggle paints anything, because the
                     // toggle is no longer its own undo: it puts a whole subtree
@@ -756,13 +757,20 @@ fn cancelled(toggled: Toggled) -> Toggled {
 /// What one press of the pact key comes to, given whether a pact is running
 /// already.
 ///
-/// Two refusals, both silent here and for different reasons. A press while a
-/// pact is in flight does nothing whatsoever — no toggle, no colour, no message
-/// — because the run in flight is already writing to the tree the second one
-/// would write to, and because the footer is saying what that run is doing,
-/// which is the answer to "why did nothing happen?". A press the app itself
-/// turns down — a file row — has already had its say in
-/// [`App::message`](warlock_tui::App::message).
+/// Two refusals, neither of them silent, and each said in its own place. A press
+/// while a pact is in flight *starts* nothing — no toggle, no colour, no run,
+/// and the panel keeps the account already on it — because the run in flight is
+/// already writing to the tree the second one would write to; what it does do is
+/// say so, by setting the flag that adds `— already running` to the end of the
+/// line the reader is already watching (see
+/// [`App::set_pact_refused`](warlock_tui::App::set_pact_refused) and
+/// [`App::pact_line`](warlock_tui::App::pact_line)). Deliberately not a message:
+/// the message line is the one a pact in flight has taken, so a sentence left
+/// there would be the one sentence the reader could not see, and it would turn
+/// up minutes later when the run ended. A press the app itself turns down — a
+/// file row — has no run over it and so has its say the ordinary way, in
+/// [`App::message`](warlock_tui::App::message), which `App::toggle_pact` has
+/// already written by the time this returns.
 ///
 /// A function rather than a guard in the match arm so that "a second press
 /// changes nothing" is a property a test can hold the app up against, rather
@@ -784,6 +792,10 @@ fn cancelled(toggled: Toggled) -> Toggled {
 /// to say.
 fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PactToggle> {
     if in_flight {
+        // The whole of the refusal: a bit of wording on a line that is already
+        // on screen. Setting it again says the same thing, so a reader leaning
+        // on the key changes nothing after the first press.
+        app.set_pact_refused();
         return None;
     }
     let toggle = app.toggle_pact()?;
@@ -3442,6 +3454,11 @@ mod tests {
                 NodeState::Unpacted,
             ));
             let mut app = App::from_tree(&tree);
+            // The run the press is going to bounce off, as the event loop would
+            // have told the app about it, and the sentence the last keystroke
+            // left, which is not this press's to spend.
+            app.set_pact_in_flight("/repo/crates/engine", 3, 12);
+            app.set_message("something the last key said");
             let before = app.clone();
 
             assert_eq!(
@@ -3449,18 +3466,94 @@ mod tests {
                 None,
                 "no second pact"
             );
+            // Saying so is the whole of it: the same app with the flag set and
+            // nothing else moved — no colour, no selection, no account started
+            // and the rows exactly as they were.
+            let refused = {
+                let mut refused = before.clone();
+                refused.set_pact_refused();
+                refused
+            };
+            assert_eq!(app, refused, "the press did more than say so");
             assert_eq!(
-                app, before,
-                "and no colour, no message, no selection moved and no account started"
+                app.pact_line().as_deref(),
+                Some("pacting engine (3/12) — already running"),
+                "the refusal is worded onto the line the reader is watching"
+            );
+            assert_eq!(
+                app.message(),
+                Some("something the last key said"),
+                "the refusal did not go through the message"
             );
 
             // The same press, with nothing running, is the press that starts a
-            // pact: same key, same app, different answer.
+            // pact: same key, same app, different answer. The run being over is
+            // the loop's news, so the app hears it the way it always does.
+            app.clear_pact_in_flight();
             let toggle =
                 pact_press(&mut app, false, Instant::now()).expect("a directory can be pacted");
             assert_eq!(toggle.path, PathBuf::from("/repo/crates"));
             assert!(toggle.pacted);
             assert_ne!(app, before, "the subtree it covers is painted");
+        }
+
+        #[test]
+        fn leaning_on_the_pact_key_while_a_pact_is_in_flight_changes_nothing_further() {
+            let tree = Tree::new(Node::new(
+                "/repo/crates",
+                None::<PathBuf>,
+                NodeState::Unpacted,
+            ));
+            let mut app = App::from_tree(&tree);
+            app.set_pact_in_flight("/repo/crates/engine", 3, 12);
+
+            assert_eq!(pact_press(&mut app, true, Instant::now()), None);
+            let after_one = app.clone();
+
+            // A reader who presses again is asking the same question, and the
+            // answer already on screen is the same one. There is nothing to
+            // count and nothing to say twice.
+            assert_eq!(pact_press(&mut app, true, Instant::now()), None);
+            assert_eq!(pact_press(&mut app, true, Instant::now()), None);
+
+            assert_eq!(app, after_one, "pressing again changed something");
+            assert_eq!(
+                app.pact_line().as_deref(),
+                Some("pacting engine (3/12) — already running")
+            );
+        }
+
+        #[test]
+        fn a_press_on_a_file_row_with_nothing_running_still_refuses_through_the_message() {
+            // A directory with a file under it, and the files shown, so the
+            // selection can sit on the one row a pact is never about.
+            let tree = Tree::new(
+                Node::new("/repo/crates", None::<PathBuf>, NodeState::Unpacted)
+                    .with_files([PathBuf::from("/repo/crates/Cargo.toml")]),
+            );
+            let mut app = App::from_tree(&tree);
+            app.toggle_files();
+            app.select_next();
+            assert_eq!(
+                app.selected_row().map(|row| row.path.clone()),
+                Some(PathBuf::from("/repo/crates/Cargo.toml")),
+                "the selection is on the file"
+            );
+
+            assert_eq!(
+                pact_press(&mut app, false, Instant::now()),
+                None,
+                "a file is not a thing to pact"
+            );
+
+            // Its own refusal, in its own place: no run has the message line, so
+            // the sentence the app wrote is the one that is drawn. And no flag,
+            // because no run turned this press down.
+            assert!(
+                app.message().is_some_and(|message| !message.is_empty()),
+                "the file row said nothing"
+            );
+            assert_eq!(app.pact_line(), None, "nothing is running to be refused by");
         }
 
         #[test]
