@@ -778,6 +778,18 @@ mod tests {
     /// included: five rows and then some.
     const FIXTURE_HEIGHT: u16 = 12;
 
+    /// How far apart the pulse tests draw their frames: one phase, after which
+    /// the row in flight should have changed colour, and the two phases that
+    /// make a whole cycle, after which it should be back where it started.
+    ///
+    /// Written as wall-clock durations rather than as multiples of the
+    /// `PULSE_PHASE` under test, because "about half a second" is what was
+    /// asked for: a phase that quietly grew to two seconds would still be
+    /// self-consistent with itself, and would fail here.
+    const PHASE: Duration = Duration::from_millis(500);
+    /// See [`PHASE`]: two of them.
+    const CYCLE: Duration = Duration::from_secs(1);
+
     /// `count` rows of nothing in particular, named so that a line on screen
     /// says which row of the tree it is.
     fn many_rows(count: usize) -> Vec<Row> {
@@ -976,6 +988,23 @@ mod tests {
             .fg
     }
 
+    /// Which drawn row of `app` stands for `path`, as an index into the window
+    /// [`tree_rows`] and [`first_glyph_colour`] read.
+    ///
+    /// The pulse tests name the directory or file they mean rather than
+    /// counting the fixture's rows, so that they keep asserting about the same
+    /// node if the fixture ever grows another one above it. Only sound while
+    /// the whole tree is on screen, which the tests that use it check.
+    fn row_index(app: &App, path: &str) -> u16 {
+        let index = app
+            .rows()
+            .iter()
+            .position(|row| row.path.as_path() == Path::new(path))
+            .unwrap_or_else(|| panic!("{path} is not a row of this app"));
+
+        u16::try_from(index).expect("the fixture tree is small")
+    }
+
     /// The rows of `buffer` — counted from the top of the screen — drawn with
     /// the selection's highlight.
     ///
@@ -1111,6 +1140,193 @@ mod tests {
             colours.iter().any(|colour| *colour != colours[0]),
             "every file was drawn in the same colour: {colours:?}"
         );
+    }
+
+    #[test]
+    fn the_row_in_flight_alternates_between_the_stale_and_the_fresh_colour() {
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FILES_HEIGHT);
+        // The keypress first, as the reader makes it: a pact on `crates`
+        // covers everything below it and paints the lot stale.
+        app.select_next();
+        assert!(app.toggle_pact().is_some(), "the crates row takes a pact");
+        app.toggle_files();
+        // Then the run reaching its first directory, the way the progress
+        // handler does it: a section opened, and that path put in flight.
+        app.account_mut()
+            .expect("a pact has started")
+            .open_section("crates/engine", base);
+        app.set_pact_in_flight("warlock/crates/engine", 1, 2);
+        assert_eq!(app.scroll_offset(), 0, "the fixture fits on this screen");
+
+        // Three frames of the same app, differing only in what time the caller
+        // says it is — no sleeping, no clock of the renderer's own.
+        let first = render_at(&app, WIDTH, FILES_HEIGHT, base);
+        let half = render_at(&app, WIDTH, FILES_HEIGHT, base + PHASE);
+        let whole = render_at(&app, WIDTH, FILES_HEIGHT, base + CYCLE);
+
+        // Half a second apart the row has changed colour; a second apart it is
+        // back where it started, and it started on the stale colour the
+        // keypress painted — the pulse leaves yellow reaching for green.
+        let row = row_index(&app, "warlock/crates/engine");
+        assert_eq!(
+            first_glyph_colour(&first, row),
+            colour_for(NodeState::PactedStale)
+        );
+        assert_eq!(
+            first_glyph_colour(&half, row),
+            colour_for(NodeState::PactedFresh)
+        );
+        assert_ne!(
+            first_glyph_colour(&first, row),
+            first_glyph_colour(&half, row)
+        );
+        assert_eq!(
+            first_glyph_colour(&whole, row),
+            first_glyph_colour(&first, row)
+        );
+
+        // And nothing else moved with it: the sibling directory the run has
+        // not reached yet, and the files inside the directory it is working on
+        // now, hold the colour the keypress painted on every frame.
+        for path in [
+            "warlock/crates/tui",
+            "warlock/crates/engine/Cargo.toml",
+            "warlock/crates/engine/WARLOCK.md",
+        ] {
+            let index = row_index(&app, path);
+            for (when, buffer) in [("0 ms", &first), ("500 ms", &half), ("1 s", &whole)] {
+                assert_eq!(
+                    first_glyph_colour(buffer, index),
+                    colour_for(NodeState::PactedStale),
+                    "{path} changed colour at {when}"
+                );
+            }
+        }
+        // A colour is the whole of what moves: the same rows, in the same
+        // places, saying the same things on all three frames.
+        assert_eq!(tree_rows(&half), tree_rows(&first));
+        assert_eq!(tree_rows(&whole), tree_rows(&first));
+    }
+
+    #[test]
+    fn each_directorys_pulse_starts_over_on_the_stale_colour() {
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        app.select_next();
+        assert!(app.toggle_pact().is_some(), "the crates row takes a pact");
+        app.account_mut()
+            .expect("a pact has started")
+            .open_section("crates/engine", base);
+        app.set_pact_in_flight("warlock/crates/engine", 1, 2);
+        let engine = row_index(&app, "warlock/crates/engine");
+        let tui = row_index(&app, "warlock/crates/tui");
+
+        // A handover half a second in, so the first directory is mid-phase and
+        // on the fresh colour at the moment the second one takes over.
+        let handover = base + PHASE;
+        let before = render_at(&app, WIDTH, FIXTURE_HEIGHT, handover);
+        assert_eq!(
+            first_glyph_colour(&before, engine),
+            colour_for(NodeState::PactedFresh)
+        );
+
+        app.account_mut()
+            .expect("a pact has started")
+            .open_section("crates/tui", handover);
+        app.set_pact_in_flight("warlock/crates/tui", 2, 2);
+        let after = render_at(&app, WIDTH, FIXTURE_HEIGHT, handover);
+        let later = render_at(&app, WIDTH, FIXTURE_HEIGHT, handover + PHASE);
+
+        // The phase is measured from the section that just opened, not from the
+        // start of the run: the new row begins on stale however far into the
+        // last directory's phase the handover landed, and turns fresh half a
+        // second after the handover rather than half a second after the run.
+        assert_eq!(
+            first_glyph_colour(&after, tui),
+            colour_for(NodeState::PactedStale)
+        );
+        assert_eq!(
+            first_glyph_colour(&later, tui),
+            colour_for(NodeState::PactedFresh)
+        );
+        // And the directory the run has left behind stops moving: it is an
+        // ordinary stale row again, on both frames.
+        for buffer in [&after, &later] {
+            assert_eq!(
+                first_glyph_colour(buffer, engine),
+                colour_for(NodeState::PactedStale)
+            );
+        }
+    }
+
+    #[test]
+    fn a_pact_in_flight_with_no_open_section_draws_a_steady_stale_row() {
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        app.select_next();
+        assert!(app.toggle_pact().is_some(), "the crates row takes a pact");
+        // The moment between the keypress and the first progress event: a path
+        // in flight and no section to measure a phase against yet.
+        app.set_pact_in_flight("warlock/crates/engine", 1, 2);
+        assert!(
+            app.account()
+                .expect("a pact has started")
+                .open_section_started()
+                .is_none()
+        );
+
+        let row = row_index(&app, "warlock/crates/engine");
+        for millis in [0, 250, 500, 1_000, 1_500] {
+            let now = base + Duration::from_millis(millis);
+            let buffer = render_at(&app, WIDTH, FIXTURE_HEIGHT, now);
+
+            // Never blank, never unstyled and never fresh: the row sits in the
+            // colour the keypress painted it until its own pass begins.
+            assert!(
+                tree_row(&buffer, row).ends_with("engine"),
+                "the row went blank at {millis} ms"
+            );
+            assert_eq!(
+                first_glyph_colour(&buffer, row),
+                colour_for(NodeState::PactedStale),
+                "at {millis} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn the_row_takes_its_own_states_colour_back_when_the_pact_stops_flying() {
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        // No keypress here on purpose: the fixture's engine is fresh already,
+        // so the pulse's stale phase is visibly not this row's own colour and a
+        // row that kept pulsing could not pass for one that had stopped.
+        app.account_mut()
+            .expect("a pact has started")
+            .open_section("crates/engine", base);
+        app.set_pact_in_flight("warlock/crates/engine", 1, 2);
+        let row = row_index(&app, "warlock/crates/engine");
+        assert_eq!(
+            first_glyph_colour(&render_at(&app, WIDTH, FIXTURE_HEIGHT, base), row),
+            colour_for(NodeState::PactedStale),
+            "the pulse should be running before it is stopped"
+        );
+
+        // Finished, failed or cancelled — whichever it was, the app is told the
+        // same way, and the account is left exactly as the run left it.
+        app.clear_pact_in_flight();
+
+        // On the next frame and every frame after it, drawn at the instants the
+        // pulse would have been stale at: its own state's colour instead.
+        for offset in [Duration::ZERO, CYCLE, CYCLE + CYCLE] {
+            let buffer = render_at(&app, WIDTH, FIXTURE_HEIGHT, base + offset);
+            assert_eq!(
+                first_glyph_colour(&buffer, row),
+                colour_for(NodeState::PactedFresh),
+                "{offset:?} after the run began"
+            );
+        }
     }
 
     #[test]
