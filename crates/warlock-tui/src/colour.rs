@@ -84,10 +84,6 @@ pub(crate) const FOCUS_COLOUR: Color = Color::Indexed(45);
 /// under all three state colours; not so far as to disappear on a light
 /// background. It is none of the four colours above, so the tests below can hold
 /// every colour on the screen apart from every other.
-// Nothing outside the tests draws a guide yet: the value and the distinctness
-// tests land first, the drawing code that reads it lands next, and this `allow`
-// goes with it.
-#[allow(dead_code)]
 pub(crate) const GUIDE_COLOUR: Color = Color::Indexed(240);
 
 #[cfg(test)]
