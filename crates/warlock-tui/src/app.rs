@@ -240,9 +240,14 @@ pub struct PactToggle {
 /// counts directories, so it reads as `(3/12)` beside a `total` that does not
 /// move for the length of the run.
 ///
-/// Private, and no accessor gives it out: what a caller can do with it is put it
-/// there, take it away, and ask for the line it makes. Handing the parts back
-/// would be a second place the wording could be decided.
+/// Private, and the only thing given out of it is the yes-or-no of
+/// [`App::is_in_flight`]: what a caller can otherwise do with it is put it
+/// there, take it away, and ask for the line it makes. The path is answered
+/// against, never handed back, and the position and total are not given out at
+/// all — handing the parts back would be a second place the wording could be
+/// decided. A renderer needs to know which row of the tree is the one being
+/// worked, and asking about a path it already holds settles that without
+/// learning how the run is spelled.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct InFlight {
     /// The directory the pact is working now.
@@ -665,6 +670,23 @@ impl App {
     #[must_use]
     pub const fn is_pacting(&self) -> bool {
         self.in_flight.is_some()
+    }
+
+    /// Whether `path` is the directory the pact is working now.
+    ///
+    /// The narrow question a renderer asks: given a row it is about to draw,
+    /// is this the one the run is inside? Answering it here rather than handing
+    /// the path out keeps [`InFlight`] private, and keeps the comparison one
+    /// exact path against one exact path — no ancestors, no descendants, and
+    /// nothing about the file rows beneath the directory.
+    ///
+    /// `false` when no pact is running, so a caller needs no separate
+    /// [`App::is_pacting`] check.
+    #[must_use]
+    pub fn is_in_flight(&self, path: &Path) -> bool {
+        self.in_flight
+            .as_ref()
+            .is_some_and(|in_flight| in_flight.path == path)
     }
 
     /// The line describing the pact in flight — `pacting crates/engine (3/12)` —
@@ -2849,6 +2871,43 @@ mod tests {
         // Clearing one that was never there changes nothing.
         app.clear_pact_in_flight();
         assert_eq!(app.pact_line(), None);
+    }
+
+    #[test]
+    fn the_app_says_which_row_is_the_one_being_worked() {
+        let mut app = App::from_rows(rooted_rows());
+        let engine = Path::new("/repo").join("crates").join("warlock-engine");
+
+        // Nothing is in flight, so no row is.
+        assert!(!app.is_in_flight(&engine));
+
+        app.set_pact_in_flight(engine.clone(), 3, 12);
+
+        // Exactly the one directory: not the root above it, not the parent, and
+        // not anything beneath it.
+        assert!(app.is_in_flight(&engine));
+        assert!(!app.is_in_flight(Path::new("/repo")));
+        assert!(!app.is_in_flight(&Path::new("/repo").join("crates")));
+        assert!(!app.is_in_flight(&engine.join("src")));
+
+        // And it follows the run to the next directory.
+        app.set_pact_in_flight(Path::new("/repo").join("crates"), 4, 12);
+        assert!(!app.is_in_flight(&engine));
+        assert!(app.is_in_flight(&Path::new("/repo").join("crates")));
+    }
+
+    #[test]
+    fn no_row_is_in_flight_once_the_run_is_over() {
+        let mut app = App::from_rows(rooted_rows());
+        let engine = Path::new("/repo").join("crates").join("warlock-engine");
+
+        app.set_pact_in_flight(engine.clone(), 3, 12);
+        app.clear_pact_in_flight();
+
+        // However the run ended, the row it was on goes back to being an
+        // ordinary row on the next frame.
+        assert!(!app.is_pacting());
+        assert!(!app.is_in_flight(&engine));
     }
 
     #[test]
