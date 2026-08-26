@@ -276,6 +276,11 @@ Some files may appear as a name and a byte size with no contents. Those were \
 too large to send. Mention such a file if it matters what it is, and never \
 guess what is inside it.
 
+Some files may instead appear with a summary: an account of the file written \
+by an earlier pass that read the whole of it. Trust it as a description of \
+what that file contains, and never quote it as the file's own text — it is \
+prose about the file, not any part of it.
+
 Output the document and nothing else: no preamble, no sign-off, no commentary \
 about the task, and no code fence wrapping the whole document. Start with a \
 level-one Markdown heading naming the directory.";
@@ -821,6 +826,27 @@ pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
 /// cap with every file listed rather than sent, which is a fact about that
 /// document and still not a failure.
 ///
+/// # What counts against the budget
+///
+/// Not what the directory weighs — what the request carries. A file sent whole
+/// spends its bytes, a file listed by name and size spends nothing, and a file
+/// carrying a summary spends the length of that summary, the way a child's
+/// document does. [`file_bytes`] is the whole rule.
+///
+/// # What is reported, and what is not
+///
+/// A [`Problem`] means a file whose contents did not reach the pass. A file
+/// that arrives with a summary is not one: a pass read the whole of it and what
+/// it found is in the request, so there is nothing left out to report and
+/// nothing for a caller to act on. Every *fallback* from that is still a
+/// `Problem` — the file could not be read, it is not text, it is past whatever
+/// ceiling the summarising imposes, or the summarising itself failed — because
+/// each of those ends with a name and a size and no account of the file.
+///
+/// No code path here can produce a summarised file yet; the rule is written
+/// down now so the slice that can produce one inherits it rather than invents
+/// it.
+///
 /// ```
 /// use std::fs;
 /// use warlock_engine::{Gathered, gather_request};
@@ -862,7 +888,6 @@ pub fn gather_request(
     let found = walk(directory)?;
 
     let mut problems = Vec::new();
-    let mut carried: u64 = 0;
 
     // Children first: their documents are part of the budget the files are
     // then fitted into, and they are the part that never gives way.
@@ -870,7 +895,6 @@ pub fn gather_request(
     for (child, path) in found.child_documents {
         match fs::read_to_string(&path) {
             Ok(text) => {
-                carried = carried.saturating_add(byte_count(text.len()));
                 child_documents.push(AgentChildDocument::new(child, text));
             }
             // Including a document that could not be read is not an option —
@@ -909,10 +933,7 @@ pub fn gather_request(
             AgentFile::omitted(relative, size)
         } else {
             match fs::read(&path) {
-                Ok(bytes) => {
-                    carried = carried.saturating_add(byte_count(bytes.len()));
-                    AgentFile::present(relative, bytes)
-                }
+                Ok(bytes) => AgentFile::present(relative, bytes),
                 Err(source) => {
                     problems.push(Problem {
                         path: path.clone(),
@@ -926,6 +947,10 @@ pub fn gather_request(
         on_disk.push(path);
     }
 
+    // Counted once, from what was actually gathered, rather than added up as
+    // the loops went: what a file spends is a property of the file that ended
+    // up in the request, not of the branch it came out of.
+    let carried = carried_bytes(&files, &child_documents);
     trim_to_budget(&mut files, &on_disk, carried, &mut problems);
 
     Ok(Gathered {
@@ -944,6 +969,10 @@ pub fn gather_request(
 /// Stops when the budget is met or when there is nothing left to give up,
 /// whichever comes first — the second case is over budget with every file
 /// already listed, which is still a request and still not an error.
+///
+/// Every file it can be handed today is either sent whole or already listed:
+/// [`gather_request`] produces no summarised file, so demoting one — to a
+/// summary, or from one to a bare name — is not a case this has to answer yet.
 fn trim_to_budget(
     files: &mut [AgentFile],
     on_disk: &[PathBuf],
@@ -1064,6 +1093,47 @@ fn relative(dir: &Path, path: &Path) -> Result<String, Error> {
 /// cannot happen.
 fn byte_count(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
+}
+
+/// How much of [`REQUEST_BYTE_CAP`] one file spends: what the request carries
+/// for it, never what it weighs on disk.
+///
+/// Three states, three answers, and only one of them is the file's size:
+///
+/// * A file **sent whole** spends its bytes, which is also its size.
+/// * A file **listed** by name and size spends nothing. Its size is still in
+///   the request as a fact about the directory, but no contents travel with it,
+///   and charging the budget for bytes nobody sent is how a directory holding
+///   one lockfile ends up sending nothing else.
+/// * A file **summarised** ([`AgentFile::summarised`]) spends the length of its
+///   summary — exactly the way a child's document is counted, and for the same
+///   reason: the summary is the text that travels. Its on-disk size is never
+///   what is counted here; a four-megabyte file described in three hundred
+///   bytes costs three hundred bytes.
+fn file_bytes(file: &AgentFile) -> u64 {
+    match (file.bytes(), file.summary()) {
+        (Some(bytes), _) => byte_count(bytes.len()),
+        // Prose about the file, counted like the child document it resembles.
+        (None, Some(summary)) => byte_count(summary.len()),
+        // A name and a size: nothing of it is in the request to pay for.
+        (None, None) => 0,
+    }
+}
+
+/// Everything a request would carry, counted the way the budget counts it: the
+/// files by [`file_bytes`], plus every child document's text.
+///
+/// Saturating throughout, like [`byte_count`]: a budget is no place to panic
+/// over a total that cannot happen.
+fn carried_bytes(files: &[AgentFile], child_documents: &[AgentChildDocument]) -> u64 {
+    let mut carried: u64 = 0;
+    for file in files {
+        carried = carried.saturating_add(file_bytes(file));
+    }
+    for child in child_documents {
+        carried = carried.saturating_add(byte_count(child.text().len()));
+    }
+    carried
 }
 
 /// Where a subtree pact has got to, and whether it should carry on: the port a
@@ -1219,6 +1289,14 @@ pub struct Gathered {
 /// something that went wrong without being worth failing over, said once and in
 /// full. A caller that ignores these gets a pact built on slightly less than the
 /// whole directory, which is safe, just unexplained.
+///
+/// One thing this is deliberately not: a file that reached the request as a
+/// summary ([`AgentFile::summarised`]) is **not** a `Problem`. Its contents were
+/// read in full and an account of them is in the request, which is the opposite
+/// of being left out. What stays a `Problem` is every fallback from that — the
+/// file could not be read, it is not text, it is beyond what summarising will
+/// attempt, or the summarising failed — since each of those leaves the pass with
+/// a name and a size and nothing more.
 #[derive(Debug)]
 pub struct Problem {
     /// The file that was left out, as it sits on disk.
@@ -1252,6 +1330,10 @@ impl std::error::Error for Problem {
 /// tripping the whole-request cap is one worth splitting up; and a look at the
 /// filesystem, because a file Warlock cannot read is a file nobody's tooling
 /// can read.
+///
+/// Every variant is a file whose contents the pass never saw. A file described
+/// by a summary has no variant here and never will — see [`Problem`] — while
+/// each way of failing to describe one does, as it lands.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Omission {
@@ -1679,14 +1761,22 @@ mod tests {
             .unwrap_or_else(|| panic!("`{path}` is in the request: {:?}", file_paths(request)))
     }
 
-    /// How many bytes a request actually carries: file contents sent whole,
-    /// plus the children's documents.
+    /// How many bytes a request actually carries: the files sent whole, the
+    /// summaries of the files described, and the children's documents.
+    ///
+    /// Written from the public accessors rather than by calling
+    /// [`super::carried_bytes`], so the module's own accounting has something
+    /// independent to agree with. A listed file contributes nothing — its size
+    /// is a fact about the directory, not bytes in the request.
     fn carried(request: &AgentRequest) -> u64 {
         let files: u64 = request
             .files()
             .iter()
-            .filter(|file| !file.is_omitted())
-            .map(AgentFile::size)
+            .map(|file| {
+                let bytes = file.bytes().map_or(0, <[u8]>::len);
+                let summary = file.summary().map_or(0, str::len);
+                (bytes + summary) as u64
+            })
             .sum();
         let children: u64 = request
             .child_documents()
@@ -1999,6 +2089,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_budget_counts_a_summarised_file_as_its_summary_and_never_its_size() {
+        // Nothing gathered from a directory can be summarised yet, so the
+        // accounting is exercised where it is decided: on a request built by
+        // hand carrying one of each of the three states.
+        let summary = "The locked dependency graph: 412 crates, no path dependencies.";
+        let request = AgentRequest::new("summarise", "/repo")
+            .with_files([
+                AgentFile::present("lib.rs", *b"//! Core engine.\n"),
+                AgentFile::omitted("vendor.js", 900_000),
+                AgentFile::summarised("Cargo.lock", 4_200_000, summary),
+            ])
+            .with_child_documents([AgentChildDocument::new("src", "# src\n")]);
+
+        assert_eq!(
+            super::carried_bytes(request.files(), request.child_documents()),
+            (b"//! Core engine.\n".len() + summary.len() + "# src\n".len()) as u64,
+            "sent whole costs its bytes, listed costs nothing, and summarised \
+             costs its summary — the way the child document beside it does",
+        );
+        assert_eq!(
+            super::carried_bytes(
+                &[AgentFile::summarised("Cargo.lock", 4_200_000, summary)],
+                &[]
+            ),
+            summary.len() as u64,
+            "the account travels; the 4.2 MB it stands for never does",
+        );
+        assert_eq!(
+            carried(&request),
+            super::carried_bytes(request.files(), request.child_documents()),
+            "and the tests' own count of what a request carries agrees",
+        );
+    }
+
     /// Only on unix, because there is no portable way to make a file
     /// unreadable. What is under test — that a file the filesystem refuses is
     /// its own case, and still not fatal — is not platform-specific.
@@ -2142,6 +2267,31 @@ mod tests {
             "the prompt is code, and it is this one",
         );
         assert_eq!(file_paths(&seen[0]), ["lib.rs"]);
+    }
+
+    #[test]
+    fn the_prompt_says_what_a_listed_file_is_and_what_a_summarised_one_is() {
+        // Two paragraphs a pass cannot do without, because they are the only
+        // account it gets of the two files it is handed without contents.
+        // Pinned here so neither can be dropped by accident.
+        let prompt = super::PROMPT;
+
+        assert!(
+            prompt.contains("a name and a byte size with no contents"),
+            "the listed file has to be explained: {prompt}",
+        );
+        assert!(
+            prompt.contains("never guess what is inside it"),
+            "and guessing at it forbidden: {prompt}",
+        );
+        assert!(
+            prompt.contains("appear with a summary"),
+            "the summarised file has to be explained too: {prompt}",
+        );
+        assert!(
+            prompt.contains("never quote it as the file's own text"),
+            "and quoting an account of a file as the file forbidden: {prompt}",
+        );
     }
 
     #[test]
