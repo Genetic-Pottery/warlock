@@ -149,11 +149,13 @@ impl Drop for CancelGuard {
 
 /// What a worker thread has to say for itself.
 ///
-/// Three things, and the order of two of them is fixed: one
+/// Four things, and the order of two of them is fixed: one
 /// [`PactEvent::Starting`] per directory as the run reaches it, any number of
-/// [`PactEvent::Doing`] from the pass that directory is running, and then
-/// exactly one [`PactEvent::Finished`]. Nothing else is sent, and nothing is
-/// sent after the outcome — the worker drops its end of the channel and stops.
+/// [`PactEvent::Doing`] from the pass that directory is running and of
+/// [`PactEvent::Summarising`] from the passes over the big files inside it, and
+/// then exactly one [`PactEvent::Finished`]. Nothing else is sent, and nothing
+/// is sent after the outcome — the worker drops its end of the channel and
+/// stops.
 ///
 /// Activities ride this channel rather than one of their own because there is
 /// nothing to gain from a second: they come from the same worker, they are read
@@ -181,6 +183,29 @@ pub(crate) enum PactEvent {
     /// worked, and anything more is the business of whoever draws these rather
     /// than of the channel that carries them.
     Doing(Activity),
+    /// A summarising pass over one over-cap file inside the directory being
+    /// worked is about to run: pass `part` of `parts`, counting from one.
+    ///
+    /// The reason a directory holding a two-megabyte lockfile is minutes long,
+    /// said while it is being paid for rather than afterwards. Like
+    /// [`Doing`](PactEvent::Doing) it carries no directory, because the
+    /// [`Starting`](PactEvent::Starting) before it already named the one whose
+    /// pass is running; unlike it, it names the file, because the file is the
+    /// whole of what it has to say.
+    ///
+    /// `parts` counts *passes*, not chunks — a file read in three chunks is
+    /// announced four times, the last of them the reduce over them — because
+    /// that is the fraction of the wait a reader can do something with. See
+    /// [`PactObserver::summarising`], whose numbers these are, unaltered.
+    Summarising {
+        /// The file being summarised, as an absolute path; the footer spells it
+        /// relative to the tree on screen, as it does a directory.
+        file: PathBuf,
+        /// Which pass over that file this is, counting from one.
+        part: usize,
+        /// How many passes the file costs in all.
+        parts: usize,
+    },
     /// The run is over, however it went: exactly what [`apply_toggle`] returned.
     Finished(Result<Toggled, String>),
 }
@@ -225,6 +250,10 @@ fn activity_port(events: &Sender<PactEvent>) -> Activities {
 /// place a stop can come from — nobody but a person at a keyboard decides that a
 /// pact has gone on long enough.
 ///
+/// The summarising passes inside a directory go out the same way and ask
+/// nothing: they are an announcement of what is being paid for while it is
+/// being paid for, and the port answers them with a send and nothing else.
+///
 /// The handle is read before anything is sent, so a cancelled run neither
 /// announces a directory it will not work nor works it. The engine's rule that
 /// the answer is asked for between directories is what bounds how long a cancel
@@ -253,6 +282,22 @@ impl PactObserver for Reporting<'_> {
             total,
         });
         Pacting::Continue
+    }
+
+    /// Pass the announcement on and get out of the way.
+    ///
+    /// One send, exactly as `starting` does it and with the same shrug at a
+    /// failure: a receiver that has gone away is an application that is
+    /// quitting. No cancellation check of its own, deliberately — this is
+    /// called from inside a directory's pass, where the engine asks nothing and
+    /// could act on no answer, and the one place a pact stops is still the
+    /// question asked between directories above.
+    fn summarising(&mut self, file: &Path, part: usize, parts: usize) {
+        let _ = self.events.send(PactEvent::Summarising {
+            file: file.to_path_buf(),
+            part,
+            parts,
+        });
     }
 }
 
@@ -513,6 +558,15 @@ pub(crate) fn apply_progress(
                 if let Some(account) = app.account_mut() {
                     account.record(&activity, now);
                 }
+            }
+            // The footer only, and on purpose: the panel's account reports what
+            // went wrong and what was written, and a file that is being
+            // summarised has done neither yet. The state it sets is cleared by
+            // the next directory's `Starting` and by the end of the run, both
+            // of which `App` does for itself, so no chunk wording is ever
+            // attributed to a directory the run has moved past.
+            Ok(PactEvent::Summarising { file, part, parts }) => {
+                app.set_pact_summarising(file, part, parts);
             }
             Ok(PactEvent::Finished(outcome)) => break Some(outcome),
             // Still running, and nothing new to say.
@@ -904,7 +958,8 @@ mod tests {
 
     use warlock_engine::{
         Agent, AgentError, AgentRequest, AgentResponse, Loaded, Manifest, Node, NodeState,
-        PactEntry, Tree, Unwatched, decide_state, load_tree, repository_root, subtree_hash,
+        PER_FILE_BYTE_CAP, PactEntry, Tree, Unwatched, decide_state, load_tree, repository_root,
+        subtree_hash,
     };
     use warlock_tui::{Account, Activities, Activity, App, ClaudeAgent, Line, PactToggle, Section};
 
@@ -1596,7 +1651,9 @@ mod tests {
                         .unwrap_or(directory)
                         .to_path_buf(),
                 ),
-                PactEvent::Doing(_) | PactEvent::Finished(_) => None,
+                PactEvent::Doing(_) | PactEvent::Summarising { .. } | PactEvent::Finished(_) => {
+                    None
+                }
             })
             .collect()
     }
@@ -1757,6 +1814,102 @@ mod tests {
                 PathBuf::from("crates/engine/src"),
                 PathBuf::from("crates/engine")
             ]
+        );
+    }
+
+    /// A file too big for one request and too big for one chunk of one:
+    /// comfortably over [`PER_FILE_BYTE_CAP`], so the engine summarises it
+    /// rather than sending it, and over twice the chunk size under that cap, so
+    /// summarising it is several map passes and a reduce over them.
+    ///
+    /// Lines, because the chunker cuts just after a newline, and lockfile-ish
+    /// filler because that is what an over-cap file in a repository actually is.
+    fn over_the_cap() -> String {
+        let line = "checksum = \"0123456789abcdef0123456789abcdef\"\n";
+        let cap = usize::try_from(PER_FILE_BYTE_CAP).expect("the cap is a few kilobytes");
+        let lines = 2 * cap / line.len() + 1;
+        line.repeat(lines)
+    }
+
+    #[test]
+    fn the_passes_over_a_big_file_are_announced_inside_the_directory_holding_it() {
+        let scratch = one_crate("summarising");
+        scratch.write("crates/engine/src/deps.lock", &over_the_cap());
+        // The same fake as everywhere else: its answer is long enough to clear
+        // `MINIMUM_DOCUMENT_BYTES` and so more than long enough to be kept as
+        // an account of a chunk, which is all a summarising pass asks of it.
+        let agent = Canned::new(&scratch, []);
+
+        let events = events_of(
+            &scratch,
+            &toggle(&scratch, "crates/engine", true),
+            &agent,
+            &Cancel::new(),
+        );
+
+        // The two directories' announcements, by where they landed in the one
+        // sequence: everything between them is work done inside the first of
+        // them, which is the whole reason these ride the same channel rather
+        // than a second one that could arrive out of order.
+        let starting: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| matches!(event, PactEvent::Starting { .. }))
+            .map(|(index, _)| index)
+            .collect();
+        let [first, second] = starting.as_slice() else {
+            panic!("one announcement per directory: {events:?}");
+        };
+
+        let passes: Vec<(&PathBuf, usize, usize)> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                PactEvent::Summarising { file, part, parts } => {
+                    assert!(
+                        index > *first && index < *second,
+                        "a pass over a file in crates/engine/src arrived outside it: {events:?}"
+                    );
+                    Some((file, *part, *parts))
+                }
+                _ => None,
+            })
+            .collect();
+
+        // And the stretch they had to land in is the right one: children before
+        // parents, so the first directory announced is the deeper one, which is
+        // where the big file is.
+        assert_eq!(
+            announced(&events, &scratch)[0],
+            PathBuf::from("crates/engine/src")
+        );
+
+        let parts = passes
+            .first()
+            .expect("an over-cap file costs at least one pass")
+            .2;
+        assert!(
+            parts > 1,
+            "several chunks and the reduce over them: {passes:?}"
+        );
+        assert_eq!(
+            passes.len(),
+            parts,
+            "every pass the file costs is announced: {passes:?}"
+        );
+        // Carried, not computed with: the file the engine named, the count it
+        // gave, and the parts running 1..=parts in order.
+        for (index, (file, part, of)) in passes.iter().enumerate() {
+            assert_eq!(*file, &scratch.path("crates/engine/src/deps.lock"));
+            assert_eq!(*part, index + 1);
+            assert_eq!(*of, parts, "the count does not move: {passes:?}");
+        }
+
+        // And none of it changed how the run went: the passes are an
+        // announcement, not a vote.
+        assert!(
+            matches!(outcome_of(&events), Ok(Toggled { granted: true, .. })),
+            "the run still granted the subtree: {events:?}"
         );
     }
 
