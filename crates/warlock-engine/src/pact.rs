@@ -633,7 +633,7 @@ pub fn pact_subtree(
             undocumented.extend(directories[index..].iter().cloned());
             break;
         }
-        match pact_directory(pacted, agent) {
+        match pact_directory(pacted, root, agent) {
             Ok(Pacted {
                 document,
                 problems: caps,
@@ -881,6 +881,17 @@ fn at_or_below(module: &str, selected: &str) -> bool {
 /// implementation is, a boxed agent works without a second signature, and a
 /// concrete fake in a test still coerces at the call site.
 ///
+/// `root` is the repository root, and it is a **parameter** rather than
+/// something this function discovers: `.warlock/` lives under it, and the
+/// engine resolves nothing from the environment — no current directory, no
+/// walking upwards looking for a marker, no environment variable. Every caller
+/// already knows which repository it is pacting ([`pact_subtree`] holds the
+/// same `root` for the manifest's relative paths and hands it straight down),
+/// so discovering it here would be a second answer to a question that was
+/// already settled, and one that a test or a front end could not override. It
+/// is not required to be an ancestor of `directory`; nothing here reads it as
+/// one.
+///
 /// ```
 /// use std::fs;
 /// use warlock_engine::{Agent, AgentError, AgentRequest, AgentResponse, Pacted, pact_directory};
@@ -898,7 +909,8 @@ fn at_or_below(module: &str, selected: &str) -> bool {
 /// fs::write(dir.path().join("lib.rs"), "//! Core engine.\n")?;
 /// let markdown = format!("# engine\n\n{}\n", "Core engine for warlock. ".repeat(20));
 ///
-/// let Pacted { document, problems } = pact_directory(dir.path(), &Canned(markdown.clone()))?;
+/// let Pacted { document, problems } =
+///     pact_directory(dir.path(), dir.path(), &Canned(markdown.clone()))?;
 ///
 /// assert_eq!(document, dir.path().join("WARLOCK.md"));
 /// assert_eq!(fs::read_to_string(&document)?, markdown, "written verbatim");
@@ -923,8 +935,14 @@ fn at_or_below(module: &str, selected: &str) -> bool {
 ///   temporary file or the rename over it was what failed. A different kind of
 ///   failure from a refusal — the answer was good and the disk said no — and
 ///   either way `WARLOCK.md` is byte for byte what it was before.
-pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<Pacted, Error> {
-    let directory = directory.as_ref();
+pub fn pact_directory(
+    directory: impl AsRef<Path>,
+    root: impl AsRef<Path>,
+    agent: &dyn Agent,
+) -> Result<Pacted, Error> {
+    // `root` is where `.warlock/` is found by joining, and is taken here rather
+    // than discovered — see the docs above. Nothing below reads it yet.
+    let (directory, _root) = (directory.as_ref(), root.as_ref());
     let Gathered {
         request,
         mut problems,
@@ -3591,7 +3609,7 @@ mod tests {
         let Pacted {
             document: path,
             problems,
-        } = pact_directory(dir.path(), &agent).expect("a good answer is written");
+        } = pact_directory(dir.path(), dir.path(), &agent).expect("a good answer is written");
 
         assert_eq!(path, dir.path().join("WARLOCK.md"));
         assert_eq!(
@@ -3642,7 +3660,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         write(dir.path(), "lib.rs", "//! Core engine.\n");
 
-        pact_directory(dir.path(), &Canned::new(document(300))).expect("pacts");
+        pact_directory(dir.path(), dir.path(), &Canned::new(document(300))).expect("pacts");
 
         let mut left = fs::read_dir(dir.path())
             .expect("lists")
@@ -3671,7 +3689,7 @@ mod tests {
             write(dir, "lib.rs", "//! Core engine.\n");
         }
 
-        pact_directory(pacted.path(), &Canned::new(&answer)).expect("pacts");
+        pact_directory(pacted.path(), pacted.path(), &Canned::new(&answer)).expect("pacts");
         write(plain.path(), DOCUMENT_FILE, &answer);
 
         assert_eq!(
@@ -3712,7 +3730,7 @@ mod tests {
             return;
         }
 
-        let error = pact_directory(dir.path(), &Canned::new(document(300)))
+        let error = pact_directory(dir.path(), dir.path(), &Canned::new(document(300)))
             .expect_err("a read-only directory takes no document");
 
         match &error {
@@ -3757,7 +3775,7 @@ mod tests {
         let answer = document(400);
         let agent = Canned::new(&answer);
 
-        pact_directory(dir.path(), &agent).expect("pacts");
+        pact_directory(dir.path(), dir.path(), &agent).expect("pacts");
 
         assert_eq!(
             written(dir.path()).as_deref(),
@@ -3780,7 +3798,8 @@ mod tests {
             stderr: "Invalid API key\n".to_owned(),
         });
 
-        let error = pact_directory(dir.path(), &agent).expect_err("a failed pass is no document");
+        let error = pact_directory(dir.path(), dir.path(), &agent)
+            .expect_err("a failed pass is no document");
 
         assert!(
             matches!(
@@ -3807,7 +3826,7 @@ mod tests {
         for answer in ["", "   \n\t\n   "] {
             let dir = tempfile::tempdir().expect("a temporary directory");
 
-            let error = pact_directory(dir.path(), &Canned::new(answer))
+            let error = pact_directory(dir.path(), dir.path(), &Canned::new(answer))
                 .expect_err("there is nothing here to write");
 
             assert!(
@@ -3829,6 +3848,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
 
         let error = pact_directory(
+            dir.path(),
             dir.path(),
             &Canned::new(document(MINIMUM_DOCUMENT_BYTES - 1)),
         )
@@ -3852,7 +3872,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let answer = document(MINIMUM_DOCUMENT_BYTES);
 
-        pact_directory(dir.path(), &Canned::new(&answer))
+        pact_directory(dir.path(), dir.path(), &Canned::new(&answer))
             .expect("the floor is what a document has to reach, not exceed");
 
         assert_eq!(written(dir.path()).as_deref(), Some(answer.as_bytes()));
@@ -3863,7 +3883,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let answer = document(MINIMUM_DOCUMENT_BYTES + 1);
 
-        pact_directory(dir.path(), &Canned::new(&answer))
+        pact_directory(dir.path(), dir.path(), &Canned::new(&answer))
             .expect("a byte past the floor is over it");
 
         assert_eq!(
@@ -3879,7 +3899,7 @@ mod tests {
         // Long enough untrimmed, far too short once the padding goes.
         let answer = format!("\n\n{}{}\n\n", " ".repeat(MINIMUM_DOCUMENT_BYTES), "# x");
 
-        let error = pact_directory(dir.path(), &Canned::new(answer))
+        let error = pact_directory(dir.path(), dir.path(), &Canned::new(answer))
             .expect_err("padding is not a document");
 
         assert!(
@@ -3908,7 +3928,8 @@ mod tests {
             let dir = tempfile::tempdir().expect("a temporary directory");
             write(dir.path(), "WARLOCK.md", before);
 
-            let error = pact_directory(dir.path(), agent).expect_err("nothing to write");
+            let error =
+                pact_directory(dir.path(), dir.path(), agent).expect_err("nothing to write");
 
             assert!(matches!(error, super::Error::Refused { .. }), "{error:?}");
             assert_eq!(
@@ -3927,8 +3948,8 @@ mod tests {
         let answer = document(300);
         let agent = Counting::new(&answer);
 
-        let Pacted { problems, .. } =
-            pact_directory(dir.path(), &agent).expect("an over-cap file never fails a pact");
+        let Pacted { problems, .. } = pact_directory(dir.path(), dir.path(), &agent)
+            .expect("an over-cap file never fails a pact");
 
         assert_eq!(written(dir.path()).as_deref(), Some(answer.as_bytes()));
         assert_eq!(
@@ -3973,7 +3994,8 @@ mod tests {
             Ok(account("the whole lockfile")),
         ]);
 
-        let Pacted { problems, .. } = pact_directory(dir.path(), &agent).expect("pacts");
+        let Pacted { problems, .. } =
+            pact_directory(dir.path(), dir.path(), &agent).expect("pacts");
 
         assert_eq!(
             agent.passes(),
@@ -4047,7 +4069,8 @@ mod tests {
         let bundle = write(dir.path(), "bundle.js", &text);
         let agent = Counting::new(document(300));
 
-        let Pacted { problems, .. } = pact_directory(dir.path(), &agent).expect("pacts");
+        let Pacted { problems, .. } =
+            pact_directory(dir.path(), dir.path(), &agent).expect("pacts");
 
         assert_eq!(
             agent.passes(),
@@ -4080,8 +4103,8 @@ mod tests {
         let script: [Result<String, fn() -> AgentError>; 1] = [Err(|| AgentError::EmptyOutput)];
         let agent = Counting::new(document(300)).scripted(script);
 
-        let Pacted { problems, .. } =
-            pact_directory(dir.path(), &agent).expect("a failed summary never fails a pact");
+        let Pacted { problems, .. } = pact_directory(dir.path(), dir.path(), &agent)
+            .expect("a failed summary never fails a pact");
 
         assert_eq!(agent.passes(), 2, "the failed map pass, then the pact");
         assert_eq!(
@@ -4125,8 +4148,8 @@ mod tests {
         }
         let agent = Canned::new(document(300));
 
-        let Pacted { problems, .. } =
-            pact_directory(dir.path(), &agent).expect("a fat directory is still pactable");
+        let Pacted { problems, .. } = pact_directory(dir.path(), dir.path(), &agent)
+            .expect("a fat directory is still pactable");
 
         let seen = agent.seen.borrow();
         assert_eq!(
@@ -4174,7 +4197,7 @@ mod tests {
         write(dir.path(), "tests/it.rs", "#[test] fn works() {}\n");
         let agent = Canned::new(document(300));
 
-        pact_directory(dir.path(), &agent).expect("pacts");
+        pact_directory(dir.path(), dir.path(), &agent).expect("pacts");
 
         let seen = agent.seen.borrow();
         assert_eq!(
@@ -4204,7 +4227,8 @@ mod tests {
         let missing = dir.path().join("nowhere");
         let agent = Canned::new(document(300));
 
-        let error = pact_directory(&missing, &agent).expect_err("there is nothing to walk");
+        let error =
+            pact_directory(&missing, dir.path(), &agent).expect_err("there is nothing to walk");
 
         assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
         assert_eq!(
