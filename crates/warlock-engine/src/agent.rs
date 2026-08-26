@@ -103,8 +103,9 @@ pub trait Agent {
 /// context it is scoped to.
 ///
 /// The context is two lists and no more. The directory's own files
-/// ([`File`]) — its whole listing, each either carrying its bytes or standing
-/// in as a name and a size — and the `WARLOCK.md` of each immediate child
+/// ([`File`]) — its whole listing, each either carrying its bytes, standing in
+/// as a name and a size, or standing in as a name, a size and an account of
+/// what it contains — and the `WARLOCK.md` of each immediate child
 /// ([`ChildDocument`]), which is how a directory learns what is underneath it
 /// without reading a single source file down there.
 ///
@@ -178,13 +179,25 @@ impl Request {
     ///
     /// let request = AgentRequest::new("summarise this module", "crates/engine")
     ///     .with_files([AgentFile::present("src/lib.rs", *b"//! Core engine.\n")])
-    ///     .with_files([AgentFile::omitted("Cargo.lock", 4_200_000)]);
+    ///     .with_files([AgentFile::omitted("Cargo.lock", 4_200_000)])
+    ///     .with_files([AgentFile::summarised(
+    ///         "src/schema.rs",
+    ///         900_000,
+    ///         "Generated request and response types for the public API.",
+    ///     )]);
     ///
-    /// assert_eq!(request.files().len(), 2);
+    /// assert_eq!(request.files().len(), 3);
     /// assert_eq!(request.files()[0].bytes(), Some(&b"//! Core engine.\n"[..]));
     /// // An omitted file is still listed, by name and size, never truncated.
     /// assert_eq!(request.files()[1].bytes(), None);
     /// assert_eq!(request.files()[1].size(), 4_200_000);
+    /// // A summarised file adds an account of its contents — and still no bytes.
+    /// assert_eq!(
+    ///     request.files()[2].summary(),
+    ///     Some("Generated request and response types for the public API."),
+    /// );
+    /// assert_eq!(request.files()[2].bytes(), None);
+    /// assert_eq!(request.files()[2].size(), 900_000);
     /// ```
     #[must_use]
     pub fn with_files(mut self, files: impl IntoIterator<Item = File>) -> Self {
@@ -254,28 +267,48 @@ impl Request {
 /// invites confident wrong conclusions about the part that never arrived,
 /// while a name and a size is accurate information a model can document
 /// honestly.
+///
+/// Between the two sits a third state ([`File::summarised`]): a name, a size,
+/// and an account of what the file contains, written by an earlier pass that
+/// did read the whole thing. It is not a shorter version of the file and not
+/// the beginning of it — it is prose *about* the file, which is why it is
+/// reached through [`File::summary`] and never through [`File::bytes`].
+/// Truncation stays forbidden and omit-and-list stays the floor: a summary is
+/// something better than a bare name and a size, not something less than the
+/// whole file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct File {
     /// Where the file is, relative to the request's directory, spelled with
     /// forward slashes — the same spelling the manifest uses, so one path
     /// means one thing on every platform.
     path: String,
-    /// Its bytes, or the size standing in for them.
+    /// Its bytes, the size standing in for them, or an account of them.
     content: Content,
 }
 
-/// What a [`File`] has to say about its contents: all of them, or how many
-/// there were.
+/// What a [`File`] has to say about its contents: all of them, how many there
+/// were, or what they amount to.
 ///
-/// Private, and reached through [`File::bytes`] and [`File::size`], so
-/// "omitted" stays one bit of the public surface rather than a variant callers
-/// match on and grow special cases around.
+/// Private, and reached through [`File::bytes`], [`File::size`] and
+/// [`File::summary`], so "omitted" and "summarised" stay bits of the public
+/// surface rather than variants callers match on and grow special cases
+/// around.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Content {
     /// The file, whole.
     Bytes(Vec<u8>),
     /// The file's size in bytes, its contents left out.
     Omitted(u64),
+    /// The file's size in bytes, and an account of its contents that is
+    /// explicitly not its text — never a prefix, never an excerpt, never
+    /// something to quote as what the file says.
+    Summarised {
+        /// How many bytes the file has on disk, unaffected by how long the
+        /// account of it happens to be.
+        size: u64,
+        /// What an earlier pass over the whole file reported it contains.
+        summary: String,
+    },
 }
 
 impl File {
@@ -301,32 +334,95 @@ impl File {
         }
     }
 
+    /// A file described rather than sent: `path`, the `size` in bytes it has
+    /// on disk, and `summary` — an account of its contents written by an
+    /// earlier pass that read the whole thing.
+    ///
+    /// The size is given rather than derived from the summary, because the two
+    /// measure different things: the file is as big as it is on disk however
+    /// briefly it can be described.
+    ///
+    /// The summary is prose about the file, not any part of the file. Nothing
+    /// reading it back may present it as the file's text — which is why it
+    /// comes out of [`File::summary`] and [`File::bytes`] still answers
+    /// `None`.
+    ///
+    /// ```
+    /// use warlock_engine::AgentFile;
+    ///
+    /// let file = AgentFile::summarised(
+    ///     "vendor/schema.json",
+    ///     2_400_000,
+    ///     "A JSON Schema for the public API: 180 object definitions, no code.",
+    /// );
+    ///
+    /// assert_eq!(file.size(), 2_400_000);
+    /// assert!(file.summary().is_some_and(|said| said.contains("JSON Schema")));
+    /// assert_eq!(file.bytes(), None, "an account of a file is not its text");
+    /// ```
+    #[must_use]
+    pub fn summarised(path: impl Into<String>, size: u64, summary: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            content: Content::Summarised {
+                size,
+                summary: summary.into(),
+            },
+        }
+    }
+
     /// Where the file is, relative to the request's directory.
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
     }
 
-    /// The file's bytes, or `None` if it was listed rather than sent.
+    /// The file's bytes, or `None` if it was listed or summarised rather than
+    /// sent.
+    ///
+    /// A summarised file answers `None` here like an omitted one: an account
+    /// of a file's contents is not its contents, and there is nowhere else it
+    /// could be mistaken for them.
     #[must_use]
     pub fn bytes(&self) -> Option<&[u8]> {
         match &self.content {
             Content::Bytes(bytes) => Some(bytes),
-            Content::Omitted(_) => None,
+            Content::Omitted(_) | Content::Summarised { .. } => None,
         }
     }
 
     /// How many bytes the file has — answered whether or not they were sent,
     /// which is what makes an omitted file a fact rather than a hole.
+    ///
+    /// For a summarised file this is its size on disk, not the length of the
+    /// account of it.
     #[must_use]
     pub fn size(&self) -> u64 {
         match &self.content {
             Content::Bytes(bytes) => bytes.len() as u64,
-            Content::Omitted(size) => *size,
+            Content::Omitted(size) | Content::Summarised { size, .. } => *size,
+        }
+    }
+
+    /// What an earlier pass reported this file contains, or `None` if it was
+    /// sent whole or merely listed.
+    ///
+    /// An account of the file, never a piece of it: a caller may report what
+    /// it says, and may not quote it as the file's text.
+    #[must_use]
+    pub fn summary(&self) -> Option<&str> {
+        match &self.content {
+            Content::Summarised { summary, .. } => Some(summary),
+            Content::Bytes(_) | Content::Omitted(_) => None,
         }
     }
 
     /// Whether the file was listed rather than sent.
+    ///
+    /// A summarised file is *not* an omitted one and answers `false`: nothing
+    /// was left out of it, because a pass read the whole thing and what came
+    /// back is on [`File::summary`]. Only a file nobody has anything to say
+    /// about — a name and a size — is omitted.
     #[must_use]
     pub fn is_omitted(&self) -> bool {
         matches!(self.content, Content::Omitted(_))
@@ -672,6 +768,11 @@ mod tests {
         assert_eq!(files[0].size(), 17);
         assert!(!files[0].is_omitted());
         assert_eq!(
+            files[0].summary(),
+            None,
+            "a file sent whole needs no account"
+        );
+        assert_eq!(
             files[1].bytes(),
             Some(&[0x89, b'P', b'N', b'G', 0x00, 0xff][..]),
             "bytes, not text: a file in a directory need not be UTF-8"
@@ -691,6 +792,74 @@ mod tests {
             file.bytes(),
             None,
             "never truncated: an omitted file has no bytes at all, not some of them"
+        );
+        assert_eq!(
+            file.summary(),
+            None,
+            "nobody has read it, so there is nothing to say about it"
+        );
+    }
+
+    #[test]
+    fn a_summarised_file_is_a_name_a_size_and_an_account_of_its_contents() {
+        let request = Request::new("summarise", "/repo").with_files([File::summarised(
+            "vendor/schema.json",
+            2_400_000,
+            "A JSON Schema for the public API: 180 object definitions, no code.",
+        )]);
+
+        let file = &request.files()[0];
+        assert_eq!(file.path(), "vendor/schema.json");
+        assert_eq!(
+            file.size(),
+            2_400_000,
+            "the size on disk, not the length of the account of it"
+        );
+        assert_eq!(
+            file.summary(),
+            Some("A JSON Schema for the public API: 180 object definitions, no code."),
+        );
+        assert_eq!(
+            file.bytes(),
+            None,
+            "an account of a file is prose about it, never a piece of it"
+        );
+        assert!(
+            !file.is_omitted(),
+            "a summarised file is not an omitted one: a pass read the whole thing"
+        );
+    }
+
+    #[test]
+    fn the_three_states_answer_the_same_four_questions_differently() {
+        // One table, so no state can quietly start answering like another.
+        let present = File::present("src/lib.rs", *b"//! Core engine.\n");
+        let omitted = File::omitted("Cargo.lock", 4_200_000);
+        let summarised = File::summarised("Cargo.lock", 4_200_000, "The locked dependency graph.");
+
+        assert_eq!(
+            [
+                present.bytes().is_some(),
+                omitted.bytes().is_some(),
+                summarised.bytes().is_some(),
+            ],
+            [true, false, false]
+        );
+        assert_eq!(
+            [present.size(), omitted.size(), summarised.size()],
+            [17, 4_200_000, 4_200_000]
+        );
+        assert_eq!(
+            [present.summary(), omitted.summary(), summarised.summary(),],
+            [None, None, Some("The locked dependency graph.")]
+        );
+        assert_eq!(
+            [
+                present.is_omitted(),
+                omitted.is_omitted(),
+                summarised.is_omitted(),
+            ],
+            [false, true, false]
         );
     }
 
