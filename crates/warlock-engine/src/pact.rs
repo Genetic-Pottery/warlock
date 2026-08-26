@@ -774,8 +774,32 @@ fn at_or_below(module: &str, selected: &str) -> bool {
             .is_some_and(|below| below.starts_with('/'))
 }
 
-/// Pact one directory: gather it, run one pass through `agent`, and write what
-/// came back to `<directory>/WARLOCK.md`.
+/// Pact one directory: gather it, describe what was too big to send, run one
+/// pass through `agent`, and write what came back to `<directory>/WARLOCK.md`.
+///
+/// # The file that is too big to send
+///
+/// Between the gather and the pass sits a step of its own. Every file the
+/// per-file cap left as a name and a size ([`Omission::TooLarge`]) is read from
+/// disk and put through this module's map-reduce — a map pass per chunk and a
+/// reduce over their answers, all of it through this same `agent` — and the one that
+/// comes back with an account of itself reaches the pass as
+/// [`AgentFile::summarised`] instead. That is the difference between "there is a
+/// two-megabyte lockfile here and I may not guess what is in it" and a document
+/// that can say what the biggest thing in the directory holds.
+///
+/// It is a step that cannot fail. A file that is not text, one past the chunk
+/// ceiling, and one whose passes produced nothing usable all stay exactly what
+/// an over-cap file has always been — a name and a size — and each says which of
+/// those it was, in place of `TooLarge` rather than beside it. The directory
+/// pass runs either way, and no [`Error`] variant is reachable from any of it.
+///
+/// A summary is bytes the request did not carry when [`gather_request`] fitted
+/// it to [`REQUEST_BYTE_CAP`], so a directory of enormous described files can
+/// end up carrying a little over the cap. Prose about a file is a small
+/// fraction of the file, and folding the summarised state into the cap's
+/// demotion order is a separate piece of work; until it lands, that is the
+/// accepted arithmetic here.
 ///
 /// The document is written **verbatim** — the response's own bytes, untrimmed,
 /// unparsed and unreformatted — over whatever was there before, unconditionally
@@ -797,9 +821,11 @@ fn at_or_below(module: &str, selected: &str) -> bool {
 /// to go green does that afterwards with what it knows about the rest of the
 /// subtree.
 ///
-/// The [`Problem`]s the byte caps produced come back on success, alongside the
-/// document that was written — a pact over budget is still a pact, so they are
-/// something to report rather than something to act on.
+/// The [`Problem`]s the byte caps and the summarising produced come back on
+/// success, alongside the document that was written — a pact over budget is
+/// still a pact, so they are something to report rather than something to act
+/// on. A file that reached the pass with a summary is not among them: nothing
+/// about it was left out.
 ///
 /// `&dyn Agent` rather than a generic: there is one code path whatever the
 /// implementation is, a boxed agent works without a second signature, and a
@@ -849,7 +875,16 @@ fn at_or_below(module: &str, selected: &str) -> bool {
 ///   either way `WARLOCK.md` is byte for byte what it was before.
 pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<Pacted, Error> {
     let directory = directory.as_ref();
-    let Gathered { request, problems } = gather_request(PROMPT, directory)?;
+    let Gathered {
+        request,
+        mut problems,
+    } = gather_request(PROMPT, directory)?;
+
+    // Before the pass that writes the document, the passes that describe what
+    // the pass would otherwise only be able to name. Infallible by construction:
+    // it answers with a request either way, and every way it can go wrong is a
+    // `Problem` in the list above.
+    let request = summarise_over_cap(directory, request, &mut problems, agent);
 
     let response = agent.run(&request).map_err(|source| Error::Refused {
         directory: directory.to_path_buf(),
@@ -1000,9 +1035,11 @@ pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
 /// ceiling the summarising imposes, or the summarising itself failed — because
 /// each of those ends with a name and a size and no account of the file.
 ///
-/// No code path here can produce a summarised file yet; the rule is written
-/// down now so the slice that can produce one inherits it rather than invents
-/// it.
+/// No code path *here* produces a summarised file: this function measures a
+/// file, lists it when it is too big, and never runs a pass. The step that turns
+/// one of those listings into a summary runs after it, on the request it
+/// returned — see [`pact_directory`], which is also where a file stops being a
+/// `Problem` because it ended up described.
 ///
 /// ```
 /// use std::fs;
@@ -1164,6 +1201,114 @@ fn trim_to_budget(
     }
 }
 
+/// Replace every file the per-file cap listed with an account of what is in it,
+/// wherever `agent` can produce one.
+///
+/// This is the step between [`gather_request`] and the directory pass. It is
+/// handed the request that gather built and the problems it reported, and it
+/// answers with the request the pass is actually run on: the same prompt, the
+/// same directory, the same children's documents, and files in the same order,
+/// with each successfully described one turned from [`AgentFile::omitted`] into
+/// [`AgentFile::summarised`].
+///
+/// # Which files
+///
+/// Only the ones [`Omission::TooLarge`] put on the problem list — a file that is
+/// over [`PER_FILE_BYTE_CAP`] by itself and would otherwise reach the pass as a
+/// name and a size. Deliberately not the others that share that fate: a file the
+/// filesystem refused ([`Omission::Unreadable`]) has no bytes to read, and a
+/// file the request cap gave up ([`Omission::OverBudget`]) was given up to make
+/// the request smaller, so paying model passes to put some of it back is the
+/// opposite of what was asked. The problem is found by matching its path against
+/// `directory.join(file.path())`, which is exact here because only the
+/// directory's own files are gathered.
+///
+/// # What it does to the problem list
+///
+/// One file, one entry, always. A file that comes back described has its
+/// `TooLarge` entry **removed** — its contents reached the pass, so there is
+/// nothing left out to report. A file that does not has that same entry's cause
+/// **replaced** by the one that says why there is no summary: not text, past the
+/// chunk ceiling, no usable answer, or — for the read this step does and gather
+/// did not — the filesystem refusing. Replaced rather than added, so a reader is
+/// never told twice about one file, and the entry that survives is the one with
+/// something to say.
+///
+/// Nothing here returns an [`Error`], and nothing here can stop a pact: the
+/// worst case is the request gather already built, with better-explained
+/// problems beside it.
+fn summarise_over_cap(
+    directory: &Path,
+    request: AgentRequest,
+    problems: &mut Vec<Problem>,
+    agent: &dyn Agent,
+) -> AgentRequest {
+    let mut files = request.files().to_vec();
+    // The problems whose files ended up described, so their entries can go. Held
+    // rather than removed as they are found, because removing from under the
+    // loop would move every index still to be matched.
+    let mut described = Vec::new();
+    let mut replaced = false;
+
+    for file in &mut files {
+        if !file.is_omitted() {
+            continue;
+        }
+        let on_disk = directory.join(file.path());
+        let Some(index) = problems.iter().position(|problem| {
+            matches!(problem.cause, Omission::TooLarge { .. }) && problem.path == on_disk
+        }) else {
+            continue;
+        };
+
+        // Read here rather than in `gather_request`, which measured this file
+        // and deliberately never opened it: the bytes are only worth holding for
+        // as long as the passes over them take.
+        let bytes = match fs::read(&on_disk) {
+            Ok(bytes) => bytes,
+            // It was over the cap a moment ago and is unreadable now. Whatever
+            // happened to it, the honest cause is the filesystem's, and it is
+            // the same one gather reports for a file it could not read.
+            Err(source) => {
+                problems[index].cause = Omission::Unreadable { source };
+                continue;
+            }
+        };
+
+        match summarise_file(directory, file.path(), &bytes, agent) {
+            Ok(summary) => {
+                let (path, size) = (file.path().to_owned(), file.size());
+                // The size on disk, not the length of the account: a file is as
+                // big as it is however briefly it can be described.
+                *file = AgentFile::summarised(path, size, summary);
+                described.push(index);
+                replaced = true;
+            }
+            Err(cause) => problems[index].cause = cause,
+        }
+    }
+
+    // Sorted so the removals are back to front whatever order the files were
+    // matched in, and so no earlier removal shifts a later index.
+    described.sort_unstable();
+    for index in described.into_iter().rev() {
+        problems.remove(index);
+    }
+
+    if !replaced {
+        // Nothing to say that the request does not already say. The common case,
+        // and the one where rebuilding would be pure copying.
+        return request;
+    }
+
+    // Rebuilt rather than mutated: an `AgentRequest` is a value whose builders
+    // append, and a request with one file exchanged is a different value, not a
+    // request in a different state.
+    AgentRequest::new(request.prompt().to_owned(), directory)
+        .with_files(files)
+        .with_child_documents(request.child_documents().to_vec())
+}
+
 /// `bytes` as the ordered list of chunks a map pass would read them in, or the
 /// [`Utf8Error`] that says there are none.
 ///
@@ -1282,15 +1427,6 @@ fn chunk_utf8(bytes: &[u8]) -> Result<Vec<String>, Utf8Error> {
 /// [`Omission::Unsummarised`]. Every one of them is a file back to being what
 /// an over-cap file has always been, a name and a size, with the reason said
 /// out loud. None of them is an [`Error`]: nothing here can fail a pact.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the step that reads over-cap files and puts their summaries in the request \
-                  lands next; today only this module's own tests run the map-reduce. See the \
-                  note on `CHUNK_BYTE_CAP`"
-    )
-)]
 fn summarise_file(
     directory: &Path,
     path: &str,
@@ -2233,6 +2369,18 @@ mod tests {
     /// a fixture's real text.
     fn filler(size: u64) -> Vec<u8> {
         vec![b'x'; usize::try_from(size).expect("a test file fits in memory")]
+    }
+
+    /// `size` bytes that are not text: what a checked-in PNG, a compiled
+    /// artefact or a fixture of random bytes looks like to the chunker.
+    ///
+    /// One byte does it, and it goes at the end so that a file which is text
+    /// almost all the way through is still not text — the same rule the
+    /// chunker applies to the whole of a file rather than to its beginning.
+    fn not_text(size: u64) -> Vec<u8> {
+        let mut bytes = filler(size);
+        *bytes.last_mut().expect("a fixture has bytes") = 0xff;
+        bytes
     }
 
     /// The request for `dir`, insisting nothing was left out of it.
@@ -3712,33 +3860,192 @@ mod tests {
     }
 
     #[test]
-    fn the_caps_problems_come_back_alongside_the_document() {
+    fn an_over_cap_file_that_is_not_text_stays_a_name_and_a_size_and_costs_no_pass() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let size = PER_FILE_BYTE_CAP + 1;
-        let lock = write(dir.path(), "Cargo.lock", filler(size));
+        let blob = write(dir.path(), "blob.bin", not_text(size));
         let answer = document(300);
-        let agent = Canned::new(&answer);
+        let agent = Counting::new(&answer);
 
         let Pacted { problems, .. } =
-            pact_directory(dir.path(), &agent).expect("an over-budget file never fails a pact");
+            pact_directory(dir.path(), &agent).expect("an over-cap file never fails a pact");
 
         assert_eq!(written(dir.path()).as_deref(), Some(answer.as_bytes()));
+        assert_eq!(
+            agent.passes(),
+            1,
+            "the directory pass and nothing else: not one pass is spent on bytes that are \
+             not text",
+        );
         assert_eq!(problems.len(), 1, "{problems:?}");
-        assert_eq!(problems[0].path, lock);
+        assert_eq!(problems[0].path, blob);
         assert!(
-            matches!(problems[0].cause, Omission::TooLarge { .. }),
-            "{:?}",
+            matches!(problems[0].cause, Omission::NotText { size: reported, .. } if reported == size),
+            "the cause is why there is no summary, in place of the cap that listed it: {:?}",
             problems[0],
         );
 
         // Read off the request the pass actually saw, rather than trusting
         // that gathering did what its own tests say it does.
         let seen = agent.seen.borrow();
-        let listed = file(&seen[0], "Cargo.lock");
+        let listed = file(&seen[0], "blob.bin");
         assert!(listed.is_omitted(), "the pass was not sent the bytes");
-        assert_eq!(listed.path(), "Cargo.lock", "but it was told the name");
+        assert_eq!(listed.path(), "blob.bin", "but it was told the name");
         assert_eq!(listed.size(), size, "and the size");
         assert_eq!(listed.bytes(), None, "and no part of the file at all");
+        assert_eq!(listed.summary(), None, "and nothing made up about it");
+    }
+
+    #[test]
+    fn an_over_cap_file_reaches_the_pass_as_a_summary_and_stops_being_a_problem() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let text = text_of_chunks(2);
+        let size = byte_count(text.len());
+        assert!(
+            size > PER_FILE_BYTE_CAP,
+            "the fixture is a file gather would list rather than send",
+        );
+        write(dir.path(), "Cargo.lock", &text);
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+        let agent = Counting::new(document(300)).scripted([
+            Ok(account("the first part")),
+            Ok(account("the second part")),
+            Ok(account("the whole lockfile")),
+        ]);
+
+        let Pacted { problems, .. } = pact_directory(dir.path(), &agent).expect("pacts");
+
+        assert_eq!(
+            agent.passes(),
+            4,
+            "a map pass per part, one reduce, and then the directory pass",
+        );
+        assert!(
+            problems.is_empty(),
+            "a file read in full and described is not left out of anything: {problems:?}",
+        );
+
+        let seen = agent.seen.borrow();
+        let pass = seen.last().expect("the directory was pacted");
+        assert_eq!(pass.prompt(), super::PROMPT, "the last pass is the pact");
+        let described = file(pass, "Cargo.lock");
+        assert!(
+            !described.is_omitted(),
+            "nothing about it was left out: {described:?}",
+        );
+        assert_eq!(described.path(), "Cargo.lock", "the pass is told the name");
+        assert_eq!(described.size(), size, "the size it has on disk");
+        assert_eq!(
+            described.summary(),
+            Some(account("the whole lockfile").as_str()),
+            "and what the passes over the whole of it found",
+        );
+        assert_eq!(
+            described.bytes(),
+            None,
+            "an account of a file is never its text",
+        );
+        assert_eq!(
+            file(pass, "lib.rs").bytes(),
+            Some(&b"//! Core engine.\n"[..]),
+            "and the rest of the directory is untouched",
+        );
+
+        // The property the whole design turns on, asserted over every request
+        // the run produced rather than the last one: a file is sent whole, sent
+        // as an account of itself, or listed — never in pieces.
+        let chunks = chunk_utf8(text.as_bytes()).expect("the fixture is text");
+        assert_eq!(chunks.len(), 2, "and the parts were parts");
+        for request in seen.iter() {
+            for carried in request.files() {
+                let Some(bytes) = carried.bytes() else {
+                    continue;
+                };
+                let whole = fs::read(dir.path().join(carried.path())).expect("reads");
+                assert_eq!(
+                    bytes,
+                    whole.as_slice(),
+                    "`{}` is attached as a file, so it is the whole file",
+                    carried.path(),
+                );
+                for chunk in &chunks {
+                    assert_ne!(
+                        bytes,
+                        chunk.as_bytes(),
+                        "no map chunk is ever attached as a file's bytes",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_over_cap_file_past_the_chunk_ceiling_stays_a_name_and_a_size_and_costs_no_pass() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let parts = CHUNK_COUNT_CEILING + 1;
+        let text = text_of_chunks(parts);
+        let bundle = write(dir.path(), "bundle.js", &text);
+        let agent = Counting::new(document(300));
+
+        let Pacted { problems, .. } = pact_directory(dir.path(), &agent).expect("pacts");
+
+        assert_eq!(
+            agent.passes(),
+            1,
+            "the count is known before a pass is spent, so one file never becomes dozens",
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].path, bundle);
+        assert!(
+            matches!(problems[0].cause, Omission::TooManyChunks { chunks, .. } if chunks == parts),
+            "{:?}",
+            problems[0],
+        );
+
+        let seen = agent.seen.borrow();
+        let listed = file(&seen[0], "bundle.js");
+        assert!(listed.is_omitted(), "{listed:?}");
+        assert_eq!(listed.size(), byte_count(text.len()));
+        assert_eq!(listed.summary(), None, "and no half-summary of it either");
+    }
+
+    #[test]
+    fn a_file_the_summarising_cannot_describe_is_reported_once_and_never_twice() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let text = text_of_chunks(2);
+        let lock = write(dir.path(), "Cargo.lock", &text);
+        // Every pass answers something too short to be an account of a file,
+        // and long enough to be a document: the first map pass ends the file,
+        // and the directory pass is unaffected.
+        let script: [Result<String, fn() -> AgentError>; 1] = [Err(|| AgentError::EmptyOutput)];
+        let agent = Counting::new(document(300)).scripted(script);
+
+        let Pacted { problems, .. } =
+            pact_directory(dir.path(), &agent).expect("a failed summary never fails a pact");
+
+        assert_eq!(agent.passes(), 2, "the failed map pass, then the pact");
+        assert_eq!(
+            problems.len(),
+            1,
+            "one file is one problem: the new cause replaces the cap's, it does not join \
+             it: {problems:?}",
+        );
+        assert_eq!(problems[0].path, lock);
+        assert!(
+            matches!(
+                problems[0].cause,
+                Omission::Unsummarised {
+                    source: Some(_),
+                    ..
+                }
+            ),
+            "{:?}",
+            problems[0],
+        );
+        assert!(
+            file(&agent.seen.borrow()[1], "Cargo.lock").is_omitted(),
+            "and the pass is handed what an over-cap file has always been",
+        );
     }
 
     #[test]
@@ -4284,6 +4591,130 @@ mod tests {
             fs::read_to_string(manifest_path(repo.path())).expect("the manifest is still there"),
             "version = 1\n",
             "the operation saves nothing: writing the manifest is the caller's, once",
+        );
+    }
+
+    /// Every directory the fixture repository's subtree pact covers, deepest
+    /// first — what "every document was written" is measured against.
+    const ENGINE_DIRECTORIES: [&str; 4] = [
+        "crates/engine/tests",
+        "crates/engine/src/inner",
+        "crates/engine/src",
+        "crates/engine",
+    ];
+
+    #[test]
+    fn a_subtree_describes_the_huge_file_it_can_read_and_names_the_one_it_cannot() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let text = text_of_chunks(2);
+        write(&engine, "Cargo.lock", &text);
+        let blob = write(&engine, "src/fixture.bin", not_text(PER_FILE_BYTE_CAP + 1));
+        // Answers every pass, map and reduce and pact alike: a document is
+        // comfortably over `MINIMUM_SUMMARY_BYTES` too.
+        let agent = Canned::new(document(300));
+
+        let PactedSubtree {
+            manifest,
+            failures,
+            problems,
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("two over-cap files never fail a pact");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        for directory in ENGINE_DIRECTORIES {
+            assert!(
+                written(&repo.path().join(directory)).is_some(),
+                "`{directory}` has its document",
+            );
+        }
+        assert_eq!(modules(&manifest).len(), ENGINE_DIRECTORIES.len());
+
+        assert_eq!(
+            problems
+                .iter()
+                .map(|problem| problem.path.clone())
+                .collect::<Vec<_>>(),
+            [blob],
+            "the file that could be read is described and reported nowhere; the one that \
+             could not is named once: {problems:?}",
+        );
+        assert!(
+            matches!(problems[0].cause, Omission::NotText { .. }),
+            "{:?}",
+            problems[0],
+        );
+
+        let seen = agent.seen.borrow();
+        let pact = seen
+            .iter()
+            .find(|request| request.prompt() == super::PROMPT && request.directory() == engine)
+            .expect("the directory the lockfile is in was pacted");
+        assert_eq!(
+            file(pact, "Cargo.lock").summary(),
+            Some(document(300).as_str()),
+            "the pass over the lockfile's directory was handed an account of it",
+        );
+    }
+
+    /// An agent that never gets a map pass done and is otherwise ordinary: no
+    /// file in the subtree is ever described, and every directory pass answers.
+    struct FailsEveryMap(String);
+
+    impl Agent for FailsEveryMap {
+        fn run(&self, request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+            if request.prompt().starts_with(MAP_PROMPT) {
+                return Err(AgentError::EmptyOutput);
+            }
+            Ok(AgentResponse::new(self.0.clone()))
+        }
+    }
+
+    #[test]
+    fn an_agent_that_fails_every_map_pass_still_writes_every_document() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let lock = write(&engine, "Cargo.lock", text_of_chunks(2));
+
+        let PactedSubtree {
+            manifest,
+            failures,
+            problems,
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &FailsEveryMap(document(300)),
+            &mut Unwatched,
+        )
+        .expect("nothing summarising does can fail a pact");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        for directory in ENGINE_DIRECTORIES {
+            assert!(
+                written(&repo.path().join(directory)).is_some(),
+                "`{directory}` has its document, summaries or no summaries",
+            );
+        }
+        assert_eq!(modules(&manifest).len(), ENGINE_DIRECTORIES.len());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].path, lock);
+        assert!(
+            matches!(
+                problems[0].cause,
+                Omission::Unsummarised {
+                    source: Some(_),
+                    ..
+                }
+            ),
+            "the file is back to a name and a size, with what went wrong said out loud: {:?}",
+            problems[0],
         );
     }
 
