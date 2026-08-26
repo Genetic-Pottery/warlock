@@ -155,6 +155,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::Utf8Error;
 
 use ignore::WalkBuilder;
 
@@ -230,6 +231,91 @@ pub const REQUEST_BYTE_CAP: u64 = 256 * 1024;
 /// caught — by a human reading the diff — and a length check is only here to
 /// stop the case where there is no document at all.
 pub const MINIMUM_DOCUMENT_BYTES: usize = 200;
+
+/// The most bytes of a file's text one map pass is handed: 96 KiB.
+///
+/// Three quarters of [`PER_FILE_BYTE_CAP`], and strictly below it on purpose. A
+/// file sent whole is the whole of what its entry in a request carries; a chunk
+/// is never alone in its window. It arrives with the map prompt, the file's
+/// name and which part of how many it is, and the pass then has to write an
+/// account of it in what is left. The 32 KiB this keeps back under the per-file
+/// cap is that room — a margin, deliberately not a figure computed from the
+/// length of a prompt that is free to change in a diff.
+///
+/// It is a target rather than a limit, because chunks split on line boundaries
+/// and a file's lines are its own: see [`chunk_utf8`] for the one case that
+/// goes over, and why going over beats cutting.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the chunking primitives land one slice before the step that runs the \
+                  passes, so today only this module's own tests reach them. `expect` rather \
+                  than `allow`, and only where the tests are not compiled: the moment the \
+                  map-reduce calls them this attribute goes unfulfilled and has to be \
+                  deleted, so the scaffolding cannot outlive its excuse"
+    )
+)]
+const CHUNK_BYTE_CAP: usize = 96 * 1024;
+
+/// The most chunks one file may become before it is left as a name and a size:
+/// 32.
+///
+/// What this protects against is one file quietly becoming hundreds of model
+/// passes. A pact is already minutes of passes per directory, and summarising
+/// is per file on top of that: with no ceiling, one checked-in 40 MB bundle
+/// turns a single directory's pact into four hundred passes, spending a
+/// caller's money and an hour of wall clock on the least interesting file in
+/// the repository. Thirty-two chunks is a little over 3 MB of text at
+/// [`CHUNK_BYTE_CAP`], plus one reduce: thirty-three passes, which is the most
+/// any one file is worth.
+///
+/// That covers what summarising exists for — a megabyte-scale lockfile or
+/// generated schema is a handful of chunks — and stops at the artefacts nobody
+/// reads line by line anyway. A file past the ceiling is neither an error nor a
+/// truncation: it stays exactly what it is today, a name and a size, with the
+/// reason said out loud.
+///
+/// The count is known before a single pass is spent, because [`chunk_utf8`] is
+/// a pure function over bytes already in memory. So this ceiling is checked for
+/// free, and can never be hit half way through a file with passes already paid
+/// for.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "checked by the step that decides whether a file is summarised at all, \
+                  which lands next; see the note on `CHUNK_BYTE_CAP`"
+    )
+)]
+const CHUNK_COUNT_CEILING: usize = 32;
+
+/// The fewest bytes a map or reduce answer may come to, once surrounding
+/// whitespace is trimmed, and still be used as an account of a file: 80.
+///
+/// The same rule as [`MINIMUM_DOCUMENT_BYTES`], for the same reason — a length
+/// is the only thing measured, and there is no phrase list here either — but at
+/// a lower number, because a summary is not a document. A document describes a
+/// whole directory and gets 200 bytes as its floor: a heading and two
+/// sentences. A summary describes one file, or one part of one, and the honest
+/// account of a chunk of a lockfile is genuinely short. 80 bytes is about a
+/// sentence and a half: above the answers that carry nothing ("Nothing of
+/// note.", "This is a lockfile."), and below the shortest sentence that
+/// actually says what a file's contents are.
+///
+/// An answer under it is not retried and not padded. The file demotes to a name
+/// and a size with the cause disclosed, which is where every other failure of
+/// summarising lands — the caps were never allowed to fail a pact, and neither
+/// are the passes the caps now cause.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "measured against a map or reduce answer, and no pass runs yet; see the \
+                  note on `CHUNK_BYTE_CAP`"
+    )
+)]
+const MINIMUM_SUMMARY_BYTES: usize = 80;
 
 /// The whole instruction a pass is given, and the only one there is.
 ///
@@ -1007,6 +1093,89 @@ fn trim_to_budget(
     }
 }
 
+/// `bytes` as the ordered list of chunks a map pass would read them in, or the
+/// [`Utf8Error`] that says there are none.
+///
+/// Pure, and deliberately narrow: nothing is opened, no [`Agent`] is run, and
+/// no policy is decided here. Whether a file should be summarised at all,
+/// whether it has too many chunks ([`CHUNK_COUNT_CEILING`]), what to report
+/// when it has — all of that belongs to the caller, which is why this answers
+/// with chunks and an error and nothing else.
+///
+/// # What it guarantees
+///
+/// * **Nothing is lost, nothing is added.** Concatenating the chunks in order
+///   reproduces `bytes` exactly, byte for byte. No separator, no ellipsis, no
+///   normalised line ending.
+/// * **Every chunk is valid UTF-8.** The whole of `bytes` is checked once,
+///   before anything is split, and every boundary after that is a boundary in a
+///   [`str`] — so no chunk can end in the middle of a character.
+/// * **Chunks end after a newline** wherever the file gives them one to end
+///   after, so a pass reads whole lines and a boundary falls where a human
+///   would put one.
+/// * **The count is known up front**, from bytes already in memory, before any
+///   pass is spent.
+///
+/// Zero bytes is zero chunks. An empty file is never over [`PER_FILE_BYTE_CAP`]
+/// and so never reaches here, and zero chunks is the honest answer for nothing
+/// to read.
+///
+/// # The line that is longer than the cap
+///
+/// A minified bundle can be a single line of two megabytes, and [`CHUNK_BYTE_CAP`]
+/// is a target rather than a hard maximum precisely because of it: **a line
+/// longer than the cap becomes one chunk of its own, at whatever length it
+/// is.** Both alternatives are worse. Cutting inside a line hands a pass half a
+/// statement and gets a confident account of the half that never arrived —
+/// exactly the guessing that "omit, never truncate" exists to stop — and
+/// refusing such a file outright would make it undescribable for a reason no
+/// reader can act on. An oversized chunk may well be a request a model refuses,
+/// and that refusal is honest: it costs one pass and lands where every other
+/// failure lands, on a name, a size and a disclosed cause.
+///
+/// # Errors
+///
+/// [`Utf8Error`] if `bytes` is not valid UTF-8 anywhere in it. The file is
+/// rejected whole — a single stray byte in a megabyte of text yields no chunks
+/// at all rather than the chunks around it — because a file that is not text is
+/// not a file this can honestly cut into readable parts.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "called by the map-reduce step, which lands next; see the note on \
+                  `CHUNK_BYTE_CAP`"
+    )
+)]
+fn chunk_utf8(bytes: &[u8]) -> Result<Vec<String>, Utf8Error> {
+    // Checked once, for the whole file, before a single boundary is chosen.
+    // Everything below this line works in `str`, so UTF-8 validity per chunk is
+    // a property of the types rather than something to remember.
+    let text = str::from_utf8(bytes)?;
+
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+    // `split_inclusive` keeps each line's newline with the line it ends, and
+    // yields a final piece whether or not the file ends in one — so the pieces
+    // put back together are the text, and a chunk boundary is always just after
+    // a newline.
+    for line in text.split_inclusive('\n') {
+        // Started a chunk and this line would take it over: end it here. The
+        // emptiness check is what lets a single over-cap line through as its
+        // own chunk instead of looping forever looking for a boundary that the
+        // file does not have.
+        if !chunk.is_empty() && chunk.len() + line.len() > CHUNK_BYTE_CAP {
+            chunks.push(std::mem::take(&mut chunk));
+        }
+        chunk.push_str(line);
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+
+    Ok(chunks)
+}
+
 /// What one request is built from: the directory's own files, and its immediate
 /// children's documents, each keyed by the relative path it will be named by.
 ///
@@ -1659,9 +1828,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        DOCUMENT_FILE, Failure, Gathered, MINIMUM_DOCUMENT_BYTES, Observer, Omission,
-        PER_FILE_BYTE_CAP, Pacted, PactedSubtree, Pacting, Problem, REQUEST_BYTE_CAP, Refusal,
-        Unwatched, gather_request, pact_directory, pact_subtree, pactable_directories,
+        CHUNK_BYTE_CAP, CHUNK_COUNT_CEILING, DOCUMENT_FILE, Failure, Gathered,
+        MINIMUM_DOCUMENT_BYTES, MINIMUM_SUMMARY_BYTES, Observer, Omission, PER_FILE_BYTE_CAP,
+        Pacted, PactedSubtree, Pacting, Problem, REQUEST_BYTE_CAP, Refusal, Unwatched, byte_count,
+        chunk_utf8, gather_request, pact_directory, pact_subtree, pactable_directories,
         unpact_subtree,
     };
     use crate::{
@@ -2233,6 +2403,167 @@ mod tests {
                 .and_then(std::error::Error::source)
                 .is_some(),
             "and an unreadable file's cause names the io error under it",
+        );
+    }
+
+    /// A text fixture of at least `bytes` bytes whose every line carries
+    /// one-, two-, three- and four-byte characters, and which ends without a
+    /// final newline.
+    ///
+    /// The multi-byte characters are the point: a boundary taken a byte or two
+    /// off would land inside one, and the round-trip test would see it. No
+    /// final newline so the last piece of the split is exercised too.
+    fn multibyte_text(bytes: usize) -> String {
+        let line = "façade — 日本語 🜂 one line of the fixture, long enough to be worth cutting\n";
+        let mut text = String::new();
+        while text.len() < bytes {
+            text.push_str(line);
+        }
+        text.push_str("façade — 日本語 🜂 and a last line with no newline after it");
+        text
+    }
+
+    /// One line of at least `bytes` bytes, newline-terminated: what a minified
+    /// bundle looks like to the chunker.
+    fn one_long_line(bytes: usize) -> String {
+        let mut line = String::new();
+        while line.len() < bytes {
+            line.push_str("λx.🜁 minified—forever; ");
+        }
+        line.push('\n');
+        line
+    }
+
+    #[test]
+    fn the_chunk_cap_leaves_room_for_the_map_prompt_in_the_same_window() {
+        assert!(
+            byte_count(CHUNK_BYTE_CAP) < PER_FILE_BYTE_CAP,
+            "a chunk shares its window with the map prompt, so it is strictly smaller than a \
+             file sent whole: {CHUNK_BYTE_CAP} vs {PER_FILE_BYTE_CAP}",
+        );
+        const {
+            assert!(
+                MINIMUM_SUMMARY_BYTES < MINIMUM_DOCUMENT_BYTES,
+                "a summary describes one file and is allowed to be shorter than a document, \
+                 which describes a whole directory",
+            );
+        }
+        assert!(
+            (12..=64).contains(&CHUNK_COUNT_CEILING),
+            "a few dozen: enough for a lockfile, far short of hundreds of passes",
+        );
+    }
+
+    #[test]
+    fn every_chunk_is_valid_utf8_and_the_chunks_put_back_together_are_the_file() {
+        // Several chunks' worth of multi-byte text with one line in the middle
+        // that is longer than the cap all by itself.
+        let mut text = multibyte_text(CHUNK_BYTE_CAP + CHUNK_BYTE_CAP / 2);
+        text.push('\n');
+        text.push_str(&one_long_line(CHUNK_BYTE_CAP + 1_000));
+        text.push_str(&multibyte_text(CHUNK_BYTE_CAP));
+        let bytes = text.as_bytes();
+
+        let chunks = chunk_utf8(bytes).expect("the fixture is text");
+
+        assert!(chunks.len() > 3, "the fixture is worth cutting up");
+        let mut rejoined: Vec<u8> = Vec::new();
+        for chunk in &chunks {
+            assert!(!chunk.is_empty(), "a chunk nobody can read is not a chunk");
+            // Tautological through a `String`, and asserted anyway: what a map
+            // pass is handed are these bytes, and they have to parse.
+            assert!(
+                std::str::from_utf8(chunk.as_bytes()).is_ok(),
+                "every chunk parses as UTF-8 on its own",
+            );
+            rejoined.extend_from_slice(chunk.as_bytes());
+        }
+        assert_eq!(
+            rejoined, bytes,
+            "the chunks in order are the file, byte for byte: nothing lost, nothing added",
+        );
+    }
+
+    #[test]
+    fn a_chunk_ends_after_a_newline_and_stays_under_the_cap() {
+        let text = multibyte_text(CHUNK_BYTE_CAP * 3);
+
+        let chunks = chunk_utf8(text.as_bytes()).expect("the fixture is text");
+
+        assert!(chunks.len() >= 3, "{} chunks", chunks.len());
+        for chunk in &chunks[..chunks.len() - 1] {
+            assert!(
+                chunk.ends_with('\n'),
+                "every chunk but the last ends on a line boundary",
+            );
+            assert!(
+                chunk.len() <= CHUNK_BYTE_CAP,
+                "{} bytes is over the {CHUNK_BYTE_CAP}-byte chunk cap",
+                chunk.len(),
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_longer_than_the_cap_becomes_one_chunk_rather_than_being_cut() {
+        let long = one_long_line(CHUNK_BYTE_CAP * 2);
+        let text = format!("first line\n{long}last line\n");
+
+        let chunks = chunk_utf8(text.as_bytes()).expect("the fixture is text");
+
+        assert_eq!(
+            chunks,
+            ["first line\n", &long, "last line\n"],
+            "the over-cap line is its own chunk, whole: cutting inside a line is the guessing \
+             this module refuses to invite",
+        );
+        assert!(
+            chunks[1].len() > CHUNK_BYTE_CAP,
+            "and it is over the cap, on purpose",
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_text_yields_no_chunks_at_all() {
+        let bytes = [0xff_u8, 0xfe, 0x80, 0x00, 0x01];
+
+        let chunked = chunk_utf8(&bytes);
+
+        assert!(chunked.is_err(), "binary bytes are not chunked");
+        assert!(
+            chunked.unwrap_or_default().is_empty(),
+            "and there is nothing to spend a pass on",
+        );
+    }
+
+    #[test]
+    fn one_stray_byte_rejects_the_whole_file_rather_than_the_lines_around_it() {
+        let mut bytes = multibyte_text(CHUNK_BYTE_CAP * 2).into_bytes();
+        bytes.push(0x9f);
+        bytes.extend_from_slice(multibyte_text(CHUNK_BYTE_CAP).as_bytes());
+
+        assert!(
+            chunk_utf8(&bytes).is_err(),
+            "a file that is not text is rejected whole, not summarised in part",
+        );
+    }
+
+    #[test]
+    fn no_bytes_is_no_chunks() {
+        assert_eq!(
+            chunk_utf8(b"").expect("empty is valid UTF-8"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_file_under_the_cap_is_one_chunk() {
+        let text = "//! Core engine.\nfn main() {}\n";
+
+        assert_eq!(
+            chunk_utf8(text.as_bytes()).expect("text"),
+            [text],
+            "one chunk, and the reduce that costs a pass is somebody else's decision",
         );
     }
 
