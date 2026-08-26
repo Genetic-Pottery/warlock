@@ -86,8 +86,16 @@ lives at `.warlock/pacts.toml`, and `Manifest::save` / `Manifest::load` take
 the repository root and read and write `<root>/.warlock/pacts.toml` under it —
 the path `manifest_path` spells out.
 
+`<root>/.warlock/summaries/` is the only other thing under that root: one
+markdown file per cached account of an over-cap file, named for the blake3
+digest of the bytes it describes and nothing else about the file. It is
+committed alongside the manifest, so an account this repository has already
+paid for arrives in a teammate's clone; it is pruned from every walk by name,
+so it reaches no tree, no `subtree_hash` and no request; and every failure to
+read an entry is an ordinary cache miss, never an error.
+
 The crate reaches the filesystem in four ways and no others. It reads and
-writes that manifest; it *walks* directories — via the `ignore` crate, so
+writes that manifest and the cache beside it; it *walks* directories — via the `ignore` crate, so
 `.gitignore` at every level is respected, hidden directories such as `.git/` are
 skipped and a `target/` the repository ignores never appears, all without a
 hand-maintained list and never following a symlink; it *reads the bytes* of
