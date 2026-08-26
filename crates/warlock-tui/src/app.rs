@@ -272,6 +272,36 @@ struct InFlight {
     total: usize,
 }
 
+/// A summarising pass running inside the directory a pact is working: the file
+/// it is about, and which pass of how many it is.
+///
+/// An over-cap file is read in chunks and summarised a chunk at a time, so a
+/// single directory can be a dozen model passes over one file, minutes long, with
+/// nothing on [`InFlight`] moving for the whole of it. This is what turns that
+/// silence into a fraction that advances. `part` is one-based and `parts` is the
+/// number of passes that file costs — the engine's own counting, see
+/// `Observer::summarising` — so it reads as `(2/5)` beside a `parts` that does
+/// not move for the length of that file.
+///
+/// The file is kept as the path the caller was handed rather than as finished
+/// text, for the same reason [`InFlight`] keeps its directory that way: the label
+/// is spelled relative to the root of the tree *on screen* at draw time, by
+/// [`App::pact_line`].
+///
+/// Private, and nothing at all is given out of it — not even the yes-or-no
+/// [`InFlight`] answers. A caller can put it there, and it goes when the
+/// directory changes or the run ends; the only thing it does is add a clause to
+/// the one line the app words.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Summarising {
+    /// The file the pass about to run is over.
+    path: PathBuf,
+    /// Which pass over that file this is, counting from one.
+    part: usize,
+    /// How many passes that file costs in total.
+    parts: usize,
+}
+
 /// Which of the screen's two panes the keys are driving.
 ///
 /// The screen is a tree column and a panel beside it, and a key that moves a
@@ -430,6 +460,13 @@ impl Focus {
 /// keystrokes for that reason, and takes the message line while it is there:
 /// see [`App::pact_line`].
 ///
+/// `summarising` is the pass over one big file happening inside that directory,
+/// if one is, and is set and cleared by the same caller for the same reason —
+/// see [`App::set_pact_summarising`]. It hangs off `in_flight` rather than
+/// standing beside it: it is wording added to that one line, and it goes whenever
+/// `in_flight` moves or goes, so no file is ever named under a directory the run
+/// has left.
+///
 /// `collapsible` is the paths of the rows that have something under them *in
 /// this view* — which is not what the tree says, because the file toggle and the
 /// pacted-only filter both change what a row holds without the tree moving. It
@@ -472,6 +509,7 @@ pub struct App {
     header: String,
     message: Option<String>,
     in_flight: Option<InFlight>,
+    summarising: Option<Summarising>,
     pact_refused: bool,
     focus: Focus,
     account: Option<Account>,
@@ -581,6 +619,7 @@ impl App {
             header: String::new(),
             message: None,
             in_flight: None,
+            summarising: None,
             pact_refused: false,
             focus: Focus::Tree,
             account: None,
@@ -707,11 +746,45 @@ impl App {
     /// the last keystroke left is still the last keystroke's, and is still there
     /// when the pact is over. Movement does not undo this either — a pact
     /// carries on being in flight however much the reader scrolls.
+    ///
+    /// Takes down whatever [`App::set_pact_summarising`] last said: the file
+    /// being summarised belonged to the directory the run has just left, so a
+    /// new directory never inherits the last one's file.
     pub fn set_pact_in_flight(&mut self, path: impl Into<PathBuf>, position: usize, total: usize) {
         self.in_flight = Some(InFlight {
             path: path.into(),
             position,
             total,
+        });
+        self.summarising = None;
+    }
+
+    /// Say that a summarising pass over the file at `path` is running — pass
+    /// `part` of `parts` — inside the directory the pact is working.
+    ///
+    /// A file too big for one request is read in chunks and summarised a chunk at
+    /// a time, so one directory of the run can be a dozen model passes over a
+    /// single file. Without this the footer would sit unchanged for the whole of
+    /// it, which is the one thing the progress line exists to prevent; with it,
+    /// the line names the file and how far through it the run is. `part` counts
+    /// from one and `parts` is how many passes that file costs — the engine's own
+    /// counting, which a caller passes straight through rather than deriving.
+    ///
+    /// The caller's to set, as [`App::set_pact_in_flight`] is and for the same
+    /// reason: the passes happen on another thread. It is not the caller's to
+    /// take away one by one, though — moving the run on with
+    /// [`App::set_pact_in_flight`] clears it, and so does
+    /// [`App::clear_pact_in_flight`], so there is no way for a file to outlive
+    /// the directory it was found in.
+    ///
+    /// Says nothing on its own: it adds a clause to [`App::pact_line`], which
+    /// exists only while a pact is in flight. Not a keystroke, so it says nothing
+    /// and takes nothing down.
+    pub fn set_pact_summarising(&mut self, path: impl Into<PathBuf>, part: usize, parts: usize) {
+        self.summarising = Some(Summarising {
+            path: path.into(),
+            part,
+            parts,
         });
     }
 
@@ -724,9 +797,14 @@ impl App {
     /// about how the run went is on screen the moment the progress line is off
     /// it.
     ///
+    /// Takes the summarising pass down with it — see
+    /// [`App::set_pact_summarising`] — so no chunk wording survives the end of a
+    /// run.
+    ///
     /// A no-op when no pact was in flight.
     pub fn clear_pact_in_flight(&mut self) {
         self.in_flight = None;
+        self.summarising = None;
     }
 
     /// Say that the pact key was pressed while a pact was already running, so
@@ -800,22 +878,39 @@ impl App {
     /// holds it, and it appears when the run ends — which is what makes the
     /// precedence a display rule rather than a loss of state.
     ///
+    /// While a summarising pass is running inside that directory the line says so
+    /// too — `pacting crates/engine (3/12) — summarising Cargo.lock (2/5)` — so
+    /// the minutes a single big file costs are minutes of a fraction advancing
+    /// rather than of a screen that has not changed: see
+    /// [`App::set_pact_summarising`]. Still one line, and the directory and its
+    /// fraction still come first, because they are what the rest of the run is
+    /// measured in. The file is named relative to the root of the tree at draw
+    /// time exactly as the directory is.
+    ///
     /// A press of the pact key refused because this run is already going adds
     /// `— already running` to the end of it, rather than taking a line of its
-    /// own: see [`App::set_pact_refused`]. It is a suffix and goes last so that
-    /// a narrow terminal cuts the answer to a key just pressed rather than the
-    /// fraction, which is the part that says Warlock has not hung. The line is
-    /// rebuilt every frame, so a progress event arriving after the press
-    /// re-words it around the new directory and position and carries the suffix
-    /// along.
+    /// own: see [`App::set_pact_refused`]. It is a suffix and goes last — after
+    /// the summarising clause as well — so that a narrow terminal cuts the answer
+    /// to a key just pressed rather than the fraction, which is the part that
+    /// says Warlock has not hung. The line is rebuilt every frame, so a progress
+    /// event arriving after the press re-words it around the new directory and
+    /// position and carries the suffix along.
     #[must_use]
     pub fn pact_line(&self) -> Option<String> {
         self.in_flight.as_ref().map(|in_flight| {
-            let line = pacting_message(
+            let mut line = pacting_message(
                 &self.label_for(&in_flight.path),
                 in_flight.position,
                 in_flight.total,
             );
+            if let Some(summarising) = self.summarising.as_ref() {
+                line = summarising_message(
+                    &line,
+                    &self.label_for(&summarising.path),
+                    summarising.part,
+                    summarising.parts,
+                );
+            }
             if self.pact_refused {
                 already_running_message(&line)
             } else {
@@ -1838,6 +1933,10 @@ pub fn reseat_on(view: &App, tree: &Tree) -> App {
     reseated.header.clone_from(&view.header);
     reseated.message.clone_from(&view.message);
     reseated.in_flight.clone_from(&view.in_flight);
+    // With the pass running inside it, for the same reason: the run did not stop
+    // because a tree was re-read, so the file being paid for right now is still
+    // being paid for and the line should not lose it for a frame.
+    reseated.summarising.clone_from(&view.summarising);
     // Carried, like the message beside it and for the same reason: a tree being
     // re-read is not a keystroke, so it is not the thing that answers one. A
     // reader whose press was refused a frame ago should still be reading the
@@ -2126,6 +2225,22 @@ fn left_on_disk_message(label: &str) -> String {
 /// one, which is the whole reason the line exists.
 fn pacting_message(label: &str, position: usize, total: usize) -> String {
     format!("pacting {label} ({position}/{total})")
+}
+
+/// What the app says while a summarising pass over the file named `label` is
+/// running inside the directory `pacting` — a line from [`pacting_message`] —
+/// is about: that same line with `— summarising <file> (part/parts)` after it.
+///
+/// A clause on the run's line rather than a line of its own, because the footer
+/// is a fixed three lines and because this *is* the run: it is where the minutes
+/// are going right now. The directory and its fraction keep the front of the line
+/// — they are what the whole run is measured in, and the file is a detail inside
+/// one of their steps — and the second fraction is what moves while the first one
+/// cannot, which is the difference between a big file being paid for and a hung
+/// Warlock. Named with the same participle as the pass itself, so the two
+/// fractions read as one sentence about one piece of work.
+fn summarising_message(pacting: &str, label: &str, part: usize, parts: usize) -> String {
+    format!("{pacting} — summarising {label} ({part}/{parts})")
 }
 
 /// What the app says when the pact key is pressed while `pacting` — a line from
@@ -3390,6 +3505,94 @@ mod tests {
     }
 
     #[test]
+    fn a_summarising_pass_names_the_file_and_its_part_beside_the_directory() {
+        let mut app = App::from_rows(rooted_rows());
+        app.set_pact_in_flight(Path::new("/repo").join("crates"), 3, 12);
+
+        app.set_pact_summarising(Path::new("/repo").join("crates").join("Cargo.lock"), 2, 5);
+
+        // One line: the directory and where the run is in it first, because that
+        // is what the whole run is measured in, then the file being paid for now
+        // and how far through it the passes are. Both named relative to the root
+        // of the tree on screen, in the manifest spelling.
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting crates (3/12) — summarising crates/Cargo.lock (2/5)")
+        );
+
+        // And the second fraction moves while the first one cannot, which is the
+        // whole point of it.
+        app.set_pact_summarising(Path::new("/repo").join("crates").join("Cargo.lock"), 3, 5);
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting crates (3/12) — summarising crates/Cargo.lock (3/5)")
+        );
+    }
+
+    #[test]
+    fn the_next_directory_does_not_inherit_the_last_ones_summarising_file() {
+        let mut app = App::from_rows(rooted_rows());
+        app.set_pact_in_flight(Path::new("/repo").join("crates"), 3, 12);
+        app.set_pact_summarising(Path::new("/repo").join("crates").join("Cargo.lock"), 2, 5);
+
+        app.set_pact_in_flight(
+            Path::new("/repo").join("crates").join("warlock-engine"),
+            4,
+            12,
+        );
+
+        // The file belonged to the directory the run has just left, so it goes
+        // with it: the footer never names a file under a directory that is not
+        // the one holding it.
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting crates/warlock-engine (4/12)")
+        );
+    }
+
+    #[test]
+    fn no_summarising_wording_survives_the_end_of_a_run() {
+        let mut app = App::from_rows(rooted_rows());
+        app.set_pact_in_flight(Path::new("/repo").join("crates"), 3, 12);
+        app.set_pact_summarising(Path::new("/repo").join("crates").join("Cargo.lock"), 2, 5);
+
+        app.clear_pact_in_flight();
+
+        assert_eq!(app.pact_line(), None);
+        // And nothing of it comes back with the next run either.
+        app.set_pact_in_flight(Path::new("/repo").join("crates"), 1, 2);
+        assert_eq!(app.pact_line().as_deref(), Some("pacting crates (1/2)"));
+    }
+
+    #[test]
+    fn a_summarising_pass_says_nothing_while_no_pact_is_in_flight() {
+        let mut app = App::from_rows(rooted_rows());
+
+        app.set_pact_summarising(Path::new("/repo").join("crates").join("Cargo.lock"), 2, 5);
+
+        // There is no line for it to be a clause on: the file is a detail inside
+        // a directory of a run, and outside a run it describes nothing.
+        assert_eq!(app.pact_line(), None);
+    }
+
+    #[test]
+    fn the_already_running_suffix_still_goes_last_with_a_summarising_pass() {
+        let mut app = App::from_rows(rooted_rows());
+        app.set_pact_in_flight(Path::new("/repo").join("crates"), 3, 12);
+        app.set_pact_summarising(Path::new("/repo").join("crates").join("Cargo.lock"), 2, 5);
+
+        app.set_pact_refused();
+
+        // The answer to a key just pressed is still the last thing on the line,
+        // so a terminal too narrow for all of it cuts that before it cuts either
+        // fraction.
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting crates (3/12) — summarising crates/Cargo.lock (2/5) — already running")
+        );
+    }
+
+    #[test]
     fn a_fresh_app_has_nothing_collapsed_and_draws_the_whole_walk() {
         let app = App::from_tree(&fixture::tree());
 
@@ -4519,7 +4722,7 @@ mod tests {
     #[test]
     fn nothing_but_a_movement_key_cares_which_pane_has_the_focus() {
         type Change = fn(&mut App);
-        let changes: [(&str, Change); 8] = [
+        let changes: [(&str, Change); 9] = [
             ("toggle_collapsed", App::toggle_collapsed),
             ("toggle_pacted_only", App::toggle_pacted_only),
             ("toggle_files", App::toggle_files),
@@ -4529,8 +4732,13 @@ mod tests {
             ("set_pact_in_flight", |app| {
                 app.set_pact_in_flight("warlock/crates", 2, 5);
             }),
+            ("set_pact_summarising", |app| {
+                app.set_pact_in_flight("warlock/crates", 2, 5);
+                app.set_pact_summarising("warlock/crates/Cargo.lock", 2, 5);
+            }),
             ("clear_pact_in_flight", |app| {
                 app.set_pact_in_flight("warlock/crates", 2, 5);
+                app.set_pact_summarising("warlock/crates/Cargo.lock", 2, 5);
                 app.clear_pact_in_flight();
             }),
             ("set_subtree_state", |app| {
@@ -5318,6 +5526,7 @@ mod tests {
         app.select_previous();
         app.set_message("something from the last keystroke");
         app.set_pact_in_flight("warlock/crates", 2, 5);
+        app.set_pact_summarising("warlock/crates/Cargo.lock", 2, 5);
         app.toggle_focus();
         // A view with something to lose in every field there is.
         assert!(app.scroll_offset() > 0);

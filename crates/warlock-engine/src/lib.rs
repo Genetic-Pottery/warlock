@@ -105,7 +105,8 @@ pub use pact::Gathered;
 pub use pact::MINIMUM_DOCUMENT_BYTES;
 /// Where a subtree pact has got to and whether it should carry on: the port a
 /// front end draws progress from and cancels through, asked once per directory
-/// and never bound to a thread.
+/// and never bound to a thread. It is also told, without being asked anything,
+/// about each model pass spent describing a file too big to send.
 pub use pact::Observer as PactObserver;
 /// Why one file's contents are not in a request: too large by itself, dropped
 /// to fit the whole request, unreadable, or — for a file too large to send that

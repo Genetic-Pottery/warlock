@@ -50,7 +50,10 @@ and grants the hashes that make it green:
   them and grant it the hash just computed — with `pact_directory` for one
   directory, `gather_request` for the context one pass is scoped to,
   `unpact_subtree` for the reverse, and `PactObserver` / `Pacting` for saying
-  where a pact has got to and stopping it. See [a completed pact grants
+  where a pact has got to and stopping it — the observer is also told, before
+  each one runs and without being asked anything, about every model pass spent
+  summarising a file too big to send, so that minutes of work on one file are
+  not minutes of silence. See [a completed pact grants
   freshness](#a-completed-pact-grants-freshness) below for what that means for
   green.
 
