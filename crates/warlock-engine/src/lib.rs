@@ -108,7 +108,11 @@ pub use pact::MINIMUM_DOCUMENT_BYTES;
 /// and never bound to a thread.
 pub use pact::Observer as PactObserver;
 /// Why one file's contents are not in a request: too large by itself, dropped
-/// to fit the whole request, or unreadable.
+/// to fit the whole request, unreadable, or — for a file too large to send that
+/// summarising did not rescue — not text at all, past the ceiling on how many
+/// model passes one file is worth, or left without a usable account by the
+/// passes that ran. Every one of them leaves the same thing in the request, a
+/// name and a size, and none of them fails a pact.
 pub use pact::Omission;
 /// The most bytes one file may carry before it is listed by name and size
 /// instead.
@@ -137,9 +141,10 @@ pub use pact::Unwatched;
 /// Build the request for one model pass over one directory: its own files, its
 /// children's documents, and what the byte caps left out.
 pub use pact::gather_request;
-/// Pact one directory: gather it, run one model pass over it, and write what
-/// came back verbatim to its `WARLOCK.md`. Writes no manifest entry and grants
-/// nothing.
+/// Pact one directory: gather it, describe the files too big to send, run one
+/// model pass over it, and write what came back verbatim to its `WARLOCK.md`.
+/// Describing a file is passes of its own, and no way it can fail is fatal.
+/// Writes no manifest entry and grants nothing.
 pub use pact::pact_directory;
 /// Pact a directory and everything below it: write every document first,
 /// children before parents, then hash each directory and grant it what it
