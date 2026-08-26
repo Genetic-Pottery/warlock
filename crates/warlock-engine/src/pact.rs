@@ -2611,12 +2611,12 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        CHUNK_BYTE_CAP, CHUNK_COUNT_CEILING, DOCUMENT_FILE, Failure, Gathered, MAP_PROMPT,
-        MINIMUM_DOCUMENT_BYTES, MINIMUM_SUMMARY_BYTES, Observer, Omission, PER_FILE_BYTE_CAP,
-        Pacted, PactedSubtree, Pacting, Problem, REDUCE_PROMPT, REQUEST_BYTE_CAP, Refusal,
-        Unwatched, byte_count, cache_summary, cached_summary, chunk_utf8, gather_request,
-        pact_directory, pact_subtree, pactable_directories, summarise_file, summary_dir,
-        summary_file_name, summary_key, unpact_subtree,
+        CHUNK_BYTE_CAP, CHUNK_COUNT_CEILING, DOCUMENT_FILE, Failure, Gathered, MANIFEST_DIR,
+        MAP_PROMPT, MINIMUM_DOCUMENT_BYTES, MINIMUM_SUMMARY_BYTES, Observer, Omission,
+        PER_FILE_BYTE_CAP, Pacted, PactedSubtree, Pacting, Problem, REDUCE_PROMPT,
+        REQUEST_BYTE_CAP, Refusal, Unwatched, byte_count, cache_summary, cached_summary,
+        chunk_utf8, gather_request, pact_directory, pact_subtree, pactable_directories,
+        summarise_file, summary_dir, summary_file_name, summary_key, unpact_subtree,
     };
     use crate::{
         Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, AgentResponse, Loaded,
@@ -5125,6 +5125,91 @@ mod tests {
 
         assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
         assert_eq!(error.directory(), missing);
+    }
+
+    /// The cache is Warlock's bookkeeping, not anybody's code: it is committed
+    /// rather than ignored, so a clone arrives holding it, and it lives under
+    /// `.warlock/`, which every walk in this crate prunes by name.
+    ///
+    /// Which makes this a test of a property rather than of a mechanism, and a
+    /// load-bearing one: filling the cache must never make a green directory
+    /// stale, and Warlock's own prose about a file must never be handed to a
+    /// model as content of the module. Both follow from the prune, and neither
+    /// is defended by an ignore rule — there is no entry for `.warlock/` in any
+    /// `.gitignore`, and nothing in this crate writes one.
+    #[test]
+    fn the_summary_cache_is_invisible_to_freshness() {
+        let repo = repository();
+        let subtree = repo.path().join("crates/engine");
+        write(&subtree, "Cargo.toml", "[package]\nname = \"engine\"\n");
+        write(&subtree, "src/lib.rs", "//! Core engine.\n");
+
+        let before = subtree_hash(repo.path()).expect("hashes");
+
+        // One entry written the way a pact writes it, and one dropped in beside
+        // it by hand, which is what a teammate's entries arriving in a clone
+        // look like.
+        let text = lock_text("a file this repository has already read");
+        cache_summary(
+            repo.path(),
+            &summary_key(text.as_bytes()),
+            &account("the whole lockfile"),
+        )
+        .expect("writes an entry");
+        fs::write(
+            summary_dir(repo.path()).join(summary_file_name(&summary_key(
+                b"bytes from another machine",
+            ))),
+            account("a file somebody else's working copy read"),
+        )
+        .expect("writes a second entry");
+        assert_eq!(
+            entries(repo.path()).len(),
+            2,
+            "the cache is genuinely populated, so what follows is not vacuous",
+        );
+
+        assert_eq!(
+            subtree_hash(repo.path()).expect("hashes"),
+            before,
+            "byte for byte the digest of the same repository holding no cache \
+             at all: writing accounts of files cannot cost anyone a grant",
+        );
+
+        // And it is in no walk either: not the loader's tree, not the pact's own
+        // ordering, not the files a request carries.
+        let Loaded { tree, problems } = load_tree(repo.path()).expect("loads");
+        assert!(problems.is_empty(), "{problems:?}");
+        let loaded: Vec<PathBuf> = tree.walk().map(|(node, _)| node.path.clone()).collect();
+        let pactable = pactable_directories(repo.path()).expect("walks");
+        for (walk, directories) in [
+            ("`load_tree`", &loaded),
+            ("`pactable_directories`", &pactable),
+        ] {
+            let names = relative_to(repo.path(), directories);
+            assert!(
+                names.contains(&"crates/engine".to_owned()),
+                "{walk} walked the repository at all: {names:?}",
+            );
+            assert!(
+                names
+                    .iter()
+                    .all(|name| !name.split('/').any(|part| part == MANIFEST_DIR)),
+                "{walk} names `.warlock/`, and so everything cached inside it: {names:?}",
+            );
+        }
+
+        assert_eq!(
+            file_paths(&request_for(repo.path())),
+            [] as [&str; 0],
+            "the repository root holds two cached accounts and offers a pass \
+             none of them",
+        );
+        assert_eq!(
+            file_paths(&request_for(&subtree)),
+            ["Cargo.toml"],
+            "and a directory that has one carries its own files and no more",
+        );
     }
 
     /// A fake that answers everywhere but one directory, which is how partial
