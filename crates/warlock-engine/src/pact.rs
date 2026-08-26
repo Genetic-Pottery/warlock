@@ -50,7 +50,15 @@
 //! source file invites confident wrong conclusions about the half that never
 //! arrived; a name and a size is accurate information a model can document
 //! honestly ("a 4.1 MB `Cargo.lock`, not read"). That is the floor an over-cap
-//! file can never fall below, and the next section is what it can rise to.
+//! file can never fall below — and neither cap drops a file onto it while there
+//! is a rung in between. A file in a request is **sent whole**, or
+//! **summarised** (a name, a size and prose about its contents), or **listed**
+//! by name and size, and both caps are met in that order: the per-file one in
+//! [`summarise_over_cap`], the whole-request one in [`demote_to_budget`]. A
+//! name and a size is where a file lands when nothing better can be said about
+//! it, not the first answer either cap gives. The sections below are that
+//! ladder in full: how a summary is made, how it is kept, and how the
+//! whole-request cap climbs down it.
 //!
 //! **Over budget is never fatal.** Section 3 of the design doc says Warlock
 //! never makes the wrong thing impossible, and failing here would do exactly
@@ -350,8 +358,13 @@ pub const PER_FILE_BYTE_CAP: u64 = 128 * 1024;
 /// every one of them buys less than it costs.
 ///
 /// The budget counts everything the request carries: the bytes of the files
-/// sent whole, and the text of the children's documents. Only files are ever
-/// dropped to get under it — see [`gather_request`].
+/// sent whole, the accounts of the ones summarised, and the text of the
+/// children's documents. Only files ever give anything up to get under it, and
+/// what they give up first is their bytes rather than their account: the
+/// largest are demoted to summaries, and to bare names only when the request is
+/// still over the cap with every account in it. [`gather_request`] makes the
+/// first answer with no model pass at all, and [`demote_to_budget`] is that
+/// answer reconsidered once summaries exist.
 pub const REQUEST_BYTE_CAP: u64 = 256 * 1024;
 
 /// The fewest bytes an answer may come to, once surrounding whitespace is
@@ -2073,11 +2086,12 @@ fn chunk_utf8(bytes: &[u8]) -> Result<Vec<String>, Utf8Error> {
 ///
 /// # Errors
 ///
-/// [`Omission`], and only ever one of the three this ticket's step can reach —
-/// [`Omission::NotText`], [`Omission::TooManyChunks`],
-/// [`Omission::Unsummarised`]. Every one of them is a file back to being what
-/// an over-cap file has always been, a name and a size, with the reason said
-/// out loud. None of them is an [`Error`]: nothing here can fail a pact.
+/// [`Omission`], and only ever one of the three the passes themselves can
+/// reach — [`Omission::NotText`], [`Omission::TooManyChunks`],
+/// [`Omission::Unsummarised`]. Every one of them is a file with no account to
+/// be had, so whichever cap asked for one leaves it where the answer puts it: a
+/// name and a size, with the reason said out loud. None of them is an
+/// [`Error`]: nothing here can fail a pact.
 ///
 /// # Saying it out loud first
 ///
@@ -2108,8 +2122,9 @@ fn summarise_file(
     if chunks.is_empty() {
         // Zero bytes is zero chunks, and there is no account to be written of
         // nothing. Unreachable from a pact — an empty file is not over
-        // [`PER_FILE_BYTE_CAP`] and never gets here — but guarded rather than
-        // assumed, and guarded before any pass is spent finding out.
+        // [`PER_FILE_BYTE_CAP`], and the budget's demotion passes over a file
+        // that is spending no bytes — but guarded rather than assumed, and
+        // guarded before any pass is spent finding out.
         return Err(Omission::Unsummarised { size, source: None });
     }
 
@@ -2714,7 +2729,9 @@ impl std::error::Error for Problem {
 /// * **The two byte caps.** [`Omission::TooLarge`] and
 ///   [`Omission::OverBudget`] call for nothing at all — a huge generated file
 ///   is working as intended — though a directory that keeps tripping the
-///   whole-request cap is one worth splitting up.
+///   whole-request cap is one worth splitting up. `OverBudget` in particular is
+///   a file the request had no room for even as an account of itself, since
+///   summaries are what the cap takes first and names only after.
 /// * **The filesystem.** [`Omission::Unreadable`] calls for a look at the disk,
 ///   because a file Warlock cannot read is a file nobody's tooling can read.
 /// * **The ways summarising an over-cap file does not happen.** The file is not
@@ -2737,8 +2754,19 @@ pub enum Omission {
         /// Its size in bytes, which is what the request carries in place of it.
         size: u64,
     },
-    /// The file fitted [`PER_FILE_BYTE_CAP`], but the directory as a whole was
-    /// over [`REQUEST_BYTE_CAP`] and this was one of the largest files in it.
+    /// The file fitted [`PER_FILE_BYTE_CAP`], but the request had no room even
+    /// for an account of it: the directory as a whole was over
+    /// [`REQUEST_BYTE_CAP`] and this was one of the largest files in it.
+    ///
+    /// The last rung rather than the first. [`gather_request`] runs no model
+    /// pass, so this is the only move it has and it makes it there and then;
+    /// but by the time a *pact* hands this back, the budget has been met the
+    /// cheap way as far as it will go — the largest files demoted to summaries
+    /// — and this file still had nowhere to stand: either the request was over
+    /// the cap with every account in it, or the budget was already full when
+    /// its turn came. See [`demote_to_budget`]. A file the whole-request cap
+    /// cost its bytes but not its summary is described in the request and is no
+    /// [`Problem`] at all.
     OverBudget {
         /// Its size in bytes, which is what the request carries in place of it.
         size: u64,

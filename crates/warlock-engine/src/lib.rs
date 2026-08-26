@@ -108,12 +108,13 @@ pub use pact::MINIMUM_DOCUMENT_BYTES;
 /// and never bound to a thread. It is also told, without being asked anything,
 /// about each model pass spent describing a file too big to send.
 pub use pact::Observer as PactObserver;
-/// Why one file's contents are not in a request: too large by itself, dropped
-/// to fit the whole request, unreadable, or — for a file too large to send that
-/// summarising did not rescue — not text at all, past the ceiling on how many
-/// model passes one file is worth, or left without a usable account by the
-/// passes that ran. Every one of them leaves the same thing in the request, a
-/// name and a size, and none of them fails a pact.
+/// Why one file's contents are not in a request: too large by itself, left by
+/// the whole-request cap with no room for even an account of it, unreadable, or
+/// — for a file too large to send that summarising did not rescue — not text at
+/// all, past the ceiling on how many model passes one file is worth, or left
+/// without a usable account by the passes that ran. Every one of them leaves
+/// the same thing in the request, a name and a size, and none of them fails a
+/// pact.
 pub use pact::Omission;
 /// The most bytes one file may carry before it is listed by name and size
 /// instead.
@@ -131,7 +132,8 @@ pub use pact::Pacting;
 /// definition: the request that produced it is still a whole request.
 pub use pact::Problem as PactProblem;
 /// The most bytes one whole request may carry before its largest files are
-/// listed rather than sent.
+/// summarised rather than sent, and listed by name and size only where even a
+/// summary of them will not fit.
 pub use pact::REQUEST_BYTE_CAP;
 /// Why a model pass produced no document: the agent failed, or the answer was
 /// too short to be one. The whole rejection policy, in two variants.
