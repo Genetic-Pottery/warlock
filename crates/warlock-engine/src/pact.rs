@@ -2,10 +2,10 @@
 //! how a whole subtree of directories is pacted at once.
 //!
 //! Two operations, one on top of the other. [`pact_directory`] is one
-//! directory, and it is four steps with nothing else in them: gather the
-//! directory into a request, describe whatever was too big to send, run one
-//! pass through an [`Agent`], and write what came back to
-//! `<directory>/WARLOCK.md`. It records nothing — no manifest entry, no hash,
+//! directory, and it is five steps with nothing else in them: gather the
+//! directory into a request, describe whatever was too big to send, fit what
+//! that comes to inside the request budget, run one pass through an [`Agent`],
+//! and write what came back to `<directory>/WARLOCK.md`. It records nothing — no manifest entry, no hash,
 //! no grant — because a pact of one directory ends in one document, whatever
 //! number of passes it took to write it. [`pact_subtree`] is the operation a
 //! keystroke runs:
@@ -50,7 +50,15 @@
 //! source file invites confident wrong conclusions about the half that never
 //! arrived; a name and a size is accurate information a model can document
 //! honestly ("a 4.1 MB `Cargo.lock`, not read"). That is the floor an over-cap
-//! file can never fall below, and the next section is what it can rise to.
+//! file can never fall below — and neither cap drops a file onto it while there
+//! is a rung in between. A file in a request is **sent whole**, or
+//! **summarised** (a name, a size and prose about its contents), or **listed**
+//! by name and size, and both caps are met in that order: the per-file one in
+//! [`summarise_over_cap`], the whole-request one in [`demote_to_budget`]. A
+//! name and a size is where a file lands when nothing better can be said about
+//! it, not the first answer either cap gives. The sections below are that
+//! ladder in full: how a summary is made, how it is kept, and how the
+//! whole-request cap climbs down it.
 //!
 //! **Over budget is never fatal.** Section 3 of the design doc says Warlock
 //! never makes the wrong thing impossible, and failing here would do exactly
@@ -142,6 +150,24 @@
 //! reachable from any of it, an agent that fails every map pass still leaves a
 //! pact that writes every document, and a file that does come back described is
 //! no `Problem` at all — nothing about it was left out.
+//!
+//! # The cliff becomes a ladder
+//!
+//! The whole-request cap has the same choice to make, one file at a time, and it
+//! now makes it in the same order. [`gather_request`] runs no passes, so the
+//! only move it has is the old one — the biggest files become names and sizes
+//! ([`trim_to_budget`]) — and [`demote_to_budget`] is that decision taken again
+//! where the summaries exist. Whole files step down to their accounts, largest
+//! first, until the request fits; the files gather already cliffed are read once
+//! more and step *up* to accounts of themselves wherever one fits in what is
+//! left of the budget, never back to their bytes; and a file loses its account
+//! altogether only when the request is still over the cap with every account in
+//! it. Three passes over a fixed list, so it always terminates, and a request
+//! that will not fit whatever is given up — an enormous child document, a
+//! directory of files that cannot be described — is simply sent as it is, over
+//! the cap, with the problems that say why. The rung a file lands on is the
+//! difference between a document that can say what the biggest thing in a
+//! directory holds and one that can only say how many bytes it weighs.
 //!
 //! # The answer, and the two ways it is turned down
 //!
@@ -332,8 +358,13 @@ pub const PER_FILE_BYTE_CAP: u64 = 128 * 1024;
 /// every one of them buys less than it costs.
 ///
 /// The budget counts everything the request carries: the bytes of the files
-/// sent whole, and the text of the children's documents. Only files are ever
-/// dropped to get under it — see [`gather_request`].
+/// sent whole, the accounts of the ones summarised, and the text of the
+/// children's documents. Only files ever give anything up to get under it, and
+/// what they give up first is their bytes rather than their account: the
+/// largest are demoted to summaries, and to bare names only when the request is
+/// still over the cap with every account in it. [`gather_request`] makes the
+/// first answer with no model pass at all, and [`demote_to_budget`] is that
+/// answer reconsidered once summaries exist.
 pub const REQUEST_BYTE_CAP: u64 = 256 * 1024;
 
 /// The fewest bytes an answer may come to, once surrounding whitespace is
@@ -922,12 +953,20 @@ fn at_or_below(module: &str, selected: &str) -> bool {
 /// those it was, in place of `TooLarge` rather than beside it. The directory
 /// pass runs either way, and no [`Error`] variant is reachable from any of it.
 ///
-/// A summary is bytes the request did not carry when [`gather_request`] fitted
-/// it to [`REQUEST_BYTE_CAP`], so a directory of enormous described files can
-/// end up carrying a little over the cap. Prose about a file is a small
-/// fraction of the file, and folding the summarised state into the cap's
-/// demotion order is a separate piece of work; until it lands, that is the
-/// accepted arithmetic here.
+/// # The whole-request budget, met by summaries rather than by names
+///
+/// [`gather_request`] fits its request to [`REQUEST_BYTE_CAP`] with the only
+/// move it has — the biggest files become names and sizes — and then a second
+/// step here ([`demote_to_budget`]) reconsiders that with the rung gather does
+/// not know about. Whole files become summaries, largest first, until the
+/// request fits; the files the cliff already took are read again and put back as
+/// summaries wherever the account fits in what is left; and a file falls all the
+/// way to a name and a size only when the request is *still* over the cap with
+/// every account in it. So the directory that trips the whole-request cap now
+/// reaches the pass able to say what its biggest files hold, and the cliff is the
+/// last resort rather than the first move. It cannot fail and it cannot loop —
+/// a request still over the cap with everything already described or listed is
+/// sent to the pass as it is, with the [`Problem`]s that say why.
 ///
 /// The document is written **verbatim** — the response's own bytes, untrimmed,
 /// unparsed and unreformatted — over whatever was there before, unconditionally
@@ -1063,6 +1102,13 @@ fn pact_directory_watched(
     // already. Infallible by construction: it answers with a request either
     // way, and every way it can go wrong is a `Problem` in the list above.
     let request = summarise_over_cap(directory, root, request, &mut problems, agent, observer);
+
+    // Then the whole-request budget, which gather could only meet by turning its
+    // biggest files into names: with an account of a file now something a request
+    // can carry, the cap is met by demoting to summaries first and to names only
+    // when even the summaries do not fit. Infallible in the same way, and through
+    // the same cache: a file already described costs no passes here either.
+    let request = demote_to_budget(directory, root, request, &mut problems, agent, observer);
 
     let response = agent.run(&request).map_err(|source| Error::Refused {
         directory: directory.to_path_buf(),
@@ -1216,12 +1262,13 @@ pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
 ///
 /// The summaries themselves are made after this returns, not in it: this
 /// function measures a file, lists it when it is too big, and runs no pass at
-/// all. The step that turns one of those listings into
-/// [`AgentFile::summarised`] works on the request and the problem list this one
-/// produced, and [`pact_directory`] is where the two meet. So a `Problem`
-/// here is a file whose contents did not reach *this* step, and by the time a
-/// caller sees the list it has been narrowed to the files nothing could be said
-/// about.
+/// all. The steps that turn those listings into [`AgentFile::summarised`] work
+/// on the request and the problem list this one produced, and
+/// [`pact_directory`] is where they meet — [`summarise_over_cap`] for the files
+/// the per-file cap listed, [`demote_to_budget`] for the ones the trimming
+/// above gave up. So a `Problem` here is a file whose contents did not reach
+/// *this* step, and by the time a caller sees the list it has been narrowed to
+/// the files nothing could be said about.
 ///
 /// ```
 /// use std::fs;
@@ -1347,13 +1394,15 @@ pub fn gather_request(
 /// already listed, which is still a request and still not an error.
 ///
 /// Every file it can be handed is either sent whole or already listed, because
-/// this runs inside [`gather_request`] and the summaries are made only after
-/// that returns: by the time [`summarise_over_cap`] turns a listing into an
-/// [`AgentFile::summarised`], this budget has already been met and is not
-/// consulted again. So the demotion order a third state calls for — whole, then
-/// summarised, then a bare name — is not a case this has to answer yet.
-/// Teaching the whole-request cap about summaries is separate work; see
-/// [`pact_directory`] for the arithmetic accepted until it lands.
+/// this runs inside [`gather_request`], which is agent-free and makes no
+/// summaries: the third state does not exist yet when this runs, so the demotion
+/// order it calls for — whole, then summarised, then a bare name — is not a case
+/// this has to answer. It is answered one level up, by [`demote_to_budget`],
+/// which runs the same budget over the same order once the summaries exist and
+/// steps every file this function cliffed back up to an account of itself
+/// wherever one fits. So a listing made here is a first answer rather than a
+/// final one, and this function stays what it is: the budget as it can be met
+/// with no model pass at all.
 fn trim_to_budget(
     files: &mut [AgentFile],
     on_disk: &[PathBuf],
@@ -1468,6 +1517,12 @@ fn summarise_over_cap(
     // loop would move every index still to be matched.
     let mut described = Vec::new();
     let mut replaced = false;
+    let mut passes = Summarising {
+        directory,
+        root,
+        agent,
+        observer,
+    };
 
     for file in &mut files {
         if !file.is_omitted() {
@@ -1494,32 +1549,11 @@ fn summarise_over_cap(
             }
         };
 
-        // The cache, over the bytes just read and nothing else about the file.
-        // A hit is the whole of this step for that file: no chunking, no map,
-        // no reduce, and an entry indistinguishable from a fresh account below.
-        // A miss is the change detection — these bytes have not been read for
-        // this repository before — so it pays the passes and records what they
-        // produced under the same key, for the next pact and for whoever clones
-        // the repository the entry is committed in.
-        let key = summary_key(&bytes);
-        let summarised = match cached_summary(root, &key) {
-            Some(cached) => Ok(cached),
-            // A hit above announces nothing, on purpose: no pass is run for it,
-            // and an announcement of work nobody is paying for is exactly the
-            // noise the footer exists to avoid.
-            None => {
-                summarise_file(directory, file.path(), &bytes, agent, observer).inspect(|summary| {
-                    // Ignorable on purpose: a cache that could not be written is
-                    // a cache that will be missed next time, and this pact
-                    // already has the summary it paid for. Nothing about a full
-                    // disk or a read-only checkout is allowed to change what
-                    // this pact does.
-                    drop(cache_summary(root, &key, summary));
-                })
-            }
-        };
-
-        match summarised {
+        // The account of those bytes, from the cache if this repository has read
+        // them before and from the passes if it has not — see
+        // [`Summarising::summary_of`], which is the whole of that arithmetic and
+        // is shared with the budget step below.
+        match passes.summary_of(file.path(), &bytes) {
             Ok(summary) => {
                 let (path, size) = (file.path().to_owned(), file.size());
                 // The size on disk, not the length of the account: a file is as
@@ -1551,6 +1585,392 @@ fn summarise_over_cap(
     AgentRequest::new(request.prompt().to_owned(), directory)
         .with_files(files)
         .with_child_documents(request.child_documents().to_vec())
+}
+
+/// Fit the request to [`REQUEST_BYTE_CAP`] by summaries first and names only
+/// after, so the whole-request cap costs a file its text rather than every
+/// account of it.
+///
+/// This is the step between [`summarise_over_cap`] and the directory pass, and
+/// it is where the third state of a file finally reaches the whole-request
+/// budget. [`trim_to_budget`], inside [`gather_request`], knows two states and
+/// so has one move: a file too big for the budget becomes a name and a size, and
+/// everything the pass could have known about it is gone. Here there is a rung
+/// between the two — [`AgentFile::summarised`], a couple of hundred bytes of
+/// prose about the whole file — and the budget is met by stepping down onto it
+/// before anything falls off the ladder altogether.
+///
+/// # The three rungs, in order
+///
+/// The order within each rung is [`trim_to_budget`]'s and for the same reason:
+/// biggest file first, ties broken by relative path, so which file gives way is
+/// a property of the directory rather than of the order a walk happened to
+/// return it in. Size is always the file's size **on disk** ([`AgentFile::size`])
+/// — what it spends is [`file_bytes`], and the two differ for exactly the files
+/// this step is about.
+///
+/// 1. **Whole files become summaries**, largest first, while the request is over
+///    the cap. This is the headline: a directory of hundreds of ordinary files
+///    used to send the small ones and name the big ones, and now the big ones
+///    arrive described. A file whose account comes back no shorter than the file
+///    itself is left whole — a summary that costs more than the text it stands
+///    for buys nothing, and the text is the better of the two.
+/// 2. **Cliffed files become summaries**, largest first, while there is room
+///    inside the cap for the account. By the time this runs, gather's cliff has
+///    already turned the largest files into [`AgentFile::omitted`] with
+///    [`Omission::OverBudget`], so this rung is the ladder reconstituted: those
+///    files are read from disk again — they are under [`PER_FILE_BYTE_CAP`], so
+///    the read is cheap, and a filesystem that now refuses is
+///    [`Omission::Unreadable`] — and put back as summaries. **Never back as
+///    themselves.** A cliffed file was given up precisely to make the request
+///    smaller, so restoring its bytes would undo the trim that made room and
+///    invite this step to trim them again; the only way up from the cliff is the
+///    rung above it. The first account that would not fit is put back on the
+///    cliff it came from, with the cause it already had, and the rung stops
+///    there rather than paying passes down a list of files that have nowhere to
+///    go.
+/// 3. **Anything still carrying bytes becomes a name and a size**, largest
+///    first, while the request is *still* over the cap — summaries from rung one,
+///    summaries from [`summarise_over_cap`], and the whole files rung one left
+///    alone. This is the old cliff, and it is now the last thing tried rather
+///    than the first: a file only loses its account when the request does not fit
+///    with the accounts in it.
+///
+/// Children's documents are counted at every rung and demoted at none, exactly
+/// as in [`gather_request`]: a file left out still says its name and its size,
+/// while a document left out replaces the only account of a whole subtree with
+/// nothing.
+///
+/// # It always terminates, and it can end over the cap
+///
+/// Three passes over a fixed list of files, none of which loops back: an
+/// oversized child document, or a directory whose every file is already a name,
+/// comes out of here over the cap and is sent to the pass anyway. That is a fact
+/// about the directory reported as [`Problem`]s, not a failure — no [`Error`]
+/// variant is reachable from this function, exactly as none is from the caps
+/// that led to it.
+///
+/// # What it does to the problem list
+///
+/// One file, one entry, the rule [`summarise_over_cap`] established. A file that
+/// ends up described has no entry — its contents reached the pass, so there is
+/// nothing left out to report — and a file that ends up a name has exactly one,
+/// whose cause is the honest reason there is no account of it: `OverBudget` when
+/// the request simply had no room for one, and the summarising's own cause
+/// ([`Omission::NotText`], [`Omission::TooManyChunks`],
+/// [`Omission::Unsummarised`], [`Omission::Unreadable`]) when there was room and
+/// no account could be made.
+///
+/// # What it costs, and what the observer hears
+///
+/// Every account goes through [`Summarising::summary_of`], so a file this
+/// repository has read before costs no passes at all and announces nothing;
+/// only the passes really run reach `observer`. The common directory — inside
+/// the cap, with nothing given up to get there — costs one comparison and
+/// returns the request it was handed.
+fn demote_to_budget(
+    directory: &Path,
+    root: &Path,
+    request: AgentRequest,
+    problems: &mut Vec<Problem>,
+    agent: &dyn Agent,
+    observer: &mut dyn Observer,
+) -> AgentRequest {
+    let carried = carried_bytes(request.files(), request.child_documents());
+    let cliffed = problems
+        .iter()
+        .any(|problem| matches!(problem.cause, Omission::OverBudget { .. }));
+    if carried <= REQUEST_BYTE_CAP && !cliffed {
+        // Inside the cap with nothing given up to get there: the ordinary
+        // directory, and the one where every rung below is a no-op.
+        return request;
+    }
+
+    let mut files = request.files().to_vec();
+    // Computed once, from the sizes on disk, and walked three times: the rung a
+    // file stands on changes under these loops, but which file is the biggest
+    // may not, or two runs of the same pact could demote in different orders.
+    let mut order: Vec<usize> = (0..files.len()).collect();
+    order.sort_by_key(|&index| (Reverse(files[index].size()), files[index].path().to_owned()));
+
+    let mut passes = Summarising {
+        directory,
+        root,
+        agent,
+        observer,
+    };
+    let carried = demote_whole_files(&mut passes, &mut files, &order, carried, problems);
+    let carried = lift_from_the_cliff(&mut passes, &mut files, &order, carried, problems);
+    list_over_budget(directory, &mut files, &order, carried, problems);
+
+    if files == request.files() {
+        // Nothing moved, so the request is the request: a directory whose files
+        // were all already names, or one where every account declined.
+        return request;
+    }
+
+    // Rebuilt rather than mutated, for the reason `summarise_over_cap` gives: a
+    // request with one file exchanged is a different value, not a request in a
+    // different state.
+    AgentRequest::new(request.prompt().to_owned(), directory)
+        .with_files(files)
+        .with_child_documents(request.child_documents().to_vec())
+}
+
+/// Rung one of [`demote_to_budget`]: whole files become accounts of themselves,
+/// biggest first, until `carried` is inside [`REQUEST_BYTE_CAP`]. Answers with
+/// what the request carries afterwards.
+///
+/// `order` is every index of `files`, biggest file first and ties by path;
+/// nothing here reorders it, so the file the budget takes is the same one on
+/// every machine.
+///
+/// Two outcomes are not a demotion at all. A file whose account comes back **no
+/// shorter than the file** stays whole: prose that costs what the text costs is
+/// a worse thing to send at the same price, and rung three is where it gives way
+/// if the request still does not fit. A file whose account **cannot be made** —
+/// not text, past the chunk ceiling, no usable answer — has no rung to step onto
+/// and so falls to a name and a size now, with that cause reported in place of
+/// any budget one.
+fn demote_whole_files(
+    passes: &mut Summarising<'_>,
+    files: &mut [AgentFile],
+    order: &[usize],
+    carried: u64,
+    problems: &mut Vec<Problem>,
+) -> u64 {
+    let mut carried = carried;
+    for &index in order {
+        if carried <= REQUEST_BYTE_CAP {
+            break;
+        }
+        // Only a file sent whole has anything to trade here, and only one that
+        // is really spending bytes is worth a pass: the listed and the already
+        // described are rungs two and three's.
+        let spent = file_bytes(&files[index]);
+        let Some(bytes) = files[index].bytes().map(<[u8]>::to_vec) else {
+            continue;
+        };
+        if spent == 0 {
+            continue;
+        }
+        let (path, size) = (files[index].path().to_owned(), files[index].size());
+
+        match passes.summary_of(&path, &bytes) {
+            Ok(summary) if byte_count(summary.len()) < spent => {
+                carried = carried
+                    .saturating_sub(spent)
+                    .saturating_add(byte_count(summary.len()));
+                files[index] = AgentFile::summarised(path, size, summary);
+            }
+            Ok(_) => {}
+            Err(cause) => {
+                carried = carried.saturating_sub(spent);
+                files[index] = AgentFile::omitted(path.clone(), size);
+                report(problems, passes.directory.join(path), cause);
+            }
+        }
+    }
+    carried
+}
+
+/// Rung two of [`demote_to_budget`]: the files gather's cliff already took,
+/// back up to an account of themselves wherever one fits in what is left of
+/// [`REQUEST_BYTE_CAP`]. Answers with what the request carries afterwards.
+///
+/// Only the files [`Omission::OverBudget`] put on the problem list, and never
+/// back to their own bytes — see [`demote_to_budget`] for why the ladder only
+/// goes one way. A file the summarising has already declined once
+/// ([`summarise_over_cap`]) is not asked again, because it would be the same
+/// passes for the same no.
+///
+/// A file that comes back described stops being a [`Problem`]; one the
+/// filesystem now refuses, or the summarising declines, keeps its single entry
+/// with the new cause in place of the budget's. The first account that does not
+/// fit ends the rung: the file stays on its cliff, and no further passes are
+/// spent finding out that the budget is still full.
+fn lift_from_the_cliff(
+    passes: &mut Summarising<'_>,
+    files: &mut [AgentFile],
+    order: &[usize],
+    carried: u64,
+    problems: &mut Vec<Problem>,
+) -> u64 {
+    let mut carried = carried;
+    for &index in order {
+        if carried > REQUEST_BYTE_CAP {
+            // Nothing would fit, so nothing is read and no pass is paid for: a
+            // request already too big is no place to be adding prose.
+            break;
+        }
+        if !files[index].is_omitted() {
+            continue;
+        }
+        let on_disk = passes.directory.join(files[index].path());
+        let Some(reported) = problems.iter().position(|problem| {
+            matches!(problem.cause, Omission::OverBudget { .. }) && problem.path == on_disk
+        }) else {
+            continue;
+        };
+
+        // Read here, having been measured and given up by gather without ever
+        // being opened. Cheap by construction: everything the cliff took was
+        // under `PER_FILE_BYTE_CAP` to begin with.
+        let bytes = match fs::read(&on_disk) {
+            Ok(bytes) => bytes,
+            // It was readable a moment ago and is not now. Whatever happened to
+            // it, the honest cause is the filesystem's.
+            Err(source) => {
+                problems[reported].cause = Omission::Unreadable { source };
+                continue;
+            }
+        };
+
+        match passes.summary_of(files[index].path(), &bytes) {
+            Ok(summary) => {
+                let length = byte_count(summary.len());
+                if carried.saturating_add(length) > REQUEST_BYTE_CAP {
+                    break;
+                }
+                let (path, size) = (files[index].path().to_owned(), files[index].size());
+                files[index] = AgentFile::summarised(path, size, summary);
+                // Described, so no longer left out of anything.
+                problems.remove(reported);
+                carried = carried.saturating_add(length);
+            }
+            Err(cause) => problems[reported].cause = cause,
+        }
+    }
+    carried
+}
+
+/// Rung three of [`demote_to_budget`]: whatever still carries bytes becomes a
+/// name and a size, biggest first, while `carried` is over
+/// [`REQUEST_BYTE_CAP`].
+///
+/// The last rung, so it answers with nothing: what the request comes to after
+/// this is the pass's business rather than any caller's.
+///
+/// [`trim_to_budget`]'s move, made last instead of first and over all three
+/// states: the accounts rung one made, the accounts [`summarise_over_cap`] made,
+/// and the whole files rung one had no shorter account for. Reaching it at all
+/// means the request does not fit with every account in it, which is why the
+/// cause is [`Omission::OverBudget`] whatever the file was a moment ago.
+///
+/// No pass, no read, no agent: everything this needs is already in the request.
+/// It can run out of files before it runs out of bytes — a child's document
+/// never gives way — and a request still over the cap is the answer then.
+fn list_over_budget(
+    directory: &Path,
+    files: &mut [AgentFile],
+    order: &[usize],
+    carried: u64,
+    problems: &mut Vec<Problem>,
+) {
+    let mut carried = carried;
+    for &index in order {
+        if carried <= REQUEST_BYTE_CAP {
+            break;
+        }
+        let spent = file_bytes(&files[index]);
+        if spent == 0 {
+            // Already a name and a size: nothing left to give up, and the entry
+            // saying why is already on the list.
+            continue;
+        }
+        let (path, size) = (files[index].path().to_owned(), files[index].size());
+        files[index] = AgentFile::omitted(path.clone(), size);
+        carried = carried.saturating_sub(spent);
+        report(
+            problems,
+            directory.join(path),
+            Omission::OverBudget { size },
+        );
+    }
+}
+
+/// Say `cause` about the file at `path`, as the one thing said about it.
+///
+/// The reporting rule of this module in one function: a file has at most one
+/// [`Problem`], so a new cause for a file already on the list **replaces** the
+/// one there rather than joining it. A reader is never told twice about one
+/// file, and the entry that survives is the last and most specific reason its
+/// contents did not reach the pass.
+fn report(problems: &mut Vec<Problem>, path: PathBuf, cause: Omission) {
+    match problems.iter().position(|problem| problem.path == path) {
+        Some(index) => problems[index].cause = cause,
+        None => problems.push(Problem { path, cause }),
+    }
+}
+
+/// Everything it takes to come back with an account of some bytes: where the
+/// files are, where the cache is, who runs a pass, and who is told one is being
+/// run.
+///
+/// Four borrows that always travel together — [`summarise_over_cap`] and every
+/// rung of [`demote_to_budget`] need exactly this set and nothing else — carried
+/// as one value so the rungs stay functions with arguments a reader can hold in
+/// their head. It owns nothing and decides nothing; the policy is entirely in
+/// the callers.
+struct Summarising<'a> {
+    /// The directory being pacted, which every file's path is relative to and
+    /// which the prompts name.
+    directory: &'a Path,
+    /// The repository root, the one thing `<root>/.warlock/summaries/` is
+    /// joined onto.
+    root: &'a Path,
+    /// Who runs a pass. One agent for the map, the reduce and the directory's
+    /// own pass — a summary is not a different kind of question.
+    agent: &'a dyn Agent,
+    /// Who hears about a pass before it runs.
+    observer: &'a mut dyn Observer,
+}
+
+impl Summarising<'_> {
+    /// The account of `bytes` — the file at `path` — from
+    /// `<root>/.warlock/summaries/` if it is already there, and from the
+    /// map-reduce through the agent if it is not.
+    ///
+    /// Every summary in this module is made here, so the cache is not something
+    /// a caller has to remember to consult: looking one up, paying the passes on
+    /// a miss, and recording what they produced are one operation with one
+    /// order.
+    ///
+    /// **A hit costs nothing and says nothing.** No chunking, no map, no reduce,
+    /// and not a word to the observer — announcing work nobody is paying for is
+    /// exactly the noise a footer exists to avoid. What comes back is
+    /// indistinguishable from a fresh account, on purpose: nothing downstream is
+    /// allowed to behave differently for a cached file.
+    ///
+    /// **A miss is the change detection.** The key is [`summary_key`] of these
+    /// bytes and nothing else about the file, so bytes this repository has not
+    /// read before find no entry, are read, and leave one behind for the next
+    /// pact and for whoever clones the repository the entry is committed in.
+    ///
+    /// Neither half can fail a pact. A missing, unreadable, corrupt or empty
+    /// entry is a miss that pays the passes a first pact would have paid anyway,
+    /// and a write the filesystem refuses costs the *next* pact those passes and
+    /// this one nothing — which is why the result of [`cache_summary`] is
+    /// dropped.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`summarise_file`] declined with — [`Omission::NotText`],
+    /// [`Omission::TooManyChunks`], [`Omission::Unsummarised`] — unchanged, for
+    /// the caller to report against the file. A cache hit never fails.
+    fn summary_of(&mut self, path: &str, bytes: &[u8]) -> Result<String, Omission> {
+        let key = summary_key(bytes);
+        if let Some(cached) = cached_summary(self.root, &key) {
+            return Ok(cached);
+        }
+        summarise_file(self.directory, path, bytes, self.agent, self.observer).inspect(|summary| {
+            // Ignorable on purpose: a cache that could not be written is a cache
+            // that will be missed next time, and this pact already has the
+            // summary it paid for. Nothing about a full disk or a read-only
+            // checkout is allowed to change what this pact does.
+            drop(cache_summary(self.root, &key, summary));
+        })
+    }
 }
 
 /// `bytes` as the ordered list of chunks a map pass would read them in, or the
@@ -1666,11 +2086,12 @@ fn chunk_utf8(bytes: &[u8]) -> Result<Vec<String>, Utf8Error> {
 ///
 /// # Errors
 ///
-/// [`Omission`], and only ever one of the three this ticket's step can reach —
-/// [`Omission::NotText`], [`Omission::TooManyChunks`],
-/// [`Omission::Unsummarised`]. Every one of them is a file back to being what
-/// an over-cap file has always been, a name and a size, with the reason said
-/// out loud. None of them is an [`Error`]: nothing here can fail a pact.
+/// [`Omission`], and only ever one of the three the passes themselves can
+/// reach — [`Omission::NotText`], [`Omission::TooManyChunks`],
+/// [`Omission::Unsummarised`]. Every one of them is a file with no account to
+/// be had, so whichever cap asked for one leaves it where the answer puts it: a
+/// name and a size, with the reason said out loud. None of them is an
+/// [`Error`]: nothing here can fail a pact.
 ///
 /// # Saying it out loud first
 ///
@@ -1701,8 +2122,9 @@ fn summarise_file(
     if chunks.is_empty() {
         // Zero bytes is zero chunks, and there is no account to be written of
         // nothing. Unreachable from a pact — an empty file is not over
-        // [`PER_FILE_BYTE_CAP`] and never gets here — but guarded rather than
-        // assumed, and guarded before any pass is spent finding out.
+        // [`PER_FILE_BYTE_CAP`], and the budget's demotion passes over a file
+        // that is spending no bytes — but guarded rather than assumed, and
+        // guarded before any pass is spent finding out.
         return Err(Omission::Unsummarised { size, source: None });
     }
 
@@ -2307,7 +2729,9 @@ impl std::error::Error for Problem {
 /// * **The two byte caps.** [`Omission::TooLarge`] and
 ///   [`Omission::OverBudget`] call for nothing at all — a huge generated file
 ///   is working as intended — though a directory that keeps tripping the
-///   whole-request cap is one worth splitting up.
+///   whole-request cap is one worth splitting up. `OverBudget` in particular is
+///   a file the request had no room for even as an account of itself, since
+///   summaries are what the cap takes first and names only after.
 /// * **The filesystem.** [`Omission::Unreadable`] calls for a look at the disk,
 ///   because a file Warlock cannot read is a file nobody's tooling can read.
 /// * **The ways summarising an over-cap file does not happen.** The file is not
@@ -2330,8 +2754,19 @@ pub enum Omission {
         /// Its size in bytes, which is what the request carries in place of it.
         size: u64,
     },
-    /// The file fitted [`PER_FILE_BYTE_CAP`], but the directory as a whole was
-    /// over [`REQUEST_BYTE_CAP`] and this was one of the largest files in it.
+    /// The file fitted [`PER_FILE_BYTE_CAP`], but the request had no room even
+    /// for an account of it: the directory as a whole was over
+    /// [`REQUEST_BYTE_CAP`] and this was one of the largest files in it.
+    ///
+    /// The last rung rather than the first. [`gather_request`] runs no model
+    /// pass, so this is the only move it has and it makes it there and then;
+    /// but by the time a *pact* hands this back, the budget has been met the
+    /// cheap way as far as it will go — the largest files demoted to summaries
+    /// — and this file still had nowhere to stand: either the request was over
+    /// the cap with every account in it, or the budget was already full when
+    /// its turn came. See [`demote_to_budget`]. A file the whole-request cap
+    /// cost its bytes but not its summary is described in the request and is no
+    /// [`Problem`] at all.
     OverBudget {
         /// Its size in bytes, which is what the request carries in place of it.
         size: u64,
@@ -4548,48 +4983,169 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_pass_over_a_fat_directory_is_sent_its_smallest_files_and_told_the_rest() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        // Named so alphabetical order is the reverse of size order: an
-        // operation that gave files up in path order would fail here.
-        let sizes = [
-            ("a.bin", 80 * 1024),
-            ("b.bin", 90 * 1024),
-            ("c.bin", 100 * 1024),
-            ("d.bin", 110 * 1024),
-            ("e.bin", 120 * 1024),
-        ];
-        for (name, size) in sizes {
-            write(dir.path(), name, filler(size));
+    /// A fat directory: five files that come to twice the request cap between
+    /// them, named so that alphabetical order is the reverse of size order —
+    /// an operation that gave files up in path order would fail on it.
+    const FAT: [(&str, u64); 5] = [
+        ("a.bin", 80 * 1024),
+        ("b.bin", 90 * 1024),
+        ("c.bin", 100 * 1024),
+        ("d.bin", 110 * 1024),
+        ("e.bin", 120 * 1024),
+    ];
+
+    /// The files of [`FAT`], written into `dir`.
+    fn fat_directory(dir: &Path) {
+        for (name, size) in FAT {
+            write(dir, name, filler(size));
         }
+    }
+
+    /// The last request a fake was asked to run: the directory's own pass,
+    /// whatever number of summarising passes came before it.
+    fn pass(seen: &[AgentRequest]) -> &AgentRequest {
+        let request = seen.last().expect("the directory was pacted");
+        assert_eq!(
+            request.prompt(),
+            super::PROMPT,
+            "the last pass of a pact is the pact",
+        );
+        request
+    }
+
+    /// The paths of the files a request carries whole, in its own order.
+    fn sent(request: &AgentRequest) -> Vec<&str> {
+        request
+            .files()
+            .iter()
+            .filter(|file| file.bytes().is_some())
+            .map(AgentFile::path)
+            .collect()
+    }
+
+    /// The paths of the files a request carries an account of, in its own
+    /// order.
+    fn described(request: &AgentRequest) -> Vec<&str> {
+        request
+            .files()
+            .iter()
+            .filter(|file| file.summary().is_some())
+            .map(AgentFile::path)
+            .collect()
+    }
+
+    /// The paths of the files a request carries as a name and a size alone, in
+    /// its own order.
+    fn listed(request: &AgentRequest) -> Vec<&str> {
+        request
+            .files()
+            .iter()
+            .filter(|file| file.is_omitted())
+            .map(AgentFile::path)
+            .collect()
+    }
+
+    #[test]
+    fn a_pass_over_a_fat_directory_is_sent_its_smallest_files_and_an_account_of_the_rest() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        fat_directory(dir.path());
         let agent = Canned::new(document(300));
 
         let Pacted { problems, .. } = pact_directory(dir.path(), dir.path(), &agent)
             .expect("a fat directory is still pactable");
 
         let seen = agent.seen.borrow();
+        let pass = pass(&seen);
         assert_eq!(
-            seen[0]
-                .files()
-                .iter()
-                .filter(|file| !file.is_omitted())
-                .map(AgentFile::path)
-                .collect::<Vec<_>>(),
+            sent(pass),
             ["a.bin", "b.bin"],
-            "the largest are given up first, so the fewest files are lost",
+            "the largest are still the ones whose text the budget takes",
         );
-        for (name, size) in sizes {
+        assert_eq!(
+            described(pass),
+            ["c.bin", "d.bin", "e.bin"],
+            "but the cliff is a ladder now: they arrive described, largest first, \
+             rather than as names and sizes",
+        );
+        assert!(
+            listed(pass).is_empty(),
+            "and nothing fell all the way, because the accounts fitted: {:?}",
+            listed(pass),
+        );
+        for (name, size) in FAT {
             assert_eq!(
-                file(&seen[0], name).size(),
+                file(pass, name).size(),
                 size,
-                "and every file, sent or not, still says how big it is",
+                "and every file, sent or described, still says how big it is",
             );
         }
         assert!(
-            carried(&seen[0]) <= REQUEST_BYTE_CAP,
+            carried(pass) <= REQUEST_BYTE_CAP,
             "{} bytes is still over the {REQUEST_BYTE_CAP}-byte cap",
-            carried(&seen[0]),
+            carried(pass),
+        );
+        assert!(
+            problems.is_empty(),
+            "a file a pass read in full and described is left out of nothing: {problems:?}",
+        );
+    }
+
+    #[test]
+    fn a_second_pact_of_an_unchanged_fat_directory_pays_for_no_summary_twice() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        fat_directory(dir.path());
+
+        let first = Counting::new(document(300));
+        pact_directory(dir.path(), dir.path(), &first).expect("pacts");
+        assert!(
+            first.passes() > 1,
+            "the first pact pays for the accounts of the three files it gave up",
+        );
+
+        let second = Counting::new(document(300));
+        let Pacted { problems, .. } =
+            pact_directory(dir.path(), dir.path(), &second).expect("pacts again");
+
+        assert_eq!(
+            second.passes(),
+            1,
+            "the directory pass and nothing else: every account came out of \
+             `.warlock/summaries/`, so demoting to a summary costs one map-reduce ever",
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        let seen = second.seen.borrow();
+        assert_eq!(
+            described(pass(&seen)),
+            ["c.bin", "d.bin", "e.bin"],
+            "and a cached account is in every way an account",
+        );
+    }
+
+    #[test]
+    fn a_fat_directory_of_files_that_cannot_be_described_still_falls_to_names_and_sizes() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // The same five files, none of them text: the ladder's bottom rung is
+        // exactly where it always was, and the cause says which rung failed.
+        for (name, size) in FAT {
+            write(dir.path(), name, not_text(size));
+        }
+        let agent = Counting::new(document(300));
+
+        let Pacted { problems, .. } =
+            pact_directory(dir.path(), dir.path(), &agent).expect("still pactable");
+
+        assert_eq!(
+            agent.passes(),
+            1,
+            "not one pass is spent on bytes that are not text",
+        );
+        let seen = agent.seen.borrow();
+        let pass = pass(&seen);
+        assert_eq!(sent(pass), ["a.bin", "b.bin"]);
+        assert_eq!(
+            listed(pass),
+            ["c.bin", "d.bin", "e.bin"],
+            "a name and a size is still the floor",
         );
         assert_eq!(
             problems
@@ -4598,6 +5154,575 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["e.bin", "d.bin", "c.bin"].map(|name| dir.path().join(name)),
             "and the pact reports each one, largest first, having succeeded anyway",
+        );
+        assert!(
+            problems
+                .iter()
+                .all(|problem| matches!(problem.cause, Omission::NotText { .. })),
+            "one file, one problem, and its cause is why there is no account of it \
+             rather than the cap that listed it: {problems:?}",
+        );
+    }
+
+    #[test]
+    fn an_account_that_does_not_fit_leaves_the_file_on_the_cliff_it_was_taken_to() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // Three files of one size: the budget takes one of them, and which one
+        // is decided by path because the sizes cannot decide it.
+        for name in ["a.bin", "b.bin", "c.bin"] {
+            write(dir.path(), name, filler(100 * 1024));
+        }
+        // An account far too long to fit in what is left of the budget: two
+        // files of 100 KiB are already in the request. One pass makes it —
+        // filler has no line to cut on, so a file of it is one chunk and one
+        // chunk is one map pass with no reduce over it.
+        let agent = Counting::new(document(300)).scripted([Ok(document(80 * 1024))]);
+
+        let Pacted { problems, .. } = pact_directory(dir.path(), dir.path(), &agent)
+            .expect("an account with nowhere to go is not a failure");
+
+        let seen = agent.seen.borrow();
+        let pass = pass(&seen);
+        assert_eq!(
+            sent(pass),
+            ["b.bin", "c.bin"],
+            "ties are broken by path, so the file given up is a value and not a race",
+        );
+        assert_eq!(
+            listed(pass),
+            ["a.bin"],
+            "and it stays given up: an account that does not fit is not carried",
+        );
+        assert!(
+            carried(pass) <= REQUEST_BYTE_CAP,
+            "{} bytes is over the {REQUEST_BYTE_CAP}-byte cap",
+            carried(pass),
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].path, dir.path().join("a.bin"));
+        assert!(
+            matches!(problems[0].cause, Omission::OverBudget { size } if size == 100 * 1024),
+            "the cause is the whole-request cap, which is what there was no room in: {:?}",
+            problems[0],
+        );
+    }
+
+    #[test]
+    fn an_account_too_big_for_the_request_gives_way_like_anything_else() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // Over the per-file cap, so it is described before the budget ever sees
+        // it — and then described at a length no request could carry.
+        let size = PER_FILE_BYTE_CAP + 1;
+        let lock = write(dir.path(), "Cargo.lock", filler(size));
+        let huge = document(usize::try_from(REQUEST_BYTE_CAP).expect("fits") + 1);
+        let agent = Counting::new(document(300)).scripted([Ok(huge)]);
+
+        let Pacted { problems, .. } = pact_directory(dir.path(), dir.path(), &agent)
+            .expect("a request that will not fit is still a request");
+
+        assert_eq!(
+            agent.passes(),
+            2,
+            "the one map pass the file costs, and the pact"
+        );
+        let seen = agent.seen.borrow();
+        let pass = pass(&seen);
+        assert_eq!(
+            listed(pass),
+            ["Cargo.lock"],
+            "the account itself gives way once there is nothing else left to give",
+        );
+        assert_eq!(
+            file(pass, "Cargo.lock").summary(),
+            None,
+            "and no part of it travels in its place",
+        );
+        assert_eq!(file(pass, "Cargo.lock").size(), size);
+        assert!(
+            carried(pass) <= REQUEST_BYTE_CAP,
+            "{} bytes is over the {REQUEST_BYTE_CAP}-byte cap",
+            carried(pass),
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].path, lock);
+        assert!(
+            matches!(problems[0].cause, Omission::OverBudget { size: reported } if reported == size),
+            "the whole-request cap took it, and says so in place of the per-file \
+             cap that listed it first: {:?}",
+            problems[0],
+        );
+    }
+
+    /// One file over [`PER_FILE_BYTE_CAP`], written into `dir`, answering with
+    /// the size it has on disk.
+    ///
+    /// The fixture the tests below reach for when the budget has to bite *after*
+    /// the summarising rather than before it. Gather never sees this file's
+    /// bytes — it lists it — so gather's cliff has nothing to take, and it is
+    /// the account `summarise_over_cap` puts in its place that carries the
+    /// request over the cap. That is the only way to reach the first rung of the
+    /// ladder from a real directory, and it is where the ladder makes its own
+    /// choices instead of undoing gather's.
+    fn over_cap_file(dir: &Path) -> u64 {
+        let size = PER_FILE_BYTE_CAP + 1;
+        write(dir, "Cargo.lock", filler(size));
+        size
+    }
+
+    /// Two files of one size, written into `dir`, answering with the size they
+    /// share.
+    ///
+    /// The same size to the byte and different bytes, so neither the size nor
+    /// the summary cache can choose between them, and written in the order that
+    /// is not the answer: only the relative path is left to decide which of them
+    /// the budget takes.
+    fn tied_pair(dir: &Path) -> u64 {
+        let size = 100 * 1024;
+        let mut other = filler(size);
+        other[0] = b'y';
+        write(dir, "omega.bin", other);
+        write(dir, "alpha.bin", filler(size));
+        size
+    }
+
+    #[test]
+    fn two_files_of_one_size_demote_in_path_order_and_not_in_walk_order() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        over_cap_file(dir.path());
+        tied_pair(dir.path());
+        // A long account of the over-cap file, and an ordinary one of whichever
+        // of the pair the budget picks.
+        let agent = Counting::new(document(300))
+            .scripted([Ok(document(60 * 1024)), Ok(account("one of the pair"))]);
+
+        let Pacted { problems, .. } =
+            pact_directory(dir.path(), dir.path(), &agent).expect("pacts");
+
+        let seen = agent.seen.borrow();
+        let pass = pass(&seen);
+        assert_eq!(
+            file(pass, "alpha.bin").size(),
+            file(pass, "omega.bin").size(),
+            "the fixture is a tie: size has nothing to say about which gives way",
+        );
+        assert_eq!(
+            described(pass),
+            ["Cargo.lock", "alpha.bin"],
+            "so the path breaks it, and the file demoted is the first of the two \
+             by relative path — a value, not a race",
+        );
+        assert_eq!(
+            sent(pass),
+            ["omega.bin"],
+            "and the other keeps its text, because one demotion was enough",
+        );
+        assert_eq!(
+            file(pass, "alpha.bin").summary(),
+            Some(account("one of the pair").as_str()),
+        );
+        assert!(
+            carried(pass) <= REQUEST_BYTE_CAP,
+            "{} bytes is over the {REQUEST_BYTE_CAP}-byte cap",
+            carried(pass),
+        );
+        assert!(
+            problems.is_empty(),
+            "nothing was left out to report: {problems:?}",
+        );
+    }
+
+    #[test]
+    fn a_second_pact_of_an_unchanged_over_budget_directory_runs_no_summarising_pass() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        over_cap_file(dir.path());
+        tied_pair(dir.path());
+
+        let first = Counting::new(document(300))
+            .scripted([Ok(document(60 * 1024)), Ok(account("one of the pair"))]);
+        pact_directory(dir.path(), dir.path(), &first).expect("pacts");
+        assert_eq!(
+            first.passes(),
+            3,
+            "the first pact pays for the account of the over-cap file, the account \
+             of the file the budget demoted, and then its own pass: {:?}",
+            first.prompts(),
+        );
+
+        // A second fake, so its count is the second pact's alone, over a
+        // directory nothing has touched since.
+        let second = Counting::new(document(300));
+        let Pacted { problems, .. } =
+            pact_directory(dir.path(), dir.path(), &second).expect("pacts again");
+
+        assert_eq!(
+            second.passes(),
+            1,
+            "the directory pass and nothing else: the demotion resolved through \
+             `.warlock/summaries/`, so an unchanged file is described for one \
+             map-reduce ever: {:?}",
+            second.prompts(),
+        );
+        let seen = second.seen.borrow();
+        assert_eq!(
+            described(pass(&seen)),
+            ["Cargo.lock", "alpha.bin"],
+            "and the same files arrive described, out of the cache: a cached \
+             account is in every way an account",
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+
+    #[test]
+    fn a_file_falls_to_a_name_only_once_every_other_file_is_already_described() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let size = over_cap_file(dir.path());
+        for (name, bytes) in [
+            ("a.bin", 60 * 1024),
+            ("b.bin", 70 * 1024),
+            ("c.bin", 80 * 1024),
+        ] {
+            write(dir.path(), name, filler(bytes));
+        }
+        // Accounts nobody could call brief: 150 KiB for the over-cap file and
+        // 40 KiB for each of the rest, so that summarising every eligible file
+        // still leaves the request over the cap and the bottom rung is really
+        // reached.
+        let agent = Counting::new(document(300)).scripted([
+            Ok(document(150 * 1024)),
+            Ok(document(40 * 1024)),
+            Ok(document(40 * 1024)),
+            Ok(document(40 * 1024)),
+        ]);
+
+        let Pacted { problems, .. } = pact_directory(dir.path(), dir.path(), &agent)
+            .expect("a request that will not fit is still a request");
+
+        assert_eq!(
+            agent.passes(),
+            5,
+            "one map pass for the over-cap file, one for each of the three the \
+             budget demoted, and the pact: {:?}",
+            agent.prompts(),
+        );
+        let seen = agent.seen.borrow();
+        let pass = pass(&seen);
+        assert_eq!(
+            described(pass),
+            ["a.bin", "b.bin", "c.bin"],
+            "every eligible file is described first — the name-and-size rung is \
+             the last thing tried, not the first",
+        );
+        assert!(
+            sent(pass).is_empty(),
+            "with nothing left carrying its own text: {:?}",
+            sent(pass),
+        );
+        assert_eq!(
+            listed(pass),
+            ["Cargo.lock"],
+            "and only then does the largest lose its account too",
+        );
+        let bare = file(pass, "Cargo.lock");
+        assert_eq!(bare.size(), size, "a name and a size is still a size");
+        assert_eq!(bare.summary(), None, "and no account travels in its place");
+        assert_eq!(bare.bytes(), None, "and no part of the file either");
+        assert!(
+            carried(pass) <= REQUEST_BYTE_CAP,
+            "{} bytes is over the {REQUEST_BYTE_CAP}-byte cap",
+            carried(pass),
+        );
+
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].path, dir.path().join("Cargo.lock"));
+        assert!(
+            matches!(problems[0].cause, Omission::OverBudget { size: reported } if reported == size),
+            "the cause is the whole-request cap, which is what there was no room \
+             in, and not the per-file cap that listed it first: {:?}",
+            problems[0],
+        );
+    }
+
+    #[test]
+    fn a_file_the_budget_described_is_left_out_of_nothing_and_reported_nowhere() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // A fat directory whose middle file is not text: three of its five are
+        // over gather's cliff, two of those come back as accounts, and the one
+        // that cannot be described stays where the cliff left it.
+        for (name, bytes) in [
+            ("a.bin", 80 * 1024),
+            ("c.bin", 100 * 1024),
+            ("e.bin", 120 * 1024),
+        ] {
+            write(dir.path(), name, filler(bytes));
+        }
+        write(dir.path(), "b.bin", filler(90 * 1024));
+        write(dir.path(), "d.bin", not_text(110 * 1024));
+        let agent = Counting::new(document(300)).scripted([
+            Ok(account("the largest file")),
+            Ok(account("the third largest file")),
+        ]);
+
+        let Pacted { problems, .. } =
+            pact_directory(dir.path(), dir.path(), &agent).expect("pacts");
+
+        let seen = agent.seen.borrow();
+        let pass = pass(&seen);
+        assert_eq!(
+            described(pass),
+            ["c.bin", "e.bin"],
+            "the two the cliff took and the ladder could describe",
+        );
+        assert_eq!(sent(pass), ["a.bin", "b.bin"], "the two it never took");
+        assert_eq!(
+            listed(pass),
+            ["d.bin"],
+            "and the one with no account to give"
+        );
+        assert_eq!(
+            problems
+                .iter()
+                .map(|problem| problem.path.clone())
+                .collect::<Vec<_>>(),
+            [dir.path().join("d.bin")],
+            "a file whose contents reached the pass as an account is left out of \
+             nothing, so it is on no problem list — the entry the cliff wrote \
+             for it is gone: {problems:?}",
+        );
+        assert!(
+            matches!(problems[0].cause, Omission::NotText { .. }),
+            "and the one entry that stays says why there is no account, in place \
+             of the budget that first took it: {:?}",
+            problems[0],
+        );
+        assert!(
+            carried(pass) <= REQUEST_BYTE_CAP,
+            "{} bytes is over the {REQUEST_BYTE_CAP}-byte cap",
+            carried(pass),
+        );
+    }
+
+    #[test]
+    fn every_way_a_demotion_can_decline_ends_on_a_name_a_size_and_a_disclosed_cause() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        over_cap_file(dir.path());
+        // Three files the budget will reach for in size order — c, then b, then
+        // a — each declining in a different way: bytes that are not text, an
+        // answer too short to be an account, and a pass that fails outright.
+        write(dir.path(), "a.bin", filler(40 * 1024));
+        write(dir.path(), "b.bin", filler(50 * 1024));
+        write(dir.path(), "c.bin", not_text(60 * 1024));
+        // Annotated because a closure only becomes a function pointer where the
+        // type it is going into says so.
+        let script: [Result<String, fn() -> AgentError>; 3] = [
+            Ok(document(250 * 1024)),
+            Ok("too short to be an account".to_owned()),
+            Err(|| AgentError::EmptyOutput),
+        ];
+        let agent = Counting::new(document(300)).scripted(script);
+
+        let Pacted { problems, .. } = pact_directory(dir.path(), dir.path(), &agent)
+            .expect("nothing about a declined account is fatal");
+
+        assert_eq!(
+            written(dir.path()).as_deref(),
+            Some(document(300).as_bytes()),
+            "and the pact finishes and writes its document anyway",
+        );
+        assert_eq!(
+            agent.passes(),
+            4,
+            "the over-cap file's account, the short answer, the failed pass, and \
+             the pact — not one pass on bytes that are not text: {:?}",
+            agent.prompts(),
+        );
+
+        let seen = agent.seen.borrow();
+        let pass = pass(&seen);
+        assert_eq!(
+            listed(pass),
+            ["a.bin", "b.bin", "c.bin"],
+            "every file that could not be described is a name and a size",
+        );
+        for name in ["a.bin", "b.bin", "c.bin"] {
+            assert_eq!(
+                file(pass, name).summary(),
+                None,
+                "and nothing is made up about `{name}`",
+            );
+        }
+        assert_eq!(
+            described(pass),
+            ["Cargo.lock"],
+            "while the file that could be described still is",
+        );
+
+        assert_eq!(
+            problems.len(),
+            3,
+            "one file, one entry, and no entry for the file that came through: \
+             {problems:?}",
+        );
+        assert_eq!(
+            problems
+                .iter()
+                .map(|problem| problem.path.clone())
+                .collect::<Vec<_>>(),
+            ["c.bin", "b.bin", "a.bin"].map(|name| dir.path().join(name)),
+            "reported in the order they were given up, largest first",
+        );
+        assert!(
+            matches!(problems[0].cause, Omission::NotText { size, .. } if size == 60 * 1024),
+            "bytes that are not text say so: {:?}",
+            problems[0],
+        );
+        assert!(
+            matches!(
+                problems[1].cause,
+                Omission::Unsummarised {
+                    size,
+                    source: None
+                } if size == 50 * 1024
+            ),
+            "an answer too short to be an account is an account nobody got: {:?}",
+            problems[1],
+        );
+        assert!(
+            matches!(
+                problems[2].cause,
+                Omission::Unsummarised {
+                    size,
+                    source: Some(_)
+                } if size == 40 * 1024
+            ),
+            "and a pass that failed keeps what the agent said under it: {:?}",
+            problems[2],
+        );
+    }
+
+    #[test]
+    fn a_file_past_the_chunk_ceiling_keeps_its_cause_and_is_never_asked_twice() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // One file too many parts to summarise at all, and three ordinary ones
+        // that put the directory over the whole-request cap between them: the
+        // budget step runs, and the file with no account to give is not asked
+        // for one a second time.
+        let parts = CHUNK_COUNT_CEILING + 1;
+        let bundle = write(dir.path(), "bundle.js", text_of_chunks(parts));
+        for name in ["a.bin", "b.bin", "c.bin"] {
+            write(dir.path(), name, filler(100 * 1024));
+        }
+        let agent = Counting::new(document(300)).scripted([Ok(account("the file the cliff took"))]);
+
+        let Pacted { problems, .. } = pact_directory(dir.path(), dir.path(), &agent)
+            .expect("a file nobody can describe is not fatal");
+
+        assert_eq!(
+            agent.passes(),
+            2,
+            "the one file the budget lifted back off the cliff, and the pact: the \
+             ceiling's answer is known without a pass and is never paid for \
+             twice: {:?}",
+            agent.prompts(),
+        );
+        let seen = agent.seen.borrow();
+        let pass = pass(&seen);
+        assert_eq!(
+            listed(pass),
+            ["bundle.js"],
+            "the file past the ceiling is a name and a size, as it was before",
+        );
+        assert_eq!(
+            file(pass, "bundle.js").summary(),
+            None,
+            "and no half-account of it either",
+        );
+        assert_eq!(
+            described(pass),
+            ["a.bin"],
+            "while the file the cliff had taken comes back described",
+        );
+        assert_eq!(sent(pass), ["b.bin", "c.bin"]);
+        assert!(
+            carried(pass) <= REQUEST_BYTE_CAP,
+            "{} bytes is over the {REQUEST_BYTE_CAP}-byte cap",
+            carried(pass),
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].path, bundle);
+        assert!(
+            matches!(problems[0].cause, Omission::TooManyChunks { chunks, .. } if chunks == parts),
+            "and its cause stays the one that is true of it, rather than being \
+             overwritten by the budget: {:?}",
+            problems[0],
+        );
+    }
+
+    #[test]
+    fn every_childs_document_survives_the_ladder_whole_and_in_its_place() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // A child document larger by itself than the whole request may be: no
+        // rung of the ladder can make room for it, and none is allowed to try by
+        // giving it up.
+        let pathological = "x".repeat(usize::try_from(REQUEST_BYTE_CAP).expect("fits") + 1);
+        let ordinary = "# tests\n\nThe integration tests.\n";
+        write(dir.path(), "src/WARLOCK.md", &pathological);
+        write(dir.path(), "tests/WARLOCK.md", ordinary);
+        write(dir.path(), "lib.rs", filler(1024));
+        write(dir.path(), "main.rs", filler(2048));
+        let agent = Counting::new(document(300));
+
+        let Pacted { problems, .. } = pact_directory(dir.path(), dir.path(), &agent)
+            .expect("over the cap is never a failure");
+
+        assert_eq!(
+            agent.passes(),
+            1,
+            "and not one pass is spent describing a file into a request that has \
+             no room for the account either: {:?}",
+            agent.prompts(),
+        );
+        let seen = agent.seen.borrow();
+        let pass = pass(&seen);
+        assert_eq!(
+            pass.child_documents()
+                .iter()
+                .map(|child| (child.directory(), child.text().len()))
+                .collect::<Vec<_>>(),
+            [("src", pathological.len()), ("tests", ordinary.len())],
+            "both children keep their place in the request, in order, and the \
+             pathological one keeps every byte: an account of a whole subtree is \
+             never demoted and never dropped",
+        );
+        assert_eq!(
+            pass.child_documents()[0].text(),
+            pathological,
+            "byte for byte, because there is nothing else that says what is under \
+             `src/`",
+        );
+        assert!(
+            carried(pass) > REQUEST_BYTE_CAP,
+            "so the request legitimately stays over the cap — {} bytes — rather \
+             than the pact going nowhere",
+            carried(pass),
+        );
+        assert_eq!(
+            listed(pass),
+            ["lib.rs", "main.rs"],
+            "the files give way instead, and still say their names and sizes",
+        );
+        assert_eq!(
+            problems
+                .iter()
+                .map(|problem| problem.path.clone())
+                .collect::<Vec<_>>(),
+            ["main.rs", "lib.rs"].map(|name| dir.path().join(name)),
+            "reported largest first, and no entry for either document",
+        );
+        assert!(
+            problems
+                .iter()
+                .all(|problem| matches!(problem.cause, Omission::OverBudget { .. })),
+            "{problems:?}",
         );
     }
 
