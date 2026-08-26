@@ -2493,6 +2493,49 @@ mod tests {
     }
 
     #[test]
+    fn a_summarising_pass_words_the_progress_line_and_grows_no_fourth_footer_line() {
+        let mut app = App::from_tree(&fixture::tree());
+        let height = 10;
+
+        app.set_pact_in_flight("warlock/crates/engine", 3, 12);
+        let quiet = render(&app, KEYS_WIDTH, height);
+        app.set_pact_summarising("warlock/crates/engine/Cargo.toml", 2, 9);
+        let buffer = render(&app, KEYS_WIDTH, height);
+
+        // A file too big for one request is a dozen model passes inside one
+        // directory, and the footer says so: same last row, same directory and
+        // fraction leading it, with the file and its part of the total added.
+        assert_eq!(
+            row_text(&buffer, height - 1),
+            "pacting warlock/crates/engine (3/12) — summarising warlock/crates/engine/Cargo.toml (2/9)"
+        );
+        // The keys line is untouched — a pass running is not a key to press —
+        // and so is the tally above it.
+        assert_eq!(row_text(&buffer, height - FOOTER_HEIGHT + 1), PACTING_KEYS);
+        assert_eq!(
+            row_text(&buffer, height - FOOTER_HEIGHT),
+            row_text(&quiet, height - FOOTER_HEIGHT)
+        );
+        // And the footer is still exactly `FOOTER_HEIGHT` lines: the longer line
+        // took the message line it was already on rather than wrapping onto a
+        // fourth, so nothing above the footer moved and the tree is the tree it
+        // was before the pass was announced.
+        assert_eq!(buffer.area.height, height);
+        for y in 0..height - FOOTER_HEIGHT {
+            assert_eq!(row_text(&buffer, y), row_text(&quiet, y), "row {y}");
+        }
+        assert_eq!(tree_rows(&buffer), tree_rows(&quiet));
+
+        // The refusal suffix still goes last, after the summarising clause, so
+        // a narrow terminal cuts the answer to a keystroke before the fraction.
+        app.set_pact_refused();
+        assert!(
+            row_text(&render(&app, KEYS_WIDTH, height), height - 1)
+                .ends_with("(2/9) — already running")
+        );
+    }
+
+    #[test]
     fn a_refused_pact_press_re_words_the_progress_line_and_moves_nothing_else() {
         let mut app = App::from_tree(&fixture::tree());
         let height = 10;
