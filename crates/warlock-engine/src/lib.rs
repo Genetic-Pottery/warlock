@@ -108,7 +108,11 @@ pub use pact::MINIMUM_DOCUMENT_BYTES;
 /// and never bound to a thread.
 pub use pact::Observer as PactObserver;
 /// Why one file's contents are not in a request: too large by itself, dropped
-/// to fit the whole request, or unreadable.
+/// to fit the whole request, unreadable, or — for a file too large to send that
+/// summarising did not rescue — not text at all, past the ceiling on how many
+/// model passes one file is worth, or left without a usable account by the
+/// passes that ran. Every one of them leaves the same thing in the request, a
+/// name and a size, and none of them fails a pact.
 pub use pact::Omission;
 /// The most bytes one file may carry before it is listed by name and size
 /// instead.

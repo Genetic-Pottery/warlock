@@ -280,14 +280,6 @@ const CHUNK_BYTE_CAP: usize = 96 * 1024;
 /// a pure function over bytes already in memory. So this ceiling is checked for
 /// free, and can never be hit half way through a file with passes already paid
 /// for.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "checked by the step that decides whether a file is summarised at all, \
-                  which lands next; see the note on `CHUNK_BYTE_CAP`"
-    )
-)]
 const CHUNK_COUNT_CEILING: usize = 32;
 
 /// The fewest bytes a map or reduce answer may come to, once surrounding
@@ -307,14 +299,6 @@ const CHUNK_COUNT_CEILING: usize = 32;
 /// and a size with the cause disclosed, which is where every other failure of
 /// summarising lands — the caps were never allowed to fail a pact, and neither
 /// are the passes the caps now cause.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "measured against a map or reduce answer, and no pass runs yet; see the \
-                  note on `CHUNK_BYTE_CAP`"
-    )
-)]
 const MINIMUM_SUMMARY_BYTES: usize = 80;
 
 /// The whole instruction a pass is given, and the only one there is.
@@ -370,6 +354,120 @@ prose about the file, not any part of it.
 Output the document and nothing else: no preamble, no sign-off, no commentary \
 about the task, and no code fence wrapping the whole document. Start with a \
 level-one Markdown heading naming the directory.";
+
+/// The whole instruction one map pass is given: describe one part of one file.
+///
+/// Code for the same reason [`PROMPT`] is code, and the argument is not
+/// repeated here: there is no configuration file, no template directory and no
+/// per-project override, so changing what a map pass is asked for is a change
+/// to this string, reviewed in a diff.
+///
+/// # What it assumes
+///
+/// **One invocation per chunk, holding that chunk and nothing else.** The
+/// request a map pass runs on carries one part of one file — no other file of
+/// the directory, no child document, no earlier map answer — and says which
+/// part of how many it is, so the prompt can talk about "this part" and about
+/// parts it was not given without either being a guess. The parts are cut on
+/// line boundaries by [`chunk_utf8`] and each is valid UTF-8 on its own, so a
+/// pass is never asked to make sense of half a character; it may well be
+/// handed half a function, which is why it is told there are other parts.
+///
+/// It also assumes its answer is the only thing that survives. The bytes are
+/// read once and dropped, and what reaches the reduce pass — and through it the
+/// directory pass — is this text. An account that leaves out what mattered
+/// cannot be recovered later by looking again.
+///
+/// # What it forbids
+///
+/// **Naming the file.** Both this prompt and [`REDUCE_PROMPT`] ask for an
+/// account of the file's *contents* and forbid restating its name, because a
+/// summary is about bytes and nothing else. Summaries will be keyed by the
+/// bytes alone, so a file that is renamed with its contents untouched keeps the
+/// summary already written for it — and a summary that opened "`Cargo.lock`
+/// is…" would be wrong the moment that happened, in a way nobody would notice.
+/// The name is in the request because a pass reads better text when it knows
+/// what it is looking at; it is out of the answer because the answer outlives
+/// it.
+///
+/// Also forbidden: guessing at the parts it was not given, and any wrapping of
+/// the answer — no preamble, no heading, no code fence — for the same reason
+/// [`PROMPT`] forbids them. What comes back is used verbatim.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the prompts land one slice before the step that runs the passes, so today \
+                  only this module's own tests reach them; see the note on `CHUNK_BYTE_CAP`"
+    )
+)]
+const MAP_PROMPT: &str = "\
+Describe what is in one part of a file.
+
+You are given a single part of a single file, and the text below says which \
+part of how many it is. Write a compact account of what these CONTENTS are: \
+what the text holds, how it is organised, and what a reader of the whole file \
+would need to know about this part of it. Nobody sees these bytes again — only \
+what you write — so leave out nothing that matters and invent nothing that is \
+not here.
+
+Write about the contents and nothing else. Do not name the file, do not \
+describe it by its name or its file type, and do not guess at the parts you \
+were not given.
+
+Output the account and nothing else: no preamble, no heading, no sign-off, no \
+commentary about the task, and no code fence. Plain prose.";
+
+/// The whole instruction one reduce pass is given: turn the accounts of a
+/// file's parts into one account of the file.
+///
+/// Code for the same reason [`PROMPT`] and [`MAP_PROMPT`] are code: no
+/// configuration file, no template, no override.
+///
+/// # What it assumes
+///
+/// **One invocation per file, holding every map answer for that file in
+/// order.** A reduce pass sees prose about the file and never a byte of the
+/// file itself, which is the one thing about its input it has to be told: an
+/// account of a part reads like the part, and a pass that mistook it for the
+/// text would quote a description as if it were source. It also assumes the
+/// parts are all of the file — the map passes covered it whole, in order —
+/// so it may write about the file rather than about a sample of it.
+///
+/// A file that came to a single part never reaches this prompt at all: the one
+/// map answer is already an account of the whole file, and a reduce pass over
+/// it would be a second pass paid for to rewrite prose.
+///
+/// # What it forbids
+///
+/// **Naming the file**, for the reason given on [`MAP_PROMPT`]: the summary is
+/// keyed by bytes, so it has to stay true when the name changes. Also
+/// forbidden: quoting an account as if it were the file's own text, adding
+/// anything no part reported, and wrapping the answer in a preamble, a heading
+/// or a code fence.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "run only once a file has been mapped, which lands next; see the note on \
+                  `CHUNK_BYTE_CAP`"
+    )
+)]
+const REDUCE_PROMPT: &str = "\
+Combine these accounts of the parts of one file into one account of the file.
+
+You are given, in order, the account an earlier pass wrote of each part of a \
+single file. They are prose about the file, not the file's own text: never \
+quote them as if they were. Together they cover the whole file. Write one \
+account of what its CONTENTS are: what the file holds, how it is organised, \
+and what a reader has to know about it, using only what the parts report.
+
+Write about the contents and nothing else. Do not name the file, do not \
+describe it by its name or its file type, and do not add anything no part \
+reported.
+
+Output the account and nothing else: no preamble, no heading, no sign-off, no \
+commentary about the task, and no code fence. Plain prose.";
 
 /// Pact `directory` and everything below it: write every document first, then
 /// hash and grant.
@@ -1493,16 +1591,26 @@ impl std::error::Error for Problem {
 
 /// Why one file's contents are not in a request.
 ///
-/// Three separate answers rather than one "skipped", because they call for
-/// three different reactions: nothing at all, since a huge generated file is
-/// working as intended; nothing at all again, though a directory that keeps
-/// tripping the whole-request cap is one worth splitting up; and a look at the
-/// filesystem, because a file Warlock cannot read is a file nobody's tooling
-/// can read.
+/// Separate answers rather than one "skipped", because they call for different
+/// reactions, and they fall into three groups:
 ///
-/// Every variant is a file whose contents the pass never saw. A file described
-/// by a summary has no variant here and never will — see [`Problem`] — while
-/// each way of failing to describe one does, as it lands.
+/// * **The two byte caps.** [`Omission::TooLarge`] and
+///   [`Omission::OverBudget`] call for nothing at all — a huge generated file
+///   is working as intended — though a directory that keeps tripping the
+///   whole-request cap is one worth splitting up.
+/// * **The filesystem.** [`Omission::Unreadable`] calls for a look at the disk,
+///   because a file Warlock cannot read is a file nobody's tooling can read.
+/// * **The ways summarising an over-cap file does not happen.** The file is not
+///   text ([`Omission::NotText`]), it is beyond what summarising will attempt
+///   ([`Omission::TooManyChunks`]), or the passes ran and produced no usable
+///   account of it ([`Omission::Unsummarised`]). None of these calls for
+///   anything either: each is a file that is back to being what every over-cap
+///   file used to be, said out loud rather than silently.
+///
+/// Every variant is a file whose contents the pass never saw, and every one of
+/// them leaves the same thing in the request: a name and a size. A file
+/// described by a summary has no variant here and never will — see [`Problem`]
+/// — while each way of failing to describe one does, as it lands.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Omission {
@@ -1524,6 +1632,57 @@ pub enum Omission {
         /// What the filesystem said.
         source: std::io::Error,
     },
+    /// The file is over [`PER_FILE_BYTE_CAP`] and its bytes are not valid
+    /// UTF-8, so there is no text to cut into parts and nothing to summarise.
+    ///
+    /// Nothing is wrong with the file: a checked-in PNG, a test fixture of
+    /// random bytes or a compiled artefact is doing exactly what it is for. It
+    /// is separate from [`Omission::TooLarge`] because it is a different
+    /// answer to "why is there no summary" — this one will never have a
+    /// summary, however the caps move — and not a single pass is spent finding
+    /// that out.
+    NotText {
+        /// Its size in bytes, which is what the request carries in place of it.
+        size: u64,
+        /// Where the bytes stopped being text, as [`std::str::from_utf8`]
+        /// reported it.
+        source: Utf8Error,
+    },
+    /// The file is text and comes to more chunks than one file is worth
+    /// summarising — the ceiling is a constant of this crate, and its number is
+    /// in the message — so it was left as a name and a size rather than turned
+    /// into dozens of model passes.
+    ///
+    /// Deliberately not a truncation and not a partial summary: half a file
+    /// summarised is the same confident wrong conclusion half a file sent would
+    /// be. The count is known before any pass runs, so nothing is spent on a
+    /// file that lands here.
+    TooManyChunks {
+        /// Its size in bytes, which is what the request carries in place of it.
+        size: u64,
+        /// How many chunks it came to, which is what the ceiling was measured
+        /// against.
+        chunks: usize,
+    },
+    /// Summarising the file was attempted and produced no account of it, so it
+    /// fell back to a name and a size.
+    ///
+    /// One variant for every way the passes end without a summary, because they
+    /// have one answer: this file, this once, is described the way it was
+    /// before summarising existed, and the pact carries on. No pass is spent on
+    /// it after the first thing that went wrong.
+    Unsummarised {
+        /// Its size in bytes, which is what the request carries in place of it.
+        size: u64,
+        /// What the agent said, where a map or reduce pass failed outright, and
+        /// `None` where a pass answered and the answer was unusable — empty, or
+        /// under the fewest bytes an account of a file may come to, which the
+        /// message names. Those two are one case for the reason
+        /// [`Refusal::TooShort`] gives: there is not enough here to be an
+        /// account of a file, and the text that failed to be one is not worth
+        /// carrying.
+        source: Option<AgentError>,
+    },
 }
 
 impl fmt::Display for Omission {
@@ -1540,6 +1699,30 @@ impl fmt::Display for Omission {
                  {size} bytes is listed by name and size"
             ),
             Self::Unreadable { source } => write!(f, "it could not be read: {source}"),
+            Self::NotText { size, source } => write!(
+                f,
+                "its {size} bytes are not text ({source}), so there is nothing to summarise and \
+                 it is listed by name and size"
+            ),
+            Self::TooManyChunks { size, chunks } => write!(
+                f,
+                "at {size} bytes it comes to {chunks} chunks, over the {CHUNK_COUNT_CEILING} one \
+                 file is worth summarising, so it is listed by name and size"
+            ),
+            Self::Unsummarised {
+                size,
+                source: Some(source),
+            } => write!(
+                f,
+                "summarising its {size} bytes produced no answer ({source}), so it is listed by \
+                 name and size"
+            ),
+            Self::Unsummarised { size, source: None } => write!(
+                f,
+                "summarising its {size} bytes produced an answer under the \
+                 {MINIMUM_SUMMARY_BYTES} bytes an account of a file has to reach, so it is \
+                 listed by name and size"
+            ),
         }
     }
 }
@@ -1548,7 +1731,11 @@ impl std::error::Error for Omission {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Unreadable { source } => Some(source),
-            Self::TooLarge { .. } | Self::OverBudget { .. } => None,
+            Self::NotText { source, .. } => Some(source),
+            Self::Unsummarised { source, .. } => source
+                .as_ref()
+                .map(|source| source as &(dyn std::error::Error + 'static)),
+            Self::TooLarge { .. } | Self::OverBudget { .. } | Self::TooManyChunks { .. } => None,
         }
     }
 }
@@ -2403,6 +2590,117 @@ mod tests {
                 .and_then(std::error::Error::source)
                 .is_some(),
             "and an unreadable file's cause names the io error under it",
+        );
+    }
+
+    #[test]
+    fn every_way_of_not_summarising_a_file_says_so_on_one_line() {
+        let mut bytes = b"PNG".to_vec();
+        bytes.push(0xff);
+        let not_text = std::str::from_utf8(&bytes).expect_err("not text");
+        let problems = [
+            Problem {
+                path: PathBuf::from("/repo/fixtures/blob.bin"),
+                cause: Omission::NotText {
+                    size: 900_000,
+                    source: not_text,
+                },
+            },
+            Problem {
+                path: PathBuf::from("/repo/vendor/bundle.js"),
+                cause: Omission::TooManyChunks {
+                    size: 40_000_000,
+                    chunks: 407,
+                },
+            },
+            Problem {
+                path: PathBuf::from("/repo/Cargo.lock"),
+                cause: Omission::Unsummarised {
+                    size: 4_200_000,
+                    source: Some(crate::AgentError::EmptyOutput),
+                },
+            },
+            Problem {
+                path: PathBuf::from("/repo/schema.json"),
+                cause: Omission::Unsummarised {
+                    size: 300_000,
+                    source: None,
+                },
+            },
+        ];
+
+        for problem in &problems {
+            let rendered = problem.to_string();
+            assert!(!rendered.contains('\n'), "{rendered}");
+            assert!(
+                rendered.contains(&problem.path.display().to_string()),
+                "a problem names its file: {rendered}",
+            );
+            assert!(
+                rendered.contains("name and size"),
+                "and says what is in the request instead of its contents: {rendered}",
+            );
+            assert!(
+                problem.source().is_some(),
+                "every problem's cause is reachable as a source: {problem}",
+            );
+        }
+        assert!(
+            problems[1]
+                .to_string()
+                .contains(&CHUNK_COUNT_CEILING.to_string()),
+            "a file past the ceiling says what the ceiling is: {}",
+            problems[1],
+        );
+        assert!(
+            problems[3]
+                .to_string()
+                .contains(&MINIMUM_SUMMARY_BYTES.to_string()),
+            "and an answer too short to use says what it had to reach: {}",
+            problems[3],
+        );
+        let under = |problem: &Problem| {
+            problem
+                .source()
+                .and_then(std::error::Error::source)
+                .is_some()
+        };
+        assert!(under(&problems[0]), "the utf-8 error is under the cause");
+        assert!(under(&problems[2]), "so is the agent's error");
+        assert!(
+            !under(&problems[3]),
+            "and an answer nobody could use has nothing under it: the text is not kept",
+        );
+    }
+
+    #[test]
+    fn the_map_and_reduce_prompts_ask_for_the_contents_and_forbid_the_name() {
+        // The one rule both prompts exist to enforce, pinned in both: a summary
+        // is about bytes, because it will be keyed by bytes alone and has to
+        // survive the file being renamed.
+        for prompt in [super::MAP_PROMPT, super::REDUCE_PROMPT] {
+            assert!(
+                prompt.contains("CONTENTS"),
+                "the account is of the contents: {prompt}",
+            );
+            assert!(
+                prompt.contains("Do not name the file"),
+                "and restating the file's name is forbidden: {prompt}",
+            );
+            assert!(
+                prompt.contains("no code fence"),
+                "the answer is used as it comes back, so nothing may wrap it: {prompt}",
+            );
+        }
+        assert!(
+            super::MAP_PROMPT.contains("which part of how many"),
+            "a map pass is told what it holds: {}",
+            super::MAP_PROMPT,
+        );
+        assert!(
+            super::REDUCE_PROMPT.contains("never quote them as if they were"),
+            "a reduce pass is told its input is prose about the file, not the file: {}",
+            super::REDUCE_PROMPT,
         );
     }
 
