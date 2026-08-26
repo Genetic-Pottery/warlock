@@ -198,6 +198,14 @@
 //! descent there and then, and [`Unwatched`] is the answer for a caller with
 //! nothing to show and nothing to cancel.
 //!
+//! Inside a directory, the same observer is told about each summarising pass
+//! just before it runs ([`Observer::summarising`]): which file, which pass of
+//! how many that file costs. A two-megabyte lockfile is a dozen model passes
+//! inside one directory's turn, and without this the fraction of directories
+//! would sit still through all of them. That one only announces — it answers
+//! nothing, it stops nothing, and it has a default body that does nothing, so
+//! it costs an existing observer no code.
+//!
 //! Two things this deliberately is not. It is not a *progress channel* — the
 //! engine hands a borrowed path to a caller-supplied trait object, with no
 //! [`Send`], no [`Sync`], no queue and no opinion about which thread a pact runs
@@ -700,7 +708,10 @@ pub fn pact_subtree(
             undocumented.extend(directories[index..].iter().cloned());
             break;
         }
-        match pact_directory(pacted, root, agent) {
+        // Through the watched form, so every summarising pass this directory
+        // pays for is announced to the same observer that was just asked about
+        // the directory itself.
+        match pact_directory_watched(pacted, root, agent, observer) {
             Ok(Pacted {
                 document,
                 problems: caps,
@@ -1017,9 +1028,30 @@ pub fn pact_directory(
     root: impl AsRef<Path>,
     agent: &dyn Agent,
 ) -> Result<Pacted, Error> {
+    pact_directory_watched(directory.as_ref(), root.as_ref(), agent, &mut Unwatched)
+}
+
+/// [`pact_directory`], with somewhere to announce the summarising passes to.
+///
+/// The whole of the difference is `observer`, which hears
+/// [`summarising`](Observer::summarising) immediately before every model pass
+/// spent describing a file too big to send — and hears nothing at all for a file
+/// whose account came from the cache, because that file costs no passes.
+/// [`starting`](Observer::starting) is not called from here: which directory a
+/// pact is on is [`pact_subtree`]'s to say, and this function pacts exactly one.
+///
+/// Private, and the public entry point is the three-argument
+/// [`pact_directory`] above it: a caller pacting one directory has nothing to
+/// report progress about, and a caller that does have a front end reaches this
+/// through [`pact_subtree`], which hands down the observer it was given.
+fn pact_directory_watched(
+    directory: &Path,
+    root: &Path,
+    agent: &dyn Agent,
+    observer: &mut dyn Observer,
+) -> Result<Pacted, Error> {
     // `root` is where `.warlock/` — and so the summary cache — is found by
     // joining, and is taken here rather than discovered; see the docs above.
-    let (directory, root) = (directory.as_ref(), root.as_ref());
     let Gathered {
         request,
         mut problems,
@@ -1030,7 +1062,7 @@ pub fn pact_directory(
     // `<root>/.warlock/summaries/` that mean those passes were paid for once
     // already. Infallible by construction: it answers with a request either
     // way, and every way it can go wrong is a `Problem` in the list above.
-    let request = summarise_over_cap(directory, root, request, &mut problems, agent);
+    let request = summarise_over_cap(directory, root, request, &mut problems, agent, observer);
 
     let response = agent.run(&request).map_err(|source| Error::Refused {
         directory: directory.to_path_buf(),
@@ -1414,12 +1446,21 @@ fn trim_to_budget(
 /// Nothing here returns an [`Error`], and nothing here can stop a pact: the
 /// worst case is the request gather already built, with better-explained
 /// problems beside it.
+///
+/// # What the observer hears
+///
+/// `observer` is told about each pass that is really run, immediately before it
+/// is run, by [`summarise_file`]. A cache hit is the one path that says nothing
+/// at all: it runs no passes, so there is nothing to announce and nothing being
+/// paid for. Nothing the observer does can stop any of this — see
+/// [`Observer::summarising`].
 fn summarise_over_cap(
     directory: &Path,
     root: &Path,
     request: AgentRequest,
     problems: &mut Vec<Problem>,
     agent: &dyn Agent,
+    observer: &mut dyn Observer,
 ) -> AgentRequest {
     let mut files = request.files().to_vec();
     // The problems whose files ended up described, so their entries can go. Held
@@ -1463,13 +1504,19 @@ fn summarise_over_cap(
         let key = summary_key(&bytes);
         let summarised = match cached_summary(root, &key) {
             Some(cached) => Ok(cached),
-            None => summarise_file(directory, file.path(), &bytes, agent).inspect(|summary| {
-                // Ignorable on purpose: a cache that could not be written is a
-                // cache that will be missed next time, and this pact already
-                // has the summary it paid for. Nothing about a full disk or a
-                // read-only checkout is allowed to change what this pact does.
-                drop(cache_summary(root, &key, summary));
-            }),
+            // A hit above announces nothing, on purpose: no pass is run for it,
+            // and an announcement of work nobody is paying for is exactly the
+            // noise the footer exists to avoid.
+            None => {
+                summarise_file(directory, file.path(), &bytes, agent, observer).inspect(|summary| {
+                    // Ignorable on purpose: a cache that could not be written is
+                    // a cache that will be missed next time, and this pact
+                    // already has the summary it paid for. Nothing about a full
+                    // disk or a read-only checkout is allowed to change what
+                    // this pact does.
+                    drop(cache_summary(root, &key, summary));
+                })
+            }
         };
 
         match summarised {
@@ -1624,11 +1671,23 @@ fn chunk_utf8(bytes: &[u8]) -> Result<Vec<String>, Utf8Error> {
 /// [`Omission::Unsummarised`]. Every one of them is a file back to being what
 /// an over-cap file has always been, a name and a size, with the reason said
 /// out loud. None of them is an [`Error`]: nothing here can fail a pact.
+///
+/// # Saying it out loud first
+///
+/// `observer` hears [`summarising`](Observer::summarising) immediately before
+/// each of those passes is handed to `agent` — never after it, and never for a
+/// pass that is not about to run. The count it is given is **passes, not
+/// chunks**: a file of N chunks is announced N + 1 times as parts 1..=N + 1,
+/// with the reduce as the last of them, and a single-chunk file is announced
+/// once as part 1 of 1. So the numbers a front end draws are a fraction of the
+/// work being paid for, and they run to their total exactly when the file is
+/// done. The two answers that cost no passes announce nothing.
 fn summarise_file(
     directory: &Path,
     path: &str,
     bytes: &[u8],
     agent: &dyn Agent,
+    observer: &mut dyn Observer,
 ) -> Result<String, Omission> {
     let size = byte_count(bytes.len());
     let chunks = chunk_utf8(bytes).map_err(|source| Omission::NotText { size, source })?;
@@ -1647,10 +1706,20 @@ fn summarise_file(
         return Err(Omission::Unsummarised { size, source: None });
     }
 
-    let parts = chunks.len();
-    let mut accounts = Vec::with_capacity(parts);
+    let chunk_count = chunks.len();
+    // What the observer counts in: every pass this file is about to cost, which
+    // is one per chunk plus the reduce over them — and no reduce, so no extra
+    // pass, when there is only the one chunk. The chunk numbering the model is
+    // told (`map_request`) is a different count and stays a count of chunks.
+    let passes = if chunk_count == 1 { 1 } else { chunk_count + 1 };
+    let announced = directory.join(path);
+
+    let mut accounts = Vec::with_capacity(chunk_count);
     for (index, chunk) in chunks.iter().enumerate() {
-        let request = map_request(directory, path, index + 1, parts, chunk);
+        let request = map_request(directory, path, index + 1, chunk_count, chunk);
+        // Before the pass, always: an announcement after it would be a report of
+        // money already spent rather than a reason for the wait.
+        observer.summarising(&announced, index + 1, passes);
         accounts.push(summarising_pass(agent, &request, size)?);
     }
 
@@ -1660,6 +1729,7 @@ fn summarise_file(
     }
 
     let request = reduce_request(directory, path, &accounts);
+    observer.summarising(&announced, passes, passes);
     summarising_pass(agent, &request, size)
 }
 
@@ -2007,6 +2077,13 @@ fn carried_bytes(files: &[AgentFile], child_documents: &[AgentChildDocument]) ->
 /// entirely the caller's: draw a line, send it down a channel, count it, ignore
 /// it.
 ///
+/// Inside a directory it also calls [`summarising`](Observer::summarising),
+/// once immediately before every model pass spent describing a file too big to
+/// send — the part of a pact that can otherwise be minutes of apparent silence.
+/// That one is an announcement rather than a question: it answers nothing, and
+/// it has a default body that does nothing, so an observer only interested in
+/// directories implements [`starting`](Observer::starting) and stops there.
+///
 /// # What this trait is careful not to require
 ///
 /// **No [`Send`], no [`Sync`], no `'static`.** The engine does not decide which
@@ -2046,6 +2123,43 @@ pub trait Observer {
     /// [`Pacting::Continue`] runs its pass, [`Pacting::Stop`] ends the pact
     /// before it, leaving `directory` and everything after it undocumented.
     fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting;
+
+    /// A summarising pass over `file` is about to run: it is pass `part` of
+    /// `parts`, counting from one.
+    ///
+    /// Called immediately before the pass is handed to the [`Agent`], once for
+    /// every pass a file costs — so a directory holding a big file is minutes
+    /// of work that says what it is doing rather than minutes of silence. `file`
+    /// is the path on disk, so a front end can name it however it names
+    /// anything else in the tree.
+    ///
+    /// # How the parts are counted
+    ///
+    /// `parts` is **the number of passes this file costs**, not the number of
+    /// chunks it was cut into, and it is the same on every call about that file:
+    /// a file read in three chunks is passes 1, 2 and 3 of 4 for its maps and
+    /// pass 4 of 4 for the reduce over them, and a file that comes to a single
+    /// chunk is pass 1 of 1 with no reduce to announce. So `part` of `parts` is
+    /// a fraction of the work that is actually being paid for, which is the only
+    /// thing a reader watching it can do anything with.
+    ///
+    /// Announced only for passes that are really run. A file whose account came
+    /// from the cache under `<root>/.warlock/summaries/` costs no passes and is
+    /// announced not at all, as are the files settled before any pass — bytes
+    /// that are not text, and files past [`CHUNK_COUNT_CEILING`] chunks.
+    ///
+    /// # Nothing is asked
+    ///
+    /// This returns nothing, unlike [`starting`](Observer::starting): it is an
+    /// announcement, not a question. Cancellation is still asked between
+    /// directories only, so no answer here could be acted on before the pass it
+    /// is about comes back.
+    ///
+    /// The default body does nothing, so an observer that only wants to watch
+    /// directories go past needs to write none of this.
+    fn summarising(&mut self, file: &Path, part: usize, parts: usize) {
+        let _ = (file, part, parts);
+    }
 }
 
 /// What an [`Observer`] says about the directory it was just offered: pact it,
@@ -2615,8 +2729,9 @@ mod tests {
         MAP_PROMPT, MINIMUM_DOCUMENT_BYTES, MINIMUM_SUMMARY_BYTES, Observer, Omission,
         PER_FILE_BYTE_CAP, Pacted, PactedSubtree, Pacting, Problem, REDUCE_PROMPT,
         REQUEST_BYTE_CAP, Refusal, Unwatched, byte_count, cache_summary, cached_summary,
-        chunk_utf8, gather_request, pact_directory, pact_subtree, pactable_directories,
-        summarise_file, summary_dir, summary_file_name, summary_key, unpact_subtree,
+        chunk_utf8, gather_request, pact_directory, pact_directory_watched, pact_subtree,
+        pactable_directories, summarise_file, summary_dir, summary_file_name, summary_key,
+        unpact_subtree,
     };
     use crate::{
         Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, AgentResponse, Loaded,
@@ -3586,8 +3701,14 @@ mod tests {
             Ok(account("the third part")),
         ]);
 
-        let summary = summarise_file(somewhere(), "Cargo.lock", text.as_bytes(), &agent)
-            .expect("a file of three good parts is summarised");
+        let summary = summarise_file(
+            somewhere(),
+            "Cargo.lock",
+            text.as_bytes(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("a file of three good parts is summarised");
 
         assert_eq!(agent.passes(), 4, "three map passes and exactly one reduce");
         assert_eq!(
@@ -3626,8 +3747,14 @@ mod tests {
         let agent = Counting::new(account("a reduce nobody asked for"))
             .scripted([Ok(account("the only part"))]);
 
-        let summary = summarise_file(somewhere(), "vendor/schema.json", text.as_bytes(), &agent)
-            .expect("one good part is a summary");
+        let summary = summarise_file(
+            somewhere(),
+            "vendor/schema.json",
+            text.as_bytes(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("one good part is a summary");
 
         assert_eq!(
             agent.passes(),
@@ -3642,7 +3769,14 @@ mod tests {
         let text = text_of_chunks(3);
         let agent = Counting::new(account("anything"));
 
-        summarise_file(somewhere(), "Cargo.lock", text.as_bytes(), &agent).expect("summarised");
+        summarise_file(
+            somewhere(),
+            "Cargo.lock",
+            text.as_bytes(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("summarised");
 
         let prompts = agent.prompts();
         for (index, prompt) in prompts[..3].iter().enumerate() {
@@ -3669,8 +3803,14 @@ mod tests {
         let text = text_of_chunks(3);
         let agent = Counting::new(account("anything"));
 
-        summarise_file(somewhere(), "vendor/bundle.js", text.as_bytes(), &agent)
-            .expect("summarised");
+        summarise_file(
+            somewhere(),
+            "vendor/bundle.js",
+            text.as_bytes(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("summarised");
 
         for request in agent.seen.borrow().iter() {
             assert!(
@@ -3705,8 +3845,14 @@ mod tests {
         bytes.push(0xff);
         let agent = Counting::new(account("a pass that must never run"));
 
-        let cause = summarise_file(somewhere(), "fixtures/blob.bin", &bytes, &agent)
-            .expect_err("bytes that are not text have no summary");
+        let cause = summarise_file(
+            somewhere(),
+            "fixtures/blob.bin",
+            &bytes,
+            &agent,
+            &mut Unwatched,
+        )
+        .expect_err("bytes that are not text have no summary");
 
         assert_eq!(agent.passes(), 0, "not one pass is spent finding that out");
         assert!(
@@ -3721,8 +3867,14 @@ mod tests {
         let text = text_of_chunks(parts);
         let agent = Counting::new(account("a pass that must never run"));
 
-        let cause = summarise_file(somewhere(), "vendor/bundle.js", text.as_bytes(), &agent)
-            .expect_err("a file past the ceiling is not summarised");
+        let cause = summarise_file(
+            somewhere(),
+            "vendor/bundle.js",
+            text.as_bytes(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect_err("a file past the ceiling is not summarised");
 
         assert_eq!(
             agent.passes(),
@@ -3747,8 +3899,14 @@ mod tests {
         ];
         let agent = Counting::new(account("a pass past the failure")).scripted(script);
 
-        let cause = summarise_file(somewhere(), "Cargo.lock", text.as_bytes(), &agent)
-            .expect_err("a map pass that fails leaves no summary");
+        let cause = summarise_file(
+            somewhere(),
+            "Cargo.lock",
+            text.as_bytes(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect_err("a map pass that fails leaves no summary");
 
         assert_eq!(
             agent.passes(),
@@ -3777,8 +3935,14 @@ mod tests {
         ];
         let agent = Counting::new(account("never reached")).scripted(script);
 
-        let cause = summarise_file(somewhere(), "Cargo.lock", text.as_bytes(), &agent)
-            .expect_err("a reduce that fails leaves no summary");
+        let cause = summarise_file(
+            somewhere(),
+            "Cargo.lock",
+            text.as_bytes(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect_err("a reduce that fails leaves no summary");
 
         assert_eq!(
             agent.passes(),
@@ -3805,8 +3969,14 @@ mod tests {
             let text = text_of_chunks(2);
             let agent = Counting::new(answer);
 
-            let cause = summarise_file(somewhere(), "Cargo.lock", text.as_bytes(), &agent)
-                .expect_err("an unusable answer is not a summary");
+            let cause = summarise_file(
+                somewhere(),
+                "Cargo.lock",
+                text.as_bytes(),
+                &agent,
+                &mut Unwatched,
+            )
+            .expect_err("an unusable answer is not a summary");
 
             assert_eq!(
                 agent.passes(),
@@ -3828,8 +3998,14 @@ mod tests {
             Ok(account("the second part")),
         ]);
 
-        let cause = summarise_file(somewhere(), "Cargo.lock", text.as_bytes(), &agent)
-            .expect_err("a reduce answer under the floor is not a summary");
+        let cause = summarise_file(
+            somewhere(),
+            "Cargo.lock",
+            text.as_bytes(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect_err("a reduce answer under the floor is not a summary");
 
         assert_eq!(agent.passes(), 3, "the passes ran; the answer was unusable");
         assert!(
@@ -6052,6 +6228,289 @@ mod tests {
             "the caller that watches nothing gets every directory pacted",
         );
         assert_eq!(Unwatched.starting(&engine, 1, 4), Pacting::Continue);
+    }
+
+    // Announcing the summarising passes: what the observer hears while one
+    // directory's big file is being read, and in what order.
+
+    /// One thing that happened during a pact, observer calls and agent calls in
+    /// the single order they really occurred — so "the observer was told before
+    /// the agent ran it" is one assertion over one list rather than two lists
+    /// and an argument about how to line them up.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Told {
+        /// [`Observer::starting`]: the directory offered, which one it is, of
+        /// how many.
+        Directory(PathBuf, usize, usize),
+        /// [`Observer::summarising`]: the file, which pass it is, of how many
+        /// that file costs.
+        Pass(PathBuf, usize, usize),
+        /// A pass that actually reached the agent, told apart by the prompt it
+        /// carried.
+        Ran(Kind),
+    }
+
+    /// Which of this module's three prompts a pass was run with.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        /// One chunk of a file too big to send.
+        Map,
+        /// The one pass over the map answers.
+        Reduce,
+        /// The directory's own pass, the one that writes `WARLOCK.md`.
+        Document,
+    }
+
+    /// The one list an observer and an agent both write to. Shared by
+    /// [`std::rc::Rc`] rather than by a lock: the engine binds an observer to no
+    /// thread and this whole test runs on one.
+    type Log = std::rc::Rc<std::cell::RefCell<Vec<Told>>>;
+
+    /// A fresh, empty log.
+    fn log() -> Log {
+        Log::default()
+    }
+
+    /// Everything that happened, in order.
+    fn told(log: &Log) -> Vec<Told> {
+        log.borrow().clone()
+    }
+
+    /// Only what the observer was told about summarising passes, in order.
+    fn announced(log: &Log) -> Vec<(PathBuf, usize, usize)> {
+        log.borrow()
+            .iter()
+            .filter_map(|entry| match entry {
+                Told::Pass(file, part, parts) => Some((file.clone(), *part, *parts)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An agent that writes down every pass it is asked for, beside the
+    /// observer's calls, and answers each kind of pass plausibly.
+    struct Overheard {
+        log: Log,
+        /// What the directory pass answers.
+        document: String,
+    }
+
+    impl Overheard {
+        fn new(log: &Log, document: impl Into<String>) -> Self {
+            Self {
+                log: Log::clone(log),
+                document: document.into(),
+            }
+        }
+    }
+
+    impl Agent for Overheard {
+        fn run(&self, request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+            let prompt = request.prompt();
+            let (kind, answer) = if prompt.starts_with(MAP_PROMPT) {
+                (Kind::Map, account("one part of it"))
+            } else if prompt.starts_with(REDUCE_PROMPT) {
+                (Kind::Reduce, account("the whole of it"))
+            } else {
+                (Kind::Document, self.document.clone())
+            };
+            self.log.borrow_mut().push(Told::Ran(kind));
+            Ok(AgentResponse::new(answer))
+        }
+    }
+
+    /// The observer half of the same log: it stops nothing and just writes down
+    /// what it is told.
+    struct Overhearing(Log);
+
+    impl Overhearing {
+        fn new(log: &Log) -> Self {
+            Self(Log::clone(log))
+        }
+    }
+
+    impl Observer for Overhearing {
+        fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
+            self.0
+                .borrow_mut()
+                .push(Told::Directory(directory.to_path_buf(), position, total));
+            Pacting::Continue
+        }
+
+        fn summarising(&mut self, file: &Path, part: usize, parts: usize) {
+            self.0
+                .borrow_mut()
+                .push(Told::Pass(file.to_path_buf(), part, parts));
+        }
+    }
+
+    #[test]
+    fn every_summarising_pass_is_announced_before_the_agent_is_asked_to_run_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let text = lock_text("a watched pact");
+        let lock = write(dir.path(), "Cargo.lock", &text);
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+
+        let log = log();
+        pact_directory_watched(
+            dir.path(),
+            dir.path(),
+            &Overheard::new(&log, document(300)),
+            &mut Overhearing::new(&log),
+        )
+        .expect("pacts");
+
+        // Two map passes and the reduce, each one said out loud first, and the
+        // directory's own pass after all of them. The parts count is the passes
+        // the file costs and never changes; the numbers run to it exactly when
+        // the file is done.
+        assert_eq!(
+            told(&log),
+            [
+                Told::Pass(lock.clone(), 1, SUMMARISING_PASSES),
+                Told::Ran(Kind::Map),
+                Told::Pass(lock.clone(), 2, SUMMARISING_PASSES),
+                Told::Ran(Kind::Map),
+                Told::Pass(lock, SUMMARISING_PASSES, SUMMARISING_PASSES),
+                Told::Ran(Kind::Reduce),
+                Told::Ran(Kind::Document),
+            ],
+            "the observer hears about each pass immediately before it is run",
+        );
+    }
+
+    #[test]
+    fn the_parts_run_from_one_to_the_number_of_passes_that_file_costs() {
+        let text = text_of_chunks(3);
+        let log = log();
+
+        summarise_file(
+            somewhere(),
+            "Cargo.lock",
+            text.as_bytes(),
+            &Overheard::new(&log, document(300)),
+            &mut Overhearing::new(&log),
+        )
+        .expect("summarised");
+
+        // Three chunks is four passes, so it is part four of four that finishes
+        // the file — a fraction of the work being paid for rather than of the
+        // chunks the file happens to have been cut into.
+        let file = somewhere().join("Cargo.lock");
+        assert_eq!(
+            announced(&log),
+            [
+                (file.clone(), 1, 4),
+                (file.clone(), 2, 4),
+                (file.clone(), 3, 4),
+                (file, 4, 4),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_file_of_one_part_is_announced_once_and_has_no_reduce_to_announce() {
+        let text = text_of_chunks(1);
+        let log = log();
+
+        summarise_file(
+            somewhere(),
+            "vendor/bundle.js",
+            text.as_bytes(),
+            &Overheard::new(&log, document(300)),
+            &mut Overhearing::new(&log),
+        )
+        .expect("summarised");
+
+        assert_eq!(
+            told(&log),
+            [
+                Told::Pass(somewhere().join("vendor/bundle.js"), 1, 1),
+                Told::Ran(Kind::Map),
+            ],
+            "one pass, announced as one of one: there is no reduce to count",
+        );
+    }
+
+    #[test]
+    fn a_cached_account_is_announced_not_at_all_because_it_runs_no_pass() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let text = lock_text("a pact that already paid");
+        write(dir.path(), "Cargo.lock", &text);
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+
+        let first = log();
+        pact_directory_watched(
+            dir.path(),
+            dir.path(),
+            &Overheard::new(&first, document(300)),
+            &mut Overhearing::new(&first),
+        )
+        .expect("pacts");
+        assert_eq!(
+            announced(&first).len(),
+            SUMMARISING_PASSES,
+            "the pact that pays for the passes announces every one of them",
+        );
+
+        // Same bytes, so the account is already under `.warlock/summaries/`.
+        let second = log();
+        pact_directory_watched(
+            dir.path(),
+            dir.path(),
+            &Overheard::new(&second, document(300)),
+            &mut Overhearing::new(&second),
+        )
+        .expect("pacts again");
+
+        assert_eq!(
+            announced(&second),
+            [],
+            "a cache hit runs no pass, so there is nothing being paid for to announce",
+        );
+        assert_eq!(
+            told(&second),
+            [Told::Ran(Kind::Document)],
+            "the directory pass, and nothing before it",
+        );
+    }
+
+    #[test]
+    fn a_subtree_pact_announces_the_passes_inside_the_directory_they_belong_to() {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        let engine = repo.path().join("crates/engine");
+        write(&engine, "src/lib.rs", "//! Core engine.\n");
+        let lock = write(&engine, "Cargo.lock", lock_text("a subtree pact"));
+
+        let log = log();
+        pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &Overheard::new(&log, document(300)),
+            &mut Overhearing::new(&log),
+        )
+        .expect("pacts");
+
+        // Children before parents, so `src` goes first and has nothing to
+        // summarise; the big file's passes fall between the announcement of the
+        // directory holding it and that directory's own pass.
+        assert_eq!(
+            told(&log),
+            [
+                Told::Directory(engine.join("src"), 1, 2),
+                Told::Ran(Kind::Document),
+                Told::Directory(engine, 2, 2),
+                Told::Pass(lock.clone(), 1, SUMMARISING_PASSES),
+                Told::Ran(Kind::Map),
+                Told::Pass(lock.clone(), 2, SUMMARISING_PASSES),
+                Told::Ran(Kind::Map),
+                Told::Pass(lock, SUMMARISING_PASSES, SUMMARISING_PASSES),
+                Told::Ran(Kind::Reduce),
+                Told::Ran(Kind::Document),
+            ],
+            "the observer handed to the subtree pact is the one the map-reduce reaches",
+        );
     }
 
     // Un-pacting: dropping the entries and keeping the documents.
