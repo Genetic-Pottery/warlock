@@ -218,6 +218,45 @@ use crate::{
 /// The directory holding Warlock's own bookkeeping, never part of a request.
 const MANIFEST_DIR: &str = ".warlock";
 
+/// Where accounts of over-cap files are kept, under [`MANIFEST_DIR`]: one file
+/// per entry, named for the digest of the bytes it describes.
+///
+/// It sits under `.warlock/` for the same reason the manifest does — it is
+/// Warlock's bookkeeping rather than content of any module — and it inherits
+/// everything that follows from being there: pruned by name from every walk in
+/// this crate, so it is in no tree, no [`subtree_hash`] and no request, and
+/// committed with the code rather than ignored, so a teammate's fresh clone
+/// arrives holding the accounts this repository has already paid for.
+///
+/// Flat rather than fanned out into subdirectories of the first byte or two.
+/// The population is one entry per distinct over-cap file a repository has ever
+/// had, which is tens, not the millions that make a fan-out worth its
+/// complication.
+const SUMMARY_DIR: &str = "summaries";
+
+/// The extension a cache entry's file name ends in.
+///
+/// The digest is the whole of the name in front of it, so the same bytes name
+/// the same file on every machine; the extension is there because the contents
+/// are prose, and a directory of prose that opens in an editor as prose beats a
+/// wall of extensionless hex when somebody goes looking at what was cached.
+const SUMMARY_EXTENSION: &str = "md";
+
+/// Domain separation for a summary cache key, via blake3's key derivation.
+///
+/// Its own context, and emphatically not the subtree hash's: the two digests
+/// answer different questions — "are these the bytes the document was granted
+/// against" versus "have these exact bytes already been read for us" — over
+/// different inputs, and one string shared between them would make a change to
+/// either one's meaning a change to the other's. Nothing in
+/// [`hash`](crate::hash) is touched by anything here.
+///
+/// The `v1` is where a future change to what an entry means announces itself.
+/// Bumping it makes every existing entry unreachable, which costs a fresh
+/// summarising pass per file and cannot produce a wrong answer: an entry that
+/// is never looked for is a cache miss, and a miss is the ordinary path.
+const SUMMARY_KEY_CONTEXT: &str = "warlock summary cache key v1 2026-08-26";
+
 /// The document a directory is described by, and the only file name a child
 /// directory contributes to its parent's request.
 const DOCUMENT_FILE: &str = "WARLOCK.md";
@@ -1629,6 +1668,134 @@ fn reduce_request(directory: &Path, path: &str, accounts: &[String]) -> AgentReq
     AgentRequest::new(prompt, directory)
 }
 
+// The summary cache: five small functions over `<root>/.warlock/summaries/`,
+// and nothing else. A key from a file's bytes, the two names that key becomes
+// on disk, a read that answers `None` to everything that is not a good entry,
+// and a write that can be ignored. None of them can fail a pact: there is no
+// `Error` variant and no `Omission` for a cache, because every way one of these
+// can go wrong is already the ordinary path — summarise the file.
+//
+// They exist before the lookup that will call them, so for now the tests are
+// their only caller outside a test build. That is what each
+// `#[cfg_attr(not(test), expect(dead_code))]` below says, and `expect` rather
+// than `allow` so the attributes clean themselves up: the moment
+// `summarise_over_cap` calls these, the expectation goes unfulfilled and the
+// build asks for the attribute to be removed.
+
+/// The cache key for a file's contents: a digest of `bytes`, and of nothing
+/// else.
+///
+/// No path, no name, no mtime, no size, no inode. A summary is an account of
+/// what is *in* a file, so the bytes are the whole of what identifies it: a
+/// lockfile renamed between two pacts, the same vendored bundle sitting in two
+/// directories, and a colleague's fresh clone of all of it are the same bytes,
+/// so they are the same key and the same entry.
+///
+/// That is also the entire change-detection mechanism. An edited file hashes to
+/// a key nothing on disk answers to, so it misses and is summarised again;
+/// nothing anywhere compares an old state to a new one, and a stale entry stops
+/// matching by itself rather than by being swept.
+///
+/// Derived through [`SUMMARY_KEY_CONTEXT`], so this digest can never collide
+/// with a plain blake3 of the same bytes computed elsewhere, and never with the
+/// subtree hash of [`hash`](crate::hash), whose context and inputs are its own.
+///
+/// The result is 64 lowercase hex characters, opaque to everything but the two
+/// functions below.
+#[cfg_attr(not(test), expect(dead_code))]
+fn summary_key(bytes: &[u8]) -> String {
+    blake3::Hasher::new_derive_key(SUMMARY_KEY_CONTEXT)
+        .update(bytes)
+        .finalize()
+        .to_hex()
+        .to_string()
+}
+
+/// Where `root`'s cached summaries live.
+#[cfg_attr(not(test), expect(dead_code))]
+fn summary_dir(root: &Path) -> PathBuf {
+    root.join(MANIFEST_DIR).join(SUMMARY_DIR)
+}
+
+/// What the entry for `key` is called inside [`summary_dir`].
+#[cfg_attr(not(test), expect(dead_code))]
+fn summary_file_name(key: &str) -> String {
+    format!("{key}.{SUMMARY_EXTENSION}")
+}
+
+/// The cached account of the bytes `key` was derived from, if there is a usable
+/// one under `root`.
+///
+/// **Every failure is a miss.** No cache directory, no entry, an entry that
+/// cannot be opened, one that is not UTF-8, one that is empty or nothing but
+/// whitespace: all of them come back `None`, which means exactly what an absent
+/// entry means — this file has not been described yet, so describe it. There is
+/// no error to return because there is nothing a caller could usefully do
+/// differently, and a cache that could fail a pact would be a cache that made
+/// pacting less reliable than not having one.
+///
+/// Those are the only rules, and in particular the summary floor
+/// ([`MINIMUM_SUMMARY_BYTES`]) is not re-applied here. An entry only ever gets
+/// written from an account that already cleared it, and the write is a rename,
+/// so a short entry is not a truncated one — it is somebody's edit, and a
+/// second, drifting opinion about how long a summary has to be is worth less
+/// than honouring it.
+///
+/// The text comes back exactly as it is on disk, because that is exactly how it
+/// was written.
+#[cfg_attr(not(test), expect(dead_code))]
+fn cached_summary(root: &Path, key: &str) -> Option<String> {
+    let text = fs::read_to_string(summary_dir(root).join(summary_file_name(key))).ok()?;
+    // Blank is not an account of anything, and it is what a zero-byte file left
+    // by some other tool looks like. Trimmed only to make the judgement; the
+    // caller gets the bytes as found.
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Record `summary` under `root` as the account of the bytes `key` was derived
+/// from.
+///
+/// The directory is created on demand, and only when there is genuinely
+/// something to put in it, so a pact over a directory with no over-cap file
+/// leaves nothing behind at all.
+///
+/// The write is [`Manifest::save`]'s idiom, through the same two helpers as the
+/// manifest and `WARLOCK.md`: a hidden temporary beside the target, flushed to
+/// disk, then renamed over it. So a later pact reads a whole entry or no entry,
+/// never a prefix of one — which matters more here than anywhere else, since a
+/// half-written entry would be read back as an account of a file it only half
+/// describes. The temporary is removed on the failure paths as well as the
+/// success one, and being a dot file it is invisible to every walk in this
+/// crate for the moment it exists.
+///
+/// # Errors
+///
+/// The [`std::io::Error`] that stopped the directory being created, the
+/// temporary being written or the rename landing. **It is entirely safe to
+/// ignore**, and callers are expected to: the summary this was called with is
+/// still the summary for this pact, and all a failure costs is that the next
+/// pact pays for the passes again. `drop(cache_summary(..))` is the intended
+/// call site.
+#[cfg_attr(not(test), expect(dead_code))]
+fn cache_summary(root: &Path, key: &str, summary: &str) -> std::io::Result<()> {
+    let dir = summary_dir(root);
+    fs::create_dir_all(&dir)?;
+
+    let name = summary_file_name(key);
+    let temp = dir.join(temp_file_name(&name));
+    if let Err(source) = write_and_sync(&temp, summary.as_bytes()) {
+        // Best effort, and nothing to report if it fails: the caller is already
+        // being told nothing was cached.
+        drop(fs::remove_file(&temp));
+        return Err(source);
+    }
+    if let Err(source) = fs::rename(&temp, dir.join(&name)) {
+        drop(fs::remove_file(&temp));
+        return Err(source);
+    }
+    Ok(())
+}
+
 /// What one request is built from: the directory's own files, and its immediate
 /// children's documents, each keyed by the relative path it will be named by.
 ///
@@ -2374,8 +2541,9 @@ mod tests {
         CHUNK_BYTE_CAP, CHUNK_COUNT_CEILING, DOCUMENT_FILE, Failure, Gathered, MAP_PROMPT,
         MINIMUM_DOCUMENT_BYTES, MINIMUM_SUMMARY_BYTES, Observer, Omission, PER_FILE_BYTE_CAP,
         Pacted, PactedSubtree, Pacting, Problem, REDUCE_PROMPT, REQUEST_BYTE_CAP, Refusal,
-        Unwatched, byte_count, chunk_utf8, gather_request, pact_directory, pact_subtree,
-        pactable_directories, summarise_file, unpact_subtree,
+        Unwatched, byte_count, cache_summary, cached_summary, chunk_utf8, gather_request,
+        pact_directory, pact_subtree, pactable_directories, summarise_file, summary_dir,
+        summary_file_name, summary_key, unpact_subtree,
     };
     use crate::{
         Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, AgentResponse, Loaded,
@@ -4288,6 +4456,155 @@ mod tests {
                 .and_then(std::error::Error::source)
                 .is_some(),
             "and a refusal's cause reaches the agent error under it",
+        );
+    }
+
+    /// A plausible cached account of a file: long enough to be a real one, and
+    /// with no whitespace at either end, so a round trip through the cache is
+    /// asserted on byte for byte.
+    fn summary() -> String {
+        "A Cargo lockfile pinning 214 packages, ratatui and blake3 among them.".to_owned()
+    }
+
+    /// Where the entry for `key` sits under `root`, spelled out of the two
+    /// helpers the cache names things with.
+    fn entry(root: &Path, key: &str) -> PathBuf {
+        summary_dir(root).join(summary_file_name(key))
+    }
+
+    /// The file names sitting in `root`'s cache directory, sorted.
+    fn entries(root: &Path) -> Vec<String> {
+        let mut names = fs::read_dir(summary_dir(root))
+            .expect("lists the cache directory")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_key_is_the_bytes_and_nothing_else_about_the_file() {
+        let (one, two) = (
+            tempfile::tempdir().expect("a temporary directory"),
+            tempfile::tempdir().expect("a second temporary directory"),
+        );
+        // The same bytes, under two roots, at two names, at two depths.
+        let bytes = filler(PER_FILE_BYTE_CAP + 1);
+        let here = write(one.path(), "Cargo.lock", &bytes);
+        let there = write(two.path(), "vendor/nested/other-name.lock", &bytes);
+        assert_ne!(here, there, "two genuinely different absolute paths");
+
+        let key = summary_key(&fs::read(&here).expect("reads"));
+        assert_eq!(
+            key,
+            summary_key(&fs::read(&there).expect("reads")),
+            "no path, no name, no directory and no mtime is in the key",
+        );
+        assert_eq!(key.len(), 64, "blake3 as lowercase hex: {key}");
+        assert!(
+            key.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            "{key}",
+        );
+
+        let mut edited = bytes.clone();
+        edited[0] = b'y';
+        assert_ne!(
+            summary_key(&edited),
+            key,
+            "and one byte different is a different key, which is the whole of \
+             the change detection",
+        );
+    }
+
+    #[test]
+    fn an_entry_written_under_one_root_is_the_same_entry_under_another() {
+        let (one, two) = (
+            tempfile::tempdir().expect("a temporary directory"),
+            tempfile::tempdir().expect("a second temporary directory"),
+        );
+        let key = summary_key(&filler(PER_FILE_BYTE_CAP + 1));
+        cache_summary(one.path(), &key, &summary()).expect("caches");
+
+        // What a clone does: the directory arrives with the code, and this
+        // working copy has never pacted anything.
+        fs::create_dir_all(summary_dir(two.path())).expect("creates the cache directory");
+        fs::copy(entry(one.path(), &key), entry(two.path(), &key)).expect("copies the entry");
+
+        assert_eq!(
+            cached_summary(two.path(), &key).as_deref(),
+            Some(summary().as_str()),
+            "the key names the same file on both sides, so the second root \
+             reads what the first one wrote",
+        );
+    }
+
+    #[test]
+    fn an_absent_empty_or_corrupt_entry_is_a_miss_and_never_an_error() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let key = summary_key(&filler(PER_FILE_BYTE_CAP + 1));
+
+        assert!(
+            cached_summary(root.path(), &key).is_none(),
+            "no cache directory at all",
+        );
+
+        fs::create_dir_all(summary_dir(root.path())).expect("creates the cache directory");
+        assert!(
+            cached_summary(root.path(), &key).is_none(),
+            "a directory with nothing in it",
+        );
+
+        for (what, bytes) in [
+            ("an empty entry", b"".as_slice()),
+            ("whitespace only", b"\n  \n".as_slice()),
+            ("not text at all", &not_text(64)),
+        ] {
+            fs::write(entry(root.path(), &key), bytes).expect("writes an entry");
+            assert!(
+                cached_summary(root.path(), &key).is_none(),
+                "{what} is unusable, so it reads as a miss",
+            );
+        }
+
+        // And the good entry over the top of the bad one is read.
+        cache_summary(root.path(), &key, &summary()).expect("caches");
+        assert_eq!(
+            cached_summary(root.path(), &key).as_deref(),
+            Some(summary().as_str()),
+        );
+    }
+
+    #[test]
+    fn caching_a_summary_makes_the_directory_and_leaves_one_file_and_no_temporary() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let key = summary_key(&filler(PER_FILE_BYTE_CAP + 1));
+        assert!(
+            !summary_dir(root.path()).exists(),
+            "nothing exists before there is something to put in it",
+        );
+
+        cache_summary(root.path(), &key, &summary()).expect("caches");
+        assert_eq!(
+            entries(root.path()),
+            [summary_file_name(&key)],
+            "the entry, and no temporary beside it",
+        );
+
+        // Writing the same key again is a rename over the same name, not a
+        // second file and not a leftover.
+        cache_summary(root.path(), &key, "A different account of the same bytes.")
+            .expect("caches again");
+        assert_eq!(entries(root.path()), [summary_file_name(&key)]);
+        assert_eq!(
+            cached_summary(root.path(), &key).as_deref(),
+            Some("A different account of the same bytes."),
         );
     }
 
