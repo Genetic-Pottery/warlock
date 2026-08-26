@@ -141,9 +141,10 @@ pub use pact::Unwatched;
 /// Build the request for one model pass over one directory: its own files, its
 /// children's documents, and what the byte caps left out.
 pub use pact::gather_request;
-/// Pact one directory: gather it, run one model pass over it, and write what
-/// came back verbatim to its `WARLOCK.md`. Writes no manifest entry and grants
-/// nothing.
+/// Pact one directory: gather it, describe the files too big to send, run one
+/// model pass over it, and write what came back verbatim to its `WARLOCK.md`.
+/// Describing a file is passes of its own, and no way it can fail is fatal.
+/// Writes no manifest entry and grants nothing.
 pub use pact::pact_directory;
 /// Pact a directory and everything below it: write every document first,
 /// children before parents, then hash each directory and grant it what it

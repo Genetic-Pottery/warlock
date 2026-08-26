@@ -2,11 +2,13 @@
 //! how a whole subtree of directories is pacted at once.
 //!
 //! Two operations, one on top of the other. [`pact_directory`] is one
-//! directory, and it is three steps with nothing else in them: gather the
-//! directory into a request, run one pass through an [`Agent`], and write what
-//! came back to `<directory>/WARLOCK.md`. It records nothing — no manifest
-//! entry, no hash, no grant — because a pact of one directory is one request,
-//! one response, one file. [`pact_subtree`] is the operation a keystroke runs:
+//! directory, and it is four steps with nothing else in them: gather the
+//! directory into a request, describe whatever was too big to send, run one
+//! pass through an [`Agent`], and write what came back to
+//! `<directory>/WARLOCK.md`. It records nothing — no manifest entry, no hash,
+//! no grant — because a pact of one directory ends in one document, whatever
+//! number of passes it took to write it. [`pact_subtree`] is the operation a
+//! keystroke runs:
 //! every directory at and below the selected one, children first, and *then*
 //! the hashing and the granting that turn what was written into a manifest.
 //!
@@ -47,7 +49,8 @@
 //! request — as its name and its size in bytes, with no contents at all. Half a
 //! source file invites confident wrong conclusions about the half that never
 //! arrived; a name and a size is accurate information a model can document
-//! honestly ("a 4.1 MB `Cargo.lock`, not read").
+//! honestly ("a 4.1 MB `Cargo.lock`, not read"). That is the floor an over-cap
+//! file can never fall below, and the next section is what it can rise to.
 //!
 //! **Over budget is never fatal.** Section 3 of the design doc says Warlock
 //! never makes the wrong thing impossible, and failing here would do exactly
@@ -64,6 +67,53 @@
 //! green nobody earned. A file that genuinely cannot be read is a third case
 //! again, and gets its own cause ([`Omission::Unreadable`]) so it is never
 //! mistaken for either.
+//!
+//! # What a file too big to send becomes
+//!
+//! A name and a size is honest, and it is thin. A directory whose biggest thing
+//! is a two-megabyte lockfile got a document that could say the lockfile is
+//! there and nothing whatever about what is in it — freshness with a hole in
+//! the middle of it. So between the gather and the directory's own pass sits a
+//! step of its own, [`summarise_over_cap`]: every file the per-file cap listed
+//! is read from disk, cut into chunks of at most [`CHUNK_BYTE_CAP`] on line
+//! boundaries by [`chunk_utf8`], put through one map pass per chunk and one
+//! reduce over their answers — all of it through the same [`Agent`] the
+//! directory pass uses — and put back into the request as
+//! [`AgentFile::summarised`]: a name, a size, and prose about its contents. A
+//! file that chunks into one part costs one pass and no reduce.
+//!
+//! What travels back is prose, never bytes. A chunk is never attached to a
+//! request as a file's contents, so the three states of a file in a request stay
+//! three: sent whole, sent as a summary, listed by name and size. Omit-and-list
+//! is still the floor and truncation is still forbidden — half a file quoted as
+//! if it were the file is exactly the confident wrong conclusion the cap exists
+//! to prevent, and a summary is prose *about* the whole file rather than a part
+//! of it. [`MAP_PROMPT`] and [`REDUCE_PROMPT`] say so to the model, and, because
+//! an account of a file will one day be keyed by its bytes alone, both ask about
+//! contents and forbid restating the name.
+//!
+//! Summarising declines in three ways, and each of them puts the file back on
+//! the floor it started from:
+//!
+//! * **It is not text** ([`Omission::NotText`]). The bytes are not UTF-8, so
+//!   there are no lines to cut on and no honest way to send a piece of it.
+//!   Nothing is spent finding out — the check is a pure one over bytes already
+//!   in memory.
+//! * **It is too many chunks** ([`Omission::TooManyChunks`]). The file is past
+//!   [`CHUNK_COUNT_CEILING`], which is what stops one checked-in artefact
+//!   quietly becoming hundreds of model passes. The count is known before the
+//!   first pass, so this is never hit with passes already paid for.
+//! * **The passes produced nothing usable** ([`Omission::Unsummarised`]). A map
+//!   or reduce pass returned an [`AgentError`], or an empty answer, or one under
+//!   [`MINIMUM_SUMMARY_BYTES`] trimmed — the same length-only rule the document
+//!   floor uses, and no phrase list here either. The first failure ends that
+//!   file; no further passes are spent on it.
+//!
+//! All three are the caps' own bargain one level up: a [`Problem`] said out
+//! loud, beside a request that is still perfectly good. No [`Error`] variant is
+//! reachable from any of it, an agent that fails every map pass still leaves a
+//! pact that writes every document, and a file that does come back described is
+//! no `Problem` at all — nothing about it was left out.
 //!
 //! # The answer, and the two ways it is turned down
 //!
@@ -1031,15 +1081,19 @@ pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
 /// that arrives with a summary is not one: a pass read the whole of it and what
 /// it found is in the request, so there is nothing left out to report and
 /// nothing for a caller to act on. Every *fallback* from that is still a
-/// `Problem` — the file could not be read, it is not text, it is past whatever
-/// ceiling the summarising imposes, or the summarising itself failed — because
-/// each of those ends with a name and a size and no account of the file.
+/// `Problem` — the file could not be read, it is not text, it is past the
+/// ceiling on how many chunks one file is worth, or the summarising itself
+/// produced nothing usable — because each of those ends with a name and a size
+/// and no account of the file.
 ///
-/// No code path *here* produces a summarised file: this function measures a
-/// file, lists it when it is too big, and never runs a pass. The step that turns
-/// one of those listings into a summary runs after it, on the request it
-/// returned — see [`pact_directory`], which is also where a file stops being a
-/// `Problem` because it ended up described.
+/// The summaries themselves are made after this returns, not in it: this
+/// function measures a file, lists it when it is too big, and runs no pass at
+/// all. The step that turns one of those listings into
+/// [`AgentFile::summarised`] works on the request and the problem list this one
+/// produced, and [`pact_directory`] is where the two meet. So a `Problem`
+/// here is a file whose contents did not reach *this* step, and by the time a
+/// caller sees the list it has been narrowed to the files nothing could be said
+/// about.
 ///
 /// ```
 /// use std::fs;
@@ -1164,9 +1218,14 @@ pub fn gather_request(
 /// whichever comes first — the second case is over budget with every file
 /// already listed, which is still a request and still not an error.
 ///
-/// Every file it can be handed today is either sent whole or already listed:
-/// [`gather_request`] produces no summarised file, so demoting one — to a
-/// summary, or from one to a bare name — is not a case this has to answer yet.
+/// Every file it can be handed is either sent whole or already listed, because
+/// this runs inside [`gather_request`] and the summaries are made only after
+/// that returns: by the time [`summarise_over_cap`] turns a listing into an
+/// [`AgentFile::summarised`], this budget has already been met and is not
+/// consulted again. So the demotion order a third state calls for — whole, then
+/// summarised, then a bare name — is not a case this has to answer yet.
+/// Teaching the whole-request cap about summaries is separate work; see
+/// [`pact_directory`] for the arithmetic accepted until it lands.
 fn trim_to_budget(
     files: &mut [AgentFile],
     on_disk: &[PathBuf],
@@ -1803,10 +1862,11 @@ pub struct Pacted {
     /// needs exactly this path and should not have to know the file name to
     /// build it.
     pub document: PathBuf,
-    /// Every file the caps left out of the request, as [`gather_request`]
-    /// reported it. Empty is the normal case, and a non-empty list never means
-    /// the document is worse — only that it was written about slightly less
-    /// than the whole directory.
+    /// Every file whose contents the pass never saw: what [`gather_request`]
+    /// left out, less the over-cap files that were then described, plus the
+    /// reason for each one that could not be. Empty is the normal
+    /// case, and a non-empty list never means the document is worse — only that
+    /// it was written about slightly less than the whole directory.
     pub problems: Vec<Problem>,
 }
 
