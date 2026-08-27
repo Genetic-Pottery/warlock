@@ -44,6 +44,15 @@
 //! nothing about the tree, the selection or the window's contents: what a row
 //! offset means is the app's to say. Nothing here follows the pointer around,
 //! and there is deliberately no hover.
+//!
+//! One thing is drawn over all of that, and only one: the gate on the way out.
+//! When [`QuitConfirm`] is up, [`draw`] finishes the frame it would have drawn
+//! anyway and then puts a small window in the middle of the terminal, with the
+//! cells behind it cleared — see [`draw_confirm`]. The question is handed in
+//! beside the app rather than read off it, because the app has never heard of it
+//! (see [`mod@crate::confirm`]), and it is one parameter of the one drawing
+//! function rather than a second entry point, so the binary still makes one call
+//! per frame and a test still asserts one buffer.
 
 use std::time::{Duration, Instant};
 
@@ -51,7 +60,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragraph};
 use warlock_engine::NodeState;
 
 // Renamed on the way in: `Line` here is ratatui's, the thing a row is drawn as,
@@ -60,6 +69,7 @@ use warlock_engine::NodeState;
 use crate::account::{Account, Line as Entry};
 use crate::app::{App, Focus, Row};
 use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
+use crate::confirm::{Answer, QuitConfirm};
 
 /// One level of nesting, per unit of the depth the engine's walk yields.
 const INDENT: &str = "  ";
@@ -397,6 +407,77 @@ const BORDER_THICKNESS: u16 = 1;
 /// fast enough that a pass of even a few seconds visibly pulses more than once.
 const PULSE_PHASE: Duration = Duration::from_millis(500);
 
+/// What the gate on the way out asks.
+///
+/// A question, in the words the answers answer: "Leave warlock?" is answered by
+/// Yes and No without either of them having to be re-read as a verb. It names
+/// the program rather than saying "quit?", because the reader who pressed Esc by
+/// reflex is being told what the keystroke was about to do, and "leave" is what
+/// the footer's own [`QUIT_KEY`] calls it in the other direction.
+///
+/// Nothing is said here about the keys that answer it. The two answers are on
+/// screen and Enter takes the lit one; a line spelling out `y`/`n`/Esc would be
+/// a second footer inside a window that exists to be read in one glance, and the
+/// keys that work are the ones anybody would try. See [`mod@crate::confirm`] for
+/// what those are.
+const CONFIRM_QUESTION: &str = "Leave warlock?";
+
+/// The left-hand answer, the one that leaves.
+///
+/// Padded a column each side so the highlight is a block around the word rather
+/// than a word with its edges touching whatever is beside it: the lit answer is
+/// drawn reversed, and reversing exactly three columns reads as a stain on the
+/// text instead of as a button. The padding is part of the constant so that the
+/// width the window is sized to (see [`confirm_size`]) is the width actually
+/// drawn.
+const CONFIRM_YES: &str = " Yes ";
+
+/// The right-hand answer, the one the question opens on. See [`CONFIRM_YES`] for
+/// the padding, and [`mod@crate::confirm`] for why the order of the two is
+/// load-bearing: Left lights this one's neighbour and Right lights this one,
+/// positionally, which is only true while Yes is drawn on the left.
+const CONFIRM_NO: &str = " No ";
+
+/// What sits between the two answers.
+///
+/// The footer's [`KEY_GAP`] is the same four columns and is deliberately not
+/// reused: that one separates names on a line of keys, this one separates two
+/// answers to one question, and a change to either has nothing to say about the
+/// other.
+const CONFIRM_ANSWER_GAP: &str = "    ";
+
+/// The clear columns the question is given inside the window's border, each
+/// side.
+///
+/// Three, where the panel's mark takes two: this window is a handful of columns
+/// of text in the middle of a full screen, and the space around it is what makes
+/// it read as something laid on top rather than as a box that happens to be
+/// there.
+const CONFIRM_MARGIN: u16 = 3;
+
+/// The clear rows above the question and below the answers, inside the border.
+///
+/// One each, for the reason [`MARK_MARGIN_ROWS`] is one: a row costs about two
+/// columns' worth of screen, and this window is drawn over a tree somebody was
+/// reading.
+const CONFIRM_MARGIN_ROWS: u16 = 1;
+
+/// The lines of the window itself: the question, a blank, the answers.
+///
+/// The blank between them is not decoration. The question and the pair of
+/// answers are two different things to read, and a reader who has already read
+/// the question needs to find the highlight without their eye being caught by
+/// the text above it.
+const CONFIRM_LINES: u16 = 3;
+
+/// How tall the whole window is: its lines, the rows kept clear around them, and
+/// the border.
+///
+/// A number rather than something measured, because unlike the width there is
+/// nothing to measure: [`CONFIRM_LINES`] is a fixed three. It is what
+/// [`confirm_area`] clamps against a short terminal.
+const CONFIRM_HEIGHT: u16 = CONFIRM_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
+
 /// Draw the whole frame: the panel on the left, the tree column on the right,
 /// the footer full width beneath both.
 ///
@@ -414,16 +495,31 @@ const PULSE_PHASE: Duration = Duration::from_millis(500);
 /// [`pulse_colour`]), and a renderer that called [`Instant::now`] itself would be
 /// a second clock for a test to fight. The event loop already redraws on a tick,
 /// so handing it the instant it woke up at is all the ticking there is.
-pub fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
+///
+/// `confirm` is the gate on the way out, and it is handed in beside the app
+/// because it is not part of the app: answering No has to leave the view exactly
+/// as it was, and the cheapest guarantee of that is an app that never heard the
+/// question (see [`mod@crate::confirm`]). While it is [`QuitConfirm::Closed`]
+/// this draws the frame it has always drawn, cell for cell. While it is open the
+/// same frame is drawn and then [`draw_confirm`] puts the question over the
+/// middle of it — over, and not instead of, so the reader can still see what
+/// they are about to leave, and so the footer keeps its three lines and its
+/// wording whichever way the question is answered.
+pub fn draw(frame: &mut Frame<'_>, app: &App, now: Instant, confirm: QuitConfirm) {
+    let screen = frame.area();
     let Areas {
         panel,
         tree,
         footer,
-    } = areas(frame.area());
+    } = areas(screen);
 
     draw_panel(frame, panel, app, now);
     draw_tree_pane(frame, tree, app, now);
     draw_footer(frame, footer, app);
+
+    if let Some(highlighted) = confirm.highlighted() {
+        draw_confirm(frame, screen, highlighted);
+    }
 }
 
 /// The three areas one frame is cut into: the panel, the tree column beside it,
@@ -1240,6 +1336,123 @@ const fn noun(state: NodeState) -> &'static str {
     }
 }
 
+/// Draw the gate on the way out: the question in a small bordered window in the
+/// middle of `screen`, with `highlighted` lit.
+///
+/// The cells behind it are cleared first. A window drawn straight over the frame
+/// would keep whatever the panel or the tree had put in the columns its own text
+/// does not reach — a path ending inside the border, half a row of guides under
+/// the answers — and the reader would be asked a question with the screen it is
+/// about still legible through it. [`Clear`] is ratatui's own widget for exactly
+/// this, so no cell is blanked by hand.
+///
+/// The two answers are drawn Yes then No, in that order, because
+/// [`mod@crate::confirm`] makes Left and Right positional against it. The lit one
+/// takes [`FOCUS_COLOUR`] reversed and bold — the colour that already means
+/// "this is what the keys are driving" on a pane border, and the modifiers the
+/// tree's own selection is drawn with, so nothing new has to be learnt and no
+/// fourth colour is spent. The other is dim, which is what the unfocused pane
+/// border is: the pair reads on a terminal with no colour as well as on one with,
+/// which matters more here than anywhere else on the screen, because the
+/// highlight is the whole of what says which way Enter goes.
+///
+/// The window is clamped rather than skipped on a terminal with no room for it —
+/// see [`confirm_area`]. This is deliberately the opposite rule to
+/// [`mark_area`]'s draw-it-whole-or-not: a mark that is not drawn costs nothing,
+/// where a question that is not drawn is a mode the reader is in with nothing on
+/// screen to say so, and every key they press then goes somewhere they cannot
+/// see.
+fn draw_confirm(frame: &mut Frame<'_>, screen: Rect, highlighted: Answer) {
+    let area = confirm_area(screen);
+    let block = Block::bordered().padding(Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS));
+    let inner = block.inner(area);
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(CONFIRM_QUESTION).centered(),
+            Line::default(),
+            answers_line(highlighted),
+        ]),
+        inner,
+    );
+}
+
+/// The two answers as one line, with `highlighted` lit.
+///
+/// Three spans and a fixed order: the gap is a span of its own rather than
+/// padding on either answer, so neither highlight can grow into the space
+/// between them and the two blocks stay the same shape as each other.
+fn answers_line(highlighted: Answer) -> Line<'static> {
+    let lit = Style::new()
+        .fg(FOCUS_COLOUR)
+        .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    let unlit = Style::new().add_modifier(Modifier::DIM);
+    let style = |answer: Answer| if answer == highlighted { lit } else { unlit };
+
+    Line::from(vec![
+        Span::styled(CONFIRM_YES, style(Answer::Yes)),
+        Span::raw(CONFIRM_ANSWER_GAP),
+        Span::styled(CONFIRM_NO, style(Answer::No)),
+    ])
+    .centered()
+}
+
+/// Where the confirmation is drawn on a terminal of `screen`: centred, and cut
+/// down to the screen if the screen is smaller than the window.
+///
+/// Centred on both axes, with the odd spare row falling below the window and the
+/// odd spare column to its right, so it sits a hair high and a hair left — which
+/// is where the eye reads the middle of a rectangle to be, and is the same
+/// rounding [`mark_area`] takes.
+///
+/// Clamped, never skipped. A terminal too narrow or too short for the whole
+/// window gets as much of it as there is room for: at that point the border is
+/// cut into, then the padding, then the question itself, and at one column by one
+/// row what is left is a single cell of border — which is still the screen saying
+/// that something is being asked. The alternative is worse than ugly: a
+/// confirmation that declined to draw would leave the reader in a mode with no
+/// sign of it, pressing keys that reach nothing they can see, and the only way
+/// out of it would be the one keystroke they cannot know is wanted.
+///
+/// Every arithmetic step is saturating or is guarded by the [`Ord::min`] above
+/// it, so no size of terminal — a zero-width [`Rect`] included — underflows its
+/// way to a window somewhere off the screen.
+fn confirm_area(screen: Rect) -> Rect {
+    let Size { width, height } = confirm_size();
+    let width = width.min(screen.width);
+    let height = height.min(screen.height);
+
+    Rect {
+        x: screen.x + (screen.width - width) / 2,
+        y: screen.y + (screen.height - height) / 2,
+        width,
+        height,
+    }
+}
+
+/// How big the whole window wants to be: the wider of its two lines, the margins
+/// and the border.
+///
+/// The width is measured off the text rather than written down as a number, the
+/// way [`mark_area`] measures the art: the question and the answers are constants
+/// a few lines apart, and a window sized by hand would be the thing that stopped
+/// agreeing with them when one of them was reworded. [`display_width`] rather
+/// than a byte count, so a question with anything but ASCII in it is still sized
+/// in the columns the backend will lay it out in.
+fn confirm_size() -> Size {
+    let answers =
+        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
+    let widest = display_width(CONFIRM_QUESTION).max(answers);
+    let width = u16::try_from(widest)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2 * CONFIRM_MARGIN)
+        .saturating_add(2 * BORDER_THICKNESS);
+
+    Size::new(width, CONFIRM_HEIGHT)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -1248,22 +1461,25 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use ratatui::layout::{Rect, Size};
+    use ratatui::layout::{Position, Rect, Size};
     use ratatui::style::{Color, Modifier};
     use warlock_engine::NodeState;
 
     use super::{
-        BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_HEIGHT,
-        Hit, INDENT, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MAX_KEYS_WIDTH, MOUSE_OFF_KEY,
-        MOUSE_ON_KEY, NO_MARKER, PACTING_KEYS, PANEL_INDENT, SCROLLBACK_ARROW, SELECTION_MARKER,
-        TREE_MIN_WIDTH, TREE_PERCENT, areas, display_width, draw, guide_prefixes, hit_test,
-        keys_line, mark_area, pane_inner, panel_height, tree_height, tree_rows_area, tree_width,
-        truncated,
+        Areas, BORDER_THICKNESS, CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN,
+        CONFIRM_MARGIN_ROWS, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FOOTER_HEIGHT,
+        GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_HEIGHT, Hit, INDENT, KEYS, LIVE_KEY, MARK,
+        MARK_MARGIN, MARK_MARGIN_ROWS, MAX_KEYS_WIDTH, MOUSE_OFF_KEY, MOUSE_ON_KEY, NO_MARKER,
+        PACTING_KEYS, PANEL_INDENT, QUIT_KEY, SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH,
+        TREE_PERCENT, areas, confirm_area, confirm_size, display_width, draw, guide_prefixes,
+        hit_test, keys_line, mark_area, pane_inner, panel_height, tree_height, tree_rows_area,
+        tree_width, truncated,
     };
     use crate::account::Outcome;
     use crate::app::{App, Row};
     use crate::claude::Activity;
     use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
+    use crate::confirm::{Answer, QuitConfirm};
     use crate::fixture;
 
     /// How many rows the window tests work with: comfortably more than fit on
@@ -1531,11 +1747,27 @@ mod tests {
 
     /// [`render`], at an instant the test chose, so a clock on screen can be
     /// asserted for equality rather than for looking about right.
+    ///
+    /// With the gate on the way out closed, which is every test that is not
+    /// about the gate: the frame this draws is the frame warlock has always
+    /// drawn.
     fn render_at(app: &App, width: u16, height: u16, now: Instant) -> Buffer {
+        render_confirm(app, width, height, now, QuitConfirm::Closed)
+    }
+
+    /// [`render_at`], with the quit confirmation in whatever state the test is
+    /// about.
+    fn render_confirm(
+        app: &App,
+        width: u16,
+        height: u16,
+        now: Instant,
+        confirm: QuitConfirm,
+    ) -> Buffer {
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("test backend never fails");
         terminal
-            .draw(|frame| draw(frame, app, now))
+            .draw(|frame| draw(frame, app, now, confirm))
             .expect("test backend never fails");
         terminal.backend().buffer().clone()
     }
@@ -3586,5 +3818,441 @@ mod tests {
             row_text(&tree_focused, FIXTURE_HEIGHT - 1),
             row_text(&panel_focused, FIXTURE_HEIGHT - 1)
         );
+    }
+
+    /// The terminal the covering is asserted on: small enough that the window
+    /// lands on all three parts of the frame at once — the panel's columns to
+    /// its left, the tree pane's to its right, and the footer under its last
+    /// rows — so "nothing shows through" is one assertion rather than three
+    /// sizes of terminal.
+    ///
+    /// Smaller than warlock is meant to be run at, and that is the point: the
+    /// window is fixed at what [`confirm_size`] says, so the way to put it over
+    /// everything at once is to shrink the frame around it.
+    const COVER_WIDTH: u16 = 60;
+    /// See [`COVER_WIDTH`]: eight rows puts the bottom of the window over the
+    /// top of the footer.
+    const COVER_HEIGHT: u16 = 8;
+
+    /// A word drawn all over the frame the confirmation is about to be drawn
+    /// over, so that the covering is asserted against a screen with something to
+    /// show through rather than against a blank one.
+    const UNDERNEATH: &str = "underneath";
+
+    /// An app with something on every part of the frame: the fixture's tree in
+    /// the tree pane, an account long enough to fill the panel with lines wide
+    /// enough to fill its rows, and the ordinary footer under both.
+    fn busy_app(base: Instant, width: u16, height: u16) -> App {
+        let mut app = pacting_app(base, width, height);
+        let detail = [UNDERNEATH; MANY].join(" ");
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section("crates/engine", base);
+        for line in 0..MANY {
+            account.record(
+                &Activity::Tool {
+                    name: "Read".to_owned(),
+                    detail: Some(detail.clone()),
+                },
+                at(base, line as u64 + 1),
+            );
+        }
+        app
+    }
+
+    /// Where the confirmation's window lands on a buffer of this size, measured
+    /// off the very function [`draw`] places it with.
+    fn confirm_rect(buffer: &Buffer) -> Rect {
+        confirm_area(buffer.area)
+    }
+
+    /// The rows of the confirmation's window, as text, clipped to its own
+    /// columns — so what these say is what the window says, with neither pane
+    /// beside it on the end.
+    fn confirm_rows(buffer: &Buffer) -> Vec<String> {
+        let area = confirm_rect(buffer);
+        (0..area.height)
+            .map(|index| text_in(buffer, area, area.y + index))
+            .collect()
+    }
+
+    /// What one row of the window actually says, with its border glyphs and the
+    /// blanks either side of them taken off.
+    ///
+    /// Trimmed from the ends only, so the gap between the two answers survives
+    /// and a row that leaked something from underneath keeps it: the whole use
+    /// of this is that a row of the window is one of three known strings, and a
+    /// helper that could turn a fourth into one of them would prove nothing.
+    fn inside_the_border(row: &str) -> String {
+        row.trim_matches(|glyph: char| "┌┐└┘─│ ".contains(glyph))
+            .to_owned()
+    }
+
+    /// The answers line as it reads on screen: Yes, the gap, No.
+    fn answers_text() -> String {
+        format!("{CONFIRM_YES}{CONFIRM_ANSWER_GAP}{CONFIRM_NO}")
+            .trim()
+            .to_owned()
+    }
+
+    /// The colour and modifiers every cell of `answer`'s word is drawn with.
+    ///
+    /// Every cell rather than the first, because a highlight that covered half a
+    /// word would still be a highlight the eye could find and would still be
+    /// wrong. The padding either side of the word is skipped: what is asserted
+    /// is that the answer is lit, and the columns the constant pads it with are
+    /// [`CONFIRM_YES`]'s business.
+    fn answer_style(buffer: &Buffer, answer: &str) -> Vec<(Color, Modifier)> {
+        let area = confirm_rect(buffer);
+        let word = answer.trim();
+        let (index, row) = confirm_rows(buffer)
+            .into_iter()
+            .enumerate()
+            .find(|(_, row)| row.contains(word))
+            .unwrap_or_else(|| panic!("{word:?} is not on the window"));
+        let start = u16::try_from(column_of(&row, word)).expect("a narrow window");
+        let width = u16::try_from(word.chars().count()).expect("a short word");
+        let y = area.y + u16::try_from(index).expect("a short window");
+
+        (start..start + width)
+            .map(|column| {
+                let cell = &buffer[(area.x + column, y)];
+                (cell.fg, cell.modifier)
+            })
+            .collect()
+    }
+
+    /// Assert that `answer` is the one the highlight is on.
+    fn assert_lit(buffer: &Buffer, answer: &str) {
+        let cells = answer_style(buffer, answer);
+        assert!(!cells.is_empty(), "{answer:?} is drawn nowhere");
+        for (fg, modifier) in cells {
+            assert_eq!(fg, FOCUS_COLOUR, "{answer:?} should be lit");
+            assert!(
+                modifier.contains(Modifier::REVERSED),
+                "{answer:?} should be lit on a terminal with no colour too"
+            );
+            assert!(
+                modifier.contains(Modifier::BOLD),
+                "{answer:?} should be lit"
+            );
+        }
+    }
+
+    /// Assert that `answer` is the one the highlight is not on.
+    fn assert_unlit(buffer: &Buffer, answer: &str) {
+        let cells = answer_style(buffer, answer);
+        assert!(!cells.is_empty(), "{answer:?} is drawn nowhere");
+        for (fg, modifier) in cells {
+            assert_ne!(fg, FOCUS_COLOUR, "{answer:?} should not be lit");
+            assert!(
+                !modifier.contains(Modifier::REVERSED),
+                "{answer:?} should not be lit"
+            );
+        }
+    }
+
+    #[test]
+    fn the_window_is_sized_by_what_it_says_plus_its_margins_and_its_border() {
+        // Measured off the text rather than written down, so a reworded
+        // question is drawn whole rather than cut off by a width somebody
+        // forgot to widen.
+        let Size { width, height } = confirm_size();
+        let answers = display_width(CONFIRM_YES)
+            + display_width(CONFIRM_ANSWER_GAP)
+            + display_width(CONFIRM_NO);
+        let text = display_width(CONFIRM_QUESTION).max(answers);
+
+        assert_eq!(
+            usize::from(width),
+            text + usize::from(2 * CONFIRM_MARGIN + 2 * BORDER_THICKNESS)
+        );
+        assert_eq!(height, CONFIRM_HEIGHT);
+        assert_eq!(
+            height,
+            CONFIRM_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS
+        );
+    }
+
+    #[test]
+    fn the_confirmation_is_a_small_window_centred_on_the_terminal() {
+        let base = Instant::now();
+        let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+
+        let buffer = render_confirm(&app, WIDTH, FIXTURE_HEIGHT, base, QuitConfirm::open());
+
+        let area = confirm_rect(&buffer);
+        let Size { width, height } = confirm_size();
+        // Small: a window over the frame, not a second screen instead of it.
+        assert_eq!((area.width, area.height), (width, height));
+        assert!(area.width < WIDTH / 2, "the window is half the terminal");
+        assert!(
+            area.height < FIXTURE_HEIGHT,
+            "the window is the whole height"
+        );
+        // Centred: the columns left over are shared out either side of it, and
+        // so are the rows, give or take the odd one that cannot be halved.
+        let left = area.x;
+        let right = WIDTH - (area.x + area.width);
+        let above = area.y;
+        let below = FIXTURE_HEIGHT - (area.y + area.height);
+        assert!(
+            left.abs_diff(right) <= 1,
+            "{left} columns left, {right} right"
+        );
+        assert!(
+            above.abs_diff(below) <= 1,
+            "{above} rows above, {below} below"
+        );
+        // And it is a window: a border all the way round it.
+        let rows = confirm_rows(&buffer);
+        assert!(
+            rows[0].starts_with('┌') && rows[0].ends_with('┐'),
+            "{rows:?}"
+        );
+        let last = rows.last().expect("the window has rows");
+        assert!(last.starts_with('└') && last.ends_with('┘'), "{rows:?}");
+        for row in &rows[1..rows.len() - 1] {
+            assert!(row.starts_with('│') && row.ends_with('│'), "{rows:?}");
+        }
+    }
+
+    #[test]
+    fn the_confirmation_asks_its_question_and_offers_exactly_two_answers() {
+        let base = Instant::now();
+        let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+
+        let buffer = render_confirm(&app, WIDTH, FIXTURE_HEIGHT, base, QuitConfirm::open());
+
+        let rows = confirm_rows(&buffer);
+        let question = rows
+            .iter()
+            .position(|row| row.contains(CONFIRM_QUESTION))
+            .unwrap_or_else(|| panic!("the question is not on the window: {rows:?}"));
+        let answers = rows
+            .iter()
+            .position(|row| row.contains(CONFIRM_YES.trim()))
+            .unwrap_or_else(|| panic!("the answers are not on the window: {rows:?}"));
+        // Two things to read, on two lines, in the order they are read in.
+        assert!(question < answers, "{rows:?}");
+        // Exactly two answers: the line says Yes, the gap and No, and nothing
+        // else — no third answer and no line of keys under it.
+        assert_eq!(inside_the_border(&rows[answers]), answers_text());
+        assert!(rows[answers].contains(CONFIRM_NO.trim()));
+        // Yes to the left of No, which is what makes Left and Right positional
+        // rather than a toggle. See `crate::confirm`.
+        assert!(
+            column_of(&rows[answers], CONFIRM_YES.trim())
+                < column_of(&rows[answers], CONFIRM_NO.trim())
+        );
+        // Said once each: a question asked twice is two questions.
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.contains(CONFIRM_QUESTION))
+                .count(),
+            1
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.contains(CONFIRM_NO.trim()))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn nothing_from_the_frame_underneath_shows_through_the_window() {
+        let base = Instant::now();
+        let app = busy_app(base, COVER_WIDTH, COVER_HEIGHT);
+
+        let closed = render_confirm(&app, COVER_WIDTH, COVER_HEIGHT, base, QuitConfirm::Closed);
+        let open = render_confirm(&app, COVER_WIDTH, COVER_HEIGHT, base, QuitConfirm::open());
+
+        // At this size the window is over the panel, over the tree pane and
+        // over the top of the footer, and every row behind it has something on
+        // it — without which the assertions below would pass on a blank screen.
+        let area = confirm_rect(&open);
+        let Areas { panel, tree, .. } = areas(open.area);
+        assert!(
+            area.x < panel.x + panel.width,
+            "the window misses the panel"
+        );
+        assert!(
+            area.x + area.width > tree.x,
+            "the window misses the tree pane"
+        );
+        assert!(
+            area.y + area.height > COVER_HEIGHT - FOOTER_HEIGHT,
+            "the window misses the footer"
+        );
+        for (index, row) in confirm_rows(&closed).iter().enumerate() {
+            assert!(
+                !row.trim().is_empty(),
+                "row {index} behind the window is blank, so this proves nothing"
+            );
+        }
+
+        // What the window says is the question, the answers, or nothing at all.
+        // Anything the frame underneath had put in these columns would be a
+        // fourth thing here.
+        let said = [String::new(), CONFIRM_QUESTION.to_owned(), answers_text()];
+        let keys = KEYS
+            .split_whitespace()
+            .next()
+            .expect("the keys line has keys");
+        for (index, row) in confirm_rows(&open).iter().enumerate() {
+            assert!(
+                said.contains(&inside_the_border(row)),
+                "window row {index} says {row:?}"
+            );
+            for leaked in [UNDERNEATH, "crates", "unpacted", keys] {
+                assert!(
+                    !row.contains(leaked),
+                    "window row {index} shows {leaked:?} through: {row:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_window_covers_its_own_cells_and_no_others() {
+        let base = Instant::now();
+        let app = busy_app(base, COVER_WIDTH, COVER_HEIGHT);
+
+        let closed = render_confirm(&app, COVER_WIDTH, COVER_HEIGHT, base, QuitConfirm::Closed);
+        let open = render_confirm(&app, COVER_WIDTH, COVER_HEIGHT, base, QuitConfirm::open());
+
+        // Outside the window, cell for cell, the frame is the one that was
+        // there before the question was asked: the panel, the tree and the
+        // footer are drawn exactly as they always were and the question is laid
+        // over the top of them.
+        let area = confirm_rect(&open);
+        for y in 0..open.area.height {
+            for x in 0..open.area.width {
+                if area.contains(Position::new(x, y)) {
+                    continue;
+                }
+                assert_eq!(
+                    open[(x, y)],
+                    closed[(x, y)],
+                    "the frame changed at column {x}, row {y}, outside the window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_closed_confirmation_leaves_no_trace_of_itself_on_the_frame() {
+        let base = Instant::now();
+        let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+
+        let closed = render_confirm(&app, WIDTH, FIXTURE_HEIGHT, base, QuitConfirm::Closed);
+
+        // Not a word of it anywhere on the frame.
+        for (index, row) in rows_text(&closed).iter().enumerate() {
+            assert!(!row.contains(CONFIRM_QUESTION), "row {index}: {row:?}");
+            assert!(!row.contains(CONFIRM_YES.trim()), "row {index}: {row:?}");
+            assert!(!row.contains(CONFIRM_NO.trim()), "row {index}: {row:?}");
+        }
+        // And the cells the window would have taken are still the frame's own:
+        // nothing was cleared for a question nobody asked. With this and
+        // `the_window_covers_its_own_cells_and_no_others`, a closed
+        // confirmation draws exactly the frame that was drawn before there was
+        // one — which is what every other test in this module asserts about,
+        // since `render` draws with the question down.
+        let behind = confirm_rows(&closed);
+        assert!(
+            behind.iter().any(|row| row.contains(UNDERNEATH)),
+            "{behind:?}"
+        );
+    }
+
+    #[test]
+    fn the_highlight_opens_on_no_and_moves_to_yes() {
+        let base = Instant::now();
+        let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+
+        let opened = render_confirm(&app, WIDTH, FIXTURE_HEIGHT, base, QuitConfirm::open());
+        let moved = render_confirm(
+            &app,
+            WIDTH,
+            FIXTURE_HEIGHT,
+            base,
+            QuitConfirm::Open(Answer::Yes),
+        );
+
+        // The dangerous answer is never the one under the reader's finger when
+        // the question arrives.
+        assert_lit(&opened, CONFIRM_NO);
+        assert_unlit(&opened, CONFIRM_YES);
+        assert_lit(&moved, CONFIRM_YES);
+        assert_unlit(&moved, CONFIRM_NO);
+        // The highlight moved and nothing else did: the two answers are drawn
+        // in the same columns whichever of them is lit, so the eye finds the
+        // one that changed rather than re-reading a line that shifted.
+        assert_eq!(confirm_rows(&opened), confirm_rows(&moved));
+    }
+
+    #[test]
+    fn a_terminal_too_small_for_the_window_clamps_it_and_still_shows_it() {
+        let base = Instant::now();
+
+        // Down to one cell. A confirmation that declined to draw would leave
+        // the reader in a mode with nothing on screen to say so, pressing keys
+        // that reach nothing they can see — which is worse than a window with
+        // its edges cut off.
+        for (width, height) in [(20, 5), (4, 2), (1, 1), (2, 20), (30, 1)] {
+            let app = busy_app(base, width, height);
+            let closed = render_confirm(&app, width, height, base, QuitConfirm::Closed);
+            let open = render_confirm(&app, width, height, base, QuitConfirm::open());
+            let area = confirm_rect(&open);
+            let size = format!("{width}x{height}");
+
+            assert!(area.width > 0 && area.height > 0, "nothing drawn at {size}");
+            assert!(area.x + area.width <= width, "off the right at {size}");
+            assert!(area.y + area.height <= height, "off the bottom at {size}");
+            let drawn = (area.y..area.y + area.height).any(|y| {
+                (area.x..area.x + area.width).any(|x| !open[(x, y)].symbol().trim().is_empty())
+            });
+            assert!(drawn, "the window is blank at {size}");
+            assert_ne!(
+                rows_text(&open),
+                rows_text(&closed),
+                "the question changed nothing on screen at {size}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_footer_keeps_its_three_lines_and_its_wording_while_the_question_is_up() {
+        let base = Instant::now();
+        let app = busy_app(base, KEYS_WIDTH, MARK_ROOM_HEIGHT);
+
+        let closed = render_confirm(
+            &app,
+            KEYS_WIDTH,
+            MARK_ROOM_HEIGHT,
+            base,
+            QuitConfirm::Closed,
+        );
+        let open = render_confirm(
+            &app,
+            KEYS_WIDTH,
+            MARK_ROOM_HEIGHT,
+            base,
+            QuitConfirm::open(),
+        );
+
+        // Three lines, in their places, saying what they said: the gate on the
+        // way out is a window over the frame and not a fourth footer line, and
+        // the keys line still names the way out it always named.
+        let footer = areas(open.area).footer;
+        assert_eq!(footer.height, FOOTER_HEIGHT);
+        assert_eq!(open.area.height, MARK_ROOM_HEIGHT);
+        for y in footer.y..footer.y + footer.height {
+            assert_eq!(row_text(&open, y), row_text(&closed, y), "footer row {y}");
+        }
+        let keys = row_text(&open, footer.y + 1);
+        assert!(keys.contains(KEYS), "{keys:?}");
+        assert!(keys.contains(QUIT_KEY), "{keys:?}");
     }
 }

@@ -124,7 +124,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use ratatui::crossterm::execute;
-use warlock_tui::{ClaudeAgent, Focus, draw, panel_height, tree_height};
+use warlock_tui::{ClaudeAgent, Focus, QuitConfirm, draw, panel_height, tree_height};
 
 mod error;
 mod input;
@@ -265,9 +265,13 @@ fn run() -> Result<(), Error> {
         // renderer: the panel's newest clock counts up against it, so a frame
         // drawn with no event waiting still shows a run that is moving. See
         // `draw`.
+        //
+        // The gate on the way out is handed in beside the app because the app
+        // has never heard of it (see `QuitConfirm`). This loop does not open it
+        // yet, so what is drawn here is the frame warlock has always drawn.
         guard
             .terminal
-            .draw(|frame| draw(frame, &app, Instant::now()))?;
+            .draw(|frame| draw(frame, &app, Instant::now(), QuitConfirm::Closed))?;
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
         // sits here, so the wait has to end whether or not anybody presses
