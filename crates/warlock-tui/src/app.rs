@@ -431,8 +431,11 @@ impl Focus {
 /// selected row, the slice of rows on screen, the tally the footer shows and
 /// the header line naming what is being shown.
 ///
-/// `all_rows` is the engine's whole walk as it was when the app was built, and
-/// nothing but a reload changes it; `rows` is what is actually drawn, rebuilt
+/// `all_rows` is the engine's whole walk as it was when the app was built. No
+/// view change touches it, and a reload replaces it whole; the only thing that
+/// writes into it is news a reload cannot be waited for — a state a running pact
+/// has earned ([`App::set_subtree_state`]) and a document it has just written
+/// ([`App::insert_file_row`]). `rows` is what is actually drawn, rebuilt
 /// from `all_rows` every time the collapsed set changes, with the descendants
 /// of every collapsed node filtered out. Keeping both means collapsing is
 /// reversible without a second walk of a tree the app no longer holds, and that
@@ -2090,6 +2093,138 @@ impl App {
         paint_subtree(&mut self.all_rows, path, state);
         paint_subtree(&mut self.rows, path, state);
     }
+
+    /// Splice a row for the file at `path` in under the directory holding it,
+    /// where a fresh load would have put it.
+    ///
+    /// A pact writes a `WARLOCK.md` beside each directory as its pass delivers,
+    /// and the row for that document has to appear then rather than when the run
+    /// ends. The tree the app was built from is not held and the tree on disk is
+    /// mid-run — the manifest is still the pre-pact one — so the row cannot be
+    /// re-derived: re-reading would repaint every row from stale state and wipe
+    /// the colours the run has already earned. So the one row that is news is
+    /// written in, and nothing else moves.
+    ///
+    /// It is written in at the place [`App::from_tree`] would have flattened it
+    /// to: among that directory's file rows in path order — the order the
+    /// engine's loader sorts a node's listing into — at one depth deeper than
+    /// the directory, and so before the rows for any of its subdirectories. A
+    /// mid-run tree and the reload that follows the run therefore agree.
+    ///
+    /// The row carries the directory's state *now*, and its `.warlockignore`
+    /// flag, for the reason [`Row::file`] gives: a file is drawn in its module's
+    /// colour, and the module's colour is whatever the run has just made it.
+    ///
+    /// Both lists move, the way [`App::set_subtree_state`] moves both: into the
+    /// whole walk, so the row survives the next collapse or filter rebuild
+    /// rather than vanishing, and into the drawn rows when the view is one this
+    /// file is drawn in. It re-filters nothing, again like `set_subtree_state` —
+    /// the drawn half is decided by asking what this view already shows, not by
+    /// rebuilding it.
+    ///
+    /// Nothing else moves at all. A `path` already in the walk is inserted
+    /// nowhere, so a re-pact of an already documented directory leaves exactly
+    /// one row for it; a `path` whose directory has no row is not news about
+    /// anything on screen and changes nothing. [`App::counts`] never moves,
+    /// because files are counted nowhere. The selection keeps naming the row it
+    /// named, and the window keeps its rows, both of which mean an index that
+    /// shifts when a row lands above it. And no message is set or cleared: this
+    /// is not a keystroke.
+    pub fn insert_file_row(&mut self, path: impl AsRef<Path>) {
+        let path = path.as_ref();
+        // One row per path, so a second delivery for a directory already
+        // holding its document is not news.
+        if self.all_rows.iter().any(|row| row.path == path) {
+            return;
+        }
+        let Some(directory) = path.parent() else {
+            return;
+        };
+        // The directory's own row, never a file row that happens to be spelled
+        // like one: a file holds nothing.
+        let Some(index) = self
+            .all_rows
+            .iter()
+            .position(|row| !row.is_file() && row.path == directory)
+        else {
+            return;
+        };
+
+        let holder = &self.all_rows[index];
+        let depth = holder.depth + 1;
+        let row = Row::file(depth, path, holder.state).with_ignored(holder.is_ignored());
+        let at = file_row_position(&self.all_rows, index, depth, path);
+        self.all_rows.insert(at, row.clone());
+
+        // The drawn half, which is conditional: `rows` holds file rows only
+        // while the toggle is on, holds a file under a pacted directory only
+        // under the pacted-only filter, and holds nothing at all under a
+        // directory that is collapsed or filtered away. Asking those three
+        // questions is what keeps this insertion and the next `reflow` from
+        // disagreeing about what is on screen.
+        if !self.show_files
+            || (self.pacted_only && !row.state.is_pacted())
+            || self.collapsed.contains(directory)
+        {
+            return;
+        }
+        // A directory whose own row is not drawn — filtered away, or under
+        // something collapsed — has nothing on screen for this to go under.
+        let Some(index) = self
+            .rows
+            .iter()
+            .position(|drawn| !drawn.is_file() && drawn.path == directory)
+        else {
+            return;
+        };
+        let at = file_row_position(&self.rows, index, depth, path);
+        self.rows.insert(at, row);
+        // `collapsible` is deliberately left alone. A directory that held
+        // nothing and has just gained its first drawn row is collapsible now and
+        // will not be said to be until the next `reflow`, which any keystroke
+        // that changes the view runs; the cost of being wrong is a collapse key
+        // that does nothing on one row for one frame, and the fix would be a
+        // second place the drawn-and-collapsed rule is written down.
+
+        // Both indices are into `rows`, so a row landing at or above one of them
+        // moves it: the selection would otherwise name the row below the one it
+        // named, and the window would slide up a line for a reason the reader
+        // did nothing to cause.
+        if at <= self.selected {
+            self.selected += 1;
+        }
+        if at <= self.scroll_offset {
+            self.scroll_offset += 1;
+        }
+        self.rescroll();
+    }
+}
+
+/// Where the row for the file at `path` goes in `rows`, given that the
+/// directory holding it has the row at `directory` and that its file rows sit at
+/// `depth`.
+///
+/// The engine's loader sorts each node's listing (`directory.files.sort()`), and
+/// [`App::from_tree`] flattens that listing straight after the directory's own
+/// row, so the file rows of a directory are the run of rows following it that
+/// are files at `depth`, in path order. The answer is the first of them that
+/// sorts after `path`, or the end of that run — which is where the rows for the
+/// directory's subdirectories begin, and so is before all of them.
+///
+/// Paths are compared as [`Path`] compares them, component by component, which
+/// is the ordering `sort` on a [`Vec<PathBuf>`] uses: one ordering, so a spliced
+/// row and a reloaded one land in the same place.
+///
+/// Pure, and deliberately free of [`App`]: rows and a path in, an index out.
+fn file_row_position(rows: &[Row], directory: usize, depth: usize, path: &Path) -> usize {
+    let mut at = directory + 1;
+    for row in rows.iter().skip(directory + 1) {
+        if !row.is_file() || row.depth != depth || row.path.as_path() > path {
+            break;
+        }
+        at += 1;
+    }
+    at
 }
 
 /// The view `view` is showing, re-seated on `tree`: the rows and the tally of
@@ -6191,5 +6326,319 @@ mod tests {
         let reseated = reseat_on(&app, &fixture::tree());
 
         assert_eq!(reseated, app);
+    }
+
+    /// The fixture as a later load would find it once the file at `path` had
+    /// been written: listed on the directory holding it, in the sorted order the
+    /// loader's `files.sort()` leaves a listing in.
+    ///
+    /// This is what an insertion is measured against. A test that asserted a
+    /// hand-written order would be asserting the same guess twice; comparing
+    /// against a tree built the way `from_tree` reads one is asserting that a
+    /// mid-run splice and the reload after the run agree.
+    fn tree_listing(path: &str) -> Tree {
+        let mut tree = fixture::tree();
+        assert!(
+            list_file(&mut tree.root, Path::new(path)),
+            "no node for the directory holding {path}"
+        );
+        tree
+    }
+
+    /// List `path` on whichever node under `node` is the directory holding it,
+    /// keeping the listing sorted. Whether one was found.
+    fn list_file(node: &mut Node, path: &Path) -> bool {
+        if Some(node.path.as_path()) == path.parent() {
+            node.files.push(path.to_path_buf());
+            node.files.sort();
+            return true;
+        }
+        node.children.iter_mut().any(|child| list_file(child, path))
+    }
+
+    /// The fixture with its files shown, which is the view an insertion is
+    /// visible in at all.
+    fn app_with_files() -> App {
+        let mut app = App::from_tree(&fixture::tree());
+        app.toggle_files();
+        app
+    }
+
+    #[test]
+    fn inserting_a_file_row_lands_it_where_a_fresh_load_would_have_put_it() {
+        // Sorts between `WARLOCK.md` and `logo.svg`, so neither appending nor
+        // prepending would pass this.
+        let mut app = app_with_files();
+
+        app.insert_file_row("warlock/assets/index.html");
+
+        let mut expected = App::from_tree(&tree_listing("warlock/assets/index.html"));
+        expected.toggle_files();
+        assert_eq!(drawn(&app), drawn(&expected));
+        // Every field, not only the drawn paths: the depth, the state and the
+        // whole walk behind the drawn rows are the load's as well.
+        assert_eq!(app, expected);
+    }
+
+    #[test]
+    fn an_inserted_file_row_goes_before_the_rows_for_its_directorys_children() {
+        // `zzz.md` sorts after every file the root lists and after the name of
+        // its child directory, so only the files-before-children rule of the
+        // walk puts it in the right place.
+        let mut app = app_with_files();
+
+        app.insert_file_row("warlock/zzz.md");
+
+        let mut expected = App::from_tree(&tree_listing("warlock/zzz.md"));
+        expected.toggle_files();
+        assert_eq!(app, expected);
+        assert_eq!(
+            &drawn(&app)[..4],
+            [
+                "warlock".to_owned(),
+                "warlock/README.md".to_owned(),
+                "warlock/WARLOCK.md".to_owned(),
+                "warlock/zzz.md".to_owned(),
+            ]
+        );
+        assert_eq!(drawn(&app)[4], "warlock/crates");
+    }
+
+    #[test]
+    fn an_inserted_file_row_is_a_file_row_in_its_directorys_colour_now() {
+        let mut app = app_with_files();
+        // The colour a run has just painted, which is the whole point: the
+        // state comes off the directory row as it stands, not off any tree.
+        app.set_subtree_state("warlock/assets", NodeState::PactedFresh);
+
+        app.insert_file_row("warlock/assets/WARLOCK.md");
+
+        let row = app
+            .rows()
+            .iter()
+            .find(|row| row.path == Path::new("warlock/assets/WARLOCK.md"))
+            .expect("the inserted row is drawn");
+        assert!(row.is_file());
+        assert_eq!(row.depth, 2);
+        assert_eq!(row.state, NodeState::PactedFresh);
+        assert_eq!(row.document, None);
+        assert_eq!(row.children, 0);
+        assert!(!row.is_ignored());
+    }
+
+    #[test]
+    fn an_inserted_file_row_carries_the_directorys_ignored_flag() {
+        let tree = Tree::new(
+            Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale).with_children([
+                Node::new("repo/vendor", None, NodeState::Unpacted).with_ignored(true),
+            ]),
+        );
+        let mut app = App::from_tree(&tree);
+        app.toggle_files();
+
+        app.insert_file_row("repo/vendor/WARLOCK.md");
+        app.insert_file_row("repo/WARLOCK.md");
+
+        let ignored = |app: &App, path: &str| {
+            app.rows()
+                .iter()
+                .find(|row| row.path == Path::new(path))
+                .map(Row::is_ignored)
+        };
+        assert_eq!(ignored(&app, "repo/vendor/WARLOCK.md"), Some(true));
+        assert_eq!(ignored(&app, "repo/WARLOCK.md"), Some(false));
+    }
+
+    #[test]
+    fn inserting_a_path_already_in_the_walk_changes_nothing() {
+        let app = app_with_files();
+
+        // A file the load already listed: a re-pact of a directory that was
+        // documented before the run started.
+        let mut again = app.clone();
+        again.insert_file_row("warlock/assets/logo.svg");
+        assert_eq!(again, app);
+
+        // And a second delivery of a row this method itself put there.
+        let mut twice = app.clone();
+        twice.insert_file_row("warlock/assets/index.html");
+        let once = twice.clone();
+        twice.insert_file_row("warlock/assets/index.html");
+        assert_eq!(twice, once);
+        assert_eq!(
+            twice
+                .rows()
+                .iter()
+                .filter(|row| row.path == Path::new("warlock/assets/index.html"))
+                .count(),
+            1,
+        );
+    }
+
+    #[test]
+    fn inserting_under_a_directory_with_no_row_changes_nothing_at_all() {
+        let app = app_with_files();
+
+        for path in [
+            // No node for the directory.
+            "warlock/nowhere/WARLOCK.md",
+            // Nor for a file's own path read as one.
+            "warlock/assets/logo.svg/WARLOCK.md",
+            // Nor above the root of the tree on screen.
+            "elsewhere/WARLOCK.md",
+            // And a path with no directory to be in.
+            "WARLOCK.md",
+        ] {
+            let mut after = app.clone();
+            after.insert_file_row(path);
+            assert_eq!(after, app, "{path} moved something");
+        }
+    }
+
+    #[test]
+    fn inserting_a_file_row_leaves_the_tally_alone() {
+        let mut app = app_with_files();
+        let before = app.counts();
+        assert_eq!(before, fixture::tree().counts());
+
+        app.insert_file_row("warlock/assets/index.html");
+        app.insert_file_row("warlock/crates/WARLOCK.md");
+
+        // Files are counted nowhere, so not one field of the footer's tally
+        // moves — not even the total.
+        assert_eq!(app.counts(), before);
+        assert_eq!(app.counts().total(), before.total());
+    }
+
+    #[test]
+    fn an_inserted_file_row_survives_a_rebuild_of_the_drawn_rows() {
+        let mut app = app_with_files();
+
+        app.insert_file_row("warlock/assets/index.html");
+        let after = drawn(&app);
+
+        // The file toggle, which rebuilds the drawn rows from the whole walk:
+        // a row written only into the drawn list would go here and never come
+        // back.
+        app.toggle_files();
+        app.toggle_files();
+        assert_eq!(drawn(&app), after);
+
+        // And a collapse over it, which rebuilds them again.
+        let mut app = select(app, "warlock/assets");
+        app.toggle_collapsed();
+        app.toggle_collapsed();
+        assert_eq!(drawn(&app), after);
+    }
+
+    #[test]
+    fn with_files_hidden_an_insertion_shows_nothing_until_the_toggle() {
+        let mut app = App::from_tree(&fixture::tree());
+        let before = app.clone();
+
+        app.insert_file_row("warlock/assets/index.html");
+
+        assert_eq!(app.rows(), before.rows());
+        assert_eq!(drawn(&app), whole_fixture());
+
+        app.toggle_files();
+
+        let mut expected = App::from_tree(&tree_listing("warlock/assets/index.html"));
+        expected.toggle_files();
+        assert_eq!(drawn(&app), drawn(&expected));
+    }
+
+    #[test]
+    fn an_insertion_under_a_collapsed_directory_waits_for_the_expand() {
+        let mut app = select(app_with_files(), "warlock/assets");
+        app.toggle_collapsed();
+        let before = drawn(&app);
+
+        app.insert_file_row("warlock/assets/index.html");
+
+        assert_eq!(
+            drawn(&app),
+            before,
+            "nothing is drawn under a collapsed row"
+        );
+
+        app.toggle_collapsed();
+
+        let mut expected = App::from_tree(&tree_listing("warlock/assets/index.html"));
+        expected.toggle_files();
+        assert_eq!(drawn(&app), drawn(&expected));
+    }
+
+    #[test]
+    fn the_filter_draws_an_inserted_file_only_under_a_pacted_directory() {
+        let mut app = app_with_files();
+        app.toggle_pacted_only();
+        let before = drawn(&app);
+
+        // `warlock/assets` is unpacted, so the filter would drop a file row
+        // taking its colour, exactly as it drops the two it already has.
+        app.insert_file_row("warlock/assets/index.html");
+        assert_eq!(drawn(&app), before);
+
+        // `warlock/crates/engine` is pacted, so the filter keeps its files.
+        app.insert_file_row("warlock/crates/engine/index.html");
+
+        let mut expected = App::from_tree(&tree_listing("warlock/crates/engine/index.html"));
+        expected.toggle_files();
+        expected.toggle_pacted_only();
+        assert_eq!(drawn(&app), drawn(&expected));
+
+        // Both rows are in the walk all the same: the filter is a view, and
+        // widening it puts the one it dropped back.
+        app.toggle_pacted_only();
+        assert!(
+            drawn(&app).contains(&"warlock/assets/index.html".to_owned()),
+            "the walk kept the row the filter would not draw"
+        );
+    }
+
+    #[test]
+    fn an_insertion_above_the_selection_keeps_the_selection_on_its_row() {
+        let mut app = app_with_files_selecting("warlock/assets/logo.svg");
+        let selected = app.selected();
+
+        // Sorts before the selected row, so the index it sits at is no longer
+        // the index it belongs at.
+        app.insert_file_row("warlock/assets/index.html");
+
+        assert_eq!(
+            app.selected_row().map(|row| row.path.clone()),
+            Some(PathBuf::from("warlock/assets/logo.svg"))
+        );
+        assert_eq!(app.selected(), selected + 1);
+
+        // A row landing below the selection moves nothing.
+        let selected = app.selected();
+        app.insert_file_row("warlock/assets/zebra.svg");
+        assert_eq!(app.selected(), selected);
+        assert_eq!(
+            app.selected_row().map(|row| row.path.clone()),
+            Some(PathBuf::from("warlock/assets/logo.svg"))
+        );
+        // And the message line is untouched throughout: this is not a keystroke.
+        assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn an_insertion_above_the_window_keeps_the_same_rows_on_screen() {
+        let mut app = app_with_files_selecting("warlock/assets/logo.svg");
+        app.set_viewport_height(4);
+        let offset = app.scroll_offset();
+        assert!(offset > 0, "the window has scrolled off the top");
+        let on_screen: Vec<String> = drawn(&app)[offset..offset + 4].to_vec();
+
+        // Above the window, so every row on screen would slide down a line if
+        // the offset were left where it was.
+        app.insert_file_row("warlock/README.txt");
+
+        let offset = app.scroll_offset();
+        assert_eq!(drawn(&app)[offset..offset + 4], on_screen[..]);
+        assert!(window_is_in_range(&app));
+        assert!(selection_is_on_screen(&app));
     }
 }
