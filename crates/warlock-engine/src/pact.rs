@@ -48,11 +48,40 @@
 //!
 //! The walk is the same walk as [`load`](crate::load) and [`hash`](crate::hash)
 //! — the [`ignore`] crate, `follow_links(false)`, `require_git(false)`,
-//! `.warlock/` pruned by name — so a file that is gitignored, hidden or
-//! Warlock's own bookkeeping is as absent from a request as it is from a tree
-//! or a digest. Symlinks are neither followed nor listed. Relative paths are
-//! spelled by [`to_manifest_path`], forward slashes and all, and everything
-//! comes out sorted, so two builds of an unchanged directory are equal values.
+//! `.warlock/` pruned by name, `.warlockignore` honoured — so a file that is
+//! gitignored, hidden, excluded by the repository or Warlock's own bookkeeping
+//! is as absent from a request as it is from a tree or a digest. Symlinks are
+//! neither followed nor listed. Relative paths are spelled by
+//! [`to_manifest_path`], forward slashes and all, and everything comes out
+//! sorted, so two builds of an unchanged directory are equal values.
+//!
+//! # What the repository says Warlock is not about
+//!
+//! `.warlockignore` is the repository's own list of content Warlock does not
+//! cover, in gitignore's syntax and read by gitignore's own matcher (the
+//! `ignores` module holds the one spelling of the name and the root check).
+//! Both of this module's walks read it:
+//! an excluded file reaches no request in any of its three states — not sent
+//! whole, not listed by name and size, not summarised — and an excluded
+//! directory is not in [`pactable_directories`], so a pact of an ancestor gives
+//! it no `WARLOCK.md` and no manifest entry. Selecting it directly is no way
+//! round that: `pactable_directories` asks about the root it was handed as
+//! well, because a walker applies its rules to what it descends into and not to
+//! where it was told to start.
+//!
+//! **Adopting, editing or removing a `.warlockignore` restales every directory
+//! whose covered content it changes, all at once.** The rules decide which
+//! files a [`subtree_hash`] is taken over, so a rule that excludes a file
+//! changes the digest of that file's directory and of every directory above it,
+//! and each of them stops matching the hash it was granted for. Turning a
+//! shelf of a repository yellow with one line in one file looks alarming and is
+//! exactly right: those documents were written from content that is no longer
+//! part of what Warlock covers, so what they say about the directory is a claim
+//! nobody has re-earned. It is not a bug, it needs no special handling, and
+//! there is nothing to suppress — a refresh describes the affected directories
+//! once and the repository is green again on the rules it now has. (The rules
+//! file is itself an ordinary file in the walk, so it is hashed like any other;
+//! see [`hash`](crate::hash) for why that double move is also correct.)
 //!
 //! # The two caps, and why neither can fail a pact
 //!
@@ -309,6 +338,7 @@ use std::str::Utf8Error;
 
 use ignore::WalkBuilder;
 
+use crate::ignores;
 use crate::manifest::{temp_file_name, write_and_sync};
 use crate::{
     Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, HashError, Manifest,
@@ -1438,12 +1468,20 @@ fn pact_directory_watched(
 ///
 /// **The same directories the tree has.** The walk is
 /// [`load`](crate::load)'s and [`hash`](crate::hash)'s — the [`ignore`] crate,
-/// `follow_links(false)`, `require_git(false)`, `.warlock/` pruned by name — so
-/// a directory that is gitignored, hidden (`.git/` with it) or Warlock's own
-/// bookkeeping is as absent from a pact as it is from a tree or a digest.
+/// `follow_links(false)`, `require_git(false)`, `.warlock/` pruned by name,
+/// `.warlockignore` honoured — so a directory that is gitignored, hidden
+/// (`.git/` with it), excluded by the repository or Warlock's own bookkeeping
+/// is as absent from a pact as it is from a tree or a digest.
 /// Nothing is filtered on top of that: an undocumented directory is exactly the
 /// one a pact exists to give a document to, so there is no "already has a
 /// `WARLOCK.md`" test here and no "has source in it" test either.
+///
+/// `root` itself is checked against `.warlockignore` before the walk, because a
+/// walker applies its rules to what it descends into and not to where it was
+/// told to start. An excluded directory comes back as no directories at all, so
+/// pacting it — by keypress, by manifest entry, by any route that reaches
+/// [`pact_subtree`] — writes no document and records no entry, exactly as
+/// selecting a directory with nothing in it would.
 ///
 /// **Children before parents.** A parent's request carries its immediate
 /// children's documents ([`AgentChildDocument`]), so pacting a parent before its
@@ -1461,10 +1499,24 @@ fn pact_directory_watched(
 /// # Errors
 ///
 /// [`Error::Walk`], naming `root`, if the directory cannot be walked: it is not
-/// there, it cannot be listed, or something vanished from under the walk. There
+/// there, it cannot be listed, something vanished from under the walk, or a
+/// `.warlockignore` governing it cannot be parsed. Unusable rules are never
+/// read as "no rules": a pact that could not tell what the repository excluded
+/// would write documents from the very content it asked to keep out. There
 /// is no partial answer — a pact planned from half a subtree would silently
 /// leave directories out.
 pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
+    // Asked first, and separately, because the walker below will not apply the
+    // rules to the root it is handed. A directory the repository excluded is
+    // pactable in no sense — it has no directories, not even itself.
+    let ignored = ignores::is_ignored(root).map_err(|source| Error::Walk {
+        directory: root.to_path_buf(),
+        source,
+    })?;
+    if ignored {
+        return Ok(Vec::new());
+    }
+
     let walker = WalkBuilder::new(root)
         // The same three rules as `load` and `hash`, for the same reasons: a
         // symlinked cycle has to terminate, a fixture with a `.gitignore` and
@@ -1473,6 +1525,11 @@ pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
         .follow_links(false)
         .require_git(false)
         .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR))
+        // The repository's own exclusions, read by the same crate that reads
+        // `.gitignore` and with the same semantics, because it is the same
+        // matcher — and read here so that what a pact covers is what a tree
+        // shows and what a hash judges.
+        .add_custom_ignore_filename(ignores::FILENAME)
         .build();
 
     // A set, so whatever order the walker offered is thrown away rather than
@@ -1485,6 +1542,16 @@ pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
             directory: root.to_path_buf(),
             source,
         })?;
+        // A rule file the walker could not use is reported beside its directory
+        // rather than in place of it, and taking that as "no rules" would pact
+        // the content the repository excluded. So it is promoted to the failure
+        // it is, naming the file and the line.
+        if let Some(source) = entry.error() {
+            return Err(Error::Walk {
+                directory: root.to_path_buf(),
+                source: source.clone(),
+            });
+        }
         // Directories only. With `follow_links(false)` a symlinked directory
         // reports as a symlink, so it is neither descended into nor pacted as
         // whatever it points at.
@@ -2663,6 +2730,11 @@ fn walk(dir: &Path) -> Result<Found, Error> {
         .follow_links(false)
         .require_git(false)
         .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR))
+        // The repository's own exclusions, on the same terms as everywhere
+        // else: a file the rules removed reaches no request in any of its three
+        // states — not whole, not as a name and a size, not as a summary —
+        // because it is never found here to be put in one.
+        .add_custom_ignore_filename(ignores::FILENAME)
         .max_depth(Some(WALK_DEPTH))
         .build();
 
@@ -2675,6 +2747,14 @@ fn walk(dir: &Path) -> Result<Found, Error> {
             directory: dir.to_path_buf(),
             source,
         })?;
+        // Rules that could not be read are the failure they are rather than a
+        // verdict of "nothing is excluded"; see `pactable_directories`.
+        if let Some(source) = entry.error() {
+            return Err(Error::Walk {
+                directory: dir.to_path_buf(),
+                source: source.clone(),
+            });
+        }
         let depth = entry.depth();
         // Regular files only. With `follow_links(false)` a symlink reports as a
         // symlink, so it is neither descended into nor listed as whatever it
@@ -3685,20 +3765,54 @@ mod tests {
             "# not a module either\n",
         );
         write(dir.path(), "lib.rs", "//! Core engine.\n");
+        // And the repository's own exclusions, which is the same walk again.
+        // `sketches.md` is small enough to be sent whole and `logo.png` is far
+        // too big for the per-file cap, so a rule the walk failed to read would
+        // show up twice over: as a file in the request, and as the `Problem`
+        // that says the big one was listed rather than sent.
+        write(dir.path(), ".warlockignore", "sketches.md\nassets/\n");
+        write(dir.path(), "sketches.md", "# the author's notebook\n");
+        write(dir.path(), "assets/logo.png", filler(PER_FILE_BYTE_CAP + 1));
+        write(dir.path(), "assets/WARLOCK.md", "# not a module at all\n");
 
-        let request = request_for(dir.path());
+        let Gathered { request, problems } =
+            gather_request("summarise", dir.path()).expect("gathers");
 
         assert_eq!(
             file_paths(&request),
             ["lib.rs"],
-            "gitignored, hidden and `.warlock/` files come through the same \
-             walk as everything else, so they never arrive at all"
+            "gitignored, hidden, `.warlock/` and `.warlockignore`d files come \
+             through the same walk as everything else, so they never arrive at \
+             all"
         );
         assert!(
             request.child_documents().is_empty(),
-            "and a document inside an ignored or pruned directory is not a \
-             child document: {:?}",
+            "and a document inside an ignored, excluded or pruned directory is \
+             not a child document: {:?}",
             request.child_documents(),
+        );
+        assert!(
+            problems.is_empty(),
+            "excluded content is not in the request and is not reported \
+             missing from it either — it is no part of what Warlock covers: \
+             {problems:?}",
+        );
+    }
+
+    #[test]
+    fn rules_the_request_walk_cannot_parse_fail_the_gather_and_name_the_file() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+        // A range that runs backwards: a glob the matcher will not compile.
+        write(dir.path(), ".warlockignore", "a[z-a]\n");
+
+        let error = gather_request("summarise", dir.path())
+            .expect_err("rules that cannot be read are not no rules");
+
+        assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
+        assert!(
+            error.to_string().contains(".warlockignore"),
+            "the failure names the file to go and fix: {error}"
         );
     }
 
@@ -7074,6 +7188,110 @@ mod tests {
             fs::read_to_string(manifest_path(repo.path())).expect("the manifest is still there"),
             "version = 1\n",
             "the operation saves nothing: writing the manifest is the caller's, once",
+        );
+    }
+
+    #[test]
+    fn a_directory_the_repository_excluded_is_no_part_of_a_pact_above_it() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        write(&engine, ".warlockignore", "tests/\n");
+        let excluded = engine.join("tests");
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &Canned::new(document(300)),
+            &mut Unwatched,
+        )
+        .expect("pacts");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            modules(&manifest),
+            [
+                "crates/engine",
+                "crates/engine/src",
+                "crates/engine/src/inner",
+            ],
+            "the excluded directory earns no entry, and the rest of the \
+             subtree is pacted exactly as it always was",
+        );
+        assert_eq!(
+            written(&excluded),
+            None,
+            "and no document was written into it: a pact of an ancestor is not \
+             a way round what the repository excluded",
+        );
+    }
+
+    #[test]
+    fn pacting_an_excluded_directory_directly_writes_nothing_and_records_nothing() {
+        let repo = project();
+        write(
+            &repo.path().join("crates/engine"),
+            ".warlockignore",
+            "tests/\n",
+        );
+        let excluded = repo.path().join("crates/engine/tests");
+        let agent = Canned::new(document(300));
+
+        let PactedSubtree {
+            manifest,
+            failures,
+            problems,
+        } = pact_subtree(
+            &excluded,
+            repo.path(),
+            &Manifest::new(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("an excluded directory is not an error, it is nothing to do");
+
+        assert!(
+            manifest.entries().is_empty(),
+            "being handed straight to the operation is not a way past the \
+             rules: {:?}",
+            modules(&manifest),
+        );
+        assert_eq!(written(&excluded), None, "and no document was written");
+        assert!(
+            agent.seen.borrow().is_empty(),
+            "not one pass was paid for, either",
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+
+    #[test]
+    fn rules_that_cannot_be_parsed_fail_the_pact_rather_than_meaning_no_rules() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        // A range that runs backwards: a glob the matcher will not compile.
+        write(&engine, ".warlockignore", "a[z-a]\n");
+        let agent = Canned::new(document(300));
+
+        let error = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect_err("a pact that cannot tell what is excluded must not run");
+
+        assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
+        assert!(
+            error.to_string().contains(".warlockignore"),
+            "the one line back names the file to go and fix: {error}"
+        );
+        assert!(
+            agent.seen.borrow().is_empty(),
+            "and it fails before a single pass is spent",
         );
     }
 
