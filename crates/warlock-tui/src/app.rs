@@ -117,6 +117,11 @@ use crate::account::{Account, Line};
 /// lists — see [`Row::file`] — which is drawn like any other row and is nothing
 /// like one otherwise: it documents nothing, contains nothing, and is counted
 /// nowhere.
+///
+/// Whether a `.warlockignore` keeps the row's content out comes along for the
+/// same reason the document does: the pact key has to refuse such a row, and
+/// [`App`] touches no filesystem, so the fact has to be here by the time the key
+/// is pressed. See [`Row::is_ignored`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Row {
     /// How deep the node sits: `0` for the root, `1` for its children.
@@ -143,6 +148,10 @@ pub struct Row {
     /// and ask it with [`Row::is_file`] rather than reading this: what the flag
     /// *means* is the interesting part.
     pub file: bool,
+    /// Whether the repository's `.warlockignore` keeps this row's content out of
+    /// Warlock, straight from [`warlock_engine::Node::is_ignored`]. Ask it with
+    /// [`Row::is_ignored`], and set it with [`Row::with_ignored`].
+    pub ignored: bool,
 }
 
 impl Row {
@@ -156,6 +165,11 @@ impl Row {
     /// Childless is the safe default rather than the common case: a row that
     /// claims children it does not have is a row the collapse key hides
     /// nothing with. Say otherwise with [`Row::with_child_count`].
+    ///
+    /// Covered by Warlock is the safe default in the same way: a row wrongly
+    /// claiming a `.warlockignore` keeps it out is a row the pact key refuses
+    /// for a reason nobody wrote down. Say otherwise with
+    /// [`Row::with_ignored`].
     #[must_use]
     pub fn new(
         depth: usize,
@@ -170,6 +184,7 @@ impl Row {
             state,
             children: 0,
             file: false,
+            ignored: false,
         }
     }
 
@@ -202,6 +217,19 @@ impl Row {
         self
     }
 
+    /// The same row, with the repository's `.warlockignore` keeping its content
+    /// out of Warlock, or not.
+    ///
+    /// [`App::from_tree`] says this from [`warlock_engine::Node::is_ignored`],
+    /// and it is the whole of how the fact reaches [`App::toggle_pact`]. It is a
+    /// builder rather than an argument to [`Row::new`] so that a test can hand a
+    /// row over without a tree, a loader or a disk behind it.
+    #[must_use]
+    pub const fn with_ignored(mut self, ignored: bool) -> Self {
+        self.ignored = ignored;
+        self
+    }
+
     /// Whether the node has child nodes in the tree.
     ///
     /// Not the question the collapse key asks — see [`App::can_collapse`]. A
@@ -222,6 +250,22 @@ impl Row {
     #[must_use]
     pub const fn is_file(&self) -> bool {
         self.file
+    }
+
+    /// Whether a `.warlockignore` in the repository keeps this row's content out
+    /// of Warlock.
+    ///
+    /// A fact carried from the load, never worked out here: this reads a stored
+    /// flag and opens nothing, which is what lets [`App::toggle_pact`] refuse
+    /// such a row without a filesystem under it.
+    ///
+    /// It says nothing about how the row is drawn. An excluded directory loads
+    /// as [`NodeState::Unpacted`] and is gray like any other unpacted directory
+    /// — gray already means outside Warlock's management — so there is no
+    /// colour, shade or marker of its own for this.
+    #[must_use]
+    pub const fn is_ignored(&self) -> bool {
+        self.ignored
     }
 }
 
@@ -569,19 +613,26 @@ impl App {
     /// built app draws the nodes and nothing else. Reading the listing once,
     /// here, is what lets the toggle be a filter later rather than a second
     /// visit to a tree the app does not keep.
+    ///
+    /// Each row is told whether a `.warlockignore` keeps its content out, from
+    /// the node's own flag, and the file rows are told the same as the directory
+    /// listing them — the rules exclude a directory's content along with it, so
+    /// a file row saying otherwise would be a second answer to one question. It
+    /// changes no colour and hides no row: an excluded directory keeps its row
+    /// and its gray, and the flag is there for [`App::toggle_pact`] to refuse a
+    /// press on it without asking the filesystem anything.
     #[must_use]
     pub fn from_tree(tree: &Tree) -> Self {
         let mut rows = Vec::new();
         for (node, depth) in tree.walk() {
             rows.push(
                 Row::new(depth, node.path.clone(), node.document.clone(), node.state)
-                    .with_child_count(node.children.len()),
+                    .with_child_count(node.children.len())
+                    .with_ignored(node.is_ignored()),
             );
-            rows.extend(
-                node.files
-                    .iter()
-                    .map(|file| Row::file(depth + 1, file.clone(), node.state)),
-            );
+            rows.extend(node.files.iter().map(|file| {
+                Row::file(depth + 1, file.clone(), node.state).with_ignored(node.is_ignored())
+            }));
         }
         Self::from_rows(rows).with_counts(tree.counts())
     }
@@ -1858,15 +1909,31 @@ impl App {
     ///
     /// A directory with no `WARLOCK.md` is pacted like any other: writing that
     /// document is what the pact operation *does*, so having none yet is the
-    /// ordinary case rather than a reason to refuse. A file row is refused, and
-    /// is the only thing that is: a pact is made with a module, and a file is
-    /// part of one rather than being one. So `None` comes back for an app with
-    /// no rows and for a selected file, and nothing moves in either case.
+    /// ordinary case rather than a reason to refuse. Two rows are refused, and
+    /// they are the only ones that are:
+    ///
+    /// - a file row, because a pact is made with a module, and a file is part of
+    ///   one rather than being one;
+    /// - a row the repository's `.warlockignore` keeps out, because the pact
+    ///   walks would find nothing there to describe — the engine excludes such a
+    ///   directory from `pactable_directories` whether or not this refuses — so a
+    ///   press that went through would paint a subtree that no run would ever
+    ///   make good on. The rules are the repository author's, so the refusal
+    ///   names the file rather than Warlock's own judgement.
+    ///
+    /// So `None` comes back for an app with no rows, for a selected file and for
+    /// excluded content, and nothing moves in any of the three cases.
+    ///
+    /// Being excluded is read off the row (see [`Row::is_ignored`]), which read
+    /// it off the node the load put it on. Nothing here opens anything: this
+    /// method is pure, and a filesystem call in it would be a filesystem under
+    /// every test of it.
     ///
     /// A refusal sets [`App::message`] to say so, and the return value stays a
     /// bare `Option`: the wording is display state, it belongs here with the
     /// rest of the display state, and a caller that had to translate an outcome
-    /// into a sentence would be a second place deciding what a file row means.
+    /// into a sentence would be a second place deciding what a refused row
+    /// means.
     /// Un-pacting sets a message of its own — the documents stay on disk, and a
     /// subtree that has just gone grey should say that the writing survived it.
     /// Pacting clears the message instead: whatever the last keystroke said,
@@ -1877,8 +1944,15 @@ impl App {
     pub fn toggle_pact(&mut self) -> Option<PactToggle> {
         let row = self.rows.get(self.selected)?;
         let path = row.path.clone();
+        let ignored = row.is_ignored();
         if row.is_file() {
+            // Answered as a file first: that is what the row *is*, and it is the
+            // answer whether or not the rules also keep it out.
             self.message = Some(file_row_message(&self.label_for(&path)));
+            return None;
+        }
+        if ignored {
+            self.message = Some(ignored_row_message(&self.label_for(&path)));
             return None;
         }
 
@@ -2456,6 +2530,26 @@ fn already_running_message(pacting: &str) -> String {
 /// others has to say which it just did.
 fn file_row_message(label: &str) -> String {
     format!("{label} is a file — pacts are made with the directory holding it, not with a file")
+}
+
+/// What the app says when the pact key is pressed on a directory the
+/// repository's `.warlockignore` keeps out, naming it as `label`.
+///
+/// The pact key's other refusal, worded in the same shape and for the same
+/// reason: a key that does nothing on some rows and something on others has to
+/// say which it just did. It names `.warlockignore` because the rule is the
+/// repository's own and is written down in a file the reader can open and edit —
+/// this is not Warlock deciding the directory is uninteresting, and the sentence
+/// should send them to the place where that decision lives rather than sound
+/// like a verdict.
+///
+/// The row stays gray and stays where it is. Being kept out is not a fourth
+/// state and gets no colour of its own: gray already means outside Warlock's
+/// management, and this sentence is the whole of how the difference is told.
+fn ignored_row_message(label: &str) -> String {
+    format!(
+        "{label} is kept out by .warlockignore — Warlock covers nothing in there, so there is nothing to pact"
+    )
 }
 
 /// The field of `counts` holding the tally for `state`.
@@ -3437,6 +3531,143 @@ mod tests {
         assert!(
             message.starts_with("warlock/assets/logo.svg is a file"),
             "{message}"
+        );
+    }
+
+    /// Three rows with a `.warlockignore` keeping the middle one out: a covered
+    /// sibling on either side, so a refusal that repainted the whole tree, or
+    /// repainted nothing because it refused every press, would both be caught.
+    ///
+    /// Rows rather than a tree, and a hand-written flag rather than a load: the
+    /// point of carrying the fact on the row is that no filesystem is needed to
+    /// answer the key, and a test that built the fixture off disk could not show
+    /// that.
+    fn rows_with_one_kept_out() -> Vec<Row> {
+        vec![
+            Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale).with_child_count(2),
+            // Kept out by the rules: unpacted like any other unpacted directory,
+            // and carrying no state of its own for being excluded.
+            Row::new(1, "repo/notes", None, NodeState::Unpacted).with_ignored(true),
+            Row::new(
+                1,
+                "repo/crates",
+                "repo/crates/WARLOCK.md",
+                NodeState::Unpacted,
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_row_kept_out_by_the_ignore_file_is_refused_and_nothing_moves() {
+        let mut app = select(App::from_rows(rows_with_one_kept_out()), "repo/notes").with_counts(
+            StateCounts {
+                unpacted: 2,
+                pacted_stale: 1,
+                ..StateCounts::default()
+            },
+        );
+        let mut before = app.clone();
+        let states: Vec<NodeState> = app.rows().iter().map(|row| row.state).collect();
+
+        assert_eq!(app.toggle_pact(), None, "an excluded row started something");
+
+        // The rule is the repository author's and is written down in a file
+        // they can open, so the refusal names it rather than sounding like a
+        // verdict of Warlock's own.
+        let message = app.message().expect("an excluded row is refused out loud");
+        assert!(message.contains(".warlockignore"), "{message}");
+        assert!(message.starts_with("repo/notes is kept out"), "{message}");
+        // No state moved: not the excluded row's, not its siblings', not the
+        // root's above it.
+        assert_eq!(
+            app.rows().iter().map(|row| row.state).collect::<Vec<_>>(),
+            states
+        );
+        assert_eq!(app.counts(), before.counts());
+        // And the message is the whole of what the press changed: no subtree
+        // repainted, no selection moved, no account started, no run in flight.
+        before.set_message(message);
+        assert_eq!(app, before, "refusing an excluded row moved something else");
+        assert!(!app.has_account());
+        assert!(!app.is_pacting());
+    }
+
+    #[test]
+    fn a_covered_sibling_of_an_excluded_row_pacts_as_usual() {
+        let mut app = select(App::from_rows(rows_with_one_kept_out()), "repo/crates");
+
+        let toggled = app
+            .toggle_pact()
+            .expect("a covered directory can be pacted");
+
+        // The refusal is about the row the rules name, not about the tree it is
+        // in, and a press that goes through says nothing.
+        assert_eq!(
+            toggled,
+            PactToggle {
+                path: PathBuf::from("repo/crates"),
+                pacted: true,
+            }
+        );
+        assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn an_excluded_row_is_drawn_in_no_colour_of_its_own() {
+        let app = App::from_rows(rows_with_one_kept_out());
+        let excluded = app
+            .rows()
+            .iter()
+            .find(|row| row.is_ignored())
+            .expect("the fixture keeps one row out");
+
+        // Gray already means outside Warlock's management, and being kept out is
+        // not a fourth state: the flag changes nothing the renderer reads.
+        assert_eq!(excluded.state, NodeState::Unpacted);
+        assert_eq!(
+            *excluded,
+            Row::new(1, "repo/notes", None, NodeState::Unpacted).with_ignored(true)
+        );
+    }
+
+    #[test]
+    fn flattening_a_tree_carries_the_ignore_flag_onto_the_rows() {
+        let tree = Tree::new(
+            Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale).with_children([
+                Node::new("repo/notes", None, NodeState::Unpacted)
+                    .with_files([PathBuf::from("repo/notes/plan.md")])
+                    .with_ignored(true),
+                Node::new("repo/crates", None, NodeState::Unpacted),
+            ]),
+        );
+        let mut app = App::from_tree(&tree);
+        app.toggle_files();
+
+        let flagged: Vec<(String, bool)> = app
+            .rows()
+            .iter()
+            .map(|row| (row.path.to_string_lossy().into_owned(), row.is_ignored()))
+            .collect();
+        assert_eq!(
+            flagged,
+            [
+                ("repo".to_owned(), false),
+                ("repo/notes".to_owned(), true),
+                // The rules exclude a directory's content along with it, so the
+                // file listed inside it is told what the directory was told.
+                ("repo/notes/plan.md".to_owned(), true),
+                ("repo/crates".to_owned(), false),
+            ]
+        );
+
+        // And the flag is enough on its own to refuse the key, with no tree,
+        // loader or filesystem behind the app by the time it is pressed.
+        let mut app = select(app, "repo/notes");
+        assert_eq!(app.toggle_pact(), None);
+        assert!(
+            app.message()
+                .expect("an excluded row is refused")
+                .contains(".warlockignore")
         );
     }
 
