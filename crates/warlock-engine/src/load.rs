@@ -37,6 +37,25 @@
 //! directories and files come out in name order so two loads of an unchanged
 //! tree are equal values.
 //!
+//! # Why `.warlockignore` prunes nothing here
+//!
+//! The repository's own `.warlockignore` is the one rule this walk deliberately
+//! does not obey. Everywhere else it removes content — nothing it covers is
+//! pacted, requested or hashed — but removing it from *this* walk would delete
+//! the directory from the screen, and a reader who cannot see the folder of
+//! images cannot see that Warlock is right not to cover it. Silence would look
+//! like a bug. So every excluded directory keeps its row, keeps its files, and
+//! loads [`NodeState::Unpacted`] like any other directory nobody pacted; it is
+//! simply marked [`Node::ignored`], which says *why* it is gray and lets a
+//! front end refuse to pact it without asking the filesystem. No state, no
+//! colour and no shade is added.
+//!
+//! The mark is made of the same matcher rather than a second one: the walk
+//! above runs again over the same root with `.warlockignore` registered, and a
+//! directory the first pass found and the second did not is exactly a directory
+//! the rules exclude. The root the load was handed is asked about separately,
+//! because a walker does not apply the rules to its own root.
+//!
 //! State is not presence in the manifest: presence only decides whether the
 //! question is worth asking. A node the manifest names is hashed over its own
 //! subtree with [`subtree_hash`], and its colour is [`decide_state`]'s verdict
@@ -54,7 +73,7 @@
 //! and no partial read ever reaches a hash: the failed digest is simply not
 //! there.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -62,7 +81,7 @@ use std::path::{Component, Path, PathBuf};
 use ignore::WalkBuilder;
 
 use crate::{
-    HashError, Manifest, ManifestError, Node, NodeState, Tree, decide_state, subtree_hash,
+    HashError, Manifest, ManifestError, Node, NodeState, Tree, decide_state, ignores, subtree_hash,
     to_manifest_path,
 };
 
@@ -255,23 +274,13 @@ pub fn repository_root(start: impl AsRef<Path>) -> Option<PathBuf> {
 /// which is the whole of this loader's determinism. The files under each key are
 /// sorted before the map is handed back, for the same reason: the order the
 /// filesystem offers them in is nobody's guarantee.
+///
+/// `.warlockignore` removes nothing from what this yields; it only decides
+/// which of the directories are marked excluded. See the module docs for why
+/// the one walk in the crate that keeps that content is this one.
 fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
-    let walker = WalkBuilder::new(root)
-        // A symlinked directory is walked as a symlink, i.e. not descended
-        // into, so a cycle of them terminates instead of recursing.
-        .follow_links(false)
-        // Fixtures and freshly-unpacked source trees have a `.gitignore` and
-        // no `.git`; honouring the file either way is what keeps the skip list
-        // out of this crate.
-        .require_git(false)
-        // `.warlock/` is Warlock's own bookkeeping, never a module of the
-        // project. Pruned by name so it stays out even if it holds a document
-        // and even if hidden directories are ever let back in.
-        .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR))
-        .build();
-
     let mut directories: BTreeMap<PathBuf, Directory> = BTreeMap::new();
-    for entry in walker {
+    for entry in builder(root).build() {
         let entry = entry.map_err(|source| Error::Walk { source })?;
         let file_type = entry.file_type();
         let path = entry.into_path();
@@ -296,7 +305,75 @@ fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
     for directory in directories.values_mut() {
         directory.files.sort();
     }
+    mark_excluded(root, &mut directories)?;
     Ok(directories)
+}
+
+/// The walk this module makes, in the one place it is configured.
+///
+/// Shared so that the pass which finds the directories and the pass which
+/// decides which of them the repository excluded differ in exactly one setting
+/// — the custom ignore filename — and cannot drift into differing in another.
+fn builder(root: &Path) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        // A symlinked directory is walked as a symlink, i.e. not descended
+        // into, so a cycle of them terminates instead of recursing.
+        .follow_links(false)
+        // Fixtures and freshly-unpacked source trees have a `.gitignore` and
+        // no `.git`; honouring the file either way is what keeps the skip list
+        // out of this crate.
+        .require_git(false)
+        // `.warlock/` is Warlock's own bookkeeping, never a module of the
+        // project. Pruned by name so it stays out even if it holds a document
+        // and even if hidden directories are ever let back in.
+        .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR));
+    builder
+}
+
+/// Mark every directory in `directories` the repository's `.warlockignore`
+/// excludes, removing none of them.
+///
+/// The same walk again, with `.warlockignore` registered on top: whatever it
+/// yields is what the rules keep, so a directory the first pass found and this
+/// one did not is excluded — and so is everything below it, which falls out for
+/// free because the walker never descends into it. One matcher used twice, not
+/// a second matcher: this file still keeps no skip list.
+///
+/// `root` is asked about on its own first, because a walker applies no rule to
+/// the root it is handed — a load rooted inside excluded content would
+/// otherwise mark nothing at all. When it is excluded, so is everything under
+/// it: gitignore semantics do not let a rule re-include content below an
+/// excluded directory.
+///
+/// A `.warlockignore` that cannot be *used* is not silently read as "no rules"
+/// where the answer is a verdict — [`subtree_hash`] and the pact walks fail
+/// loudly, and a failed hash still reaches the caller as a [`Problem`] against
+/// the node it happened at. Here the walker's own soft errors are left where
+/// the pass above leaves them, since this mark is a hint for the front end and
+/// not the thing that keeps excluded content out of a pact.
+fn mark_excluded(root: &Path, directories: &mut BTreeMap<PathBuf, Directory>) -> Result<(), Error> {
+    if ignores::is_ignored(root).map_err(|source| Error::Walk { source })? {
+        for directory in directories.values_mut() {
+            directory.ignored = true;
+        }
+        return Ok(());
+    }
+
+    let mut kept: BTreeSet<PathBuf> = BTreeSet::new();
+    for entry in builder(root)
+        .add_custom_ignore_filename(ignores::FILENAME)
+        .build()
+    {
+        let entry = entry.map_err(|source| Error::Walk { source })?;
+        if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+            kept.insert(entry.into_path());
+        }
+    }
+    for (path, directory) in directories.iter_mut() {
+        directory.ignored = !kept.contains(path);
+    }
+    Ok(())
 }
 
 /// What one pass of the walk learned about a single directory.
@@ -311,6 +388,9 @@ struct Directory {
     /// The files directly inside it, in path order, its `WARLOCK.md` among
     /// them. See [`Node::files`] for what a listing is and is not.
     files: Vec<PathBuf>,
+    /// Whether the repository's `.warlockignore` excludes it. Filled in by
+    /// [`mark_excluded`] after the walk, and carried onto [`Node::ignored`].
+    ignored: bool,
 }
 
 /// The directories a walk found, plus everything needed to turn one into a
@@ -350,10 +430,14 @@ impl Builder {
         let files = found
             .map(|directory| directory.files.clone())
             .unwrap_or_default();
+        // A mark and nothing else: the node keeps its row, its files and its
+        // colour, and only gains the reason it can never be pacted.
+        let ignored = found.is_some_and(|directory| directory.ignored);
 
         Node::new(dir, document, self.state_of(dir, problems))
             .with_children(children)
             .with_files(files)
+            .with_ignored(ignored)
     }
 
     /// The directories directly inside `dir`, in name order.
@@ -871,6 +955,158 @@ mod tests {
             "`target/` and `vendored/` are gitignored, `.git/` is git's own, \
              and `.warlock/` is ours — a document in any of them changes \
              nothing"
+        );
+    }
+
+    /// Every node in the tree as `(path relative to `root`, state)`, in walk
+    /// order — the whole of what a colour-blind reload has to reproduce.
+    fn states(tree: &Tree, root: &Path) -> Vec<(String, NodeState)> {
+        relative_paths(tree, root)
+            .into_iter()
+            .zip(tree.walk().map(|(node, _)| node.state))
+            .collect()
+    }
+
+    /// A repository whose `.warlockignore` excludes every directory named
+    /// `notes/`, with one such directory inside the pacted module `docs/` and
+    /// an ordinary `docs/src/` beside it.
+    fn excluding_fixture() -> tempfile::TempDir {
+        let repo = fixture(&[], &["docs"]);
+        write_file(&repo.path().join(".warlockignore"), "notes/\n");
+        write_file(&repo.path().join("docs/notes/one.md"), "a thought\n");
+        write_file(&repo.path().join("docs/notes/gone.md"), "another\n");
+        write_file(&repo.path().join("docs/src/lib.rs"), "pub fn one() {}\n");
+        repo
+    }
+
+    #[test]
+    fn an_excluded_directory_keeps_its_row_and_is_marked_rather_than_pruned() {
+        let repo = excluding_fixture();
+        let tree = tree_of(repo.path());
+
+        assert_eq!(
+            relative_paths(&tree, repo.path()),
+            ["", "docs", "docs/notes", "docs/src"],
+            "`.warlockignore` prunes nothing here: the reader is meant to see \
+             what the repository excluded",
+        );
+
+        let notes = tree
+            .find(repo.path().join("docs/notes"))
+            .expect("the excluded directory is a node like any other");
+        assert!(notes.is_ignored(), "and it says so");
+        assert_eq!(
+            notes.state,
+            NodeState::Unpacted,
+            "no fourth state: an excluded directory is gray like any other \
+             directory nobody pacted",
+        );
+        assert_eq!(
+            file_names(&tree, repo.path().join("docs/notes")),
+            ["gone.md", "one.md"],
+            "the row is a real one, files and all",
+        );
+
+        for covered in ["", "docs", "docs/src"] {
+            assert!(
+                !tree
+                    .find(repo.path().join(covered))
+                    .expect("a node")
+                    .is_ignored(),
+                "`{covered}` is covered content and no rule names it",
+            );
+        }
+    }
+
+    #[test]
+    fn everything_below_an_excluded_directory_is_marked_too() {
+        let repo = fixture(&[], &["docs"]);
+        write_file(&repo.path().join(".warlockignore"), "notes/\n");
+        write_file(&repo.path().join("docs/notes/deep/deeper/a.md"), "a\n");
+
+        let tree = tree_of(repo.path());
+
+        for below in ["docs/notes", "docs/notes/deep", "docs/notes/deep/deeper"] {
+            assert!(
+                tree.find(repo.path().join(below))
+                    .unwrap_or_else(|| panic!("`{below}` is still a row"))
+                    .is_ignored(),
+                "`{below}` sits inside excluded content: gitignore does not let \
+                 a rule re-include below an excluded directory",
+            );
+        }
+    }
+
+    #[test]
+    fn a_load_rooted_at_an_excluded_directory_marks_it_all_the_same() {
+        // The walker applies no rule to the root it is handed, so this is the
+        // case a registered filename alone would miss.
+        let repo = excluding_fixture();
+        let notes = repo.path().join("docs/notes");
+        write_file(&notes.join("deep/a.md"), "a\n");
+
+        let tree = tree_of(&notes);
+
+        assert_eq!(
+            tree.root_path(),
+            notes,
+            "the tree is rooted where it was told"
+        );
+        assert!(
+            tree.walk().all(|(node, _)| node.is_ignored()),
+            "the root the load was given is excluded, and so is everything \
+             under it",
+        );
+        assert!(
+            tree.walk()
+                .all(|(node, _)| node.state == NodeState::Unpacted),
+        );
+    }
+
+    #[test]
+    fn editing_adding_or_deleting_excluded_content_changes_no_colour() {
+        let repo = excluding_fixture();
+        let module = repo.path().join("docs");
+        // A grant taken over the module's real content, so there is a green
+        // here for a stray edit to lose.
+        let granted = subtree_hash(&module).expect("the module hashes");
+        hand_write_manifest(repo.path(), &[("docs", Some(&granted))]);
+
+        let before = states(&tree_of(repo.path()), repo.path());
+        assert!(
+            before.contains(&("docs".to_owned(), NodeState::PactedFresh)),
+            "the fixture has to start green for this test to mean anything: \
+             {before:?}",
+        );
+
+        // Edit, add and delete, all inside content the repository excluded.
+        write_file(&module.join("notes/one.md"), "a revised thought\n");
+        write_file(&module.join("notes/two.md"), "an added one\n");
+        fs::remove_file(module.join("notes/gone.md")).expect("deletes an excluded file");
+
+        assert_eq!(
+            states(&tree_of(repo.path()), repo.path()),
+            before,
+            "nothing Warlock covers changed, so nothing changed colour",
+        );
+
+        // And the control: the same three moves against covered content do.
+        write_file(&module.join("src/lib.rs"), "pub fn two() {}\n");
+        assert_ne!(
+            states(&tree_of(repo.path()), repo.path()),
+            before,
+            "a covered edit still restales, or this test proves nothing",
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_rules_marks_nothing() {
+        let repo = fixture(&["docs/notes"], &["docs"]);
+        assert!(
+            tree_of(repo.path())
+                .walk()
+                .all(|(node, _)| !node.is_ignored()),
+            "with no `.warlockignore` anywhere, every directory is covered",
         );
     }
 

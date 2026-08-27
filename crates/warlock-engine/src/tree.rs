@@ -5,6 +5,16 @@
 //! that tree a type. It is pure shape and nothing else — building a tree from
 //! a real directory belongs to [`load_tree`](crate::load_tree), and the state
 //! on a node is a plain stored field, never computed here.
+//!
+//! [`Node::ignored`] is the same kind of thing: a plain stored fact, put there
+//! by whoever built the node. It says the repository's own `.warlockignore`
+//! excludes that directory — content Warlock is not about. It is deliberately
+//! *not* a [`NodeState`] and not a colour: gray already means "outside
+//! Warlock's management", an excluded directory is gray like any other unpacted
+//! one, and there is no fourth colour. The flag exists so that a front end can
+//! refuse to pact such a directory without asking the filesystem, since every
+//! other fact about a node — its state, its document, its files — comes from
+//! the load and this one should too.
 
 use std::path::{Path, PathBuf};
 
@@ -33,6 +43,22 @@ pub struct Node {
     pub document: Option<PathBuf>,
     /// What Warlock knows about this node right now.
     pub state: NodeState,
+    /// Whether the repository's own `.warlockignore` rules exclude this
+    /// directory.
+    ///
+    /// A fact about the node, not a state and not a colour: an excluded
+    /// directory is [`NodeState::Unpacted`] and draws gray like any other
+    /// directory nobody has pacted. What it adds is *why* — this one cannot be
+    /// pacted at all, because the repository said Warlock is not about it — so
+    /// a front end can say so instead of starting a run that would produce
+    /// nothing.
+    ///
+    /// Stored rather than derived, like [`state`](Node::state): asking the
+    /// filesystem is the loader's job, and a tree is just values by the time
+    /// anyone renders it. Defaulted on deserialisation, so a tree written
+    /// before this field existed still reads back.
+    #[serde(default)]
+    pub ignored: bool,
     /// Child nodes, in the order they should be rendered. Empty for a leaf.
     pub children: Vec<Node>,
     /// The files sitting directly in this directory, in path order.
@@ -66,6 +92,10 @@ impl Node {
     /// [`Node::with_files`], or by pushing onto [`Node::children`] and
     /// [`Node::files`] directly.
     ///
+    /// The node is not [`ignored`](Node::ignored): a directory is content
+    /// Warlock covers unless a rule says otherwise, and only a loader that
+    /// consulted the rules can say otherwise — see [`Node::with_ignored`].
+    ///
     /// ```
     /// use warlock_engine::{Node, NodeState};
     ///
@@ -82,6 +112,7 @@ impl Node {
             path: path.into(),
             document: document.into_document(),
             state,
+            ignored: false,
             children: Vec::new(),
             files: Vec::new(),
         }
@@ -117,6 +148,40 @@ impl Node {
     pub fn with_files(mut self, files: impl IntoIterator<Item = PathBuf>) -> Self {
         self.files = files.into_iter().collect();
         self
+    }
+
+    /// The same node marked — or unmarked — as excluded by the repository's
+    /// `.warlockignore`, the companion to [`with_children`](Node::with_children)
+    /// and [`with_files`](Node::with_files) for the fact only a loader can
+    /// know.
+    ///
+    /// Nothing else about the node moves: it keeps its state, its document and
+    /// its children, because being excluded is not a state and an excluded
+    /// directory is a row in the tree like any other. Hiding it is not on
+    /// offer — the reader is meant to see what the repository excluded.
+    ///
+    /// ```
+    /// use warlock_engine::{Node, NodeState};
+    ///
+    /// let assets = Node::new("repo/assets", None, NodeState::Unpacted).with_ignored(true);
+    /// assert!(assets.is_ignored());
+    /// // Still an ordinary unpacted node: no fourth state, no fourth colour.
+    /// assert_eq!(assets.state, NodeState::Unpacted);
+    /// ```
+    #[must_use]
+    pub fn with_ignored(mut self, ignored: bool) -> Self {
+        self.ignored = ignored;
+        self
+    }
+
+    /// Whether the repository's `.warlockignore` excludes this directory.
+    ///
+    /// Reads [`ignored`](Node::ignored) and touches no filesystem, so a caller
+    /// that must stay pure — an event loop deciding whether a keypress can pact
+    /// this row — can ask it.
+    #[must_use]
+    pub fn is_ignored(&self) -> bool {
+        self.ignored
     }
 
     /// Whether this node has no children.
@@ -421,6 +486,65 @@ mod tests {
     }
 
     #[test]
+    fn a_node_is_covered_until_something_says_otherwise() {
+        let node = Node::new("a", "a/WARLOCK.md", NodeState::Unpacted);
+        assert!(
+            !node.is_ignored(),
+            "only a loader that read the rules can say a directory is excluded",
+        );
+
+        let excluded = node.clone().with_ignored(true);
+        assert!(excluded.is_ignored());
+        assert_eq!(excluded.ignored, excluded.is_ignored());
+        assert_eq!(
+            excluded.state, node.state,
+            "being excluded is not a state: the node is unpacted either way",
+        );
+        assert_eq!(excluded.document, node.document);
+        assert_eq!(excluded.children, node.children);
+        assert_eq!(excluded.files, node.files);
+        assert!(
+            !excluded.with_ignored(false).is_ignored(),
+            "the setter sets rather than latches",
+        );
+    }
+
+    #[test]
+    fn a_node_written_before_the_flag_existed_reads_back_as_covered() {
+        use serde_test::{Token, assert_de_tokens};
+
+        // The same tokens as the round trip below, minus `ignored` entirely:
+        // a tree serialised by an older build. It must still deserialise, and
+        // the missing fact must read as "not excluded" rather than fail.
+        assert_de_tokens(
+            &Node::new("repo", "repo/WARLOCK.md", NodeState::PactedFresh),
+            &[
+                Token::Struct {
+                    name: "Node",
+                    len: 5,
+                },
+                Token::Str("path"),
+                Token::Str("repo"),
+                Token::Str("document"),
+                Token::Some,
+                Token::Str("repo/WARLOCK.md"),
+                Token::Str("state"),
+                Token::UnitVariant {
+                    name: "NodeState",
+                    variant: "PactedFresh",
+                },
+                Token::Str("children"),
+                Token::Seq { len: Some(0) },
+                Token::SeqEnd,
+                Token::Str("files"),
+                Token::Seq { len: Some(0) },
+                Token::SeqEnd,
+                Token::StructEnd,
+            ],
+        );
+    }
+
+    #[test]
     fn with_files_attaches_them_in_order_and_leaves_the_node_a_leaf() {
         // A plain `README.md` rides along as an ordinary file: it is a listing
         // entry like any other and documents nothing.
@@ -619,6 +743,7 @@ mod tests {
         let tree = Tree::new(
             Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
                 .with_children([Node::new("repo/docs", None, NodeState::Unpacted)
+                    .with_ignored(true)
                     .with_files([PathBuf::from("repo/docs/adr.md")])])
                 .with_files([
                     PathBuf::from("repo/Cargo.toml"),
@@ -636,7 +761,7 @@ mod tests {
                 Token::Str("root"),
                 Token::Struct {
                     name: "Node",
-                    len: 5,
+                    len: 6,
                 },
                 Token::Str("path"),
                 Token::Str("repo"),
@@ -648,11 +773,13 @@ mod tests {
                     name: "NodeState",
                     variant: "PactedStale",
                 },
+                Token::Str("ignored"),
+                Token::Bool(false),
                 Token::Str("children"),
                 Token::Seq { len: Some(1) },
                 Token::Struct {
                     name: "Node",
-                    len: 5,
+                    len: 6,
                 },
                 Token::Str("path"),
                 Token::Str("repo/docs"),
@@ -663,6 +790,8 @@ mod tests {
                     name: "NodeState",
                     variant: "Unpacted",
                 },
+                Token::Str("ignored"),
+                Token::Bool(true),
                 Token::Str("children"),
                 Token::Seq { len: Some(0) },
                 Token::SeqEnd,

@@ -550,9 +550,13 @@ fn cancelled(toggled: Toggled) -> Toggled {
 /// the message line is the one a pact in flight has taken, so a sentence left
 /// there would be the one sentence the reader could not see, and it would turn
 /// up minutes later when the run ended. A press the app itself turns down — a
-/// file row — has no run over it and so has its say the ordinary way, in
+/// file row, or a directory the repository's `.warlockignore` keeps out — has no
+/// run over it and so has its say the ordinary way, in
 /// [`App::message`](warlock_tui::App::message), which `App::toggle_pact` has
-/// already written by the time this returns.
+/// already written by the time this returns. Every such refusal comes back from
+/// `App::toggle_pact` as `None` and leaves through the `?` below, so nothing
+/// here starts a run or opens an account for one: there is one place that
+/// decides what a press means, and this is not it.
 ///
 /// A function rather than a guard in the match arm so that "a second press
 /// changes nothing" is a property a test can hold the app up against, rather
@@ -562,9 +566,9 @@ fn cancelled(toggled: Toggled) -> Toggled {
 /// begins, at `at`: one pact, one account, so a new run clears whatever the last
 /// one left rather than appending to it. It happens here rather than in the
 /// event loop so that "the account a press starts is empty" is a property of the
-/// same function, and it happens on this path only — a press turned down for a
-/// file row, and a press while a run is in flight, leave the last run's account
-/// on screen because neither of them started anything.
+/// same function, and it happens on this path only — a press the app turned
+/// down, and a press while a run is in flight, leave the last run's account on
+/// screen because neither of them started anything.
 ///
 /// An un-pact does not start one either, and that is the one case where the
 /// keystroke does something and the panel does not move. Un-pacting is manifest
@@ -2443,6 +2447,51 @@ mod tests {
             "the file row said nothing"
         );
         assert_eq!(app.pact_line(), None, "nothing is running to be refused by");
+    }
+
+    #[test]
+    fn a_press_on_a_row_the_ignore_file_keeps_out_starts_nothing() {
+        // A directory the repository's `.warlockignore` excludes, said the way
+        // the load says it: a flag on the node, so no filesystem is needed to
+        // answer the key.
+        let tree =
+            Tree::new(
+                Node::new("/repo", None::<PathBuf>, NodeState::Unpacted).with_children([
+                    Node::new("/repo/notes", None::<PathBuf>, NodeState::Unpacted)
+                        .with_ignored(true),
+                ]),
+            );
+        let mut app = App::from_tree(&tree);
+        app.select_next();
+        assert_eq!(
+            app.selected_row().map(|row| row.path.clone()),
+            Some(PathBuf::from("/repo/notes")),
+            "the selection is on the excluded directory"
+        );
+        let before = app.clone();
+
+        assert_eq!(
+            pact_press(&mut app, false, Instant::now()),
+            None,
+            "there is nothing in there to pact"
+        );
+
+        // The refusal is the app's, so it goes through the message, and this
+        // function adds nothing to it: no account is opened for a run that never
+        // started, and no flag is set, because no run turned the press down.
+        assert!(
+            app.message()
+                .is_some_and(|message| message.contains(".warlockignore")),
+            "the excluded row said nothing about the rules that keep it out"
+        );
+        assert!(!app.has_account(), "an account was opened for no run");
+        assert_eq!(app.pact_line(), None, "nothing is running to be refused by");
+        let refused = {
+            let mut refused = before.clone();
+            refused.set_message(app.message().expect("the app said why"));
+            refused
+        };
+        assert_eq!(app, refused, "the press did more than say so");
     }
 
     #[test]
