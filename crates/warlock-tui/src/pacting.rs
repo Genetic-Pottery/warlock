@@ -9,6 +9,13 @@
 //! lands on the app there, and the run ends with the one reload that puts the
 //! documents it wrote on screen.
 //!
+//! The refresh key is the same machinery over a shorter list. [`refresh_press`]
+//! is [`pact_press`]'s twin, [`Work`] is the one value that says which of the
+//! two a run is, and everything below that — the worker, the channel, the
+//! account, the say-when, the single save, the reload — is shared rather than
+//! written twice: the difference between the two runs is one engine call in
+//! [`apply_toggle`] and one verb on the footer.
+//!
 //! Stopping a run has two spellings kept deliberately apart: Esc *cancels*
 //! through [`CancelGuard`], and the worker still hashes, saves and reports
 //! what it finished; quitting drops the guard, which kills the `claude` in
@@ -22,9 +29,11 @@ use std::{fs, io, thread};
 
 use warlock_engine::{
     Agent, Manifest, NodeState, PactFailure, PactObserver, PactProblem, PactedSubtree, Pacting,
-    Tree, pact_subtree, to_manifest_path, unpact_subtree,
+    Tree, pact_subtree, refresh_subtree, to_manifest_path, unpact_subtree,
 };
-use warlock_tui::{Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactToggle, Section};
+use warlock_tui::{
+    Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactToggle, Run, Section,
+};
 
 use crate::error::{Error, one_line};
 use crate::session::{Scope, reload_tree};
@@ -55,13 +64,15 @@ const PACT_CANCELLED: &str = "the pact was cancelled; what it finished first is 
 /// drawing the screen.
 ///
 /// Four things, and no handle to join: what the worker has to say, how to tell
-/// it to stop, which subtree it was started on, and what the tree looked like
-/// before the keystroke painted that subtree yellow.
+/// it to stop, what it was asked to do, and what the tree looked like before the
+/// keystroke painted that subtree yellow.
 ///
-/// The path is kept here rather than read back off the app because it is the
-/// subtree the *run* covers, which is a fact about the run and not about
-/// whatever is selected by the time it ends — the reader is free to move the
-/// selection anywhere while a pact works, and does.
+/// The work is kept here rather than read back off the app because the subtree
+/// it names is the one the *run* covers, which is a fact about the run and not
+/// about whatever is selected by the time it ends — the reader is free to move
+/// the selection anywhere while a run works, and does. It is also what says
+/// whether the footer's line reads as pacting or as refreshing, for the length
+/// of the run and not just at the press.
 ///
 /// The copy of the app is the undo for a run that comes back with nothing
 /// recorded. It is taken before the toggle paints, so it is also older than any
@@ -80,10 +91,70 @@ pub(crate) struct Running {
     /// Say-when for the worker: the flag its observer reads between directories
     /// and the kill switch for the `claude` it is waiting on.
     pub(crate) cancel: CancelGuard,
-    /// The directory the pact key was pressed on, whose subtree the run covers.
-    pub(crate) path: PathBuf,
+    /// What the key that started this run asked for, which names the subtree it
+    /// covers and says which of the two runs it is.
+    pub(crate) work: Work,
     /// The app as it stood before the toggle painted the subtree.
     pub(crate) before: App,
+}
+
+/// What a worker thread was asked to do: carry a pact toggle out, or refresh a
+/// subtree.
+///
+/// One value rather than two of everything, because below the keystroke there
+/// is nothing to tell the two runs apart. A refresh is the same worker on the
+/// same channel reporting through the same observer into the same account,
+/// stoppable by the same handle and ending in the same single save and the same
+/// reload; the whole of the difference is which engine entry point
+/// [`apply_toggle`] calls — [`pact_subtree`] describes every directory of the
+/// subtree, [`refresh_subtree`] only the stale ones — and which verb the
+/// footer's progress line is worded with.
+///
+/// A refresh carries a bare directory where a pact carries a [`PactToggle`],
+/// and that is the whole of the shape difference: a pact goes two ways and has
+/// to say which, while there is no such thing as an un-refresh.
+#[derive(Debug, Clone)]
+pub(crate) enum Work {
+    /// The pact key's press: describe the whole subtree, or take it out of the
+    /// manifest, as [`PactToggle::pacted`] says.
+    Pact(PactToggle),
+    /// The refresh key's press: describe the stale directories under this one
+    /// and leave the fresh ones exactly as they are.
+    Refresh(PathBuf),
+}
+
+impl Work {
+    /// The root of the subtree the run covers, whichever key asked for it.
+    pub(crate) fn path(&self) -> &Path {
+        match self {
+            Self::Pact(toggle) => &toggle.path,
+            Self::Refresh(directory) => directory,
+        }
+    }
+
+    /// Which of the two runs this is, for the one line the app words about a
+    /// run in flight: see [`Run`] and
+    /// [`App::set_run_in_flight`](warlock_tui::App::set_run_in_flight).
+    pub(crate) const fn kind(&self) -> Run {
+        match self {
+            Self::Pact(_) => Run::Pact,
+            Self::Refresh(_) => Run::Refresh,
+        }
+    }
+
+    /// Whether Esc can stop this run part way through.
+    ///
+    /// Anything that runs model passes can: a pact and a refresh are both a
+    /// descent of minutes, and both hash and save whatever they finished before
+    /// the key landed. An un-pact cannot — it is manifest arithmetic that is
+    /// over before a key can be read, so a handle latched while one ran would be
+    /// describing something else entirely.
+    const fn is_cancellable(&self) -> bool {
+        match self {
+            Self::Pact(toggle) => toggle.pacted,
+            Self::Refresh(_) => true,
+        }
+    }
 }
 
 /// A [`Cancel`] that is spent when it goes out of scope.
@@ -320,11 +391,15 @@ impl PactObserver for Reporting<'_> {
     }
 }
 
-/// Run `toggle` on a thread of its own, and hand back the channel it reports on.
+/// Run `work` on a thread of its own, and hand back the channel it reports on.
+///
+/// A pact and a refresh come through here alike, because from here down they
+/// are the same run: what tells them apart is inside [`Work`] and is spent in
+/// one `match` at the bottom of [`apply_toggle`].
 ///
 /// The worker owns everything it touches — its own manifest, its own root, its
-/// own toggle, its own [`ClaudeAgent`], which is a command line and a timeout
-/// and so is cheap to clone — so nothing is shared with the event loop but the
+/// own copy of the work, its own [`ClaudeAgent`], which is a command line and a
+/// timeout and so is cheap to clone — so nothing is shared with the event loop but the
 /// channel and `cancel`. The handle is the exception that proves the rule: it is
 /// a flag and a slot for one child, written by whoever says stop and read
 /// between directories, and it is what the agent given to this run answers to,
@@ -345,12 +420,12 @@ impl PactObserver for Reporting<'_> {
 pub(crate) fn spawn_pact(
     manifest: &Manifest,
     repo_root: &Path,
-    toggle: &PactToggle,
+    work: &Work,
     agent: &ClaudeAgent,
     cancel: Cancel,
 ) -> Receiver<PactEvent> {
     let (events, received) = mpsc::channel();
-    let (manifest, repo_root, toggle) = (manifest.clone(), repo_root.to_path_buf(), toggle.clone());
+    let (manifest, repo_root, work) = (manifest.clone(), repo_root.to_path_buf(), work.clone());
     // This run's copy of the agent, and the only one that answers to this run's
     // handle: the agent the event loop keeps has a handle of its own that nobody
     // else holds, so cancelling one run can never reach into the next.
@@ -362,11 +437,40 @@ pub(crate) fn spawn_pact(
         .clone()
         .with_cancel(cancel.clone())
         .with_activities(activity_port(&events));
-    thread::spawn(move || run_pact(&manifest, &repo_root, &toggle, &agent, &cancel, &events));
+    thread::spawn(move || run_pact(&manifest, &repo_root, &work, &agent, &cancel, &events));
     received
 }
 
-/// The worker thread's whole body: carry the toggle out, saying where it has got
+/// Everything a press that really starts a run comes to, once the press itself
+/// has decided there is one.
+///
+/// The three things the event loop has to keep about work it is not doing,
+/// gathered where they belong together: the worker and the channel it reports
+/// on ([`spawn_pact`]), the say-when the reader's Esc latches, and the copy of
+/// the app taken before the keystroke painted anything.
+///
+/// One function for both keys, and that is the point of it rather than a saving
+/// of lines: a pact and a refresh are the same run, so they are started by the
+/// same code and the loop holds the same one value for either. The handle is
+/// made here and never reused — a cancel is final, so the run after a cancelled
+/// one has to start with a handle nobody has said stop to.
+pub(crate) fn start_run(
+    work: Work,
+    before: App,
+    manifest: &Manifest,
+    repo_root: &Path,
+    agent: &ClaudeAgent,
+) -> Running {
+    let cancel = CancelGuard::new();
+    Running {
+        events: spawn_pact(manifest, repo_root, &work, agent, cancel.handle()),
+        cancel,
+        work,
+        before,
+    }
+}
+
+/// The worker thread's whole body: carry the work out, saying where it has got
 /// to, and report how it went.
 ///
 /// Written as a function of its channel rather than inside the closure so that
@@ -384,7 +488,7 @@ pub(crate) fn spawn_pact(
 fn run_pact(
     manifest: &Manifest,
     repo_root: &Path,
-    toggle: &PactToggle,
+    work: &Work,
     agent: &dyn Agent,
     cancel: &Cancel,
     events: &Sender<PactEvent>,
@@ -392,15 +496,15 @@ fn run_pact(
     let outcome = apply_toggle(
         manifest,
         repo_root,
-        toggle,
+        work,
         agent,
         &mut Reporting { events, cancel },
     );
-    // Only a pact is cancellable. An un-pact is manifest arithmetic that is over
-    // before a key can be read, so a handle latched while one ran would be
-    // describing something else entirely.
+    // Every run that spends minutes on model passes is stoppable, and both of
+    // them are: a refresh is reworded here exactly as a pact is. The one run
+    // that is not is an un-pact — see [`Work::is_cancellable`].
     let outcome = match outcome {
-        Ok(toggled) if toggle.pacted && cancel.is_cancelled() => Ok(cancelled(toggled)),
+        Ok(toggled) if work.is_cancellable() && cancel.is_cancelled() => Ok(cancelled(toggled)),
         outcome => outcome,
     };
     // Ignored for the same reason `Reporting`'s sends are: a receiver that has
@@ -483,6 +587,42 @@ pub(crate) fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<
     Some(toggle)
 }
 
+/// What one press of the refresh key comes to, given whether a run is going
+/// already.
+///
+/// [`pact_press`] for the other key, and deliberately the same two refusals in
+/// the same two places. A press while *any* run is in flight — a pact or
+/// another refresh — starts nothing and says so on the progress line the reader
+/// is already watching, leaving the account that run opened where it is; that
+/// is the one in-flight check both keys go through, so a pact refused during a
+/// refresh and a refresh refused during a pact read alike. A press the app
+/// itself turns down — a file row, a fresh directory, an unpacted one — has no
+/// run over it and has its say the ordinary way, in
+/// [`App::message`](warlock_tui::App::message), which
+/// [`App::refresh`](warlock_tui::App::refresh) has already written by the time
+/// this returns.
+///
+/// What comes back is the directory to refresh: the run covers it and
+/// everything under it, and which of the directories in there are stale enough
+/// to be worth a pass is the engine's judgement rather than this file's.
+///
+/// Every press that starts a run starts the panel's account, at `at`, for
+/// [`pact_press`]'s reason — one run, one account — and there is no second case
+/// here as there is there: a refresh always runs passes when it runs at all, so
+/// there is nothing that changes the manifest without having anything to
+/// account for.
+pub(crate) fn refresh_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PathBuf> {
+    if in_flight {
+        // The whole of the refusal, and the very one a second pact press gets:
+        // a bit of wording on a line that is already on screen.
+        app.set_pact_refused();
+        return None;
+    }
+    let directory = app.refresh()?;
+    app.start_account(at);
+    Some(directory)
+}
+
 /// Apply everything the worker has said since the last frame, and take the pact
 /// down once it has said how it went.
 ///
@@ -559,7 +699,13 @@ pub(crate) fn apply_progress(
                 if let Some(account) = app.account_mut() {
                     account.open_section(section_label(&scope.root, &directory), now);
                 }
-                app.set_pact_in_flight(directory, position, total);
+                // The fraction is the observer's own, whichever run is
+                // reporting: a refresh of a subtree of forty directories with
+                // seven stale ones counts to seven, because seven is what the
+                // engine planned to visit and said so. Nothing here counts
+                // anything. The kind rides along so the line reads as
+                // refreshing rather than pacting — see `Work::kind`.
+                app.set_run_in_flight(running.work.kind(), directory, position, total);
             }
             // Filed under whichever directory is open, which is the one the
             // `Starting` before it named: an activity carries no directory
@@ -635,8 +781,15 @@ pub(crate) fn apply_progress(
             // which is what the manifest is about to say of them. Colouring
             // anything else from this arm would be this file second-guessing
             // per node a manifest it did not compute.
+            //
+            // A refresh reads the same way, and it is the engine that makes
+            // that true rather than anything here: a refresh keeps the grant of
+            // every directory it skipped (WAR-39), so a run with no failure in
+            // it leaves the whole subtree granted even though it described a
+            // handful of directories. The paint is of the subtree the run
+            // covered either way.
             if granted {
-                app.set_subtree_state(&running.path, NodeState::PactedFresh);
+                app.set_subtree_state(running.work.path(), NodeState::PactedFresh);
             }
             if let Some(message) = message {
                 app.set_message(message);
@@ -861,15 +1014,21 @@ impl From<&PactFailure> for Refusal {
     }
 }
 
-/// Carry `toggle` out — pact the subtree, or take it out of the manifest — and
-/// write the result to disk.
+/// Carry `work` out — pact the subtree, refresh its stale parts, or take it out
+/// of the manifest — and write the result to disk.
 ///
-/// Both halves are the engine's ([`pact_subtree`], [`unpact_subtree`]); what
-/// this function owns is the order the front end needs them in and the single
-/// [`Manifest::save`] at the end of it. Once, at the end, is the whole point:
-/// a save per directory would leave `.warlock/pacts.toml` recording a pact that
-/// was still running, and one that died half way through would be indexed as
-/// finished.
+/// Every half is the engine's ([`pact_subtree`], [`refresh_subtree`],
+/// [`unpact_subtree`]); what this function owns is the order the front end needs
+/// them in and the single [`Manifest::save`] at the end of it. Once, at the end,
+/// is the whole point: a save per directory would leave `.warlock/pacts.toml`
+/// recording a pact that was still running, and one that died half way through
+/// would be indexed as finished. A refresh saves nothing of its own for exactly
+/// that reason, and so belongs under the same one write as everything else here.
+///
+/// This is the one place the two runs part company, and they part in a single
+/// `match` arm: [`refresh_subtree`] takes [`pact_subtree`]'s arguments and hands
+/// back [`pact_subtree`]'s [`PactedSubtree`], so what the front end makes of it
+/// is the same in both cases — see [`described`].
 ///
 /// The agent is passed in as the engine's port rather than reached for here, so
 /// that the tests of this file drive it with a fake and never run `claude`.
@@ -893,50 +1052,71 @@ impl From<&PactFailure> for Refusal {
 fn apply_toggle(
     manifest: &Manifest,
     repo_root: &Path,
-    toggle: &PactToggle,
+    work: &Work,
     agent: &dyn Agent,
     observer: &mut dyn PactObserver,
 ) -> Result<Toggled, String> {
-    let (next, granted, message, refusals) = if toggle.pacted {
-        let PactedSubtree {
-            manifest,
-            failures,
-            problems,
-        } = pact_subtree(&toggle.path, repo_root, manifest, agent, observer)
-            .map_err(|source| one_line(&source.to_string()))?;
-        // Failures alone decide freshness, and the byte caps' problems do not:
-        // a request that left a lockfile out still produced a document, a hash
-        // and a grant. They are still worth a line, which is why the two travel
-        // separately from here on.
-        let granted = failures.is_empty();
-        // And the same failures a second time, per directory: the footer takes
-        // one of them and the panel takes all of them, because the panel has a
-        // section for each and can say which is which.
-        let refusals = failures.iter().map(Refusal::from).collect();
-        (
-            manifest,
-            granted,
-            pact_message(&failures, &problems),
-            refusals,
-        )
-    } else {
+    let toggled = match work {
         // Un-pacting is pure manifest editing — no walk, no pass, no hash, and
         // every `WARLOCK.md` left where it is — so the only thing it can refuse
         // is a path the manifest has no spelling for. The app has already said
         // what un-pacting leaves behind, and nothing here talks over it.
-        let next = unpact_subtree(&toggle.path, repo_root, manifest)
-            .map_err(|source| Error::Manifest { source }.to_string())?;
-        (next, false, None, Vec::new())
+        Work::Pact(toggle) if !toggle.pacted => Toggled {
+            manifest: unpact_subtree(&toggle.path, repo_root, manifest)
+                .map_err(|source| Error::Manifest { source }.to_string())?,
+            granted: false,
+            message: None,
+            refusals: Vec::new(),
+        },
+        // Every directory in the subtree, whatever state it was in.
+        Work::Pact(toggle) => described(
+            pact_subtree(&toggle.path, repo_root, manifest, agent, observer)
+                .map_err(|source| one_line(&source.to_string()))?,
+        ),
+        // Only the stale ones, and which those are is the engine's judgement:
+        // it decides staleness from the same manifest handed in here, keeps the
+        // grant of everything it skipped, and — like the pact above — saves
+        // nothing, leaving the one write below.
+        Work::Refresh(directory) => described(
+            refresh_subtree(directory, repo_root, manifest, agent, observer)
+                .map_err(|source| one_line(&source.to_string()))?,
+        ),
     };
 
-    next.save(repo_root)
+    toggled
+        .manifest
+        .save(repo_root)
         .map_err(|source| Error::Manifest { source }.to_string())?;
-    Ok(Toggled {
-        manifest: next,
+    Ok(toggled)
+}
+
+/// What a run that described directories came to, whichever run described them.
+///
+/// The half a pact and a refresh share, which is all of it below the engine
+/// call: the two entry points hand back the same [`PactedSubtree`], and reading
+/// one is the same job twice over. The manifest inside is the one the caller is
+/// about to save.
+fn described(subtree: PactedSubtree) -> Toggled {
+    let PactedSubtree {
+        manifest,
+        failures,
+        problems,
+    } = subtree;
+    // Failures alone decide freshness, and the byte caps' problems do not:
+    // a request that left a lockfile out still produced a document, a hash
+    // and a grant. They are still worth a line, which is why the two travel
+    // separately from here on.
+    let granted = failures.is_empty();
+    // And the same failures a second time, per directory: the footer takes
+    // one of them and the panel takes all of them, because the panel has a
+    // section for each and can say which is which.
+    let refusals = failures.iter().map(Refusal::from).collect();
+    Toggled {
+        manifest,
         granted,
-        message,
+        message: pact_message(&failures, &problems),
         refusals,
-    })
+    }
 }
 
 /// The footer's one line about a pact that did not go perfectly, or `None` for
@@ -995,13 +1175,15 @@ mod tests {
         PER_FILE_BYTE_CAP, PactEntry, Tree, Unwatched, decide_state, load_tree, repository_root,
         subtree_hash,
     };
-    use warlock_tui::{Account, Activities, Activity, App, ClaudeAgent, Line, PactToggle, Section};
+    use warlock_tui::{
+        Account, Activities, Activity, App, ClaudeAgent, Line, PactToggle, Run, Section,
+    };
 
     use warlock_tui::Cancel;
 
     use super::{
-        CancelGuard, PACT_CANCELLED, PACT_LOST, PactEvent, Running, Toggled, activity_port,
-        apply_progress, apply_toggle, pact_press, run_pact, spawn_pact,
+        CancelGuard, PACT_CANCELLED, PACT_LOST, PactEvent, Running, Toggled, Work, activity_port,
+        apply_progress, apply_toggle, pact_press, refresh_press, run_pact, spawn_pact,
     };
     use crate::session::{NOT_REFRESHED, Scope};
 
@@ -1179,12 +1361,29 @@ mod tests {
         }
     }
 
-    /// The toggle the app hands back for the directory at `relative`.
-    fn toggle(scratch: &Scratch, relative: &str, pacted: bool) -> PactToggle {
-        PactToggle {
+    /// The work a press of the pact key over the directory at `relative` hands
+    /// to a worker.
+    fn toggle(scratch: &Scratch, relative: &str, pacted: bool) -> Work {
+        Work::Pact(PactToggle {
             path: scratch.path(relative),
             pacted,
-        }
+        })
+    }
+
+    /// The work a press of the refresh key over the directory at `relative`
+    /// hands to a worker: the same run, over whichever directories under it the
+    /// engine finds stale.
+    fn refreshing(scratch: &Scratch, relative: &str) -> Work {
+        Work::Refresh(scratch.path(relative))
+    }
+
+    /// The same for a pact of the subtree at `path`, for the tests that build a
+    /// [`Running`] straight rather than through a scratch repository.
+    fn pact_of(path: impl Into<PathBuf>) -> Work {
+        Work::Pact(PactToggle {
+            path: path.into(),
+            pacted: true,
+        })
     }
 
     /// A repository with one crate of two directories in it.
@@ -1299,7 +1498,7 @@ mod tests {
         app: &mut App,
         manifest: &mut Manifest,
         scope: &Scope,
-        toggle: &PactToggle,
+        work: &Work,
         agent: &dyn Agent,
     ) {
         let before = app.clone();
@@ -1307,7 +1506,7 @@ mod tests {
         run_pact(
             manifest,
             &scratch.root,
-            toggle,
+            work,
             agent,
             &Cancel::new(),
             &events,
@@ -1316,7 +1515,7 @@ mod tests {
         let mut pact = Some(Running {
             events: received,
             cancel: CancelGuard::new(),
-            path: toggle.path.clone(),
+            work: work.clone(),
             before,
         });
         apply_progress(&mut pact, app, manifest, scope, Instant::now());
@@ -1567,10 +1766,10 @@ mod tests {
     fn a_directory_outside_the_repository_root_is_refused_rather_than_stored() {
         // No filesystem: un-pacting is path arithmetic, and this path has
         // no manifest spelling to do it with.
-        let outside = PactToggle {
+        let outside = Work::Pact(PactToggle {
             path: PathBuf::from("/elsewhere/crates/engine"),
             pacted: false,
-        };
+        });
         let scratch = Scratch::new("elsewhere");
 
         let message = apply_toggle(
@@ -1656,21 +1855,46 @@ mod tests {
     /// half way through is somebody pressing Esc.
     fn events_of(
         scratch: &Scratch,
-        toggle: &PactToggle,
+        work: &Work,
+        agent: &dyn Agent,
+        cancel: &Cancel,
+    ) -> Vec<PactEvent> {
+        events_from(scratch, &Manifest::new(), work, agent, cancel)
+    }
+
+    /// The same, starting from `manifest` rather than from nothing.
+    ///
+    /// What a refresh needs and a first pact does not: which directories are
+    /// stale is decided against the manifest the run is handed, so a refresh
+    /// over an empty one would find everything stale and prove nothing.
+    fn events_from(
+        scratch: &Scratch,
+        manifest: &Manifest,
+        work: &Work,
         agent: &dyn Agent,
         cancel: &Cancel,
     ) -> Vec<PactEvent> {
         let (events, received) = mpsc::channel();
-        run_pact(
-            &Manifest::new(),
-            &scratch.root,
-            toggle,
-            agent,
-            cancel,
-            &events,
-        );
+        run_pact(manifest, &scratch.root, work, agent, cancel, &events);
         drop(events);
         received.into_iter().collect()
+    }
+
+    /// What each directory a run announced said it was: its position and the
+    /// total the observer reported alongside it.
+    fn fractions(events: &[PactEvent]) -> Vec<(usize, usize)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PactEvent::Starting {
+                    position, total, ..
+                } => Some((*position, *total)),
+                PactEvent::Doing(_)
+                | PactEvent::Summarising { .. }
+                | PactEvent::Documented { .. }
+                | PactEvent::Finished(_) => None,
+            })
+            .collect()
     }
 
     /// The directories a run announced, in the order it announced them,
@@ -1708,6 +1932,29 @@ mod tests {
         scratch.write("crates/alpha/src/lib.rs", "//! Alpha.\n");
         scratch.write("crates/beta/src/lib.rs", "//! Beta.\n");
         scratch
+    }
+
+    /// Pact the subtree at `relative` for real, and hand back the manifest it
+    /// earned.
+    ///
+    /// Where every refresh test starts, because a refresh is only a question
+    /// about a subtree that was pacted once: the grants this leaves are what
+    /// staleness is later decided against, and the documents it writes are what
+    /// a skipped directory keeps. Saved to disk as a real pact saves it, so the
+    /// refresh that follows runs against the repository a reader would have.
+    fn pacted(scratch: &Scratch, relative: &str) -> Manifest {
+        let Toggled {
+            manifest, granted, ..
+        } = apply_toggle(
+            &Manifest::new(),
+            &scratch.root,
+            &toggle(scratch, relative, true),
+            &Canned::new(scratch, []),
+            &mut Unwatched,
+        )
+        .expect("a subtree that walks and a manifest that writes");
+        assert!(granted, "the subtree a refresh test starts from is fresh");
+        manifest
     }
 
     #[test]
@@ -2244,6 +2491,130 @@ mod tests {
     }
 
     #[test]
+    fn either_key_starts_nothing_while_a_run_is_in_flight() {
+        // No filesystem: what a press comes to while something is running is
+        // app state and a bit of wording. The run in flight is a refresh, and
+        // the account it opened has a section in it, so that a refusal that
+        // cleared the panel would show.
+        let tree = Tree::new(Node::new(
+            "/repo/crates",
+            None::<PathBuf>,
+            NodeState::PactedStale,
+        ));
+        let mut app = App::from_tree(&tree);
+        let base = Instant::now();
+        app.start_account(base);
+        app.account_mut()
+            .expect("the press that started the run opened one")
+            .open_section("engine", base);
+        app.set_run_in_flight(Run::Refresh, "/repo/crates/engine", 2, 7);
+        app.set_message("something the last key said");
+        let before = app.clone();
+
+        // The refresh key during a refresh, and the pact key during the same
+        // refresh: one in-flight check, so one answer.
+        assert_eq!(
+            refresh_press(&mut app, true, at(base, 1)),
+            None,
+            "no second run"
+        );
+        assert_eq!(
+            pact_press(&mut app, true, at(base, 2)),
+            None,
+            "and not by the other key either"
+        );
+
+        let refused = {
+            let mut refused = before.clone();
+            refused.set_pact_refused();
+            refused
+        };
+        assert_eq!(app, refused, "the presses did more than say so");
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("refreshing engine (2/7) — already running"),
+            "the refusal is worded onto the line the reader is watching"
+        );
+        assert_eq!(
+            app.message(),
+            Some("something the last key said"),
+            "the refusal did not go through the message"
+        );
+        assert_eq!(
+            app.account().map(Account::line_count),
+            before.account().map(Account::line_count),
+            "the running run's account was cleared"
+        );
+
+        // And the other direction, which is the same sentence about the other
+        // run: a refresh asked for during a pact.
+        app.set_pact_in_flight("/repo/crates/engine", 3, 12);
+        assert_eq!(refresh_press(&mut app, true, at(base, 3)), None);
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting engine (3/12) — already running")
+        );
+    }
+
+    #[test]
+    fn a_refresh_of_a_directory_with_nothing_stale_under_it_starts_no_run() {
+        // The good outcome: the reader asked whether anything needed
+        // describing again and the answer is no, which costs a sentence rather
+        // than a run.
+        let fresh = Tree::new(Node::new(
+            "/repo/crates",
+            None::<PathBuf>,
+            NodeState::PactedFresh,
+        ));
+        let mut app = App::from_tree(&fresh);
+        let base = Instant::now();
+
+        assert_eq!(
+            refresh_press(&mut app, false, base),
+            None,
+            "there is nothing under it to describe again"
+        );
+        assert!(!app.has_account(), "a run nobody started has no account");
+        assert!(
+            app.message()
+                .is_some_and(|message| message.contains("already fresh")),
+            "the fresh row said nothing: {:?}",
+            app.message()
+        );
+        assert_eq!(app.pact_line(), None, "nothing is running to be refused by");
+
+        // The same key on the same directory gone stale is the press that
+        // starts a run, and it starts the panel's account at the moment of the
+        // press — which is what the clocks under it are counted from.
+        let stale = Tree::new(Node::new(
+            "/repo/crates",
+            None::<PathBuf>,
+            NodeState::PactedStale,
+        ));
+        let mut app = App::from_tree(&stale);
+        assert_eq!(
+            refresh_press(&mut app, false, base),
+            Some(PathBuf::from("/repo/crates")),
+            "a stale subtree is a thing to refresh"
+        );
+        let account = app.account_mut().expect("the press started an account");
+        account.open_section("crates", at(base, 5));
+        account.finish(at(base, 5));
+        assert_eq!(
+            panel_text(&app, at(base, 5)),
+            [
+                "crates".to_owned(),
+                "0:00 waiting".to_owned(),
+                // Five seconds of run, and nothing in it had happened yet:
+                // the account was opened by the press.
+                "pact finished — 1 directory, 0:05, $0.00 (incomplete: 1 pass reported no cost)"
+                    .to_owned(),
+            ],
+            "the run is counted from the press that started it"
+        );
+    }
+
+    #[test]
     fn a_cancel_stops_the_descent_and_records_only_what_finished() {
         let scratch = two_crates("cancelled");
         let cancel = Cancel::new();
@@ -2376,6 +2747,198 @@ mod tests {
     }
 
     #[test]
+    fn a_refresh_describes_the_stale_directories_and_leaves_the_fresh_ones_as_they_were() {
+        // A pact of everything, then one file moved under `beta`, then the
+        // refresh key on the root of it all. Three of the five directories are
+        // stale — the one holding the file, its parent and the root above them
+        // — and the run is over the three rather than the five.
+        let scratch = two_crates("refreshed");
+        let before = pacted(&scratch, "crates");
+        let kept: Vec<PactEntry> = ["crates/alpha", "crates/alpha/src"]
+            .into_iter()
+            .map(|module| {
+                before
+                    .entry(module)
+                    .expect("the pact recorded every directory")
+                    .clone()
+            })
+            .collect();
+        scratch.write("crates/beta/src/lib.rs", "//! Beta, and something new.\n");
+
+        let agent = Canned::new(&scratch, []);
+        let events = events_from(
+            &scratch,
+            &before,
+            &refreshing(&scratch, "crates"),
+            &agent,
+            &Cancel::new(),
+        );
+
+        // Announced and worked in the same reverse order a pact walks, and
+        // `alpha` in neither list: a pass is what a refresh is trying not to
+        // spend.
+        let stale = [
+            PathBuf::from("crates/beta/src"),
+            PathBuf::from("crates/beta"),
+            PathBuf::from("crates"),
+        ];
+        assert_eq!(announced(&events, &scratch), stale);
+        assert_eq!(agent.directories(), stale);
+        // And the fraction counts the run rather than the subtree: three of
+        // three, from the engine's observer, with five directories under the
+        // key that was pressed.
+        assert_eq!(fractions(&events), [(1, 3), (2, 3), (3, 3)]);
+
+        let Ok(Toggled {
+            manifest,
+            granted,
+            message,
+            ..
+        }) = outcome_of(&events)
+        else {
+            panic!("a refresh that walks and saves: {events:?}");
+        };
+        assert!(granted, "no pass went wrong, so the subtree is fresh");
+        assert_eq!(*message, None, "and there is nothing to report");
+
+        // The skipped directories are the entries they were, grant and all —
+        // the engine's rule (WAR-39), which is what lets the whole subtree be
+        // painted fresh off `granted` alone.
+        for entry in &kept {
+            assert_eq!(
+                manifest.entry(entry.module()),
+                Some(entry),
+                "a skipped directory was rewritten"
+            );
+        }
+        assert_eq!(
+            &saved(&scratch.root).expect("the manifest was written"),
+            manifest,
+            "the one save at the end is this run's"
+        );
+        for module in [
+            "crates",
+            "crates/alpha",
+            "crates/alpha/src",
+            "crates/beta",
+            "crates/beta/src",
+        ] {
+            let hash = subtree_hash(scratch.path(module)).expect("it hashes");
+            assert_eq!(
+                decide_state(manifest.entry(module), &hash),
+                NodeState::PactedFresh,
+                "`{module}` is not fresh after the refresh: {manifest:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cancelled_refresh_saves_what_it_finished_and_says_it_was_stopped() {
+        // Both crates move, so every directory under `crates` is stale and the
+        // refresh has all five to work; Esc lands while `alpha` is being
+        // described, which is the fourth of them.
+        let scratch = two_crates("refresh-cancelled");
+        scratch.write(".git/HEAD", "ref: refs/heads/main\n");
+        let before = pacted(&scratch, "crates");
+        scratch.write("crates/alpha/src/lib.rs", "//! Alpha, edited.\n");
+        scratch.write("crates/beta/src/lib.rs", "//! Beta, edited.\n");
+
+        let (mut app, scope) = load(&scratch);
+        let mut manifest = before.clone();
+        let base = Instant::now();
+        app.start_account(base);
+
+        // The event loop's own handle and the clone the run answers to: the
+        // pair `spawn_pact` makes, so what the panel reads at the end is the
+        // flag the reader's key latched.
+        let guard = CancelGuard::new();
+        let cancel = guard.handle();
+        let work = refreshing(&scratch, "crates");
+        let said = recorded_from(&scratch, &before, &work, &cancel, |events| {
+            Canned::new(&scratch, [])
+                .reporting(activity_port(events))
+                .cancelling_at("crates/alpha", cancel.clone())
+        });
+
+        // The descent stopped between directories, exactly as a cancelled pact
+        // stops: four of the five offered a pass, and the root of the run —
+        // worked last, after its children — was never announced and never run.
+        let worked = [
+            PathBuf::from("crates/beta/src"),
+            PathBuf::from("crates/beta"),
+            PathBuf::from("crates/alpha/src"),
+            PathBuf::from("crates/alpha"),
+        ];
+        assert_eq!(announced(&said, &scratch), worked);
+        assert_eq!(fractions(&said), [(1, 5), (2, 5), (3, 5), (4, 5)]);
+
+        let Ok(Toggled {
+            granted, message, ..
+        }) = outcome_of(&said)
+        else {
+            panic!("a cancelled refresh still saves what it finished: {said:?}");
+        };
+        // Reworded as the stopped run it is, which is the whole of what a
+        // refresh needed of `run_pact`: a pact says this and an un-pact cannot.
+        assert_eq!(message.as_deref(), Some(PACT_CANCELLED));
+        assert!(!granted, "a run that was stopped has proved nothing fresh");
+
+        let progress = replay_work(&mut app, &mut manifest, &scope, guard, &work, said, base);
+        assert_eq!(progress.len(), 4, "one line per directory: {progress:?}");
+
+        // What the run finished is on disk. The four directories that did are
+        // green again, and the root the cancel came before keeps the entry its
+        // pact gave it and stays yellow: a refresh drops nothing it could not
+        // re-describe.
+        assert_eq!(
+            saved(&scratch.root).expect("the manifest was written"),
+            manifest,
+            "what the run finished is on disk"
+        );
+        for module in [
+            "crates/alpha",
+            "crates/alpha/src",
+            "crates/beta",
+            "crates/beta/src",
+        ] {
+            let hash = subtree_hash(scratch.path(module)).expect("it hashes");
+            assert_eq!(
+                decide_state(manifest.entry(module), &hash),
+                NodeState::PactedFresh,
+                "`{module}` finished before the cancel: {manifest:?}"
+            );
+        }
+        let hash = subtree_hash(scratch.path("crates")).expect("it hashes");
+        assert_eq!(
+            decide_state(manifest.entry("crates"), &hash),
+            NodeState::PactedStale,
+            "the directory the cancel came before is still pacted and still stale"
+        );
+        assert_eq!(
+            state_of(&app, &scratch.path("crates")),
+            Some(NodeState::PactedStale),
+            "a stopped run painted the subtree green"
+        );
+
+        // And the panel says it was stopped, in the section it was stopped in
+        // and with what that pass had spent by then — the same ending a
+        // cancelled pact leaves, because it is the same code closing it.
+        let lines = panel_text(&app, at(base, 10_000));
+        assert_eq!(
+            &lines[lines.len() - 5..],
+            [
+                "crates/alpha".to_owned(),
+                "0:20 Read crates/alpha".to_owned(),
+                "0:50 thinking".to_owned(),
+                "0:50 cancelled — $0.25 spent".to_owned(),
+                "pact finished — 4 directories, 3:20, $1.00".to_owned(),
+            ],
+            "the cancel is recorded in the section it happened in"
+        );
+        assert_eq!(app.message(), Some(PACT_CANCELLED));
+    }
+
+    #[test]
     fn a_run_that_goes_out_of_scope_takes_its_claude_with_it() {
         // What quitting mid-pact comes to: `q` and Ctrl-C return from the
         // event loop, the run goes out of scope with them, and the child it
@@ -2392,7 +2955,7 @@ mod tests {
         let running = Running {
             events: received,
             cancel,
-            path: PathBuf::from("/repo/crates"),
+            work: pact_of("/repo/crates"),
             before: App::from_tree(&tree),
         };
 
@@ -2429,7 +2992,7 @@ mod tests {
         let running = Running {
             events: received,
             cancel: CancelGuard::new(),
-            path: PathBuf::from("/repo/crates"),
+            work: pact_of("/repo/crates"),
             before: before.clone(),
         };
         (app, before, Manifest::new(), events, running)
@@ -2653,7 +3216,7 @@ mod tests {
         let mut pact = Some(Running {
             events: received,
             cancel: CancelGuard::new(),
-            path: PathBuf::from("/repo/crates"),
+            work: pact_of("/repo/crates"),
             before: app.clone(),
         });
 
@@ -2721,7 +3284,7 @@ mod tests {
         let mut pact = Some(Running {
             events: received,
             cancel: CancelGuard::new(),
-            path: PathBuf::from("/repo/crates"),
+            work: pact_of("/repo/crates"),
             before: app.clone(),
         });
 
@@ -2801,7 +3364,7 @@ mod tests {
         let mut pact = Some(Running {
             events: received,
             cancel: CancelGuard::new(),
-            path: PathBuf::from("/repo/crates"),
+            work: pact_of("/repo/crates"),
             before: before.clone(),
         });
 
@@ -2862,16 +3425,27 @@ mod tests {
         cancel: &Cancel,
         agent: impl FnOnce(&Sender<PactEvent>) -> Canned,
     ) -> Vec<PactEvent> {
+        recorded_from(
+            scratch,
+            &Manifest::new(),
+            &toggle(scratch, relative, true),
+            cancel,
+            agent,
+        )
+    }
+
+    /// The same, for a run that starts from a manifest rather than from
+    /// nothing: what a refresh needs, since staleness is decided against it.
+    fn recorded_from(
+        scratch: &Scratch,
+        manifest: &Manifest,
+        work: &Work,
+        cancel: &Cancel,
+        agent: impl FnOnce(&Sender<PactEvent>) -> Canned,
+    ) -> Vec<PactEvent> {
         let (events, received) = mpsc::channel();
         let agent = agent(&events);
-        run_pact(
-            &Manifest::new(),
-            &scratch.root,
-            &toggle(scratch, relative, true),
-            &agent,
-            cancel,
-            &events,
-        );
+        run_pact(manifest, &scratch.root, work, &agent, cancel, &events);
         // Both ends the worker would have held: its own, and the one inside
         // the port attached to its agent.
         drop(events);
@@ -2896,19 +3470,52 @@ mod tests {
         said: Vec<PactEvent>,
         base: Instant,
     ) {
+        replay_work(
+            app,
+            manifest,
+            scope,
+            cancel,
+            &pact_of(scope.root.clone()),
+            said,
+            base,
+        );
+    }
+
+    /// The same, for a run that is not a pact of the whole tree, keeping what
+    /// the footer's progress line said as it went.
+    ///
+    /// The line comes back with consecutive repeats dropped, because it is
+    /// re-worded every frame and says the same thing until the next directory
+    /// starts: what a test of it is about is what the reader saw change.
+    fn replay_work(
+        app: &mut App,
+        manifest: &mut Manifest,
+        scope: &Scope,
+        cancel: CancelGuard,
+        work: &Work,
+        said: Vec<PactEvent>,
+        base: Instant,
+    ) -> Vec<String> {
         let (events, received) = mpsc::channel();
         let mut pact = Some(Running {
             events: received,
             cancel,
-            path: scope.root.clone(),
+            work: work.clone(),
             before: app.clone(),
         });
+        let mut progress: Vec<String> = Vec::new();
         for (frame, event) in said.into_iter().enumerate() {
             let frame = u64::try_from(frame).expect("a run of fewer than 2^64 events");
             events.send(event).expect("the loop is still listening");
             apply_progress(&mut pact, app, manifest, scope, at(base, frame * FRAME));
+            if let Some(line) = app.pact_line()
+                && progress.last() != Some(&line)
+            {
+                progress.push(line);
+            }
         }
         assert!(pact.is_none(), "the run reported its outcome and is over");
+        progress
     }
 
     /// How big the document under `relative` is, read the way the panel
@@ -3127,6 +3734,129 @@ mod tests {
         assert_eq!(app.message(), Some(PACT_CANCELLED));
     }
 
+    /// A repository of eight crates, sixteen directories under the one they
+    /// sit in.
+    ///
+    /// Big enough for a refresh to be visibly a run over part of it: the
+    /// fraction the reader is shown has to be able to disagree with the size
+    /// of the subtree for the test of it to say anything.
+    fn eight_crates(name: &str) -> Scratch {
+        let scratch = Scratch::new(name);
+        for crate_name in CRATES {
+            scratch.write(
+                &format!("crates/{crate_name}/src/lib.rs"),
+                "//! A crate of its own.\n",
+            );
+        }
+        scratch.write(".git/HEAD", "ref: refs/heads/main\n");
+        scratch
+    }
+
+    /// The crates [`eight_crates`] writes, named so that reverse path order —
+    /// which is the order the engine descends in — is `c8` first and `c1`
+    /// last.
+    const CRATES: [&str; 8] = ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"];
+
+    #[test]
+    fn a_refresh_counts_what_it_will_visit_rather_than_the_subtree_it_was_pointed_at() {
+        // Seventeen directories pacted, three files then moved, and a refresh
+        // of the lot: seven directories are stale — three that hold a moved
+        // file, their three parents, and the root above all of them — and
+        // seven is what the reader is counted to.
+        let scratch = eight_crates("refresh-fraction");
+        let pacted_once = pacted(&scratch, "crates");
+        assert_eq!(
+            pacted_once.entries().len(),
+            17,
+            "the subtree the key is pressed on is much bigger than the run"
+        );
+        for crate_name in ["c1", "c2", "c3"] {
+            scratch.write(
+                &format!("crates/{crate_name}/src/lib.rs"),
+                "//! A crate of its own, and something new.\n",
+            );
+        }
+
+        let (mut app, scope) = load(&scratch);
+        let mut manifest = pacted_once.clone();
+        let base = Instant::now();
+        // Everything the press does before the worker starts, which is what
+        // `refresh_press` does for real: one account, opened at the press.
+        app.start_account(base);
+
+        let work = refreshing(&scratch, "crates");
+        let said = recorded_from(&scratch, &pacted_once, &work, &Cancel::new(), |_| {
+            Canned::new(&scratch, [])
+        });
+        let progress = replay_work(
+            &mut app,
+            &mut manifest,
+            &scope,
+            CancelGuard::new(),
+            &work,
+            said,
+            base,
+        );
+
+        // The verb is the run's and the fraction is the engine observer's:
+        // seven of seven, and not one of seventeen.
+        assert_eq!(
+            progress,
+            [
+                "refreshing crates/c3/src (1/7)",
+                "refreshing crates/c3 (2/7)",
+                "refreshing crates/c2/src (3/7)",
+                "refreshing crates/c2 (4/7)",
+                "refreshing crates/c1/src (5/7)",
+                "refreshing crates/c1 (6/7)",
+                "refreshing crates (7/7)",
+            ],
+            "the footer counted something other than what the run visited"
+        );
+
+        // The panel filled the same way, a section per directory the run
+        // reached and none for a directory it skipped.
+        let lines = panel_text(&app, at(base, 10_000));
+        let stale = [
+            "crates/c3/src",
+            "crates/c3",
+            "crates/c2/src",
+            "crates/c2",
+            "crates/c1/src",
+            "crates/c1",
+            "crates",
+        ];
+        let headings: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| stale.contains(line))
+            .collect();
+        assert_eq!(headings, stale, "a section per directory, in walk order");
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(
+                "pact finished — 7 directories, 2:20, $0.00 (incomplete: 7 passes reported no cost)"
+            ),
+            "the summary counts the run: {lines:?}"
+        );
+
+        // And the run ended the ordinary way: the manifest it computed is on
+        // disk, and every directory of the subtree — the described and the
+        // skipped alike — is green again.
+        assert_eq!(
+            saved(&scratch.root).expect("the manifest was written"),
+            manifest
+        );
+        for entry in manifest.entries() {
+            let module = entry.module();
+            assert_eq!(
+                state_of(&app, &scratch.path(module)),
+                Some(NodeState::PactedFresh),
+                "`{module}` is not green after the refresh"
+            );
+        }
+    }
+
     #[test]
     fn a_pass_that_never_said_what_it_cost_leaves_the_total_incomplete() {
         // The first pass's result line carries no cost — WAR-24 reports none
@@ -3207,7 +3937,7 @@ mod tests {
         let mut pact = Some(Running {
             events: received,
             cancel: CancelGuard::new(),
-            path: PathBuf::from("/repo/crates"),
+            work: pact_of("/repo/crates"),
             before: before.clone(),
         });
 
@@ -3450,7 +4180,7 @@ mod tests {
         let mut pact = Some(Running {
             events: received,
             cancel: CancelGuard::new(),
-            path: PathBuf::from("/repo/crates"),
+            work: pact_of("/repo/crates"),
             before: before.clone(),
         });
 
@@ -3523,7 +4253,7 @@ mod tests {
             let mut pact = Some(Running {
                 events: received,
                 cancel: CancelGuard::new(),
-                path: PathBuf::from("/repo/crates"),
+                work: pact_of("/repo/crates"),
                 before,
             });
 
@@ -3601,7 +4331,7 @@ mod tests {
         let mut pact = Some(Running {
             events: received,
             cancel: CancelGuard::new(),
-            path: scratch.path("crates/engine"),
+            work: pact_of(scratch.path("crates/engine")),
             before: app.clone(),
         });
         events
@@ -3662,7 +4392,7 @@ mod tests {
         use super::{
             CancelGuard, Canned, Loaded, Manifest, NodeState, PactEvent, Running, Scope, Toggled,
             Unwatched, apply_progress, apply_toggle, load, load_tree, mpsc, one_crate_to_load,
-            state_of, toggle,
+            pact_of, state_of, toggle,
         };
         use crate::POLL_INTERVAL;
         use crate::session::{NOT_WATCHING, Watched, note};
@@ -3821,7 +4551,7 @@ mod tests {
             let mut pact = Some(Running {
                 events: received,
                 cancel: CancelGuard::new(),
-                path: scratch.path("crates/engine"),
+                work: pact_of(scratch.path("crates/engine")),
                 before: app.clone(),
             });
             events
