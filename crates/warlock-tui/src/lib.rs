@@ -45,6 +45,15 @@
 //! nothing about what a prompt says, and it needs no terminal either — its tests
 //! point it at stand-ins and pass on a machine with no `claude` installed.
 //!
+//! The gate on the way out is data too. [`QuitConfirm`] is whether the quit
+//! confirmation is up and which of its two answers is lit, and [`answer_for`]
+//! says what one key does to it — a value and a pure function, not a mode the
+//! event loop keeps in its head, so both the drawing and the key handling are
+//! assertable with nothing attached to stdout. It is deliberately not a field on
+//! [`App`]: answering No has to leave the app exactly as it was, and the app
+//! never having heard of the question is a cheaper guarantee of that than
+//! putting every field back.
+//!
 //! The dependency edge runs TUI -> engine: this crate knows the engine's
 //! vocabulary, and the engine knows nothing about terminals.
 
@@ -52,6 +61,7 @@ mod account;
 mod app;
 mod claude;
 mod colour;
+mod confirm;
 /// The hand-written tree the tests in this crate draw and walk, so none of
 /// them needs a repository on disk. Test-only, and private on purpose: the
 /// real tree comes from the engine's loader.
@@ -107,6 +117,18 @@ pub use claude::ClaudeAgent;
 pub use claude::INVOCATION_TIMEOUT;
 /// The colour a node state is drawn in.
 pub use colour::colour_for;
+/// One of the two answers the quit confirmation offers: Yes, drawn on the left,
+/// and No, drawn on the right and lit when the question opens.
+pub use confirm::Answer;
+/// What a keystroke comes to while the quit confirmation is up: the question
+/// stays with an answer lit, closes on No, or leaves on Yes.
+pub use confirm::Answered;
+/// Whether the quit confirmation is up, and which answer is lit while it is —
+/// a value of its own rather than a field on [`App`], so answering No leaves the
+/// app untouched rather than carefully restored.
+pub use confirm::QuitConfirm;
+/// What one key does to the quit confirmation, given the answer it has lit.
+pub use confirm::answer_for;
 /// What is drawn where a pointer landed: the footer, a border, the tree's
 /// header, a row of the tree's window, a line of the panel's.
 pub use ui::Hit;

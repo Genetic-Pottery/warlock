@@ -1,18 +1,28 @@
 //! What a keystroke or a mouse event asks the app to do.
 //!
-//! Two pure translations, one per device, and no terminal in either.
+//! Pure translations, one per device, and no terminal in any of them.
 //! [`action_for`] turns a key event and a situation — is a pact in flight —
 //! into an [`Action`]; [`mouse_action`] turns a mouse event, the size the
-//! frame was drawn at and the app into a [`MouseAction`]. Naming the intent
-//! apart from the event that produced it is what keeps both testable with
-//! nothing attached to stdout, and leaves the event loop in `main.rs` reading
-//! as a list of consequences.
+//! frame was drawn at, the app and the gate on the way out into a
+//! [`MouseAction`]. Naming the intent apart from the event that produced it is
+//! what keeps both testable with nothing attached to stdout, and leaves the
+//! event loop in `main.rs` reading as a list of consequences.
+//!
+//! [`press_for`] is the keyboard's second half and the newer one: it is where
+//! the quit confirmation is decided, so that the loop above has one arm that
+//! returns, one that moves the question and one that hands the key on. Esc and
+//! `q` no longer leave by themselves — with nothing running they open the
+//! question instead — and while the question is up every key goes to
+//! [`answer_for`](warlock_tui::answer_for) rather than to [`action_for`], which
+//! is what keeps a stray `j` from moving a selection nobody can see behind the
+//! dialog. Ctrl-C is answered before either of them, and a run in flight
+//! suppresses the whole gate; both are argued for on [`press_for`] itself.
 
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Size;
-use warlock_tui::{App, Focus, Hit, hit_test};
+use warlock_tui::{Answered, App, Focus, Hit, QuitConfirm, answer_for, hit_test};
 
 /// What a keystroke asks the app to do.
 ///
@@ -179,6 +189,112 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
     }
 }
 
+/// What a keystroke comes to once the gate on the way out has had it.
+///
+/// [`Action`] says what a key asks the *app* for; this says what it asks the
+/// *loop* for, and the gap between the two is the whole of the gate. Leaving is
+/// no longer something a key does to the app — it is one of three things that
+/// can happen to a session — so it is named here, beside the question that now
+/// stands in front of it, rather than left as an [`Action`] the loop has to
+/// remember to treat differently.
+///
+/// Four variants, and the useful part is that they are exclusive: a keystroke
+/// either ends the session, or moves the question, or reaches the app, or comes
+/// to nothing. While the question is up only the first two are possible, which
+/// is the plain statement of "nothing leaks through to the tree underneath".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pressed {
+    /// Leave warlock now, by the path a quit has always taken: the loop returns,
+    /// the run's handle drops and takes a running `claude` with it, and the
+    /// terminal guard puts the screen back.
+    Leave,
+    /// The gate had the key: the confirmation is `.0` from here on, and nothing
+    /// else happened. It covers opening the question, moving its highlight,
+    /// closing it again, and the keys that leave it exactly where it was.
+    Confirm(QuitConfirm),
+    /// The app's key: do `.0`.
+    ///
+    /// Never [`Action::Quit`]. Every way out is [`Pressed::Leave`] above, which
+    /// is what makes "the gate cannot be bypassed" a fact about this type rather
+    /// than a rule the loop is trusted to keep.
+    Act(Action),
+    /// A key nothing is bound to, or one already answered where it was decided.
+    Nothing,
+}
+
+/// Whether `key` is the keystroke every reader trusts to get them out.
+///
+/// Split out of [`action_for`]'s first arm because [`press_for`] has to answer
+/// it *before* it consults anything else, and answering it in two places with
+/// two different spellings is how the one keystroke that must always work stops
+/// working in one of them. `contains` rather than equality for the reason the
+/// arm below has it: shift or caps lock can ride along, and Ctrl-C is still
+/// Ctrl-C.
+fn is_ctrl_c(key: KeyEvent) -> bool {
+    key.kind == KeyEventKind::Press
+        && matches!(key.code, KeyCode::Char('c' | 'C'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// What `key` comes to with the confirmation at `confirm` and a run `in_flight`.
+///
+/// The gate itself, and it is a function of a key and two situations so that
+/// every rule below is one assertion with no terminal attached. Three roads out
+/// of it, in the order they are decided.
+///
+/// **Ctrl-C first, always.** It is a key event and not a signal — raw mode is
+/// exactly the mode in which the terminal stops turning it into `SIGINT` — so if
+/// nothing here answers it, nothing does. Routed through the question it would
+/// arrive at [`answer_for`] as an ordinary `c` with a modifier riding along,
+/// i.e. one of the keys that change nothing, and the last resort of a reader
+/// who wants out would be the one keystroke the dialog swallowed. So it leaves
+/// with the question up and with it closed, and during a run as well as outside
+/// one, exactly as it always has.
+///
+/// **Then the question, if it is up.** Every other key goes to [`answer_for`]
+/// and *only* to it: this is where "nothing reaches the app underneath" is
+/// true, because [`action_for`] is not called at all on that road. The tree's
+/// own bindings — `j`, `k`, `g`, `G`, space, `o`, `f`, `p`, `m`, Tab, the page
+/// keys — are inert for as long as the question stands, without any of them
+/// needing to know the question exists.
+///
+/// **Then the keys, as they have always been read.** [`action_for`] answers,
+/// and the one answer this function re-reads is [`Action::Quit`]: with nothing
+/// running it opens the question instead of leaving, and with a run in flight it
+/// leaves outright. That last part is the whole reason `in_flight` is here.
+/// Esc during a run already means cancel (see [`action_for`]), and the press
+/// after it is the reflex second Esc this gate exists for — but `q` and Ctrl-C
+/// during a run are keys a reader reaches for deliberately, often to get out of
+/// a run that is going nowhere, and a question in front of them would be a
+/// question in front of somebody who has already decided. The gate is for the
+/// twitch, not for the decision; the twitch only happens when there is a run to
+/// have cancelled, and by then Esc means cancel anyway.
+///
+/// Nothing here changes what cancel means, what Ctrl-C does, or what any other
+/// key is bound to: [`action_for`] is untouched and is still the one place a key
+/// is turned into an [`Action`].
+pub(crate) fn press_for(key: KeyEvent, confirm: QuitConfirm, in_flight: bool) -> Pressed {
+    if is_ctrl_c(key) {
+        return Pressed::Leave;
+    }
+
+    if let Some(highlighted) = confirm.highlighted() {
+        return match answer_for(key, highlighted) {
+            Answered::Open(answer) => Pressed::Confirm(QuitConfirm::Open(answer)),
+            Answered::Close => Pressed::Confirm(QuitConfirm::Closed),
+            Answered::Leave => Pressed::Leave,
+        };
+    }
+
+    match action_for(key, in_flight) {
+        // The gate, in one arm: the key that used to leave now asks first.
+        Some(Action::Quit) if !in_flight => Pressed::Confirm(QuitConfirm::open()),
+        Some(Action::Quit) => Pressed::Leave,
+        Some(action) => Pressed::Act(action),
+        None => Pressed::Nothing,
+    }
+}
+
 /// How far one notch of the wheel moves a pane: three rows of the tree, or
 /// three lines of the panel.
 ///
@@ -224,10 +340,10 @@ pub(crate) enum MouseAction {
     Focus(Focus),
 }
 
-/// What `mouse` over a terminal of `size` asks `app` to do, or `None` for an
-/// event that means nothing here.
+/// What `mouse` over a terminal of `size` asks `app` to do with the
+/// confirmation at `confirm`, or `None` for an event that means nothing here.
 ///
-/// [`action_for`]'s counterpart, and the same shape: three things in, one
+/// [`action_for`]'s counterpart, and the same shape: everything in, one
 /// intention out, no terminal read and nothing drawn. The size is the one the
 /// round measured before it drew, so the hit test agrees with the frame the
 /// reader is pointing at rather than with a second opinion about the layout; the
@@ -243,7 +359,25 @@ pub(crate) enum MouseAction {
 /// are read and dropped: they are out of scope by decision, not by omission,
 /// and dropping them here is what keeps a pointer swept across the screen from
 /// changing anything at all.
-pub(crate) fn mouse_action(mouse: MouseEvent, size: Size, app: &App) -> Option<MouseAction> {
+///
+/// While the confirmation is up the pointer means nothing anywhere: every event
+/// is read and dropped, wheel and click alike. The dialog has no clickable Yes
+/// and no clickable No — it is answered from the keyboard, like the keystroke
+/// that opened it — and a click that landed on the tree behind it would select a
+/// row the reader cannot see, under a window that is about to close. The gate
+/// lives here rather than in the loop's arm for the same reason [`press_for`]'s
+/// does: it is a decision, and decisions are testable with nothing attached to
+/// stdout.
+pub(crate) fn mouse_action(
+    mouse: MouseEvent,
+    size: Size,
+    app: &App,
+    confirm: QuitConfirm,
+) -> Option<MouseAction> {
+    if confirm.is_open() {
+        return None;
+    }
+
     let hit = hit_test(mouse.column, mouse.row, size);
     match mouse.kind {
         // Down the tree and down the account are the same direction, so one
@@ -931,6 +1065,431 @@ mod tests {
         }
     }
 
+    /// The gate on the way out: what Esc and `q` come to now that a question
+    /// stands in front of them, and what the question does with everything else.
+    ///
+    /// Two layers again, as in [`pointer`] below. [`press_for`] is asked what a
+    /// key *means*, which is the pure part and the only place a variant is
+    /// named; [`round`] — the loop's key arms written out a second time — is
+    /// asked what it *does*, so that "answering No changes nothing" is one
+    /// comparison of an app against a copy of itself rather than a list of
+    /// fields. No terminal is entered and no frame is drawn: the whole gate is a
+    /// function of a key, a mode and a flag.
+    mod gate {
+        use std::time::Instant;
+
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
+        };
+        use ratatui::layout::Size;
+        use warlock_engine::NodeState;
+        use warlock_tui::{Answer, App, Focus, QuitConfirm, Row, panel_height, tree_height};
+
+        use super::super::{Action, Pressed, action_for, press_for};
+
+        /// The terminal these tests measure their app against: the same eighty
+        /// by twenty-four every other test here uses.
+        const SIZE: Size = Size {
+            width: 80,
+            height: 24,
+        };
+
+        /// Every key the tree answers to, plus a character bound to nothing:
+        /// the list the question has to swallow whole, so that no keystroke
+        /// reaches the app behind it.
+        const INERT: [KeyCode; 15] = [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('g'),
+            KeyCode::Char('G'),
+            KeyCode::Char(' '),
+            KeyCode::Char('o'),
+            KeyCode::Char('f'),
+            KeyCode::Char('p'),
+            KeyCode::Char('m'),
+            KeyCode::Tab,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Char('x'),
+        ];
+
+        /// Whether a round of the loop ended the session: the loop's
+        /// `return Ok(())` written down as a value, so a test can assert that
+        /// warlock stayed as flatly as it asserts that it left.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Round {
+            /// The loop went round again.
+            Stayed,
+            /// The loop returned, which is the whole of quitting.
+            Left,
+        }
+
+        /// A plain press of `code`, as crossterm reports one with no modifiers.
+        fn press(code: KeyCode) -> KeyEvent {
+            KeyEvent::new(code, KeyModifiers::NONE)
+        }
+
+        /// Ctrl-C, as crossterm reports it in raw mode: a key event like any
+        /// other, which is exactly why the gate has to answer it first.
+        fn ctrl_c() -> KeyEvent {
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        }
+
+        /// A tree with more rows than the screen holds, told how big that
+        /// screen is — which is what the top of the event loop does every round.
+        ///
+        /// Half the directories are pacted and half are not, so that the
+        /// pacted-only filter has something to hide and something to keep: with
+        /// it on there are still rows to select, collapse and scroll past, which
+        /// is what lets [`app_in_use`] hold both filters off their defaults at
+        /// once. Each file is in the state of the directory listing it, as the
+        /// loader has it.
+        fn app_on_screen() -> App {
+            let mut rows = vec![
+                Row::new(0, "/repo", "/repo/WARLOCK.md", NodeState::PactedStale)
+                    .with_child_count(12),
+            ];
+            for n in 0..12 {
+                let directory = format!("/repo/d{n:02}");
+                let state = if n % 2 == 0 {
+                    NodeState::PactedFresh
+                } else {
+                    NodeState::Unpacted
+                };
+                rows.push(Row::new(1, directory.clone(), None, state));
+                rows.push(Row::file(2, format!("{directory}/lib.rs"), state));
+            }
+            let mut app = App::from_rows(rows);
+            app.set_viewport_height(tree_height(SIZE));
+            app.set_panel_height(panel_height(SIZE));
+            app
+        }
+
+        /// That app, moved off its defaults in every way the confirmation
+        /// promises to leave alone.
+        ///
+        /// Selection, scroll offset, panel offset, focus, both filters, the
+        /// collapsed set and the message: a copy of this is what the No answer
+        /// is compared against, so each of them is somewhere it would not be if
+        /// a key had leaked through. The counts come with the rows and are
+        /// compared along with everything else, because the comparison is
+        /// [`App`]'s own — every field, named or not.
+        fn app_in_use() -> App {
+            let mut app = app_on_screen();
+            app.toggle_files();
+            app.toggle_pacted_only();
+            app.select_row(9);
+            app.toggle_collapsed();
+            app.select_previous();
+            // A panel with more in it than its window holds, so that scrolling
+            // it back is a real offset rather than a no-op: an app with no
+            // account has exactly one place its window can be, and a field that
+            // cannot move cannot catch a key that moved it.
+            let started = Instant::now();
+            app.start_account(started);
+            if let Some(account) = app.account_mut() {
+                for n in 0..40 {
+                    account.open_section(format!("/repo/d{n:02}"), started);
+                }
+            }
+            app.scroll_panel_up(5);
+            app.set_focus(Focus::Panel);
+            app.set_message("something worth keeping");
+            app
+        }
+
+        /// One round of the event loop with `key` arriving in it and the gate at
+        /// `confirm`: the answer worked out, then done, then said.
+        ///
+        /// The loop's key arms written out a second time, as [`pointer`]'s
+        /// `round` is for the pointer, so the tests below are about an app and a
+        /// mode rather than about the name of a variant. Nothing is in flight
+        /// here, which is the only situation the question can be up in at all —
+        /// the gate does not open during a run, and no key that reaches the app
+        /// while it is up could start one.
+        ///
+        /// The three arms the loop answers with a worker thread or an escape
+        /// sequence — the pact key, the refresh key and the mouse key — panic
+        /// rather than doing nothing quietly: a key that reached one of those
+        /// from behind the question is precisely the accident these tests exist
+        /// to catch.
+        fn round(app: &mut App, confirm: &mut QuitConfirm, key: KeyEvent) -> Round {
+            match press_for(key, *confirm, false) {
+                Pressed::Leave | Pressed::Act(Action::Quit) => return Round::Left,
+                Pressed::Confirm(next) => *confirm = next,
+                Pressed::Act(Action::ToggleFocus) => app.toggle_focus(),
+                Pressed::Act(Action::SelectPrevious) => app.select_previous(),
+                Pressed::Act(Action::SelectNext) => app.select_next(),
+                Pressed::Act(Action::SelectPageUp) => app.select_page_up(),
+                Pressed::Act(Action::SelectPageDown) => app.select_page_down(),
+                Pressed::Act(Action::SelectFirst) => app.select_first(),
+                Pressed::Act(Action::SelectLast) => app.select_last(),
+                Pressed::Act(Action::ToggleCollapsed) => app.toggle_collapsed(),
+                Pressed::Act(Action::TogglePactedOnly) => app.toggle_pacted_only(),
+                Pressed::Act(Action::ToggleFiles) => app.toggle_files(),
+                Pressed::Act(
+                    action @ (Action::CancelPact
+                    | Action::TogglePact
+                    | Action::Refresh
+                    | Action::ToggleMouseCapture),
+                ) => panic!("{action:?} reached the app"),
+                Pressed::Nothing => {}
+            }
+            Round::Stayed
+        }
+
+        #[test]
+        fn the_app_the_no_answer_is_compared_against_is_off_its_defaults() {
+            // The teeth behind every `assert_eq!(app, before)` below. An app
+            // sitting on its defaults would compare equal to one a leaked
+            // keystroke had put back there, so each of the things the
+            // confirmation promises to leave alone is somewhere a stray key
+            // would move it away from — and the fixture is asserted rather than
+            // assumed, because a later edit that flattened it would leave the
+            // tests passing and testing nothing.
+            let app = app_in_use();
+            let fresh = app_on_screen();
+
+            assert!(app.show_files(), "the file filter is on");
+            assert!(app.pacted_only(), "and so is the pacted-only filter");
+            assert_ne!(app.selected(), fresh.selected(), "the selection has moved");
+            assert_ne!(
+                app.panel_scroll_offset(),
+                0,
+                "the panel's window is off the top"
+            );
+            assert!(
+                !app.panel_follows(),
+                "and no longer following the newest line"
+            );
+            assert_eq!(app.focus(), Focus::Panel, "the panel has the keys");
+            assert!(app.message().is_some(), "and there is a line worth keeping");
+            assert_ne!(
+                app.rows().len(),
+                fresh.rows().len(),
+                "something is collapsed or filtered out of the list"
+            );
+        }
+
+        #[test]
+        fn esc_and_q_ask_before_they_leave() {
+            // The whole ticket in one assertion each: the key that used to end
+            // the session now puts a question in front of it, with the safe
+            // answer lit.
+            for code in [KeyCode::Esc, KeyCode::Char('q')] {
+                let mut app = app_in_use();
+                let before = app.clone();
+                let mut confirm = QuitConfirm::Closed;
+
+                assert_eq!(
+                    round(&mut app, &mut confirm, press(code)),
+                    Round::Stayed,
+                    "{code:?} should not leave on its own"
+                );
+                assert_eq!(confirm, QuitConfirm::Open(Answer::No));
+                assert_eq!(app, before, "opening the question changed nothing");
+            }
+        }
+
+        #[test]
+        fn the_question_swallows_every_key_the_tree_answers_to() {
+            // Asserted at both highlight positions, and in both layers: the key
+            // comes to a mode and never to an `Action`, and the app behind the
+            // dialog is the app that was there before it opened.
+            for lit in [Answer::Yes, Answer::No] {
+                let mut app = app_in_use();
+                let before = app.clone();
+                let mut confirm = QuitConfirm::Open(lit);
+
+                for code in INERT {
+                    assert_eq!(
+                        press_for(press(code), QuitConfirm::Open(lit), false),
+                        Pressed::Confirm(QuitConfirm::Open(lit)),
+                        "{code:?} should reach neither the app nor the way out with {lit:?} lit"
+                    );
+                    assert_eq!(round(&mut app, &mut confirm, press(code)), Round::Stayed);
+                }
+
+                assert_eq!(
+                    confirm,
+                    QuitConfirm::Open(lit),
+                    "the highlight did not move"
+                );
+                assert_eq!(app, before, "nothing reached the tree underneath");
+            }
+        }
+
+        #[test]
+        fn answering_yes_leaves_by_the_road_a_quit_already_takes() {
+            // Both spellings of Yes, and the same value Ctrl-C comes to: one
+            // road out of the loop means one `return Ok(())`, so the terminal
+            // guard restores the screen and a running `claude` is taken down by
+            // the run's own drop, exactly as before this gate existed.
+            for key in [press(KeyCode::Char('y')), press(KeyCode::Enter)] {
+                let mut app = app_in_use();
+                let mut confirm = QuitConfirm::Open(Answer::Yes);
+
+                assert_eq!(press_for(key, confirm, false), Pressed::Leave);
+                assert_eq!(
+                    press_for(key, confirm, false),
+                    press_for(ctrl_c(), confirm, false)
+                );
+                assert_eq!(round(&mut app, &mut confirm, key), Round::Left);
+            }
+        }
+
+        #[test]
+        fn answering_no_closes_the_question_and_leaves_the_app_untouched() {
+            // The three ways of saying No — the key, the key that opened the
+            // question, and Enter on the answer that is lit when it opens — each
+            // with the highlight walked over to Yes and back first, so the app
+            // is compared after a handful of keystrokes rather than after one.
+            for code in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Enter] {
+                let mut app = app_in_use();
+                let before = app.clone();
+                let mut confirm = QuitConfirm::Closed;
+
+                assert_eq!(
+                    round(&mut app, &mut confirm, press(KeyCode::Esc)),
+                    Round::Stayed
+                );
+                assert_eq!(
+                    round(&mut app, &mut confirm, press(KeyCode::Left)),
+                    Round::Stayed
+                );
+                assert_eq!(
+                    round(&mut app, &mut confirm, press(KeyCode::Right)),
+                    Round::Stayed
+                );
+                assert_eq!(
+                    round(&mut app, &mut confirm, press(code)),
+                    Round::Stayed,
+                    "{code:?} should answer No"
+                );
+
+                assert_eq!(confirm, QuitConfirm::Closed, "the question came down");
+                assert_eq!(app, before, "and took nothing with it");
+            }
+        }
+
+        #[test]
+        fn the_reflex_second_esc_closes_the_question_rather_than_the_session() {
+            // The accident this gate exists for, spelled out: two presses of the
+            // key nearest to hand leave warlock exactly where it was.
+            let mut app = app_in_use();
+            let before = app.clone();
+            let mut confirm = QuitConfirm::Closed;
+
+            for _ in 0..4 {
+                assert_eq!(
+                    round(&mut app, &mut confirm, press(KeyCode::Esc)),
+                    Round::Stayed
+                );
+            }
+
+            assert_eq!(confirm, QuitConfirm::Closed, "an even number of presses");
+            assert_eq!(app, before);
+        }
+
+        #[test]
+        fn ctrl_c_leaves_at_once_with_the_question_up_or_down() {
+            // Answered before the mode is consulted, which is what keeps it out
+            // of `answer_for`'s "every other key" arm: through there it would be
+            // an ordinary `c` with a modifier riding along, and the one
+            // keystroke every reader trusts would be the one the dialog ate.
+            for confirm in [
+                QuitConfirm::Closed,
+                QuitConfirm::Open(Answer::No),
+                QuitConfirm::Open(Answer::Yes),
+            ] {
+                for in_flight in [false, true] {
+                    assert_eq!(
+                        press_for(ctrl_c(), confirm, in_flight),
+                        Pressed::Leave,
+                        "Ctrl-C should leave with {confirm:?} and a run in flight = {in_flight}"
+                    );
+                }
+            }
+
+            let mut app = app_in_use();
+            let mut confirm = QuitConfirm::open();
+            assert_eq!(round(&mut app, &mut confirm, ctrl_c()), Round::Left);
+        }
+
+        #[test]
+        fn a_run_in_flight_puts_no_question_in_front_of_anybody() {
+            // Esc still cancels the run and `q` still leaves, pinned at both
+            // settings of the flag: the gate is for the twitch that follows a
+            // cancel, and during a run Esc already means cancel.
+            assert_eq!(
+                press_for(press(KeyCode::Esc), QuitConfirm::Closed, true),
+                Pressed::Act(Action::CancelPact),
+            );
+            assert_eq!(
+                press_for(press(KeyCode::Char('q')), QuitConfirm::Closed, true),
+                Pressed::Leave,
+            );
+
+            // And the same two keys with nothing running, which is the only
+            // difference the flag makes here.
+            assert_eq!(
+                press_for(press(KeyCode::Esc), QuitConfirm::Closed, false),
+                Pressed::Confirm(QuitConfirm::open()),
+            );
+            assert_eq!(
+                press_for(press(KeyCode::Char('q')), QuitConfirm::Closed, false),
+                Pressed::Confirm(QuitConfirm::open()),
+            );
+        }
+
+        #[test]
+        fn every_other_key_still_means_what_it_always_meant() {
+            // The gate is one question in front of two keys and nothing else:
+            // with it closed, every binding reaches the app as before, at both
+            // settings of the flag.
+            for in_flight in [false, true] {
+                for code in INERT {
+                    assert_eq!(
+                        press_for(press(code), QuitConfirm::Closed, in_flight),
+                        action_for(press(code), in_flight).map_or(Pressed::Nothing, Pressed::Act),
+                        "{code:?} should read as it always has, in flight = {in_flight}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn releases_and_repeats_neither_open_the_question_nor_answer_it() {
+            // The same rule the two key functions already keep, and here it is
+            // the difference between a gate and no gate: acting on a release
+            // would answer the question with the release of the very key that
+            // opened it.
+            for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+                for code in [KeyCode::Esc, KeyCode::Char('q'), KeyCode::Char('y')] {
+                    let key = KeyEvent::new_with_kind_and_state(
+                        code,
+                        KeyModifiers::NONE,
+                        kind,
+                        KeyEventState::NONE,
+                    );
+
+                    assert_eq!(
+                        press_for(key, QuitConfirm::Closed, false),
+                        Pressed::Nothing,
+                        "{kind:?} of {code:?} should open nothing"
+                    );
+                    assert_eq!(
+                        press_for(key, QuitConfirm::open(), false),
+                        Pressed::Confirm(QuitConfirm::open()),
+                        "{kind:?} of {code:?} should answer nothing"
+                    );
+                }
+            }
+        }
+    }
+
     /// What the pointer comes to: which move a notch of the wheel or a press of
     /// the left button at a named point on a named screen asks the app for.
     ///
@@ -941,9 +1500,10 @@ mod tests {
     /// rather than something the event loop does inline.
     ///
     /// Two layers are asserted, and they are different things. Most tests ask
-    /// [`mouse_action`] what a point *means*, which is the pure part. The few
-    /// that care what the reader would see also go through [`round`], which is
-    /// the event loop's arms written out a second time, so
+    /// [`asks`] — that is [`mouse_action`] over the screen below, with the gate
+    /// on the way out closed — what a point *means*, which is the pure part. The
+    /// few that care what the reader would see also go through [`round`], which
+    /// is the event loop's arms written out a second time, so
     /// that "three rows a notch, clamped" and "a click on the row already
     /// selected opens it" are asserted about an app rather than about a variant
     /// name. What each of those moves does on its own is `app.rs`'s to test, and
@@ -952,7 +1512,7 @@ mod tests {
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Size;
         use warlock_engine::NodeState;
-        use warlock_tui::{App, Focus, Row, panel_height, tree_height};
+        use warlock_tui::{App, Focus, QuitConfirm, Row, panel_height, tree_height};
 
         use super::super::{MouseAction, mouse_action};
 
@@ -1076,15 +1636,27 @@ mod tests {
             app
         }
 
-        /// One round of the event loop with `mouse` arriving in it: the answer
-        /// worked out and then done, which is the loop's arms written out again.
+        /// What `mouse` over [`SIZE`] asks `app` for with the gate on the way
+        /// out closed, which is the situation every test here but the last one
+        /// is about.
+        ///
+        /// Named so the question the pointer tests ask stays one line long now
+        /// that the confirmation is one of the things a pointer event is read
+        /// against.
+        fn asks(mouse: MouseEvent, app: &App) -> Option<MouseAction> {
+            mouse_action(mouse, SIZE, app, QuitConfirm::Closed)
+        }
+
+        /// One round of the event loop with `mouse` arriving in it and the gate
+        /// at `confirm`: the answer worked out and then done, which is the
+        /// loop's arms written out again.
         ///
         /// Here so that a test can assert about a selection and a focus rather
         /// than about the name of a variant. It is the pointer's whole road, and
         /// a change to the loop that this stopped matching would be a change one
         /// of the tests below is asserting the old shape of.
-        fn round(app: &mut App, mouse: MouseEvent) {
-            match mouse_action(mouse, SIZE, app) {
+        fn round(app: &mut App, confirm: QuitConfirm, mouse: MouseEvent) {
+            match mouse_action(mouse, SIZE, app, confirm) {
                 Some(MouseAction::SelectNextBy(rows)) => app.select_next_by(rows),
                 Some(MouseAction::SelectPreviousBy(rows)) => app.select_previous_by(rows),
                 Some(MouseAction::ScrollPanelDown(lines)) => app.scroll_panel_down(lines),
@@ -1120,11 +1692,11 @@ mod tests {
             let app = app_on_screen();
 
             assert_eq!(
-                mouse_action(wheel_down(IN_TREE, FIRST_TREE_ROW + 4), SIZE, &app),
+                asks(wheel_down(IN_TREE, FIRST_TREE_ROW + 4), &app),
                 Some(MouseAction::SelectNextBy(3)),
             );
             assert_eq!(
-                mouse_action(wheel_up(IN_TREE, FIRST_TREE_ROW + 4), SIZE, &app),
+                asks(wheel_up(IN_TREE, FIRST_TREE_ROW + 4), &app),
                 Some(MouseAction::SelectPreviousBy(3)),
             );
             // Every part of the pane's inside answers for the pane, the header
@@ -1132,7 +1704,7 @@ mod tests {
             // nothing because the pointer sat on the naming line would read as a
             // wheel that sticks.
             assert_eq!(
-                mouse_action(wheel_down(IN_TREE, TREE_HEADER), SIZE, &app),
+                asks(wheel_down(IN_TREE, TREE_HEADER), &app),
                 Some(MouseAction::SelectNextBy(3)),
             );
         }
@@ -1145,18 +1717,30 @@ mod tests {
                 pressed.select_next();
             }
 
-            round(&mut app, wheel_down(IN_TREE, FIRST_TREE_ROW));
+            round(
+                &mut app,
+                QuitConfirm::Closed,
+                wheel_down(IN_TREE, FIRST_TREE_ROW),
+            );
             assert_eq!(app, pressed, "a notch is three presses of the movement key");
 
             // Clamped at both ends rather than wrapping or running off: the
             // wheel is spun past the end far more easily than a key is held
             // there.
             for _ in 0..20 {
-                round(&mut app, wheel_up(IN_TREE, FIRST_TREE_ROW));
+                round(
+                    &mut app,
+                    QuitConfirm::Closed,
+                    wheel_up(IN_TREE, FIRST_TREE_ROW),
+                );
             }
             assert_eq!(app.selected(), 0, "stopped at the first row");
             for _ in 0..20 {
-                round(&mut app, wheel_down(IN_TREE, FIRST_TREE_ROW));
+                round(
+                    &mut app,
+                    QuitConfirm::Closed,
+                    wheel_down(IN_TREE, FIRST_TREE_ROW),
+                );
             }
             assert_eq!(app.selected(), app.rows().len() - 1, "stopped at the last");
         }
@@ -1166,11 +1750,11 @@ mod tests {
             let app = app_on_screen();
 
             assert_eq!(
-                mouse_action(wheel_down(IN_PANEL, FIRST_PANEL_LINE + 7), SIZE, &app),
+                asks(wheel_down(IN_PANEL, FIRST_PANEL_LINE + 7), &app),
                 Some(MouseAction::ScrollPanelDown(3)),
             );
             assert_eq!(
-                mouse_action(wheel_up(IN_PANEL, FIRST_PANEL_LINE), SIZE, &app),
+                asks(wheel_up(IN_PANEL, FIRST_PANEL_LINE), &app),
                 Some(MouseAction::ScrollPanelUp(3)),
             );
         }
@@ -1183,7 +1767,11 @@ mod tests {
             // pane instead would move the half of the screen they are not.
             let mut app = app_on_screen();
             app.set_focus(Focus::Panel);
-            round(&mut app, wheel_down(IN_TREE, FIRST_TREE_ROW + 2));
+            round(
+                &mut app,
+                QuitConfirm::Closed,
+                wheel_down(IN_TREE, FIRST_TREE_ROW + 2),
+            );
 
             assert_eq!(app.selected(), 3, "the tree moved under the pointer");
             assert_eq!(app.focus(), Focus::Panel, "the keys did not follow");
@@ -1192,7 +1780,11 @@ mod tests {
             // over the panel, and the notch is the panel's.
             let mut app = app_on_screen();
             let selected = app.selected();
-            round(&mut app, wheel_up(IN_PANEL, FIRST_PANEL_LINE));
+            round(
+                &mut app,
+                QuitConfirm::Closed,
+                wheel_up(IN_PANEL, FIRST_PANEL_LINE),
+            );
 
             assert_eq!(app.focus(), Focus::Tree, "the keys did not follow");
             assert_eq!(app.selected(), selected, "the tree did not move");
@@ -1216,12 +1808,12 @@ mod tests {
                 (IN_PANEL, 20),
             ] {
                 assert_eq!(
-                    mouse_action(wheel_down(column, row), SIZE, &app),
+                    asks(wheel_down(column, row), &app),
                     None,
                     "a notch at {column},{row} should change nothing"
                 );
                 assert_eq!(
-                    mouse_action(wheel_up(column, row), SIZE, &app),
+                    asks(wheel_up(column, row), &app),
                     None,
                     "a notch at {column},{row} should change nothing"
                 );
@@ -1234,12 +1826,16 @@ mod tests {
             app.set_focus(Focus::Panel);
 
             assert_eq!(
-                mouse_action(left_click(IN_TREE, FIRST_TREE_ROW + 5), SIZE, &app),
+                asks(left_click(IN_TREE, FIRST_TREE_ROW + 5), &app),
                 Some(MouseAction::SelectRow(5)),
                 "the sixth row of a window that has not scrolled"
             );
 
-            round(&mut app, left_click(IN_TREE, FIRST_TREE_ROW + 5));
+            round(
+                &mut app,
+                QuitConfirm::Closed,
+                left_click(IN_TREE, FIRST_TREE_ROW + 5),
+            );
             assert_eq!(app.selected(), 5);
             assert_eq!(app.focus(), Focus::Tree, "the reader pointed at the tree");
         }
@@ -1258,7 +1854,7 @@ mod tests {
             );
 
             assert_eq!(
-                mouse_action(left_click(IN_TREE, FIRST_TREE_ROW + 3), SIZE, &app),
+                asks(left_click(IN_TREE, FIRST_TREE_ROW + 3), &app),
                 Some(MouseAction::SelectRow(offset + 3)),
             );
         }
@@ -1274,19 +1870,16 @@ mod tests {
             // own: the second click is the one that collapses, and it is the
             // same point twice.
             let point = left_click(IN_TREE, FIRST_TREE_ROW + 1);
-            round(&mut app, point);
+            round(&mut app, QuitConfirm::Closed, point);
             let path = app.selected_row().expect("a row is selected").path.clone();
             assert!(!app.is_collapsed(&path), "nothing collapsed by selecting");
 
-            assert_eq!(
-                mouse_action(point, SIZE, &app),
-                Some(MouseAction::ToggleCollapsed),
-            );
-            round(&mut app, point);
+            assert_eq!(asks(point, &app), Some(MouseAction::ToggleCollapsed),);
+            round(&mut app, QuitConfirm::Closed, point);
             assert!(app.is_collapsed(&path), "the second click closed it");
 
             // And back open, which is what space does on the third press too.
-            round(&mut app, point);
+            round(&mut app, QuitConfirm::Closed, point);
             assert!(!app.is_collapsed(&path), "the third click opened it");
         }
 
@@ -1298,14 +1891,14 @@ mod tests {
             let mut app = app_on_screen();
             app.toggle_files();
             let point = left_click(IN_TREE, FIRST_TREE_ROW + 2);
-            round(&mut app, point);
+            round(&mut app, QuitConfirm::Closed, point);
             assert!(
                 app.selected_row().expect("a row is selected").is_file(),
                 "the third drawn row is a file"
             );
 
             let before = app.clone();
-            round(&mut app, point);
+            round(&mut app, QuitConfirm::Closed, point);
             assert_eq!(app, before, "a file row has nothing to open");
         }
 
@@ -1315,12 +1908,16 @@ mod tests {
             let before = app.clone();
 
             assert_eq!(
-                mouse_action(left_click(IN_PANEL, FIRST_PANEL_LINE + 9), SIZE, &app),
+                asks(left_click(IN_PANEL, FIRST_PANEL_LINE + 9), &app),
                 Some(MouseAction::Focus(Focus::Panel)),
                 "the panel has no selection, so focus is the whole of it"
             );
 
-            round(&mut app, left_click(IN_PANEL, FIRST_PANEL_LINE + 9));
+            round(
+                &mut app,
+                QuitConfirm::Closed,
+                left_click(IN_PANEL, FIRST_PANEL_LINE + 9),
+            );
             assert_eq!(app.focus(), Focus::Panel);
             assert_eq!(app.selected(), before.selected(), "the tree did not move");
             assert_eq!(
@@ -1337,11 +1934,15 @@ mod tests {
             let selected = app.selected();
 
             assert_eq!(
-                mouse_action(left_click(IN_TREE, TREE_HEADER), SIZE, &app),
+                asks(left_click(IN_TREE, TREE_HEADER), &app),
                 Some(MouseAction::Focus(Focus::Tree)),
             );
 
-            round(&mut app, left_click(IN_TREE, TREE_HEADER));
+            round(
+                &mut app,
+                QuitConfirm::Closed,
+                left_click(IN_TREE, TREE_HEADER),
+            );
             assert_eq!(app.focus(), Focus::Tree);
             assert_eq!(app.selected(), selected, "the selection did not move");
         }
@@ -1362,12 +1963,16 @@ mod tests {
             app.set_focus(Focus::Panel);
 
             assert_eq!(
-                mouse_action(left_click(IN_TREE, FIRST_TREE_ROW + 6), SIZE, &app),
+                asks(left_click(IN_TREE, FIRST_TREE_ROW + 6), &app),
                 Some(MouseAction::Focus(Focus::Tree)),
             );
 
             let before = app.clone();
-            round(&mut app, left_click(IN_TREE, FIRST_TREE_ROW + 6));
+            round(
+                &mut app,
+                QuitConfirm::Closed,
+                left_click(IN_TREE, FIRST_TREE_ROW + 6),
+            );
             assert_eq!(app.focus(), Focus::Tree);
             assert_eq!(app.rows(), before.rows(), "nothing was opened or closed");
             assert_eq!(app.selected(), 0, "the one row stayed selected");
@@ -1387,7 +1992,7 @@ mod tests {
                 (IN_PANEL, 20),
             ] {
                 assert_eq!(
-                    mouse_action(left_click(column, row), SIZE, &app),
+                    asks(left_click(column, row), &app),
                     None,
                     "a click at {column},{row} should change nothing"
                 );
@@ -1423,12 +2028,58 @@ mod tests {
                     (50, FIRST_TREE_ROW),
                 ] {
                     assert_eq!(
-                        mouse_action(event(kind, column, row), SIZE, &app),
+                        asks(event(kind, column, row), &app),
                         None,
                         "{kind:?} at {column},{row} should mean nothing"
                     );
                 }
             }
+        }
+
+        #[test]
+        fn the_pointer_is_read_and_dropped_while_the_confirmation_is_up() {
+            // The dialog is answered from the keyboard and has no clickable Yes
+            // or No, so a click that got through would land on a tree the
+            // reader cannot see, behind a window that is about to close. Asked
+            // over the whole pointer — both notches, a click on a row, a click
+            // on the row already selected and a click in the panel — and then
+            // asserted about the app itself, since "read and dropped" is a
+            // claim about what did not move.
+            let mut app = app_on_screen();
+            app.toggle_files();
+            // Selected and focused somewhere other than where it started, so a
+            // leak has something to disturb: the panel has the keys and its
+            // window has been scrolled back, and the tree's selection is a row
+            // down the list rather than the first one.
+            app.select_row(9);
+            app.scroll_panel_down(4);
+            app.set_focus(Focus::Panel);
+            let before = app.clone();
+            assert_eq!(
+                app.scroll_offset(),
+                0,
+                "the tree's window has not moved, so drawn row nine is row nine"
+            );
+
+            for mouse in [
+                wheel_down(IN_TREE, FIRST_TREE_ROW),
+                wheel_up(IN_TREE, FIRST_TREE_ROW),
+                wheel_down(IN_PANEL, FIRST_PANEL_LINE),
+                wheel_up(IN_PANEL, FIRST_PANEL_LINE),
+                left_click(IN_TREE, FIRST_TREE_ROW),
+                left_click(IN_TREE, FIRST_TREE_ROW + 9),
+                left_click(IN_TREE, TREE_HEADER),
+                left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
+            ] {
+                assert_eq!(
+                    mouse_action(mouse, SIZE, &app, QuitConfirm::open()),
+                    None,
+                    "{mouse:?} should mean nothing while the question is up"
+                );
+                round(&mut app, QuitConfirm::open(), mouse);
+            }
+
+            assert_eq!(app, before, "the pointer moved nothing behind the dialog");
         }
     }
 }

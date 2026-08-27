@@ -101,13 +101,36 @@
 //! mouse in the same breath as it takes the alternate screen, so the reporting
 //! is switched off by the same [`restore_terminal`] every way out already runs
 //! through; and an event that arrives is turned into an intention by
-//! [`mouse_action`], which is [`action_for`] for the pointer — a function of the
-//! event, the size this round measured and the app, with no terminal in it. The
-//! wheel drives whichever pane the pointer is over rather than whichever pane
-//! has the keys, a left click selects a row and takes the keys with it, and
-//! everything else a mouse can send is read and dropped, so a pointer swept
-//! across the screen changes nothing and costs no more than the round it
-//! arrived in.
+//! [`mouse_action`], which is [`input::action_for`] for the pointer — a function
+//! of the event, the size this round measured, the app and the gate on the way
+//! out, with no terminal in it. The wheel drives whichever pane the pointer is
+//! over rather than whichever pane has the keys, a left click selects a row and
+//! takes the keys with it, and everything else a mouse can send is read and
+//! dropped, so a pointer swept across the screen changes nothing and costs no
+//! more than the round it arrived in.
+//!
+//! There is one thing between a keystroke and the end of the session now, and
+//! it is a question. Esc and `q` no longer return from [`run`]: with nothing
+//! running they open the quit confirmation ([`QuitConfirm`]), which is drawn
+//! over the frame and answered from the keyboard, and only a Yes returns. The
+//! decision is [`press_for`]'s and not this file's — a key, the question's state
+//! and whether a run is in flight go in, and what the loop is to do comes out —
+//! so the whole gate is testable with nothing attached to stdout, and the arms
+//! below are the three things that can come of a keystroke: leave, move the
+//! question, or hand the key to the app. While the question is up the app hears
+//! nothing at all, the pointer included: mouse events are read and dropped, so a
+//! click cannot select a row behind a window that is about to close.
+//!
+//! Two keystrokes are deliberately outside the gate. Ctrl-C is answered before
+//! the question is consulted, because in raw mode it is a key event rather than
+//! a signal: routed through the dialog it would be an ordinary `c` with a
+//! modifier riding along — one of the keys that change nothing — and the last
+//! resort of a reader who wants out would be the one keystroke the dialog
+//! swallowed. And a run in flight suppresses the gate entirely: Esc means cancel
+//! for as long as there is something to cancel, so the reflex press this gate
+//! exists for cannot reach the way out anyway, while `q` and Ctrl-C during a run
+//! are what a reader reaches for having already decided — a question in front of
+//! them would be a question asked of somebody who has answered it.
 //!
 //! The reader can hand the pointer back. `m` turns the terminal's reporting off
 //! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
@@ -124,7 +147,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use ratatui::crossterm::execute;
-use warlock_tui::{ClaudeAgent, Focus, draw, panel_height, tree_height};
+use warlock_tui::{ClaudeAgent, Focus, QuitConfirm, draw, panel_height, tree_height};
 
 mod error;
 mod input;
@@ -133,7 +156,7 @@ mod session;
 mod terminal;
 
 use error::Error;
-use input::{Action, MouseAction, action_for, mouse_action};
+use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Running, Work, apply_progress, pact_press, refresh_press, start_run};
 use session::{Watched, load_app, load_manifest, note};
 use terminal::{TerminalGuard, install_panic_hook};
@@ -204,6 +227,11 @@ fn main() -> ExitCode {
 /// a run that ended has had its own reload, and a watcher that could not be
 /// started is a line put on the footer here — once, before the loop — and never
 /// an error out of this function.
+///
+/// One thing now stands between a keystroke and the return: the question the
+/// gate asks. It is a value on this stack rather than a field on the app, and
+/// [`press_for`] is what decides what each key does to it — see the module docs
+/// above for why Ctrl-C goes round it and why a run in flight suppresses it.
 fn run() -> Result<(), Error> {
     let (mut app, scope, tree) = load_app()?;
     // Loaded before the terminal is touched, for the same reason the tree is:
@@ -239,6 +267,12 @@ fn run() -> Result<(), Error> {
     // needs to keep about a run it is not performing. `None` is the ordinary
     // state, and it is what the pact key checks before starting anything.
     let mut pact: Option<Running> = None;
+    // The gate on the way out, closed as every session starts. It lives here
+    // rather than on the app because it is state about this keystroke and the
+    // next one rather than about what warlock is showing — which is also what
+    // makes "answering No leaves the app exactly as it was" true by
+    // construction: the app is never told the question was asked.
+    let mut confirm = QuitConfirm::default();
 
     loop {
         // Told before it is drawn, and every frame rather than on resize: the
@@ -265,9 +299,14 @@ fn run() -> Result<(), Error> {
         // renderer: the panel's newest clock counts up against it, so a frame
         // drawn with no event waiting still shows a run that is moving. See
         // `draw`.
+        //
+        // The gate on the way out is handed in beside the app because the app
+        // has never heard of it (see `QuitConfirm`): closed, it changes nothing
+        // about the frame; open, it is a small window drawn over the middle of
+        // it with everything behind it cleared.
         guard
             .terminal
-            .draw(|frame| draw(frame, &app, Instant::now()))?;
+            .draw(|frame| draw(frame, &app, Instant::now(), confirm))?;
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
         // sits here, so the wait has to end whether or not anybody presses
@@ -276,11 +315,13 @@ fn run() -> Result<(), Error> {
         // keystroke to appear is worse than none at all.
         if event::poll(POLL_INTERVAL)? {
             match event::read()? {
-                // The mode is passed in rather than read out of the app
-                // because there is exactly one key it changes the meaning of —
-                // Esc, which cancels a run when there is one and quits when
-                // there is not. See [`action_for`].
-                Event::Key(key) => match action_for(key, pact.is_some()) {
+                // Two situations are passed in rather than read out of the app,
+                // and each answers one key. Whether a run is in flight is what
+                // Esc reads two ways — it cancels a run when there is one and
+                // asks about quitting when there is not — and the question on
+                // screen is what every key reads differently while it is up.
+                // See [`press_for`], which owns both readings.
+                Event::Key(key) => match press_for(key, confirm, pact.is_some()) {
                     // Returning is the whole of quitting, and it is enough even
                     // with a pact in flight. `pact` drops on the way out, which
                     // cancels the run and kills the `claude` it was waiting on
@@ -289,7 +330,18 @@ fn run() -> Result<(), Error> {
                     // ended by the process, having written whole documents or none,
                     // and the manifest it never got to rewrite still says what it
                     // said before.
-                    Some(Action::Quit) => return Ok(()),
+                    //
+                    // Every way out arrives here: a Yes to the question, Ctrl-C,
+                    // and `q` during a run. The second spelling is the app's old
+                    // quit, which [`press_for`] no longer produces — naming it
+                    // beside the first keeps one road out of this loop rather
+                    // than two that have to be kept doing the same thing.
+                    Pressed::Leave | Pressed::Act(Action::Quit) => return Ok(()),
+                    // The question, opened, moved, or taken down again. Nothing
+                    // else happens and nothing else needs to: the app was never
+                    // touched, so a No has nothing to put back, and the top of
+                    // this loop draws whatever the question now is.
+                    Pressed::Confirm(next) => confirm = next,
                     // Esc with a run in flight. The handle does both halves at once
                     // — it latches, so the descent stops at the next directory
                     // instead of starting a pass for it, and it kills the `claude`
@@ -302,7 +354,7 @@ fn run() -> Result<(), Error> {
                     // like any other outcome; forgetting about it now would leave
                     // the footer's progress line up for a run nobody was listening
                     // to any more.
-                    Some(Action::CancelPact) => {
+                    Pressed::Act(Action::CancelPact) => {
                         if let Some(running) = pact.as_ref() {
                             running.cancel.cancel();
                         }
@@ -317,16 +369,16 @@ fn run() -> Result<(), Error> {
                     // nothing for this arm to gate a second time, and no message: a
                     // key that changes what the *next* key means has nothing to
                     // report.
-                    Some(Action::ToggleFocus) => app.toggle_focus(),
-                    Some(Action::SelectPrevious) => app.select_previous(),
-                    Some(Action::SelectNext) => app.select_next(),
+                    Pressed::Act(Action::ToggleFocus) => app.toggle_focus(),
+                    Pressed::Act(Action::SelectPrevious) => app.select_previous(),
+                    Pressed::Act(Action::SelectNext) => app.select_next(),
                     // No height is passed: the app was told the viewport's height
                     // at the top of this loop, so a page is whatever the frame just
                     // drawn could show.
-                    Some(Action::SelectPageUp) => app.select_page_up(),
-                    Some(Action::SelectPageDown) => app.select_page_down(),
-                    Some(Action::SelectFirst) => app.select_first(),
-                    Some(Action::SelectLast) => app.select_last(),
+                    Pressed::Act(Action::SelectPageUp) => app.select_page_up(),
+                    Pressed::Act(Action::SelectPageDown) => app.select_page_down(),
+                    Pressed::Act(Action::SelectFirst) => app.select_first(),
+                    Pressed::Act(Action::SelectLast) => app.select_last(),
                     // Nothing else happens here on purpose. What is collapsed is
                     // the front end's view of the tree and never touches disk (§8),
                     // so there is no manifest to write; the tree has not changed,
@@ -334,7 +386,7 @@ fn run() -> Result<(), Error> {
                     // and the scroll offset back into range itself, and the next
                     // frame — the top of this same loop — draws the shorter or
                     // longer list.
-                    Some(Action::ToggleCollapsed) => app.toggle_collapsed(),
+                    Pressed::Act(Action::ToggleCollapsed) => app.toggle_collapsed(),
                     // Nothing else happens here either, and for the same reasons as
                     // collapsing: which rows are worth looking at is the front end's
                     // view of the tree and is never written down (§5), so there is
@@ -342,7 +394,7 @@ fn run() -> Result<(), Error> {
                     // there is nothing to re-read. The app re-flows its rows and
                     // puts the selection and the scroll offset back in range; the
                     // next frame draws whatever is left.
-                    Some(Action::TogglePactedOnly) => app.toggle_pacted_only(),
+                    Pressed::Act(Action::TogglePactedOnly) => app.toggle_pacted_only(),
                     // Nothing else here either, for the third time and for the same
                     // reasons as the two arms above: whether the files inside a
                     // module are on screen is the front end's view of the tree and
@@ -351,7 +403,7 @@ fn run() -> Result<(), Error> {
                     // there is nothing to re-read. The app re-flows its rows and
                     // keeps the selection and the scroll offset in range; the next
                     // frame draws the longer or shorter list.
-                    Some(Action::ToggleFiles) => app.toggle_files(),
+                    Pressed::Act(Action::ToggleFiles) => app.toggle_files(),
                     // The one keystroke that writes anything, and the one that
                     // takes longer than a frame — so it is the one that is not done
                     // here. The subtree pact goes to a worker thread and this arm
@@ -370,7 +422,7 @@ fn run() -> Result<(), Error> {
                     // the same documents and the same manifest — and said so by
                     // setting the flag that words `App::pact_line` as already
                     // running. Neither is this arm's to explain — see `pact_press`.
-                    Some(Action::TogglePact) => {
+                    Pressed::Act(Action::TogglePact) => {
                         // Copied before the toggle paints anything, because the
                         // toggle is no longer its own undo: it puts a whole subtree
                         // into one state, and the states it painted over were not
@@ -411,7 +463,7 @@ fn run() -> Result<(), Error> {
                     // `TogglePact`'s two reasons: a row the app turned down has
                     // its sentence in `App::message` already, and a press while
                     // a run is going said so on that run's progress line.
-                    Some(Action::Refresh) => {
+                    Pressed::Act(Action::Refresh) => {
                         let before = app.clone();
                         if let Some(directory) =
                             refresh_press(&mut app, pact.is_some(), Instant::now())
@@ -439,17 +491,13 @@ fn run() -> Result<(), Error> {
                     // With capture off the terminal keeps the pointer to itself,
                     // so `Event::Mouse` simply stops arriving and the mouse
                     // handler needs no gate of its own.
-                    Some(Action::ToggleMouseCapture) => {
-                        if mouse_captured {
-                            execute!(io::stdout(), DisableMouseCapture)?;
-                        } else {
-                            execute!(io::stdout(), EnableMouseCapture)?;
-                        }
+                    Pressed::Act(Action::ToggleMouseCapture) => {
+                        report_mouse(!mouse_captured)?;
                         mouse_captured = !mouse_captured;
                     }
                     // A key nothing is bound to, or one whose press has already
                     // been answered where it was decided.
-                    None => {}
+                    Pressed::Nothing => {}
                 },
                 // The pointer, answered in the same shape and for the same
                 // reasons. [`mouse_action`] is handed the event, the size this
@@ -459,7 +507,13 @@ fn run() -> Result<(), Error> {
                 // on where the tree's window is. Nothing here reads the
                 // terminal and nothing draws: the round is the redraw, which is
                 // why a pointer swept across the screen costs nothing.
-                Event::Mouse(mouse) => match mouse_action(mouse, size, &app) {
+                //
+                // The question on the way out is handed over too, and it makes
+                // every event mean nothing: while it is up the pointer is read
+                // and dropped, because the dialog has no clickable answers and a
+                // click on the tree behind it would move a selection the reader
+                // cannot see.
+                Event::Mouse(mouse) => match mouse_action(mouse, size, &app, confirm) {
                     // The wheel over the tree column, whichever pane the keys
                     // are pointed at: the selection moves and the window
                     // follows it, exactly as it does for a movement key.
@@ -531,6 +585,22 @@ fn run() -> Result<(), Error> {
         // reload above — and nothing at all is read when the disk has been
         // still, which is almost every round.
         watched.round(&mut app, &scope, pact.is_some(), now);
+    }
+}
+
+/// Ask the terminal to report its mouse, or to stop reporting it.
+///
+/// The whole of what `m` does to a terminal, and the only thing that differs
+/// between its two directions is which sequence is written — so it is one line
+/// at the keystroke rather than an `if` in the middle of the loop. The caller
+/// moves the flag it keeps only after this has returned, which is what keeps
+/// what warlock believes about the terminal down to what it last successfully
+/// told it.
+fn report_mouse(on: bool) -> io::Result<()> {
+    if on {
+        execute!(io::stdout(), EnableMouseCapture)
+    } else {
+        execute!(io::stdout(), DisableMouseCapture)
     }
 }
 
