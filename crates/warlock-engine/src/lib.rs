@@ -19,6 +19,7 @@ mod agent;
 mod clock;
 mod decide;
 mod hash;
+mod ignores;
 mod load;
 mod manifest;
 mod pact;
