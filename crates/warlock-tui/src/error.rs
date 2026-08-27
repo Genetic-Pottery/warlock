@@ -7,11 +7,12 @@
 //! like a crash. [`one_line`] is the flattening that rule leans on, and other
 //! modules borrow it for the same reason: the footer is one line too.
 
+use std::path::PathBuf;
 use std::{fmt, io};
 
-use warlock_engine::{LoadError, LoadProblem, ManifestError};
+use warlock_engine::{AgentsMdError, LoadError, LoadProblem, ManifestError};
 
-/// Everything that can stop warlock showing a tree.
+/// Everything that can stop warlock showing a tree, or writing an `AGENTS.md`.
 ///
 /// Richer than the `io::Error` this used to return, because loading brings
 /// failures that are not I/O — a directory outside any repository, a manifest
@@ -19,6 +20,12 @@ use warlock_engine::{LoadError, LoadProblem, ManifestError};
 /// of those sentences is a single line: `main` prints exactly one, after the
 /// terminal is back, and a message wrapping onto a second line in a restored
 /// shell is a message that looks like a crash.
+///
+/// `warlock init` shares the vocabulary rather than having one of its own: it
+/// fails in the same two ways the tree does — a working directory outside any
+/// repository, and a file that will not write — and it is printed by the same
+/// line of `main`, so a second enum would be a second wording of the same
+/// sentences.
 #[derive(Debug)]
 pub(crate) enum Error {
     /// The working directory could not be read, so there is nothing to scope
@@ -54,6 +61,27 @@ pub(crate) enum Error {
     Manifest {
         /// Which of the manifest's cases it was, with the path it names.
         source: ManifestError,
+    },
+    /// `warlock init` was run somewhere with no repository above it, so there
+    /// is no root to write an `AGENTS.md` at.
+    ///
+    /// The tree's own version of this refusal comes through [`Error::Load`] in
+    /// the engine's words; `init` never loads a tree, so it asks
+    /// [`repository_root`](warlock_engine::repository_root) directly and words
+    /// the same fact here, in the same shape: what was looked for, where the
+    /// looking started, and what that means for what was asked.
+    NoRepository {
+        /// The working directory the search upwards started from.
+        start: PathBuf,
+    },
+    /// `warlock init` could not write the `AGENTS.md`: it is there and cannot
+    /// be read, it is not text, or the write itself failed.
+    ///
+    /// Nothing is half-written when this arrives — the engine writes beside and
+    /// renames over — so the file named is either untouched or whole.
+    AgentsMd {
+        /// Which of the writer's cases it was, with the path it names.
+        source: AgentsMdError,
     },
     /// The terminal could not be set up, drawn to, or read from.
     Terminal {
@@ -119,6 +147,18 @@ impl fmt::Display for Error {
             // Flattened for the same reason as a load: the manifest's own
             // errors carry the TOML parser's multi-line diagnostic.
             Self::Manifest { source } => write!(f, "{}", one_line(&source.to_string())),
+            // The engine's `.git` wording, with what it cost the caller on the
+            // end: this is a refusal to write a file rather than a refusal to
+            // draw a tree, and the reader asked for the file.
+            Self::NoRepository { start } => write!(
+                f,
+                "no `.git` directory in `{}` or any of its parents, so there is no \
+                 repository root to write `AGENTS.md` at",
+                start.display()
+            ),
+            // Flattened like the two above it: what the filesystem says can run
+            // to more than one line, and this prints as one.
+            Self::AgentsMd { source } => write!(f, "{}", one_line(&source.to_string())),
             Self::Problems { first, rest: 0 } => write!(f, "{first}"),
             Self::Problems { first, rest } => {
                 write!(f, "{first} (and {rest} more like it)")
@@ -134,7 +174,8 @@ impl std::error::Error for Error {
             Self::WorkingDirectory { source } | Self::Terminal { source } => Some(source),
             Self::Load { source } => Some(source),
             Self::Manifest { source } => Some(source),
-            Self::Problems { .. } => None,
+            Self::AgentsMd { source } => Some(source),
+            Self::Problems { .. } | Self::NoRepository { .. } => None,
         }
     }
 }
@@ -152,7 +193,7 @@ impl From<io::Error> for Error {
 mod tests {
     use std::path::PathBuf;
 
-    use warlock_engine::ManifestError;
+    use warlock_engine::{AgentsMdError, ManifestError};
 
     use super::{Error, one_line};
 
@@ -231,6 +272,20 @@ mod tests {
                     source: std::io::Error::other("boom"),
                 },
             },
+            Error::NoRepository {
+                start: PathBuf::from("/elsewhere"),
+            },
+            Error::AgentsMd {
+                source: AgentsMdError::Write {
+                    path: PathBuf::from("/repo/AGENTS.md"),
+                    source: std::io::Error::other("boom"),
+                },
+            },
+            Error::AgentsMd {
+                source: AgentsMdError::NotText {
+                    path: PathBuf::from("/repo/AGENTS.md"),
+                },
+            },
         ];
 
         for error in errors {
@@ -252,6 +307,34 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "could not read or write `/repo/.warlock/pacts.toml`: permission denied"
+        );
+    }
+
+    #[test]
+    fn init_outside_a_repository_says_what_was_looked_for_and_where() {
+        let error = Error::NoRepository {
+            start: PathBuf::from("/elsewhere"),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "no `.git` directory in `/elsewhere` or any of its parents, so there is \
+             no repository root to write `AGENTS.md` at"
+        );
+    }
+
+    #[test]
+    fn an_agents_md_that_cannot_be_written_says_so_in_the_engines_words() {
+        let error = Error::AgentsMd {
+            source: AgentsMdError::Write {
+                path: PathBuf::from("/repo/AGENTS.md"),
+                source: std::io::Error::other("permission denied"),
+            },
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "could not write `/repo/AGENTS.md`: permission denied"
         );
     }
 }
