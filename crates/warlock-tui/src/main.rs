@@ -414,7 +414,14 @@ fn run() -> Result<(), Error> {
                         }
                         mouse_captured = !mouse_captured;
                     }
-                    None => {}
+                    // `Refresh` is bound but not yet wired: `r` translates to an
+                    // action (WAR-44.01) and the run behind it lands in a task
+                    // of its own, which gives it an arm of its own. The match is
+                    // exhaustive, so the variant has to be named the moment it
+                    // exists, and until the run exists it does what `None` does
+                    // — nothing, sharing the arm because sharing what it does is
+                    // the honest way to say it does the same thing.
+                    Some(Action::Refresh) | None => {}
                 },
                 // The pointer, answered in the same shape and for the same
                 // reasons. [`mouse_action`] is handed the event, the size this

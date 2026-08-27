@@ -57,6 +57,15 @@ pub(crate) enum Action {
     ToggleFiles,
     /// Pact the selected node, or unpact it if it is pacted already.
     TogglePact,
+    /// Re-describe the stale directories under the selected node, and only
+    /// those.
+    ///
+    /// A pact says "describe all of this"; this says "describe the part of it
+    /// that has gone yellow". One edited file in a large repository leaves a
+    /// handful of directories stale and the rest green, and getting back to
+    /// green through [`Action::TogglePact`] would pay for a pass over every
+    /// directory in the subtree to re-describe the few that need it.
+    Refresh,
     /// Stop the terminal reporting its mouse, or ask it to start again if it has
     /// been stopped.
     ///
@@ -154,6 +163,12 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
         // product's own word (pact, §15), and the action is its own undo —
         // pressing it again removes what it wrote.
         KeyCode::Char('p') => Some(Action::TogglePact),
+        // Lower case only, like `p` above: the mnemonic is "refresh", and `R`
+        // is a different keystroke that means nothing here. Like every key but
+        // Esc it reads the same way with a run in flight as without one —
+        // what a refresh does about a run already working is the app's answer
+        // to give, not this function's, exactly as a second `p` is.
+        KeyCode::Char('r') => Some(Action::Refresh),
         // Lower case only, like the three above it. The mnemonic is "mouse",
         // and the key means the same thing whether or not a pact is in flight:
         // giving the terminal its own text selection back is exactly the thing a
@@ -362,6 +377,7 @@ mod tests {
             KeyCode::Char('o'),
             KeyCode::Char('f'),
             KeyCode::Char('p'),
+            KeyCode::Char('r'),
             KeyCode::Tab,
             KeyCode::Char('x'),
         ];
@@ -635,6 +651,7 @@ mod tests {
             KeyCode::Char('k'),
             KeyCode::Char('l'),
             KeyCode::Char('O'),
+            KeyCode::Char('r'),
             KeyCode::Char(' '),
         ] {
             assert_ne!(
@@ -726,6 +743,79 @@ mod tests {
     }
 
     #[test]
+    fn r_asks_for_a_refresh_with_a_run_in_flight_or_without_one() {
+        // Like every key but Esc, `r` means one thing in both situations: what
+        // a refresh does about a run already working is the app's answer to
+        // give, and a second `p` is refused in exactly the same place.
+        for in_flight in [false, true] {
+            assert_eq!(
+                action_for(press(KeyCode::Char('r')), in_flight),
+                Some(Action::Refresh),
+                "r should ask for a refresh with a run in flight = {in_flight}"
+            );
+        }
+    }
+
+    #[test]
+    fn upper_r_asks_for_nothing() {
+        // Lower case only, like `o`, `f`, `p` and `m`: the upper-case letter is
+        // a different keystroke, and leaving it unbound keeps it free for a
+        // later one.
+        for in_flight in [false, true] {
+            assert_eq!(action_for(press(KeyCode::Char('R')), in_flight), None);
+        }
+    }
+
+    #[test]
+    fn releases_and_repeats_of_r_start_nothing() {
+        // The same rule as `p`, and it matters for the same reason: a release
+        // acted on would ask for a second run on the heels of the one the press
+        // started, and a held key would ask as fast as the terminal repeats.
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                KeyCode::Char('r'),
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                action_for(event, false),
+                None,
+                "{kind:?} of r should not start anything"
+            );
+        }
+    }
+
+    #[test]
+    fn r_is_the_only_key_that_refreshes() {
+        // Its neighbours on the keyboard, the keys it sits beside in the match
+        // arms above, and its upper-case self, which this binding does not
+        // answer to.
+        for code in [
+            KeyCode::Char('e'),
+            KeyCode::Char('t'),
+            KeyCode::Char('f'),
+            KeyCode::Char('p'),
+            KeyCode::Char('m'),
+            KeyCode::Char('R'),
+            KeyCode::Char(' '),
+            KeyCode::Enter,
+        ] {
+            assert_ne!(
+                action_for(press(code), false),
+                Some(Action::Refresh),
+                "{code:?} should not refresh anything"
+            );
+            assert_ne!(
+                action_for(press(code), true),
+                Some(Action::Refresh),
+                "{code:?} should not refresh anything mid-run"
+            );
+        }
+    }
+
+    #[test]
     fn m_toggles_the_mouse_with_a_pact_in_flight_or_without_one() {
         // The one key here that is about the terminal rather than the tree, and
         // it reads the same way in both situations — like everything but Esc.
@@ -764,6 +854,7 @@ mod tests {
                 Action::TogglePactedOnly,
                 Action::ToggleFiles,
                 Action::TogglePact,
+                Action::Refresh,
             ] {
                 assert_ne!(action, Some(other), "m should not mean {other:?}");
             }
@@ -780,6 +871,7 @@ mod tests {
             KeyCode::Char('o'),
             KeyCode::Char('f'),
             KeyCode::Char('p'),
+            KeyCode::Char('r'),
             KeyCode::Char('M'),
             KeyCode::Char(' '),
             KeyCode::Enter,
