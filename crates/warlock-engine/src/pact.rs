@@ -274,7 +274,7 @@ use ignore::WalkBuilder;
 use crate::manifest::{temp_file_name, write_and_sync};
 use crate::{
     Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, HashError, Manifest,
-    ManifestError, PactEntry, now_rfc3339, subtree_hash, to_manifest_path,
+    ManifestError, NodeState, PactEntry, decide_state, now_rfc3339, subtree_hash, to_manifest_path,
 };
 
 /// The directory holding Warlock's own bookkeeping, never part of a request.
@@ -728,6 +728,173 @@ pub fn pact_subtree(
         failures,
         problems,
     })
+}
+
+/// Refresh `directory` and everything below it: describe what has gone stale,
+/// pass over what is still green.
+///
+/// The other way back to green, and the cheap one. [`pact_subtree`] buys a model
+/// pass for every directory in a subtree whether anything under it moved or not;
+/// a refresh asks [`decide_state`] about each directory first and hands the pass
+/// only to the ones it calls anything other than [`PactedFresh`]. Editing one
+/// file in a forty-directory repository then costs the passes on the path from
+/// that file up to the refreshed root, and nothing else. Everything after that
+/// choice is [`pact_subtree`]'s machinery unchanged, because it is literally the
+/// same code: the two phases, the deepest-first order, the single
+/// [`now_rfc3339`] for the whole run, cancellation, [`Failure`]s and
+/// [`Problem`]s all behave exactly as they are documented there.
+///
+/// The arguments and the return type are [`pact_subtree`]'s, down to the
+/// promise that **this function saves nothing**: `directory` is the selected
+/// directory, `root` the repository root the manifest's paths are relative to,
+/// `manifest` what `.warlock/pacts.toml` says today — which is also the whole of
+/// what deciding staleness needs, so nothing extra is asked of a caller — and
+/// what comes back is what the manifest should say tomorrow.
+///
+/// # Which directories are described
+///
+/// Every directory [`pactable_directories`] finds whose entry in `manifest`,
+/// judged against what that directory hashes to now, is not [`PactedFresh`]:
+/// unpacted, pacted-but-never-judged and pacted-against-other-content are all
+/// stale, exactly as [`decide_state`] says. A directory whose
+/// path cannot be stored in a manifest has no entry to be fresh by, and a
+/// directory whose [`subtree_hash`] fails here has no hash to be fresh against,
+/// so both are stale and both are described.
+///
+/// The described set keeps `pactable_directories`' deepest-first order, so a
+/// stale parent is still re-described from its children's newly written
+/// documents. And it can be a small set safely, because a grant means more than
+/// it looks: [`pact_subtree`] withholds the grant from any directory with an
+/// undocumented descendant, so a directory that is fresh implies every directory
+/// beneath it is fresh too.
+///
+/// # What happens to a directory that is skipped
+///
+/// Nothing at all. Its entry is carried through byte-identical — same module,
+/// same document, same `granted_hash`, same `granted_at` — because a refresh
+/// removes no entry and drops no grant, anywhere. That is this function's own
+/// rule and not the shared core's: [`pact_subtree`] is right to drop the entry
+/// of a directory it covered and that earned nothing, since a pact is a claim
+/// about the whole subtree it walked, while a refresh is a claim only about the
+/// directories it actually described.
+///
+/// Freshness is still only ever earned. Every grant a refresh writes follows a
+/// pass that ran on that directory and a hash taken afterwards; a skipped
+/// directory keeps the grant it already had rather than being handed a new one.
+///
+/// ```
+/// use std::cell::Cell;
+/// use std::fs;
+/// use warlock_engine::{
+///     Agent, AgentError, AgentRequest, AgentResponse, Manifest, NodeState, PactedSubtree,
+///     Unwatched, decide_state, pact_subtree, refresh_subtree, subtree_hash,
+/// };
+///
+/// /// The engine's own tests reach a model exactly like this: they don't.
+/// struct Canned {
+///     markdown: String,
+///     passes: Cell<usize>,
+/// }
+///
+/// impl Agent for Canned {
+///     fn run(&self, _request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+///         self.passes.set(self.passes.get() + 1);
+///         Ok(AgentResponse::new(self.markdown.clone()))
+///     }
+/// }
+///
+/// let repo = tempfile::tempdir()?;
+/// let engine = repo.path().join("crates").join("engine");
+/// fs::create_dir_all(engine.join("src"))?;
+/// fs::write(engine.join("src").join("lib.rs"), "//! Core engine.\n")?;
+/// let agent = Canned {
+///     markdown: format!("# engine\n\n{}\n", "Core engine for warlock. ".repeat(20)),
+///     passes: Cell::new(0),
+/// };
+///
+/// // A pact first, to have something to refresh: both directories go green.
+/// let PactedSubtree { manifest, .. } =
+///     pact_subtree(&engine, repo.path(), &Manifest::new(), &agent, &mut Unwatched)?;
+/// assert_eq!(agent.passes.get(), 2, "one pass each, children before parents");
+///
+/// // Nothing has moved, so a refresh describes nothing and costs nothing.
+/// let PactedSubtree { manifest, .. } =
+///     refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)?;
+/// assert_eq!(agent.passes.get(), 2, "nothing stale, no pass");
+///
+/// // Now a file changes in the parent directory only.
+/// let below = manifest.entry("crates/engine/src").expect("the child is pacted").clone();
+/// fs::write(engine.join("Cargo.toml"), "[package]\nname = \"engine\"\n")?;
+///
+/// let PactedSubtree { manifest, failures, .. } =
+///     refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)?;
+///
+/// assert!(failures.is_empty());
+/// assert_eq!(agent.passes.get(), 3, "the changed directory, and not the one below it");
+/// assert_eq!(manifest.entry("crates/engine/src"), Some(&below), "skipped, grant and all");
+/// let entry = manifest.entry("crates/engine").expect("the described directory is pacted");
+/// assert_eq!(decide_state(Some(entry), &subtree_hash(&engine)?), NodeState::PactedFresh);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+///
+/// [`Error::Walk`], and nothing else, for [`pact_subtree`]'s reason: a run
+/// planned from half a walk would silently leave directories out. A hash that
+/// fails while staleness is being decided is not an error — it is a directory
+/// to describe.
+///
+/// [`PactedFresh`]: crate::NodeState::PactedFresh
+pub fn refresh_subtree(
+    directory: impl AsRef<Path>,
+    root: impl AsRef<Path>,
+    manifest: &Manifest,
+    agent: &dyn Agent,
+    observer: &mut dyn Observer,
+) -> Result<PactedSubtree, Error> {
+    let (directory, root) = (directory.as_ref(), root.as_ref());
+    let stale: Vec<PathBuf> = pactable_directories(directory)?
+        .into_iter()
+        .filter(|candidate| !is_fresh(manifest, root, candidate))
+        .collect();
+
+    let Described {
+        entries,
+        failures,
+        problems,
+    } = describe_and_grant(&stale, root, agent, observer);
+
+    // Covering nothing is the whole of the carry-through: `rewrite` drops an
+    // existing entry only where the run covered its module and it earned
+    // nothing this time, and a refresh never claims that about a directory. So
+    // a skipped directory's entry survives untouched, and so does the entry of
+    // a stale directory whose pass failed — a refresh that could not re-describe
+    // something leaves it as stale as it found it rather than un-pacting it.
+    Ok(PactedSubtree {
+        manifest: rewrite(manifest, &[], root, entries),
+        failures,
+        problems,
+    })
+}
+
+/// Whether `directory` is green as the manifest stands: a grant recorded for it
+/// that equals what it hashes to now.
+///
+/// [`decide_state`]'s judgement and nothing on top of it, with the two ways of
+/// having no answer folded into the stale side. A directory that cannot be
+/// spelled as a manifest path has no entry, which decides as
+/// [`Unpacted`](crate::NodeState::Unpacted); a directory whose [`subtree_hash`]
+/// fails has nothing to compare a grant against, and the honest answer to "is
+/// this still the content it was granted for" is then no. Both come back
+/// `false`, so [`refresh_subtree`] describes them.
+fn is_fresh(manifest: &Manifest, root: &Path, directory: &Path) -> bool {
+    let entry = to_manifest_path(root, directory)
+        .ok()
+        .and_then(|module| manifest.entry(&module));
+    let Ok(computed) = subtree_hash(directory) else {
+        return false;
+    };
+    decide_state(entry, &computed) == NodeState::PactedFresh
 }
 
 /// What the two phases came to: the entries they earned, and everything that

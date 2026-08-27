@@ -154,6 +154,12 @@ pub use pact::pact_directory;
 /// earned. Returns the manifest to save and saves nothing itself. Each directory
 /// is announced to a [`PactObserver`] first, which may stop the pact there.
 pub use pact::pact_subtree;
+/// Refresh a directory and everything below it: describe every directory that
+/// has gone stale, exactly as a pact would, and pass over every directory that
+/// is still fresh. Skipped directories keep the entry and the grant they had —
+/// a refresh removes no entry and drops no grant. Returns the manifest to save
+/// and saves nothing itself.
+pub use pact::refresh_subtree;
 /// Un-pact a directory and everything below it: drop their manifest entries and
 /// leave every `WARLOCK.md` on disk, byte for byte. Returns the manifest to save
 /// and saves nothing itself.
