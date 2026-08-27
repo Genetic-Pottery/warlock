@@ -51,11 +51,12 @@ pub use clock::now_rfc3339;
 /// no entry is unpacted, a granted hash equal to the computed one is fresh, and
 /// everything else — including never judged — is stale.
 ///
-/// Freshness is granted in exactly one place: [`pact_subtree`], once every
-/// document of a pact is written. Nothing else in this workspace writes a
-/// `granted_hash`, and in particular nothing re-grants a node that has gone
-/// stale — there is no refresh pass yet, so a directory edited after its pact
-/// stays stale until it is pacted again.
+/// Freshness is granted only where a pass has just run: [`pact_subtree`] and
+/// [`refresh_subtree`] both hash each directory they described once every
+/// document is written, and nothing else in this workspace writes a
+/// `granted_hash`. This is also the judgement [`refresh_subtree`] runs on, one
+/// directory at a time, to decide stale-or-skip: fresh directories are passed
+/// over with their entries untouched, and everything else is described again.
 pub use decide::decide_state;
 /// Everything that can stop a subtree being hashed.
 pub use hash::Error as HashError;

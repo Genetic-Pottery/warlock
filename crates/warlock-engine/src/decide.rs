@@ -27,16 +27,31 @@
 //! through this function returns stale except the single one where a hash
 //! somebody recorded matches a hash just computed.
 //!
-//! One operation grants freshness, and it is [`pact_subtree`]: once a pact has
-//! written every document it was going to, it hashes each directory and records
-//! that hash, which is the only code in this workspace that writes a
-//! `granted_hash`. Nothing re-grants a node that has gone stale — there is no
-//! refresh pass yet — so a directory edited after its pact stays [`PactedStale`]
-//! until it is pacted again. The tests below reach [`PactedFresh`] the third
-//! way, by writing a hash into an entry by hand, because this function's job is
-//! the comparison and not where either side of it came from.
+//! Freshness is granted where a pass has just run, and nowhere else. Once a
+//! subtree operation has written every document it was going to, it hashes each
+//! directory it described and records that hash, which is the only code in this
+//! workspace that writes a `granted_hash`. Two operations reach it —
+//! [`pact_subtree`], which describes every directory at and below the selected
+//! one, and [`refresh_subtree`], which describes only the stale ones — and
+//! neither re-grants a node without describing it first, so a directory edited
+//! after its pact stays [`PactedStale`] until something runs a pass on it again.
+//!
+//! [`refresh_subtree`] is where this verdict does work of its own rather than
+//! colouring a tree on screen: it asks this function about every directory in
+//! the subtree, and the answer is stale-or-skip. [`PactedFresh`] is passed over,
+//! entry and grant carried through untouched; anything else — unpacted, never
+//! judged, judged against other content — is described and granted afresh. A
+//! directory whose hash fails there has nothing to compare a grant against, and
+//! by the paragraph above that is the stale side of the same rule, so it is
+//! described too; see [`refresh_subtree`] for what that costs when the hash goes
+//! on failing.
+//!
+//! The tests below reach [`PactedFresh`] a third way, by writing a hash into an
+//! entry by hand, because this function's job is the comparison and not where
+//! either side of it came from.
 //!
 //! [`pact_subtree`]: crate::pact_subtree
+//! [`refresh_subtree`]: crate::refresh_subtree
 //!
 //! [`Unpacted`]: NodeState::Unpacted
 //! [`PactedStale`]: NodeState::PactedStale
@@ -182,9 +197,10 @@ mod tests {
     #[test]
     fn a_hand_written_grant_in_a_real_manifest_is_the_only_way_to_fresh() {
         // The point of going through the filesystem here: the fresh case has to
-        // be reachable from a manifest a human wrote, because nothing in this
-        // workspace writes a `granted_hash`. The text below is hand-written,
-        // not produced by `Manifest::save`, and the hash in it is a literal.
+        // be reachable from a manifest a human wrote, because the only code
+        // that writes a `granted_hash` is a subtree pact or refresh, and no
+        // test in this module runs one. The text below is hand-written, not
+        // produced by `Manifest::save`, and the hash in it is a literal.
         let root = tempfile::tempdir().expect("a temporary directory");
         hand_write(
             root.path(),

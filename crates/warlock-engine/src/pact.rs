@@ -1,8 +1,8 @@
 //! Pacting: what a model pass gets to see, what is done with what it says, and
-//! how a whole subtree of directories is pacted at once.
+//! how a whole subtree of directories is pacted or refreshed at once.
 //!
-//! Two operations, one on top of the other. [`pact_directory`] is one
-//! directory, and it is five steps with nothing else in them: gather the
+//! Three operations, stacked. [`pact_directory`] is one directory, and it is
+//! five steps with nothing else in them: gather the
 //! directory into a request, describe whatever was too big to send, fit what
 //! that comes to inside the request budget, run one pass through an [`Agent`],
 //! and write what came back to `<directory>/WARLOCK.md`. It records nothing — no manifest entry, no hash,
@@ -11,6 +11,22 @@
 //! keystroke runs:
 //! every directory at and below the selected one, children first, and *then*
 //! the hashing and the granting that turn what was written into a manifest.
+//! [`refresh_subtree`] is the same run over a shorter list: it asks
+//! [`decide_state`] about each of those directories in turn and keeps only the
+//! ones that are not green, so editing one file costs the passes on the path
+//! from it to the refreshed root rather than a pass per directory in the
+//! subtree.
+//!
+//! The two subtree operations are the same code. [`describe_and_grant`] is both
+//! phases — write every document, then hash and grant every directory — over
+//! exactly the list of directories it is handed, and it neither chooses that
+//! list nor reads the manifest. What is left on either side of it is small and
+//! is the whole of the difference: which directories reach phase one, and what
+//! becomes of the entry of a directory that got no document this run.
+//! [`pact_subtree`] hands over everything [`pactable_directories`] found and
+//! lets [`rewrite`] drop what earned nothing; [`refresh_subtree`] hands over the
+//! stale ones and carries every other entry through byte-identical, because a
+//! refresh removes no entry and drops no grant.
 //!
 //! Section 11 of the design doc calls context scoping "the actual
 //! differentiator: maximal relevant context, minimal waste". This module is
@@ -215,6 +231,28 @@
 //! an entry with no grant — which by [`decide_state`](crate::decide_state)'s
 //! rule is pacted and stale, i.e. yellow. That is what the manifest's optional
 //! grant was for, so partial completion needs no new state and no new field.
+//!
+//! # A hash that fails, before a pass and after one
+//!
+//! Hashing can fail: a file that cannot be read, a name that is not UTF-8, a
+//! walk that gave up. Phase two answers that with [`Failure::Hash`] — the
+//! document is written, the entry is recorded, and only the grant is missing —
+//! and that meaning is exactly what it was: a verdict about a directory a pass
+//! has already run on, produced nowhere but phase two.
+//!
+//! [`refresh_subtree`] hashes each directory earlier and for a different
+//! question, deciding stale-or-skip, and a failure there is not a failure at
+//! all. A directory with no hash has nothing to compare a grant against, so the
+//! honest answer to "is this still the content it was granted for" is no, and
+//! it is described. The consequence is worth stating plainly, because a pass is
+//! paid for it: such a directory is described, phase two hashes it again, that
+//! hash almost certainly fails again for the same reason it failed the first
+//! time, and it lands as a [`Failure::Hash`] with an ungranted entry — yellow,
+//! with a pass spent on it. That is the honest outcome for a directory
+//! something is really wrong with. The alternative is to skip it, and skipping
+//! is what a refresh does to green directories: it would call a directory
+//! nobody can read fresh, on no evidence, and say nothing about it at all.
+//! Better to spend the pass and end up yellow with a named failure.
 //!
 //! # Saying where a pact is, and stopping it
 //!
