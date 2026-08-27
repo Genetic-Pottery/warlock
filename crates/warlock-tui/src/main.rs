@@ -25,7 +25,7 @@
 //!
 //! The one long keystroke is the pact key, and it is the reason the loop below
 //! is shaped the way it is. A subtree pact is minutes of model passes, so
-//! pressing the key spawns a worker thread ([`spawn_pact`]) and hands back a
+//! pressing the key spawns a worker thread ([`pacting::spawn_pact`]) and hands back a
 //! [`Receiver`] of what that worker has to say: which directory it is on, and,
 //! once, how the whole thing went. The loop polls for a keystroke with a short
 //! timeout instead of blocking on one, drains that channel every frame, and
@@ -33,6 +33,14 @@
 //! and the run lands on screen the moment the worker is done with it. Nothing
 //! here waits on the worker: the manifest, the tree and the message are updated
 //! from the events it sends, and the thread is never joined.
+//!
+//! The refresh key is the second long keystroke and is not a second anything
+//! else: `r` asks the engine to describe only the stale directories under the
+//! selected one, and it does so through the same [`start_run`], the same
+//! channel, the same account and the same [`Running`] — which is what makes one
+//! run at a time a fact rather than a rule. The two keys refuse each other by
+//! that alone: whichever run is in flight, the other key's press finds a `Some`
+//! here and says so on the line the reader is already watching.
 //!
 //! Those events are also what fills the panel. The press that really starts a
 //! run opens an [`warlock_tui::Account`] on the app — one pact, one account, so
@@ -126,7 +134,7 @@ mod terminal;
 
 use error::Error;
 use input::{Action, MouseAction, action_for, mouse_action};
-use pacting::{CancelGuard, Running, apply_progress, pact_press, spawn_pact};
+use pacting::{Running, Work, apply_progress, pact_press, refresh_press, start_run};
 use session::{Watched, load_app, load_manifest, note};
 use terminal::{TerminalGuard, install_panic_hook};
 
@@ -188,7 +196,7 @@ fn main() -> ExitCode {
 /// on screen at the top of the next one, a few milliseconds later, and a
 /// keystroke pressed during a pact is handled by exactly the same match as a
 /// keystroke pressed with nothing running. Quitting while a pact runs returns
-/// from here without joining the worker — see [`spawn_pact`] for why that is
+/// from here without joining the worker — see [`pacting::spawn_pact`] for why that is
 /// safe — and the guard restores the terminal on the way out as it always did.
 ///
 /// The round has a third thing in it now: what the disk did while the loop was
@@ -374,22 +382,47 @@ fn run() -> Result<(), Error> {
                         // is as old as the keystroke that asked for it, not as old
                         // as the first thing the model got round to saying.
                         if let Some(toggle) = pact_press(&mut app, pact.is_some(), Instant::now()) {
-                            // One handle per run, and never reused: a cancel is
-                            // final, so the run after a cancelled one has to start
-                            // with a handle nobody has said stop to.
-                            let cancel = CancelGuard::new();
-                            pact = Some(Running {
-                                events: spawn_pact(
-                                    &manifest,
-                                    &scope.repo_root,
-                                    &toggle,
-                                    &agent,
-                                    cancel.handle(),
-                                ),
-                                cancel,
-                                path: toggle.path,
+                            // The worker, the channel and the say-when, in the one
+                            // value this loop keeps about a run it is not doing —
+                            // see [`start_run`], which is where both keys start
+                            // theirs.
+                            pact = Some(start_run(
+                                Work::Pact(toggle),
                                 before,
-                            });
+                                &manifest,
+                                &scope.repo_root,
+                                &agent,
+                            ));
+                        }
+                    }
+                    // The same arm again with one word changed, and that is the
+                    // point of it: a refresh is a run like a pact — one worker,
+                    // one channel, one account, one say-when — over the stale
+                    // directories of the subtree rather than all of them, and
+                    // which those are is the engine's judgement and not this
+                    // loop's. So the copy is taken the same way, the press
+                    // decides the same three things ([`refresh_press`]), and
+                    // what comes back fills the very same `Option<Running>`,
+                    // which is what makes the two keys refuse each other: the
+                    // in-flight check both of them go through is `pact.is_some()`
+                    // here, whichever run is the one in flight.
+                    //
+                    // `None` needs nothing done about it here either, for
+                    // `TogglePact`'s two reasons: a row the app turned down has
+                    // its sentence in `App::message` already, and a press while
+                    // a run is going said so on that run's progress line.
+                    Some(Action::Refresh) => {
+                        let before = app.clone();
+                        if let Some(directory) =
+                            refresh_press(&mut app, pact.is_some(), Instant::now())
+                        {
+                            pact = Some(start_run(
+                                Work::Refresh(directory),
+                                before,
+                                &manifest,
+                                &scope.repo_root,
+                                &agent,
+                            ));
                         }
                     }
                     // The one key that answers to the terminal rather than to
@@ -414,6 +447,8 @@ fn run() -> Result<(), Error> {
                         }
                         mouse_captured = !mouse_captured;
                     }
+                    // A key nothing is bound to, or one whose press has already
+                    // been answered where it was decided.
                     None => {}
                 },
                 // The pointer, answered in the same shape and for the same

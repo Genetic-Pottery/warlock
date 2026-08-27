@@ -245,8 +245,32 @@ pub struct PactToggle {
     pub pacted: bool,
 }
 
+/// Which kind of run is in flight: a pact over a whole subtree, or a refresh
+/// over the stale parts of one.
+///
+/// The two runs are the same run in every way the app cares about — one worker,
+/// one channel, one account, one cancel, one line on the footer — and differ in
+/// exactly one: the verb that line is worded with. So this is a kind on the one
+/// in-flight record rather than a second in-flight state, and everything that
+/// asks whether something is running ([`App::is_pacting`], [`App::is_in_flight`],
+/// [`App::in_flight_covers`]) goes on asking it without knowing which kind it
+/// got.
+///
+/// It is public because the caller starting the run is the only one who knows
+/// which it started: see [`App::set_run_in_flight`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Run {
+    /// A pact: every directory in the subtree is described, whatever state it
+    /// was in.
+    Pact,
+    /// A refresh: only the stale directories of the subtree are described, and
+    /// the fraction counts those rather than all of them.
+    Refresh,
+}
+
 /// A pact running somewhere else, as far as the screen is concerned: the
-/// directory being worked now, and where it sits in the run.
+/// directory being worked now, where it sits in the run, and which kind of run
+/// it is.
 ///
 /// The directory is kept as the path the caller was handed, not as finished
 /// text, so the label is spelled relative to the root of the tree *on screen*
@@ -270,6 +294,9 @@ struct InFlight {
     position: usize,
     /// How many directories the whole run covers.
     total: usize,
+    /// Whether the run is a pact or a refresh, which decides the verb
+    /// [`App::pact_line`] words the line with and nothing else.
+    run: Run,
 }
 
 /// A summarising pass running inside the directory a pact is working: the file
@@ -751,10 +778,34 @@ impl App {
     /// being summarised belonged to the directory the run has just left, so a
     /// new directory never inherits the last one's file.
     pub fn set_pact_in_flight(&mut self, path: impl Into<PathBuf>, position: usize, total: usize) {
+        self.set_run_in_flight(Run::Pact, path, position, total);
+    }
+
+    /// Say that the run of kind `run` is working the directory at `path`, which
+    /// is directory `position` of `total`.
+    ///
+    /// [`App::set_pact_in_flight`] with the kind said out loud, for the caller
+    /// driving a refresh — which is the same run reported the same way, over the
+    /// same channel, in the same account, with one word of the footer different:
+    /// see [`Run`]. Everything the doc comment on [`App::set_pact_in_flight`]
+    /// says holds here, kind and all, because that method is this one with
+    /// [`Run::Pact`] filled in.
+    ///
+    /// The kind rides on the same single in-flight record as the directory and
+    /// the fraction, so a run cannot end up half pact and half refresh, and
+    /// [`App::clear_pact_in_flight`] takes the kind away with everything else.
+    pub fn set_run_in_flight(
+        &mut self,
+        run: Run,
+        path: impl Into<PathBuf>,
+        position: usize,
+        total: usize,
+    ) {
         self.in_flight = Some(InFlight {
             path: path.into(),
             position,
             total,
+            run,
         });
         self.summarising = None;
     }
@@ -881,8 +932,15 @@ impl App {
         })
     }
 
-    /// The line describing the pact in flight — `pacting crates/engine (3/12)` —
-    /// or `None` when no pact is running.
+    /// The line describing the run in flight — `pacting crates/engine (3/12)`,
+    /// or `refreshing crates/engine (3/7)` for a refresh — or `None` when no run
+    /// is running.
+    ///
+    /// The verb is the one the caller said the run was started by — see [`Run`]
+    /// and [`App::set_run_in_flight`] — and it is the only difference between the
+    /// two lines: the directory, the fraction, the summarising clause and the
+    /// refusal suffix are worded the same way for both, because a refresh is a
+    /// run in flight in every way that matters here.
     ///
     /// The directory is named relative to the root of the tree on screen, in the
     /// engine's own manifest spelling, for the reason every other label here is:
@@ -918,11 +976,11 @@ impl App {
     #[must_use]
     pub fn pact_line(&self) -> Option<String> {
         self.in_flight.as_ref().map(|in_flight| {
-            let mut line = pacting_message(
-                &self.label_for(&in_flight.path),
-                in_flight.position,
-                in_flight.total,
-            );
+            let label = self.label_for(&in_flight.path);
+            let mut line = match in_flight.run {
+                Run::Pact => pacting_message(&label, in_flight.position, in_flight.total),
+                Run::Refresh => refreshing_message(&label, in_flight.position, in_flight.total),
+            };
             if let Some(summarising) = self.summarising.as_ref() {
                 line = summarising_message(
                     &line,
@@ -1838,6 +1896,67 @@ impl App {
         Some(PactToggle { path, pacted })
     }
 
+    /// Ask for the selected directory's stale parts to be described again, and
+    /// say why not when there is nothing to ask for.
+    ///
+    /// The refresh key's half of what [`App::toggle_pact`] is for the pact key:
+    /// it decides what the press means on the row the selection is on, words any
+    /// refusal, and hands the directory back for whoever actually runs the pass.
+    /// The path that comes back is the root of the subtree to refresh — the run
+    /// covers it and everything below it, exactly as a pact does — and `None`
+    /// means nothing should start.
+    ///
+    /// Three rows are refused, and each says so through [`App::message`]:
+    ///
+    /// - a file row, in [`App::toggle_pact`]'s own words, because the reason is
+    ///   the same one — a file is part of a module rather than being one, so
+    ///   there is no subtree here to describe;
+    /// - a directory that is pacted and *fresh*, because a refresh describes the
+    ///   stale directories of a subtree and this one has none, so the honest
+    ///   answer is that the work is already done;
+    /// - a directory that is not pacted, which points at the pact key: a refresh
+    ///   re-describes an existing pact and cannot make one, so `p` is the key
+    ///   that would help. A directory a `.warlockignore` keeps out reads as
+    ///   unpacted here like any other, and is refused for that reason without
+    ///   this having to know which reason made it so.
+    ///
+    /// A refusal moves nothing else whatever: no subtree is repainted, no tally
+    /// moves, no account is started and no run is touched. A press that goes
+    /// through clears the message instead — whatever the last keystroke said,
+    /// this one did something — and the run's own line takes the footer from
+    /// there.
+    ///
+    /// Whether a run is already in flight is not asked here. That refusal is
+    /// worded on the progress line rather than in the message (see
+    /// [`App::set_pact_refused`]), so it belongs to the caller that knows about
+    /// the worker, exactly as it does for the pact key. Nothing here spawns
+    /// anything, reads a file or starts an account either: this is app state,
+    /// and the pass is somebody else's.
+    pub fn refresh(&mut self) -> Option<PathBuf> {
+        let row = self.rows.get(self.selected)?;
+        let path = row.path.clone();
+        let state = row.state;
+
+        if row.is_file() {
+            self.message = Some(file_row_message(&self.label_for(&path)));
+            return None;
+        }
+        match state {
+            NodeState::Unpacted => {
+                self.message = Some(unpacted_message(&self.label_for(&path)));
+                None
+            }
+            NodeState::PactedFresh => {
+                self.message = Some(already_fresh_message(&self.label_for(&path)));
+                None
+            }
+            NodeState::PactedStale => {
+                self.message = None;
+                Some(path)
+            }
+        }
+    }
+
     /// Put the directory at `path`, every directory below it and every file
     /// inside any of them into `state`.
     ///
@@ -2247,9 +2366,58 @@ fn pacting_message(label: &str, position: usize, total: usize) -> String {
     format!("pacting {label} ({position}/{total})")
 }
 
+/// What the app says while a refresh is working the directory named `label`,
+/// which is directory `position` of `total`.
+///
+/// [`pacting_message`] with the other verb, and shaped identically down to the
+/// fraction, because the reader is watching the same kind of work: a pass per
+/// directory, minutes at a time, with a number that has to move. The verb is the
+/// one the `r` key is named after, so the line says which key is still going —
+/// which is the one thing a reader cannot tell from the shape alone.
+///
+/// The fraction counts the directories this run will visit, which for a refresh
+/// is the stale ones rather than all of them: a refresh of a forty-directory
+/// subtree with seven stale directories counts to seven. That is the engine's
+/// counting, passed straight through, exactly as [`pacting_message`]'s is.
+fn refreshing_message(label: &str, position: usize, total: usize) -> String {
+    format!("refreshing {label} ({position}/{total})")
+}
+
+/// What the app says when the refresh key is pressed on a pacted directory that
+/// is already fresh, naming it as `label`.
+///
+/// A refresh describes the stale directories under the one it is pointed at, so
+/// a subtree with none is a run with nothing in it: starting one would spend
+/// minutes and money re-describing content that already holds. Worded as news
+/// rather than as an error, because it is the good outcome — the reader asked
+/// whether anything needed doing and the answer is no — and said out loud rather
+/// than silently ignored, so that a key that starts a long run on some rows and
+/// nothing on others always says which it just did.
+fn already_fresh_message(label: &str) -> String {
+    format!("{label} is already fresh — there is nothing under it to describe again")
+}
+
+/// What the app says when the refresh key is pressed on a directory that is not
+/// pacted, naming it as `label`.
+///
+/// A refresh re-describes an existing pact; it cannot make one, and a directory
+/// with no pact has no grant to have gone stale against. So the refusal names
+/// the key that would help rather than merely saying no — the reader is one
+/// keystroke from what they wanted, and the two keys sit next to each other in
+/// the footer.
+///
+/// This is the answer for a directory a `.warlockignore` keeps out as well. Such
+/// a directory reads as unpacted, which is exactly what it is as far as the
+/// manifest goes, and the sentence stays true: `p` is still the key that
+/// would change it.
+fn unpacted_message(label: &str) -> String {
+    format!("{label} is not pacted — press p to pact it, and there will be something to refresh")
+}
+
 /// What the app says while a summarising pass over the file named `label` is
-/// running inside the directory `pacting` — a line from [`pacting_message`] —
-/// is about: that same line with `— summarising <file> (part/parts)` after it.
+/// running inside the directory `pacting` — a line from [`pacting_message`] or
+/// [`refreshing_message`] — is about: that same line with
+/// `— summarising <file> (part/parts)` after it.
 ///
 /// A clause on the run's line rather than a line of its own, because the footer
 /// is a fixed three lines and because this *is* the run: it is where the minutes
@@ -2263,9 +2431,9 @@ fn summarising_message(pacting: &str, label: &str, part: usize, parts: usize) ->
     format!("{pacting} — summarising {label} ({part}/{parts})")
 }
 
-/// What the app says when the pact key is pressed while `pacting` — a line from
-/// [`pacting_message`] — is already on the footer: that same line with
-/// `— already running` on the end.
+/// What the app says when the pact or refresh key is pressed while `pacting` — a
+/// line from [`pacting_message`] or [`refreshing_message`] — is already on the
+/// footer: that same line with `— already running` on the end.
 ///
 /// The answer to the press is worded as a suffix rather than as a line of its
 /// own because the run's line is where the reader is already looking, and
@@ -2312,7 +2480,8 @@ mod tests {
     use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
     use super::{
-        Account, App, Focus, Line, PactToggle, Row, panel_offset_for, reseat_on, scroll_offset_for,
+        Account, App, Focus, Line, PactToggle, Row, Run, panel_offset_for, reseat_on,
+        scroll_offset_for,
     };
     use crate::claude::Activity;
     use crate::fixture;
@@ -3234,6 +3403,93 @@ mod tests {
     }
 
     #[test]
+    fn refreshing_a_stale_directory_hands_its_subtree_back_and_says_nothing() {
+        let mut app = app_selecting("warlock/crates/tui");
+        app.set_message("something the last keystroke said");
+        let before = app.clone();
+
+        let asked = app.refresh();
+
+        // The root of the subtree to describe again, for whoever runs the pass.
+        assert_eq!(asked, Some(PathBuf::from("warlock/crates/tui")));
+        // A press that does something says nothing, and does nothing else here:
+        // the states, the tally, the selection and the panel are the run's to
+        // move once it is under way, not this key's.
+        assert_eq!(app.message(), None);
+        assert_eq!(app.rows(), before.rows());
+        assert_eq!(app.counts(), before.counts());
+        assert!(!app.has_account());
+        assert!(!app.is_pacting());
+    }
+
+    #[test]
+    fn a_file_row_is_refused_in_the_pact_keys_own_words() {
+        let mut refreshed = app_with_files_selecting("warlock/assets/logo.svg");
+        let mut pacted = app_with_files_selecting("warlock/assets/logo.svg");
+
+        assert_eq!(refreshed.refresh(), None);
+        assert_eq!(pacted.toggle_pact(), None);
+
+        // The same refusal, because it is the same reason: a file is part of a
+        // module rather than being one, so neither key has a subtree here.
+        let message = refreshed.message().expect("a file row is refused out loud");
+        assert_eq!(Some(message), pacted.message());
+        assert!(
+            message.starts_with("warlock/assets/logo.svg is a file"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_directory_is_refused_and_nothing_else_moves() {
+        let mut app = app_selecting("warlock/crates/engine");
+        let mut before = app.clone();
+
+        assert_eq!(app.refresh(), None);
+
+        let message = app.message().expect("a fresh directory is refused");
+        assert!(
+            message.starts_with("warlock/crates/engine is already fresh"),
+            "{message}"
+        );
+        // The message is the whole of what the press changed: no subtree
+        // repainted, no tally moved, no account started, no run in flight.
+        before.set_message(message);
+        assert_eq!(app, before, "refusing a fresh row moved something else");
+    }
+
+    #[test]
+    fn an_unpacted_directory_is_refused_by_naming_the_pact_key() {
+        // Two ways a directory comes to be unpacted: one the loader found no
+        // document for, and one that has a document and no manifest entry —
+        // which is how a directory a `.warlockignore` keeps out reads here. The
+        // refusal does not care which, because the answer is the same.
+        for path in ["warlock/crates", "warlock/assets"] {
+            let mut app = app_selecting(path);
+            let mut before = app.clone();
+
+            assert_eq!(app.refresh(), None, "{path} started something");
+
+            let message = app.message().expect("an unpacted row is refused");
+            assert!(
+                message.starts_with(&format!("{path} is not pacted")),
+                "{message}"
+            );
+            // The key that would help is named, since the reader is one
+            // keystroke away from what they asked for.
+            assert!(message.contains("press p to pact it"), "{message}");
+            before.set_message(message);
+            assert_eq!(app, before, "refusing {path} moved something else");
+        }
+    }
+
+    #[test]
+    fn an_app_with_no_rows_refreshes_nothing() {
+        assert_eq!(App::from_rows(Vec::new()).refresh(), None);
+        assert_eq!(App::from_rows(Vec::new()).message(), None);
+    }
+
+    #[test]
     fn an_app_with_nothing_to_say_says_nothing() {
         assert_eq!(App::from_rows(three_rows()).message(), None);
         assert_eq!(App::from_tree(&fixture::tree()).message(), None);
@@ -3303,6 +3559,87 @@ mod tests {
                 "pacting crates/warlock-engine (3/3)",
             ]
         );
+    }
+
+    #[test]
+    fn the_progress_line_takes_its_verb_from_the_kind_of_run() {
+        for (run, said) in [
+            (Run::Pact, "pacting crates/warlock-engine (3/12)"),
+            (Run::Refresh, "refreshing crates/warlock-engine (3/12)"),
+        ] {
+            let mut app = App::from_rows(rooted_rows());
+
+            app.set_run_in_flight(
+                run,
+                Path::new("/repo").join("crates").join("warlock-engine"),
+                3,
+                12,
+            );
+
+            // One word apart: the directory, the fraction and the shape of the
+            // line are the same, because it is the same kind of work.
+            assert_eq!(app.pact_line().as_deref(), Some(said), "{run:?}");
+            // And a refresh is a run in flight for everything else that asks.
+            assert!(app.is_pacting(), "{run:?}");
+            assert!(
+                app.is_in_flight(&Path::new("/repo").join("crates").join("warlock-engine")),
+                "{run:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pact_key_starts_the_pacting_verb_and_nothing_has_to_say_so() {
+        let mut app = App::from_rows(rooted_rows());
+
+        app.set_pact_in_flight("/repo", 1, 5);
+
+        // `set_pact_in_flight` is `set_run_in_flight` with the kind filled in,
+        // so every caller that predates the refresh goes on wording pacts.
+        assert_eq!(app.pact_line().as_deref(), Some("pacting /repo (1/5)"));
+    }
+
+    #[test]
+    fn a_refresh_counts_the_stale_directories_it_was_given_and_keeps_its_clauses() {
+        let mut app = App::from_rows(rooted_rows());
+
+        // Seven of the subtree's forty directories are stale, which is the
+        // engine's counting for the refresh and is passed straight through.
+        app.set_run_in_flight(
+            Run::Refresh,
+            Path::new("/repo").join("crates").join("warlock-engine"),
+            3,
+            7,
+        );
+        app.set_pact_summarising(
+            Path::new("/repo").join("crates").join("warlock-engine"),
+            2,
+            5,
+        );
+        app.set_pact_refused();
+
+        // The summarising clause and the refusal are worded exactly as they are
+        // for a pact, and the refusal still goes last.
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some(
+                "refreshing crates/warlock-engine (3/7) — summarising \
+                 crates/warlock-engine (2/5) — already running"
+            )
+        );
+
+        // The run moving on re-words the line around the new directory and
+        // carries the refusal along, refresh or not.
+        app.set_run_in_flight(Run::Refresh, Path::new("/repo").join("crates"), 4, 7);
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("refreshing crates (4/7) — already running")
+        );
+
+        // And the end of the run takes the whole line down, kind and all.
+        app.clear_pact_in_flight();
+        assert!(!app.is_pacting());
+        assert_eq!(app.pact_line(), None);
     }
 
     #[test]

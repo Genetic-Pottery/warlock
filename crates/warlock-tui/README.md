@@ -71,6 +71,12 @@ and only presses count, so a key release or an auto-repeat does nothing:
   them, and widens it back to the whole walk.
 - **`p`** pacts the selected directory and everything below it, or takes the
   lot back out again. It is the one key that writes anything; see below.
+- **`r`** refreshes the selected pacted subtree: the directories that have gone
+  yellow are re-described and the ones still green are left alone, so getting
+  back to green after editing one file costs the passes that file made stale
+  rather than a pass per directory. It refuses — and says why on the message
+  line — on a fresh row, on a row that is not pacted (which is what `p` is for)
+  and on a file row.
 - **`q`** and **Ctrl-C** exit, whatever else is happening. Ctrl-C is handled
   here as a key event, not as a signal: raw mode is exactly the mode in which
   the terminal stops turning it into `SIGINT`.
@@ -81,10 +87,21 @@ and only presses count, so a key release or an auto-repeat does nothing:
   nearest to hand would be the one keystroke that throws away minutes of
   somebody else's model time by mistake.
 
-Lower case only for `f`, `o` and `p` — the upper-case letters are different
+Lower case only for `f`, `o`, `p` and `r` — the upper-case letters are different
 keystrokes and mean nothing here — while `g` and `G` are told apart by case
 alone, so a terminal that reports the shift modifier alongside the letter lands
 on the same action as one that does not.
+
+The footer's keys line is shorter than that list on purpose. It reads
+`k/j: move` and not `up/down k/j: move`, and `g/G: ends` and not
+`g/G: first/last`: the line has a fixed width it may not grow past, so a new key
+is paid for by shortening the names already on it, and `r: refresh` was bought
+with those two. The arrows and PgUp/PgDn keep working exactly as described
+above; they are unnamed on the line, not unbound. That line is still wider than
+an eighty-column terminal, and the footer does not wrap, so a terminal that
+narrow loses the right-hand end of it — including the quit key. Known, written
+down here, and not fixed by shortening the one name a stuck reader is looking
+for.
 
 ## The pact key
 
@@ -104,10 +121,12 @@ There is no dialog and no confirmation prompt.
   message line says which directory is being worked and where it sits in the
   run — `pacting crates/engine (3/12)`, position and total, so a screen that
   has not changed in two minutes reads as work rather than as a hang.
-- **No second pact starts while one is running.** Pressing `p` again changes
-  nothing and says nothing: two runs writing the same documents and the same
-  manifest would be a race, and there is nothing about it worth putting on a
-  line the run in flight is already using.
+- **No second run starts while one is running.** Pressing `p` again — or `r`,
+  which goes through the very same check — starts nothing: two runs writing the
+  same documents and the same manifest would be a race. It is not silent, but
+  what it says goes on the line the reader is already watching, as an
+  `— already running` clause on the run's own progress line, rather than on the
+  message line that run has taken.
 - **Esc cancels the run**, and only while there is one to cancel; with nothing
   running Esc still quits, and `q` and Ctrl-C quit either way. A cancel stops
   the descent at the next directory *and* kills the `claude` in flight, so it
@@ -146,6 +165,26 @@ recorded nothing — a subtree that could not be walked, a manifest that would n
 save on a read-only `.warlock/` or a full disk — puts the rows back exactly as
 they were before the key was pressed and puts the reason on the footer's message
 line, rather than taking the screen down with it.
+
+## The refresh key is the same run over a shorter list
+
+`r` is not a second machine. It spawns the same worker on the same channel,
+reporting through the same observer into the same panel account, stoppable by
+the same handle and ending in the same single save and the same reload; the
+whole of the difference is which engine entry point the worker calls — every
+directory of the subtree, or only the stale ones — and which verb the footer is
+worded with. So a refusal, a cancel and a failure all read on a refresh exactly
+as they read on a pact, because they are the same code saying them.
+
+Two consequences worth naming. The progress line reads
+`refreshing crates/engine (3/7)`, and its total is the number of directories the
+engine planned to visit rather than the size of the subtree the key was pressed
+on: a refresh of a forty-directory subtree with seven stale directories counts
+to seven. And Esc cancels a refresh as it cancels a pact — the descent stops at
+the next directory, the `claude` in flight is killed, what finished is hashed,
+saved and left green, and the run reports itself as stopped rather than as
+something that went wrong. An un-pact is the one run Esc cannot stop, because it
+is manifest arithmetic that is over before the key can be read.
 
 ## Files are shown, not opened
 

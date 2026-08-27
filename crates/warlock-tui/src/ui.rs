@@ -230,8 +230,17 @@ const LIVE_KEY: &str = "G";
 /// That is why `o` is labelled with what it leaves on screen rather than with a
 /// sentence about filtering, and `f` with what it shows rather than with a
 /// sentence about a toggle.
-const KEYS: &str = "up/down k/j: move    PgUp/PgDn: page    g/G: first/last    \
-                    space: collapse    o: pacted    f: files    p: pact";
+///
+/// The movement names are the shortest of the lot because they are the ones a
+/// reader needs told once. `k/j: move` names the keys that have to be learnt
+/// and leaves the arrows unnamed — they were the same sentence twice, and the
+/// arrows are what a reader presses before reading anything — and `g/G: ends`
+/// says where the pair go without spelling out which end is which, which the
+/// keys' own order already implies. Those two shortenings are what paid for
+/// `r: refresh`; see [`MAX_KEYS_WIDTH`].
+const KEYS: &str = "k/j: move    PgUp/PgDn: page    g/G: ends    \
+                    space: collapse    o: pacted    f: files    p: pact    \
+                    r: refresh";
 
 /// What separates one key's name from the next on the keys line.
 ///
@@ -263,6 +272,45 @@ const MOUSE_ON_KEY: &str = "m: mouse on";
 /// and the first thing they have to be able to find.
 const QUIT_KEY: &str = "q/Esc/Ctrl-C: quit";
 
+/// The widest the assembled [`keys_line`] is allowed to be: what it measures
+/// today, and not one column more.
+///
+/// A budget, not a measurement. The line may not grow: [`draw_footer`] draws it
+/// without wrapping, so every column past the terminal's width is cut off the
+/// right-hand end, and the end is where the way out is. A new key is therefore
+/// paid for out of the names already on the line — shorten them until the new
+/// one fits — and a key that cannot be afforded that way is a key the line has
+/// no room for. `r: refresh` was bought with `up/down k/j: move` and
+/// `g/G: first/last`; see [`KEYS`].
+///
+/// Known defect, recorded rather than fixed here: 148 columns is already wider
+/// than an eighty-column terminal, and what falls off such a terminal is the
+/// tail of the line — which is [`QUIT_KEY`], the one name a stuck reader is
+/// looking for. Shortening the quit key would be the wrong saving for the same
+/// reason. The fix is a footer that lays the keys out for the width it has, and
+/// that is not this constant's job; holding the line still is.
+///
+/// The tests' render canvas is wider than this on purpose, so that a line which
+/// outgrew its budget is asserted against rather than silently truncated. That
+/// canvas is not the budget.
+const MAX_KEYS_WIDTH: usize = 148;
+
+/// The budget, enforced where a name is edited rather than where it is drawn: a
+/// line that outgrew it does not compile.
+///
+/// Bytes, which is the only length available in a const, and the same number as
+/// columns while every name on the line is ASCII — which they are, and which is
+/// the point of holding them to it. The measure that counts columns properly is
+/// [`display_width`], in
+/// `tests::the_keys_line_is_no_wider_than_its_budget_in_either_mouse_state`.
+/// [`MOUSE_OFF_KEY`] because it is the longer of the two names [`keys_line`]
+/// picks between, so the line it makes is the widest one there is.
+const _: () = assert!(
+    KEYS.len() + KEY_GAP.len() + MOUSE_OFF_KEY.len() + KEY_GAP.len() + QUIT_KEY.len()
+        <= MAX_KEYS_WIDTH,
+    "the keys line is over budget: shorten a name rather than widening the line"
+);
+
 /// The whole keys line for a terminal that is reporting its mouse or one that is
 /// not.
 ///
@@ -271,6 +319,10 @@ const QUIT_KEY: &str = "q/Esc/Ctrl-C: quit";
 /// so the state capture is in is read off the key that changes it rather than
 /// announced on the message line — which the next keystroke would wipe, while
 /// capture stays off until somebody presses `m` again.
+///
+/// Whichever name it picks, what comes back is no wider than
+/// [`MAX_KEYS_WIDTH`], which is what pins the length of the pieces it is made
+/// of.
 fn keys_line(mouse_captured: bool) -> String {
     let mouse = if mouse_captured {
         MOUSE_OFF_KEY
@@ -1202,10 +1254,11 @@ mod tests {
 
     use super::{
         BORDER_THICKNESS, ELLIPSIS, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_HEIGHT,
-        Hit, INDENT, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY,
-        NO_MARKER, PACTING_KEYS, PANEL_INDENT, SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH,
-        TREE_PERCENT, areas, display_width, draw, guide_prefixes, hit_test, keys_line, mark_area,
-        pane_inner, panel_height, tree_height, tree_rows_area, tree_width, truncated,
+        Hit, INDENT, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MAX_KEYS_WIDTH, MOUSE_OFF_KEY,
+        MOUSE_ON_KEY, NO_MARKER, PACTING_KEYS, PANEL_INDENT, SCROLLBACK_ARROW, SELECTION_MARKER,
+        TREE_MIN_WIDTH, TREE_PERCENT, areas, display_width, draw, guide_prefixes, hit_test,
+        keys_line, mark_area, pane_inner, panel_height, tree_height, tree_rows_area, tree_width,
+        truncated,
     };
     use crate::account::Outcome;
     use crate::app::{App, Row};
@@ -2387,21 +2440,22 @@ mod tests {
         // line that has grown past the width it is drawn at fails here instead
         // of quietly losing whatever sat on the right-hand end of it.
         assert_eq!(keys, keys_line(app.mouse_captured()));
-        // "p: pact" and not the bare "p", which "up/down" would satisfy.
+        // "p: pact" and not the bare "p", which "PgUp" would satisfy.
         for key in [
-            "up/down",
-            "k/j",
+            "k/j: move",
             "PgUp",
             "PgDn",
             "page",
-            "g/G",
-            "first/last",
+            "g/G: ends",
             // Named, not left to be discovered: the three keys that change what
             // there is to scroll through.
             "space: collapse",
             "o: pacted",
             "f: files",
             "p: pact",
+            // The two keys that run passes, next to each other because the
+            // question they answer is the same one.
+            "r: refresh",
             // The mouse key, named by what pressing it does next rather than by
             // the state it is in: see
             // `the_keys_line_names_the_mouse_key_by_what_the_next_press_does`.
@@ -2677,6 +2731,25 @@ mod tests {
             row_text(&render(&app, KEYS_WIDTH, height), y),
             keys_line(app.mouse_captured())
         );
+    }
+
+    #[test]
+    fn the_keys_line_is_no_wider_than_its_budget_in_either_mouse_state() {
+        // Both states, because the two `m` names are different lengths and the
+        // budget has to hold for the longer one as well as the shorter.
+        for captured in [true, false] {
+            let line = keys_line(captured);
+            // The crate's own measure, the one `truncated` and `draw_footer`
+            // count in: columns on a terminal, not bytes and not `char`s.
+            let width = display_width(&line);
+            assert!(
+                width <= MAX_KEYS_WIDTH,
+                "the keys line is {width} columns with mouse capture {captured} \
+                 and may not be wider than {MAX_KEYS_WIDTH}: a new key is paid \
+                 for by shortening the names already on the line, not by \
+                 letting it grow — {line:?}"
+            );
+        }
     }
 
     #[test]
