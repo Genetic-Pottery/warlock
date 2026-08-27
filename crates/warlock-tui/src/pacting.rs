@@ -149,10 +149,11 @@ impl Drop for CancelGuard {
 
 /// What a worker thread has to say for itself.
 ///
-/// Four things, and the order of two of them is fixed: one
+/// Five things, and the order of two of them is fixed: one
 /// [`PactEvent::Starting`] per directory as the run reaches it, any number of
 /// [`PactEvent::Doing`] from the pass that directory is running and of
-/// [`PactEvent::Summarising`] from the passes over the big files inside it, and
+/// [`PactEvent::Summarising`] from the passes over the big files inside it, at
+/// most one [`PactEvent::Documented`] per directory as its pass delivers, and
 /// then exactly one [`PactEvent::Finished`]. Nothing else is sent, and nothing
 /// is sent after the outcome — the worker drops its end of the channel and
 /// stops.
@@ -205,6 +206,16 @@ pub(crate) enum PactEvent {
         part: usize,
         /// How many passes the file costs in all.
         parts: usize,
+    },
+    /// `directory` and everything under it is documented: its pass delivered,
+    /// and no pass below it failed. The engine's own word, sent the moment it
+    /// becomes true — see [`PactObserver::documented`] — and the one event that
+    /// recolours rows while a run is still going: a finished directory turns
+    /// green there and then instead of staying yellow until the whole batch is
+    /// over.
+    Documented {
+        /// The directory, as an absolute path.
+        directory: PathBuf,
     },
     /// The run is over, however it went: exactly what [`apply_toggle`] returned.
     Finished(Result<Toggled, String>),
@@ -297,6 +308,14 @@ impl PactObserver for Reporting<'_> {
             file: file.to_path_buf(),
             part,
             parts,
+        });
+    }
+
+    /// Pass the announcement on, exactly as `summarising` is passed on and
+    /// with the same shrug at a send that fails.
+    fn documented(&mut self, directory: &Path) {
+        let _ = self.events.send(PactEvent::Documented {
+            directory: directory.to_path_buf(),
         });
     }
 }
@@ -568,6 +587,18 @@ pub(crate) fn apply_progress(
             Ok(PactEvent::Summarising { file, part, parts }) => {
                 app.set_pact_summarising(file, part, parts);
             }
+            // The one recolouring a run does before it is over. The engine
+            // only says this of a directory whose whole subtree delivered —
+            // the very condition its grant is decided on — so painting the
+            // subtree green here repeats the engine's judgement rather than
+            // second-guessing it, and a directory that finished third of five
+            // is green while the fourth is still being paid for. The reload at
+            // the end repaints from the manifest either way, which is what
+            // catches the one thing this preview cannot know: a hash that
+            // fails in phase two.
+            Ok(PactEvent::Documented { directory }) => {
+                app.set_subtree_state(&directory, NodeState::PactedFresh);
+            }
             Ok(PactEvent::Finished(outcome)) => break Some(outcome),
             // Still running, and nothing new to say.
             Err(TryRecvError::Empty) => return None,
@@ -591,16 +622,19 @@ pub(crate) fn apply_progress(
             refusals,
         })) => {
             *manifest = next;
-            // The app painted the subtree stale when the key was pressed,
-            // because stale is all it could know. A pact that came back with
-            // nothing wrong wrote, hashed and granted every directory in it, so
-            // the subtree is fresh and only this line knows it.
+            // The app painted the subtree stale when the key was pressed, and
+            // the run's `Documented` announcements have been turning finished
+            // branches green one at a time since. A pact that came back with
+            // nothing wrong wrote, hashed and granted every directory in it,
+            // so the one paint left is the whole subtree at once — the same
+            // fact the announcements said piecemeal, said once at the end.
             //
-            // A pact with a failure in it leaves the whole subtree yellow,
-            // branches that did earn grants included: yellow is "pacted, not
-            // proven fresh", which is true of every directory in it until the
-            // next load, and colouring the rest green from here would be this
-            // file second-guessing per node a manifest it did not compute.
+            // A pact with a failure in it paints nothing here: the finished
+            // branches are already green by the engine's own word, and the
+            // failure's ancestors stay yellow — "pacted, not proven fresh" —
+            // which is what the manifest is about to say of them. Colouring
+            // anything else from this arm would be this file second-guessing
+            // per node a manifest it did not compute.
             if granted {
                 app.set_subtree_state(&running.path, NodeState::PactedFresh);
             }
@@ -1651,9 +1685,10 @@ mod tests {
                         .unwrap_or(directory)
                         .to_path_buf(),
                 ),
-                PactEvent::Doing(_) | PactEvent::Summarising { .. } | PactEvent::Finished(_) => {
-                    None
-                }
+                PactEvent::Doing(_)
+                | PactEvent::Summarising { .. }
+                | PactEvent::Documented { .. }
+                | PactEvent::Finished(_) => None,
             })
             .collect()
     }
@@ -1689,17 +1724,24 @@ mod tests {
 
         // One announcement per directory, in the order the passes run —
         // children before parents — counted from one against a total that
-        // does not move, and then exactly one outcome and nothing after it.
+        // does not move, each answered by the word that its pass delivered,
+        // and then exactly one outcome and nothing after it.
         let [
             PactEvent::Starting {
                 directory: first,
                 position: 1,
                 total: 2,
             },
+            PactEvent::Documented {
+                directory: first_done,
+            },
             PactEvent::Starting {
                 directory: second,
                 position: 2,
                 total: 2,
+            },
+            PactEvent::Documented {
+                directory: second_done,
             },
             PactEvent::Finished(Ok(Toggled {
                 manifest,
@@ -1714,6 +1756,11 @@ mod tests {
 
         assert_eq!(first, &scratch.path("crates/engine/src"));
         assert_eq!(second, &scratch.path("crates/engine"));
+        assert_eq!(
+            first_done, first,
+            "documented names the pass that delivered"
+        );
+        assert_eq!(second_done, second);
         assert_eq!(agent.directories().len(), 2, "and it ran both passes");
         // The outcome that reaches the loop is the one that reached disk:
         // saved once, at the end, by the worker itself.
@@ -1764,6 +1811,7 @@ mod tests {
             }),
             PactEvent::Doing(Activity::Thinking),
             PactEvent::Doing(Activity::Cost { usd: first_cost }),
+            PactEvent::Documented { .. },
             PactEvent::Starting {
                 directory: second,
                 position: 2,
@@ -1775,6 +1823,7 @@ mod tests {
             }),
             PactEvent::Doing(Activity::Thinking),
             PactEvent::Doing(Activity::Cost { .. }),
+            PactEvent::Documented { .. },
             PactEvent::Finished(Ok(Toggled { granted: true, .. })),
         ] = events.as_slice()
         else {
@@ -2409,9 +2458,9 @@ mod tests {
 
         assert!(pact.is_some(), "a run that is talking is still running");
         assert_eq!(
-            panel_text(&app, base),
-            ["engine"],
-            "the section is open and empty"
+            panel_text(&app, at(base, 2)),
+            ["engine", "0:02 waiting"],
+            "the section is open, and its clock ticks before the pass says anything"
         );
         let mut in_flight = before.clone();
         in_flight.set_pact_in_flight("/repo/crates/engine", 1, 2);
@@ -2579,6 +2628,69 @@ mod tests {
             ],
             "the account of a finished run stays whole and is closed off"
         );
+    }
+
+    #[test]
+    fn a_documented_directory_turns_green_the_moment_the_engine_says_so() {
+        // The engine's word that a directory and everything under it
+        // delivered recolours that subtree there and then, mid-run: a run
+        // three directories long shows one green, one flashing and one
+        // still yellow, rather than a wall of yellow until the batch is
+        // over.
+        let stale = NodeState::PactedStale;
+        let tree = Tree::new(
+            Node::new("/repo/crates", None::<PathBuf>, stale).with_children([
+                Node::new("/repo/crates/engine", None::<PathBuf>, stale)
+                    .with_children([Node::new("/repo/crates/engine/src", None::<PathBuf>, stale)]),
+                Node::new("/repo/crates/tui", None::<PathBuf>, stale),
+            ]),
+        );
+        let mut app = App::from_tree(&tree);
+        let base = Instant::now();
+        app.start_account(base);
+        let mut manifest = Manifest::new();
+        let (events, received) = mpsc::channel();
+        let mut pact = Some(Running {
+            events: received,
+            cancel: CancelGuard::new(),
+            path: PathBuf::from("/repo/crates"),
+            before: app.clone(),
+        });
+
+        // The deepest directory's pass delivers, and the run moves on to the
+        // one above it without ending.
+        for event in [
+            PactEvent::Starting {
+                directory: PathBuf::from("/repo/crates/engine/src"),
+                position: 1,
+                total: 3,
+            },
+            PactEvent::Documented {
+                directory: PathBuf::from("/repo/crates/engine/src"),
+            },
+            PactEvent::Starting {
+                directory: PathBuf::from("/repo/crates/engine"),
+                position: 2,
+                total: 3,
+            },
+        ] {
+            events.send(event).expect("the loop is still listening");
+        }
+        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+
+        assert!(pact.is_some(), "the run is still going");
+        assert_eq!(
+            state_of(&app, Path::new("/repo/crates/engine/src")),
+            Some(NodeState::PactedFresh),
+            "the finished directory is green while the run pays for the rest"
+        );
+        for still in ["/repo/crates", "/repo/crates/engine", "/repo/crates/tui"] {
+            assert_eq!(
+                state_of(&app, Path::new(still)),
+                Some(stale),
+                "{still} has not delivered, so it keeps the keypress's yellow"
+            );
+        }
     }
 
     #[test]
@@ -2840,23 +2952,23 @@ mod tests {
             [
                 "crates/engine/src".to_owned(),
                 "0:20 Read crates/engine/src".to_owned(),
-                "0:40 thinking".to_owned(),
+                "0:50 thinking".to_owned(),
                 format!(
-                    "0:40 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.25",
+                    "0:50 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.25",
                     document_bytes(&scratch, "crates/engine/src")
                 ),
                 "crates/engine".to_owned(),
                 "0:20 Read crates/engine".to_owned(),
-                "0:40 thinking".to_owned(),
+                "0:50 thinking".to_owned(),
                 format!(
-                    "0:40 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                    "0:50 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
                     document_bytes(&scratch, "crates/engine")
                 ),
-                // Nine frames of ten seconds: the run started with the first
-                // and ended with the ninth. The total is the two passes
-                // added up, and there is no `incomplete` on it because both
-                // of them said what they cost.
-                "pact finished — 2 directories, 1:20, $0.50".to_owned(),
+                // Eleven frames of ten seconds: the run started with the
+                // first and ended with the eleventh. The total is the two
+                // passes added up, and there is no `incomplete` on it because
+                // both of them said what they cost.
+                "pact finished — 2 directories, 1:40, $0.50".to_owned(),
             ],
             "each section is closed with its own document and its own cost"
         );
@@ -2988,11 +3100,11 @@ mod tests {
             [
                 "crates/alpha".to_owned(),
                 "0:20 Read crates/alpha".to_owned(),
-                "0:40 thinking".to_owned(),
-                "0:40 cancelled — $0.25 spent".to_owned(),
+                "0:50 thinking".to_owned(),
+                "0:50 cancelled — $0.25 spent".to_owned(),
                 // Four directories and not the five the subtree holds: the
                 // descent stopped, and the account counts what it reached.
-                "pact finished — 4 directories, 2:40, $1.00".to_owned(),
+                "pact finished — 4 directories, 3:20, $1.00".to_owned(),
             ],
             "the cancel is recorded in the section it happened in"
         );
@@ -3005,7 +3117,7 @@ mod tests {
             assert_eq!(
                 lines[index * 4 + 3],
                 format!(
-                    "0:40 wrote {directory}/WARLOCK.md — {} bytes, $0.25",
+                    "0:50 wrote {directory}/WARLOCK.md — {} bytes, $0.25",
                     document_bytes(&scratch, directory)
                 ),
                 "a section above the cancel keeps the ending it earned"
@@ -3055,19 +3167,19 @@ mod tests {
             [
                 "crates/engine/src".to_owned(),
                 "0:20 Read crates/engine/src".to_owned(),
-                "0:30 thinking".to_owned(),
+                "0:40 thinking".to_owned(),
                 format!(
-                    "0:30 wrote crates/engine/src/WARLOCK.md — {} bytes, no cost reported",
+                    "0:40 wrote crates/engine/src/WARLOCK.md — {} bytes, no cost reported",
                     document_bytes(&scratch, "crates/engine/src")
                 ),
                 "crates/engine".to_owned(),
                 "0:20 Read crates/engine".to_owned(),
-                "0:40 thinking".to_owned(),
+                "0:50 thinking".to_owned(),
                 format!(
-                    "0:40 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                    "0:50 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
                     document_bytes(&scratch, "crates/engine")
                 ),
-                "pact finished — 2 directories, 1:10, \
+                "pact finished — 2 directories, 1:30, \
                      $0.25 (incomplete: 1 pass reported no cost)"
                     .to_owned(),
             ],

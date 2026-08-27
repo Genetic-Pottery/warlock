@@ -861,6 +861,26 @@ impl App {
             .is_some_and(|in_flight| in_flight.path == path)
     }
 
+    /// Whether the pass in flight covers `row`: the directory being worked, or
+    /// a file that directory holds.
+    ///
+    /// The pulse's question, wider than [`App::is_in_flight`] by exactly the
+    /// file rows. A directory's pass reads the files directly inside it, so
+    /// while it runs those rows are the work on screen and flash with it. Its
+    /// child *directories* are not covered — each has a pass of its own,
+    /// already finished by the time the parent's runs, and a row that is done
+    /// has no business flashing — and nor are files deeper down, which belong
+    /// to those passes. Ancestors and siblings are as untouched as ever.
+    ///
+    /// `false` when no pact is running, exactly as [`App::is_in_flight`] is.
+    #[must_use]
+    pub fn in_flight_covers(&self, row: &Row) -> bool {
+        self.in_flight.as_ref().is_some_and(|in_flight| {
+            in_flight.path == row.path
+                || (row.is_file() && row.path.parent() == Some(in_flight.path.as_path()))
+        })
+    }
+
     /// The line describing the pact in flight — `pacting crates/engine (3/12)` —
     /// or `None` when no pact is running.
     ///
@@ -3327,6 +3347,62 @@ mod tests {
     }
 
     #[test]
+    fn the_pass_in_flight_covers_its_directory_and_the_files_it_holds() {
+        let mut app = App::from_rows(rooted_rows());
+        let engine = Path::new("/repo").join("crates").join("warlock-engine");
+        let covered = |app: &App, row: &Row| app.in_flight_covers(row);
+
+        // Nothing is in flight, so nothing is covered.
+        let directory = Row::new(2, engine.clone(), None::<PathBuf>, NodeState::PactedStale);
+        assert!(!covered(&app, &directory));
+
+        app.set_pact_in_flight(engine.clone(), 3, 12);
+
+        // The directory being worked, and the files directly inside it: they
+        // are what its pass is reading.
+        assert!(covered(&app, &directory));
+        assert!(covered(
+            &app,
+            &Row::file(3, engine.join("Cargo.toml"), NodeState::PactedStale)
+        ));
+
+        // Not a child directory — its pass already ran — and not a file that
+        // belongs to that pass, however the paths nest.
+        assert!(!covered(
+            &app,
+            &Row::new(
+                3,
+                engine.join("src"),
+                None::<PathBuf>,
+                NodeState::PactedStale
+            )
+        ));
+        assert!(!covered(
+            &app,
+            &Row::file(4, engine.join("src").join("lib.rs"), NodeState::PactedStale)
+        ));
+        // And not the parent, nor a file beside the directory rather than in
+        // it.
+        assert!(!covered(
+            &app,
+            &Row::new(
+                1,
+                Path::new("/repo").join("crates"),
+                None::<PathBuf>,
+                NodeState::PactedStale
+            )
+        ));
+        assert!(!covered(
+            &app,
+            &Row::file(
+                2,
+                Path::new("/repo").join("crates").join("README.md"),
+                NodeState::PactedStale
+            )
+        ));
+    }
+
+    #[test]
     fn no_row_is_in_flight_once_the_run_is_over() {
         let mut app = App::from_rows(rooted_rows());
         let engine = Path::new("/repo").join("crates").join("warlock-engine");
@@ -4869,7 +4945,10 @@ mod tests {
             .open_section("crates/tui", at(base, 100));
 
         assert!(app.panel_follows());
-        assert_eq!(panel_text(&app, at(base, 100)), ["crates/tui".to_owned()]);
+        assert_eq!(
+            panel_text(&app, at(base, 100)),
+            ["crates/tui".to_owned(), "waiting".to_owned()]
+        );
     }
 
     #[test]
@@ -4886,11 +4965,17 @@ mod tests {
         );
 
         // Longer than the panel: the window is the last screenful, and moves as
-        // each line arrives without anybody telling it to.
+        // each line arrives without anybody telling it to. Numbered tools
+        // rather than thinking, because a stretch of thinking is one line
+        // however often it is reported and this test needs several.
         for line in 2..6 {
-            app.account_mut()
-                .expect("a run is under way")
-                .record(&Activity::Thinking, at(base, line + 1));
+            app.account_mut().expect("a run is under way").record(
+                &Activity::Tool {
+                    name: "Read".to_owned(),
+                    detail: Some(format!("line {line}")),
+                },
+                at(base, line + 1),
+            );
         }
 
         assert!(app.panel_follows());
@@ -4898,7 +4983,7 @@ mod tests {
         assert_eq!(app.panel_lines_below(), 0);
         assert_eq!(
             panel_text(&app, at(base, 7)),
-            ["thinking", "thinking", "thinking"],
+            ["Read line 3", "Read line 4", "Read line 5"],
         );
     }
 

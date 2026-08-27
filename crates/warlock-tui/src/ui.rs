@@ -860,13 +860,14 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// this frame was laid out with, but if it ever does, nothing is highlighted
 /// rather than the wrong row.
 ///
-/// While a pact is running, one row of the window is drawn in the pulsing colour
-/// [`pulse_colour`] works out for this frame instead of its own state colour: the
-/// row whose path is the directory the run is inside right now. The colour is
-/// computed once for the frame and then offered to exactly the row the app says
-/// is in flight — [`App::is_in_flight`] is an exact-path question, so ancestors,
-/// siblings, descendants and the file rows under that directory are never
-/// offered it and keep the colour the keypress painted.
+/// While a pact is running, the rows the pass covers are drawn in the pulsing
+/// colour [`pulse_colour`] works out for this frame instead of their own state
+/// colour: the row of the directory the run is inside right now, and the rows
+/// of the files that directory holds — the very files the pass is reading. The
+/// colour is computed once for the frame and then offered to exactly the rows
+/// [`App::in_flight_covers`] says yes to; ancestors, siblings and child
+/// *directories* — passes of their own, already finished — are never offered it
+/// and keep the colour their state paints.
 fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     let first = app.scroll_offset().min(app.rows().len());
     let height = usize::from(area.height);
@@ -882,7 +883,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
                 &guides[offset],
                 app.can_collapse(first + offset),
                 app.is_collapsed(&row.path),
-                pulse.filter(|_| app.is_in_flight(&row.path)),
+                pulse.filter(|_| app.in_flight_covers(row)),
             ))
         })
         .collect();
@@ -1336,6 +1337,20 @@ mod tests {
     /// the test chose and its clocks asserted for equality.
     fn at(base: Instant, seconds: u64) -> Instant {
         base + Duration::from_secs(seconds)
+    }
+
+    /// The `line`th activity of a pass, as a tool call numbered so it is its
+    /// own line.
+    ///
+    /// The tests below that need a long account need it to be long, and a
+    /// stretch of thinking is one line however often it is reported — so what
+    /// fills a panel is a sequence of distinguishable activities rather than
+    /// the same one repeated.
+    fn numbered(line: usize) -> Activity {
+        Activity::Tool {
+            name: "Read".to_owned(),
+            detail: Some(format!("line {line}")),
+        }
     }
 
     /// An app with the fixture's tree and an account of a pact that started at
@@ -2006,11 +2021,10 @@ mod tests {
             first_glyph_colour(&first, row)
         );
 
-        // And nothing else moved with it: the sibling directory the run has
-        // not reached yet, and the files inside the directory it is working on
-        // now, hold the colour the keypress painted on every frame.
+        // The files inside the directory being worked move with it: they are
+        // what the pass is reading, so their rows flash in step with their
+        // directory's on every frame.
         for path in [
-            "warlock/crates/tui",
             "warlock/crates/engine/Cargo.toml",
             "warlock/crates/engine/WARLOCK.md",
         ] {
@@ -2018,10 +2032,20 @@ mod tests {
             for (when, buffer) in [("0 ms", &first), ("500 ms", &half), ("1 s", &whole)] {
                 assert_eq!(
                     first_glyph_colour(buffer, index),
-                    colour_for(NodeState::PactedStale),
-                    "{path} changed colour at {when}"
+                    first_glyph_colour(buffer, row),
+                    "{path} fell out of step with its directory at {when}"
                 );
             }
+        }
+        // And nothing else moved: the sibling directory the run has not
+        // reached yet holds the colour the keypress painted on every frame.
+        let sibling = row_index(&app, "warlock/crates/tui");
+        for (when, buffer) in [("0 ms", &first), ("500 ms", &half), ("1 s", &whole)] {
+            assert_eq!(
+                first_glyph_colour(buffer, sibling),
+                colour_for(NodeState::PactedStale),
+                "warlock/crates/tui changed colour at {when}"
+            );
         }
         // A colour is the whole of what moves: the same rows, in the same
         // places, saying the same things on all three frames.
@@ -3170,7 +3194,7 @@ mod tests {
         let account = app.account_mut().expect("a pact has started");
         account.open_section("crates/engine", base);
         for line in 0..MANY {
-            account.record(&Activity::Thinking, at(base, line as u64 + 1));
+            account.record(&numbered(line), at(base, line as u64 + 1));
         }
         let buffer = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 99));
         assert!(!panel_rows(&buffer)[0].is_empty());
@@ -3353,7 +3377,7 @@ mod tests {
         let account = app.account_mut().expect("a pact has started");
         account.open_section("crates/engine", base);
         for line in 0..height * 3 {
-            account.record(&Activity::Thinking, at(base, line as u64 + 1));
+            account.record(&numbered(line), at(base, line as u64 + 1));
         }
 
         // Following the newest line: there is nothing below the view, so the
@@ -3410,7 +3434,7 @@ mod tests {
             let account = app.account_mut().expect("a pact has started");
             account.open_section("crates/engine", base);
             for line in 0..usize::from(measured) * 2 {
-                account.record(&Activity::Thinking, at(base, line as u64 + 1));
+                account.record(&numbered(line), at(base, line as u64 + 1));
             }
 
             let buffer = render_at(&app, WIDTH, height, at(base, 99));

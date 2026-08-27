@@ -749,6 +749,19 @@ pub fn pact_subtree(
             }) => {
                 problems.extend(caps);
                 documents.insert(pacted.clone(), document);
+                // Children before parents means everything under this
+                // directory has already had its turn, so whether its subtree
+                // is whole is decided here and now — the same prefix test
+                // phase two grants by. Announced only when it is, because the
+                // announcement is what a front end colours done: a directory
+                // above a failure is going to be recorded without a grant,
+                // and that is not a colour to preview.
+                if !undocumented
+                    .iter()
+                    .any(|missing| missing.starts_with(pacted))
+                {
+                    observer.documented(pacted);
+                }
             }
             Err(error) => {
                 undocumented.push(pacted.clone());
@@ -2506,6 +2519,12 @@ fn carried_bytes(files: &[AgentFile], child_documents: &[AgentChildDocument]) ->
 /// it has a default body that does nothing, so an observer only interested in
 /// directories implements [`starting`](Observer::starting) and stops there.
 ///
+/// And when a directory comes out of its pass with its document written — and
+/// every directory beneath it already has one — it calls
+/// [`documented`](Observer::documented), so a front end can mark work done as
+/// it is done rather than when the whole run is. An announcement like
+/// `summarising`, with the same do-nothing default.
+///
 /// # What this trait is careful not to require
 ///
 /// **No [`Send`], no [`Sync`], no `'static`.** The engine does not decide which
@@ -2581,6 +2600,31 @@ pub trait Observer {
     /// directories go past needs to write none of this.
     fn summarising(&mut self, file: &Path, part: usize, parts: usize) {
         let _ = (file, part, parts);
+    }
+
+    /// `directory`'s pass has written its document, and so has every pass under
+    /// it: nothing phase one can still do will take this directory's grant away.
+    ///
+    /// The announcement a front end colours a finished directory with, made the
+    /// moment it becomes true instead of at the end of the run. It is
+    /// deliberately *not* "the pass finished" — a directory whose pass wrote a
+    /// document above a descendant that failed is going to be recorded without
+    /// a grant, and announcing it as done would be announcing a colour the
+    /// manifest is about to contradict. The pact works children before parents,
+    /// so by the time a directory's own pass is over the question has an
+    /// answer, and a directory this is never called for is one that failed or
+    /// sits above one that did.
+    ///
+    /// Still short of a promise: granting happens in phase two, where a hash
+    /// that cannot be read leaves the entry ungranted — see [`Failure::Hash`].
+    /// What a front end paints on this is a preview, and the manifest the pact
+    /// hands back is the record.
+    ///
+    /// An announcement, not a question, with a default body that does nothing —
+    /// exactly as [`summarising`](Observer::summarising) is, and for the same
+    /// reason.
+    fn documented(&mut self, directory: &Path) {
+        let _ = directory;
     }
 }
 
@@ -6541,6 +6585,8 @@ mod tests {
         /// Every call, in order: the directory offered, its position and the
         /// total it was one of.
         calls: Vec<(PathBuf, usize, usize)>,
+        /// Every `documented` announcement, in the order it was made.
+        documented: Vec<PathBuf>,
     }
 
     impl Watching {
@@ -6549,6 +6595,7 @@ mod tests {
             Self {
                 stop_after: None,
                 calls: Vec::new(),
+                documented: Vec::new(),
             }
         }
 
@@ -6558,6 +6605,7 @@ mod tests {
             Self {
                 stop_after: Some(directories),
                 calls: Vec::new(),
+                documented: Vec::new(),
             }
         }
 
@@ -6581,6 +6629,12 @@ mod tests {
                 .map(|(directory, ..)| directory.clone())
                 .collect()
         }
+
+        /// The directories announced documented, named relative to `root`, in
+        /// the order they were announced.
+        fn done(&self, root: &Path) -> Vec<String> {
+            relative_to(root, &self.documented)
+        }
     }
 
     impl Observer for Watching {
@@ -6590,6 +6644,10 @@ mod tests {
                 Some(limit) if position > limit => Pacting::Stop,
                 _ => Pacting::Continue,
             }
+        }
+
+        fn documented(&mut self, directory: &Path) {
+            self.documented.push(directory.to_path_buf());
         }
     }
 
@@ -7192,6 +7250,67 @@ mod tests {
             "and each one names the directory whose pass runs next, not the one \
              that has just finished",
         );
+    }
+
+    #[test]
+    fn a_directory_is_announced_documented_the_moment_its_pass_delivers() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let mut observer = Watching::patient();
+
+        let PactedSubtree { failures, .. } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &Canned::new(document(300)),
+            &mut observer,
+        )
+        .expect("pacts");
+
+        // One announcement per directory, in the order the passes finish —
+        // which on a clean run is the order they were offered in, children
+        // before parents. Each lands before the next directory is offered,
+        // which is what lets a front end colour work done while the run is
+        // still paying for the rest.
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            observer.done(repo.path()),
+            [
+                "crates/engine/tests",
+                "crates/engine/src/inner",
+                "crates/engine/src",
+                "crates/engine",
+            ],
+        );
+    }
+
+    #[test]
+    fn a_directory_above_a_failure_is_never_announced_documented() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let failing = engine.join("src").join("inner");
+        let agent = FailsFor {
+            directory: failing,
+            text: document(300),
+        };
+        let mut observer = Watching::patient();
+
+        let PactedSubtree { failures, .. } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &agent,
+            &mut observer,
+        )
+        .expect("one refused pass does not fail the pact");
+
+        // `tests` is a whole subtree this run documented, so it is announced.
+        // `src/inner` failed, `src` and `engine` sit above the failure, and
+        // all three are headed for an entry with no grant or none at all —
+        // the announcement stays honest by saying nothing about any of them,
+        // even though `src` and `engine` did write documents.
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(observer.done(repo.path()), ["crates/engine/tests"]);
     }
 
     #[test]

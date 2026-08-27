@@ -25,6 +25,14 @@
 //! stops at the value it had reached, rather than snapping backwards to the
 //! moment the line was first printed.
 //!
+//! A section that has opened but heard nothing yet has no line to put a clock
+//! on, and a bare heading is the still screen all over again — the first thing
+//! a pass does is often a minute of silence before its first word arrives. So
+//! an empty section shows one placeholder line, `waiting`, clocked like any
+//! other: it ticks from the moment the section opens and is replaced by the
+//! first real line the pass reports. It is drawn rather than stored, so nothing
+//! has to arrive to create it and nothing has to be deleted when it goes.
+//!
 //! Nothing here reads a clock. [`Instant::now`] is never called in this file,
 //! which is what lets a test drive a whole run off `base + Duration::from_secs`
 //! and assert on exact text.
@@ -48,6 +56,23 @@ use crate::claude::Activity;
 /// The bare fact, exactly as [`Activity::Thinking`] carries it: that thinking
 /// happened, never what was thought.
 const THINKING: &str = "thinking";
+
+/// The placeholder line of a section that has heard nothing yet.
+///
+/// The pass is running and has not said anything — which, over a stream that
+/// reports an assistant message only when it is whole, is most of the first
+/// minute of every pass. The word is about warlock rather than the model on
+/// purpose: `thinking` would claim to know what the silence is, and this file
+/// only words what it is given.
+const WAITING: &str = "waiting";
+
+/// The whole of what "the pass is producing its answer" is worth saying.
+///
+/// The counterpart of [`THINKING`], and on a toolless pass the longer of the
+/// two: a pass thinks for a few seconds and then spends the rest of its time
+/// writing. The word is about the pass, not about the document — what it is
+/// writing is the document, and the document is the outcome line's business.
+const WRITING: &str = "writing";
 
 /// One line of a section, and the instant it arrived.
 ///
@@ -186,9 +211,14 @@ impl Section {
         self.closed.is_some()
     }
 
-    /// How many drawable rows this section is: its heading plus its lines.
+    /// How many drawable rows this section is: its heading plus its lines,
+    /// where a section with no lines yet draws the one [`WAITING`] placeholder.
+    ///
+    /// Counted here as well as drawn, because this number is what a scroll
+    /// offset is clamped against: a row that is drawn but not counted would be
+    /// one the panel can never scroll to the edge of.
     fn line_count(&self) -> usize {
-        self.entries.len() + 1
+        self.entries.len().max(1) + 1
     }
 
     /// The instant the line at `index` shows on its clock, against a caller's
@@ -220,6 +250,22 @@ impl Section {
     /// is the honest instant to freeze at.
     fn freeze(&mut self, at: Instant) {
         self.closed.get_or_insert(at);
+    }
+
+    /// Let the stretch of `text` go on if it is already the newest line, or
+    /// open one for it at `at` if it is not.
+    ///
+    /// What makes a repeated report read as one continuing thing rather than as
+    /// a column of identical lines: the entry that is already there keeps the
+    /// instant it opened at, so its clock counts the whole stretch rather than
+    /// restarting on every report the stream happens to send.
+    fn extend_or_open(&mut self, text: &str, at: Instant) {
+        if self.entries.last().is_none_or(|entry| entry.text != text) {
+            self.entries.push(Entry {
+                at,
+                text: text.to_owned(),
+            });
+        }
     }
 
     /// Put `outcome`'s line under this section, and stop it moving.
@@ -344,9 +390,11 @@ impl Account {
     /// Open a section for `directory` at `at`, and freeze the one above it.
     ///
     /// The clock under this heading counts from `at`, so every directory starts
-    /// again at `0:00`. Whatever section was live stops there and then — the
-    /// pass that was running it is over, whether or not the caller closed it
-    /// with an outcome, so its newest line has no business still counting up.
+    /// again at `0:00` — and it is on screen from this call, as the [`WAITING`]
+    /// placeholder, rather than from whenever the pass first says something.
+    /// Whatever section was live stops there and then — the pass that was
+    /// running it is over, whether or not the caller closed it with an outcome,
+    /// so its newest line has no business still counting up.
     pub fn open_section(&mut self, directory: impl Into<PathBuf>, at: Instant) {
         if let Some(previous) = self.sections.last_mut() {
             previous.freeze(at);
@@ -383,10 +431,17 @@ impl Account {
 
         match activity {
             Activity::Cost { usd } => *section.cost.get_or_insert(0.0) += usd,
-            Activity::Thinking => section.entries.push(Entry {
-                at,
-                text: THINKING.to_owned(),
-            }),
+            // One line per stretch, however many times the stream says the
+            // stretch is still going. A pass reports thinking every few seconds
+            // while it thinks, and appending each would fill the panel with a
+            // column of identical words; keeping the first means the line that
+            // is already there goes on ticking, and its clock — measured from
+            // when the stretch *started*, which is what this keeps — is the
+            // count of how long it has been at it. A stretch that ends and
+            // begins again opens a new line, because something else will have
+            // been filed in between.
+            Activity::Thinking => section.extend_or_open(THINKING, at),
+            Activity::Writing => section.extend_or_open(WRITING, at),
             Activity::Tool { name, detail } => section.entries.push(Entry {
                 at,
                 text: detail
@@ -542,19 +597,36 @@ impl Account {
     }
 
     /// Every row, lazily, so a window costs only the rows it takes.
+    ///
+    /// A section with no entries draws the [`WAITING`] placeholder under its
+    /// heading, so a pass that has not said anything yet still has a clock on
+    /// screen counting up from the moment its section opened. It is clocked as
+    /// entry zero, which gives it the right instant by the ordinary rule: no
+    /// entry follows it, so it ticks with `now` while the section is live and
+    /// freezes where the section froze. The first real entry takes its place —
+    /// same rule, nothing special to remove.
     fn rows(&self, now: Instant) -> impl Iterator<Item = Line> + '_ {
         self.sections
             .iter()
             .flat_map(move |section| {
+                let waiting = section.entries.is_empty().then(|| Line::Clocked {
+                    clock: section.clock(0, now),
+                    text: WAITING.to_owned(),
+                });
                 std::iter::once(Line::Directory {
                     path: section.directory.clone(),
                 })
-                .chain(section.entries.iter().enumerate().map(
-                    move |(index, entry)| Line::Clocked {
-                        clock: section.clock(index, now),
-                        text: entry.text.clone(),
-                    },
-                ))
+                .chain(waiting)
+                .chain(
+                    section
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .map(move |(index, entry)| Line::Clocked {
+                            clock: section.clock(index, now),
+                            text: entry.text.clone(),
+                        }),
+                )
             })
             .chain(
                 self.summary
@@ -697,6 +769,111 @@ mod tests {
     }
 
     #[test]
+    fn a_section_that_has_heard_nothing_ticks_waiting_until_the_pass_speaks() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        account.open_section("crates/engine", base);
+
+        // On screen from the moment the section opens: the clock is already
+        // moving with nothing recorded, which is what says the silence is a
+        // pass and not a hang.
+        assert_eq!(account.line_count(), 2);
+        assert_eq!(
+            said(&account, at(base, 12)),
+            vec!["crates/engine".to_owned(), "0:12 waiting".to_owned()],
+        );
+
+        // The first real line takes its place, on the same clock: the pass
+        // was quiet for fifty-eight seconds and then it was thinking.
+        account.record(&Activity::Thinking, at(base, 58));
+        assert_eq!(
+            said(&account, at(base, 60)),
+            vec!["crates/engine".to_owned(), "1:00 thinking".to_owned()],
+        );
+    }
+
+    #[test]
+    fn a_stretch_of_thinking_is_one_line_however_often_it_is_reported() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        account.open_section("crates/engine", base);
+        // The stream says "still thinking" every few seconds; the panel says it
+        // once, and lets the clock do the rest.
+        for second in [2, 5, 9, 40] {
+            account.record(&Activity::Thinking, at(base, second));
+        }
+
+        assert_eq!(
+            said(&account, at(base, 55)),
+            vec!["crates/engine".to_owned(), "0:55 thinking".to_owned()],
+            "one line, counting from when thinking started",
+        );
+
+        // Something else happening ends the stretch, and thinking after it is a
+        // new one — the two are separated by what came between them.
+        account.record(&tool("Read", "src/lib.rs"), at(base, 60));
+        account.record(&Activity::Thinking, at(base, 61));
+        account.record(&Activity::Thinking, at(base, 65));
+
+        assert_eq!(
+            said(&account, at(base, 70)),
+            vec![
+                "crates/engine".to_owned(),
+                "1:00 thinking".to_owned(),
+                "1:01 Read src/lib.rs".to_owned(),
+                "1:10 thinking".to_owned(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_pass_reads_as_thinking_and_then_as_writing() {
+        // The whole of a toolless pass, which is what a pact runs now: a few
+        // seconds of thinking, then the rest of the time producing the
+        // document. Two lines, each clocked from when its own stretch began, so
+        // the panel says which half the wait is being spent in.
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        account.open_section("crates/engine", base);
+        account.record(&Activity::Thinking, at(base, 2));
+        account.record(&Activity::Thinking, at(base, 3));
+        account.record(&Activity::Writing, at(base, 4));
+        account.record(&Activity::Writing, at(base, 9));
+
+        assert_eq!(
+            said(&account, at(base, 25)),
+            vec![
+                "crates/engine".to_owned(),
+                // Thinking froze when writing began, four seconds in.
+                "0:04 thinking".to_owned(),
+                // And writing is the live line, counting from when it started.
+                "0:25 writing".to_owned(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_waiting_line_freezes_with_the_section_it_waits_in() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        account.open_section("crates/engine", base);
+        account.open_section("crates/tui", at(base, 30));
+
+        // The first section froze when the second opened, still with nothing
+        // heard, so its waiting line stops where the pass stopped — however
+        // late the frame is drawn.
+        for now in [at(base, 30), at(base, 900)] {
+            assert_eq!(said(&account, now)[1], "0:30 waiting");
+        }
+        // While the live section's own waiting line goes on ticking.
+        assert_eq!(said(&account, at(base, 45))[3], "0:15 waiting");
+    }
+
+    #[test]
     fn the_newest_line_counts_up_with_the_now_it_is_asked_about() {
         let base = Instant::now();
         let mut account = Account::new(base);
@@ -810,11 +987,12 @@ mod tests {
         account.record(&Activity::Cost { usd: 0.21 }, at(base, 1));
         account.record(&Activity::Cost { usd: 0.04 }, at(base, 2));
 
-        // Nothing but the heading was drawn, and the money was kept.
-        assert_eq!(account.line_count(), 1);
+        // No line of its own: the section still reads as waiting for the pass
+        // to be seen doing something, and the money was kept.
+        assert_eq!(account.line_count(), 2);
         assert_eq!(
             said(&account, at(base, 2)),
-            vec!["crates/engine".to_owned()]
+            vec!["crates/engine".to_owned(), "0:02 waiting".to_owned()]
         );
         assert_eq!(account.sections()[0].cost(), Some(0.25));
     }
