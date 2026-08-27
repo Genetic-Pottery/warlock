@@ -132,6 +132,18 @@
 //! are what a reader reaches for having already decided — a question in front of
 //! them would be a question asked of somebody who has answered it.
 //!
+//! One thing now happens before any of that, and it happens with nothing
+//! attached to the terminal: the arguments are read. Zero of them is the whole
+//! of warlock as it was — the panic hook, the loop, the alternate screen — and
+//! anything else is answered here and exits. `init` writes an `AGENTS.md` at the
+//! repository root and says which file it wrote; `-h` and `--help` print the one
+//! usage line; and every other word, and every second argument, prints that same
+//! line on stderr and fails. Refusing is the point of the last of those: warlock
+//! used to open the tree for `warlock status`, which reads as the typed command
+//! having run. The decision is [`intention_for`], a function of the arguments
+//! alone, so all of it is testable with no terminal, no repository and no
+//! process to spawn.
+//!
 //! The reader can hand the pointer back. `m` turns the terminal's reporting off
 //! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
 //! off the terminal keeps its own text selection and no `Event::Mouse` arrives
@@ -141,12 +153,13 @@
 //! through [`restore_terminal`], which turns reporting off whichever state the
 //! toggle was left in.
 
-use std::io;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
+use std::{env, io};
 
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use ratatui::crossterm::execute;
+use warlock_engine::{Written, repository_root, write_agents_md};
 use warlock_tui::{ClaudeAgent, Focus, QuitConfirm, draw, panel_height, tree_height};
 
 mod error;
@@ -178,21 +191,153 @@ use terminal::{TerminalGuard, install_panic_hook};
 /// few timer wakeups.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-fn main() -> ExitCode {
-    // Before anything touches the terminal: a panic during setup has to leave
-    // the terminal usable too.
-    install_panic_hook();
+/// The whole of warlock's command line, in the one line it is printed as.
+///
+/// Printed on stdout when it was asked for and on stderr when it was not, and
+/// the same string either way: a reader who typed something warlock does not
+/// have should be shown exactly what a reader who asked for help is shown.
+///
+/// One line, because that is all there is to say — warlock is a terminal
+/// interface with one subcommand, not a CLI with a manual — and because the
+/// refusal path shares it, where several lines of help in answer to a typo would
+/// bury the fact that nothing ran.
+const USAGE: &str = "usage: warlock [init] — no arguments opens the tree; \
+                     `init` writes AGENTS.md at the repository root";
 
-    match run() {
+/// What `warlock init` says when there was no `AGENTS.md` and now there is one.
+const CREATED: &str = "created";
+
+/// What it says when there was one already and warlock's section in it is now
+/// current — which includes the case where the file did not change, since
+/// "updated" is true of the section either way and a reader running `init`
+/// twice is not owed a third word for it.
+const UPDATED: &str = "updated";
+
+fn main() -> ExitCode {
+    // Read before anything else happens and, deliberately, before anything
+    // touches the terminal: `init`, help and a refusal all print on the ordinary
+    // screen, and a program that entered the alternate screen to write one line
+    // would tear it down around a message nobody saw.
+    let outcome = match intention_for(env::args().skip(1)) {
+        Intention::Tui => {
+            // Before anything touches the terminal: a panic during setup has to
+            // leave the terminal usable too.
+            install_panic_hook();
+            run()
+        }
+        Intention::Init => init(),
+        // Asked for, so it goes to stdout and the exit status says it worked.
+        Intention::Help => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        // Not asked for, so the same line goes to stderr and the exit status
+        // says nothing ran. This is the arm that stops `warlock status` opening
+        // the tree as if the word had meant something.
+        Intention::Refuse => {
+            eprintln!("{USAGE}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         // `run` has returned, so the guard inside it has already dropped and
         // the terminal is back to normal; only now is it worth printing
         // anything, because on the alternate screen nobody would ever see it.
+        // `init` never went near the terminal, and prints through the same line
+        // so that a failure looks the same however warlock was invoked.
         Err(error) => {
             eprintln!("warlock: {error}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// What warlock was asked to do, as decided by its arguments and nothing else.
+///
+/// Four things, which is all a program with one subcommand has: open the tree,
+/// write the file, say how it is invoked, or say that and fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Intention {
+    /// No arguments: warlock as it has always been.
+    Tui,
+    /// `warlock init`.
+    Init,
+    /// `-h` or `--help`: [`USAGE`] on stdout, exit success.
+    Help,
+    /// Anything else at all: [`USAGE`] on stderr, exit failure.
+    Refuse,
+}
+
+/// What `args` — the arguments after the program's own name — asks warlock to
+/// do.
+///
+/// A handful of string comparisons rather than an argument parser, and
+/// deliberately so: warlock's command line is one optional word, and a
+/// dependency to compare one word against three is a dependency to keep up to
+/// date forever. Pure, so every arm is a test rather than a process to spawn.
+///
+/// More than one argument is refused before the first is even looked at, which
+/// is the rule that matters most here: `warlock init extra` typed by somebody
+/// who meant something by `extra` must not run an `init` that silently ignored
+/// it.
+fn intention_for(args: impl IntoIterator<Item = impl AsRef<str>>) -> Intention {
+    let mut args = args.into_iter();
+    let Some(first) = args.next() else {
+        return Intention::Tui;
+    };
+    if args.next().is_some() {
+        return Intention::Refuse;
+    }
+
+    match first.as_ref() {
+        "init" => Intention::Init,
+        "-h" | "--help" => Intention::Help,
+        // `--version` was considered and is deliberately left out: it lands
+        // here, in the refusal, along with everything else warlock does not
+        // have. Warlock is not installed from a registry and nobody is
+        // diagnosing a version skew in it yet, so the honest answer today is
+        // that the flag does not exist. Adding it later is one arm above this
+        // one and a `println!` of `env!("CARGO_PKG_VERSION")` — not a reason to
+        // carry a half-answer in the meantime.
+        _ => Intention::Refuse,
+    }
+}
+
+/// `warlock init`: write the `AGENTS.md` at the repository root and say which
+/// file was written.
+///
+/// Three steps and no policy of its own. The working directory says where to
+/// start, [`repository_root`] walks up to the nearest ancestor with a `.git/`
+/// — so running this from any subdirectory writes the one file in the right
+/// place — and the engine does the writing, because the splice, the delimiters
+/// and the text are all its business (see
+/// [`write_agents_md`](warlock_engine::write_agents_md)).
+///
+/// Nothing here touches the terminal: what happened is one line on the ordinary
+/// screen, and a failure is an [`Error`] returned to `main`, which prints it in
+/// exactly the same place and shape as a tree that would not load.
+fn init() -> Result<(), Error> {
+    let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
+    // Asked directly rather than through a load: `init` writes one file into a
+    // repository that may never have been pacted, and walking the tree to find
+    // its root would be reading every directory in it to answer a question about
+    // ancestors.
+    let root = repository_root(&working_dir).ok_or(Error::NoRepository { start: working_dir })?;
+
+    let written = write_agents_md(&root).map_err(|source| Error::AgentsMd { source })?;
+    // Asked as a question rather than matched arm by arm, because the engine's
+    // enum is `#[non_exhaustive]`: there is one thing to distinguish here — a
+    // file that did not exist before — and anything it gains later is a file
+    // that did.
+    let what = if matches!(written, Written::Created { .. }) {
+        CREATED
+    } else {
+        UPDATED
+    };
+    println!("warlock: {what} `{}`", written.path().display());
+    Ok(())
 }
 
 /// Load the tree, set the terminal up, run the event loop, and put the
@@ -606,8 +751,60 @@ fn report_mouse(on: bool) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::{Intention, USAGE, intention_for};
+
     #[test]
     fn the_binary_is_named_warlock() {
         assert_eq!(env!("CARGO_BIN_NAME"), "warlock");
+    }
+
+    #[test]
+    fn no_arguments_opens_the_tree() {
+        assert_eq!(intention_for(Vec::<String>::new()), Intention::Tui);
+    }
+
+    #[test]
+    fn init_is_the_one_subcommand() {
+        assert_eq!(intention_for(["init"]), Intention::Init);
+    }
+
+    #[test]
+    fn both_spellings_of_help_are_help() {
+        assert_eq!(intention_for(["-h"]), Intention::Help);
+        assert_eq!(intention_for(["--help"]), Intention::Help);
+    }
+
+    #[test]
+    fn a_word_warlock_does_not_have_is_refused_rather_than_opening_the_tree() {
+        // The whole reason the dispatch exists: `warlock status` used to open
+        // the tree, which reads as the typed command having run.
+        assert_eq!(intention_for(["status"]), Intention::Refuse);
+        assert_eq!(intention_for(["nonsense"]), Intention::Refuse);
+        assert_eq!(intention_for([""]), Intention::Refuse);
+    }
+
+    #[test]
+    fn version_is_refused_because_warlock_does_not_have_one_yet() {
+        // Deliberate, and recorded on `intention_for`: the flag is not
+        // implemented, so it is refused like any other word warlock does not
+        // have rather than answered with a half-truth.
+        assert_eq!(intention_for(["--version"]), Intention::Refuse);
+        assert_eq!(intention_for(["-V"]), Intention::Refuse);
+    }
+
+    #[test]
+    fn a_trailing_argument_is_refused_and_never_quietly_dropped() {
+        assert_eq!(intention_for(["init", "extra"]), Intention::Refuse);
+        assert_eq!(intention_for(["--help", "init"]), Intention::Refuse);
+        assert_eq!(intention_for(["init", "init", "init"]), Intention::Refuse);
+    }
+
+    #[test]
+    fn the_usage_line_is_one_line_and_names_the_only_subcommand() {
+        // Printed on stdout when asked for and on stderr when not, and a usage
+        // line that wraps is a usage line that reads like a crash.
+        assert!(!USAGE.contains('\n'), "{USAGE}");
+        assert!(USAGE.contains("init"), "{USAGE}");
+        assert!(USAGE.starts_with("usage: warlock"), "{USAGE}");
     }
 }
