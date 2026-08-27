@@ -3430,13 +3430,13 @@ mod tests {
         PER_FILE_BYTE_CAP, Pacted, PactedSubtree, Pacting, Problem, REDUCE_PROMPT,
         REQUEST_BYTE_CAP, Refusal, Unwatched, byte_count, cache_summary, cached_summary,
         chunk_utf8, gather_request, pact_directory, pact_directory_watched, pact_subtree,
-        pactable_directories, summarise_file, summary_dir, summary_file_name, summary_key,
-        unpact_subtree,
+        pactable_directories, refresh_subtree, summarise_file, summary_dir, summary_file_name,
+        summary_key, unpact_subtree,
     };
     use crate::{
         Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, AgentResponse, Loaded,
         Manifest, ManifestError, NodeState, PactEntry, decide_state, from_manifest_path, load_tree,
-        manifest_path, subtree_hash,
+        manifest_path, subtree_hash, to_manifest_path,
     };
 
     /// The whole point of the agent seam, in one struct: a model pass that
@@ -8175,5 +8175,575 @@ mod tests {
             let document = from_manifest_path(repo.path(), module).join(DOCUMENT_FILE);
             assert!(document.is_file(), "`{}` was deleted", document.display());
         }
+    }
+
+    // Refreshing a subtree: describing what has gone stale and passing over
+    // what has not.
+
+    /// A whole-subtree pact over `crates/engine`, insisted on as green: the
+    /// starting state of every refresh below, because a refresh only has
+    /// something to skip once something is fresh.
+    fn refreshable(repo: &Path) -> Manifest {
+        let PactedSubtree {
+            manifest,
+            failures,
+            problems,
+        } = pact_subtree(
+            repo.join("crates/engine"),
+            repo,
+            &Manifest::new(),
+            &Canned::new(document(300)),
+            &mut Unwatched,
+        )
+        .expect("pacts");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            modules(&manifest),
+            [
+                "crates/engine",
+                "crates/engine/src",
+                "crates/engine/src/inner",
+                "crates/engine/tests",
+            ],
+        );
+        for module in modules(&manifest) {
+            assert_eq!(
+                state(&manifest, repo, module),
+                NodeState::PactedFresh,
+                "`{module}` starts green, or there is nothing here to skip",
+            );
+        }
+        manifest
+    }
+
+    /// Every directory a fake was asked about, named relative to `root`, in the
+    /// order it was asked.
+    ///
+    /// The fixtures below are small enough that no file is ever summarised, so
+    /// this is also one entry per pass: what a refresh cost, and on what.
+    fn described_by(agent: &Canned, root: &Path) -> Vec<String> {
+        let asked: Vec<PathBuf> = agent
+            .seen
+            .borrow()
+            .iter()
+            .map(|request| request.directory().to_path_buf())
+            .collect();
+        relative_to(root, &asked)
+    }
+
+    #[test]
+    fn a_refresh_describes_every_stale_directory_and_none_it_calls_fresh() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let manifest = refreshable(repo.path());
+
+        // Two ways of being stale and one of being fresh, in one subtree: a
+        // directory whose content changed, a directory nobody ever pacted, and
+        // a `src/` nothing has touched since it was granted.
+        write(
+            repo.path(),
+            "crates/engine/tests/it.rs",
+            "#[test] fn works_differently() {}\n",
+        );
+        write(
+            repo.path(),
+            "crates/engine/benches/speed.rs",
+            "fn bench() {}\n",
+        );
+        let agent = Canned::new(document(300));
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)
+            .expect("refreshes");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            described_by(&agent, repo.path()),
+            [
+                "crates/engine/tests",
+                "crates/engine/benches",
+                "crates/engine",
+            ],
+            "every directory `decide_state` calls stale — changed, unpacted, \
+             and the directory above both — and no directory it calls fresh",
+        );
+        // Said again from the other side: what was fresh is exactly what was
+        // never handed to a pass.
+        for skipped in ["crates/engine/src", "crates/engine/src/inner"] {
+            assert!(
+                !described_by(&agent, repo.path()).contains(&skipped.to_owned()),
+                "`{skipped}` hashes to what it was granted for, so it is not \
+                 described",
+            );
+        }
+        for module in modules(&manifest) {
+            assert_eq!(
+                state(&manifest, repo.path(), module),
+                NodeState::PactedFresh,
+                "`{module}` ends green: what was described earned a grant, what \
+                 was skipped kept one",
+            );
+        }
+    }
+
+    #[test]
+    fn a_grant_means_every_directory_below_it_is_fresh_too() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let failing = engine.join("tests");
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &FailsFor {
+                directory: failing,
+                text: document(300),
+            },
+            &mut Unwatched,
+        )
+        .expect("one refused pass does not fail the pact");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+
+        // The invariant a refresh prunes on, and the reason pruning a green
+        // directory may take its whole subtree with it: a pact withholds the
+        // grant from any directory with an undocumented descendant, so wherever
+        // there is a grant, everything beneath it is documented and green.
+        let granted: Vec<&str> = manifest
+            .entries()
+            .iter()
+            .filter(|entry| entry.granted_hash().is_some())
+            .map(PactEntry::module)
+            .collect();
+        assert_eq!(
+            granted,
+            ["crates/engine/src", "crates/engine/src/inner"],
+            "the fixture really does hold both a granted directory with a \
+             directory under it and an ungranted one, or the loop below proves \
+             nothing",
+        );
+
+        for module in granted {
+            let directory = from_manifest_path(repo.path(), module);
+            for below in pactable_directories(&directory).expect("walks") {
+                let beneath = to_manifest_path(repo.path(), &below).expect("storable");
+                assert_eq!(
+                    state(&manifest, repo.path(), &beneath),
+                    NodeState::PactedFresh,
+                    "`{module}` is granted, so `{beneath}` beneath it cannot be \
+                     anything but fresh",
+                );
+            }
+        }
+        assert_eq!(
+            manifest
+                .entry("crates/engine")
+                .expect("documented, so pacted")
+                .granted_hash(),
+            None,
+            "and the directory above the failure is exactly the one that keeps \
+             no grant to be pruned on",
+        );
+    }
+
+    #[test]
+    fn a_refresh_leaves_the_entry_of_every_directory_it_skipped_as_it_found_it() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let before = refreshable(repo.path());
+
+        write(
+            repo.path(),
+            "crates/engine/src/inner/deep.rs",
+            "fn deeper() {}\n",
+        );
+        let agent = Canned::new(document(400));
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut Unwatched)
+            .expect("refreshes");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        let described = [
+            "crates/engine/src/inner",
+            "crates/engine/src",
+            "crates/engine",
+        ];
+        assert_eq!(described_by(&agent, repo.path()), described);
+
+        let skipped: Vec<&str> = modules(&before)
+            .into_iter()
+            .filter(|module| !described.contains(module))
+            .collect();
+        assert_eq!(skipped, ["crates/engine/tests"], "the fixture skips one");
+        for module in skipped {
+            let was = before.entry(module).expect("pacted before the refresh");
+            let now = manifest.entry(module).expect("still pacted after it");
+            assert_eq!(
+                (
+                    now.module(),
+                    now.document(),
+                    now.granted_hash(),
+                    now.granted_at()
+                ),
+                (
+                    was.module(),
+                    was.document(),
+                    was.granted_hash(),
+                    was.granted_at()
+                ),
+                "`{module}` was skipped, so its entry keeps its module, its \
+                 document, its hash and its timestamp",
+            );
+            assert_eq!(now, was, "and the whole entry with them");
+        }
+
+        for module in described {
+            assert_eq!(
+                state(&manifest, repo.path(), module),
+                NodeState::PactedFresh,
+                "`{module}` was described and hashed afterwards, so it ends green",
+            );
+        }
+    }
+
+    #[test]
+    fn one_changed_file_costs_one_pass_for_each_directory_above_it_and_no_others() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let manifest = refreshable(repo.path());
+
+        write(
+            repo.path(),
+            "crates/engine/src/inner/deep.rs",
+            "fn deeper() {}\n",
+        );
+        let agent = Canned::new(document(300));
+
+        let PactedSubtree { failures, .. } =
+            refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)
+                .expect("refreshes");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            described_by(&agent, repo.path()),
+            [
+                "crates/engine/src/inner",
+                "crates/engine/src",
+                "crates/engine",
+            ],
+            "the path from the changed file up to the refreshed root, deepest \
+             first, and nothing beside it",
+        );
+        assert_eq!(
+            agent.seen.borrow().len(),
+            3,
+            "one pass per directory on that path — `crates/engine/tests` is a \
+             quarter of the subtree and costs nothing",
+        );
+    }
+
+    #[test]
+    fn a_refresh_with_nothing_stale_runs_no_pass_and_changes_no_entry() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let before = refreshable(repo.path());
+        let agent = Canned::new(document(300));
+        let mut observer = Watching::patient();
+
+        let PactedSubtree {
+            manifest,
+            failures,
+            problems,
+        } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut observer)
+            .expect("refreshes");
+
+        assert!(
+            agent.seen.borrow().is_empty(),
+            "nothing is stale, so nothing is described and no pass is bought",
+        );
+        assert!(
+            observer.calls(repo.path()).is_empty(),
+            "and there is no directory to announce: {:?}",
+            observer.calls(repo.path()),
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            manifest, before,
+            "the manifest comes back with every entry, every grant and every \
+             timestamp exactly as it went in",
+        );
+    }
+
+    #[test]
+    fn the_total_announced_counts_the_directories_a_refresh_will_describe() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let manifest = refreshable(repo.path());
+        write(
+            repo.path(),
+            "crates/engine/tests/it.rs",
+            "#[test] fn works_differently() {}\n",
+        );
+        let mut observer = Watching::patient();
+
+        let PactedSubtree { failures, .. } = refresh_subtree(
+            &engine,
+            repo.path(),
+            &manifest,
+            &Canned::new(document(300)),
+            &mut observer,
+        )
+        .expect("refreshes");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            observer.calls(repo.path()),
+            [
+                ("crates/engine/tests".to_owned(), 1, 2),
+                ("crates/engine".to_owned(), 2, 2),
+            ],
+            "two of two: the directories this run will actually describe, not \
+             the four in the subtree",
+        );
+        assert_eq!(
+            observer.done(repo.path()),
+            ["crates/engine/tests", "crates/engine"],
+            "and each is announced documented as its pass delivers, exactly as \
+             in a pact",
+        );
+    }
+
+    /// Only on unix, because there is no portable way to make a file
+    /// unreadable. What is under test — that a directory with no hash is a
+    /// directory to describe — is not platform-specific.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_whose_hash_fails_while_staleness_is_decided_is_described_anyway() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let manifest = refreshable(repo.path());
+
+        let unreadable = engine.join("tests").join("it.rs");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmods");
+        if fs::read(&unreadable).is_ok() {
+            // Running as root: no file is unreadable, so there is nothing here
+            // to assert against.
+            return;
+        }
+
+        let agent = Canned::new(document(300));
+        let PactedSubtree {
+            manifest, failures, ..
+        } = refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)
+            .expect("a hash nobody can take is a directory to describe, not an error");
+
+        assert_eq!(
+            described_by(&agent, repo.path()),
+            ["crates/engine/tests", "crates/engine"],
+            "no hash is no answer to `is this still the content it was granted \
+             for`, so both directories the unreadable file sits under are \
+             described",
+        );
+        // And then it plays out exactly as the module docs say it does: phase
+        // two hashes them again, that hash fails again, and each lands as a
+        // `Failure::Hash` with an ungranted entry — yellow, with a pass paid
+        // for it, which is the honest outcome for a directory something is
+        // really wrong with.
+        for module in ["crates/engine/tests", "crates/engine"] {
+            let entry = manifest.entry(module).expect("described, so pacted");
+            assert_eq!(
+                entry.granted_hash(),
+                None,
+                "`{module}` was described and still has no hash to grant against",
+            );
+        }
+        assert_eq!(failures.len(), 2, "{failures:?}");
+        assert!(
+            failures
+                .iter()
+                .all(|failure| matches!(failure, Failure::Hash { .. })),
+            "the documents were written; only the hashes failed: {failures:?}",
+        );
+        assert_eq!(
+            state(&manifest, repo.path(), "crates/engine/src"),
+            NodeState::PactedFresh,
+            "the part of the subtree nothing is wrong with is skipped and stays \
+             green",
+        );
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).expect("chmods back");
+    }
+
+    #[test]
+    fn a_refresh_whose_passes_all_fail_removes_no_entry_and_drops_no_grant() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let before = refreshable(repo.path());
+        write(
+            repo.path(),
+            "crates/engine/src/inner/deep.rs",
+            "fn deeper() {}\n",
+        );
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = refresh_subtree(
+            &engine,
+            repo.path(),
+            &before,
+            &Fails(|| AgentError::EmptyOutput),
+            &mut Unwatched,
+        )
+        .expect("a refused pass does not fail the refresh");
+
+        assert_eq!(
+            failures.len(),
+            3,
+            "one per stale directory, and none for the fresh one nobody asked \
+             about: {failures:?}",
+        );
+        assert!(
+            failures
+                .iter()
+                .all(|failure| matches!(failure, Failure::Document { .. })),
+            "{failures:?}",
+        );
+        assert_eq!(
+            manifest, before,
+            "a refresh that could not re-describe anything leaves the manifest \
+             exactly as stale as it found it: no entry removed, no grant \
+             dropped",
+        );
+        assert_eq!(
+            state(&manifest, repo.path(), "crates/engine"),
+            NodeState::PactedStale,
+            "still yellow, which is what a stale directory nobody managed to \
+             re-describe should be",
+        );
+    }
+
+    #[test]
+    fn a_cancelled_refresh_keeps_what_it_described_and_leaves_the_rest_alone() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let before = refreshable(repo.path());
+        write(
+            repo.path(),
+            "crates/engine/src/inner/deep.rs",
+            "fn deeper() {}\n",
+        );
+        let agent = Canned::new(document(300));
+        let mut observer = Watching::stopping_after(1);
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut observer)
+            .expect("a refresh somebody stopped is not a refresh that failed");
+
+        assert_eq!(
+            observer.calls(repo.path()),
+            [
+                ("crates/engine/src/inner".to_owned(), 1, 3),
+                ("crates/engine/src".to_owned(), 2, 3),
+            ],
+            "the second directory was offered and turned down, and there was no \
+             third question",
+        );
+        assert!(
+            failures.is_empty(),
+            "nothing went wrong — fewer directories were asked for: {failures:?}",
+        );
+        assert_eq!(
+            described_by(&agent, repo.path()),
+            ["crates/engine/src/inner"],
+            "and the cancel cost no pass at all",
+        );
+
+        assert_eq!(
+            modules(&manifest),
+            modules(&before),
+            "a cancelled refresh drops no entry either",
+        );
+        assert_eq!(
+            state(&manifest, repo.path(), "crates/engine/src/inner"),
+            NodeState::PactedFresh,
+            "what finished before the cancel is granted like any other",
+        );
+        for untouched in ["crates/engine/src", "crates/engine"] {
+            assert_eq!(
+                manifest.entry(untouched),
+                before.entry(untouched),
+                "`{untouched}` is at or past the cancel, so it keeps the entry \
+                 the refresh found",
+            );
+            assert_eq!(
+                state(&manifest, repo.path(), untouched),
+                NodeState::PactedStale,
+                "which is to say it is exactly as stale as it was",
+            );
+        }
+    }
+
+    #[test]
+    fn a_refresh_above_a_failed_pass_records_the_ancestor_without_a_grant() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let before = refreshable(repo.path());
+        write(
+            repo.path(),
+            "crates/engine/src/inner/deep.rs",
+            "fn deeper() {}\n",
+        );
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = refresh_subtree(
+            &engine,
+            repo.path(),
+            &before,
+            &FailsFor {
+                directory: engine.join("src").join("inner"),
+                text: document(300),
+            },
+            &mut Unwatched,
+        )
+        .expect("one refused pass does not fail the refresh");
+
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(failures[0].directory(), engine.join("src").join("inner"));
+        assert_eq!(
+            manifest.entry("crates/engine/src/inner"),
+            before.entry("crates/engine/src/inner"),
+            "the directory whose pass failed keeps the entry it had — a refresh \
+             that could not re-describe it does not un-pact it",
+        );
+        for above in ["crates/engine/src", "crates/engine"] {
+            assert_eq!(
+                manifest
+                    .entry(above)
+                    .expect("documented, so pacted")
+                    .granted_hash(),
+                None,
+                "`{above}` has an undocumented descendant, so it earned no \
+                 grant — partial completion reads in a refresh exactly as it \
+                 does in a pact",
+            );
+            assert_eq!(state(&manifest, repo.path(), above), NodeState::PactedStale);
+        }
+        assert_eq!(
+            manifest.entry("crates/engine/tests"),
+            before.entry("crates/engine/tests"),
+            "and the fresh directory beside all of it is untouched",
+        );
     }
 }
