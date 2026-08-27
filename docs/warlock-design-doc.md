@@ -50,7 +50,7 @@ State files and `WARLOCK.md` files are committed to git. A teammate clones the r
 
 The project tree is the interface. It renders every directory in the project that is not ignored, so the first thing anyone sees on a fresh repo is their whole codebase in gray, waiting to be pacted.
 
-**What is in the tree:** every directory git would not ignore. Traversal honors `.gitignore` at every level, hidden directories, and global excludes, plus Warlock's own `.warlock/`. This is deliberately not a skip list Warlock maintains. If a project does not ignore `node_modules`, Warlock walks into it, and that is the project's call to fix.
+**What is in the tree:** every directory git would not ignore. Traversal honors `.gitignore` at every level, hidden directories, and global excludes, plus Warlock's own `.warlock/`. A repository can also say what Warlock is not about, in a `.warlockignore` written in gitignore's syntax and read by gitignore's own matcher. Content it names is never pacted, never sent to an agent and never hashed, so editing a folder of images or a design notebook cannot turn a directory yellow. Those directories keep their rows in the tree and sit gray, since gray already means outside Warlock's management and the reader should be able to see what they excluded. Neither list is a skip list Warlock maintains: `.gitignore` is git's, and `.warlockignore` is the repository's own, written by its author and by nothing Warlock runs. If a project does not ignore `node_modules`, Warlock walks into it, and that is the project's call to fix.
 
 **Colors:**
 - **Gray** = not pacted. Outside Warlock's management.
