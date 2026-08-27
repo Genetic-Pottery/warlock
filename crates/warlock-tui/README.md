@@ -71,6 +71,12 @@ and only presses count, so a key release or an auto-repeat does nothing:
   them, and widens it back to the whole walk.
 - **`p`** pacts the selected directory and everything below it, or takes the
   lot back out again. It is the one key that writes anything; see below.
+- **`r`** refreshes the selected pacted subtree: the directories that have gone
+  yellow are re-described and the ones still green are left alone, so getting
+  back to green after editing one file costs the passes that file made stale
+  rather than a pass per directory. It refuses — and says why on the message
+  line — on a fresh row, on a row that is not pacted (which is what `p` is for)
+  and on a file row.
 - **`q`** and **Ctrl-C** exit, whatever else is happening. Ctrl-C is handled
   here as a key event, not as a signal: raw mode is exactly the mode in which
   the terminal stops turning it into `SIGINT`.
@@ -81,10 +87,21 @@ and only presses count, so a key release or an auto-repeat does nothing:
   nearest to hand would be the one keystroke that throws away minutes of
   somebody else's model time by mistake.
 
-Lower case only for `f`, `o` and `p` — the upper-case letters are different
+Lower case only for `f`, `o`, `p` and `r` — the upper-case letters are different
 keystrokes and mean nothing here — while `g` and `G` are told apart by case
 alone, so a terminal that reports the shift modifier alongside the letter lands
 on the same action as one that does not.
+
+The footer's keys line is shorter than that list on purpose. It reads
+`k/j: move` and not `up/down k/j: move`, and `g/G: ends` and not
+`g/G: first/last`: the line has a fixed width it may not grow past, so a new key
+is paid for by shortening the names already on it, and `r: refresh` was bought
+with those two. The arrows and PgUp/PgDn keep working exactly as described
+above; they are unnamed on the line, not unbound. That line is still wider than
+an eighty-column terminal, and the footer does not wrap, so a terminal that
+narrow loses the right-hand end of it — including the quit key. Known, written
+down here, and not fixed by shortening the one name a stuck reader is looking
+for.
 
 ## The pact key
 
