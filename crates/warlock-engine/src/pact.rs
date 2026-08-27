@@ -717,6 +717,60 @@ pub fn pact_subtree(
     let (directory, root) = (directory.as_ref(), root.as_ref());
     let directories = pactable_directories(directory)?;
 
+    let Described {
+        entries,
+        failures,
+        problems,
+    } = describe_and_grant(&directories, root, agent, observer);
+
+    Ok(PactedSubtree {
+        manifest: rewrite(manifest, &directories, root, entries),
+        failures,
+        problems,
+    })
+}
+
+/// What the two phases came to: the entries they earned, and everything that
+/// went wrong on the way without stopping them.
+///
+/// Not [`PactedSubtree`], because there is no manifest here yet. The entries are
+/// keyed by stored module path, ready for [`rewrite`] — deciding what an
+/// existing entry for a directory this run did not describe deserves is the
+/// caller's, not the core's.
+#[derive(Debug)]
+struct Described {
+    /// One entry per directory that got a document, keyed by the path the
+    /// manifest stores it under. Granted where the subtree came out whole and
+    /// its hash could be taken, ungranted where it did not.
+    entries: BTreeMap<String, PactEntry>,
+    /// Every directory that failed, phase one's before phase two's.
+    failures: Vec<Failure>,
+    /// Every file the byte caps left out of a request.
+    problems: Vec<Problem>,
+}
+
+/// The two phases themselves, over exactly the `directories` handed in:
+/// describe every one of them, then hash and grant.
+///
+/// The shared middle of the subtree operations. `directories` is the list to
+/// describe, deepest-first as [`pactable_directories`] orders it, and it is the
+/// whole of what this function will touch: nothing here decides which
+/// directories belong on it, and nothing here looks at the manifest. `root` is
+/// the repository root the entries' paths are relative to, `agent` runs the
+/// passes and `observer` is told where the run has got to and may stop it —
+/// with a `total` that is `directories.len()`, so a run counts the directories
+/// it will actually describe.
+///
+/// Both phases, the cancellation rule, the single [`now_rfc3339`] for the whole
+/// run and the ungranted entry a directory with an undocumented descendant
+/// earns are described in full on [`pact_subtree`], which is this function plus
+/// a walk and a [`rewrite`].
+fn describe_and_grant(
+    directories: &[PathBuf],
+    root: &Path,
+    agent: &dyn Agent,
+    observer: &mut dyn Observer,
+) -> Described {
     let mut failures = Vec::new();
     let mut problems = Vec::new();
 
@@ -776,7 +830,7 @@ pub fn pact_subtree(
     // invite someone to read an ordering into it.
     let granted_at = now_rfc3339();
     let mut entries = BTreeMap::new();
-    for pacted in &directories {
+    for pacted in directories {
         let Some(document) = documents.get(pacted) else {
             // No document, no entry: a directory this run failed to describe is
             // not a directory this run pacted.
@@ -818,11 +872,11 @@ pub fn pact_subtree(
         entries.insert(entry.module().to_owned(), entry);
     }
 
-    Ok(PactedSubtree {
-        manifest: rewrite(manifest, &directories, root, entries),
+    Described {
+        entries,
         failures,
         problems,
-    })
+    }
 }
 
 /// `manifest` with the pact's entries in it: `pacted` replaced, everything else
