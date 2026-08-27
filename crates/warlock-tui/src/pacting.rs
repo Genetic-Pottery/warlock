@@ -748,6 +748,24 @@ pub(crate) fn apply_progress(
             // fails in phase two.
             Ok(PactEvent::Documented { directory }) => {
                 app.set_subtree_state(&directory, NodeState::PactedFresh);
+                // The document the pass just wrote, put on screen where it was
+                // written: beside the directory, in the colour the paint above
+                // has this moment given it. The paint comes first so the row is
+                // born green rather than repainted into it, though the order is
+                // not load-bearing — `set_subtree_state` paints a directory's
+                // files along with the directory, so an insertion above it
+                // would end up the same colour by the other road.
+                //
+                // And no reload, here or anywhere else mid-run. The manifest on
+                // disk is still the pre-pact one until the single save at the
+                // end of the run, so re-reading the tree now would re-derive
+                // every row's state from that stale record and wipe the green
+                // the run has been painting a directory at a time. That is why
+                // the one reload stays at the bottom of this function, after the
+                // outcome has landed and the manifest is written: by then disk
+                // is the honest account, and this preview is the thing it
+                // corrects rather than the thing it contradicts.
+                app.insert_file_row(directory.join(DOCUMENT_FILE));
             }
             Ok(PactEvent::Finished(outcome)) => break Some(outcome),
             // Still running, and nothing new to say.
@@ -3303,6 +3321,238 @@ mod tests {
                 "{still} has not delivered, so it keeps the keypress's yellow"
             );
         }
+    }
+
+    /// A subtree whose middle directory has a listing, for the tests about the
+    /// document row a run writes into the tree as it goes.
+    ///
+    /// The listing is what makes the position assertable: `WARLOCK.md` sorts
+    /// between `Cargo.toml` and `build.rs` — paths compare component by
+    /// component, and a capital sorts before a lowercase — so a row spliced in
+    /// where a fresh load would put it lands *between* the two rather than at
+    /// either end of the run.
+    fn one_directory_with_files(state: NodeState) -> Tree {
+        Tree::new(
+            Node::new("/repo/crates", None::<PathBuf>, state).with_children([
+                Node::new("/repo/crates/engine", None::<PathBuf>, state)
+                    .with_files(
+                        [
+                            "/repo/crates/engine/Cargo.toml",
+                            "/repo/crates/engine/build.rs",
+                        ]
+                        .map(PathBuf::from),
+                    )
+                    .with_children([Node::new("/repo/crates/engine/src", None::<PathBuf>, state)]),
+                Node::new("/repo/crates/tui", None::<PathBuf>, state),
+            ]),
+        )
+    }
+
+    /// A run of `work` over `app` that nobody has said anything to yet, and the
+    /// end of the channel a test sends its events down.
+    fn running_over(app: &App, work: Work) -> (Sender<PactEvent>, Option<Running>) {
+        let (events, received) = mpsc::channel();
+        let running = Running {
+            events: received,
+            cancel: CancelGuard::new(),
+            work,
+            before: app.clone(),
+        };
+        (events, Some(running))
+    }
+
+    /// Every row the app is drawing, as a path and the state it is drawn in.
+    fn drawn(app: &App) -> Vec<(PathBuf, NodeState)> {
+        app.rows()
+            .iter()
+            .map(|row| (row.path.clone(), row.state))
+            .collect()
+    }
+
+    #[test]
+    fn the_document_a_pass_wrote_appears_under_its_directory_as_the_run_goes() {
+        // The engine's word that a directory delivered is also the news that
+        // there is a `WARLOCK.md` beside it now. The row for it goes in there
+        // and then, in the colour the same event just gave the directory,
+        // where a fresh load would have put it.
+        let stale = NodeState::PactedStale;
+        let mut app = App::from_tree(&one_directory_with_files(stale));
+        // The tally the recolouring moves between states but nothing moves the
+        // size of: a document row stands for no node and is counted nowhere.
+        let nodes = app.counts().total();
+        let mut manifest = Manifest::new();
+        let (events, mut pact) = running_over(&app, pact_of("/repo/crates"));
+        let on_screen: Vec<_> = app.rows().iter().map(|row| row.path.clone()).collect();
+
+        events
+            .send(PactEvent::Documented {
+                directory: PathBuf::from("/repo/crates/engine"),
+            })
+            .expect("the loop is still listening");
+        apply_progress(
+            &mut pact,
+            &mut app,
+            &mut manifest,
+            &nowhere(),
+            Instant::now(),
+        );
+
+        assert!(pact.is_some(), "the run is still going");
+        // Files are hidden, so the reader's tree has not moved a row — the
+        // insertion went into the walk and waits there for the toggle.
+        assert_eq!(
+            app.rows()
+                .iter()
+                .map(|row| row.path.clone())
+                .collect::<Vec<_>>(),
+            on_screen,
+            "the same rows in the same order: nothing new is drawn"
+        );
+        assert_eq!(
+            app.counts().total(),
+            nodes,
+            "a file row is counted nowhere, so the tally cannot have grown"
+        );
+
+        app.toggle_files();
+        assert_eq!(
+            drawn(&app),
+            [
+                ("/repo/crates", stale),
+                ("/repo/crates/engine", NodeState::PactedFresh),
+                ("/repo/crates/engine/Cargo.toml", NodeState::PactedFresh),
+                ("/repo/crates/engine/WARLOCK.md", NodeState::PactedFresh),
+                ("/repo/crates/engine/build.rs", NodeState::PactedFresh),
+                ("/repo/crates/engine/src", NodeState::PactedFresh),
+                ("/repo/crates/tui", stale),
+            ]
+            .map(|(path, state)| (PathBuf::from(path), state)),
+            "the document is among its directory's files, in path order and \
+             before the subdirectory, in the green the run just painted"
+        );
+    }
+
+    #[test]
+    fn a_second_document_for_the_same_directory_inserts_nothing() {
+        // A re-pact of an already documented directory says `Documented`
+        // about a `WARLOCK.md` that is already a row. One row per path, so
+        // the second announcement changes nothing at all.
+        let mut app = App::from_tree(&one_directory_with_files(NodeState::PactedStale));
+        app.toggle_files();
+        let mut manifest = Manifest::new();
+        let (events, mut pact) = running_over(&app, pact_of("/repo/crates"));
+
+        for _ in 0..2 {
+            events
+                .send(PactEvent::Documented {
+                    directory: PathBuf::from("/repo/crates/engine"),
+                })
+                .expect("the loop is still listening");
+        }
+        apply_progress(
+            &mut pact,
+            &mut app,
+            &mut manifest,
+            &nowhere(),
+            Instant::now(),
+        );
+
+        assert!(pact.is_some(), "the run is still going");
+        assert_eq!(
+            app.rows()
+                .iter()
+                .filter(|row| row.path == Path::new("/repo/crates/engine/WARLOCK.md"))
+                .count(),
+            1,
+            "the document has exactly one row however often it is announced"
+        );
+    }
+
+    #[test]
+    fn a_documented_directory_with_no_row_changes_nothing() {
+        // The event names a directory the tree on screen knows nothing about
+        // — a run over a subtree the reader has since loaded away from. There
+        // is nothing to hang a document row on, and nothing happens.
+        let stale = NodeState::PactedStale;
+        let mut app = App::from_tree(&one_directory_with_files(stale));
+        app.toggle_files();
+        let before = drawn(&app);
+        let counts = app.counts();
+        let mut manifest = Manifest::new();
+        let (events, mut pact) = running_over(&app, pact_of("/repo/crates"));
+
+        events
+            .send(PactEvent::Documented {
+                directory: PathBuf::from("/repo/docs/adr"),
+            })
+            .expect("the loop is still listening");
+        apply_progress(
+            &mut pact,
+            &mut app,
+            &mut manifest,
+            &nowhere(),
+            Instant::now(),
+        );
+
+        assert!(pact.is_some(), "the run is still going");
+        assert_eq!(
+            drawn(&app),
+            before,
+            "no row stands for that directory, so none is added under it"
+        );
+        assert_eq!(app.counts(), counts, "and the tally is where it was");
+    }
+
+    #[test]
+    fn the_document_rows_a_run_writes_cost_no_reload() {
+        // Every directory of the run delivers, one event at a time, and the
+        // rows for their documents pile up in a tree that is nowhere on disk.
+        // A reload from `nowhere()` would fail and say so on the footer, and a
+        // reload that somehow worked would have thrown these rows away — so a
+        // tree still holding them, with nothing on the message line and the
+        // run still in flight, is the whole of "nothing was re-read".
+        let stale = NodeState::PactedStale;
+        let mut app = App::from_tree(&one_directory_with_files(stale));
+        app.toggle_files();
+        let mut manifest = Manifest::new();
+        let (events, mut pact) = running_over(&app, pact_of("/repo/crates"));
+
+        for directory in ["/repo/crates/engine/src", "/repo/crates/engine"] {
+            events
+                .send(PactEvent::Documented {
+                    directory: PathBuf::from(directory),
+                })
+                .expect("the loop is still listening");
+        }
+        apply_progress(
+            &mut pact,
+            &mut app,
+            &mut manifest,
+            &nowhere(),
+            Instant::now(),
+        );
+
+        assert!(pact.is_some(), "the run is still going");
+        assert!(
+            app.message().is_none(),
+            "no reload was attempted, so no reload failed: {:?}",
+            app.message()
+        );
+        assert_eq!(
+            drawn(&app),
+            [
+                ("/repo/crates", stale),
+                ("/repo/crates/engine", NodeState::PactedFresh),
+                ("/repo/crates/engine/Cargo.toml", NodeState::PactedFresh),
+                ("/repo/crates/engine/WARLOCK.md", NodeState::PactedFresh),
+                ("/repo/crates/engine/build.rs", NodeState::PactedFresh),
+                ("/repo/crates/engine/src", NodeState::PactedFresh),
+                ("/repo/crates/engine/src/WARLOCK.md", NodeState::PactedFresh),
+                ("/repo/crates/tui", stale),
+            ]
+            .map(|(path, state)| (PathBuf::from(path), state)),
+            "both documents are on screen, each under its own directory"
+        );
     }
 
     #[test]
