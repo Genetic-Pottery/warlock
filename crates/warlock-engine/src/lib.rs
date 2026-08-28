@@ -24,6 +24,7 @@ mod ignores;
 mod load;
 mod manifest;
 mod pact;
+mod scope;
 mod state;
 mod tree;
 
@@ -179,6 +180,20 @@ pub use pact::refresh_subtree;
 /// leave every `WARLOCK.md` on disk, byte for byte. Returns the manifest to save
 /// and saves nothing itself.
 pub use pact::unpact_subtree;
+/// The one rule a string broke on its way to not being a scope, renderable as
+/// a single line for a prompt to refuse with or a load to report.
+pub use scope::Rule as ScopeRule;
+/// Whether a string is a scope a pacted directory may carry: 1 to 24
+/// characters of ASCII lowercase letters, digits, `-` and `_`, beginning with a
+/// letter and not ending with a separator. Judges only — it never lower-cases,
+/// trims or otherwise repairs what it was handed, so folding case stays with
+/// the callers that take the string from a person.
+pub use scope::validate_scope;
+/// Whether a string is a sigil a person may hold: everything
+/// [`validate_scope`] accepts, plus the wildcard `*`, which means "may work
+/// anywhere" and is refused on the directory side because blank already says
+/// "open to anyone" there.
+pub use scope::validate_sigil;
 /// The three-state vocabulary every node is coloured by.
 pub use state::NodeState;
 /// A depth-first walk over a tree, yielding each node with its depth.
