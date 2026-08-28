@@ -9,7 +9,8 @@
 //!
 //! This file is the loop itself; each of the loop's concerns lives in a
 //! sibling module. What a keystroke or a click means is [`input`]'s, running a
-//! pact on a worker thread and applying what it says is [`pacting`]'s, where
+//! pact on a worker thread and applying what it says is [`pacting`]'s, asking
+//! for a scope and writing it is [`scoping`]'s, where
 //! the tree came from and when it is re-read is [`session`]'s, the terminal's
 //! setup and restoration is [`terminal`]'s, and the one-line errors `main`
 //! prints are [`error`]'s. The paragraphs below describe how the loop drives
@@ -113,13 +114,26 @@
 //! it is a question. Esc and `q` no longer return from [`run`]: with nothing
 //! running they open the quit confirmation ([`QuitConfirm`]), which is drawn
 //! over the frame and answered from the keyboard, and only a Yes returns. The
-//! decision is [`press_for`]'s and not this file's — a key, the question's state
-//! and whether a run is in flight go in, and what the loop is to do comes out —
-//! so the whole gate is testable with nothing attached to stdout, and the arms
-//! below are the three things that can come of a keystroke: leave, move the
-//! question, or hand the key to the app. While the question is up the app hears
-//! nothing at all, the pointer included: mouse events are read and dropped, so a
-//! click cannot select a row behind a window that is about to close.
+//! decision is [`press_for`]'s and not this file's — a key, the question's
+//! state, the scope prompt's and whether a run is in flight go in, and what the
+//! loop is to do comes out — so the whole gate is testable with nothing attached
+//! to stdout, and the arms below are the four things that can come of a
+//! keystroke: leave, move the question, type into the scope prompt, or hand the
+//! key to the app. While either window is up the app hears nothing, the pointer
+//! included: mouse events are read and dropped, so a click cannot select a row
+//! behind a window that is about to close.
+//!
+//! The second window is the scope prompt, and it is the one keystroke that
+//! writes to disk without being a run. `s` opens it over the selected directory
+//! holding the scope that directory carries now, read out of the manifest this
+//! loop already holds; Enter writes the manifest here, on this thread, between
+//! two frames. There is no worker, no channel, no say-when, no account and no
+//! reload — a scope is one string in one entry of a file already in hand, and it
+//! changes no row's state or colour, so re-reading the tree afterwards would walk
+//! the repository to arrive at the tree already on screen. Both halves of it live
+//! in [`scoping`], the way the pact key's live in [`pacting`], and the deliberate
+//! consequence is recorded there: a successful write says nothing at all, because
+//! the fact it produces is a label on the row that a sibling slice draws.
 //!
 //! Two keystrokes are deliberately outside the gate. Ctrl-C is answered before
 //! the question is consulted, because in raw mode it is a key event rather than
@@ -168,12 +182,15 @@ use std::{env, io};
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use ratatui::crossterm::execute;
 use warlock_engine::{Written, repository_root, write_agents_md};
-use warlock_tui::{ClaudeAgent, Focus, QuitConfirm, draw, panel_height, tree_height};
+use warlock_tui::{
+    App, ClaudeAgent, Focus, QuitConfirm, ScopePrompt, draw, panel_height, tree_height,
+};
 
 mod config;
 mod error;
 mod input;
 mod pacting;
+mod scoping;
 mod session;
 mod terminal;
 
@@ -181,6 +198,7 @@ use config::configure;
 use error::Error;
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Running, Work, apply_progress, pact_press, refresh_press, start_run};
+use scoping::{scope_edit, scope_press};
 use session::{Watched, load_app, load_manifest, note};
 use terminal::{TerminalGuard, install_panic_hook};
 
@@ -449,6 +467,15 @@ fn run() -> Result<(), Error> {
     // makes "answering No leaves the app exactly as it was" true by
     // construction: the app is never told the question was asked.
     let mut confirm = QuitConfirm::default();
+    // The other question this loop can be carrying: the scope prompt, closed as
+    // every session starts, and here for the reason the gate is — it is state
+    // about this keystroke and the next one, and an `App` that has never heard
+    // of it is an `App` that Esc cannot have changed.
+    //
+    // `prompt` and not `scope`: the `scope` this function already holds is the
+    // session's — the repo root and what warlock was pointed at — and two things
+    // by that name in one loop is one of them being read as the other.
+    let mut prompt = ScopePrompt::default();
 
     loop {
         // Told before it is drawn, and every frame rather than on resize: the
@@ -479,10 +506,12 @@ fn run() -> Result<(), Error> {
         // The gate on the way out is handed in beside the app because the app
         // has never heard of it (see `QuitConfirm`): closed, it changes nothing
         // about the frame; open, it is a small window drawn over the middle of
-        // it with everything behind it cleared.
+        // it with everything behind it cleared. The scope prompt goes in beside
+        // it for the same reason and is drawn the same way — by reference, since
+        // it carries the text somebody is typing.
         guard
             .terminal
-            .draw(|frame| draw(frame, &app, Instant::now(), confirm))?;
+            .draw(|frame| draw(frame, &app, Instant::now(), confirm, &prompt))?;
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
         // sits here, so the wait has to end whether or not anybody presses
@@ -497,7 +526,7 @@ fn run() -> Result<(), Error> {
                 // asks about quitting when there is not — and the question on
                 // screen is what every key reads differently while it is up.
                 // See [`press_for`], which owns both readings.
-                Event::Key(key) => match press_for(key, confirm, pact.is_some()) {
+                Event::Key(key) => match press_for(key, confirm, &prompt, pact.is_some()) {
                     // Returning is the whole of quitting, and it is enough even
                     // with a pact in flight. `pact` drops on the way out, which
                     // cancels the run and kills the `claude` it was waiting on
@@ -671,6 +700,32 @@ fn run() -> Result<(), Error> {
                         report_mouse(!mouse_captured)?;
                         mouse_captured = !mouse_captured;
                     }
+                    // The third key that writes to disk, and the one that is
+                    // not a run: it opens a window holding the scope the
+                    // selected directory carries now, read out of the manifest
+                    // this loop is already holding. Everything it can refuse it
+                    // refuses inside `scope_press` — a file row and an unpacted
+                    // one through `App::message`, a press during a run through
+                    // the progress line — and every one of those comes back as
+                    // a prompt that is still closed, so this arm needs no
+                    // `None` case of its own. See `scoping::scope_press`.
+                    Pressed::Act(Action::OpenScope) => {
+                        prompt = scope_press(&mut app, &manifest, &scope.repo_root, pact.is_some());
+                    }
+                    // Somebody typing into that window: a character more or
+                    // less in the field, the window abandoned, or — on Enter —
+                    // the manifest written. The whole of that last one happens
+                    // here, on this thread, between two frames: no worker, no
+                    // channel, no account and no reload, because a scope is one
+                    // string written into one entry of a file already in this
+                    // thread's hand (see `mod@scoping`). What comes back is the
+                    // prompt from here on — down for a submit that was
+                    // answered, still up over the text for one the engine
+                    // refused. See `scoping::scope_edit`.
+                    Pressed::Scope(edited) => {
+                        prompt =
+                            scope_edit(&mut app, &mut manifest, &scope.repo_root, &prompt, edited);
+                    }
                     // A key nothing is bound to, or one whose press has already
                     // been answered where it was decided.
                     Pressed::Nothing => {}
@@ -680,50 +735,25 @@ fn run() -> Result<(), Error> {
                 // round measured at the top — the one the hit test has to
                 // agree with, because it is the size the frame above was drawn
                 // at — and the app, since which row a click lands on depends
-                // on where the tree's window is. Nothing here reads the
-                // terminal and nothing draws: the round is the redraw, which is
-                // why a pointer swept across the screen costs nothing.
+                // on where the tree's window is. Both windows are handed over
+                // too, and either one up makes every event mean nothing: the
+                // pointer is read and dropped, because neither has clickable
+                // answers and a click on the tree behind one would move a
+                // selection the reader cannot see.
                 //
-                // The question on the way out is handed over too, and it makes
-                // every event mean nothing: while it is up the pointer is read
-                // and dropped, because the dialog has no clickable answers and a
-                // click on the tree behind it would move a selection the reader
-                // cannot see.
-                Event::Mouse(mouse) => match mouse_action(mouse, size, &app, confirm) {
-                    // The wheel over the tree column, whichever pane the keys
-                    // are pointed at: the selection moves and the window
-                    // follows it, exactly as it does for a movement key.
-                    Some(MouseAction::SelectNextBy(rows)) => app.select_next_by(rows),
-                    Some(MouseAction::SelectPreviousBy(rows)) => app.select_previous_by(rows),
-                    // The panel's half of the same wheel. What the follow rule
-                    // makes of it is the app's business and is not restated
-                    // here: a window scrolled back stops following the newest
-                    // line, and one scrolled to the end starts again.
-                    Some(MouseAction::ScrollPanelDown(lines)) => app.scroll_panel_down(lines),
-                    Some(MouseAction::ScrollPanelUp(lines)) => app.scroll_panel_up(lines),
-                    // A click names a row, and a click in a pane also says
-                    // which pane the keys are about from now on: the reader has
-                    // just pointed at it, and leaving the keys driving the
-                    // other pane would send the next `j` somewhere they are not
-                    // looking.
-                    Some(MouseAction::SelectRow(index)) => {
-                        app.set_focus(Focus::Tree);
-                        app.select_row(index);
-                    }
-                    // A click on the row that is already selected, which is
-                    // space by another road — so it goes through the very
-                    // method space goes through, and a row with nothing under
-                    // it collapses nothing here exactly as it would there.
-                    Some(MouseAction::ToggleCollapsed) => {
-                        app.set_focus(Focus::Tree);
-                        app.toggle_collapsed();
-                    }
-                    // A click inside a pane with nothing under it: the tree's
-                    // header, the space below its last row, a line of the
-                    // panel. Taking the focus is the whole of what it does.
-                    Some(MouseAction::Focus(focus)) => app.set_focus(focus),
-                    None => {}
-                },
+                // What comes of it is done in [`apply_mouse`], which is where
+                // the arms that used to stand here live: none of them reads the
+                // terminal and none of them draws — the round is the redraw,
+                // which is why a pointer swept across the screen costs nothing
+                // — and side by side with the keystrokes they crowd out the
+                // half of this match that can leave the loop.
+                Event::Mouse(mouse) => {
+                    // Decided over the app as it stands and only then applied,
+                    // in two statements rather than one: the hit test reads the
+                    // app it is about, and the app cannot be lent out twice.
+                    let action = mouse_action(mouse, size, &app, confirm, &prompt);
+                    apply_mouse(&mut app, action);
+                }
                 // Resizes, focus changes and pasted text: read and dropped. The
                 // frame is measured again at the top of every round, so a
                 // resize needs nothing done about it here, and the other two
@@ -761,6 +791,56 @@ fn run() -> Result<(), Error> {
         // reload above — and nothing at all is read when the disk has been
         // still, which is almost every round.
         watched.round(&mut app, &scope, pact.is_some(), now);
+    }
+}
+
+/// Do to the app whatever the pointer just asked for.
+///
+/// The other half of [`mouse_action`], which is handed the event, the size the
+/// round measured — the one the hit test has to agree with, because it is the
+/// size the frame was drawn at — and the app, since which row a click lands on
+/// depends on where the tree's window is. Nothing here reads the terminal and
+/// nothing draws: the round is the redraw, which is why a pointer swept across
+/// the screen costs nothing.
+///
+/// `None` covers a click that means nothing and every event arriving while a
+/// window is up: the pointer is read and dropped then, because neither dialog
+/// has clickable answers and a click on the tree behind one would move a
+/// selection the reader cannot see.
+fn apply_mouse(app: &mut App, action: Option<MouseAction>) {
+    match action {
+        // The wheel over the tree column, whichever pane the keys are pointed
+        // at: the selection moves and the window follows it, exactly as it does
+        // for a movement key.
+        Some(MouseAction::SelectNextBy(rows)) => app.select_next_by(rows),
+        Some(MouseAction::SelectPreviousBy(rows)) => app.select_previous_by(rows),
+        // The panel's half of the same wheel. What the follow rule makes of it
+        // is the app's business and is not restated here: a window scrolled
+        // back stops following the newest line, and one scrolled to the end
+        // starts again.
+        Some(MouseAction::ScrollPanelDown(lines)) => app.scroll_panel_down(lines),
+        Some(MouseAction::ScrollPanelUp(lines)) => app.scroll_panel_up(lines),
+        // A click names a row, and a click in a pane also says which pane the
+        // keys are about from now on: the reader has just pointed at it, and
+        // leaving the keys driving the other pane would send the next `j`
+        // somewhere they are not looking.
+        Some(MouseAction::SelectRow(index)) => {
+            app.set_focus(Focus::Tree);
+            app.select_row(index);
+        }
+        // A click on the row that is already selected, which is space by
+        // another road — so it goes through the very method space goes through,
+        // and a row with nothing under it collapses nothing here exactly as it
+        // would there.
+        Some(MouseAction::ToggleCollapsed) => {
+            app.set_focus(Focus::Tree);
+            app.toggle_collapsed();
+        }
+        // A click inside a pane with nothing under it: the tree's header, the
+        // space below its last row, a line of the panel. Taking the focus is
+        // the whole of what it does.
+        Some(MouseAction::Focus(focus)) => app.set_focus(focus),
+        None => {}
     }
 }
 

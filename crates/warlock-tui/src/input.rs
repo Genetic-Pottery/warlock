@@ -9,20 +9,24 @@
 //! event loop in `main.rs` reading as a list of consequences.
 //!
 //! [`press_for`] is the keyboard's second half and the newer one: it is where
-//! the quit confirmation is decided, so that the loop above has one arm that
-//! returns, one that moves the question and one that hands the key on. Esc and
-//! `q` no longer leave by themselves — with nothing running they open the
-//! question instead — and while the question is up every key goes to
-//! [`answer_for`](warlock_tui::answer_for) rather than to [`action_for`], which
-//! is what keeps a stray `j` from moving a selection nobody can see behind the
-//! dialog. Ctrl-C is answered before either of them, and a run in flight
-//! suppresses the whole gate; both are argued for on [`press_for`] itself.
+//! the windows drawn over the frame are decided, so that the loop above has one
+//! arm that returns, one that moves the question, one that types into the scope
+//! prompt and one that hands the key on. Esc and `q` no longer leave by
+//! themselves — with nothing running they open the question instead — and while
+//! either window is up every key goes to its own pure function,
+//! [`answer_for`](warlock_tui::answer_for) or [`edit_for`](warlock_tui::edit_for),
+//! rather than to [`action_for`], which is what keeps a stray `j` from moving a
+//! selection nobody can see behind the window. Ctrl-C is answered before any of
+//! them, and a run in flight suppresses the quit gate; both are argued for on
+//! [`press_for`] itself.
 
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Size;
-use warlock_tui::{Answered, App, Focus, Hit, QuitConfirm, answer_for, hit_test};
+use warlock_tui::{
+    Answered, App, Edited, Focus, Hit, QuitConfirm, ScopePrompt, answer_for, edit_for, hit_test,
+};
 
 /// What a keystroke asks the app to do.
 ///
@@ -76,6 +80,23 @@ pub(crate) enum Action {
     /// green through [`Action::TogglePact`] would pay for a pass over every
     /// directory in the subtree to re-describe the few that need it.
     Refresh,
+    /// Ask what scope the selected directory carries.
+    ///
+    /// The only action here that opens a window rather than changing the tree,
+    /// and the only one whose whole answer is somewhere else: what the loop does
+    /// with it is read the directory's scope out of the manifest and put the
+    /// prompt up over it, and from that keystroke on the keys belong to
+    /// [`edit_for`](warlock_tui::edit_for) rather than to this file.
+    ///
+    /// It is not a run. Nothing is spawned, no `claude` is started and no
+    /// progress line appears — a scope is a fact somebody types, and the whole
+    /// of writing one is a manifest saved on the loop's own thread.
+    ///
+    /// The two refusals a press can come to — a row that cannot be scoped, and a
+    /// run already in flight — are the app's answer and the loop's, exactly as
+    /// they are for [`Action::TogglePact`] and [`Action::Refresh`]. This
+    /// function's business is that the key was pressed.
+    OpenScope,
     /// Stop the terminal reporting its mouse, or ask it to start again if it has
     /// been stopped.
     ///
@@ -179,6 +200,12 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
         // what a refresh does about a run already working is the app's answer
         // to give, not this function's, exactly as a second `p` is.
         KeyCode::Char('r') => Some(Action::Refresh),
+        // Lower case only, like `p` and `r` above: the mnemonic is "scope", and
+        // `S` is a different keystroke that means nothing here. Like every key
+        // but Esc it reads the same way with a run in flight as without one —
+        // a run is a reason to refuse the prompt, and refusing is the loop's
+        // answer to give, exactly as it is for a second `p`.
+        KeyCode::Char('s') => Some(Action::OpenScope),
         // Lower case only, like the three above it. The mnemonic is "mouse",
         // and the key means the same thing whether or not a pact is in flight:
         // giving the terminal its own text selection back is exactly the thing a
@@ -198,11 +225,12 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
 /// stands in front of it, rather than left as an [`Action`] the loop has to
 /// remember to treat differently.
 ///
-/// Four variants, and the useful part is that they are exclusive: a keystroke
-/// either ends the session, or moves the question, or reaches the app, or comes
-/// to nothing. While the question is up only the first two are possible, which
-/// is the plain statement of "nothing leaks through to the tree underneath".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Five variants, and the useful part is that they are exclusive: a keystroke
+/// either ends the session, or moves the question, or goes into the scope
+/// prompt, or reaches the app, or comes to nothing. While either window is up
+/// the [`Pressed::Act`] road is unreachable, which is the plain statement of
+/// "nothing leaks through to the tree underneath".
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Pressed {
     /// Leave warlock now, by the path a quit has always taken: the loop returns,
     /// the run's handle drops and takes a running `claude` with it, and the
@@ -212,6 +240,17 @@ pub(crate) enum Pressed {
     /// else happened. It covers opening the question, moving its highlight,
     /// closing it again, and the keys that leave it exactly where it was.
     Confirm(QuitConfirm),
+    /// The scope prompt had the key, and `.0` is what it made of it: the field
+    /// with one character more or less in it, the prompt abandoned, or the text
+    /// offered up for the engine to judge.
+    ///
+    /// The prompt's own outcome is carried through rather than translated,
+    /// because two of its three answers are the loop's to act on and none of
+    /// them is a state this file can name better than
+    /// [`edit_for`](warlock_tui::edit_for) already does. Like
+    /// [`Pressed::Confirm`], it says the app was not consulted: while the prompt
+    /// is up every key that is not Ctrl-C comes back through here.
+    Scope(Edited),
     /// The app's key: do `.0`.
     ///
     /// Never [`Action::Quit`]. Every way out is [`Pressed::Leave`] above, which
@@ -236,10 +275,11 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
         && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// What `key` comes to with the confirmation at `confirm` and a run `in_flight`.
+/// What `key` comes to with the confirmation at `confirm`, the scope prompt at
+/// `prompt` and a run `in_flight`.
 ///
-/// The gate itself, and it is a function of a key and two situations so that
-/// every rule below is one assertion with no terminal attached. Three roads out
+/// The gate itself, and it is a function of a key and three situations so that
+/// every rule below is one assertion with no terminal attached. Four roads out
 /// of it, in the order they are decided.
 ///
 /// **Ctrl-C first, always.** It is a key event and not a signal — raw mode is
@@ -254,9 +294,18 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
 /// **Then the question, if it is up.** Every other key goes to [`answer_for`]
 /// and *only* to it: this is where "nothing reaches the app underneath" is
 /// true, because [`action_for`] is not called at all on that road. The tree's
-/// own bindings — `j`, `k`, `g`, `G`, space, `o`, `f`, `p`, `m`, Tab, the page
-/// keys — are inert for as long as the question stands, without any of them
-/// needing to know the question exists.
+/// own bindings — `j`, `k`, `g`, `G`, space, `o`, `f`, `p`, `r`, `s`, `m`, Tab,
+/// the page keys — are inert for as long as the question stands, without any of
+/// them needing to know the question exists.
+///
+/// **Then the scope prompt, if that is up.** The same road again, to
+/// [`edit_for`] and only to it, and for the same reason: while somebody is
+/// typing a scope, the tree's bindings are letters going into a field or
+/// keystrokes that mean nothing, and [`action_for`] is not consulted at all.
+/// The two windows are asked in this order rather than the other because a key
+/// answered twice is a key answered wrongly once; in practice they cannot both
+/// be up, since `q` and Esc are text and an abandonment while the prompt has the
+/// keyboard and so never reach the gate that opens the question.
 ///
 /// **Then the keys, as they have always been read.** [`action_for`] answers,
 /// and the one answer this function re-reads is [`Action::Quit`]: with nothing
@@ -273,7 +322,12 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
 /// Nothing here changes what cancel means, what Ctrl-C does, or what any other
 /// key is bound to: [`action_for`] is untouched and is still the one place a key
 /// is turned into an [`Action`].
-pub(crate) fn press_for(key: KeyEvent, confirm: QuitConfirm, in_flight: bool) -> Pressed {
+pub(crate) fn press_for(
+    key: KeyEvent,
+    confirm: QuitConfirm,
+    prompt: &ScopePrompt,
+    in_flight: bool,
+) -> Pressed {
     if is_ctrl_c(key) {
         return Pressed::Leave;
     }
@@ -284,6 +338,10 @@ pub(crate) fn press_for(key: KeyEvent, confirm: QuitConfirm, in_flight: bool) ->
             Answered::Close => Pressed::Confirm(QuitConfirm::Closed),
             Answered::Leave => Pressed::Leave,
         };
+    }
+
+    if let Some(field) = prompt.field() {
+        return Pressed::Scope(edit_for(key, field));
     }
 
     match action_for(key, in_flight) {
@@ -341,7 +399,8 @@ pub(crate) enum MouseAction {
 }
 
 /// What `mouse` over a terminal of `size` asks `app` to do with the
-/// confirmation at `confirm`, or `None` for an event that means nothing here.
+/// confirmation at `confirm` and the scope prompt at `prompt`, or `None` for an
+/// event that means nothing here.
 ///
 /// [`action_for`]'s counterpart, and the same shape: everything in, one
 /// intention out, no terminal read and nothing drawn. The size is the one the
@@ -360,21 +419,23 @@ pub(crate) enum MouseAction {
 /// and dropping them here is what keeps a pointer swept across the screen from
 /// changing anything at all.
 ///
-/// While the confirmation is up the pointer means nothing anywhere: every event
-/// is read and dropped, wheel and click alike. The dialog has no clickable Yes
-/// and no clickable No — it is answered from the keyboard, like the keystroke
-/// that opened it — and a click that landed on the tree behind it would select a
-/// row the reader cannot see, under a window that is about to close. The gate
-/// lives here rather than in the loop's arm for the same reason [`press_for`]'s
-/// does: it is a decision, and decisions are testable with nothing attached to
-/// stdout.
+/// While either window is up the pointer means nothing anywhere: every event is
+/// read and dropped, wheel and click alike. Neither has anything clickable in it
+/// — the confirmation has no clickable Yes and no clickable No, and the scope
+/// prompt has a field that is typed into and no buttons — both are answered from
+/// the keyboard, like the keystrokes that opened them, and a click that landed
+/// on the tree behind either would select a row the reader cannot see, under a
+/// window that is about to close. The gate lives here rather than in the loop's
+/// arm for the same reason [`press_for`]'s does: it is a decision, and decisions
+/// are testable with nothing attached to stdout.
 pub(crate) fn mouse_action(
     mouse: MouseEvent,
     size: Size,
     app: &App,
     confirm: QuitConfirm,
+    prompt: &ScopePrompt,
 ) -> Option<MouseAction> {
-    if confirm.is_open() {
+    if confirm.is_open() || prompt.is_open() {
         return None;
     }
 
@@ -512,6 +573,7 @@ mod tests {
             KeyCode::Char('f'),
             KeyCode::Char('p'),
             KeyCode::Char('r'),
+            KeyCode::Char('s'),
             KeyCode::Tab,
             KeyCode::Char('x'),
         ];
@@ -950,6 +1012,83 @@ mod tests {
     }
 
     #[test]
+    fn s_asks_for_the_scope_prompt_with_a_run_in_flight_or_without_one() {
+        // Like `p` and `r`, and like every key but Esc, `s` means one thing in
+        // both situations: a run in flight is a reason to refuse the prompt,
+        // and refusing is the loop's answer to give rather than this
+        // function's.
+        for in_flight in [false, true] {
+            assert_eq!(
+                action_for(press(KeyCode::Char('s')), in_flight),
+                Some(Action::OpenScope),
+                "s should ask for the prompt with a run in flight = {in_flight}"
+            );
+        }
+    }
+
+    #[test]
+    fn upper_s_asks_for_nothing() {
+        // Lower case only, like `o`, `f`, `p`, `r` and `m`: the upper-case
+        // letter is a different keystroke, and leaving it unbound keeps it free
+        // for a later one.
+        for in_flight in [false, true] {
+            assert_eq!(action_for(press(KeyCode::Char('S')), in_flight), None);
+        }
+    }
+
+    #[test]
+    fn releases_and_repeats_of_s_open_nothing() {
+        // The same rule as `p` and `r`, and here it decides whether the prompt
+        // can be typed into at all: acting on a release would reopen the prompt
+        // on the release of the very key that opened it, and a held `s` would
+        // reopen it — losing whatever had been typed — as fast as the terminal
+        // repeats.
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                KeyCode::Char('s'),
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                action_for(event, false),
+                None,
+                "{kind:?} of s should open nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn s_is_the_only_key_that_scopes() {
+        // Its neighbours on the keyboard, the keys it sits between in the match
+        // arms above, and its upper-case self, which this binding does not
+        // answer to.
+        for code in [
+            KeyCode::Char('a'),
+            KeyCode::Char('d'),
+            KeyCode::Char('w'),
+            KeyCode::Char('p'),
+            KeyCode::Char('r'),
+            KeyCode::Char('m'),
+            KeyCode::Char('S'),
+            KeyCode::Char(' '),
+            KeyCode::Enter,
+        ] {
+            assert_ne!(
+                action_for(press(code), false),
+                Some(Action::OpenScope),
+                "{code:?} should not ask for a scope"
+            );
+            assert_ne!(
+                action_for(press(code), true),
+                Some(Action::OpenScope),
+                "{code:?} should not ask for a scope mid-run"
+            );
+        }
+    }
+
+    #[test]
     fn m_toggles_the_mouse_with_a_pact_in_flight_or_without_one() {
         // The one key here that is about the terminal rather than the tree, and
         // it reads the same way in both situations — like everything but Esc.
@@ -989,6 +1128,7 @@ mod tests {
                 Action::ToggleFiles,
                 Action::TogglePact,
                 Action::Refresh,
+                Action::OpenScope,
             ] {
                 assert_ne!(action, Some(other), "m should not mean {other:?}");
             }
@@ -1083,7 +1223,10 @@ mod tests {
         };
         use ratatui::layout::Size;
         use warlock_engine::NodeState;
-        use warlock_tui::{Answer, App, Focus, QuitConfirm, Row, panel_height, tree_height};
+        use warlock_tui::{
+            Answer, App, Edited, Focus, QuitConfirm, Row, ScopeField, ScopePrompt, edit_for,
+            panel_height, tree_height,
+        };
 
         use super::super::{Action, Pressed, action_for, press_for};
 
@@ -1094,10 +1237,14 @@ mod tests {
             height: 24,
         };
 
+        /// The directory the scope prompt is opened over below, so a test that
+        /// meant to assert about the text cannot pass by asserting about this.
+        const DIRECTORY: &str = "crates/warlock-engine";
+
         /// Every key the tree answers to, plus a character bound to nothing:
-        /// the list the question has to swallow whole, so that no keystroke
+        /// the list either window has to swallow whole, so that no keystroke
         /// reaches the app behind it.
-        const INERT: [KeyCode; 15] = [
+        const INERT: [KeyCode; 17] = [
             KeyCode::Char('j'),
             KeyCode::Char('k'),
             KeyCode::Char('g'),
@@ -1106,6 +1253,8 @@ mod tests {
             KeyCode::Char('o'),
             KeyCode::Char('f'),
             KeyCode::Char('p'),
+            KeyCode::Char('r'),
+            KeyCode::Char('s'),
             KeyCode::Char('m'),
             KeyCode::Tab,
             KeyCode::PageUp,
@@ -1210,15 +1359,45 @@ mod tests {
         /// the gate does not open during a run, and no key that reaches the app
         /// while it is up could start one.
         ///
-        /// The three arms the loop answers with a worker thread or an escape
-        /// sequence — the pact key, the refresh key and the mouse key — panic
-        /// rather than doing nothing quietly: a key that reached one of those
-        /// from behind the question is precisely the accident these tests exist
-        /// to catch.
+        /// The four arms the loop answers with a worker thread, a window or an
+        /// escape sequence — the pact key, the refresh key, the scope key and
+        /// the mouse key — panic rather than doing nothing quietly: a key that
+        /// reached one of those from behind either window is precisely the
+        /// accident these tests exist to catch.
         fn round(app: &mut App, confirm: &mut QuitConfirm, key: KeyEvent) -> Round {
-            match press_for(key, *confirm, false) {
+            round_under(app, confirm, &mut ScopePrompt::Closed, key)
+        }
+
+        /// The same round with the scope prompt at `prompt` as well: the other
+        /// window the tree's bindings go inert under.
+        ///
+        /// A parameter rather than a second copy of the arms below, exactly as
+        /// in [`pointer`]: a test that swallowed keys through a kinder version
+        /// of the loop written beside it would be testing the version it wrote.
+        /// The prompt's own answer is applied here the way the loop applies it
+        /// — the field replaced, or the prompt taken down — and a submit does
+        /// nothing to the app, because writing a manifest is not something an
+        /// [`App`] hears about.
+        fn round_under(
+            app: &mut App,
+            confirm: &mut QuitConfirm,
+            prompt: &mut ScopePrompt,
+            key: KeyEvent,
+        ) -> Round {
+            match press_for(key, *confirm, prompt, false) {
                 Pressed::Leave | Pressed::Act(Action::Quit) => return Round::Left,
                 Pressed::Confirm(next) => *confirm = next,
+                Pressed::Scope(Edited::Open(field)) => *prompt = ScopePrompt::Open(field),
+                Pressed::Scope(Edited::Close) => *prompt = ScopePrompt::Closed,
+                // What a submit comes to is a manifest saved on the loop's own
+                // thread, and nothing an app can see: the prompt stays up until
+                // the engine has judged the text, which is the next slice's.
+                // All this arm can say is where the key came from, and it says
+                // it rather than nothing so that a submit conjured out of a
+                // closed prompt would be caught here.
+                Pressed::Scope(Edited::Submit) => {
+                    assert!(prompt.is_open(), "a submit came from a prompt that is up");
+                }
                 Pressed::Act(Action::ToggleFocus) => app.toggle_focus(),
                 Pressed::Act(Action::SelectPrevious) => app.select_previous(),
                 Pressed::Act(Action::SelectNext) => app.select_next(),
@@ -1233,6 +1412,7 @@ mod tests {
                     action @ (Action::CancelPact
                     | Action::TogglePact
                     | Action::Refresh
+                    | Action::OpenScope
                     | Action::ToggleMouseCapture),
                 ) => panic!("{action:?} reached the app"),
                 Pressed::Nothing => {}
@@ -1305,7 +1485,12 @@ mod tests {
 
                 for code in INERT {
                     assert_eq!(
-                        press_for(press(code), QuitConfirm::Open(lit), false),
+                        press_for(
+                            press(code),
+                            QuitConfirm::Open(lit),
+                            &ScopePrompt::Closed,
+                            false
+                        ),
                         Pressed::Confirm(QuitConfirm::Open(lit)),
                         "{code:?} should reach neither the app nor the way out with {lit:?} lit"
                     );
@@ -1331,10 +1516,13 @@ mod tests {
                 let mut app = app_in_use();
                 let mut confirm = QuitConfirm::Open(Answer::Yes);
 
-                assert_eq!(press_for(key, confirm, false), Pressed::Leave);
                 assert_eq!(
-                    press_for(key, confirm, false),
-                    press_for(ctrl_c(), confirm, false)
+                    press_for(key, confirm, &ScopePrompt::Closed, false),
+                    Pressed::Leave
+                );
+                assert_eq!(
+                    press_for(key, confirm, &ScopePrompt::Closed, false),
+                    press_for(ctrl_c(), confirm, &ScopePrompt::Closed, false)
                 );
                 assert_eq!(round(&mut app, &mut confirm, key), Round::Left);
             }
@@ -1406,7 +1594,7 @@ mod tests {
             ] {
                 for in_flight in [false, true] {
                     assert_eq!(
-                        press_for(ctrl_c(), confirm, in_flight),
+                        press_for(ctrl_c(), confirm, &ScopePrompt::Closed, in_flight),
                         Pressed::Leave,
                         "Ctrl-C should leave with {confirm:?} and a run in flight = {in_flight}"
                     );
@@ -1424,22 +1612,42 @@ mod tests {
             // settings of the flag: the gate is for the twitch that follows a
             // cancel, and during a run Esc already means cancel.
             assert_eq!(
-                press_for(press(KeyCode::Esc), QuitConfirm::Closed, true),
+                press_for(
+                    press(KeyCode::Esc),
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Closed,
+                    true
+                ),
                 Pressed::Act(Action::CancelPact),
             );
             assert_eq!(
-                press_for(press(KeyCode::Char('q')), QuitConfirm::Closed, true),
+                press_for(
+                    press(KeyCode::Char('q')),
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Closed,
+                    true
+                ),
                 Pressed::Leave,
             );
 
             // And the same two keys with nothing running, which is the only
             // difference the flag makes here.
             assert_eq!(
-                press_for(press(KeyCode::Esc), QuitConfirm::Closed, false),
+                press_for(
+                    press(KeyCode::Esc),
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Closed,
+                    false
+                ),
                 Pressed::Confirm(QuitConfirm::open()),
             );
             assert_eq!(
-                press_for(press(KeyCode::Char('q')), QuitConfirm::Closed, false),
+                press_for(
+                    press(KeyCode::Char('q')),
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Closed,
+                    false
+                ),
                 Pressed::Confirm(QuitConfirm::open()),
             );
         }
@@ -1452,7 +1660,12 @@ mod tests {
             for in_flight in [false, true] {
                 for code in INERT {
                     assert_eq!(
-                        press_for(press(code), QuitConfirm::Closed, in_flight),
+                        press_for(
+                            press(code),
+                            QuitConfirm::Closed,
+                            &ScopePrompt::Closed,
+                            in_flight
+                        ),
                         action_for(press(code), in_flight).map_or(Pressed::Nothing, Pressed::Act),
                         "{code:?} should read as it always has, in flight = {in_flight}"
                     );
@@ -1476,17 +1689,134 @@ mod tests {
                     );
 
                     assert_eq!(
-                        press_for(key, QuitConfirm::Closed, false),
+                        press_for(key, QuitConfirm::Closed, &ScopePrompt::Closed, false),
                         Pressed::Nothing,
                         "{kind:?} of {code:?} should open nothing"
                     );
                     assert_eq!(
-                        press_for(key, QuitConfirm::open(), false),
+                        press_for(key, QuitConfirm::open(), &ScopePrompt::Closed, false),
                         Pressed::Confirm(QuitConfirm::open()),
                         "{kind:?} of {code:?} should answer nothing"
                     );
                 }
             }
+        }
+
+        #[test]
+        fn the_scope_prompt_swallows_every_key_the_tree_answers_to() {
+            // The confirmation's rule, said again for the other window: while
+            // somebody is typing a scope, `j`, `k`, `g`, `G`, space, `o`, `f`,
+            // `p`, `r`, `s`, `m`, Tab and the page keys are letters going into a
+            // field or keystrokes that mean nothing, and `action_for` is not
+            // consulted at all. Both layers: the key comes back as the prompt's
+            // own answer and never as an `Action`, and the app behind the window
+            // is the app that was there before it opened.
+            //
+            // Asserted on an empty field and on one already holding a scope,
+            // because what is in the field is nothing to do with what the gate
+            // does with a key.
+            for text in ["", "data-plane"] {
+                let mut app = app_in_use();
+                let before = app.clone();
+                let field = ScopeField::new(DIRECTORY, text);
+                let mut prompt = ScopePrompt::Open(field.clone());
+                let mut confirm = QuitConfirm::Closed;
+
+                for code in INERT {
+                    let key = press(code);
+                    let pressed = press_for(key, QuitConfirm::Closed, &prompt, false);
+
+                    assert_eq!(
+                        pressed,
+                        Pressed::Scope(edit_for(key, prompt.field().expect("the prompt is up"))),
+                        "{code:?} should go to the prompt and nowhere else"
+                    );
+                    assert!(
+                        matches!(pressed, Pressed::Scope(_)),
+                        "{code:?} reached something other than the prompt: {pressed:?}"
+                    );
+
+                    assert_eq!(
+                        round_under(&mut app, &mut confirm, &mut prompt, key),
+                        Round::Stayed
+                    );
+                }
+
+                assert!(prompt.is_open(), "the prompt is still up");
+                assert_eq!(confirm, QuitConfirm::Closed, "and no question was opened");
+                assert_eq!(app, before, "nothing reached the tree underneath");
+            }
+        }
+
+        #[test]
+        fn esc_and_q_belong_to_the_prompt_while_it_is_up() {
+            // The order the gate decides in, where it is visible: the prompt is
+            // asked before `action_for`, so `q` is a character somebody typed
+            // rather than a way out, and Esc takes the prompt down rather than
+            // putting a question in front of a session nobody asked to end.
+            let field = ScopeField::new(DIRECTORY, "web");
+            let prompt = ScopePrompt::Open(field.clone());
+
+            assert_eq!(
+                press_for(
+                    press(KeyCode::Char('q')),
+                    QuitConfirm::Closed,
+                    &prompt,
+                    false
+                ),
+                Pressed::Scope(Edited::Open(ScopeField::new(DIRECTORY, "webq"))),
+                "q is a letter while the field has the keyboard"
+            );
+            assert_eq!(
+                press_for(press(KeyCode::Esc), QuitConfirm::Closed, &prompt, false),
+                Pressed::Scope(Edited::Close),
+                "Esc abandons the prompt rather than opening the question"
+            );
+
+            // And through the loop's arms: the prompt comes down, the question
+            // does not go up, and the app never heard either keystroke.
+            let mut app = app_in_use();
+            let before = app.clone();
+            let mut confirm = QuitConfirm::Closed;
+            let mut prompt = ScopePrompt::Open(field);
+
+            assert_eq!(
+                round_under(&mut app, &mut confirm, &mut prompt, press(KeyCode::Esc)),
+                Round::Stayed
+            );
+            assert_eq!(prompt, ScopePrompt::Closed, "the prompt came down");
+            assert_eq!(confirm, QuitConfirm::Closed, "and nothing took its place");
+            assert_eq!(app, before);
+        }
+
+        #[test]
+        fn ctrl_c_leaves_at_once_with_the_scope_prompt_up() {
+            // Answered before either window is consulted, and for the reason it
+            // is answered before the question: through `edit_for` it is a `c`
+            // wearing a modifier, i.e. one of the keys that change nothing, and
+            // the last resort of a reader who wants out would be the one
+            // keystroke the field swallowed. Pinned with an empty field, with
+            // something typed, and at both settings of the run flag.
+            for prompt in [
+                ScopePrompt::open(DIRECTORY, ""),
+                ScopePrompt::open(DIRECTORY, "data-plane"),
+            ] {
+                for in_flight in [false, true] {
+                    assert_eq!(
+                        press_for(ctrl_c(), QuitConfirm::Closed, &prompt, in_flight),
+                        Pressed::Leave,
+                        "Ctrl-C should leave with {prompt:?} up and a run in flight = {in_flight}"
+                    );
+                }
+            }
+
+            let mut app = app_in_use();
+            let mut confirm = QuitConfirm::Closed;
+            let mut prompt = ScopePrompt::open(DIRECTORY, "billing");
+            assert_eq!(
+                round_under(&mut app, &mut confirm, &mut prompt, ctrl_c()),
+                Round::Left
+            );
         }
     }
 
@@ -1512,7 +1842,7 @@ mod tests {
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Size;
         use warlock_engine::NodeState;
-        use warlock_tui::{App, Focus, QuitConfirm, Row, panel_height, tree_height};
+        use warlock_tui::{App, Focus, QuitConfirm, Row, ScopePrompt, panel_height, tree_height};
 
         use super::super::{MouseAction, mouse_action};
 
@@ -1636,15 +1966,14 @@ mod tests {
             app
         }
 
-        /// What `mouse` over [`SIZE`] asks `app` for with the gate on the way
-        /// out closed, which is the situation every test here but the last one
-        /// is about.
+        /// What `mouse` over [`SIZE`] asks `app` for with both windows down,
+        /// which is the situation every test here but the last two is about.
         ///
         /// Named so the question the pointer tests ask stays one line long now
-        /// that the confirmation is one of the things a pointer event is read
-        /// against.
+        /// that the confirmation and the scope prompt are things a pointer event
+        /// is read against.
         fn asks(mouse: MouseEvent, app: &App) -> Option<MouseAction> {
-            mouse_action(mouse, SIZE, app, QuitConfirm::Closed)
+            mouse_action(mouse, SIZE, app, QuitConfirm::Closed, &ScopePrompt::Closed)
         }
 
         /// One round of the event loop with `mouse` arriving in it and the gate
@@ -1656,7 +1985,23 @@ mod tests {
         /// a change to the loop that this stopped matching would be a change one
         /// of the tests below is asserting the old shape of.
         fn round(app: &mut App, confirm: QuitConfirm, mouse: MouseEvent) {
-            match mouse_action(mouse, SIZE, app, confirm) {
+            round_under(app, confirm, &ScopePrompt::Closed, mouse);
+        }
+
+        /// The same round with the scope prompt at `prompt` as well: the other
+        /// window the pointer goes inert under.
+        ///
+        /// A parameter rather than a second copy of the arms below, so the two
+        /// windows are asserted against the one road out of [`mouse_action`] —
+        /// a test that dropped events through a second, kinder version of the
+        /// loop would be testing the version it wrote.
+        fn round_under(
+            app: &mut App,
+            confirm: QuitConfirm,
+            prompt: &ScopePrompt,
+            mouse: MouseEvent,
+        ) {
+            match mouse_action(mouse, SIZE, app, confirm, prompt) {
                 Some(MouseAction::SelectNextBy(rows)) => app.select_next_by(rows),
                 Some(MouseAction::SelectPreviousBy(rows)) => app.select_previous_by(rows),
                 Some(MouseAction::ScrollPanelDown(lines)) => app.scroll_panel_down(lines),
@@ -2072,7 +2417,7 @@ mod tests {
                 left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
             ] {
                 assert_eq!(
-                    mouse_action(mouse, SIZE, &app, QuitConfirm::open()),
+                    mouse_action(mouse, SIZE, &app, QuitConfirm::open(), &ScopePrompt::Closed),
                     None,
                     "{mouse:?} should mean nothing while the question is up"
                 );
@@ -2080,6 +2425,56 @@ mod tests {
             }
 
             assert_eq!(app, before, "the pointer moved nothing behind the dialog");
+        }
+
+        #[test]
+        fn the_pointer_is_read_and_dropped_while_the_scope_prompt_is_up() {
+            // The same rule as the confirmation above, for the same reasons:
+            // the prompt is typed into and has no buttons, and a click that got
+            // through would move a selection under a window the reader is in
+            // the middle of answering. The whole pointer again — both notches,
+            // a click on a row, a click on the row already selected, a click on
+            // the header and a click in the panel — with the app asserted
+            // afterwards, since "read and dropped" is a claim about what did
+            // not move.
+            let mut app = app_on_screen();
+            app.toggle_files();
+            app.select_row(9);
+            app.scroll_panel_down(4);
+            app.set_focus(Focus::Panel);
+            let before = app.clone();
+            assert_eq!(
+                app.scroll_offset(),
+                0,
+                "the tree's window has not moved, so drawn row nine is row nine"
+            );
+
+            // Both an empty field and one with something typed into it: the
+            // gate is the prompt being up, not what is in it.
+            for prompt in [
+                ScopePrompt::open("crates/warlock-engine", ""),
+                ScopePrompt::open("crates/warlock-engine", "data-plane"),
+            ] {
+                for mouse in [
+                    wheel_down(IN_TREE, FIRST_TREE_ROW),
+                    wheel_up(IN_TREE, FIRST_TREE_ROW),
+                    wheel_down(IN_PANEL, FIRST_PANEL_LINE),
+                    wheel_up(IN_PANEL, FIRST_PANEL_LINE),
+                    left_click(IN_TREE, FIRST_TREE_ROW),
+                    left_click(IN_TREE, FIRST_TREE_ROW + 9),
+                    left_click(IN_TREE, TREE_HEADER),
+                    left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
+                ] {
+                    assert_eq!(
+                        mouse_action(mouse, SIZE, &app, QuitConfirm::Closed, &prompt),
+                        None,
+                        "{mouse:?} should mean nothing while the prompt is up"
+                    );
+                    round_under(&mut app, QuitConfirm::Closed, &prompt, mouse);
+                }
+            }
+
+            assert_eq!(app, before, "the pointer moved nothing behind the prompt");
         }
     }
 }

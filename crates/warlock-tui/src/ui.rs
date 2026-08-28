@@ -61,7 +61,7 @@ use ratatui::layout::{Constraint, Layout, Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragraph};
-use warlock_engine::NodeState;
+use warlock_engine::{NodeState, SCOPE_RULES};
 
 // Renamed on the way in: `Line` here is ratatui's, the thing a row is drawn as,
 // and the account's `Line` is what a row says. Both names are right where they
@@ -70,6 +70,7 @@ use crate::account::{Account, Line as Entry};
 use crate::app::{App, Focus, Row};
 use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
 use crate::confirm::{Answer, QuitConfirm};
+use crate::prompt::{ScopeField, ScopePrompt};
 
 /// One level of nesting, per unit of the depth the engine's walk yields.
 const INDENT: &str = "  ";
@@ -242,7 +243,9 @@ const LIVE_KEY: &str = "G";
 /// nothing but change what there is to move through — space, which hides a
 /// subtree, `o`, which hides everything Warlock is not managing, and `f`, which
 /// is the one of the three that puts rows on screen rather than taking them
-/// off — and only then the keys that change something.
+/// off — and only then the keys that change something. `s` comes after `p` and
+/// `r` because it is the one of the three that needs a pact to already be
+/// there: nothing on a row `p` has never been pressed on is scopeable.
 ///
 /// Every name here is as short as it can be and still be read: the line is
 /// already wider than an eighty-column terminal, and a key nobody can see
@@ -252,15 +255,24 @@ const LIVE_KEY: &str = "G";
 /// sentence about a toggle.
 ///
 /// The movement names are the shortest of the lot because they are the ones a
-/// reader needs told once. `k/j: move` names the keys that have to be learnt
-/// and leaves the arrows unnamed — they were the same sentence twice, and the
+/// reader needs told once. `k/j: row` names the keys that have to be learnt and
+/// leaves the arrows unnamed — they were the same sentence twice, and the
 /// arrows are what a reader presses before reading anything — and `g/G: ends`
 /// says where the pair go without spelling out which end is which, which the
-/// keys' own order already implies. Those two shortenings are what paid for
-/// `r: refresh`; see [`MAX_KEYS_WIDTH`].
-const KEYS: &str = "k/j: move    PgUp/PgDn: page    g/G: ends    \
-                    space: collapse    o: pacted    f: files    p: pact    \
-                    r: refresh";
+/// keys' own order already implies. `PgUp/PgDn` carries no label at all for the
+/// same reason: its label was the word already inside the keys' own names, and
+/// a name that repeats itself is the cheapest kind of column to give up. The
+/// three of them read as the granularities they are — a row, a page, the ends —
+/// which is the order the group is in anyway.
+///
+/// Those shortenings are what paid for the keys that came later: `r: refresh`
+/// was bought with `up/down k/j: move` and `g/G: first/last`, and `s: scope`
+/// with `k/j: move` → `k/j: row`, `PgUp/PgDn: page` → `PgUp/PgDn`,
+/// `space: collapse` → `space: fold` and `o: pacted` → `o: pacts` — twelve
+/// columns for a twelve-column key. See [`MAX_KEYS_WIDTH`].
+const KEYS: &str = "k/j: row    PgUp/PgDn    g/G: ends    \
+                    space: fold    o: pacts    f: files    p: pact    \
+                    r: refresh    s: scope";
 
 /// What separates one key's name from the next on the keys line.
 ///
@@ -301,7 +313,11 @@ const QUIT_KEY: &str = "q/Esc/Ctrl-C: quit";
 /// paid for out of the names already on the line — shorten them until the new
 /// one fits — and a key that cannot be afforded that way is a key the line has
 /// no room for. `r: refresh` was bought with `up/down k/j: move` and
-/// `g/G: first/last`; see [`KEYS`].
+/// `g/G: first/last`; `s: scope`, and the gap in front of it, cost twelve
+/// columns and was bought with four more of the same kind — `k/j: move` →
+/// `k/j: row`, `PgUp/PgDn: page` → `PgUp/PgDn`, `space: collapse` →
+/// `space: fold` and `o: pacted` → `o: pacts`. See [`KEYS`], which records
+/// which shortening paid for what.
 ///
 /// Known defect, recorded rather than fixed here: 148 columns is already wider
 /// than an eighty-column terminal, and what falls off such a terminal is the
@@ -488,6 +504,64 @@ const CONFIRM_LINES: u16 = 3;
 /// [`confirm_area`] clamps against a short terminal.
 const CONFIRM_HEIGHT: u16 = CONFIRM_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
+/// What the scope window says it is about, in front of the directory it is
+/// about.
+///
+/// "Scope for `crates/warlock-engine`" rather than a bare path, because a path
+/// on its own in a window that appeared under somebody's hands says which
+/// directory but not what is being asked of it — and this window is opened by a
+/// single keystroke, which is exactly the way to arrive at one without having
+/// meant to. The trailing space is part of the constant so that the width the
+/// window is sized to (see [`scope_size`]) is the width actually drawn, the way
+/// [`CONFIRM_YES`]'s padding is.
+const SCOPE_HEADING: &str = "Scope for ";
+
+/// The clear columns the scope window's text is given inside its border, each
+/// side: [`CONFIRM_MARGIN`], spelled as that rather than as a three.
+///
+/// Two windows laid over the same frame by the same program, inset by different
+/// amounts, would read as two programs — and a number copied here would be free
+/// to become a different number by nobody's decision.
+const SCOPE_MARGIN: u16 = CONFIRM_MARGIN;
+
+/// The clear rows above and below the scope window's text, inside its border:
+/// [`CONFIRM_MARGIN_ROWS`], for the reason [`SCOPE_MARGIN`] is
+/// [`CONFIRM_MARGIN`].
+const SCOPE_MARGIN_ROWS: u16 = CONFIRM_MARGIN_ROWS;
+
+/// The one column drawn after the text in the field, reversed, to say where the
+/// next character will land.
+///
+/// Drawn rather than asked for. The terminal's own caret is hidden for every
+/// frame warlock draws — a caret parked in the corner of a tree nobody is typing
+/// into is a caret in the wrong place all session — and showing it for this one
+/// window would mean putting it back for the frame after, on a terminal whose
+/// blink and shape warlock does not control. A reversed blank is in the buffer,
+/// so it is the same on every terminal and a test can find it.
+///
+/// A space rather than a block glyph, for the same reason: reversing a cell
+/// lands wherever the palette lands, where `█` is a font's opinion of a full
+/// block and sits a row too high in some of them.
+const SCOPE_CURSOR: &str = " ";
+
+/// The lines of the scope window: the heading, a blank, the field, the row the
+/// broken rule goes in, and the rules a scope keeps.
+///
+/// Five whether or not a rule has been broken. The row under the field is kept
+/// clear rather than closed up when [`ScopeField::rule`] is `None`, so a refused
+/// submit puts a line on screen without moving the field out from under the
+/// reader's eye — a window that grew a row on Enter would take the text they are
+/// about to correct with it, and on a short terminal would take it a row closer
+/// to being clipped. The blank under the heading is [`CONFIRM_LINES`]'s blank,
+/// for the same reason: what the window is about and what is being typed are two
+/// things to read.
+const SCOPE_LINES: u16 = 5;
+
+/// How tall the whole scope window is: its lines, the rows kept clear around
+/// them, and the border. [`CONFIRM_HEIGHT`]'s arithmetic, over
+/// [`SCOPE_LINES`].
+const SCOPE_HEIGHT: u16 = SCOPE_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS;
+
 /// Draw the whole frame: the panel on the left, the tree column on the right,
 /// the footer full width beneath both.
 ///
@@ -515,7 +589,28 @@ const CONFIRM_HEIGHT: u16 = CONFIRM_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER
 /// middle of it — over, and not instead of, so the reader can still see what
 /// they are about to leave, and so the footer keeps its three lines and its
 /// wording whichever way the question is answered.
-pub fn draw(frame: &mut Frame<'_>, app: &App, now: Instant, confirm: QuitConfirm) {
+///
+/// `scope` is the other question this frame can be carrying, handed in beside
+/// the app for the same reason and drawn the same way: closed, it changes
+/// nothing about the frame; open, [`draw_scope`] puts a window over the middle
+/// of it with the directory being scoped, the field, and the rules a scope keeps
+/// (see [`mod@crate::prompt`]). By reference rather than by value, unlike
+/// `confirm`, because it is carrying a string somebody is typing and a renderer
+/// has no business owning a copy of it.
+///
+/// The two are drawn in that order, and the scope prompt last, so that a frame
+/// somehow carrying both shows the one whose keys are live rather than half of
+/// each. The event loop never opens both — while either is up it consults that
+/// one instead of the app, so the key that would open the other never reaches
+/// anything — and this is what that costs to be safe about it: one `if` in the
+/// order the modes stack.
+pub fn draw(
+    frame: &mut Frame<'_>,
+    app: &App,
+    now: Instant,
+    confirm: QuitConfirm,
+    scope: &ScopePrompt,
+) {
     let screen = frame.area();
     let Areas {
         panel,
@@ -529,6 +624,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, now: Instant, confirm: QuitConfirm
 
     if let Some(highlighted) = confirm.highlighted() {
         draw_confirm(frame, screen, highlighted);
+    }
+    if let Some(field) = scope.field() {
+        draw_scope(frame, screen, field);
     }
 }
 
@@ -1455,6 +1553,21 @@ fn answers_line(highlighted: Answer) -> Line<'static> {
 /// Where the confirmation is drawn on a terminal of `screen`: centred, and cut
 /// down to the screen if the screen is smaller than the window.
 ///
+/// A name of its own for what [`centred`] says about [`confirm_size`], because
+/// the question's own place on the frame is what the tests about it ask for; the
+/// centring and the clamping are [`centred`]'s, and are the same for the scope
+/// prompt.
+fn confirm_area(screen: Rect) -> Rect {
+    centred(screen, confirm_size())
+}
+
+/// Where a window of `size` is drawn on a terminal of `screen`: in the middle of
+/// it, and cut down to the screen when the screen is the smaller of the two.
+///
+/// Both windows over the frame place themselves through here, so the quit
+/// confirmation and the scope prompt land in the same place and behave the same
+/// way on a terminal too small for either.
+///
 /// Centred on both axes, with the odd spare row falling below the window and the
 /// odd spare column to its right, so it sits a hair high and a hair left — which
 /// is where the eye reads the middle of a rectangle to be, and is the same
@@ -1462,18 +1575,18 @@ fn answers_line(highlighted: Answer) -> Line<'static> {
 ///
 /// Clamped, never skipped. A terminal too narrow or too short for the whole
 /// window gets as much of it as there is room for: at that point the border is
-/// cut into, then the padding, then the question itself, and at one column by one
-/// row what is left is a single cell of border — which is still the screen saying
-/// that something is being asked. The alternative is worse than ugly: a
-/// confirmation that declined to draw would leave the reader in a mode with no
-/// sign of it, pressing keys that reach nothing they can see, and the only way
-/// out of it would be the one keystroke they cannot know is wanted.
+/// cut into, then the padding, then the text itself, and at one column by one row
+/// what is left is a single cell of border — which is still the screen saying
+/// that something is being asked. The alternative is worse than ugly: a window
+/// that declined to draw would leave the reader in a mode with no sign of it,
+/// pressing keys that reach nothing they can see, and the only way out of it
+/// would be the one keystroke they cannot know is wanted.
 ///
 /// Every arithmetic step is saturating or is guarded by the [`Ord::min`] above
 /// it, so no size of terminal — a zero-width [`Rect`] included — underflows its
 /// way to a window somewhere off the screen.
-fn confirm_area(screen: Rect) -> Rect {
-    let Size { width, height } = confirm_size();
+fn centred(screen: Rect, size: Size) -> Rect {
+    let Size { width, height } = size;
     let width = width.min(screen.width);
     let height = height.min(screen.height);
 
@@ -1506,6 +1619,92 @@ fn confirm_size() -> Size {
     Size::new(width, CONFIRM_HEIGHT)
 }
 
+/// Draw the scope prompt: what is being scoped, what has been typed into it, and
+/// the rules a scope keeps, in a bordered window over the middle of `screen`.
+///
+/// [`draw_confirm`]'s shape, down to the [`Clear`] before the border and the
+/// clamping rather than skipping on a terminal with no room — a mode with
+/// nothing on screen to say so is the same trap whichever question is being
+/// asked. What differs is that this window is sized off a value rather than off
+/// constants, because part of what it shows is being typed: see [`scope_size`].
+///
+/// Left-aligned, where the confirmation is centred. The field is a line somebody
+/// is adding characters to, and a centred field would slide half a column left
+/// on every other keystroke, taking the cursor and the text already typed with
+/// it. Everything above and below it is aligned to the same edge, so the window
+/// reads as one block rather than as a centred heading over a left-hung field.
+fn draw_scope(frame: &mut Frame<'_>, screen: Rect, field: &ScopeField) {
+    let area = centred(screen, scope_size(field));
+    let block = Block::bordered().padding(Padding::symmetric(SCOPE_MARGIN, SCOPE_MARGIN_ROWS));
+    let inner = block.inner(area);
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(scope_lines(field)), inner);
+}
+
+/// The [`SCOPE_LINES`] lines of the scope window, in the order they are drawn.
+///
+/// The directory is bold against the plain [`SCOPE_HEADING`]: the heading is the
+/// same words every time the window opens and the path is the one part of it
+/// worth reading, and bold is what the tree already spends on the row the keys
+/// are driving, so no new colour is invented for a window that is up for a few
+/// seconds.
+///
+/// The cursor is a reversed [`SCOPE_CURSOR`] after the text and nowhere else,
+/// which is not a decision made here: [`mod@crate::prompt`] appends and deletes
+/// at the end and moves nothing, so the end of the text is where the next
+/// character lands, by construction.
+///
+/// The rules line is dim, as the footer's keys are: it is there to be read once,
+/// before anything is typed, and then to stop competing with the text. The
+/// broken rule above it is not dimmed — it is the one thing that changed since
+/// the last frame, and it is the reason the prompt is still up.
+fn scope_lines(field: &ScopeField) -> Vec<Line<'_>> {
+    vec![
+        Line::from(vec![
+            Span::raw(SCOPE_HEADING),
+            Span::raw(field.directory()).bold(),
+        ]),
+        Line::default(),
+        Line::from(vec![
+            Span::raw(field.text()),
+            Span::styled(SCOPE_CURSOR, Style::new().add_modifier(Modifier::REVERSED)),
+        ]),
+        Line::from(field.rule().unwrap_or_default()),
+        Line::from(SCOPE_RULES).dim(),
+    ]
+}
+
+/// How big the scope window wants to be: its widest line, the margins and the
+/// border.
+///
+/// Measured off the lines the way [`confirm_size`] is, and off the field as well
+/// as the constants, because a path and a broken rule are as much of the window
+/// as the heading is. In practice [`SCOPE_RULES`] is the floor and the window
+/// does not breathe as somebody types: the rules sentence is wider than a
+/// directory that fits on a tree row and wider than any scope the engine would
+/// accept, so the width only moves for a path or a refusal longer than it.
+///
+/// [`SCOPE_RULES`] is the engine's sentence rather than one written here, and
+/// that is a rule rather than a convenience: a window that spelled out how long
+/// a scope may be or which characters it may hold would be this crate judging a
+/// scope, and there is one judge — see [`mod@crate::prompt`].
+fn scope_size(field: &ScopeField) -> Size {
+    let heading = display_width(SCOPE_HEADING) + display_width(field.directory());
+    let typed = display_width(field.text()) + display_width(SCOPE_CURSOR);
+    let widest = heading
+        .max(typed)
+        .max(field.rule().map_or(0, display_width))
+        .max(display_width(SCOPE_RULES));
+    let width = u16::try_from(widest)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2 * SCOPE_MARGIN)
+        .saturating_add(2 * BORDER_THICKNESS);
+
+    Size::new(width, SCOPE_HEIGHT)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -1516,17 +1715,18 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::{Position, Rect, Size};
     use ratatui::style::{Color, Modifier};
-    use warlock_engine::NodeState;
+    use warlock_engine::{NodeState, SCOPE_RULES};
 
     use super::{
         Areas, BORDER_THICKNESS, CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN,
         CONFIRM_MARGIN_ROWS, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FOOTER_HEIGHT,
         GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEYS, LIVE_KEY,
         MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MAX_KEYS_WIDTH, MOUSE_OFF_KEY, MOUSE_ON_KEY,
-        NO_MARKER, PACTING_KEYS, PANEL_INDENT, QUIT_KEY, SCROLLBACK_ARROW, SELECTION_MARKER,
-        TREE_MIN_WIDTH, TREE_PERCENT, areas, confirm_area, confirm_size, display_width, draw,
-        guide_prefixes, hit_test, keys_line, mark_area, pane_inner, panel_height, tree_height,
-        tree_rows_area, tree_width, truncated,
+        NO_MARKER, PACTING_KEYS, PANEL_INDENT, QUIT_KEY, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT,
+        SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER,
+        TREE_MIN_WIDTH, TREE_PERCENT, areas, centred, confirm_area, confirm_size, display_width,
+        draw, guide_prefixes, hit_test, keys_line, mark_area, pane_inner, panel_height, scope_size,
+        tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::account::Outcome;
     use crate::app::{App, Row, Sigils};
@@ -1534,6 +1734,7 @@ mod tests {
     use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
     use crate::confirm::{Answer, QuitConfirm};
     use crate::fixture;
+    use crate::prompt::{ScopeField, ScopePrompt};
 
     /// How many rows the window tests work with: comfortably more than fit on
     /// the terminal they draw into.
@@ -1832,7 +2033,8 @@ mod tests {
     }
 
     /// [`render_at`], with the quit confirmation in whatever state the test is
-    /// about.
+    /// about, and the scope prompt closed — which is every test but the ones
+    /// about the scope prompt itself.
     fn render_confirm(
         app: &App,
         width: u16,
@@ -1840,10 +2042,35 @@ mod tests {
         now: Instant,
         confirm: QuitConfirm,
     ) -> Buffer {
+        render_windows(app, width, height, now, confirm, &ScopePrompt::Closed)
+    }
+
+    /// [`render_at`], with the scope prompt in whatever state the test is about
+    /// and the gate on the way out closed.
+    fn render_scope(
+        app: &App,
+        width: u16,
+        height: u16,
+        now: Instant,
+        scope: &ScopePrompt,
+    ) -> Buffer {
+        render_windows(app, width, height, now, QuitConfirm::Closed, scope)
+    }
+
+    /// The one place a frame is actually drawn: the app, the instant, and both
+    /// windows that can be over it.
+    fn render_windows(
+        app: &App,
+        width: u16,
+        height: u16,
+        now: Instant,
+        confirm: QuitConfirm,
+        scope: &ScopePrompt,
+    ) -> Buffer {
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("test backend never fails");
         terminal
-            .draw(|frame| draw(frame, app, now, confirm))
+            .draw(|frame| draw(frame, app, now, confirm, scope))
             .expect("test backend never fails");
         terminal.backend().buffer().clone()
     }
@@ -2663,7 +2890,7 @@ mod tests {
             // nothing to say, which is the whole of this walk.
             assert!(
                 footer.iter().any(|line| line.contains("unpacted"))
-                    && footer.iter().any(|line| line.contains("move")),
+                    && footer.iter().any(|line| line.contains("k/j: row")),
                 "footer {footer:?} at selection {selected}"
             );
             assert!(
@@ -2750,20 +2977,23 @@ mod tests {
         assert_eq!(keys, keys_line(app.mouse_captured()));
         // "p: pact" and not the bare "p", which "PgUp" would satisfy.
         for key in [
-            "k/j: move",
+            "k/j: row",
+            // The page keys carry no label of their own: the word was already
+            // in the keys' names, and those columns bought `s: scope`.
             "PgUp",
             "PgDn",
-            "page",
             "g/G: ends",
             // Named, not left to be discovered: the three keys that change what
             // there is to scroll through.
-            "space: collapse",
-            "o: pacted",
+            "space: fold",
+            "o: pacts",
             "f: files",
             "p: pact",
             // The two keys that run passes, next to each other because the
-            // question they answer is the same one.
+            // question they answer is the same one, and then the key that needs
+            // one of them to have been pressed already.
             "r: refresh",
+            "s: scope",
             // The mouse key, named by what pressing it does next rather than by
             // the state it is in: see
             // `the_keys_line_names_the_mouse_key_by_what_the_next_press_does`.
@@ -3057,6 +3287,17 @@ mod tests {
                  for by shortening the names already on the line, not by \
                  letting it grow — {line:?}"
             );
+            // And the newest key is on the line in both states, whole: the
+            // budget is kept by shortening other names, so a `s: scope` that
+            // went missing to make room would be the wrong way to pass this.
+            assert!(
+                line.contains("s: scope"),
+                "the keys line does not name `s` with mouse capture \
+                 {captured} — {line:?}"
+            );
+            // Nor did the quit key pay for it: it is still whole and still the
+            // last thing on the line, which is where a stuck reader looks.
+            assert!(line.ends_with(QUIT_KEY), "{line:?}");
         }
     }
 
@@ -4413,5 +4654,342 @@ mod tests {
         let keys = row_text(&open, footer.y + 1);
         assert!(keys.contains(KEYS), "{keys:?}");
         assert!(keys.contains(QUIT_KEY), "{keys:?}");
+    }
+
+    /// The directory the scope prompt's tests open over: a path with a separator
+    /// in it, because a bare name would not show whether the heading has room
+    /// for what a real module is called.
+    const SCOPED: &str = "crates/warlock-engine";
+
+    /// A scope already on that directory, so the field can be asserted holding
+    /// something rather than only being empty.
+    const CARRIED: &str = "data-plane";
+
+    /// Where the scope prompt's window lands on a buffer, measured off the very
+    /// functions [`draw`] places it with.
+    fn scope_rect(buffer: &Buffer, field: &ScopeField) -> Rect {
+        centred(buffer.area, scope_size(field))
+    }
+
+    /// The rows of the scope prompt's window, as text, clipped to its own
+    /// columns — [`confirm_rows`] for the other window.
+    fn scope_rows(buffer: &Buffer, field: &ScopeField) -> Vec<String> {
+        let area = scope_rect(buffer, field);
+        (0..area.height)
+            .map(|index| text_in(buffer, area, area.y + index))
+            .collect()
+    }
+
+    /// The cell the cursor should be in: one column past `text` on the field's
+    /// row, worked out from the window's own corner, its border and its margin
+    /// rather than by looking for something that looks like a cursor.
+    fn cursor_cell(buffer: &Buffer, field: &ScopeField) -> Position {
+        let area = scope_rect(buffer, field);
+        let typed = u16::try_from(display_width(field.text())).expect("a short scope");
+
+        Position::new(
+            area.x + BORDER_THICKNESS + SCOPE_MARGIN + typed,
+            area.y + BORDER_THICKNESS + SCOPE_MARGIN_ROWS + FIELD_LINE,
+        )
+    }
+
+    /// Which of the window's [`SCOPE_LINES`] the field is: the heading, a blank,
+    /// then the field.
+    const FIELD_LINE: u16 = 2;
+
+    /// [`COVER_WIDTH`] for the scope prompt, which is the wider and taller of
+    /// the two windows: a terminal small enough that the window lands over the
+    /// panel, the tree pane and the top of the footer at once, and large enough
+    /// that it is still a window with frame either side of it rather than a
+    /// screen clamped to the terminal's own edges.
+    const SCOPE_COVER_WIDTH: u16 = 80;
+    /// See [`SCOPE_COVER_WIDTH`]: twelve rows puts the bottom of the window over
+    /// the top of the footer.
+    const SCOPE_COVER_HEIGHT: u16 = 12;
+
+    #[test]
+    fn the_scope_window_is_sized_by_what_it_says_plus_its_margins_and_its_border() {
+        // Sized off the field as well as off the constants, because a path and a
+        // refusal are as much of the window as the heading is.
+        let refused = ScopeField::new(SCOPED, CARRIED).refused("a very long line about a rule");
+        for field in [
+            ScopeField::new(SCOPED, ""),
+            ScopeField::new(SCOPED, CARRIED),
+            ScopeField::new("a", ""),
+            refused.clone(),
+        ] {
+            let Size { width, height } = scope_size(&field);
+            let widest = (display_width(SCOPE_HEADING) + display_width(field.directory()))
+                .max(display_width(field.text()) + display_width(SCOPE_CURSOR))
+                .max(field.rule().map_or(0, display_width))
+                .max(display_width(SCOPE_RULES));
+
+            assert_eq!(
+                usize::from(width),
+                widest + usize::from(2 * SCOPE_MARGIN + 2 * BORDER_THICKNESS),
+                "{field:?}"
+            );
+            // And it is the same height whatever is in it: the row the broken
+            // rule goes in is there before one is broken, so a refusal does not
+            // move the field out from under the reader's eye.
+            assert_eq!(height, SCOPE_HEIGHT, "{field:?}");
+            assert_eq!(
+                height,
+                SCOPE_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS
+            );
+        }
+        assert_eq!(
+            scope_size(&ScopeField::new(SCOPED, "")).height,
+            SCOPE_HEIGHT
+        );
+    }
+
+    #[test]
+    fn the_scope_prompt_names_the_directory_the_field_and_the_rules() {
+        let base = Instant::now();
+        let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+        let field = ScopeField::new(SCOPED, "");
+
+        let buffer = render_scope(
+            &app,
+            WIDTH,
+            FIXTURE_HEIGHT,
+            base,
+            &ScopePrompt::open(SCOPED, ""),
+        );
+
+        // A window, bordered all the way round, over the middle of the frame.
+        let rows = scope_rows(&buffer, &field);
+        assert!(
+            rows[0].starts_with('┌') && rows[0].ends_with('┐'),
+            "{rows:?}"
+        );
+        let last = rows.last().expect("the window has rows");
+        assert!(last.starts_with('└') && last.ends_with('┘'), "{rows:?}");
+        // Everything that has to be legible before a single character is typed:
+        // what is being scoped, and the rules the answer will be judged by.
+        let heading = rows
+            .iter()
+            .position(|row| row.contains(SCOPE_HEADING.trim()) && row.contains(SCOPED))
+            .unwrap_or_else(|| panic!("the directory is not on the window: {rows:?}"));
+        let rules = rows
+            .iter()
+            .position(|row| row.contains(SCOPE_RULES))
+            .unwrap_or_else(|| panic!("the rules are not on the window: {rows:?}"));
+        // In the order they are read in, with the field between them.
+        assert!(heading < rules, "{rows:?}");
+        assert_eq!(
+            heading,
+            usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS),
+            "{rows:?}"
+        );
+        // The rules are the engine's sentence, word for word: nothing in this
+        // crate says how long a scope may be or which characters it may hold.
+        assert!(rows[rules].contains(SCOPE_RULES), "{rows:?}");
+        // The field is empty because the directory carries no scope, and the
+        // cursor is at the front of it waiting for the first character.
+        assert_eq!(
+            inside_the_border(
+                &rows[usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + FIELD_LINE)]
+            ),
+            ""
+        );
+        let cursor = cursor_cell(&buffer, &field);
+        assert!(
+            buffer[cursor].modifier.contains(Modifier::REVERSED),
+            "no cursor at {cursor:?}: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_field_opens_on_the_scope_the_directory_carries_with_the_cursor_after_it() {
+        let base = Instant::now();
+        let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+        let field = ScopeField::new(SCOPED, CARRIED);
+
+        let buffer = render_scope(
+            &app,
+            WIDTH,
+            FIXTURE_HEIGHT,
+            base,
+            &ScopePrompt::open(SCOPED, CARRIED),
+        );
+
+        // What is already true is on screen, so Enter on an untouched prompt
+        // would set what is already set rather than clear it.
+        let rows = scope_rows(&buffer, &field);
+        let line = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + FIELD_LINE);
+        assert_eq!(inside_the_border(&rows[line]), CARRIED, "{rows:?}");
+        // And the cursor is where the next character will land: one column past
+        // the text, which is the only place it can be — see `crate::prompt`.
+        let cursor = cursor_cell(&buffer, &field);
+        assert!(
+            buffer[cursor].modifier.contains(Modifier::REVERSED),
+            "no cursor at {cursor:?}: {rows:?}"
+        );
+        let before = Position::new(cursor.x - 1, cursor.y);
+        assert_eq!(buffer[before].symbol(), &CARRIED[CARRIED.len() - 1..]);
+        assert!(
+            !buffer[before].modifier.contains(Modifier::REVERSED),
+            "the cursor is over the text rather than after it"
+        );
+    }
+
+    #[test]
+    fn a_broken_rule_is_drawn_under_the_field_with_the_text_still_in_it() {
+        let base = Instant::now();
+        let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+        // Worded by whoever refused — the engine, in the loop — and printed
+        // here without being read: this crate judges no scope and describes no
+        // rule of its own.
+        let broken = "a scope holds lowercase letters, digits, `-` and `_`";
+        let typed = "control-plane, data-plane";
+        let field = ScopeField::new(SCOPED, typed).refused(broken);
+
+        let refused = render_scope(
+            &app,
+            WIDTH,
+            FIXTURE_HEIGHT,
+            base,
+            &ScopePrompt::Open(field.clone()),
+        );
+
+        let rows = scope_rows(&refused, &field);
+        let line = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + FIELD_LINE);
+        // The text that was refused is still in the field, one character away
+        // from being fixed, and the reason is on the row under it.
+        assert_eq!(inside_the_border(&rows[line]), typed, "{rows:?}");
+        assert!(rows[line + 1].contains(broken), "{rows:?}");
+        // The rules are still there under that: a refusal adds a line, it does
+        // not replace the one that was there before anything was typed.
+        assert!(rows[line + 2].contains(SCOPE_RULES), "{rows:?}");
+        // And nothing moved: the field is on the same row of the window it was
+        // on before the submit was refused.
+        let opened = render_scope(
+            &app,
+            WIDTH,
+            FIXTURE_HEIGHT,
+            base,
+            &ScopePrompt::open(SCOPED, typed),
+        );
+        let opened_rows = scope_rows(&opened, &field);
+        assert_eq!(inside_the_border(&opened_rows[line]), typed);
+        assert_eq!(opened_rows[line + 1].trim_matches('│').trim(), "");
+    }
+
+    #[test]
+    fn nothing_from_the_frame_underneath_shows_through_the_scope_window() {
+        let base = Instant::now();
+        let app = busy_app(base, SCOPE_COVER_WIDTH, SCOPE_COVER_HEIGHT);
+        let field = ScopeField::new(SCOPED, CARRIED);
+
+        let closed = render_scope(
+            &app,
+            SCOPE_COVER_WIDTH,
+            SCOPE_COVER_HEIGHT,
+            base,
+            &ScopePrompt::Closed,
+        );
+        let open = render_scope(
+            &app,
+            SCOPE_COVER_WIDTH,
+            SCOPE_COVER_HEIGHT,
+            base,
+            &ScopePrompt::Open(field.clone()),
+        );
+
+        // At this size the window is over the panel, over the tree pane and over
+        // the top of the footer.
+        let over = scope_rect(&open, &field);
+        let Areas { panel, tree, .. } = areas(open.area);
+        assert!(
+            over.x < panel.x + panel.width,
+            "the window misses the panel"
+        );
+        assert!(
+            over.x + over.width > tree.x,
+            "the window misses the tree pane"
+        );
+        assert!(
+            over.y + over.height > SCOPE_COVER_HEIGHT - FOOTER_HEIGHT,
+            "the window misses the footer"
+        );
+        // Every row behind the window has something on it, without which the
+        // assertions below would pass on a blank screen.
+        for (index, row) in scope_rows(&closed, &field).iter().enumerate() {
+            assert!(
+                !row.trim().is_empty(),
+                "row {index} behind the window is blank, so this proves nothing"
+            );
+        }
+        // What the window says is its own five lines and nothing else.
+        for (index, row) in scope_rows(&open, &field).iter().enumerate() {
+            for leaked in [UNDERNEATH, "unpacted", "module"] {
+                assert!(
+                    !row.contains(leaked),
+                    "window row {index} shows {leaked:?} through: {row:?}"
+                );
+            }
+        }
+        // Outside it, cell for cell, the frame is the one that was there before
+        // the prompt opened.
+        let area = scope_rect(&open, &field);
+        for y in 0..open.area.height {
+            for x in 0..open.area.width {
+                if area.contains(Position::new(x, y)) {
+                    continue;
+                }
+                assert_eq!(
+                    open[(x, y)],
+                    closed[(x, y)],
+                    "the frame changed at column {x}, row {y}, outside the window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_closed_scope_prompt_leaves_no_trace_of_itself_on_the_frame() {
+        let base = Instant::now();
+        let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+
+        let closed = render_scope(&app, WIDTH, FIXTURE_HEIGHT, base, &ScopePrompt::Closed);
+
+        // Not a word of it anywhere, and the frame is the one every other test
+        // in this module draws.
+        for (index, row) in rows_text(&closed).iter().enumerate() {
+            assert!(!row.contains(SCOPE_HEADING.trim()), "row {index}: {row:?}");
+            assert!(!row.contains(SCOPE_RULES), "row {index}: {row:?}");
+        }
+        assert_eq!(
+            rows_text(&closed),
+            rows_text(&render_at(&app, WIDTH, FIXTURE_HEIGHT, base))
+        );
+    }
+
+    #[test]
+    fn a_terminal_too_small_for_the_scope_window_clamps_it_and_still_shows_it() {
+        let base = Instant::now();
+        let field = ScopeField::new(SCOPED, CARRIED);
+
+        // Down to one cell, for the reason the confirmation clamps: a prompt
+        // that declined to draw would leave the reader typing into a window
+        // they cannot see.
+        for (width, height) in [(20, 5), (4, 2), (1, 1), (2, 20), (30, 1)] {
+            let app = busy_app(base, width, height);
+            let closed = render_scope(&app, width, height, base, &ScopePrompt::Closed);
+            let open = render_scope(&app, width, height, base, &ScopePrompt::Open(field.clone()));
+            let area = scope_rect(&open, &field);
+            let size = format!("{width}x{height}");
+
+            assert!(area.width > 0 && area.height > 0, "nothing drawn at {size}");
+            assert!(area.x + area.width <= width, "off the right at {size}");
+            assert!(area.y + area.height <= height, "off the bottom at {size}");
+            assert_ne!(
+                rows_text(&open),
+                rows_text(&closed),
+                "the prompt changed nothing on screen at {size}"
+            );
+        }
     }
 }

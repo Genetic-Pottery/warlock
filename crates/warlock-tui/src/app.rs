@@ -2171,6 +2171,65 @@ impl App {
         }
     }
 
+    /// Say which directory the scope key would set a scope on, and say why not
+    /// when there is none.
+    ///
+    /// The scope key's half of what [`App::toggle_pact`] is for the pact key and
+    /// [`App::refresh`] is for the refresh key: it decides what the press means
+    /// on the row the selection is on, words any refusal, and hands the
+    /// directory back for whoever actually opens the prompt and writes the
+    /// manifest. `None` means nothing should open.
+    ///
+    /// A scope is a fact recorded against a pact — an entry in
+    /// `.warlock/pacts.toml` — so the rows that have one to set are exactly the
+    /// pacted ones, fresh or stale alike: whether a pact's grants still hold has
+    /// nothing to do with which team the module belongs to. Two rows are
+    /// refused, and each says so through [`App::message`]:
+    ///
+    /// - a file row, in [`App::toggle_pact`]'s own words, because the reason is
+    ///   the same one — a file is part of a module rather than being one, and it
+    ///   is the module that carries the pact a scope hangs off;
+    /// - a directory that is not pacted, which points at the pact key: there is
+    ///   no entry to record a scope against until one exists, so `p` is the key
+    ///   that would help. A directory a `.warlockignore` keeps out reads as
+    ///   unpacted here like any other, and is refused for that reason without
+    ///   this having to know which reason made it so.
+    ///
+    /// A press that goes through changes *nothing whatever*, and that includes
+    /// the message line: unlike the other two keys this one does not clear it,
+    /// because opening the prompt and dismissing it with Esc must leave the app
+    /// exactly as it was found — the reader who opened a window and closed it
+    /// again did not answer the keystroke that put the last line up. Nothing is
+    /// repainted, no tally moves, no selection moves and no run is touched
+    /// either.
+    ///
+    /// Whether a run is already in flight is not asked here, exactly as it is
+    /// not asked by the other two keys: that refusal is worded on the progress
+    /// line rather than in the message (see [`App::set_pact_refused`]), so it
+    /// belongs to the caller that knows about the worker. Nothing here reads the
+    /// manifest either — what scope the directory carries now is read from the
+    /// manifest by the caller that opens the prompt, never off a [`Row`] — and
+    /// nothing here opens, spawns or writes anything: this is app state.
+    pub fn scope_target(&mut self) -> Option<PathBuf> {
+        let row = self.rows.get(self.selected)?;
+        let path = row.path.clone();
+        let state = row.state;
+
+        if row.is_file() {
+            self.message = Some(file_row_message(&self.label_for(&path)));
+            return None;
+        }
+        match state {
+            NodeState::Unpacted => {
+                self.message = Some(unpacted_scope_message(&self.label_for(&path)));
+                None
+            }
+            // Fresh or stale, the pact is there and so is the entry the scope
+            // is written on. Not a line of state is touched on the way out.
+            NodeState::PactedFresh | NodeState::PactedStale => Some(path),
+        }
+    }
+
     /// Put the directory at `path`, every directory below it and every file
     /// inside any of them into `state`.
     ///
@@ -2764,6 +2823,25 @@ fn already_fresh_message(label: &str) -> String {
 /// would change it.
 fn unpacted_message(label: &str) -> String {
     format!("{label} is not pacted — press p to pact it, and there will be something to refresh")
+}
+
+/// What the app says when the scope key is pressed on a directory that is not
+/// pacted, naming it as `label`.
+///
+/// [`unpacted_message`]'s sibling, and deliberately not that same sentence: a
+/// scope is recorded against a manifest entry, so what a pact would give this
+/// directory is something to *scope* rather than something to refresh, and a
+/// refusal that promised the wrong thing would send the reader looking for it.
+/// The front half is shared word for word, because it is the same fact about the
+/// same row, and it names the key that would help for the same reason — the
+/// reader is one keystroke from what they wanted.
+///
+/// This is the answer for a directory a `.warlockignore` keeps out as well, for
+/// [`unpacted_message`]'s reason: such a directory reads as unpacted, which is
+/// what it is as far as the manifest goes, and `p` is still the key that would
+/// change it.
+fn unpacted_scope_message(label: &str) -> String {
+    format!("{label} is not pacted — press p to pact it, and there will be a pact to scope")
 }
 
 /// What the app says while a summarising pass over the file named `label` is
@@ -4093,6 +4171,106 @@ mod tests {
     fn an_app_with_no_rows_refreshes_nothing() {
         assert_eq!(App::from_rows(Vec::new()).refresh(), None);
         assert_eq!(App::from_rows(Vec::new()).message(), None);
+    }
+
+    #[test]
+    fn scoping_a_pacted_directory_hands_it_back_and_changes_nothing_at_all() {
+        // Stale and fresh alike: whether the grants still hold has nothing to
+        // do with which team the module belongs to.
+        for path in ["warlock/crates/tui", "warlock/crates/engine"] {
+            let mut app = app_selecting(path);
+            app.set_message("something the last keystroke said");
+            let before = app.clone();
+
+            let asked = app.scope_target();
+
+            // The directory whose entry the prompt will be opened on.
+            assert_eq!(asked, Some(PathBuf::from(path)), "{path}");
+            // And nothing whatever moved — including the message line, which
+            // this key alone leaves standing: a prompt opened and dismissed
+            // with Esc has to leave the app exactly as it was found.
+            assert_eq!(app, before, "an accepted press moved something on {path}");
+        }
+    }
+
+    #[test]
+    fn a_file_row_is_refused_by_the_scope_key_in_the_pact_keys_own_words() {
+        let mut scoped = app_with_files_selecting("warlock/assets/logo.svg");
+        let mut pacted = app_with_files_selecting("warlock/assets/logo.svg");
+
+        assert_eq!(scoped.scope_target(), None);
+        assert_eq!(pacted.toggle_pact(), None);
+
+        // The same refusal, because it is the same reason: a file is part of a
+        // module rather than being one, and the module is what carries the pact
+        // a scope hangs off.
+        let message = scoped.message().expect("a file row is refused out loud");
+        assert_eq!(Some(message), pacted.message());
+        assert!(
+            message.starts_with("warlock/assets/logo.svg is a file"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_unpacted_directory_is_refused_by_the_scope_key_naming_the_pact_key() {
+        // The two ways a directory comes to be unpacted, as in the refresh
+        // key's test: one the loader found no document for, and one with a
+        // document and no manifest entry.
+        for path in ["warlock/crates", "warlock/assets"] {
+            let mut app = app_selecting(path);
+            let mut before = app.clone();
+
+            assert_eq!(app.scope_target(), None, "{path} opened something");
+
+            let message = app.message().expect("an unpacted row is refused");
+            assert!(
+                message.starts_with(&format!("{path} is not pacted")),
+                "{message}"
+            );
+            // The key that would help is named, as it is on the refresh key —
+            // but what a pact would leave behind is worded for this key: a pact
+            // to scope, not something to refresh.
+            assert!(message.contains("press p to pact it"), "{message}");
+            assert!(
+                message.ends_with("there will be a pact to scope"),
+                "{message}"
+            );
+            // The message is the whole of what the press changed.
+            before.set_message(message);
+            assert_eq!(app, before, "refusing {path} moved something else");
+        }
+    }
+
+    #[test]
+    fn a_row_kept_out_by_the_ignore_file_is_refused_by_the_scope_key_as_unpacted() {
+        let mut app = select(App::from_rows(rows_with_one_kept_out()), "repo/notes").with_counts(
+            StateCounts {
+                unpacted: 2,
+                pacted_stale: 1,
+                ..StateCounts::default()
+            },
+        );
+        let mut before = app.clone();
+
+        assert_eq!(app.scope_target(), None, "an excluded row opened something");
+
+        // Refused for having no pact rather than for being kept out: as far as
+        // the manifest goes those are the same fact, and the sentence stays
+        // true either way.
+        let message = app.message().expect("an excluded row is refused out loud");
+        assert!(message.starts_with("repo/notes is not pacted"), "{message}");
+        assert!(message.contains("press p to pact it"), "{message}");
+        before.set_message(message);
+        assert_eq!(app, before, "refusing an excluded row moved something else");
+    }
+
+    #[test]
+    fn an_app_with_no_rows_scopes_nothing() {
+        let mut app = App::from_rows(Vec::new());
+
+        assert_eq!(app.scope_target(), None);
+        assert_eq!(app.message(), None);
     }
 
     #[test]
