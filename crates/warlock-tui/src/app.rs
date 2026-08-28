@@ -2370,6 +2370,11 @@ impl App {
     /// colour, and a copy nobody updates is a file drawn in the colour its
     /// module used to be.
     ///
+    /// Content the repository's `.warlockignore` keeps out is the one thing a
+    /// pacted `state` does not reach — see [`moves_with_subtree`] for why the
+    /// two directions differ. It is why this method takes a whole subtree and
+    /// still cannot paint a pact onto a directory no pact will ever cover.
+    ///
     /// The tally moves too, one node out of each old state's field and into
     /// `state`, so [`App::counts`] keeps describing [`App::rows`] and
     /// [`StateCounts::total`] does not budge. Nothing recounts the rows: the
@@ -2392,7 +2397,7 @@ impl App {
         // counted once whether or not it is drawn — and before the states are
         // written, since what moves out of a field is what each node is now.
         for row in &self.all_rows {
-            if row.is_file() || row.state == state || !in_subtree(&row.path, path) {
+            if row.is_file() || row.state == state || !moves_with_subtree(row, path, state) {
                 continue;
             }
             // Both halves of the move happen together or neither does. An app
@@ -2711,10 +2716,45 @@ fn node_rows(all: &[Row]) -> Vec<Row> {
 /// Pure, and deliberately free of [`App`]: rows in, rows painted.
 fn paint_subtree(rows: &mut [Row], path: &Path, state: NodeState) {
     for row in rows {
-        if in_subtree(&row.path, path) {
+        if moves_with_subtree(row, path, state) {
             row.state = state;
         }
     }
+}
+
+/// Whether `row` moves when the subtree at `root` is put into `state`.
+///
+/// Being in the subtree is most of the answer, and for every ordinary row it is
+/// the whole of it. The exception is the row the repository's `.warlockignore`
+/// keeps out, which moves in one direction only, because the two engine walks
+/// underneath the two directions do not agree about it:
+///
+/// - **Into a pacted state, it does not move.** `pactable_directories` reads
+///   `.warlockignore` and leaves excluded content out of the walk, so no pass
+///   runs there, no `WARLOCK.md` is written and no entry is recorded. Painting
+///   such a row yellow — or, when the grants land, green — would promise a pact
+///   that the run has already decided not to make, and the promise would stand
+///   until the reload at the end quietly took it back. This is the same refusal
+///   [`App::toggle_pact`] makes when the excluded row is the one *selected*; it
+///   belongs here as well, because a subtree paints rows the selection never
+///   touched.
+/// - **Into [`NodeState::Unpacted`], it moves like anything else.**
+///   `unpact_subtree` is manifest arithmetic and drops every entry at or below
+///   the directory without asking what the ignore rules say, so an excluded
+///   directory carrying a pact from before it was excluded loses it with the
+///   rest. Skipping it here would leave that row coloured for a pact that is no
+///   longer recorded.
+///
+/// So the rule is not "excluded rows never move" but "excluded rows are never
+/// pacted", which is the same thing the rest of Warlock says: a directory the
+/// repository keeps out can always stop being managed, and can never start.
+///
+/// File rows are included in this. A file row carries the ignore flag of the
+/// directory holding it (see [`Row::file`] and [`App::from_tree`]), so a file
+/// inside excluded content is held back exactly as its directory is, and is not
+/// left drawn in a colour its module never took.
+fn moves_with_subtree(row: &Row, root: &Path, state: NodeState) -> bool {
+    in_subtree(&row.path, root) && !(state.is_pacted() && row.is_ignored())
 }
 
 /// Whether `path` is the subtree rooted at `root`, or something inside it —
@@ -4219,6 +4259,109 @@ mod tests {
             }
         );
         assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn pacting_a_subtree_leaves_an_excluded_row_out_of_the_pact() {
+        // The press the reader actually makes: `p` on a directory *above* the
+        // excluded one, which never asks `toggle_pact`'s refusal anything. The
+        // fixture's root is pacted already, so the first press takes the subtree
+        // out and the second is the one under test.
+        let mut app =
+            select(App::from_rows(rows_with_one_kept_out()), "repo").with_counts(StateCounts {
+                unpacted: 2,
+                pacted_stale: 1,
+                ..StateCounts::default()
+            });
+        app.toggle_pact().expect("the root can be un-pacted");
+
+        let toggled = app.toggle_pact().expect("and pacted again");
+
+        assert!(toggled.pacted);
+        // The engine's pact walk reads `.warlockignore` and will never reach
+        // `repo/notes`, so painting it yellow would promise a document that no
+        // run is going to write.
+        assert_eq!(
+            states(&app),
+            [
+                ("repo", NodeState::PactedStale),
+                ("repo/notes", NodeState::Unpacted),
+                ("repo/crates", NodeState::PactedStale),
+            ]
+        );
+        assert_eq!(app.counts(), tally(&app));
+        assert_eq!(app.counts().unpacted, 1);
+        assert_eq!(app.counts().total(), 3);
+    }
+
+    #[test]
+    fn a_granted_subtree_leaves_an_excluded_row_out_too() {
+        // The other half of the same rule, and the one a run reaches: the
+        // caller with grants in hand says so over the whole subtree, and green
+        // is a claim about a document that `repo/notes` has no more of than
+        // yellow was.
+        let mut app = App::from_rows(rows_with_one_kept_out());
+
+        app.set_subtree_state("repo", NodeState::PactedFresh);
+
+        assert_eq!(
+            states(&app),
+            [
+                ("repo", NodeState::PactedFresh),
+                ("repo/notes", NodeState::Unpacted),
+                ("repo/crates", NodeState::PactedFresh),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_excluded_row_still_follows_its_subtree_out_of_a_pact() {
+        // The direction that does move it. `unpact_subtree` is manifest
+        // arithmetic and drops every entry at or below the directory without
+        // asking the ignore rules anything, so a directory excluded after it was
+        // pacted loses its entry with the rest — and a row held back here would
+        // keep a colour the manifest no longer has anything to say for.
+        let mut rows = rows_with_one_kept_out();
+        rows[1].state = NodeState::PactedFresh;
+        let mut app = App::from_rows(rows);
+
+        app.set_subtree_state("repo", NodeState::Unpacted);
+
+        assert_eq!(
+            states(&app),
+            [
+                ("repo", NodeState::Unpacted),
+                ("repo/notes", NodeState::Unpacted),
+                ("repo/crates", NodeState::Unpacted),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_inside_excluded_content_is_held_back_with_its_directory() {
+        // A file row carries its directory's ignore flag precisely so that it
+        // is not left drawn in a colour its module never took.
+        let tree = Tree::new(
+            Node::new("repo", "repo/WARLOCK.md", NodeState::Unpacted)
+                .with_files([PathBuf::from("repo/WARLOCK.md")])
+                .with_children([Node::new("repo/notes", None, NodeState::Unpacted)
+                    .with_files([PathBuf::from("repo/notes/plan.md")])
+                    .with_ignored(true)]),
+        );
+        let mut app = App::from_tree(&tree);
+        app.toggle_files();
+
+        app.set_subtree_state("repo", NodeState::PactedStale);
+
+        assert_eq!(
+            states(&app),
+            [
+                ("repo", NodeState::PactedStale),
+                ("repo/WARLOCK.md", NodeState::PactedStale),
+                ("repo/notes", NodeState::Unpacted),
+                ("repo/notes/plan.md", NodeState::Unpacted),
+            ]
+        );
     }
 
     #[test]

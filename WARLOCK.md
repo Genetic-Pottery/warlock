@@ -1,0 +1,20 @@
+# warlock
+
+The repository root. This is the top-level Rust workspace for Warlock itself — the tool described in `README.md` — plus its licence, formatting policy, and the `CLAUDE.md` that defines how warlock's own conventions (pacts, freshness colours, scopes and sigils) are meant to be read and honoured while working in this codebase. All actual code lives one level down, under `crates/`.
+
+## What is here
+
+- **`README.md`** — the pitch and mental model for the whole project: pacts, the fresh/stale/unpacted tree, the conversation-first workflow, and an explicit list of what Warlock is not (not autonomous, not a project generator, not an editor, not a writer of your `README.md`). Read this before `crates/` if you have not seen the project before; it is the intent that the code is supposed to satisfy.
+- **`Cargo.toml`** — the workspace manifest. Declares the two members (`crates/warlock-engine`, `crates/warlock-tui`), and centralises `[workspace.package]`, `[workspace.lints]`, and `[workspace.dependencies]` so both crates inherit one set of rules rather than each declaring its own. This is where the hard project rules live in enforceable form: `unsafe_code = "deny"` (no `unsafe` anywhere in Warlock), `missing_docs`/`unreachable_pub`/`missing_debug_implementations` all warn, and `clippy::pedantic` is on as a group. Every dependency entry carries a comment justifying its inclusion — that comment is part of the contract, not decoration, and a new shared dependency added without one is a review flag.
+- **`Cargo.lock`** — generated, workspace-wide; not hand-edited.
+- **`rustfmt.toml`** — deliberately close to rustfmt defaults, pinned to `edition = "2024"` / `style_edition = "2024"` and `newline_style = "Unix"` so formatting is identical on every machine and in CI; explicitly nothing nightly-only, since this box runs Rust from nixpkgs stable with no rustup shims (also noted in memory).
+- **`LICENSE`** — Apache-2.0, standard text.
+- **`CLAUDE.md`** — the project instructions reproduced at the top of this context. It is also the canonical description of what warlock's own product does (pacts, scopes, sigils, the three colours), so it doubles as spec and as operating instructions for anyone — human or model — working in this repo.
+
+## What a reader has to know before changing anything
+
+- **There is no code at this level.** Anything behavioural — the freshness model, the manifest format, the TUI, the `claude` subprocess boundary — lives under `crates/`, described in its own `WARLOCK.md`, which in turn defers to `crates/warlock-engine` and `crates/warlock-tui`. Changes here are workspace wiring, licensing, or top-level policy only.
+- **The three CI checks in `README.md`'s Contributing section are the whole gate**: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. They run locally exactly as they run in CI, so there is no excuse for a push that fails one.
+- **Lint changes belong in this `Cargo.toml`, not in a crate.** If a lint fires somewhere and feels wrong, the workspace-level lint table is the first place to look, and any new `allow` anywhere in the tree must carry a comment saying why, matching the standard already set for `unsafe_code`, `missing_docs`, etc.
+- **This project treats its own README as sacred to the user.** Per the "not a squatter" promise in `README.md`, Warlock (the tool) never writes to a project's own `README.md`. When working in this repo, extend that same care: this root `README.md` is authored prose, not a generated artifact, and edits to it are a different kind of change than editing a `WARLOCK.md`.
+- **No scope/sigil enforcement exists yet anywhere in the tree** — this is stated independently in `crates/`'s own document and worth repeating here so it isn't rediscovered as a surprise: the vocabulary is defined and partially wired (the TUI can write a scope), but nothing currently checks a held sigil against a directory's scope and blocks or warns on a mismatch.

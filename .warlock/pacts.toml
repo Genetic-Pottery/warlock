@@ -1,31 +1,38 @@
 version = 1
 
 [[pact]]
+module = "."
+document = "WARLOCK.md"
+scope = "warlock-team"
+granted_hash = "46ef6bf05036086dbb2cf3cc0867cb3975f8aa9c55fa3cb9de287cf8fe02c0db"
+granted_at = "2026-08-28T10:06:47Z"
+
+[[pact]]
 module = "crates"
 document = "crates/WARLOCK.md"
-granted_hash = "fe7bb5204e93e3412715f52c9a8b5f7fc88b9c7f7aa577c38589144ae92f7bc2"
-granted_at = "2026-08-27T23:59:12Z"
+granted_hash = "5adcd6610aaae262545c39a90ee5495844c0caf321b0b01d6083f25050787688"
+granted_at = "2026-08-28T10:06:47Z"
 
 [[pact]]
 module = "crates/warlock-engine"
 document = "crates/warlock-engine/WARLOCK.md"
-granted_hash = "236adede0d9183b37aefa1fdcb4f0e8921766311e5acb16f039dae6fe40bea9e"
-granted_at = "2026-08-27T23:59:12Z"
+granted_hash = "4c587cf75c7fd9fe87236b04e04893b1eaeae52f57fce5c4d8261de188caa6e3"
+granted_at = "2026-08-28T10:06:47Z"
 
 [[pact]]
 module = "crates/warlock-engine/src"
 document = "crates/warlock-engine/src/WARLOCK.md"
-granted_hash = "3ff7ad6f2deb74af244ca98837d4f28214501ed747f162c740d9cea9b40bfe5c"
-granted_at = "2026-08-27T23:59:12Z"
+granted_hash = "1aac1d1d276d2ec2f15f043ab109e4259783b8592e764c2586d0023bfa29f5a9"
+granted_at = "2026-08-28T10:06:47Z"
 
 [[pact]]
 module = "crates/warlock-tui"
 document = "crates/warlock-tui/WARLOCK.md"
-granted_hash = "dac13c2d99f176a59c53ad8793e2b5b191521e2445abd625f8efeaf2bec0c18a"
-granted_at = "2026-08-27T23:59:12Z"
+granted_hash = "2ba0b7874170003547fe0eec67d3df46e5a6dccf891b09b13b0cc19e2d4501fa"
+granted_at = "2026-08-28T10:06:47Z"
 
 [[pact]]
 module = "crates/warlock-tui/src"
 document = "crates/warlock-tui/src/WARLOCK.md"
-granted_hash = "0502409d7941695e0b6012eea77fcf5bdbc73450a4e68176af9519602d216e96"
-granted_at = "2026-08-27T23:59:12Z"
+granted_hash = "8c754ab7c01c5446e4bdd1553b1e5a4829904b35234935fb38f0db6d04cabca4"
+granted_at = "2026-08-28T10:06:47Z"
