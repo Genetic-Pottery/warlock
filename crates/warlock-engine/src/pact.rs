@@ -9002,4 +9002,206 @@ mod tests {
             "and the fresh directory beside all of it is untouched",
         );
     }
+
+    // The bytes themselves. Everything above asserts about entries; this
+    // asserts about the file, so that a change of shape — a key that moves, a
+    // blank line that appears, an entry that is appended where it used to be
+    // replaced in place — fails the build instead of passing quietly.
+
+    /// What `module` hashes to right now, as the manifest would store it.
+    fn hash_of(repo: &Path, module: &str) -> String {
+        subtree_hash(from_manifest_path(repo, module)).expect("the subtree hashes")
+    }
+
+    /// The `granted_at` recorded against `module`, which a run mints once for
+    /// the whole of itself.
+    fn granted_at_of(manifest: &Manifest, module: &str) -> String {
+        manifest
+            .entry(module)
+            .unwrap_or_else(|| panic!("`{module}` is pacted"))
+            .granted_at()
+            .unwrap_or_else(|| panic!("`{module}` is granted"))
+            .to_owned()
+    }
+
+    /// Every byte the manifest should hold after the pact below: the entry the
+    /// starting manifest already had for a covered module re-granted where it
+    /// sat, the entry for the module the pact never covered carried through
+    /// with the grant it came in with, and the three modules the pact gained
+    /// appended after both in stored-path order.
+    ///
+    /// `granted_at` is the run's timestamp, read back off what it produced —
+    /// the one thing here that is not fixed. The hashes are, so they are taken
+    /// from the fixture rather than pasted, which also makes this insist that
+    /// each entry records the hash of its own subtree as it stands now.
+    fn expected_after_the_pact(repo: &Path, granted_at: &str) -> String {
+        format!(
+            "version = 1\n\
+             \n\
+             [[pact]]\n\
+             module = \"crates/engine/src\"\n\
+             document = \"crates/engine/src/WARLOCK.md\"\n\
+             granted_hash = \"{src}\"\n\
+             granted_at = \"{granted_at}\"\n\
+             \n\
+             [[pact]]\n\
+             module = \"crates/tui\"\n\
+             document = \"crates/tui/WARLOCK.md\"\n\
+             granted_hash = \"othercrate\"\n\
+             granted_at = \"2026-02-02T00:00:00Z\"\n\
+             \n\
+             [[pact]]\n\
+             module = \"crates/engine\"\n\
+             document = \"crates/engine/WARLOCK.md\"\n\
+             granted_hash = \"{root}\"\n\
+             granted_at = \"{granted_at}\"\n\
+             \n\
+             [[pact]]\n\
+             module = \"crates/engine/src/inner\"\n\
+             document = \"crates/engine/src/inner/WARLOCK.md\"\n\
+             granted_hash = \"{inner}\"\n\
+             granted_at = \"{granted_at}\"\n\
+             \n\
+             [[pact]]\n\
+             module = \"crates/engine/tests\"\n\
+             document = \"crates/engine/tests/WARLOCK.md\"\n\
+             granted_hash = \"{tests}\"\n\
+             granted_at = \"{granted_at}\"\n",
+            root = hash_of(repo, "crates/engine"),
+            src = hash_of(repo, "crates/engine/src"),
+            inner = hash_of(repo, "crates/engine/src/inner"),
+            tests = hash_of(repo, "crates/engine/tests"),
+        )
+    }
+
+    /// Every byte the manifest should hold after the refresh below: the same
+    /// five entries in the same five places, two of them re-granted at
+    /// `refreshed_at` because their content moved, three still carrying
+    /// `pacted_at` because the refresh never described them.
+    fn expected_after_the_refresh(repo: &Path, pacted_at: &str, refreshed_at: &str) -> String {
+        format!(
+            "version = 1\n\
+             \n\
+             [[pact]]\n\
+             module = \"crates/engine/src\"\n\
+             document = \"crates/engine/src/WARLOCK.md\"\n\
+             granted_hash = \"{src}\"\n\
+             granted_at = \"{pacted_at}\"\n\
+             \n\
+             [[pact]]\n\
+             module = \"crates/tui\"\n\
+             document = \"crates/tui/WARLOCK.md\"\n\
+             granted_hash = \"othercrate\"\n\
+             granted_at = \"2026-02-02T00:00:00Z\"\n\
+             \n\
+             [[pact]]\n\
+             module = \"crates/engine\"\n\
+             document = \"crates/engine/WARLOCK.md\"\n\
+             granted_hash = \"{root}\"\n\
+             granted_at = \"{refreshed_at}\"\n\
+             \n\
+             [[pact]]\n\
+             module = \"crates/engine/src/inner\"\n\
+             document = \"crates/engine/src/inner/WARLOCK.md\"\n\
+             granted_hash = \"{inner}\"\n\
+             granted_at = \"{pacted_at}\"\n\
+             \n\
+             [[pact]]\n\
+             module = \"crates/engine/tests\"\n\
+             document = \"crates/engine/tests/WARLOCK.md\"\n\
+             granted_hash = \"{tests}\"\n\
+             granted_at = \"{refreshed_at}\"\n",
+            root = hash_of(repo, "crates/engine"),
+            src = hash_of(repo, "crates/engine/src"),
+            inner = hash_of(repo, "crates/engine/src/inner"),
+            tests = hash_of(repo, "crates/engine/tests"),
+        )
+    }
+
+    #[test]
+    fn a_pact_and_a_refresh_over_a_granted_manifest_write_these_exact_bytes() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+
+        // A manifest that already says something: one entry for a directory the
+        // pact will cover, carrying a grant from a run that is not this one, and
+        // one entry for a directory it will not cover at all. The covered one is
+        // written first so that keeping its position is visible in the bytes —
+        // it must stay at the top with the newly gained entries below it, not be
+        // dropped and re-appended in sorted order.
+        let entry = |module: &str| {
+            PactEntry::new(repo.path(), module, format!("{module}/{DOCUMENT_FILE}"))
+                .expect("the fixture's paths are spellable")
+        };
+        let before = Manifest::with_entries([
+            entry("crates/engine/src").with_grant("stalehash", "2026-01-01T00:00:00Z"),
+            entry("crates/tui").with_grant("othercrate", "2026-02-02T00:00:00Z"),
+        ]);
+
+        let PactedSubtree {
+            manifest,
+            failures,
+            problems,
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &before,
+            &Canned::new(document(300)),
+            &mut Unwatched,
+        )
+        .expect("pacts");
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(problems.is_empty(), "{problems:?}");
+
+        // The one thing a run does not decide for itself: the clock. Read back
+        // off the manifest rather than guessed at, and read back once, so the
+        // literal below still insists that every entry the run granted carries
+        // the same timestamp.
+        let pacted_at = granted_at_of(&manifest, "crates/engine");
+
+        assert_eq!(
+            manifest.to_toml_string().expect("serialises"),
+            expected_after_the_pact(repo.path(), &pacted_at),
+            "the whole file, not a fragment of it",
+        );
+
+        // Now a refresh over that manifest, with one file moved under `tests/`.
+        // Two directories go stale — `tests` and the `crates/engine` above it —
+        // and everything else, covered or not, is carried through byte for byte,
+        // grants and positions and all.
+        write(
+            repo.path(),
+            "crates/engine/tests/it.rs",
+            "#[test] fn works_differently() {}\n",
+        );
+
+        let PactedSubtree {
+            manifest,
+            failures,
+            problems,
+        } = refresh_subtree(
+            &engine,
+            repo.path(),
+            &manifest,
+            &Canned::new(document(300)),
+            &mut Unwatched,
+        )
+        .expect("refreshes");
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(problems.is_empty(), "{problems:?}");
+
+        // Read the same way, and deliberately not asserted to differ from
+        // `pacted_at`: the clock is only to the second, so two runs in one test
+        // very often mint the same string. What the literal below pins is which
+        // entries got the refresh's timestamp and which kept the pact's, and
+        // that reads the same either way.
+        let refreshed_at = granted_at_of(&manifest, "crates/engine");
+
+        assert_eq!(
+            manifest.to_toml_string().expect("serialises"),
+            expected_after_the_refresh(repo.path(), &pacted_at, &refreshed_at),
+            "the whole file again: two entries re-granted where they sat, three \
+             carried through untouched",
+        );
+    }
 }
