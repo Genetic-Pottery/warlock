@@ -786,13 +786,13 @@ pub fn pact_subtree(
     let directories = pactable_directories(directory)?;
 
     let Described {
-        entries,
+        outcomes,
         failures,
         problems,
     } = describe_and_grant(&directories, root, agent, observer);
 
     Ok(PactedSubtree {
-        manifest: rewrite(manifest, &directories, root, entries),
+        manifest: rewrite(manifest, &directories, root, outcomes),
         failures,
         problems,
     })
@@ -927,7 +927,7 @@ pub fn refresh_subtree(
         .collect();
 
     let Described {
-        entries,
+        outcomes,
         failures,
         problems,
     } = describe_and_grant(&stale, root, agent, observer);
@@ -939,7 +939,7 @@ pub fn refresh_subtree(
     // a stale directory whose pass failed — a refresh that could not re-describe
     // something leaves it as stale as it found it rather than un-pacting it.
     Ok(PactedSubtree {
-        manifest: rewrite(manifest, &[], root, entries),
+        manifest: rewrite(manifest, &[], root, outcomes),
         failures,
         problems,
     })
@@ -965,23 +965,78 @@ fn is_fresh(manifest: &Manifest, root: &Path, directory: &Path) -> bool {
     decide_state(entry, &computed) == NodeState::PactedFresh
 }
 
-/// What the two phases came to: the entries they earned, and everything that
+/// What the two phases came to: the outcomes they earned, and everything that
 /// went wrong on the way without stopping them.
 ///
-/// Not [`PactedSubtree`], because there is no manifest here yet. The entries are
+/// Not [`PactedSubtree`], because there is no manifest here yet — and not
+/// entries either, because a run does not own a whole entry. The outcomes are
 /// keyed by stored module path, ready for [`rewrite`] — deciding what an
 /// existing entry for a directory this run did not describe deserves is the
 /// caller's, not the core's.
 #[derive(Debug)]
 struct Described {
-    /// One entry per directory that got a document, keyed by the path the
+    /// One [`Outcome`] per directory that got a document, keyed by the path the
     /// manifest stores it under. Granted where the subtree came out whole and
     /// its hash could be taken, ungranted where it did not.
-    entries: BTreeMap<String, PactEntry>,
+    outcomes: BTreeMap<String, Outcome>,
     /// Every directory that failed, phase one's before phase two's.
     failures: Vec<Failure>,
     /// Every file the byte caps left out of a request.
     problems: Vec<Problem>,
+}
+
+/// Everything a run has to say about one directory, and nothing else.
+///
+/// A pact writes a document and may earn a grant for it; that is the whole of
+/// its authority over an entry. Handing [`rewrite`] outcomes rather than whole
+/// [`PactEntry`] values is what makes that a rule the compiler keeps: a field
+/// on `PactEntry` that a person owns rather than a run cannot be spelled here,
+/// so it cannot be overwritten there.
+#[derive(Debug)]
+struct Outcome {
+    /// The pacted directory as the manifest stores it — [`to_manifest_path`]'s
+    /// form, which is also the key this outcome is filed under.
+    module: String,
+    /// The document this run wrote for it, stored the same way.
+    document: String,
+    /// The grant it earned, or `None` for a directory left pacted and
+    /// unjudged. Hash and timestamp travel as one so an outcome cannot express
+    /// a hash without the timestamp saying when it was earned.
+    grant: Option<Grant>,
+}
+
+/// The half of an [`Outcome`] that says freshness was judged: the subtree hash
+/// that was granted, and when.
+#[derive(Debug)]
+struct Grant {
+    /// What the subtree hashed to once every document was on disk.
+    hash: String,
+    /// The run's single [`now_rfc3339`] reading, RFC 3339.
+    at: String,
+}
+
+impl Outcome {
+    /// Write this outcome onto an entry the manifest already holds: module,
+    /// document, `granted_hash` and `granted_at` overwritten, every other field
+    /// on `entry` left exactly as it was.
+    fn apply(self, entry: &mut PactEntry) {
+        entry.overwrite_run_fields(
+            self.module,
+            self.document,
+            self.grant.map(|Grant { hash, at }| (hash, at)),
+        );
+    }
+
+    /// This outcome as a brand-new entry, for a module the manifest has never
+    /// held: there is nothing there to preserve, so an outcome is the whole of
+    /// it.
+    fn into_entry(self) -> PactEntry {
+        let entry = PactEntry::stored(self.module, self.document);
+        match self.grant {
+            Some(Grant { hash, at }) => entry.with_grant(hash, at),
+            None => entry,
+        }
+    }
 }
 
 /// The two phases themselves, over exactly the `directories` handed in:
@@ -1064,15 +1119,20 @@ fn describe_and_grant(
     // record a single event, and a per-directory clock reading would only
     // invite someone to read an ordering into it.
     let granted_at = now_rfc3339();
-    let mut entries = BTreeMap::new();
+    let mut outcomes = BTreeMap::new();
     for pacted in directories {
         let Some(document) = documents.get(pacted) else {
-            // No document, no entry: a directory this run failed to describe is
-            // not a directory this run pacted.
+            // No document, no outcome: a directory this run failed to describe
+            // is not a directory this run pacted.
             continue;
         };
-        let entry = match PactEntry::new(root, pacted, document) {
-            Ok(entry) => entry,
+        // Both paths spelled the manifest's way here, where the directory to
+        // blame is still in hand — an outcome carries stored paths and no root
+        // to re-derive them from.
+        let stored = to_manifest_path(root, pacted)
+            .and_then(|module| to_manifest_path(root, document).map(|document| (module, document)));
+        let (module, document) = match stored {
+            Ok(paths) => paths,
             Err(source) => {
                 failures.push(Failure::Record {
                     directory: pacted.clone(),
@@ -1082,52 +1142,68 @@ fn describe_and_grant(
             }
         };
 
-        // An entry with no grant is the whole representation of partial
-        // completion: pacted, never judged, yellow. `starts_with` is a
-        // component-wise prefix test, so `src` never counts as an ancestor of
-        // `src-tests`.
-        if undocumented
+        // No grant is the whole representation of partial completion: pacted,
+        // never judged, yellow. `starts_with` is a component-wise prefix test,
+        // so `src` never counts as an ancestor of `src-tests`.
+        let ungranted = undocumented
             .iter()
-            .any(|missing| missing.starts_with(pacted))
-        {
-            entries.insert(entry.module().to_owned(), entry);
-            continue;
-        }
-
-        let entry = match subtree_hash(pacted) {
-            Ok(hash) => entry.with_grant(hash, &granted_at),
-            Err(source) => {
-                failures.push(Failure::Hash {
-                    directory: pacted.clone(),
-                    source,
-                });
-                entry
+            .any(|missing| missing.starts_with(pacted));
+        let grant = if ungranted {
+            None
+        } else {
+            match subtree_hash(pacted) {
+                Ok(hash) => Some(Grant {
+                    hash,
+                    at: granted_at.clone(),
+                }),
+                Err(source) => {
+                    failures.push(Failure::Hash {
+                        directory: pacted.clone(),
+                        source,
+                    });
+                    None
+                }
             }
         };
-        entries.insert(entry.module().to_owned(), entry);
+
+        outcomes.insert(
+            module.clone(),
+            Outcome {
+                module,
+                document,
+                grant,
+            },
+        );
     }
 
     Described {
-        entries,
+        outcomes,
         failures,
         problems,
     }
 }
 
-/// `manifest` with the pact's entries in it: `pacted` replaced, everything else
-/// left exactly as it was.
+/// `manifest` with the run's outcomes written into it: the fields a run owns
+/// updated, everything else left exactly as it was.
 ///
-/// `entries` is what the pact earned, keyed by stored module path, and
+/// `outcomes` is what the run earned, keyed by stored module path, and
 /// `directories` is everything it covered — including the directories that
-/// earned nothing, whose entries go. Existing entries keep their position, so a
-/// re-pact moves no lines around; entries the manifest has never seen are
-/// appended in stored-path order, which puts a parent above the children it
-/// gained.
+/// earned nothing, whose entries go. An outcome met by an entry that is already
+/// there writes exactly four fields on it — module, document, `granted_hash`
+/// and `granted_at`, the last two cleared when the outcome earned no grant —
+/// and leaves every other field that entry carries untouched. It also keeps its
+/// position, so a re-pact moves no lines around; modules the manifest has never
+/// seen are appended in stored-path order, which puts a parent above the
+/// children it gained.
+///
+/// Taking outcomes rather than entries is the point: there is no way to hand
+/// this function a whole [`PactEntry`], so there is no way for a run to erase a
+/// field of one.
 fn rewrite(
     manifest: &Manifest,
     directories: &[PathBuf],
     root: &Path,
-    mut entries: BTreeMap<String, PactEntry>,
+    mut outcomes: BTreeMap<String, Outcome>,
 ) -> Manifest {
     // Every module the pact is entitled to speak for. A directory whose path
     // cannot be stored has no entry to match against anyway, so a failure to
@@ -1137,16 +1213,20 @@ fn rewrite(
         .filter_map(|pacted| to_manifest_path(root, pacted).ok())
         .collect();
 
-    let mut kept = Vec::with_capacity(manifest.entries().len() + entries.len());
+    let mut kept = Vec::with_capacity(manifest.entries().len() + outcomes.len());
     for existing in manifest.entries() {
-        if let Some(entry) = entries.remove(existing.module()) {
-            // Replaced where it sat: one entry per module, never two.
+        if let Some(outcome) = outcomes.remove(existing.module()) {
+            // Written onto the entry that is already there, where it sat: one
+            // entry per module, never two, and nothing on it lost but the
+            // fields the run is entitled to speak for.
+            let mut entry = existing.clone();
+            outcome.apply(&mut entry);
             kept.push(entry);
         } else if !covered.contains(existing.module()) {
             kept.push(existing.clone());
         }
     }
-    kept.extend(entries.into_values());
+    kept.extend(outcomes.into_values().map(Outcome::into_entry));
     Manifest::with_entries(kept)
 }
 

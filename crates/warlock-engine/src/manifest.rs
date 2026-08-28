@@ -390,6 +390,50 @@ impl PactEntry {
         self
     }
 
+    /// A never-judged entry whose paths are **already** in the form this
+    /// manifest stores — relative, forward slashes, `"."` for the root.
+    ///
+    /// [`PactEntry::new`]'s job less the normalising, for the one caller that
+    /// has done that normalising itself: a pact run, which spells its stored
+    /// paths with [`to_manifest_path`] while it is still holding the directory
+    /// to blame if one cannot be spelled. Crate-private for the same reason
+    /// `module` and `document` are private — nothing outside this crate should
+    /// be trusted to have got the form right.
+    pub(crate) fn stored(module: String, document: String) -> Self {
+        Self {
+            module,
+            document,
+            granted_hash: None,
+            granted_at: None,
+        }
+    }
+
+    /// Overwrite the fields a pact run owns — `module`, `document` and the
+    /// grant — and **touch nothing else on this entry**.
+    ///
+    /// `grant` is the hash and the timestamp together, `None` for a module that
+    /// was left pacted and unjudged; passing `None` clears any grant already
+    /// recorded here, hash and timestamp both. The two travel as one so no
+    /// caller can leave a hash without the timestamp that says when it was
+    /// earned.
+    ///
+    /// Crate-private, and written as a mutation rather than as a fresh entry to
+    /// swap in, precisely so that a field added to `PactEntry` later — one a
+    /// person owns rather than a run — survives every pact and every refresh
+    /// without anyone having to remember to carry it across.
+    pub(crate) fn overwrite_run_fields(
+        &mut self,
+        module: String,
+        document: String,
+        grant: Option<(String, String)>,
+    ) {
+        let (granted_hash, granted_at) = grant.unzip();
+        self.module = module;
+        self.document = document;
+        self.granted_hash = granted_hash;
+        self.granted_at = granted_at;
+    }
+
     /// The module directory as stored: relative, forward slashes, `"."` for
     /// the root of the repository itself.
     #[must_use]
