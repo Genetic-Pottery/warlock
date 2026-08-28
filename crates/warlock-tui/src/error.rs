@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::{fmt, io};
 
-use warlock_engine::{AgentsMdError, LoadError, LoadProblem, ManifestError};
+use warlock_engine::{AgentsMdError, LoadError, LoadProblem, ManifestError, ScopeRule, SigilError};
 
 /// Everything that can stop warlock showing a tree, or writing an `AGENTS.md`.
 ///
@@ -21,11 +21,12 @@ use warlock_engine::{AgentsMdError, LoadError, LoadProblem, ManifestError};
 /// terminal is back, and a message wrapping onto a second line in a restored
 /// shell is a message that looks like a crash.
 ///
-/// `warlock init` shares the vocabulary rather than having one of its own: it
-/// fails in the same two ways the tree does — a working directory outside any
-/// repository, and a file that will not write — and it is printed by the same
-/// line of `main`, so a second enum would be a second wording of the same
-/// sentences.
+/// `warlock init` and `warlock config` share the vocabulary rather than having
+/// one each: they fail in the same ways the tree does — a working directory
+/// outside any repository, a file that will not write — and they are printed by
+/// the same line of `main`, so a second enum would be a second wording of the
+/// same sentences. Where one of them needs a sentence of its own, it is a
+/// variant here beside the others.
 #[derive(Debug)]
 pub(crate) enum Error {
     /// The working directory could not be read, so there is nothing to scope
@@ -62,17 +63,26 @@ pub(crate) enum Error {
         /// Which of the manifest's cases it was, with the path it names.
         source: ManifestError,
     },
-    /// `warlock init` was run somewhere with no repository above it, so there
-    /// is no root to write an `AGENTS.md` at.
+    /// A subcommand was run somewhere with no repository above it, so there is
+    /// no root to write an `AGENTS.md` at or to hold sigils for.
     ///
     /// The tree's own version of this refusal comes through [`Error::Load`] in
-    /// the engine's words; `init` never loads a tree, so it asks
+    /// the engine's words; neither subcommand loads a tree, so each asks
     /// [`repository_root`](warlock_engine::repository_root) directly and words
     /// the same fact here, in the same shape: what was looked for, where the
     /// looking started, and what that means for what was asked.
+    ///
+    /// One variant for both subcommands, with the consequence carried as
+    /// `wanted`: the sentence up to that point is the same fact about `.git`
+    /// twice over, and two variants would be two wordings of it to keep in step.
     NoRepository {
         /// The working directory the search upwards started from.
         start: PathBuf,
+        /// What the root was wanted for, as the tail of the sentence: "write
+        /// `AGENTS.md` at", "hold sigils for". A `&'static str` because there
+        /// are exactly as many of these as there are subcommands, each spelled
+        /// where its subcommand is written.
+        wanted: &'static str,
     },
     /// `warlock init` could not write the `AGENTS.md`: it is there and cannot
     /// be read, it is not text, or the write itself failed.
@@ -82,6 +92,43 @@ pub(crate) enum Error {
     AgentsMd {
         /// Which of the writer's cases it was, with the path it names.
         source: AgentsMdError,
+    },
+    /// `warlock config` could not work out where this machine's home directory
+    /// is, so it does not know where the sigils would be kept.
+    ///
+    /// Carries nothing: the two variables that were looked at are the whole of
+    /// the fact, and they are named in the sentence rather than stored.
+    NoHome,
+    /// The line `warlock config` prints its prompt for could not be read.
+    ///
+    /// Deliberately not [`Error::Terminal`]: `warlock config` never enters the
+    /// alternate screen and never leaves cooked mode, so a failure here is
+    /// stdin being closed or unreadable — a pipe that broke — rather than
+    /// anything the terminal was asked to do.
+    Prompt {
+        /// What the read said.
+        source: io::Error,
+    },
+    /// Something typed at that prompt is not a sigil.
+    ///
+    /// Nothing has been written when this arrives: the whole line is judged
+    /// before anything is saved, so the set held is the set that was held. The
+    /// string is kept as it was typed rather than as it was folded, because
+    /// that is what the reader can see on their screen.
+    Sigil {
+        /// The offending string, exactly as it was entered.
+        entered: String,
+        /// The one rule it broke, in the engine's words.
+        rule: ScopeRule,
+    },
+    /// The machine-local sigil config could not be read or written.
+    ///
+    /// Nothing is half-written when this arrives — the engine writes beside and
+    /// renames over — and nothing inside the repository is touched either way:
+    /// the file named is under the home directory.
+    Sigils {
+        /// Which of the engine's cases it was, with the path it names.
+        source: SigilError,
     },
     /// The terminal could not be set up, drawn to, or read from.
     Terminal {
@@ -148,17 +195,39 @@ impl fmt::Display for Error {
             // errors carry the TOML parser's multi-line diagnostic.
             Self::Manifest { source } => write!(f, "{}", one_line(&source.to_string())),
             // The engine's `.git` wording, with what it cost the caller on the
-            // end: this is a refusal to write a file rather than a refusal to
-            // draw a tree, and the reader asked for the file.
-            Self::NoRepository { start } => write!(
+            // end: this is a refusal to do the thing that was typed rather than
+            // a refusal to draw a tree, and the reader asked for that thing.
+            Self::NoRepository { start, wanted } => write!(
                 f,
                 "no `.git` directory in `{}` or any of its parents, so there is no \
-                 repository root to write `AGENTS.md` at",
+                 repository root to {wanted}",
                 start.display()
             ),
             // Flattened like the two above it: what the filesystem says can run
             // to more than one line, and this prints as one.
             Self::AgentsMd { source } => write!(f, "{}", one_line(&source.to_string())),
+            // Says which variables were looked at and what to do about it: a
+            // reader whose `HOME` is unset is in an unusual shell and needs the
+            // name of the thing to set rather than a fact about warlock.
+            Self::NoHome => write!(
+                f,
+                "neither `HOME` nor `USERPROFILE` is set, so there is no home \
+                 directory to keep the sigils for this repository under: set \
+                 `HOME` and run `warlock config` again"
+            ),
+            Self::Prompt { source } => {
+                write!(f, "could not read the line that was typed: {source}")
+            }
+            // The rule is a sentence of its own, so this says what it is about
+            // and, because the reader has just typed a whole line, that the rest
+            // of that line has not been written either.
+            Self::Sigil { entered, rule } => write!(
+                f,
+                "`{entered}` is not a sigil, so nothing was written: {rule}"
+            ),
+            // Flattened like the manifest's, and for the same reason: a config
+            // that will not parse carries the TOML parser's diagnostic.
+            Self::Sigils { source } => write!(f, "{}", one_line(&source.to_string())),
             Self::Problems { first, rest: 0 } => write!(f, "{first}"),
             Self::Problems { first, rest } => {
                 write!(f, "{first} (and {rest} more like it)")
@@ -171,11 +240,15 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::WorkingDirectory { source } | Self::Terminal { source } => Some(source),
+            Self::WorkingDirectory { source }
+            | Self::Terminal { source }
+            | Self::Prompt { source } => Some(source),
             Self::Load { source } => Some(source),
             Self::Manifest { source } => Some(source),
             Self::AgentsMd { source } => Some(source),
-            Self::Problems { .. } | Self::NoRepository { .. } => None,
+            Self::Sigil { rule, .. } => Some(rule),
+            Self::Sigils { source } => Some(source),
+            Self::Problems { .. } | Self::NoRepository { .. } | Self::NoHome => None,
         }
     }
 }
@@ -193,9 +266,15 @@ impl From<io::Error> for Error {
 mod tests {
     use std::path::PathBuf;
 
-    use warlock_engine::{AgentsMdError, ManifestError};
+    use warlock_engine::{AgentsMdError, ManifestError, ScopeRule, SigilError};
 
     use super::{Error, one_line};
+
+    /// What `warlock init` wants a repository root for, as `main` spells it.
+    const FOR_AGENTS_MD: &str = "write `AGENTS.md` at";
+
+    /// What `warlock config` wants one for, as `config` spells it.
+    const FOR_SIGILS: &str = "hold sigils for";
 
     /// The problem text the engine hands over, standing in for a
     /// [`LoadProblem`](warlock_engine::LoadProblem) — which cannot be built
@@ -274,6 +353,11 @@ mod tests {
             },
             Error::NoRepository {
                 start: PathBuf::from("/elsewhere"),
+                wanted: FOR_AGENTS_MD,
+            },
+            Error::NoRepository {
+                start: PathBuf::from("/elsewhere"),
+                wanted: FOR_SIGILS,
             },
             Error::AgentsMd {
                 source: AgentsMdError::Write {
@@ -284,6 +368,25 @@ mod tests {
             Error::AgentsMd {
                 source: AgentsMdError::NotText {
                     path: PathBuf::from("/repo/AGENTS.md"),
+                },
+            },
+            Error::NoHome,
+            Error::Prompt {
+                source: std::io::Error::other("boom"),
+            },
+            Error::Sigil {
+                entered: "Data Plane!".to_owned(),
+                rule: ScopeRule::Character { character: '!' },
+            },
+            Error::Sigils {
+                source: SigilError::NotFound {
+                    path: PathBuf::from("/home/someone/.warlock/repo-abc/config.toml"),
+                },
+            },
+            Error::Sigils {
+                source: SigilError::Io {
+                    path: PathBuf::from("/home/someone/.warlock/repo-abc/config.toml"),
+                    source: std::io::Error::other("boom"),
                 },
             },
         ];
@@ -314,12 +417,69 @@ mod tests {
     fn init_outside_a_repository_says_what_was_looked_for_and_where() {
         let error = Error::NoRepository {
             start: PathBuf::from("/elsewhere"),
+            wanted: FOR_AGENTS_MD,
         };
 
         assert_eq!(
             error.to_string(),
             "no `.git` directory in `/elsewhere` or any of its parents, so there is \
              no repository root to write `AGENTS.md` at"
+        );
+    }
+
+    #[test]
+    fn config_outside_a_repository_says_the_same_thing_about_sigils() {
+        // One fact about `.git`, worded once, with what the reader asked for on
+        // the end of it.
+        let error = Error::NoRepository {
+            start: PathBuf::from("/elsewhere"),
+            wanted: FOR_SIGILS,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "no `.git` directory in `/elsewhere` or any of its parents, so there is \
+             no repository root to hold sigils for"
+        );
+    }
+
+    #[test]
+    fn a_string_that_is_not_a_sigil_names_itself_and_the_rule_it_broke() {
+        let error = Error::Sigil {
+            entered: "Data-Plane!".to_owned(),
+            rule: ScopeRule::Character { character: '!' },
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "`Data-Plane!` is not a sigil, so nothing was written: a scope holds \
+             only lowercase letters, digits, `-` and `_`, and this one holds `!`"
+        );
+    }
+
+    #[test]
+    fn no_home_says_which_variables_were_looked_at_and_what_to_do() {
+        assert_eq!(
+            Error::NoHome.to_string(),
+            "neither `HOME` nor `USERPROFILE` is set, so there is no home directory \
+             to keep the sigils for this repository under: set `HOME` and run \
+             `warlock config` again"
+        );
+    }
+
+    #[test]
+    fn a_sigil_config_that_cannot_be_read_says_so_in_the_engines_words() {
+        let error = Error::Sigils {
+            source: SigilError::Io {
+                path: PathBuf::from("/home/someone/.warlock/repo-abc/config.toml"),
+                source: std::io::Error::other("permission denied"),
+            },
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "could not read or write `/home/someone/.warlock/repo-abc/config.toml`: \
+             permission denied"
         );
     }
 
