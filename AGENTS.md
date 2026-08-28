@@ -1,93 +1,48 @@
 # AGENTS.md
 
-Rough draft. A later ticket cleans this up and `warlock init` will generate it.
+<!-- warlock:begin -->
 
-## Read the `WARLOCK.md` files first
+## Warlock
 
-Every directory under warlock's management has a `WARLOCK.md` beside it,
-written by a model and committed with the code. It describes that directory:
-its files, and what the directories under it are for.
+Warlock is a freshness ledger for a codebase's own documentation. Every
+directory under its management holds a `WARLOCK.md`: a document about that
+one directory — its files, and what the directories below it are for —
+written by a model pass and committed beside the code, like any other source
+file.
 
-**They are the fast way into this codebase.** Read the ones covering the area
-you are working in before you start opening source files. A parent's document
-is written from its children's documents, so reading top-down gets you the
-shape of the thing in a few files instead of a few dozen.
+**Read the `WARLOCK.md` files first.** They are the fast way into this
+repository: read the ones covering the area you are about to work in before
+you start opening source files. A parent's document is written from its
+children's documents, so reading downwards from the top gives you the shape
+of the project in a few files instead of a few dozen.
 
-One caveat: a document can be behind the code it describes. See the colours
-below. If a document and the source disagree, the source is right — and say so
-in your work, because that gap is the thing warlock exists to make visible.
+One caveat, and it is what the colours below exist for: **a document can be
+behind the code it describes.** Where a document and the code disagree, the
+code is right. Say so in your work, because that gap is the thing warlock
+exists to make visible.
 
-## What warlock is
+## What the colours mean
 
-A TUI where the project tree is rendered as the AI understands it: one document
-per directory, each coloured by whether that understanding is still true.
+Warlock draws the project as a tree, one row per directory, each in one of
+three colours:
 
-- **Gray** — unpacted. Outside warlock's management.
-- **Yellow** — pacted and stale. Content at or below it changed since the last
-  grant. Stale is *mechanical*: the hash moved, so it is stale, immediately.
-- **Green** — pacted and fresh. A model pass read the directory and granted it.
-  Fresh is *earned* and can only be granted, never assumed.
+- **Unpacted** — outside warlock's management. No document, no record, and
+  nothing claimed about it either way.
+- **Stale** — pacted, and something at or below it has changed since its
+  document was last granted. Stale is *mechanical*: the hash moved, so it is
+  stale, immediately, with no opinion involved.
+- **Fresh** — pacted, and granted after a model pass read the directory.
+  Fresh is only ever *granted*, never assumed, and a directory nobody has
+  judged yet is stale rather than fresh.
 
-There is deliberately no fourth state. Unjudged is stale.
+There is deliberately no fourth colour.
 
-**Pacting** is how a directory comes under management. You point at one and
-pact it, and every directory beneath it is pacted too — each gets its own
-`WARLOCK.md`, its own manifest entry and its own hash. Un-pacting is the
-inverse and leaves the documents on disk.
+**The hash is the trigger, not the judgement.** Warlock digests every byte at
+and below a directory and records that digest at the moment a document is
+granted. When the digest stops matching, something happened down there and
+the document is owed a look. It never decides that a document is *wrong* —
+whether a particular change warrants a documentation update was always a
+judgement call, and warlock makes the change visible rather than pretending
+to make that call for you.
 
-**The hash is the trigger, not the judge.** `subtree_hash` digests every byte
-of every file at or below a directory. It is recorded at grant time; when it
-stops matching, something happened there and the document is owed a look. It
-never decides whether the document is *wrong* — that is a model pass's job, and
-whether a change warrants a doc update was always a judgement call. Warlock is
-not trying to be correct about that. It is trying to make it visible.
-
-The three sources of truth: the code, the `WARLOCK.md` documents, and
-`.warlock/pacts.toml` (the manifest — one entry per pacted directory, holding
-its granted hash).
-
-## Working in this repo
-
-Two crates. The dependency edge runs **TUI → engine, and never back**.
-
-- `crates/warlock-engine` — the tree, the hash, the manifest, the pact. Pure
-  domain logic. It opens no sockets and spawns no subprocesses, and its tests
-  run with no terminal, no network and no `claude` binary present. Keep it that
-  way.
-- `crates/warlock-tui` — the terminal front end, and the only place a model is
-  actually invoked (`claude.rs`).
-
-The gate, which CI runs and which must be clean before you hand work back:
-
-```
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
-
-Standing rules:
-
-- **No `unsafe`.** Denied at the workspace root.
-- **No new dependency** without it being the point of the ticket. Whatever you
-  need is probably already in the workspace table.
-- **No configuration.** Caps, prompts, budgets and walk rules are constants in
-  code, reviewed in a diff. A decision that can be changed without a diff is a
-  decision nobody reviewed.
-- **Prompts are code.** They live beside the code that sends them. No template
-  files, no overrides.
-- Stable Rust 2024, `rust-version` in `Cargo.toml`. There is no
-  `rust-toolchain.toml` and it would be inert here.
-- Public items need docs (`missing_docs` is warned, clippy is `-D warnings`).
-  The house style is doc comments that say *why*, not what — match the density
-  of the file you are editing.
-
-## Briefs
-
-`docs/red-brief-NN-*.md` are the project briefs, in order. Each one states its
-outcome, success criteria, constraints, what is deliberately out of scope, and
-its slices. `docs/warlock-design-doc.md` is the standing design; the briefs
-cite it by section.
-
-If you are implementing a ticket, its brief is the spec. Read it, and read the
-"Out of scope" section too — a lot of what looks like an obvious improvement is
-a decision that was already made against.
+<!-- warlock:end -->
