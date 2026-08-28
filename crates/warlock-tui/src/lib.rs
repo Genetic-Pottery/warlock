@@ -54,6 +54,17 @@
 //! never having heard of the question is a cheaper guarantee of that than
 //! putting every field back.
 //!
+//! The scope prompt is the same arrangement with a string in it. [`ScopePrompt`]
+//! is whether the field is up, which directory it is over, what has been typed
+//! and why the last submit was refused, and [`edit_for`] says what one key does
+//! to it — append a character, take one back, submit, or close. It judges
+//! nothing: Enter comes back as a submit whatever was typed, and whether that is
+//! a scope is the engine's
+//! [`validate_scope`](warlock_engine::validate_scope)'s answer, asked by the
+//! caller, so this crate holds no idea of how long a scope may be or which
+//! characters it may hold. It is not a field on [`App`] either, for the reason
+//! the confirmation is not.
+//!
 //! The dependency edge runs TUI -> engine: this crate knows the engine's
 //! vocabulary, and the engine knows nothing about terminals.
 
@@ -67,6 +78,7 @@ mod confirm;
 /// real tree comes from the engine's loader.
 #[cfg(test)]
 mod fixture;
+mod prompt;
 mod ui;
 mod watch;
 
@@ -132,6 +144,19 @@ pub use confirm::Answered;
 pub use confirm::QuitConfirm;
 /// What one key does to the quit confirmation, given the answer it has lit.
 pub use confirm::answer_for;
+/// What a keystroke comes to while the scope prompt is up: the field stays with
+/// one character more or less, closes on Esc, or is submitted on Enter.
+pub use prompt::Edited;
+/// The scope prompt's field: the directory being scoped, the text typed into it
+/// with the cursor always at the end, and the one line saying why the last
+/// submit was refused.
+pub use prompt::ScopeField;
+/// Whether the scope prompt is up, and the field being typed into while it is —
+/// a value of its own rather than a field on [`App`], so Esc leaves the app
+/// untouched rather than carefully restored.
+pub use prompt::ScopePrompt;
+/// What one key does to the scope prompt, given the field it is open over.
+pub use prompt::edit_for;
 /// What is drawn where a pointer landed: the footer, a border, the tree's
 /// header, a row of the tree's window, a line of the panel's.
 pub use ui::Hit;
