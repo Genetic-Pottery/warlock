@@ -7,16 +7,25 @@
 //! no other, and [`Watched`] is what decides when the disk moving under the
 //! loop makes that re-read owed. [`note`] is the footer's precedence in one
 //! place: housekeeping lines give way to whatever a run had to say.
+//!
+//! [`sigils_held`] is the last thing settled once and kept: what this machine
+//! holds for the repository, read from the config `warlock config` writes and
+//! stated on the header beside the scope. It is read here and nowhere else, it
+//! cannot fail — a home that will not resolve or a config that will not parse is
+//! a state on that line rather than a reason not to draw a tree — and no reload
+//! re-reads it, because nothing a running warlock does can change it.
 
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::{
-    Loaded, Manifest, ManifestError, Tree, load_tree, manifest_path, repository_root,
+    Loaded, Manifest, ManifestError, SigilError, Tree, load_sigils, load_tree, manifest_path,
+    repository_root,
 };
-use warlock_tui::{App, Watch, WatchPolicy, Watching, reseat_on};
+use warlock_tui::{App, Sigils, Watch, WatchPolicy, Watching, reseat_on};
 
+use crate::config::home_directory;
 use crate::error::{Error, one_line};
 
 /// What the footer says when the reload after a run could not read the tree,
@@ -266,6 +275,50 @@ impl Watched {
     }
 }
 
+/// What this machine holds for the repository at `repo_root`, for the header to
+/// state.
+///
+/// The one place a running warlock reads the sigil config, and it reads it once
+/// — from [`load_app`], before the loop starts. A sigil is written by `warlock
+/// config`, on the ordinary screen with warlock not running, so there is nothing
+/// for a reload to find that this did not; re-reading it every round would be a
+/// file opened ten times a second to answer a question that cannot have changed.
+///
+/// The home directory is resolved here and handed down as a path — see
+/// [`home_directory`], the single point in warlock where the environment becomes
+/// one — which is what lets [`sigils_under`] be tested against a temporary
+/// directory rather than the developer's own.
+///
+/// A home that cannot be resolved reads as nothing held rather than as a config
+/// that would not read. There is no file in that case and no path to name one
+/// by, so [`Sigils::Unknown`] would be claiming that something on disk is broken
+/// when nothing on disk was ever looked at.
+fn sigils_held(repo_root: &Path) -> Sigils {
+    home_directory().map_or(Sigils::Nothing, |home| sigils_under(&home, repo_root))
+}
+
+/// What is held for `repo_root` under `home`, as one of the header's three
+/// states.
+///
+/// Never an error, and this is the whole of the reason it is a function of its
+/// own: what a machine holds is a line on a header, and warlock is a way of
+/// reading a tree. A config that will not parse must not keep the tree off the
+/// screen, so it becomes [`Sigils::Unknown`] — said out loud, so that broken is
+/// never drawn as absent — and nothing here can return upwards to end the event
+/// loop.
+///
+/// The engine's "not found" is the one error that is not a problem (see
+/// [`load_sigils`]) and joins the empty set as [`Sigils::Nothing`]: a machine
+/// that has never run `warlock config` and one that cleared its sigils hold the
+/// same nothing, and the header says nothing about either.
+fn sigils_under(home: &Path, repo_root: &Path) -> Sigils {
+    match load_sigils(home, repo_root) {
+        Ok(sigils) => Sigils::held(sigils),
+        Err(SigilError::NotFound { .. }) => Sigils::Nothing,
+        Err(_) => Sigils::Unknown,
+    }
+}
+
 /// The repository's manifest, or an empty one if it has never pacted anything.
 ///
 /// The same reading of a missing file the loader takes: nothing on disk and
@@ -303,6 +356,13 @@ pub(crate) fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
 /// The root is taken from the loaded tree rather than from the working
 /// directory as typed, so the header names the same path the engine walked.
 ///
+/// The sigil config is read here too, once, and for the same reason the two
+/// paths are resolved here: it is a fact about the machine and the repository
+/// rather than about the frame, and the header states it from the first one on.
+/// It is read through [`sigils_held`], which cannot fail — a missing home or an
+/// unreadable config is a state on that line, never a way out of a function
+/// whose failures end the session before the tree is drawn.
+///
 /// A load that reported problems is refused rather than drawn. The problems
 /// are files Warlock could not read, so the nodes above them are coloured
 /// stale on no evidence; showing that as an ordinary tree would put a colour
@@ -324,7 +384,9 @@ pub(crate) fn load_app() -> Result<(App, Scope, Tree), Error> {
     // reached.
     let repo_root = repository_root(tree.root_path()).unwrap_or(working_dir);
 
-    let app = App::from_tree(&tree).with_scope(&repo_root, tree.root_path());
+    let app = App::from_tree(&tree)
+        .with_scope(&repo_root, tree.root_path())
+        .with_sigils(sigils_held(&repo_root));
     let scope = Scope {
         root: tree.root_path().to_path_buf(),
         repo_root,
@@ -338,9 +400,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::{env, fs, process};
 
-    use warlock_engine::{Manifest, PactEntry, manifest_path};
+    use warlock_engine::{Manifest, PactEntry, manifest_path, save_sigils, sigils_path};
+    use warlock_tui::Sigils;
 
-    use super::load_manifest;
+    use super::{load_manifest, sigils_under};
     use crate::error::Error;
 
     /// A scratch repository root of this module's own, deleted when the test
@@ -422,5 +485,65 @@ mod tests {
             !message.contains('\n'),
             "`main` prints one line, and this wraps: {message}"
         );
+    }
+
+    #[test]
+    fn a_machine_that_never_ran_warlock_config_holds_nothing() {
+        // The ordinary state of a machine, and the one the header says nothing
+        // at all about: no file, no directory, nothing to say.
+        let home = a_dir();
+        let repo = a_dir();
+
+        assert_eq!(sigils_under(home.path(), repo.path()), Sigils::Nothing);
+    }
+
+    #[test]
+    fn the_sigils_on_disk_are_the_sigils_the_header_states() {
+        let home = a_dir();
+        let repo = a_dir();
+        let held = ["billing".to_owned(), "web".to_owned()];
+        save_sigils(home.path(), repo.path(), &held).expect("a config that writes");
+
+        assert_eq!(
+            sigils_under(home.path(), repo.path()),
+            Sigils::Held(held.to_vec())
+        );
+    }
+
+    #[test]
+    fn a_config_holding_the_empty_set_is_the_same_nothing_as_no_config_at_all() {
+        // Clearing a holding puts the header back where it was, rather than
+        // leaving an empty list drawn on it.
+        let home = a_dir();
+        let repo = a_dir();
+        save_sigils(home.path(), repo.path(), &[]).expect("a config that writes");
+
+        assert_eq!(sigils_under(home.path(), repo.path()), Sigils::Nothing);
+    }
+
+    #[test]
+    fn a_config_that_will_not_parse_is_said_rather_than_ending_the_session() {
+        // The whole point of this returning a state instead of a `Result`: a
+        // broken config is a word on a header, never a reason to keep the tree
+        // off the screen — and never drawn as absent, since the two mean
+        // opposite things about what is on disk.
+        let home = a_dir();
+        let repo = a_dir();
+        let path = sigils_path(home.path(), repo.path());
+        fs::create_dir_all(
+            path.parent()
+                .expect("the config lives in a project directory"),
+        )
+        .expect("the project directory");
+        fs::write(&path, "not a config\n").expect("a file that is not TOML");
+
+        assert_eq!(sigils_under(home.path(), repo.path()), Sigils::Unknown);
+    }
+
+    /// A throwaway directory: every test here builds both its home *and* its
+    /// repository root out of these, so nothing in this module reads or writes
+    /// the developer's real home.
+    fn a_dir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("a temporary directory")
     }
 }

@@ -346,7 +346,10 @@ fn read_line() -> Result<Option<String>, Error> {
 /// The only place in warlock that reads either variable: the engine takes a home
 /// as a parameter all the way through, which is what keeps its tests off the
 /// developer's real one, so this is the single point where a process's
-/// environment becomes a path.
+/// environment becomes a path. It is shared with the TUI's own read of the
+/// config — [`sigils_held`](crate::session::sigils_held), which states what is
+/// held on the header — rather than copied there, so the two answer "where is
+/// home" the same way or not at all.
 ///
 /// Read as an `OsString`, since a home directory is a path rather than text and
 /// need not be UTF-8, and an empty value is treated as unset — an exported but
@@ -355,7 +358,7 @@ fn read_line() -> Result<Option<String>, Error> {
 /// # Errors
 ///
 /// [`Error::NoHome`] if neither is set to anything.
-fn home_directory() -> Result<PathBuf, Error> {
+pub(crate) fn home_directory() -> Result<PathBuf, Error> {
     [HOME, USERPROFILE]
         .into_iter()
         .find_map(|variable| env::var_os(variable).filter(|value| !value.is_empty()))
