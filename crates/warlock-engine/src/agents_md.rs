@@ -81,6 +81,26 @@ const END: &str = "<!-- warlock:end -->";
 /// instruction, which is to read the documents first and to treat a stale one
 /// as possibly behind the code it describes.
 ///
+/// Then scopes and sigils, the vocabulary of who a piece of work belongs to: a
+/// pacted directory may carry one scope, recorded in `.warlock/pacts.toml`
+/// beside the grant and shown in the tree; a scope covers everything beneath it
+/// until a nearer one overrides it, so an outer scope is a default rather than
+/// a second gate, and a directory with no scope over it is open to anyone; the
+/// operator may hold several sigils and any one of them opens a matching scope,
+/// which makes access a membership test rather than an expression to evaluate;
+/// `warlock config` prints what is held, and holding nothing means
+/// unrestricted; a scope is a term of the pact, so an unpacted directory cannot
+/// carry one and un-pacting removes one. Its own load-bearing instruction is to
+/// look at the scopes of what a change would touch before making it and to say
+/// plainly when the work crosses a scope the operator does not hold — narrowing
+/// it or naming the sigil it wants, never refusing, blocking or editing around
+/// it.
+///
+/// Nothing here claims that warlock enforces any of that, or that the agent
+/// should: nothing in this workspace matches a sigil against a scope, and a
+/// file that promises a wall warlock does not build is worse than no file,
+/// because the first person to sail through it learns the document lies.
+///
 /// It opens at heading level two: warlock owns a section of a file whose title,
 /// if it has one, belongs to whoever created it.
 ///
@@ -131,7 +151,38 @@ granted. When the digest stops matching, something happened down there and
 the document is owed a look. It never decides that a document is *wrong* —
 whether a particular change warrants a documentation update was always a
 judgement call, and warlock makes the change visible rather than pretending
-to make that call for you.";
+to make that call for you.
+
+## Scopes and sigils
+
+A pacted directory may carry one **scope**: a short label — `data-plane`,
+`billing`, `web` — saying whose work that part of the repository is. Scopes
+live in `.warlock/pacts.toml` beside the grant, and are shown in the tree
+next to the directory they are written on.
+
+A scope covers everything beneath it until a nearer one overrides it. The
+nearest scope at or above a directory is the one that applies, on its own: an
+outer scope is a *default* for everything below it that has said nothing, not
+a second gate to also satisfy. A pacted directory with no scope above it is
+open to anyone.
+
+The other half of the vocabulary is the **sigil**, which is what the operator
+holds. They may hold several, and any one of them opens a matching scope — so
+whether a scope is open to them is a membership test, not an expression to
+evaluate. `warlock config` prints what is held. Holding nothing means
+unrestricted, not shut out.
+
+**A scope is a term of the pact, not a thing beside it.** An unpacted
+directory cannot carry one, and un-pacting a directory takes its scope away
+with the rest of the pact. So a boundary is changed by changing a pact, and
+there is nowhere else to look for one.
+
+**Before planning or making a change, look at what the directories it would
+touch are scoped to, and at what the operator holds.** When the work crosses
+a scope they do not hold, say so plainly, and then either narrow the work to
+what they hold or name the sigil the work wants. Never refuse the work, never
+block it, and never quietly edit around the boundary: saying what is being
+crossed is the whole of the job here.";
 
 /// Warlock's block, markers and all, as it is written into an `AGENTS.md`.
 ///
@@ -443,6 +494,69 @@ mod tests {
     }
 
     #[test]
+    fn the_body_says_the_things_it_exists_to_say_about_scopes_and_sigils() {
+        // Same standard as above, for the second half of the vocabulary: each
+        // phrase is a fact an agent gets wrong by default if nobody says it.
+        for phrase in [
+            "## Scopes and sigils",
+            "may carry one **scope**",
+            "`.warlock/pacts.toml`",
+            "shown in the tree",
+            "covers everything beneath it until a nearer one overrides it",
+            "*default*",
+            "not\na second gate",
+            "open to anyone",
+            "**sigil**",
+            "may hold several",
+            "any one of them opens a matching scope",
+            "membership test, not an expression to\nevaluate",
+            "`warlock config` prints what is held",
+            "unrestricted",
+            "A scope is a term of the pact, not a thing beside it",
+            "unpacted\ndirectory cannot carry one",
+            "un-pacting a directory takes its scope away",
+            "Before planning or making a change",
+            "crosses\na scope they do not hold",
+            "say so plainly",
+            "name the sigil the work wants",
+            "Never refuse the work, never\nblock it",
+            "never quietly edit around the boundary",
+        ] {
+            assert!(BODY.contains(phrase), "the body should mention {phrase:?}");
+        }
+    }
+
+    #[test]
+    fn the_body_promises_no_enforcement() {
+        // Nothing in this workspace matches a sigil against a scope, so the
+        // text must not imply that anything does. A file that promises a wall
+        // warlock does not build is worse than no file: the first person to
+        // sail through it learns the document lies. (The instruction *to* the
+        // agent says "never block" and "never refuse", which is why these are
+        // claim-shaped phrases rather than bare words.)
+        for phrase in [
+            "enforc",
+            "warlock check",
+            "blocks",
+            "blocked",
+            "refuses",
+            "refused",
+            "will refuse",
+            "will block",
+            "checks that",
+            "not allowed",
+            "permission",
+            "exit code",
+            "CI",
+        ] {
+            assert!(
+                !BODY.contains(phrase),
+                "the body should promise no enforcement: {phrase:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_body_offers_no_guidance_on_writing_a_document() {
         // The reason is on the constant: a pacting pass cannot read this file,
         // so anything prompt-shaped here is a second prompt nothing obeys.
@@ -569,6 +683,70 @@ mod tests {
         assert_eq!(theirs, before, "byte for byte");
         assert_eq!(ours, format!("\n{BEGIN}\n\n{BODY}\n\n{END}\n"));
         assert_eq!(listing(repo.path()), [FILE], "and no temporary behind");
+    }
+
+    /// The body as brief 08 shipped it: documents and the three colours, and
+    /// nothing about scopes. Kept verbatim rather than derived from [`BODY`],
+    /// because the point of the test below is that a file written by the *old*
+    /// warlock is brought forward by the new one.
+    const BRIEF_08_BODY: &str = "\
+## Warlock
+
+Warlock is a freshness ledger for a codebase's own documentation. Every
+directory under its management holds a `WARLOCK.md`: a document about that
+one directory — its files, and what the directories below it are for —
+written by a model pass and committed beside the code, like any other source
+file.
+
+**Read the `WARLOCK.md` files first.** They are the fast way into this
+repository: read the ones covering the area you are about to work in before
+you start opening source files.
+
+## What the colours mean
+
+- **Unpacted** — outside warlock's management.
+- **Stale** — pacted, and something at or below it has changed.
+- **Fresh** — pacted, and granted after a model pass read the directory.
+
+There is deliberately no fourth colour.";
+
+    #[test]
+    fn a_brief_08_block_gains_the_new_text_and_disturbs_nothing_around_it() {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        let before = "# AGENTS.md\n\nRun the tests.\n";
+        let after = "\n## Ours\n\nAnd the linter.\n";
+        let old = format!("{before}\n{BEGIN}\n\n{BRIEF_08_BODY}\n\n{END}\n{after}");
+        fs::write(repo.path().join(FILE), &old).expect("writes the file");
+
+        let written = write_agents_md(repo.path()).expect("writes");
+        assert!(matches!(written, Written::Updated { .. }), "{written:?}");
+        let text = fs::read_to_string(written.path()).expect("reads it back");
+
+        // The new section arrived.
+        assert!(text.contains("## Scopes and sigils"), "{text}");
+        assert!(
+            text.contains("`warlock config` prints what is held"),
+            "{text}"
+        );
+        assert!(text.contains(BODY), "the whole current body, not a patch");
+        assert_eq!(text.matches(BEGIN).count(), 1, "still one section: {text}");
+
+        // And every byte outside the markers is exactly as the reader left it.
+        let start = text.find(BEGIN).expect("an opening marker");
+        let finish = text.find(END).expect("a closing marker") + END.len();
+        assert_eq!(&text[..start], &old[..old.find(BEGIN).expect("the same")]);
+        assert_eq!(
+            &text[finish..],
+            &old[old.find(END).expect("the same") + END.len()..]
+        );
+        assert_eq!(listing(repo.path()), [FILE], "and no temporary behind");
+
+        // A second run after the upgrade is still a no-op on the bytes.
+        write_agents_md(repo.path()).expect("writes again");
+        assert_eq!(
+            fs::read_to_string(repo.path().join(FILE)).expect("reads it back"),
+            text
+        );
     }
 
     #[test]
