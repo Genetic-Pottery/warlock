@@ -242,7 +242,9 @@ const LIVE_KEY: &str = "G";
 /// nothing but change what there is to move through — space, which hides a
 /// subtree, `o`, which hides everything Warlock is not managing, and `f`, which
 /// is the one of the three that puts rows on screen rather than taking them
-/// off — and only then the keys that change something.
+/// off — and only then the keys that change something. `s` comes after `p` and
+/// `r` because it is the one of the three that needs a pact to already be
+/// there: nothing on a row `p` has never been pressed on is scopeable.
 ///
 /// Every name here is as short as it can be and still be read: the line is
 /// already wider than an eighty-column terminal, and a key nobody can see
@@ -252,15 +254,24 @@ const LIVE_KEY: &str = "G";
 /// sentence about a toggle.
 ///
 /// The movement names are the shortest of the lot because they are the ones a
-/// reader needs told once. `k/j: move` names the keys that have to be learnt
-/// and leaves the arrows unnamed — they were the same sentence twice, and the
+/// reader needs told once. `k/j: row` names the keys that have to be learnt and
+/// leaves the arrows unnamed — they were the same sentence twice, and the
 /// arrows are what a reader presses before reading anything — and `g/G: ends`
 /// says where the pair go without spelling out which end is which, which the
-/// keys' own order already implies. Those two shortenings are what paid for
-/// `r: refresh`; see [`MAX_KEYS_WIDTH`].
-const KEYS: &str = "k/j: move    PgUp/PgDn: page    g/G: ends    \
-                    space: collapse    o: pacted    f: files    p: pact    \
-                    r: refresh";
+/// keys' own order already implies. `PgUp/PgDn` carries no label at all for the
+/// same reason: its label was the word already inside the keys' own names, and
+/// a name that repeats itself is the cheapest kind of column to give up. The
+/// three of them read as the granularities they are — a row, a page, the ends —
+/// which is the order the group is in anyway.
+///
+/// Those shortenings are what paid for the keys that came later: `r: refresh`
+/// was bought with `up/down k/j: move` and `g/G: first/last`, and `s: scope`
+/// with `k/j: move` → `k/j: row`, `PgUp/PgDn: page` → `PgUp/PgDn`,
+/// `space: collapse` → `space: fold` and `o: pacted` → `o: pacts` — twelve
+/// columns for a twelve-column key. See [`MAX_KEYS_WIDTH`].
+const KEYS: &str = "k/j: row    PgUp/PgDn    g/G: ends    \
+                    space: fold    o: pacts    f: files    p: pact    \
+                    r: refresh    s: scope";
 
 /// What separates one key's name from the next on the keys line.
 ///
@@ -301,7 +312,11 @@ const QUIT_KEY: &str = "q/Esc/Ctrl-C: quit";
 /// paid for out of the names already on the line — shorten them until the new
 /// one fits — and a key that cannot be afforded that way is a key the line has
 /// no room for. `r: refresh` was bought with `up/down k/j: move` and
-/// `g/G: first/last`; see [`KEYS`].
+/// `g/G: first/last`; `s: scope`, and the gap in front of it, cost twelve
+/// columns and was bought with four more of the same kind — `k/j: move` →
+/// `k/j: row`, `PgUp/PgDn: page` → `PgUp/PgDn`, `space: collapse` →
+/// `space: fold` and `o: pacted` → `o: pacts`. See [`KEYS`], which records
+/// which shortening paid for what.
 ///
 /// Known defect, recorded rather than fixed here: 148 columns is already wider
 /// than an eighty-column terminal, and what falls off such a terminal is the
@@ -2663,7 +2678,7 @@ mod tests {
             // nothing to say, which is the whole of this walk.
             assert!(
                 footer.iter().any(|line| line.contains("unpacted"))
-                    && footer.iter().any(|line| line.contains("move")),
+                    && footer.iter().any(|line| line.contains("k/j: row")),
                 "footer {footer:?} at selection {selected}"
             );
             assert!(
@@ -2750,20 +2765,23 @@ mod tests {
         assert_eq!(keys, keys_line(app.mouse_captured()));
         // "p: pact" and not the bare "p", which "PgUp" would satisfy.
         for key in [
-            "k/j: move",
+            "k/j: row",
+            // The page keys carry no label of their own: the word was already
+            // in the keys' names, and those columns bought `s: scope`.
             "PgUp",
             "PgDn",
-            "page",
             "g/G: ends",
             // Named, not left to be discovered: the three keys that change what
             // there is to scroll through.
-            "space: collapse",
-            "o: pacted",
+            "space: fold",
+            "o: pacts",
             "f: files",
             "p: pact",
             // The two keys that run passes, next to each other because the
-            // question they answer is the same one.
+            // question they answer is the same one, and then the key that needs
+            // one of them to have been pressed already.
             "r: refresh",
+            "s: scope",
             // The mouse key, named by what pressing it does next rather than by
             // the state it is in: see
             // `the_keys_line_names_the_mouse_key_by_what_the_next_press_does`.
@@ -3057,6 +3075,17 @@ mod tests {
                  for by shortening the names already on the line, not by \
                  letting it grow — {line:?}"
             );
+            // And the newest key is on the line in both states, whole: the
+            // budget is kept by shortening other names, so a `s: scope` that
+            // went missing to make room would be the wrong way to pass this.
+            assert!(
+                line.contains("s: scope"),
+                "the keys line does not name `s` with mouse capture \
+                 {captured} — {line:?}"
+            );
+            // Nor did the quit key pay for it: it is still whole and still the
+            // last thing on the line, which is where a stuck reader looks.
+            assert!(line.ends_with(QUIT_KEY), "{line:?}");
         }
     }
 
