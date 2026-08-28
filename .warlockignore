@@ -1,0 +1,10 @@
+# What Warlock is not about in this repository.
+#
+# gitignore syntax: a leading slash anchors to this directory, a trailing
+# slash matches directories only.
+
+# Prose about Warlock, not the code a document is written from.
+/docs/
+
+# Images and other binary content no summary is written from.
+/assets/
