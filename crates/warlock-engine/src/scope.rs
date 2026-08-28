@@ -51,6 +51,30 @@ use crate::manifest::{Error as ManifestError, Manifest, ROOT_MODULE, to_manifest
 /// shorter than a sentence.
 const MAXIMUM_CHARACTERS: usize = 24;
 
+/// The rules a scope keeps, as one line, for a prompt to show before anything
+/// has been typed.
+///
+/// Here rather than wherever a scope is asked for, because it is a *statement of
+/// [`validate_scope`]* and belongs beside it: a window that spelled the ceiling
+/// or the character class out for itself would be a second copy of the rules,
+/// free to drift from the one that actually judges, and the caller that showed
+/// it would be judging a scope in the act of describing one. Every caller that
+/// asks for a scope shows this same line, so the prompt, `warlock config` and
+/// anything else that grows one all say the same thing.
+///
+/// The length and the character class, and not the two rules about the ends.
+/// The line sits over a field somebody is about to type into, and what it is for
+/// is that they type something acceptable first time; "begins with a letter" and
+/// "does not end with `-` or `_`" are rules a name that follows this one breaks
+/// about once in a hundred, and [`Rule`] has a line ready for the moment either
+/// is broken. A hint long enough to need reading twice is not read once.
+///
+/// The maximum is spelled out rather than interpolated — a `const` cannot format
+/// one — and a test below holds the two together, so a changed
+/// [`MAXIMUM_CHARACTERS`] fails here rather than quietly leaving a window
+/// promising a number the validator stopped keeping.
+pub const RULES: &str = "1 to 24 characters: lowercase letters, digits, `-` and `_`";
+
 /// The wildcard sigil: "may work anywhere".
 ///
 /// Spelled once, here, so the one place that accepts it and any future place
@@ -331,7 +355,8 @@ fn is_separator(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAXIMUM_CHARACTERS, Rule, at_or_above, scope_covering, validate_scope, validate_sigil,
+        MAXIMUM_CHARACTERS, RULES, Rule, at_or_above, is_scope_character, scope_covering,
+        validate_scope, validate_sigil,
     };
     use crate::{Manifest, PactEntry};
 
@@ -669,5 +694,30 @@ mod tests {
         );
         assert_eq!(at_or_above("crates").collect::<Vec<_>>(), ["crates", "."]);
         assert_eq!(at_or_above(".").collect::<Vec<_>>(), ["."]);
+    }
+
+    #[test]
+    fn the_rules_line_states_the_rules_it_is_about() {
+        // The line is shown over a field somebody is typing a scope into, so a
+        // ceiling or a character class that drifted from the validator would be
+        // a promise the next keystroke breaks.
+        assert!(
+            RULES.contains(&MAXIMUM_CHARACTERS.to_string()),
+            "the line does not name the maximum it is about: {RULES:?}"
+        );
+        for described in ['-', '_'] {
+            assert!(RULES.contains(described), "{described:?} is not named");
+            assert!(is_scope_character(described));
+        }
+        // And what it describes is accepted, character for character: a name
+        // built out of exactly what the line names, at exactly the length it
+        // promises, is a scope.
+        let promised = format!("{}a-9_z", of_length(MAXIMUM_CHARACTERS - 5));
+        assert_eq!(promised.chars().count(), MAXIMUM_CHARACTERS);
+        assert_eq!(
+            validate_scope(&promised),
+            Ok(()),
+            "the line promises {promised:?} is a scope"
+        );
     }
 }

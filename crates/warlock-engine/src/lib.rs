@@ -185,6 +185,10 @@ pub use pact::refresh_subtree;
 /// leave every `WARLOCK.md` on disk, byte for byte. Returns the manifest to save
 /// and saves nothing itself.
 pub use pact::unpact_subtree;
+/// The rules a scope keeps, as one line for a prompt to show before anything is
+/// typed: the length and the character class, worded here so that nothing that
+/// asks for a scope has to describe one for itself.
+pub use scope::RULES as SCOPE_RULES;
 /// The one rule a string broke on its way to not being a scope, renderable as
 /// a single line for a prompt to refuse with or a load to report.
 pub use scope::Rule as ScopeRule;

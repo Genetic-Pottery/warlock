@@ -168,7 +168,7 @@ use std::{env, io};
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use ratatui::crossterm::execute;
 use warlock_engine::{Written, repository_root, write_agents_md};
-use warlock_tui::{ClaudeAgent, Focus, QuitConfirm, draw, panel_height, tree_height};
+use warlock_tui::{ClaudeAgent, Focus, QuitConfirm, ScopePrompt, draw, panel_height, tree_height};
 
 mod config;
 mod error;
@@ -449,6 +449,20 @@ fn run() -> Result<(), Error> {
     // makes "answering No leaves the app exactly as it was" true by
     // construction: the app is never told the question was asked.
     let mut confirm = QuitConfirm::default();
+    // The other question this loop can be carrying: the scope prompt, closed as
+    // every session starts, and here for the reason the gate is — it is state
+    // about this keystroke and the next one, and an `App` that has never heard
+    // of it is an `App` that Esc cannot have changed.
+    //
+    // Not `mut` yet, and drawn without ever being opened: the key that opens it
+    // is a slice of its own, and a `mut` on a binding nothing assigns to is a
+    // warning this workspace treats as an error. The frame it makes while it is
+    // closed is the frame warlock has always drawn.
+    //
+    // `prompt` and not `scope`: the `scope` this function already holds is the
+    // session's — the repo root and what warlock was pointed at — and two things
+    // by that name in one loop is one of them being read as the other.
+    let prompt = ScopePrompt::default();
 
     loop {
         // Told before it is drawn, and every frame rather than on resize: the
@@ -479,10 +493,12 @@ fn run() -> Result<(), Error> {
         // The gate on the way out is handed in beside the app because the app
         // has never heard of it (see `QuitConfirm`): closed, it changes nothing
         // about the frame; open, it is a small window drawn over the middle of
-        // it with everything behind it cleared.
+        // it with everything behind it cleared. The scope prompt goes in beside
+        // it for the same reason and is drawn the same way — by reference, since
+        // it carries the text somebody is typing.
         guard
             .terminal
-            .draw(|frame| draw(frame, &app, Instant::now(), confirm))?;
+            .draw(|frame| draw(frame, &app, Instant::now(), confirm, &prompt))?;
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
         // sits here, so the wait has to end whether or not anybody presses
