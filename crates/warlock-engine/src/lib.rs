@@ -184,6 +184,15 @@ pub use pact::unpact_subtree;
 /// The one rule a string broke on its way to not being a scope, renderable as
 /// a single line for a prompt to refuse with or a load to report.
 pub use scope::Rule as ScopeRule;
+/// The scope covering a path: the one on the nearest pacted directory at or
+/// above it that carries a valid scope, and at most one — nearest wins, so an
+/// inner scope replaces an outer one outright and the outer one is a *default*
+/// for what has said nothing below it, never a second gate to also satisfy. A
+/// scope [`validate_scope`] refuses is stepped over as if it were not written,
+/// so the answer is never a string that is not a scope. Nothing in this
+/// workspace calls it yet: it exists so the matcher has one home when it is
+/// written, rather than three callers each walking up the tree their own way.
+pub use scope::scope_covering;
 /// Whether a string is a scope a pacted directory may carry: 1 to 24
 /// characters of ASCII lowercase letters, digits, `-` and `_`, beginning with a
 /// letter and not ending with a separator. Judges only — it never lower-cases,

@@ -48,6 +48,15 @@ const MANIFEST_DIR: &str = ".warlock";
 /// The manifest's file name inside [`MANIFEST_DIR`].
 const MANIFEST_FILE: &str = "pacts.toml";
 
+/// How the repository root itself is spelled as a stored path, per
+/// [`to_manifest_path`]: the one module that is an ancestor of every other.
+///
+/// Spelled once, here, because two things walk stored paths against each other
+/// — un-pacting a subtree and asking which scope covers a path — and a root
+/// that meant `"."` to one of them and something else to the other would make
+/// them disagree about the one directory everything sits under.
+pub(crate) const ROOT_MODULE: &str = ".";
+
 /// The schema version this build reads and writes.
 ///
 /// A manifest carrying any other version is rejected outright with
@@ -622,7 +631,7 @@ pub fn to_manifest_path(root: impl AsRef<Path>, path: impl AsRef<Path>) -> Resul
 
     if parts.is_empty() {
         // `root` itself: the repository root can be a pacted module too.
-        return Ok(".".to_owned());
+        return Ok(ROOT_MODULE.to_owned());
     }
     Ok(parts.join("/"))
 }

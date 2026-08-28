@@ -33,11 +33,15 @@
 //!
 //! # Nothing here enforces anything
 //!
-//! A scope is a label. This module says whether a label is well formed; it has
-//! no opinion on who may work where, and nothing in this crate matches a scope
-//! against anything.
+//! A scope is a label. This module says whether a label is well formed, and —
+//! in [`scope_covering`] — which label a given path sits under; it has no
+//! opinion on who may work where, and nothing in this crate matches a scope
+//! against a person, a sigil or a change.
 
 use std::fmt;
+use std::path::Path;
+
+use crate::manifest::{Error as ManifestError, Manifest, ROOT_MODULE, to_manifest_path};
 
 /// The most characters a scope may hold.
 ///
@@ -199,6 +203,114 @@ pub fn validate_sigil(sigil: &str) -> Result<(), Rule> {
     validate_scope(sigil)
 }
 
+/// The scope covering `path`: the one written on the nearest directory at or
+/// above it that carries a valid one, or `None` if no such directory exists.
+///
+/// `path` may be a file or a directory, absolute or relative to `root`, and
+/// `root` is the repository root the manifest's paths are relative to. Nothing
+/// here touches the filesystem: `path` is put into the manifest's own
+/// forward-slash form and walked upwards against the stored module paths, so a
+/// path that does not exist on disk still answers, and a scope on
+/// `crates/engine` does not cover `crates/engine-tools` — the walk is
+/// segment-wise, like [`unpact_subtree`](crate::unpact_subtree)'s, never a
+/// textual prefix.
+///
+/// # Nearest wins, and one answer only
+///
+/// The signature holds at most one scope, and that is the design rather than a
+/// simplification to be relaxed later. Walking up stops at the first valid
+/// scope: an inner scope replaces an outer one outright, and the outer one is a
+/// *default* for everything below it that has said nothing — not a second gate
+/// to also satisfy. There is no accumulating, no "needs both", and no list.
+///
+/// # An invalid scope is stepped over
+///
+/// A scope that [`validate_scope`] refuses reads as no scope, exactly as it
+/// does everywhere else: the walk carries on past it to the next ancestor that
+/// has a valid one, or off the top to `None`. So this never hands back a string
+/// that is not a scope, and one typo in a hand-edited manifest widens the
+/// boundary to its parent's rather than inventing a boundary nobody wrote.
+///
+/// # Nothing calls this yet
+///
+/// It exists so that the matcher, when it is written, has one home to ask from
+/// rather than three callers each walking up the tree their own way. No
+/// enforcement in this workspace reads its answer.
+///
+/// ```
+/// use warlock_engine::{Manifest, PactEntry, scope_covering};
+///
+/// let manifest = Manifest::with_entries([
+///     PactEntry::new(".", "crates", "crates/WARLOCK.md")?.with_scope("platform"),
+///     PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?.with_scope("data-plane"),
+///     PactEntry::new(".", "crates/engine-tools", "crates/engine-tools/WARLOCK.md")?,
+/// ]);
+///
+/// // The nearest scoped ancestor wins, and a directory answers with its own.
+/// assert_eq!(scope_covering("crates/engine/src/lib.rs", ".", &manifest)?, Some("data-plane"));
+/// assert_eq!(scope_covering("crates/engine", ".", &manifest)?, Some("data-plane"));
+/// // A sibling that merely shares a prefix is not below it: `crates` covers this.
+/// assert_eq!(scope_covering("crates/engine-tools/src", ".", &manifest)?, Some("platform"));
+/// // Nothing at or above it carries a scope.
+/// assert_eq!(scope_covering("docs/adr", ".", &manifest)?, None);
+/// # Ok::<(), warlock_engine::ManifestError>(())
+/// ```
+///
+/// # Errors
+///
+/// [`ManifestError::PathOutsideRoot`] or [`ManifestError::NonUtf8Path`] if
+/// `path` has no manifest-relative form, i.e. it does not sit under `root` or
+/// cannot be spelled as text. Such a path is not unscoped — it is a path this
+/// manifest has nothing to say about at all, and saying so beats answering
+/// "open to anyone" for a file that was never in the repository.
+pub fn scope_covering(
+    path: impl AsRef<Path>,
+    root: impl AsRef<Path>,
+    manifest: &Manifest,
+) -> Result<Option<&str>, ManifestError> {
+    let stored = to_manifest_path(root, path)?;
+    Ok(at_or_above(&stored).find_map(|module| valid_scope_on(manifest, module)))
+}
+
+/// The scope written on the module stored at `module`, if it has an entry, if
+/// that entry carries a scope, and if that scope is one.
+///
+/// The three "if"s collapse to the same answer — `None`, meaning this directory
+/// says nothing and the walk goes on — which is what makes an invalid scope
+/// indistinguishable from an absent one to every caller.
+fn valid_scope_on<'manifest>(
+    manifest: &'manifest Manifest,
+    module: &str,
+) -> Option<&'manifest str> {
+    manifest
+        .entry(module)?
+        .scope()
+        .filter(|scope| validate_scope(scope).is_ok())
+}
+
+/// The stored path `stored` and every stored path above it, nearest first,
+/// ending at [`ROOT_MODULE`].
+///
+/// Segments are cut at `/`, which is what keeps this segment-wise rather than
+/// textual: the ancestors of `crates/engine-tools` are `crates` and `.`, and
+/// `crates/engine` is never among them however much of a prefix it looks like.
+fn at_or_above(stored: &str) -> impl Iterator<Item = &str> {
+    let mut next = Some(stored);
+    std::iter::from_fn(move || {
+        let current = next?;
+        next = match current.rsplit_once('/') {
+            // A path with a parent segment: `crates/engine` above
+            // `crates/engine/src`.
+            Some((parent, _)) => Some(parent),
+            // A single segment sits directly under the root, and the root sits
+            // under nothing.
+            None if current == ROOT_MODULE => None,
+            None => Some(ROOT_MODULE),
+        };
+        Some(current)
+    })
+}
+
 /// Whether `character` may appear anywhere in a scope.
 ///
 /// ASCII lowercase, digits and the two separators, and deliberately nothing
@@ -218,7 +330,22 @@ fn is_separator(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAXIMUM_CHARACTERS, Rule, validate_scope, validate_sigil};
+    use super::{
+        MAXIMUM_CHARACTERS, Rule, at_or_above, scope_covering, validate_scope, validate_sigil,
+    };
+    use crate::{Manifest, PactEntry};
+
+    /// An entry for `module`, documented the way a pact would document it.
+    fn entry(module: &str) -> PactEntry {
+        PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+            .expect("a relative module path is inside the root")
+    }
+
+    /// The scope covering `path` in `manifest`, for paths the manifest can
+    /// always spell.
+    fn covering<'manifest>(path: &str, manifest: &'manifest Manifest) -> Option<&'manifest str> {
+        scope_covering(path, ".", manifest).expect("a relative path is inside the root")
+    }
 
     /// A scope of exactly `characters` characters, all of them legal: a letter
     /// and then digits, so the beginning and ending rules are satisfied and
@@ -389,5 +516,158 @@ mod tests {
             assert!(!line.is_empty(), "{rule:?} renders as nothing");
             assert!(!line.contains('\n'), "{rule:?} renders as more than a line");
         }
+    }
+
+    #[test]
+    fn an_inner_scope_overrides_the_one_above_it() {
+        let manifest = Manifest::with_entries([
+            entry("crates").with_scope("platform"),
+            entry("crates/engine").with_scope("data-plane"),
+        ]);
+
+        // Nearest wins: the outer scope is a default for what has said nothing,
+        // not a second boundary the inner one is added to.
+        assert_eq!(
+            covering("crates/engine/src/lib.rs", &manifest),
+            Some("data-plane")
+        );
+        assert_eq!(covering("crates/engine", &manifest), Some("data-plane"));
+        assert_eq!(covering("crates/tui/src", &manifest), Some("platform"));
+    }
+
+    #[test]
+    fn a_directory_answers_with_its_own_scope() {
+        let manifest = Manifest::with_entries([entry("crates/engine").with_scope("data-plane")]);
+
+        assert_eq!(covering("crates/engine", &manifest), Some("data-plane"));
+    }
+
+    #[test]
+    fn a_path_nothing_covers_has_no_scope() {
+        let manifest = Manifest::with_entries([entry("crates/engine").with_scope("data-plane")]);
+
+        assert_eq!(covering("docs/adr/0001.md", &manifest), None);
+        assert_eq!(covering("docs", &manifest), None);
+        assert_eq!(covering(".", &manifest), None);
+        // An empty manifest covers nothing, including the root itself.
+        assert_eq!(covering("crates/engine", &Manifest::new()), None);
+        assert_eq!(covering(".", &Manifest::new()), None);
+    }
+
+    #[test]
+    fn an_unscoped_entry_in_the_way_is_walked_straight_past() {
+        let manifest = Manifest::with_entries([
+            entry("crates").with_scope("platform"),
+            entry("crates/engine"),
+        ]);
+
+        // A pacted directory with no scope is not a boundary of its own, so the
+        // answer comes from above it.
+        assert_eq!(covering("crates/engine/src", &manifest), Some("platform"));
+    }
+
+    #[test]
+    fn an_invalid_scope_is_stepped_over_for_the_next_valid_ancestor() {
+        for invalid in [
+            "",
+            "1data",
+            "data-",
+            "*",
+            "Data-Plane",
+            "données",
+            &of_length(25),
+        ] {
+            let manifest = Manifest::with_entries([
+                entry("crates").with_scope("platform"),
+                entry("crates/engine").with_scope(invalid),
+            ]);
+
+            assert_eq!(
+                covering("crates/engine/src/lib.rs", &manifest),
+                Some("platform"),
+                "`{invalid}` should read as no scope and fall through"
+            );
+            assert_eq!(
+                covering("crates/engine", &manifest),
+                Some("platform"),
+                "`{invalid}` should read as no scope on its own directory too"
+            );
+        }
+    }
+
+    #[test]
+    fn an_invalid_scope_with_nothing_valid_above_it_covers_nothing() {
+        let manifest = Manifest::with_entries([
+            entry("crates").with_scope("Platform"),
+            entry("crates/engine").with_scope("data-"),
+        ]);
+
+        // Two typos and no valid scope anywhere above: unscoped, and never one
+        // of the two strings that are not scopes.
+        assert_eq!(covering("crates/engine/src/lib.rs", &manifest), None);
+        assert_eq!(covering("crates", &manifest), None);
+    }
+
+    #[test]
+    fn a_sibling_that_shares_a_prefix_is_not_covered() {
+        let manifest = Manifest::with_entries([
+            entry("crates/engine").with_scope("data-plane"),
+            entry("crates/engine-tools"),
+        ]);
+
+        // Textual prefix matching would hand `data-plane` to both of these.
+        assert_eq!(covering("crates/engine-tools", &manifest), None);
+        assert_eq!(covering("crates/engine-tools/src/main.rs", &manifest), None);
+        assert_eq!(covering("crates/engineer", &manifest), None);
+    }
+
+    #[test]
+    fn a_scope_on_the_root_covers_everything_below_it() {
+        let manifest = Manifest::with_entries([
+            entry(".").with_scope("whole-repo"),
+            entry("crates/engine").with_scope("data-plane"),
+        ]);
+
+        assert_eq!(covering(".", &manifest), Some("whole-repo"));
+        assert_eq!(covering("docs/adr", &manifest), Some("whole-repo"));
+        assert_eq!(covering("crates/engine/src", &manifest), Some("data-plane"));
+    }
+
+    #[test]
+    fn an_absolute_path_under_the_root_answers_the_same_as_a_relative_one() {
+        let manifest = Manifest::with_entries([entry("crates/engine").with_scope("data-plane")]);
+        let root = std::path::Path::new("/repo");
+
+        let covered = scope_covering(
+            root.join("crates").join("engine").join("src"),
+            root,
+            &manifest,
+        )
+        .expect("a path under the root has a manifest-relative form");
+        assert_eq!(covered, Some("data-plane"));
+    }
+
+    #[test]
+    fn a_path_outside_the_root_is_an_error_rather_than_unscoped() {
+        let manifest = Manifest::with_entries([entry(".").with_scope("whole-repo")]);
+
+        // Not "open to anyone": this manifest has nothing to say about it.
+        assert!(scope_covering("../elsewhere", ".", &manifest).is_err());
+    }
+
+    #[test]
+    fn ancestors_are_nearest_first_and_end_at_the_root() {
+        assert_eq!(
+            at_or_above("crates/engine/src/lib.rs").collect::<Vec<_>>(),
+            [
+                "crates/engine/src/lib.rs",
+                "crates/engine/src",
+                "crates/engine",
+                "crates",
+                "."
+            ]
+        );
+        assert_eq!(at_or_above("crates").collect::<Vec<_>>(), ["crates", "."]);
+        assert_eq!(at_or_above(".").collect::<Vec<_>>(), ["."]);
     }
 }

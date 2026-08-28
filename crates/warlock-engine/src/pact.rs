@@ -339,7 +339,7 @@ use std::str::Utf8Error;
 use ignore::WalkBuilder;
 
 use crate::ignores;
-use crate::manifest::{temp_file_name, write_and_sync};
+use crate::manifest::{ROOT_MODULE, temp_file_name, write_and_sync};
 use crate::{
     Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, HashError, Manifest,
     ManifestError, NodeState, PactEntry, decide_state, now_rfc3339, subtree_hash, to_manifest_path,
@@ -390,10 +390,6 @@ const SUMMARY_KEY_CONTEXT: &str = "warlock summary cache key v1 2026-08-26";
 /// The document a directory is described by, and the only file name a child
 /// directory contributes to its parent's request.
 const DOCUMENT_FILE: &str = "WARLOCK.md";
-
-/// How the repository root itself is spelled as a stored module path, per
-/// [`to_manifest_path`]: the one module that is an ancestor of every other.
-const ROOT_MODULE: &str = ".";
 
 /// How deep the walk goes: the directory itself (0), its own files and its
 /// immediate children (1), and the files directly inside those children (2),
