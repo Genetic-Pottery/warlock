@@ -23,7 +23,7 @@ use warlock_engine::{
     Loaded, Manifest, ManifestError, SigilError, Tree, load_sigils, load_tree, manifest_path,
     repository_root,
 };
-use warlock_tui::{App, Sigils, Watch, WatchPolicy, Watching, reseat_on};
+use warlock_tui::{App, Chrome, Sigils, Watch, WatchPolicy, Watching, reseat_on};
 
 use crate::config::home_directory;
 use crate::error::{Error, one_line};
@@ -56,11 +56,13 @@ pub(crate) const NOT_WATCHING: &str = "live updates are off; the tree is the one
 /// Re-read the tree at `scope` from disk and put the view back on top of it.
 ///
 /// Two calls and no judgement of its own: [`load_tree`] for what is on disk now,
-/// and [`reseat_on`] to carry the reader's selection, collapsed set, filters,
-/// window and footer across to it. The header is re-derived the way
-/// [`load_app`] derives it, from the repository root and the root the new tree
-/// came back rooted at, so the line at the top names the tree the engine just
-/// walked rather than the one it walked at startup.
+/// and [`reseat_on`] to carry the reader's viewpoint, footer and panel across to
+/// it. The header is not among them and is not re-derived either — it is the
+/// [`Chrome`] on the [`Scope`] this function was handed, resolved once at
+/// startup from a pair of roots that cannot change while warlock runs, and
+/// nothing here touches it. It used to be carried by [`reseat_on`] and then
+/// immediately overwritten by the line below, which is two ways of moving a fact
+/// that never moves.
 ///
 /// Called on the event loop's thread and on no other. A worker thread must never
 /// reach in here: it would be reading a tree while the thread that draws it is
@@ -94,7 +96,7 @@ pub(crate) const NOT_WATCHING: &str = "live updates are off; the tree is the one
 pub(crate) fn reload_tree(app: &mut App, scope: &Scope) -> Option<Tree> {
     match load_tree(&scope.root) {
         Ok(Loaded { tree, problems }) => {
-            *app = reseat_on(app, &tree).with_scope(&scope.repo_root, tree.root_path());
+            *app = reseat_on(app, &tree);
             // The same count, in the same words, as the startup load that
             // refuses to draw a tree with problems in it: one problem quoted
             // and the rest counted. A node the engine could not hash is
@@ -148,6 +150,14 @@ pub(crate) struct Scope {
     pub(crate) root: PathBuf,
     /// The repository root above `root`: the nearest ancestor with a `.git/`.
     pub(crate) repo_root: PathBuf,
+    /// What the header line states about the pair above: the tree's identity,
+    /// and what this machine holds for the repository it came out of.
+    ///
+    /// Here rather than on the [`App`] for the reason the two paths are here:
+    /// it is resolved once and cannot change while warlock runs, so an app that
+    /// is rebuilt on every reload has no business carrying it. The renderer is
+    /// handed it directly — see [`warlock_tui::draw`].
+    pub(crate) chrome: Chrome,
 }
 
 /// Everything the loop keeps about the disk moving under it.
@@ -384,12 +394,18 @@ pub(crate) fn load_app() -> Result<(App, Scope, Tree), Error> {
     // reached.
     let repo_root = repository_root(tree.root_path()).unwrap_or(working_dir);
 
-    let app = App::from_tree(&tree)
-        .with_scope(&repo_root, tree.root_path())
-        .with_sigils(sigils_held(&repo_root));
+    let app = App::from_tree(&tree);
+    // Resolved here and nowhere else. Neither half of the header line can
+    // change under a running warlock — the roots are fixed for the session and a
+    // sigil is written with warlock not running — so it is built once, kept
+    // beside the roots it was built from, and handed to the renderer every
+    // frame. A reload does not touch it, which is why `reseat_on` no longer
+    // carries it and `reload_tree` no longer puts it back afterwards.
+    let chrome = Chrome::of(&repo_root, tree.root_path()).with_sigils(sigils_held(&repo_root));
     let scope = Scope {
         root: tree.root_path().to_path_buf(),
         repo_root,
+        chrome,
     };
     Ok((app, scope, tree))
 }
@@ -401,10 +417,42 @@ mod tests {
     use std::{env, fs, process};
 
     use warlock_engine::{Manifest, PactEntry, manifest_path, save_sigils, sigils_path};
-    use warlock_tui::Sigils;
+    use warlock_tui::{Chrome, Sigils};
 
-    use super::{load_manifest, sigils_under};
+    use super::{Scope, load_manifest, sigils_under};
     use crate::error::Error;
+
+    #[test]
+    fn what_is_held_survives_a_reload_because_a_reload_never_touches_it() {
+        // The claim this used to make about `App`, made where it now lives. The
+        // config is read once, before the loop starts, and a reload is a tree
+        // being read again rather than a machine changing what it holds — so a
+        // header that stopped stating a holding after a run would read as one
+        // dropped.
+        //
+        // What changed is how it is kept true. It used to be `reseat_on`
+        // remembering to carry two more fields; it is now that the fact is not
+        // on the app at all, so there is nothing for a reload to carry or drop.
+        // `reload_tree` reads `scope.chrome` and writes it nowhere.
+        let scope = Scope {
+            root: PathBuf::from("/repo/crates"),
+            repo_root: PathBuf::from("/repo"),
+            chrome: Chrome::of("/repo", "/repo/crates")
+                .with_sigils(Sigils::held(["billing", "web"])),
+        };
+
+        // A load from a path that is not there fails, which is the arm that
+        // keeps the tree already drawn — and the arm that would be the last
+        // chance to lose a header if one could still be lost here.
+        let mut app = warlock_tui::App::default();
+        assert_eq!(super::reload_tree(&mut app, &scope), None);
+
+        assert_eq!(scope.chrome.header(), "crates");
+        assert_eq!(
+            scope.chrome.sigils(),
+            &Sigils::Held(vec!["billing".to_owned(), "web".to_owned()])
+        );
+    }
 
     /// A scratch repository root of this module's own, deleted when the test
     /// drops it. `load_manifest` is entirely about what is and is not on

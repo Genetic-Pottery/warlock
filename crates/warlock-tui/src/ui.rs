@@ -67,7 +67,7 @@ use warlock_engine::{NodeState, SCOPE_RULES};
 // and the account's `Line` is what a row says. Both names are right where they
 // live, and this module is the one place both are in scope.
 use crate::account::{Account, Line as Entry};
-use crate::app::{App, Focus, Row};
+use crate::app::{App, Chrome, Focus, Row};
 use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
 use crate::confirm::{Answer, QuitConfirm};
 use crate::prompt::{ScopeField, ScopePrompt};
@@ -607,6 +607,7 @@ const SCOPE_HEIGHT: u16 = SCOPE_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICK
 pub fn draw(
     frame: &mut Frame<'_>,
     app: &App,
+    chrome: &Chrome,
     now: Instant,
     confirm: QuitConfirm,
     scope: &ScopePrompt,
@@ -619,7 +620,7 @@ pub fn draw(
     } = areas(screen);
 
     draw_panel(frame, panel, app, now);
-    draw_tree_pane(frame, tree, app, now);
+    draw_tree_pane(frame, tree, app, chrome, now);
     draw_footer(frame, footer, app);
 
     if let Some(highlighted) = confirm.highlighted() {
@@ -1080,13 +1081,13 @@ fn display_width(text: &str) -> usize {
 ///
 /// `now` is only passed through: nothing about the border or the header moves
 /// with the clock, and the rows under them do — see [`draw_tree`].
-fn draw_tree_pane(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
+fn draw_tree_pane(frame: &mut Frame<'_>, area: Rect, app: &App, chrome: &Chrome, now: Instant) {
     let inner = pane_inner(area);
     frame.render_widget(pane_block(app.focus() == Focus::Tree), area);
 
     let [header_area, rows_area] =
         Layout::vertical([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)]).areas(inner);
-    draw_header(frame, header_area, app);
+    draw_header(frame, header_area, chrome);
     draw_tree(frame, rows_area, app, now);
 }
 
@@ -1097,9 +1098,9 @@ fn draw_tree_pane(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
 /// means a node state and the header is not a node — and a holding is not one
 /// either, so it is drawn in the header's own weight rather than picking up a
 /// colour or a mark of its own.
-fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn draw_header(frame: &mut Frame<'_>, area: Rect, chrome: &Chrome) {
     frame.render_widget(
-        Paragraph::new(Line::from(header_line(app, usize::from(area.width))).bold()),
+        Paragraph::new(Line::from(header_line(chrome, usize::from(area.width))).bold()),
         area,
     );
 }
@@ -1108,7 +1109,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// what this machine holds stated after it when there is room for both.
 ///
 /// Two facts of unequal standing, and this function is the whole of the
-/// inequality. The identity — the module [`App::with_scope`] worded, which is
+/// inequality. The identity — the module [`Chrome::of`] worded, which is
 /// the answer to "what am I looking at" — is written out as it stands, whatever
 /// the width; the holding is offered the room left over and dropped entirely
 /// when it does not fit. Dropped rather than cut, because half a set of sigils
@@ -1126,9 +1127,9 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// holds nothing gets the identity and nothing else, byte for byte the line it
 /// got before this existed — including the empty one a tree rooted at the
 /// repository root draws.
-fn header_line(app: &App, width: usize) -> String {
-    let identity = app.header();
-    let Some(holding) = app.sigils().line() else {
+fn header_line(chrome: &Chrome, width: usize) -> String {
+    let identity = chrome.header();
+    let Some(holding) = chrome.sigils().line() else {
         return identity.to_owned();
     };
 
@@ -1764,7 +1765,7 @@ mod tests {
         tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::account::Outcome;
-    use crate::app::{App, Row, Sigils};
+    use crate::app::{App, Chrome, Row, Sigils};
     use crate::claude::Activity;
     use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
     use crate::confirm::{Answer, QuitConfirm};
@@ -2080,17 +2081,24 @@ mod tests {
         text_in(buffer, area, area.y + index)
     }
 
-    /// The fixture under `crates`, holding `sigils`: the app the header tests
-    /// draw, with both halves of the line set and nothing else about it
-    /// changed.
+    /// The tree under `crates`, holding `sigils`: the header line the tests
+    /// about it draw, with both halves set.
     ///
-    /// The holding is handed over as a value, as the app takes it — nothing here
-    /// reads a config, and no test of this module goes anywhere near a home
-    /// directory.
-    fn held_app(sigils: Sigils) -> App {
+    /// The holding is handed over as a value, as [`Chrome`](crate::app::Chrome)
+    /// takes it — nothing here reads a config, and no test of this module goes
+    /// anywhere near a home directory.
+    fn held_chrome(sigils: Sigils) -> Chrome {
+        Chrome::of("/repo", "/repo/crates").with_sigils(sigils)
+    }
+
+    /// The app the header tests draw under that line: the fixture, unchanged.
+    ///
+    /// A header says which tree is on screen and nothing about the rows, so
+    /// every one of those tests draws the same app and varies only the
+    /// [`Chrome`](crate::app::Chrome) beside it — which is the arrangement the
+    /// type exists to make possible.
+    fn header_app() -> App {
         App::from_tree(&fixture::tree())
-            .with_scope("/repo", "/repo/crates")
-            .with_sigils(sigils)
     }
 
     /// The tree pane's header line, as text.
@@ -2163,7 +2171,15 @@ mod tests {
         now: Instant,
         confirm: QuitConfirm,
     ) -> Buffer {
-        render_windows(app, width, height, now, confirm, &ScopePrompt::Closed)
+        render_windows(
+            app,
+            &Chrome::default(),
+            width,
+            height,
+            now,
+            confirm,
+            &ScopePrompt::Closed,
+        )
     }
 
     /// [`render_at`], with the scope prompt in whatever state the test is about
@@ -2175,13 +2191,41 @@ mod tests {
         now: Instant,
         scope: &ScopePrompt,
     ) -> Buffer {
-        render_windows(app, width, height, now, QuitConfirm::Closed, scope)
+        render_windows(
+            app,
+            &Chrome::default(),
+            width,
+            height,
+            now,
+            QuitConfirm::Closed,
+            scope,
+        )
+    }
+
+    /// [`render`], with a header line the test chose.
+    ///
+    /// The header is no longer app state, so the tests about it hand one in
+    /// rather than building an app that carries one: see
+    /// [`Chrome`](crate::app::Chrome). Every other test here draws through
+    /// [`render`], which passes a default — an empty identity holding nothing,
+    /// which is the line warlock drew before either half existed.
+    fn render_chrome(app: &App, chrome: &Chrome, width: u16, height: u16) -> Buffer {
+        render_windows(
+            app,
+            chrome,
+            width,
+            height,
+            Instant::now(),
+            QuitConfirm::Closed,
+            &ScopePrompt::Closed,
+        )
     }
 
     /// The one place a frame is actually drawn: the app, the instant, and both
     /// windows that can be over it.
     fn render_windows(
         app: &App,
+        chrome: &Chrome,
         width: u16,
         height: u16,
         now: Instant,
@@ -2191,7 +2235,7 @@ mod tests {
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("test backend never fails");
         terminal
-            .draw(|frame| draw(frame, app, now, confirm, scope))
+            .draw(|frame| draw(frame, app, chrome, now, confirm, scope))
             .expect("test backend never fails");
         terminal.backend().buffer().clone()
     }
@@ -3129,16 +3173,19 @@ mod tests {
     #[test]
     fn the_header_and_footer_stay_put_while_the_tree_scrolls_under_them() {
         let window = usize::from(tree_height(Size::new(WIDTH, HEIGHT)));
-        let mut chrome = None;
+        // The header line these frames are drawn under, built once: it is not
+        // app state, so it does not change as the selection walks the tree.
+        let chrome = Chrome::of("/repo", "/repo/crates");
+        let mut fixed = None;
         let mut offsets = Vec::new();
 
         // Every row in turn, so the window is at the top, somewhere in the
         // middle, and at the bottom over the course of the walk.
         for selected in 0..MANY {
-            let app = tall_app(selected).with_scope("/repo", "/repo/crates");
+            let app = tall_app(selected);
             offsets.push(app.scroll_offset());
 
-            let buffer = render(&app, WIDTH, HEIGHT);
+            let buffer = render_chrome(&app, &chrome, WIDTH, HEIGHT);
 
             let (header, footer) = header_and_footer(&buffer);
             assert_eq!(header, ["crates"], "selection {selected}");
@@ -3157,8 +3204,8 @@ mod tests {
             );
             // Byte for byte the same rows, whatever the tree between them is
             // showing.
-            let chrome = chrome.get_or_insert_with(|| (header.clone(), footer.clone()));
-            assert_eq!(*chrome, (header, footer), "selection {selected}");
+            let fixed = fixed.get_or_insert_with(|| (header.clone(), footer.clone()));
+            assert_eq!(*fixed, (header, footer), "selection {selected}");
         }
 
         // And the tree really did scroll under them, from one end to the other.
@@ -3626,12 +3673,12 @@ mod tests {
 
     #[test]
     fn the_header_names_the_root_relative_to_the_repository_root() {
-        let app = App::from_tree(&fixture::tree()).with_scope(
+        let chrome = Chrome::of(
             Path::new("/repo"),
             Path::new("/repo").join("crates").join("warlock-engine"),
         );
 
-        let buffer = render(&app, WIDTH, HEIGHT);
+        let buffer = render_chrome(&header_app(), &chrome, WIDTH, HEIGHT);
 
         // Forward slashes whatever the platform's separator is, because this
         // is the engine's manifest spelling of a module.
@@ -3640,9 +3687,7 @@ mod tests {
 
     #[test]
     fn a_tree_rooted_at_the_repository_root_draws_a_blank_header_and_keeps_its_row() {
-        let app = App::from_tree(&fixture::tree()).with_scope("/repo", "/repo");
-
-        let buffer = render(&app, WIDTH, HEIGHT);
+        let buffer = render_chrome(&header_app(), &Chrome::of("/repo", "/repo"), WIDTH, HEIGHT);
 
         // Nothing to say — the whole repository is not a part of itself — and
         // the root row below already names the directory.
@@ -3656,9 +3701,9 @@ mod tests {
 
     #[test]
     fn the_header_states_what_this_machine_holds_after_the_tree_it_names() {
-        let app = held_app(Sigils::held(["billing", "web"]));
+        let chrome = held_chrome(Sigils::held(["billing", "web"]));
 
-        let buffer = render(&app, HELD_WIDTH, HEIGHT);
+        let buffer = render_chrome(&header_app(), &chrome, HELD_WIDTH, HEIGHT);
 
         // One line, both facts, the identity first: what am I looking at, and
         // then what do I hold for it.
@@ -3671,7 +3716,12 @@ mod tests {
 
     #[test]
     fn a_config_that_would_not_read_says_so_on_the_header_rather_than_going_quiet() {
-        let buffer = render(&held_app(Sigils::Unknown), HELD_WIDTH, HEIGHT);
+        let buffer = render_chrome(
+            &header_app(),
+            &held_chrome(Sigils::Unknown),
+            HELD_WIDTH,
+            HEIGHT,
+        );
 
         // Broken is never drawn as absent: a reader whose config will not parse
         // is told, on the same line and in the same row.
@@ -3687,22 +3737,24 @@ mod tests {
         // Byte for byte, at both widths, in both spellings of nothing: the
         // reader who never runs `warlock config` must not be able to tell that
         // any of this arrived.
-        let before = held_app(Sigils::Nothing);
-        let never_told = App::from_tree(&fixture::tree()).with_scope("/repo", "/repo/crates");
+        let app = header_app();
+        let before = held_chrome(Sigils::Nothing);
+        let never_told = Chrome::of("/repo", "/repo/crates");
 
         for width in [HELD_WIDTH, NARROW_WIDTH] {
-            let drawn = render(&before, width, HEIGHT);
+            let drawn = render_chrome(&app, &before, width, HEIGHT);
 
             assert_eq!(header_text(&drawn), "crates", "at {width} columns");
             assert_eq!(
                 rows_text(&drawn),
-                rows_text(&render(&never_told, width, HEIGHT)),
+                rows_text(&render_chrome(&app, &never_told, width, HEIGHT)),
                 "at {width} columns"
             );
             assert_eq!(
                 rows_text(&drawn),
-                rows_text(&render(
-                    &held_app(Sigils::held(Vec::<String>::new())),
+                rows_text(&render_chrome(
+                    &app,
+                    &held_chrome(Sigils::held(Vec::<String>::new())),
                     width,
                     HEIGHT
                 )),
@@ -3713,7 +3765,7 @@ mod tests {
 
     #[test]
     fn a_header_with_no_room_for_both_drops_the_holding_and_keeps_the_tree_it_names() {
-        let app = held_app(Sigils::held(["billing", "web"]));
+        let chrome = held_chrome(Sigils::held(["billing", "web"]));
         // Twenty columns of tree pane, eighteen inside it: room for the
         // identity several times over, and nowhere near room for both.
         let narrow = pane_inner(areas(Rect::new(0, 0, NARROW_WIDTH, HEIGHT)).tree);
@@ -3722,7 +3774,7 @@ mod tests {
                 > usize::from(narrow.width)
         );
 
-        let buffer = render(&app, NARROW_WIDTH, HEIGHT);
+        let buffer = render_chrome(&header_app(), &chrome, NARROW_WIDTH, HEIGHT);
 
         // The whole holding is gone rather than half of it: the identity is the
         // answer to "what am I looking at", so it is never spent on sigils, and
@@ -3739,9 +3791,12 @@ mod tests {
 
     #[test]
     fn the_header_sits_above_the_first_tree_row_inside_the_panes_border() {
-        let app = App::from_tree(&fixture::tree()).with_scope("/repo", "/repo/crates");
-
-        let buffer = render(&app, WIDTH, HEIGHT);
+        let buffer = render_chrome(
+            &header_app(),
+            &Chrome::of("/repo", "/repo/crates"),
+            WIDTH,
+            HEIGHT,
+        );
 
         let header = header_area(&buffer);
         let rows = rows_area(&buffer);
@@ -3905,7 +3960,9 @@ mod tests {
         // The header is the line the frame drew the tree's name on, not a row.
         let header = header_area(&buffer);
         assert_eq!(hit_test(header.x, header.y, size), Hit::TreeHeader);
-        assert_eq!(header_text(&buffer), app.header());
+        // Blank, because this frame was drawn through `render`, which passes
+        // the default `Chrome`: the line is not the app's to fill any more.
+        assert_eq!(header_text(&buffer), "");
     }
 
     #[test]

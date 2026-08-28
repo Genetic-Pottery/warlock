@@ -1,5 +1,3 @@
-# AGENTS.md
-
 <!-- warlock:begin -->
 
 ## Warlock
@@ -44,5 +42,36 @@ the document is owed a look. It never decides that a document is *wrong* —
 whether a particular change warrants a documentation update was always a
 judgement call, and warlock makes the change visible rather than pretending
 to make that call for you.
+
+## Scopes and sigils
+
+A pacted directory may carry one **scope**: a short label — `data-plane`,
+`billing`, `web` — saying whose work that part of the repository is. Scopes
+live in `.warlock/pacts.toml` beside the grant, and are shown in the tree
+next to the directory they are written on.
+
+A scope covers everything beneath it until a nearer one overrides it. The
+nearest scope at or above a directory is the one that applies, on its own: an
+outer scope is a *default* for everything below it that has said nothing, not
+a second gate to also satisfy. A pacted directory with no scope above it is
+open to anyone.
+
+The other half of the vocabulary is the **sigil**, which is what the operator
+holds. They may hold several, and any one of them opens a matching scope — so
+whether a scope is open to them is a membership test, not an expression to
+evaluate. `warlock config` prints what is held. Holding nothing means
+unrestricted, not shut out.
+
+**A scope is a term of the pact, not a thing beside it.** An unpacted
+directory cannot carry one, and un-pacting a directory takes its scope away
+with the rest of the pact. So a boundary is changed by changing a pact, and
+there is nowhere else to look for one.
+
+**Before planning or making a change, look at what the directories it would
+touch are scoped to, and at what the operator holds.** When the work crosses
+a scope they do not hold, say so plainly, and then either narrow the work to
+what they hold or name the sigil the work wants. Never refuse the work, never
+block it, and never quietly edit around the boundary: saying what is being
+crossed is the whole of the job here.
 
 <!-- warlock:end -->

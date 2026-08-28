@@ -88,6 +88,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -484,8 +485,8 @@ impl Focus {
 /// repository. Nothing here matches the one against the other — this is a
 /// statement, not a rule — and nothing here reads a disk either: whoever loaded
 /// the config turns what they found into one of these three values and hands it
-/// over with [`App::with_sigils`], exactly as the header's text is handed over
-/// finished by [`App::with_scope`].
+/// over with [`Chrome::with_sigils`], exactly as the header's text is worded
+/// once by [`Chrome::of`].
 ///
 /// Three variants because there are exactly three things the header can
 /// honestly say, and the middle one is why this is not an `Option<Vec<String>>`:
@@ -557,9 +558,125 @@ impl Sigils {
     }
 }
 
-/// The front end's state: the flattened tree, which of it is collapsed, the
-/// selected row, the slice of rows on screen, the tally the footer shows and
-/// the header line naming what is being shown.
+/// What the header line states: which tree is on screen, and what this machine
+/// holds for the repository it came out of.
+///
+/// Both are resolved once, by whoever loaded the app, and neither can change
+/// under a running warlock: the tree's root and the repository above it are
+/// fixed for the session, and a sigil is written by `warlock config` with
+/// warlock not running. So this is not app state and is deliberately not a field
+/// on [`App`] — it is handed to [`draw`](crate::draw) beside the two windows
+/// that are drawn over the frame, for the reason those are:
+/// a value the app has never heard of is a value no keystroke, run or reload can
+/// be suspected of having changed.
+///
+/// It used to be two fields on [`App`], which meant every reload had to carry
+/// them and then recompute the header anyway — `reseat_on` copied the header
+/// across and its one caller immediately overwrote it. Neither move is needed
+/// when the fact never moves.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Chrome {
+    header: String,
+    sigils: Sigils,
+}
+
+impl Chrome {
+    /// The header for the tree rooted at `root` inside the repository at
+    /// `repo_root`, holding nothing.
+    ///
+    /// The text is `root` relative to `repo_root` in forward slashes — the
+    /// engine's own manifest spelling, so the header and the manifest name a
+    /// module the same way on every platform.
+    ///
+    /// A tree rooted at `repo_root` itself gets no header at all. The line is
+    /// there to say *which part* of the repository is on screen, which is a
+    /// thing worth saying only when it is not the whole of it: at the root there
+    /// is no part, the relative spelling would be a bare `"."`, and any wording
+    /// for it says out loud what the root row underneath already shows. So the
+    /// line goes blank and keeps its row, because a header that appeared and
+    /// disappeared would move every tree row up and down with it.
+    ///
+    /// The caller resolving the pair is where the filesystem is touched; this
+    /// only formats what it was handed, which keeps the header a pure function
+    /// of the values above it all the way down to the renderer. A `root` that
+    /// does not sit inside `repo_root`, or that is not UTF-8, cannot be
+    /// described relatively at all and falls back to `root` printed lossily: a
+    /// header is a label, and failing to draw one is no reason to fail to draw
+    /// the tree.
+    #[must_use]
+    pub fn of(repo_root: impl AsRef<Path>, root: impl AsRef<Path>) -> Self {
+        let root = root.as_ref();
+        let header = match to_manifest_path(repo_root, root) {
+            Ok(relative) if relative == "." => String::new(),
+            Ok(relative) => relative,
+            Err(_) => root.display().to_string(),
+        };
+        Self {
+            header,
+            sigils: Sigils::Nothing,
+        }
+    }
+
+    /// The same header, stating `sigils` beside it.
+    ///
+    /// The other half of the one line: the header says which tree is on screen,
+    /// and this says what this machine holds for the repository it came out of.
+    /// Set once, by whoever loaded the app — a sigil is written by `warlock
+    /// config`, on the ordinary screen, with warlock not running.
+    ///
+    /// Takes the value rather than a path or a home directory: reading the
+    /// config is the caller's, so this type keeps no filesystem and the three
+    /// states it can be in are three values a test can write down. See
+    /// [`Sigils`] for why there are three of them, and note that
+    /// [`Sigils::Nothing`] leaves the header byte for byte the line it would
+    /// have been if this had never been called.
+    ///
+    /// It states them and nothing else: no row is coloured, filtered, sorted or
+    /// re-ordered by what is held, nothing is refused for it, and no key acts on
+    /// it. Matching a sigil against a scope is not this slice's, and it would not
+    /// be this type's when it is.
+    #[must_use]
+    pub fn with_sigils(mut self, sigils: Sigils) -> Self {
+        self.sigils = sigils;
+        self
+    }
+
+    /// The header line: what tree is on screen, as [`Chrome::of`] worded it.
+    ///
+    /// The repository identity alone. What this machine *holds* is stated on the
+    /// same line and is kept apart from it here, because the header states the
+    /// two in order of importance and drops the second when the pane is too
+    /// narrow for both: see [`Chrome::sigils`].
+    #[must_use]
+    pub fn header(&self) -> &str {
+        &self.header
+    }
+
+    /// What this machine holds for the repository on screen, as
+    /// [`Chrome::with_sigils`] was told it.
+    #[must_use]
+    pub const fn sigils(&self) -> &Sigils {
+        &self.sigils
+    }
+}
+
+/// The front end's state: the flattened tree, where the selection sits, the
+/// slice of rows on screen, and the three groups of view state beside them.
+///
+/// Nine fields, six of them about the tree and three of them values of their
+/// own. The split is by *lifetime*, and it is the thing this type is arranged
+/// around, because the one operation that has to know it — [`reseat_on`], which
+/// puts a reader back on a tree that has just been read again — used to be
+/// twenty assignments that named each field by hand and could not be checked.
+/// The three groups are `Viewpoint`, what the reader has done to the view;
+/// `Status`, what the footer is saying right now; and `Panel`, the account
+/// of the run and the window onto it. Each carries whole across a reload, so
+/// there is nothing inside them for that function to forget.
+///
+/// What is *not* here is the header line, and its absence is deliberate: see
+/// [`Chrome`]. Both halves of it are resolved once and cannot change while
+/// warlock runs, so an app rebuilt on every reload has no business holding
+/// either, and the renderer is handed one directly.
 ///
 /// `all_rows` is the engine's whole walk as it was when the app was built. No
 /// view change touches it, and a reload replaces it whole; the only thing that
@@ -571,6 +688,68 @@ impl Sigils {
 /// reversible without a second walk of a tree the app no longer holds, and that
 /// a row hidden under a collapsed parent keeps its depth and its place in the
 /// order for when the parent opens again.
+///
+/// `collapsible` is the paths of the rows that have something under them *in
+/// this view* — which is not what the tree says, because the file toggle and the
+/// pacted-only filter both change what a row holds without the tree moving. It
+/// is derived beside `rows`, in the one pass that already knows: see
+/// `drawn_rows`, and [`App::can_collapse`] for what reads it. Kept as paths
+/// rather than as a flag on [`Row`] so that a row stays a fact about the tree
+/// and two rows for the same node compare equal whatever is filtered.
+///
+/// The tally is the engine's own [`StateCounts`], carried along rather than
+/// recomputed: counting states is the engine's job, and a renderer that adds
+/// up its rows itself is a second implementation of that job waiting to
+/// disagree with the first.
+///
+/// `selected` is kept in range by construction and by every method that moves
+/// it, so [`App::selected_row`] is `None` only when there are no rows at all.
+/// It is kept *meaningful* by `reflow`, which puts it back on the node it was
+/// on after the row list changes, or on that node's nearest drawn ancestor when
+/// collapsing has taken it off screen.
+///
+/// `scroll_offset` is kept in step with `selected` by those same methods, so
+/// the selected row is always inside the window the renderer draws — see
+/// [`App::scroll_offset`]. It is derived state, never moved on its own: there
+/// is no "scroll without moving the selection" here, because a selection that
+/// has scrolled off screen is a selection the next keystroke moves invisibly.
+///
+/// Those two are also the two that a re-seat cannot simply carry, which is why
+/// they sit out here rather than in `Viewpoint` with the rest of the reader's
+/// state: an index names whichever node now sits at that position, so the
+/// selection has to travel by path and be looked up again in the new rows.
+///
+/// Holds an [`Account`], which holds an [`f64`] cost, so it is [`PartialEq`] and
+/// not [`Eq`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct App {
+    all_rows: Vec<Row>,
+    rows: Vec<Row>,
+    collapsible: BTreeSet<PathBuf>,
+    counts: StateCounts,
+    selected: usize,
+    scroll_offset: usize,
+    viewpoint: Viewpoint,
+    status: Status,
+    panel: Panel,
+}
+
+/// What the reader has done to the view, and the only part of an [`App`] that
+/// survives a reload whole.
+///
+/// The five facts here move together because they have one lifetime: they are
+/// set by a keystroke, they are true until another keystroke changes them, and
+/// nothing about a tree being read again touches any of them. That is what lets
+/// [`reseat_on`] carry them as one value rather than as five assignments it has
+/// to remember to make — and what makes a sixth of them one field here rather
+/// than a field, a copy and a test that nobody writes.
+///
+/// The two facts that are *not* here are `selected` and `scroll_offset`, and
+/// they are missing on purpose. Both have to be re-derived against the new rows
+/// rather than carried: the selection is carried by *path* and looked up again,
+/// because an index names whichever node now sits at that position, and the
+/// offset is restored and then put back in range by `rescroll`. They are the
+/// exception, so they are visibly the exception — see [`reseat_on`].
 ///
 /// `collapsed` holds node paths, never row indices: an index names a different
 /// node the moment the row list changes length, and the row list is rebuilt
@@ -591,81 +770,46 @@ impl Sigils {
 /// in when the flag goes on is what makes the flag reversible without the tree,
 /// exactly as `collapsed` is.
 ///
-/// `selected` is kept in range by construction and by every method that moves
-/// it, so [`App::selected_row`] is `None` only when there are no rows at all.
-/// It is kept *meaningful* by `reflow`, which puts it back on the node it was
-/// on after the row list changes, or on that node's nearest drawn ancestor when
-/// collapsing has taken it off screen.
-///
-/// `scroll_offset` is kept in step with `selected` by those same methods, so
-/// the selected row is always inside the window the renderer draws — see
-/// [`App::scroll_offset`]. It is derived state, never moved on its own: there
-/// is no "scroll without moving the selection" here, because a selection that
-/// has scrolled off screen is a selection the next keystroke moves invisibly.
-///
-/// The tally is the engine's own [`StateCounts`], carried along rather than
-/// recomputed: counting states is the engine's job, and a renderer that adds
-/// up its rows itself is a second implementation of that job waiting to
-/// disagree with the first.
-///
-/// The header is carried as finished text for the same reason: the renderer
-/// draws app state and nothing else, so it never has to know what a repository
-/// root is or ask the engine where this tree came from.
-///
-/// `sigils` is what this machine holds for that repository, and it sits beside
-/// the header because it is stated on the same line: see [`Sigils`] and
-/// [`App::with_sigils`]. It is carried as a value rather than as finished text,
-/// which is the one place this type differs from the header — the renderer
-/// composes the line, because whether there is room for the holding is a
-/// question about the width of a pane and nothing here has ever been told one.
-/// It is read once, by whoever loaded the app, and never again: a sigil is a
-/// fact about a machine, so no keystroke, run or reload can change it under a
-/// running warlock.
-///
-/// The message is the one line the app has to say about the keystroke just
-/// pressed — why a pact was refused, or whatever the caller put there. It is
-/// finished text for the same reason the header is, and it lives here rather
-/// than in the caller's hand because it is display state like everything else
-/// around it: the renderer draws whatever is in it, and every method that moves
-/// the selection empties it, so a message lasts exactly until the next
-/// keystroke.
-///
 /// `focus` is which of the screen's two panes the keys are driving, and it is
 /// here rather than in the event loop for the reason everything else here is:
 /// it is view state that changes what a keystroke does, and the rule it decides
 /// — that a movement key moves the tree's selection while the tree has the focus
-/// and scrolls the panel while the panel has it — is a rule about this type's
+/// and scrolls the panel while the panel has it — is a rule about [`App`]'s
 /// methods, testable with nothing attached to stdout. It starts on the tree,
 /// which is the pane warlock opens on. See [`Focus`].
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Viewpoint {
+    collapsed: BTreeSet<PathBuf>,
+    pacted_only: bool,
+    show_files: bool,
+    viewport_height: usize,
+    focus: Focus,
+}
+
+/// What the footer is saying right now: the line about the last keystroke, the
+/// run in flight, and the two flags that word them.
 ///
-/// `account` is what the pact running now, or the last one to run, has been seen
-/// doing. It is `None` until the first pact of the session, which is not the
-/// same as an empty account: an app that has never run a pact has nothing to
-/// draw in the panel at all, not even a heading, and the difference between "no
-/// account" and "an account with no lines yet" is the difference between a blank
-/// panel and one that has started. [`App::start_account`] is what turns the one
-/// into the other, and a second pact starts a second account rather than
-/// appending to the first: one pact, one account.
+/// One lifetime again, and it is the shortest of the three: everything here
+/// belongs to the keystroke just pressed or to the run going on behind it, and
+/// every movement method empties the message as it goes. It is the group a run
+/// that ends with nothing recorded *rolls back* — see `restore` in
+/// `mod@crate::pacting` — which is the whole reason it is kept apart from the
+/// panel beside it.
 ///
-/// `panel_height`, `panel_offset` and `panel_follows` are that account's window,
-/// and are to the panel what `viewport_height` and `scroll_offset` are to the
-/// tree — with one difference, which is the flag. The tree's window is dragged
-/// about by a selection; the panel has no selection, so its window is either
-/// pinned to the newest line or parked where the reader put it, and
-/// `panel_follows` says which. While it is set, `panel_offset` is not read at
-/// all: the offset is the end of the account, worked out from the line count at
-/// the moment it is asked for, so appending a line moves the window without
-/// anybody having to tell the window that a line was appended. See
-/// [`App::panel_scroll_offset`].
+/// `mouse_captured` is here for its lifetime rather than its ownership: it is
+/// not the app's own fact — the terminal is the binary's to switch, and the loop
+/// tells the app what it did every frame — but it changes at the same rate as
+/// everything around it and is read by the same footer, in `keys_line`. Being in
+/// this group means a rolled-back run installs the flag as it was before the
+/// run; that is what happened before this type existed too, and it is put right
+/// by the loop's next frame, which sets it unconditionally.
 ///
-/// `mouse_captured` is whether the terminal is reporting its mouse, and it is the
-/// one field here that is not the app's own: the terminal is the binary's to
-/// switch, so the loop that switches it tells the app what it did, every frame,
-/// the way it tells it the two window heights. It is here for the footer's sake
-/// alone — the keys line names the `m` key by what the *next* press of it does,
-/// so it has to know what this press left behind — and nothing in this type reads
-/// it. `false` for a freshly built app, which is the truth about one nobody has
-/// put on a terminal yet. See [`App::set_mouse_captured`].
+/// The message is the one line the app has to say about the keystroke just
+/// pressed — why a pact was refused, or whatever the caller put there. It is
+/// finished text, and it lives here rather than in the caller's hand because it
+/// is display state like everything else around it: the renderer draws whatever
+/// is in it, and every method that moves the selection empties it, so a message
+/// lasts exactly until the next keystroke.
 ///
 /// `in_flight` is the pact running now, if one is, and is the one piece of state
 /// here that no keystroke touches: it is put there and taken away by whoever is
@@ -681,57 +825,59 @@ impl Sigils {
 /// `in_flight` moves or goes, so no file is ever named under a directory the run
 /// has left.
 ///
-/// `collapsible` is the paths of the rows that have something under them *in
-/// this view* — which is not what the tree says, because the file toggle and the
-/// pacted-only filter both change what a row holds without the tree moving. It
-/// is derived beside `rows`, in the one pass that already knows: see
-/// [`drawn_rows`], and [`App::can_collapse`] for what reads it. Kept as paths
-/// rather than as a flag on [`Row`] so that a row stays a fact about the tree
-/// and two rows for the same node compare equal whatever is filtered.
-///
 /// `pact_refused` is the one keystroke that has nowhere else to go: the pact key
 /// pressed while `in_flight` is already there. It is a flag rather than a
 /// message because the message line is exactly what a pact in flight has taken —
-/// a sentence put in `message` would be the one sentence nobody could read — and
-/// it is a flag rather than a fourth footer line because the footer is a fixed
-/// three. So it is a bit that changes how `in_flight` is worded, and nothing
-/// more: see [`App::set_pact_refused`] and [`App::pact_line`]. It belongs to the
-/// keystroke that set it, so it goes the way `message` does, on the next one.
-/// Holds an [`Account`], which holds an [`f64`] cost, so it is [`PartialEq`] and
-/// not [`Eq`].
+/// a sentence put in the message would be the one sentence nobody could read —
+/// and it is a flag rather than a fourth footer line because the footer is a
+/// fixed three. So it is a bit that changes how `in_flight` is worded, and
+/// nothing more: see [`App::set_pact_refused`] and [`App::pact_line`]. It
+/// belongs to the keystroke that set it, so it goes the way the message does,
+/// on the next one.
 #[derive(Debug, Clone, Default, PartialEq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "the five flags here are independent facts about the view — files \
-              shown, pacted-only, panel following, pact refused, mouse captured \
-              — and every one of the thirty-two combinations is a state the \
-              screen can honestly be in. Folding them into a state machine would \
-              invent an ordering between things that have none, and cost the \
-              derives a bool keeps free"
-)]
-pub struct App {
-    all_rows: Vec<Row>,
-    rows: Vec<Row>,
-    collapsed: BTreeSet<PathBuf>,
-    collapsible: BTreeSet<PathBuf>,
-    pacted_only: bool,
-    show_files: bool,
-    selected: usize,
-    scroll_offset: usize,
-    viewport_height: usize,
-    counts: StateCounts,
-    header: String,
-    sigils: Sigils,
+struct Status {
     message: Option<String>,
     in_flight: Option<InFlight>,
     summarising: Option<Summarising>,
     pact_refused: bool,
-    focus: Focus,
-    account: Option<Account>,
-    panel_height: usize,
-    panel_offset: usize,
-    panel_follows: bool,
     mouse_captured: bool,
+}
+
+/// The account of the run, and the window the panel shows it through.
+///
+/// The group that survives everything. A reload carries it, because the tree is
+/// read again *because* a run finished and dropping it would wipe the record at
+/// the moment the reader turned to read it; and a run that ends with nothing
+/// recorded carries it too, because an account is not a claim about the tree and
+/// has no business being rolled back with one. That second rule used to be
+/// `App::take_account_from`, a method whose whole purpose was to reach into a
+/// live app and steal back the four fields that must not roll back. It is a
+/// field move now.
+///
+/// `account` is what the pact running now, or the last one to run, has been seen
+/// doing. It is `None` until the first pact of the session, which is not the
+/// same as an empty account: an app that has never run a pact has nothing to
+/// draw in the panel at all, not even a heading, and the difference between "no
+/// account" and "an account with no lines yet" is the difference between a blank
+/// panel and one that has started. [`App::start_account`] is what turns the one
+/// into the other, and a second pact starts a second account rather than
+/// appending to the first: one pact, one account.
+///
+/// `height`, `offset` and `follows` are that account's window, and are to the
+/// panel what `viewport_height` and `scroll_offset` are to the tree — with one
+/// difference, which is the flag. The tree's window is dragged about by a
+/// selection; the panel has no selection, so its window is either pinned to the
+/// newest line or parked where the reader put it, and `follows` says which.
+/// While it is set, `offset` is not read at all: the offset is the end of the
+/// account, worked out from the line count at the moment it is asked for, so
+/// appending a line moves the window without anybody having to tell the window
+/// that a line was appended. See [`App::panel_scroll_offset`].
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Panel {
+    account: Option<Account>,
+    height: usize,
+    offset: usize,
+    follows: bool,
 }
 
 impl App {
@@ -774,19 +920,7 @@ impl App {
     /// flag there is nothing of the directory's to copy down. See [`Row::scope`].
     #[must_use]
     pub fn from_tree(tree: &Tree) -> Self {
-        let mut rows = Vec::new();
-        for (node, depth) in tree.walk() {
-            rows.push(
-                Row::new(depth, node.path.clone(), node.document.clone(), node.state)
-                    .with_child_count(node.children.len())
-                    .with_ignored(node.is_ignored())
-                    .with_scope(node.scope.clone()),
-            );
-            rows.extend(node.files.iter().map(|file| {
-                Row::file(depth + 1, file.clone(), node.state).with_ignored(node.is_ignored())
-            }));
-        }
-        Self::from_rows(rows).with_counts(tree.counts())
+        Self::from_rows(walk_of(tree)).with_counts(tree.counts())
     }
 
     /// The app state for an already-flattened list of rows, with everything
@@ -798,12 +932,10 @@ impl App {
     /// truth for that empty case; any caller passing rows should say what they
     /// tally to with [`App::with_counts`].
     ///
-    /// The header starts empty: an app nobody has told where its tree came
-    /// from has nothing honest to put there. See [`App::with_scope`]. It states
-    /// no sigils either, which is the same answer for the same reason — an app
-    /// nobody has told what this machine holds says nothing about it, and that
-    /// is exactly the header a machine holding nothing gets. See
-    /// [`App::with_sigils`].
+    /// Nothing here says anything about the header line: neither half of it is
+    /// app state, and an app carries no [`Chrome`] at all — see that type for
+    /// why a fact resolved once and fixed for the session has no business being
+    /// rebuilt on every reload.
     ///
     /// The viewport starts at zero rows tall and the window at the top, which
     /// is what is true of an app that has never been drawn: nothing is on
@@ -839,29 +971,38 @@ impl App {
     /// bare list of rows is the one input here that does not come from a tree.
     #[must_use]
     pub fn from_rows(rows: Vec<Row>) -> Self {
+        // Every field named, and no `..Default::default()` anywhere in this
+        // file: a struct literal that names all of them is what turns a
+        // twenty-third field into a compile error here and in [`reseat_on`],
+        // rather than into a field somebody forgot to carry. See the note on
+        // [`reseat_on`].
         let mut app = Self {
             rows: rows.clone(),
             all_rows: rows,
-            collapsed: BTreeSet::new(),
             collapsible: BTreeSet::new(),
-            pacted_only: false,
-            show_files: false,
+            counts: StateCounts::default(),
             selected: 0,
             scroll_offset: 0,
-            viewport_height: 0,
-            counts: StateCounts::default(),
-            header: String::new(),
-            sigils: Sigils::Nothing,
-            message: None,
-            in_flight: None,
-            summarising: None,
-            pact_refused: false,
-            focus: Focus::Tree,
-            account: None,
-            panel_height: 0,
-            panel_offset: 0,
-            panel_follows: false,
-            mouse_captured: false,
+            viewpoint: Viewpoint {
+                collapsed: BTreeSet::new(),
+                pacted_only: false,
+                show_files: false,
+                viewport_height: 0,
+                focus: Focus::Tree,
+            },
+            status: Status {
+                message: None,
+                in_flight: None,
+                summarising: None,
+                pact_refused: false,
+                mouse_captured: false,
+            },
+            panel: Panel {
+                account: None,
+                height: 0,
+                offset: 0,
+                follows: false,
+            },
         };
         // The rows handed over may hold file rows, which the file toggle starts
         // off over, so the drawn list is derived rather than assumed even here.
@@ -888,7 +1029,7 @@ impl App {
         mut self,
         collapsed: impl IntoIterator<Item = impl Into<PathBuf>>,
     ) -> Self {
-        self.collapsed = collapsed.into_iter().map(Into::into).collect();
+        self.viewpoint.collapsed = collapsed.into_iter().map(Into::into).collect();
         self.reflow();
         self
     }
@@ -903,84 +1044,6 @@ impl App {
         self
     }
 
-    /// The same app state, with a header naming the tree rooted at `root`
-    /// inside the repository at `repo_root`.
-    ///
-    /// The text is `root` relative to `repo_root` in forward slashes — the
-    /// engine's own manifest spelling, so the header and the manifest name a
-    /// module the same way on every platform.
-    ///
-    /// A tree rooted at `repo_root` itself gets no header at all. The line is
-    /// there to say *which part* of the repository is on screen, which is a
-    /// thing worth saying only when it is not the whole of it: at the root there
-    /// is no part, the relative spelling would be a bare `"."`, and any wording
-    /// for it says out loud what the root row underneath already shows. So the
-    /// line goes blank and keeps its row, because a header that appeared and
-    /// disappeared would move every tree row up and down with it.
-    ///
-    /// The caller resolving the pair is where the filesystem is touched; this
-    /// only formats what it was handed, which keeps the header a pure function
-    /// of app state all the way down to the renderer. A `root` that does not
-    /// sit inside `repo_root`, or that is not UTF-8, cannot be described
-    /// relatively at all and falls back to `root` printed lossily: a header is
-    /// a label, and failing to draw one is no reason to fail to draw the tree.
-    #[must_use]
-    pub fn with_scope(mut self, repo_root: impl AsRef<Path>, root: impl AsRef<Path>) -> Self {
-        let root = root.as_ref();
-        self.header = match to_manifest_path(repo_root, root) {
-            Ok(relative) if relative == "." => String::new(),
-            Ok(relative) => relative,
-            Err(_) => root.display().to_string(),
-        };
-        self
-    }
-
-    /// The header line: what tree is on screen, as [`App::with_scope`] worded
-    /// it, or empty for an app that was never told.
-    ///
-    /// The repository identity alone. What this machine *holds* is stated on the
-    /// same line and is kept apart from it here, because the header states the
-    /// two in order of importance and drops the second when the pane is too
-    /// narrow for both: see [`App::sigils`].
-    #[must_use]
-    pub fn header(&self) -> &str {
-        &self.header
-    }
-
-    /// The same app state, stating `sigils` on its header line.
-    ///
-    /// Beside [`App::with_scope`] because it is the other half of that one line:
-    /// the scope says which tree is on screen, and this says what this machine
-    /// holds for the repository it came out of. Set once, by whoever loaded the
-    /// app — a sigil is written by `warlock config`, on the ordinary screen,
-    /// with warlock not running — so nothing in the event loop ever calls this
-    /// again.
-    ///
-    /// Takes the value rather than a path or a home directory: reading the
-    /// config is the caller's, so this type keeps no filesystem and the three
-    /// states it can be in are three values a test can write down. See
-    /// [`Sigils`] for why there are three of them, and note that
-    /// [`Sigils::Nothing`] leaves the header byte for byte the line it would
-    /// have been if this had never been called.
-    ///
-    /// It states them and nothing else: no row is coloured, filtered, sorted or
-    /// re-ordered by what is held, nothing is refused for it, and no key acts on
-    /// it. Matching a sigil against a scope is not this slice's, and it would not
-    /// be this type's when it is.
-    #[must_use]
-    pub fn with_sigils(mut self, sigils: Sigils) -> Self {
-        self.sigils = sigils;
-        self
-    }
-
-    /// What this machine holds for the repository on screen, as
-    /// [`App::with_sigils`] was told it, or [`Sigils::Nothing`] for an app that
-    /// was never told.
-    #[must_use]
-    pub const fn sigils(&self) -> &Sigils {
-        &self.sigils
-    }
-
     /// What the app has to say about the last keystroke, or `None` when it has
     /// nothing to say.
     ///
@@ -990,7 +1053,7 @@ impl App {
     /// what is here always belongs to the keystroke just pressed.
     #[must_use]
     pub fn message(&self) -> Option<&str> {
-        self.message.as_deref()
+        self.status.message.as_deref()
     }
 
     /// Say `message` until the next keystroke moves the selection.
@@ -1000,7 +1063,7 @@ impl App {
     /// the screen from rather than two. Replaces whatever was there: only the
     /// latest keystroke has anything to report.
     pub fn set_message(&mut self, message: impl Into<String>) {
-        self.message = Some(message.into());
+        self.status.message = Some(message.into());
     }
 
     /// Say that a pact is working the directory at `path`, which is directory
@@ -1048,13 +1111,13 @@ impl App {
         position: usize,
         total: usize,
     ) {
-        self.in_flight = Some(InFlight {
+        self.status.in_flight = Some(InFlight {
             path: path.into(),
             position,
             total,
             run,
         });
-        self.summarising = None;
+        self.status.summarising = None;
     }
 
     /// Say that a summarising pass over the file at `path` is running — pass
@@ -1079,7 +1142,7 @@ impl App {
     /// exists only while a pact is in flight. Not a keystroke, so it says nothing
     /// and takes nothing down.
     pub fn set_pact_summarising(&mut self, path: impl Into<PathBuf>, part: usize, parts: usize) {
-        self.summarising = Some(Summarising {
+        self.status.summarising = Some(Summarising {
             path: path.into(),
             part,
             parts,
@@ -1101,8 +1164,8 @@ impl App {
     ///
     /// A no-op when no pact was in flight.
     pub fn clear_pact_in_flight(&mut self) {
-        self.in_flight = None;
-        self.summarising = None;
+        self.status.in_flight = None;
+        self.status.summarising = None;
     }
 
     /// Say that the pact key was pressed while a pact was already running, so
@@ -1128,7 +1191,7 @@ impl App {
     /// fraction of a second after the press would otherwise wipe the answer
     /// before it was read.
     pub fn set_pact_refused(&mut self) {
-        self.pact_refused = true;
+        self.status.pact_refused = true;
     }
 
     /// Whether a pact is running now, as last set by
@@ -1139,7 +1202,7 @@ impl App {
     /// whatever the caller last said, not something the app went and checked.
     #[must_use]
     pub const fn is_pacting(&self) -> bool {
-        self.in_flight.is_some()
+        self.status.in_flight.is_some()
     }
 
     /// Whether `path` is the directory the pact is working now.
@@ -1154,7 +1217,8 @@ impl App {
     /// [`App::is_pacting`] check.
     #[must_use]
     pub fn is_in_flight(&self, path: &Path) -> bool {
-        self.in_flight
+        self.status
+            .in_flight
             .as_ref()
             .is_some_and(|in_flight| in_flight.path == path)
     }
@@ -1173,7 +1237,7 @@ impl App {
     /// `false` when no pact is running, exactly as [`App::is_in_flight`] is.
     #[must_use]
     pub fn in_flight_covers(&self, row: &Row) -> bool {
-        self.in_flight.as_ref().is_some_and(|in_flight| {
+        self.status.in_flight.as_ref().is_some_and(|in_flight| {
             in_flight.path == row.path
                 || (row.is_file() && row.path.parent() == Some(in_flight.path.as_path()))
         })
@@ -1222,13 +1286,13 @@ impl App {
     /// position and carries the suffix along.
     #[must_use]
     pub fn pact_line(&self) -> Option<String> {
-        self.in_flight.as_ref().map(|in_flight| {
+        self.status.in_flight.as_ref().map(|in_flight| {
             let label = self.label_for(&in_flight.path);
             let mut line = match in_flight.run {
                 Run::Pact => pacting_message(&label, in_flight.position, in_flight.total),
                 Run::Refresh => refreshing_message(&label, in_flight.position, in_flight.total),
             };
-            if let Some(summarising) = self.summarising.as_ref() {
+            if let Some(summarising) = self.status.summarising.as_ref() {
                 line = summarising_message(
                     &line,
                     &self.label_for(&summarising.path),
@@ -1236,7 +1300,7 @@ impl App {
                     summarising.parts,
                 );
             }
-            if self.pact_refused {
+            if self.status.pact_refused {
                 already_running_message(&line)
             } else {
                 line
@@ -1264,9 +1328,9 @@ impl App {
     /// run — so it neither says anything nor takes down what the last keystroke
     /// said.
     pub fn start_account(&mut self, at: Instant) {
-        self.account = Some(Account::new(at));
-        self.panel_offset = 0;
-        self.panel_follows = true;
+        self.panel.account = Some(Account::new(at));
+        self.panel.offset = 0;
+        self.panel.follows = true;
     }
 
     /// Whether a pact has run this session, and so whether the panel has
@@ -1277,14 +1341,14 @@ impl App {
     /// be read once the run that made it is over.
     #[must_use]
     pub const fn has_account(&self) -> bool {
-        self.account.is_some()
+        self.panel.account.is_some()
     }
 
     /// The account of the pact running now, or of the last one to run, or `None`
     /// before the first pact of the session.
     #[must_use]
     pub const fn account(&self) -> Option<&Account> {
-        self.account.as_ref()
+        self.panel.account.as_ref()
     }
 
     /// The same account, to record what the run has just been seen doing.
@@ -1298,36 +1362,34 @@ impl App {
     ///
     /// `None` before the first pact, where there is nothing to record against.
     pub const fn account_mut(&mut self) -> Option<&mut Account> {
-        self.account.as_mut()
+        self.panel.account.as_mut()
     }
 
-    /// Take `view`'s account and the panel's window over from it, leaving `view`
-    /// with none.
+    /// Put `view` back in place of this app, keeping this app's panel.
     ///
-    /// For the one caller that puts an older copy of the app back in place of
-    /// the live one: a run that ended with nothing recorded restores the rows,
-    /// the colours and the selection to what the manifest on disk still says,
-    /// and that copy was taken before the run started, so it knows nothing of
-    /// what the run then did. The account is not a claim about the tree and has
-    /// no business being rolled back with it — it is the record of a run that
-    /// really happened, and the run that ends this way is exactly the one a
-    /// reader most wants to see the end of.
+    /// The one move a run that ended with nothing recorded needs, and the whole
+    /// of it. `view` is the copy taken before the run started, so it holds the
+    /// rows, the colours and the selection the manifest on disk still says are
+    /// true; what it cannot hold is the account of the run that has just
+    /// happened, because it predates it. An account is not a claim about the
+    /// tree and has no business being rolled back with one — and the run that
+    /// ends this way is exactly the one a reader most wants to see the end of.
     ///
-    /// Moved rather than copied because the app it comes from is on its way out;
-    /// an account is every line of a run that may have taken minutes, and there
-    /// is no reason to duplicate it on the way past.
-    pub fn take_account_from(&mut self, view: &mut Self) {
-        self.account = view.account.take();
-        self.panel_height = view.panel_height;
-        self.panel_offset = view.panel_offset;
-        self.panel_follows = view.panel_follows;
+    /// So the panel stays and everything else goes back. This used to be
+    /// `take_account_from`, a method that reached into the live app from the old
+    /// one to steal four fields back out of it; with the panel a value of its
+    /// own it is one move, and the four fields are not enumerated anywhere.
+    pub fn restore_from(&mut self, view: Self) {
+        let panel = mem::take(&mut self.panel);
+        *self = view;
+        self.panel = panel;
     }
 
     /// How many lines of account fit in the panel, as last set by
     /// [`App::set_panel_height`].
     #[must_use]
     pub const fn panel_height(&self) -> usize {
-        self.panel_height
+        self.panel.height
     }
 
     /// Tell the app how many lines of account fit in the panel.
@@ -1342,7 +1404,7 @@ impl App {
     /// following, so a terminal that has just been made shorter or taller still
     /// shows the newest line at the bottom.
     pub fn set_panel_height(&mut self, height: u16) {
-        self.panel_height = usize::from(height);
+        self.panel.height = usize::from(height);
     }
 
     /// Whether the panel is following the newest line of the account.
@@ -1353,7 +1415,7 @@ impl App {
     /// or ask for it outright. See [`App::select_last`].
     #[must_use]
     pub const fn panel_follows(&self) -> bool {
-        self.panel_follows
+        self.panel.follows
     }
 
     /// Which line of the account is drawn at the top of the panel.
@@ -1371,9 +1433,9 @@ impl App {
     pub fn panel_scroll_offset(&self) -> usize {
         panel_offset_for(
             self.account_line_count(),
-            self.panel_height,
-            self.panel_offset,
-            self.panel_follows,
+            self.panel.height,
+            self.panel.offset,
+            self.panel.follows,
         )
     }
 
@@ -1386,9 +1448,12 @@ impl App {
     /// drawing it.
     #[must_use]
     pub fn panel_lines(&self, now: Instant) -> Vec<Line> {
-        self.account.as_ref().map_or_else(Vec::new, |account| {
-            account.window(self.panel_scroll_offset(), self.panel_height, now)
-        })
+        self.panel
+            .account
+            .as_ref()
+            .map_or_else(Vec::new, |account| {
+                account.window(self.panel_scroll_offset(), self.panel.height, now)
+            })
     }
 
     /// How many lines of the account sit below the panel's window.
@@ -1404,12 +1469,12 @@ impl App {
     #[must_use]
     pub fn panel_lines_below(&self) -> usize {
         self.account_line_count()
-            .saturating_sub(self.panel_scroll_offset() + self.panel_height)
+            .saturating_sub(self.panel_scroll_offset() + self.panel.height)
     }
 
     /// How many lines the account draws as, or none where there is no account.
     fn account_line_count(&self) -> usize {
-        self.account.as_ref().map_or(0, Account::line_count)
+        self.panel.account.as_ref().map_or(0, Account::line_count)
     }
 
     /// Every row that is drawn, in the order it is drawn: the engine's walk
@@ -1431,7 +1496,7 @@ impl App {
     /// in here and drawn nowhere.
     #[must_use]
     pub const fn collapsed(&self) -> &BTreeSet<PathBuf> {
-        &self.collapsed
+        &self.viewpoint.collapsed
     }
 
     /// Whether the node at `path` is collapsed.
@@ -1443,7 +1508,7 @@ impl App {
     /// and this answers one bit of them.
     #[must_use]
     pub fn is_collapsed(&self, path: impl AsRef<Path>) -> bool {
-        self.collapsed.contains(path.as_ref())
+        self.viewpoint.collapsed.contains(path.as_ref())
     }
 
     /// Whether the row at `index` in [`App::rows`] has anything under it in the
@@ -1474,7 +1539,7 @@ impl App {
     /// [`App::toggle_pacted_only`] for what `true` leaves on screen.
     #[must_use]
     pub const fn pacted_only(&self) -> bool {
-        self.pacted_only
+        self.viewpoint.pacted_only
     }
 
     /// Narrow the view to the pacted part of the tree, or widen it back to the
@@ -1506,7 +1571,7 @@ impl App {
     /// Clears the last keystroke's message, like every other key that does
     /// something.
     pub fn toggle_pacted_only(&mut self) {
-        self.pacted_only = !self.pacted_only;
+        self.viewpoint.pacted_only = !self.viewpoint.pacted_only;
         self.forget_last_keystroke();
         self.reflow();
     }
@@ -1519,7 +1584,7 @@ impl App {
     /// first thing a reader is shown.
     #[must_use]
     pub const fn show_files(&self) -> bool {
-        self.show_files
+        self.viewpoint.show_files
     }
 
     /// Show the files inside each directory, or hide them again.
@@ -1548,7 +1613,7 @@ impl App {
     /// Clears the last keystroke's message, like every other key that does
     /// something.
     pub fn toggle_files(&mut self) {
-        self.show_files = !self.show_files;
+        self.viewpoint.show_files = !self.viewpoint.show_files;
         self.forget_last_keystroke();
         self.reflow();
     }
@@ -1599,7 +1664,7 @@ impl App {
     /// nobody has drawn.
     #[must_use]
     pub const fn viewport_height(&self) -> usize {
-        self.viewport_height
+        self.viewpoint.viewport_height
     }
 
     /// Tell the app how many rows of tree fit on screen, and bring the window
@@ -1624,7 +1689,7 @@ impl App {
     /// terminal that has just been made shorter scrolls the selection back
     /// into view instead of leaving it below the fold.
     pub fn set_viewport_height(&mut self, height: u16) {
-        self.viewport_height = usize::from(height);
+        self.viewpoint.viewport_height = usize::from(height);
         self.rescroll();
     }
 
@@ -1637,7 +1702,7 @@ impl App {
     /// pointer's events never arrive, so there is no second door to lock.
     #[must_use]
     pub const fn mouse_captured(&self) -> bool {
-        self.mouse_captured
+        self.status.mouse_captured
     }
 
     /// Tell the app whether the terminal is reporting its mouse.
@@ -1650,7 +1715,7 @@ impl App {
     /// before a pact and put back after one cannot leave the keys line naming a
     /// state the terminal is no longer in.
     pub const fn set_mouse_captured(&mut self, captured: bool) {
-        self.mouse_captured = captured;
+        self.status.mouse_captured = captured;
     }
 
     /// Which pane the keys are driving: the tree column, or the panel beside
@@ -1661,7 +1726,7 @@ impl App {
     /// movement methods below, deciding whether they mean anything.
     #[must_use]
     pub const fn focus(&self) -> Focus {
-        self.focus
+        self.viewpoint.focus
     }
 
     /// Move the focus to the other pane.
@@ -1676,7 +1741,7 @@ impl App {
     /// nothing here for a message to report and nothing that would make a
     /// message stale.
     pub const fn toggle_focus(&mut self) {
-        self.focus = self.focus.other();
+        self.viewpoint.focus = self.viewpoint.focus.other();
     }
 
     /// Put the focus on `focus`, wherever it was.
@@ -1692,7 +1757,7 @@ impl App {
     /// itself, so the selection, both windows and the last keystroke's message
     /// are none of its business.
     pub const fn set_focus(&mut self, focus: Focus) {
-        self.focus = focus;
+        self.viewpoint.focus = focus;
     }
 
     /// Move up one line: the selection while the tree has the focus, the
@@ -1895,7 +1960,7 @@ impl App {
         tree: impl FnOnce(&Self) -> usize,
         panel: impl FnOnce(&Self, usize) -> usize,
     ) {
-        if self.focus.drives_the_tree() {
+        if self.viewpoint.focus.drives_the_tree() {
             self.selected = tree(self);
             self.moved();
         } else {
@@ -1917,27 +1982,27 @@ impl App {
         // Where the end is, asked of the one function that decides it, so that
         // "as far down as the account goes" means the same thing to a keystroke
         // as it does to the frame being drawn.
-        let end = panel_offset_for(self.account_line_count(), self.panel_height, 0, true);
-        self.panel_offset = offset.min(end);
-        self.panel_follows = self.panel_offset == end;
+        let end = panel_offset_for(self.account_line_count(), self.panel.height, 0, true);
+        self.panel.offset = offset.min(end);
+        self.panel.follows = self.panel.offset == end;
     }
 
     /// How many rows one page key moves the tree by: a windowful, or a single
     /// row for an app whose window nobody has measured yet.
     const fn page(&self) -> usize {
-        if self.viewport_height == 0 {
+        if self.viewpoint.viewport_height == 0 {
             1
         } else {
-            self.viewport_height
+            self.viewpoint.viewport_height
         }
     }
 
     /// How many lines one page key moves the panel by, on the same rule.
     const fn panel_page(&self) -> usize {
-        if self.panel_height == 0 {
+        if self.panel.height == 0 {
             1
         } else {
-            self.panel_height
+            self.panel.height
         }
     }
 
@@ -1950,7 +2015,7 @@ impl App {
     fn rescroll(&mut self) {
         self.scroll_offset = scroll_offset_for(
             self.rows.len(),
-            self.viewport_height,
+            self.viewpoint.viewport_height,
             self.selected,
             self.scroll_offset,
         );
@@ -1984,17 +2049,17 @@ impl App {
     /// ancestor still drawn, and on the first row when not even that survives.
     fn reflow(&mut self) {
         let selected = self.rows.get(self.selected).map(|row| row.path.clone());
-        let kept: Cow<'_, [Row]> = if self.show_files {
+        let kept: Cow<'_, [Row]> = if self.viewpoint.show_files {
             Cow::Borrowed(&self.all_rows)
         } else {
             Cow::Owned(node_rows(&self.all_rows))
         };
-        let kept: Cow<'_, [Row]> = if self.pacted_only {
+        let kept: Cow<'_, [Row]> = if self.viewpoint.pacted_only {
             Cow::Owned(pacted_rows(&kept))
         } else {
             kept
         };
-        (self.rows, self.collapsible) = drawn_rows(&kept, &self.collapsed);
+        (self.rows, self.collapsible) = drawn_rows(&kept, &self.viewpoint.collapsed);
         self.selected = selected
             .and_then(|path| index_for(&self.rows, &path))
             .unwrap_or(0);
@@ -2026,8 +2091,8 @@ impl App {
     /// a fraction of a second after the press would wipe the answer before it
     /// could be read.
     fn forget_last_keystroke(&mut self) {
-        self.message = None;
-        self.pact_refused = false;
+        self.status.message = None;
+        self.status.pact_refused = false;
     }
 
     /// How to name `path` in a message: relative to the root of the tree on
@@ -2082,8 +2147,8 @@ impl App {
         };
 
         let path = row.path.clone();
-        if !self.collapsed.remove(&path) {
-            self.collapsed.insert(path);
+        if !self.viewpoint.collapsed.remove(&path) {
+            self.viewpoint.collapsed.insert(path);
         }
         self.forget_last_keystroke();
         self.reflow();
@@ -2144,11 +2209,11 @@ impl App {
         if row.is_file() {
             // Answered as a file first: that is what the row *is*, and it is the
             // answer whether or not the rules also keep it out.
-            self.message = Some(file_row_message(&self.label_for(&path)));
+            self.status.message = Some(file_row_message(&self.label_for(&path)));
             return None;
         }
         if ignored {
-            self.message = Some(ignored_row_message(&self.label_for(&path)));
+            self.status.message = Some(ignored_row_message(&self.label_for(&path)));
             return None;
         }
 
@@ -2161,7 +2226,7 @@ impl App {
                 NodeState::Unpacted
             },
         );
-        self.message = (!pacted).then(|| left_on_disk_message(&self.label_for(&path)));
+        self.status.message = (!pacted).then(|| left_on_disk_message(&self.label_for(&path)));
 
         Some(PactToggle { path, pacted })
     }
@@ -2208,20 +2273,20 @@ impl App {
         let state = row.state;
 
         if row.is_file() {
-            self.message = Some(file_row_message(&self.label_for(&path)));
+            self.status.message = Some(file_row_message(&self.label_for(&path)));
             return None;
         }
         match state {
             NodeState::Unpacted => {
-                self.message = Some(unpacted_message(&self.label_for(&path)));
+                self.status.message = Some(unpacted_message(&self.label_for(&path)));
                 None
             }
             NodeState::PactedFresh => {
-                self.message = Some(already_fresh_message(&self.label_for(&path)));
+                self.status.message = Some(already_fresh_message(&self.label_for(&path)));
                 None
             }
             NodeState::PactedStale => {
-                self.message = None;
+                self.status.message = None;
                 Some(path)
             }
         }
@@ -2272,12 +2337,12 @@ impl App {
         let state = row.state;
 
         if row.is_file() {
-            self.message = Some(file_row_message(&self.label_for(&path)));
+            self.status.message = Some(file_row_message(&self.label_for(&path)));
             return None;
         }
         match state {
             NodeState::Unpacted => {
-                self.message = Some(unpacted_scope_message(&self.label_for(&path)));
+                self.status.message = Some(unpacted_scope_message(&self.label_for(&path)));
                 None
             }
             // Fresh or stale, the pact is there and so is the entry the scope
@@ -2414,9 +2479,9 @@ impl App {
         // directory that is collapsed or filtered away. Asking those three
         // questions is what keeps this insertion and the next `reflow` from
         // disagreeing about what is on screen.
-        if !self.show_files
-            || (self.pacted_only && !row.state.is_pacted())
-            || self.collapsed.contains(directory)
+        if !self.viewpoint.show_files
+            || (self.viewpoint.pacted_only && !row.state.is_pacted())
+            || self.viewpoint.collapsed.contains(directory)
         {
             return;
         }
@@ -2525,34 +2590,47 @@ pub fn reseat_on(view: &App, tree: &Tree) -> App {
     // old view that the new rows cannot be asked for.
     let selected = view.selected_row().map(|row| row.path.clone());
 
-    let mut reseated = App::from_tree(tree);
-    reseated.collapsed.clone_from(&view.collapsed);
-    reseated.pacted_only = view.pacted_only;
-    reseated.show_files = view.show_files;
-    reseated.viewport_height = view.viewport_height;
-    reseated.header.clone_from(&view.header);
-    // With what is held on it, for the header's other half is no more a fact
-    // about the tree than its first half is: the config was read once, before
-    // the loop started, and a tree being re-read is not a machine changing what
-    // it holds. Lost here, it would be lost on every reload — and a header that
-    // stopped stating a holding after a run would read as a holding dropped.
-    reseated.sigils.clone_from(&view.sigils);
-    reseated.message.clone_from(&view.message);
-    reseated.in_flight.clone_from(&view.in_flight);
-    // With the pass running inside it, for the same reason: the run did not stop
-    // because a tree was re-read, so the file being paid for right now is still
-    // being paid for and the line should not lose it for a frame.
-    reseated.summarising.clone_from(&view.summarising);
-    // Carried, like the message beside it and for the same reason: a tree being
-    // re-read is not a keystroke, so it is not the thing that answers one. A
-    // reader whose press was refused a frame ago should still be reading the
-    // answer, and the run it refers to has been carried over too.
-    reseated.pact_refused = view.pact_refused;
-    reseated.focus = view.focus;
-    reseated.account.clone_from(&view.account);
-    reseated.panel_height = view.panel_height;
-    reseated.panel_offset = view.panel_offset;
-    reseated.panel_follows = view.panel_follows;
+    // Destructured rather than read field by field, and deliberately with no
+    // `..`: this function is the one place that decides what survives a reload,
+    // and a pattern that names every field is what makes adding a tenth one a
+    // compile error here rather than a fact that quietly stops being carried.
+    // That used to be twenty assignments nobody could check, and the proof it
+    // could not be checked is that the header was among them — carried here and
+    // then immediately recomputed by the only caller.
+    let App {
+        // From the tree, every time. Whatever the old view held for these is a
+        // description of a tree that has just been replaced.
+        all_rows: _,
+        rows: _,
+        collapsible: _,
+        counts: _,
+        // Re-derived below against the new rows rather than carried as they
+        // stand: an index names whichever node now sits at that position, so
+        // the selection travels by path, and the offset is put back only to be
+        // brought into range by `rescroll`.
+        selected: _,
+        scroll_offset,
+        // Carried whole. Three values, three moves — and nothing to forget
+        // inside them, because a field added to any of the three is carried by
+        // the move that already exists.
+        viewpoint,
+        status,
+        panel,
+    } = view;
+
+    let mut reseated = App {
+        all_rows: walk_of(tree),
+        // Both derived by the `reflow` below, which is the one thing that knows
+        // how the filters and the collapsed set turn a walk into a row list.
+        rows: Vec::new(),
+        collapsible: BTreeSet::new(),
+        counts: tree.counts(),
+        selected: 0,
+        scroll_offset: 0,
+        viewpoint: viewpoint.clone(),
+        status: status.clone(),
+        panel: panel.clone(),
+    };
 
     // Re-filter first, so the selection is looked up in the rows that will
     // actually be drawn rather than in the whole walk: what a hidden node falls
@@ -2565,10 +2643,48 @@ pub fn reseat_on(view: &App, tree: &Tree) -> App {
     // selection; the offset the reader left is the one the window rule is owed,
     // so it goes back before that rule is applied to where the selection really
     // landed. A window that still holds the selection does not move at all.
-    reseated.scroll_offset = view.scroll_offset;
+    reseated.scroll_offset = *scroll_offset;
     reseated.rescroll();
 
     reseated
+}
+
+/// The engine's whole walk of `tree`, flattened into the row list an [`App`]
+/// keeps as `all_rows`.
+///
+/// Pulled out of [`App::from_tree`] so that [`reseat_on`] has the same thing to
+/// build from without going through a whole [`App`] it would then have to take
+/// apart again: the tree-derived half of a re-seat is this list and the tally
+/// beside it, and nothing else.
+///
+/// Each row is told whether a `.warlockignore` keeps its content out, from the
+/// node's own flag, and the file rows are told the same as the directory
+/// listing them — the rules exclude a directory's content along with it, so a
+/// file row saying otherwise would be a second answer to one question. It
+/// changes no colour and hides no row: an excluded directory keeps its row and
+/// its gray, and the flag is there for [`App::toggle_pact`] to refuse a press on
+/// it without asking the filesystem anything.
+///
+/// Each row is told the scope written on its own node the same way, from the
+/// node's own field — never an ancestor's, and never by asking
+/// [`warlock_engine::scope_covering`], because the label in the tree marks where
+/// a boundary starts. The file rows are told nothing: a file has no pact entry
+/// to write a scope on, so unlike the state and the exclusion flag there is
+/// nothing of the directory's to copy down. See [`Row::scope`].
+fn walk_of(tree: &Tree) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for (node, depth) in tree.walk() {
+        rows.push(
+            Row::new(depth, node.path.clone(), node.document.clone(), node.state)
+                .with_child_count(node.children.len())
+                .with_ignored(node.is_ignored())
+                .with_scope(node.scope.clone()),
+        );
+        rows.extend(node.files.iter().map(|file| {
+            Row::file(depth + 1, file.clone(), node.state).with_ignored(node.is_ignored())
+        }));
+    }
+    rows
 }
 
 /// Which of `all` stand for nodes: the walk with every file row dropped, which
@@ -2986,8 +3102,8 @@ mod tests {
     use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
     use super::{
-        Account, App, Focus, Line, PactToggle, Row, Run, Sigils, panel_offset_for, reseat_on,
-        scroll_offset_for,
+        Account, App, Chrome, Focus, Line, PactToggle, Row, Run, Sigils, panel_offset_for,
+        reseat_on, scroll_offset_for,
     };
     use crate::claude::Activity;
     use crate::fixture;
@@ -3246,82 +3362,89 @@ mod tests {
     }
 
     #[test]
-    fn a_scope_below_the_repository_root_is_named_relative_to_it() {
-        let app = App::from_rows(three_rows()).with_scope(
+    fn a_root_below_the_repository_root_is_named_relative_to_it() {
+        let chrome = Chrome::of(
             Path::new("/repo"),
             Path::new("/repo").join("crates").join("engine"),
         );
 
         // Forward slashes even where the separator is a backslash: this is the
         // engine's manifest spelling.
-        assert_eq!(app.header(), "crates/engine");
+        assert_eq!(chrome.header(), "crates/engine");
     }
 
     #[test]
     fn the_repository_root_itself_gets_no_header_rather_than_a_dot_or_a_label() {
-        let app = App::from_rows(three_rows()).with_scope("/repo", "/repo");
+        let chrome = Chrome::of("/repo", "/repo");
 
         // The header says which part of the repository is on screen. The whole
         // of it is not a part, so there is nothing for the line to say — and the
         // bare "." the relative spelling would give is not an answer, it is the
         // question left unanswered.
-        assert_eq!(app.header(), "");
-        assert_ne!(app.header(), ".");
+        assert_eq!(chrome.header(), "");
+        assert_ne!(chrome.header(), ".");
     }
 
     #[test]
-    fn a_relative_scope_is_taken_to_be_relative_to_the_repository_root_already() {
-        let app = App::from_rows(three_rows()).with_scope("/repo", "docs/adr");
-
-        assert_eq!(app.header(), "docs/adr");
+    fn a_relative_root_is_taken_to_be_relative_to_the_repository_root_already() {
+        assert_eq!(Chrome::of("/repo", "docs/adr").header(), "docs/adr");
     }
 
     #[test]
     fn a_root_outside_the_repository_falls_back_to_printing_itself() {
-        let app = App::from_rows(three_rows()).with_scope("/repo", "/elsewhere/docs");
-
         // Not describable relative to the repository root, but a header is a
         // label: it says what it can rather than going blank.
-        assert_eq!(app.header(), "/elsewhere/docs");
+        assert_eq!(
+            Chrome::of("/repo", "/elsewhere/docs").header(),
+            "/elsewhere/docs"
+        );
     }
 
     #[test]
-    fn an_app_that_was_never_told_its_scope_has_no_header() {
-        assert_eq!(App::from_rows(three_rows()).header(), "");
-        assert_eq!(App::from_tree(&fixture::tree()).header(), "");
+    fn a_chrome_nobody_built_states_nothing_at_all() {
+        let chrome = Chrome::default();
+
+        assert_eq!(chrome.header(), "");
+        assert_eq!(chrome.sigils(), &Sigils::Nothing);
     }
 
     #[test]
-    fn a_scope_changes_nothing_but_the_header() {
-        let app = App::from_tree(&fixture::tree());
+    fn the_header_is_not_app_state_and_no_app_carries_one() {
+        // The structural claim this type exists for, and the reason there is no
+        // `App::header` to assert against: both halves of the header are
+        // resolved once and cannot change while warlock runs, so an app rebuilt
+        // on every reload has no business holding either. What is left to check
+        // is that building one costs an app nothing — a `Chrome` is a function
+        // of two paths and a config, and there is no `App` anywhere in it.
+        let chrome = Chrome::of("/repo", "/repo/crates").with_sigils(Sigils::held(["billing"]));
 
-        let scoped = app.clone().with_scope("/repo", "/repo/crates");
-
-        assert_eq!(scoped.rows(), app.rows());
-        assert_eq!(scoped.counts(), app.counts());
-        assert_eq!(scoped.selected(), app.selected());
+        assert_eq!(chrome.header(), "crates");
+        assert_eq!(chrome.sigils(), &Sigils::Held(vec!["billing".to_owned()]));
     }
 
     #[test]
-    fn an_app_that_was_never_told_what_is_held_states_nothing() {
+    fn a_chrome_that_was_never_told_what_is_held_states_nothing() {
         // The default, and the state a reader who has never run `warlock
         // config` is in: there is no wording for it at all, so there is nothing
         // for the header to join onto the line it already had.
-        let app = App::from_rows(three_rows());
+        let chrome = Chrome::of("/repo", "/repo/crates");
 
-        assert_eq!(app.sigils(), &Sigils::Nothing);
-        assert_eq!(app.sigils().line(), None);
+        assert_eq!(chrome.sigils(), &Sigils::Nothing);
+        assert_eq!(chrome.sigils().line(), None);
     }
 
     #[test]
     fn the_sigils_held_are_listed_in_the_order_the_config_has_them() {
-        let app = App::from_rows(three_rows()).with_sigils(Sigils::held(["billing", "web"]));
+        let chrome = Chrome::default().with_sigils(Sigils::held(["billing", "web"]));
 
         assert_eq!(
-            app.sigils(),
+            chrome.sigils(),
             &Sigils::Held(vec!["billing".to_owned(), "web".to_owned()])
         );
-        assert_eq!(app.sigils().line(), Some("holding `billing`, `web`".into()));
+        assert_eq!(
+            chrome.sigils().line(),
+            Some("holding `billing`, `web`".into())
+        );
     }
 
     #[test]
@@ -3352,51 +3475,28 @@ mod tests {
         // The promise the three states are arranged around: a reader who never
         // runs `warlock config` sees the header they have always seen, in both
         // spellings of nothing and whether or not anything was ever set.
-        let told = App::from_rows(three_rows()).with_scope("/repo", "/repo/crates/engine");
+        let told = Chrome::of("/repo", "/repo/crates/engine");
         let before = told.header().to_owned();
 
         for nothing in [Sigils::Nothing, Sigils::held(Vec::<String>::new())] {
-            let app = told.clone().with_sigils(nothing);
+            let chrome = told.clone().with_sigils(nothing);
 
-            assert_eq!(app.header(), before);
-            assert_eq!(app.sigils().line(), None);
+            assert_eq!(chrome.header(), before);
+            assert_eq!(chrome.sigils().line(), None);
         }
     }
 
     #[test]
     fn what_is_held_changes_nothing_but_what_the_header_states() {
-        // No row is coloured, filtered, sorted or re-ordered by a holding, and
-        // the identity half of the header is not touched either.
-        let app = App::from_tree(&fixture::tree()).with_scope("/repo", "/repo/crates");
+        // The identity half of the header is not touched by a holding. That no
+        // *row* is coloured, filtered, sorted or re-ordered by one used to be
+        // asserted here too, over an `App`; it is now true by construction,
+        // because a `Chrome` has no rows to reach.
+        let chrome = Chrome::of("/repo", "/repo/crates");
 
-        let holding = app.clone().with_sigils(Sigils::held(["billing"]));
+        let holding = chrome.clone().with_sigils(Sigils::held(["billing"]));
 
-        assert_eq!(holding.header(), app.header());
-        assert_eq!(holding.rows(), app.rows());
-        assert_eq!(holding.counts(), app.counts());
-        assert_eq!(holding.selected(), app.selected());
-    }
-
-    #[test]
-    fn what_is_held_survives_a_re_seat() {
-        // The config is read once, before the loop starts. A reload is a tree
-        // being read again, not a machine changing what it holds — and a header
-        // that stopped stating a holding after a run would read as one dropped.
-        let app = App::from_tree(&fixture::tree())
-            .with_scope("/repo", "/repo/warlock")
-            .with_sigils(Sigils::held(["billing", "web"]));
-
-        let reseated = reseat_on(&app, &fixture::tree_after_a_run());
-
-        assert_eq!(reseated.sigils(), app.sigils());
-        assert_eq!(reseated.header(), app.header());
-        // And the broken state carries too, for the same reason: a reload finds
-        // no config either way.
-        let unknown = App::from_tree(&fixture::tree()).with_sigils(Sigils::Unknown);
-        assert_eq!(
-            reseat_on(&unknown, &fixture::tree_after_a_run()).sigils(),
-            &Sigils::Unknown
-        );
+        assert_eq!(holding.header(), chrome.header());
     }
 
     #[test]
@@ -6850,7 +6950,7 @@ mod tests {
 
     #[test]
     fn re_seating_on_a_tree_that_has_not_changed_leaves_the_view_exactly_as_it_was() {
-        let mut app = App::from_tree(&fixture::tree()).with_scope("/repo", "/repo/warlock");
+        let mut app = App::from_tree(&fixture::tree());
         app.toggle_files();
         app.toggle_pacted_only();
         let mut app = select(app, "warlock/crates");

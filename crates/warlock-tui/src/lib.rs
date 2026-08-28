@@ -10,11 +10,21 @@
 //! A view here outlives the tree it was built on, because a run writes documents
 //! and the tree has to be read again to show them. [`reseat_on`] is that move,
 //! and it is a function over two values like everything else: rows, states and
-//! the tally come from the new tree, while the selection, the collapsed
-//! directories, the filters and the window come from the old view and are
-//! carried by path rather than by row number, so a reload leaves the reader
-//! where they were rather than at the top. It reads no disk and asks for no
-//! reload of its own — *when* a tree is read again is the binary's business.
+//! the tally come from the new tree, while what the reader has done to the view
+//! — the collapsed directories, the filters, the window and the focus — comes
+//! from the old one, along with what the footer was saying and the account in
+//! the panel. The selection travels by path rather than by row number, because
+//! an index names whichever node now sits at that position, so a reload leaves
+//! the reader where they were rather than at the top. It reads no disk and asks
+//! for no reload of its own — *when* a tree is read again is the binary's
+//! business.
+//!
+//! Which of an [`App`]'s facts survive that move is a property of the type
+//! rather than a list somebody keeps: the reader's view state, the footer's and
+//! the panel's are each one value, so a re-seat moves three things and has
+//! nothing inside them to forget. What it does *not* move is the header line —
+//! see [`Chrome`], which is not app state at all, because neither half of it can
+//! change while warlock runs.
 //!
 //! What a run is *doing* while it runs is data of the same kind. [`Account`] is
 //! one pact's own record of itself — a section per directory, a line per thing a
@@ -97,8 +107,16 @@ pub use account::Section;
 /// drive whichever pane has the focus, or by a pointer, which names the row and
 /// the pane it landed on and so consults no focus at all. It also carries what
 /// the binary has told it about the terminal's mouse capture, which the footer
-/// names the key that changes it by.
+/// names the key that changes it by. What it does not carry is the header line,
+/// which is a [`Chrome`].
 pub use app::App;
+/// What the header line states — which tree is on screen, and what this machine
+/// holds for the repository it came out of. Resolved once by whoever loaded the
+/// app and handed to [`draw`] beside the two windows, deliberately not a field
+/// on [`App`]: neither half can change under a running warlock, so an app that
+/// has never heard of them is an app no keystroke can be suspected of having
+/// changed them on.
+pub use app::Chrome;
 /// Which of the screen's two panes the keys are driving: toggled by the focus
 /// key, or set outright by a click naming a pane.
 pub use app::Focus;
@@ -113,7 +131,10 @@ pub use app::Run;
 /// config that could not be read — as the tree pane's header states it.
 pub use app::Sigils;
 /// Put a view back on top of a tree that has just been read again: same
-/// selection, same collapsed directories, same filters, same window, new rows.
+/// selection, same collapsed directories, same filters, same window, same
+/// footer, same panel, new rows. Every field of the old view is named in one
+/// pattern with no `..` in it, so a field added to [`App`] stops this
+/// compiling rather than quietly ceasing to be carried.
 pub use app::reseat_on;
 /// A handle for hearing what a model pass is doing, from another thread, while
 /// it is still running.

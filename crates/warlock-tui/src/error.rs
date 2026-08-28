@@ -10,9 +10,9 @@
 use std::path::PathBuf;
 use std::{fmt, io};
 
-use warlock_engine::{AgentsMdError, LoadError, LoadProblem, ManifestError, ScopeRule, SigilError};
+use warlock_engine::{ClaudeMdError, LoadError, LoadProblem, ManifestError, ScopeRule, SigilError};
 
-/// Everything that can stop warlock showing a tree, or writing an `AGENTS.md`.
+/// Everything that can stop warlock showing a tree, or writing a `CLAUDE.md`.
 ///
 /// Richer than the `io::Error` this used to return, because loading brings
 /// failures that are not I/O — a directory outside any repository, a manifest
@@ -64,7 +64,7 @@ pub(crate) enum Error {
         source: ManifestError,
     },
     /// A subcommand was run somewhere with no repository above it, so there is
-    /// no root to write an `AGENTS.md` at or to hold sigils for.
+    /// no root to write a `CLAUDE.md` at or to hold sigils for.
     ///
     /// The tree's own version of this refusal comes through [`Error::Load`] in
     /// the engine's words; neither subcommand loads a tree, so each asks
@@ -79,19 +79,19 @@ pub(crate) enum Error {
         /// The working directory the search upwards started from.
         start: PathBuf,
         /// What the root was wanted for, as the tail of the sentence: "write
-        /// `AGENTS.md` at", "hold sigils for". A `&'static str` because there
+        /// `CLAUDE.md` at", "hold sigils for". A `&'static str` because there
         /// are exactly as many of these as there are subcommands, each spelled
         /// where its subcommand is written.
         wanted: &'static str,
     },
-    /// `warlock init` could not write the `AGENTS.md`: it is there and cannot
+    /// `warlock init` could not write the `CLAUDE.md`: it is there and cannot
     /// be read, it is not text, or the write itself failed.
     ///
     /// Nothing is half-written when this arrives — the engine writes beside and
     /// renames over — so the file named is either untouched or whole.
-    AgentsMd {
+    ClaudeMd {
         /// Which of the writer's cases it was, with the path it names.
-        source: AgentsMdError,
+        source: ClaudeMdError,
     },
     /// `warlock config` could not work out where this machine's home directory
     /// is, so it does not know where the sigils would be kept.
@@ -205,7 +205,7 @@ impl fmt::Display for Error {
             ),
             // Flattened like the two above it: what the filesystem says can run
             // to more than one line, and this prints as one.
-            Self::AgentsMd { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::ClaudeMd { source } => write!(f, "{}", one_line(&source.to_string())),
             // Says which variables were looked at and what to do about it: a
             // reader whose `HOME` is unset is in an unusual shell and needs the
             // name of the thing to set rather than a fact about warlock.
@@ -245,7 +245,7 @@ impl std::error::Error for Error {
             | Self::Prompt { source } => Some(source),
             Self::Load { source } => Some(source),
             Self::Manifest { source } => Some(source),
-            Self::AgentsMd { source } => Some(source),
+            Self::ClaudeMd { source } => Some(source),
             Self::Sigil { rule, .. } => Some(rule),
             Self::Sigils { source } => Some(source),
             Self::Problems { .. } | Self::NoRepository { .. } | Self::NoHome => None,
@@ -266,12 +266,12 @@ impl From<io::Error> for Error {
 mod tests {
     use std::path::PathBuf;
 
-    use warlock_engine::{AgentsMdError, ManifestError, ScopeRule, SigilError};
+    use warlock_engine::{ClaudeMdError, ManifestError, ScopeRule, SigilError};
 
     use super::{Error, one_line};
 
     /// What `warlock init` wants a repository root for, as `main` spells it.
-    const FOR_AGENTS_MD: &str = "write `AGENTS.md` at";
+    const FOR_CLAUDE_MD: &str = "write `CLAUDE.md` at";
 
     /// What `warlock config` wants one for, as `config` spells it.
     const FOR_SIGILS: &str = "hold sigils for";
@@ -353,21 +353,21 @@ mod tests {
             },
             Error::NoRepository {
                 start: PathBuf::from("/elsewhere"),
-                wanted: FOR_AGENTS_MD,
+                wanted: FOR_CLAUDE_MD,
             },
             Error::NoRepository {
                 start: PathBuf::from("/elsewhere"),
                 wanted: FOR_SIGILS,
             },
-            Error::AgentsMd {
-                source: AgentsMdError::Write {
-                    path: PathBuf::from("/repo/AGENTS.md"),
+            Error::ClaudeMd {
+                source: ClaudeMdError::Write {
+                    path: PathBuf::from("/repo/CLAUDE.md"),
                     source: std::io::Error::other("boom"),
                 },
             },
-            Error::AgentsMd {
-                source: AgentsMdError::NotText {
-                    path: PathBuf::from("/repo/AGENTS.md"),
+            Error::ClaudeMd {
+                source: ClaudeMdError::NotText {
+                    path: PathBuf::from("/repo/CLAUDE.md"),
                 },
             },
             Error::NoHome,
@@ -417,13 +417,13 @@ mod tests {
     fn init_outside_a_repository_says_what_was_looked_for_and_where() {
         let error = Error::NoRepository {
             start: PathBuf::from("/elsewhere"),
-            wanted: FOR_AGENTS_MD,
+            wanted: FOR_CLAUDE_MD,
         };
 
         assert_eq!(
             error.to_string(),
             "no `.git` directory in `/elsewhere` or any of its parents, so there is \
-             no repository root to write `AGENTS.md` at"
+             no repository root to write `CLAUDE.md` at"
         );
     }
 
@@ -484,17 +484,17 @@ mod tests {
     }
 
     #[test]
-    fn an_agents_md_that_cannot_be_written_says_so_in_the_engines_words() {
-        let error = Error::AgentsMd {
-            source: AgentsMdError::Write {
-                path: PathBuf::from("/repo/AGENTS.md"),
+    fn a_claude_md_that_cannot_be_written_says_so_in_the_engines_words() {
+        let error = Error::ClaudeMd {
+            source: ClaudeMdError::Write {
+                path: PathBuf::from("/repo/CLAUDE.md"),
                 source: std::io::Error::other("permission denied"),
             },
         };
 
         assert_eq!(
             error.to_string(),
-            "could not write `/repo/AGENTS.md`: permission denied"
+            "could not write `/repo/CLAUDE.md`: permission denied"
         );
     }
 }

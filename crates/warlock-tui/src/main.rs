@@ -149,7 +149,7 @@
 //! One thing now happens before any of that, and it happens with nothing
 //! attached to the terminal: the arguments are read. Zero of them is the whole
 //! of warlock as it was — the panic hook, the loop, the alternate screen — and
-//! anything else is answered here and exits. `init` writes an `AGENTS.md` at the
+//! anything else is answered here and exits. `init` writes a `CLAUDE.md` at the
 //! repository root and says which file it wrote; `config` prints the sigils this
 //! machine holds for this repository and reads a line replacing them
 //! ([`config`]); `-h` and `--help` print the one usage line; and every other
@@ -181,7 +181,7 @@ use std::{env, io};
 
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use ratatui::crossterm::execute;
-use warlock_engine::{Written, repository_root, write_agents_md};
+use warlock_engine::{Written, repository_root, write_claude_md};
 use warlock_tui::{
     App, ClaudeAgent, Focus, QuitConfirm, ScopePrompt, draw, panel_height, tree_height,
 };
@@ -230,15 +230,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// refusal path shares it, where several lines of help in answer to a typo would
 /// bury the fact that nothing ran.
 const USAGE: &str = "usage: warlock [init|config] — no arguments opens the tree; \
-                     `init` writes AGENTS.md at the repository root; `config` sets \
+                     `init` writes CLAUDE.md at the repository root; `config` sets \
                      the sigils this machine holds for it";
 
 /// What `warlock init` wants the repository root for, as the tail of
 /// [`Error::NoRepository`]'s sentence. `config`'s own tail is spelled beside
 /// `config`, in its module.
-const FOR_AGENTS_MD: &str = "write `AGENTS.md` at";
+const FOR_CLAUDE_MD: &str = "write `CLAUDE.md` at";
 
-/// What `warlock init` says when there was no `AGENTS.md` and now there is one.
+/// What `warlock init` says when there was no `CLAUDE.md` and now there is one.
 const CREATED: &str = "created";
 
 /// What it says when there was one already and warlock's section in it is now
@@ -351,7 +351,7 @@ fn intention_for(args: impl IntoIterator<Item = impl AsRef<str>>) -> Intention {
     }
 }
 
-/// `warlock init`: write the `AGENTS.md` at the repository root and say which
+/// `warlock init`: write the `CLAUDE.md` at the repository root and say which
 /// file was written.
 ///
 /// Three steps and no policy of its own. The working directory says where to
@@ -359,7 +359,7 @@ fn intention_for(args: impl IntoIterator<Item = impl AsRef<str>>) -> Intention {
 /// — so running this from any subdirectory writes the one file in the right
 /// place — and the engine does the writing, because the splice, the delimiters
 /// and the text are all its business (see
-/// [`write_agents_md`](warlock_engine::write_agents_md)).
+/// [`write_claude_md`](warlock_engine::write_claude_md)).
 ///
 /// Nothing here touches the terminal: what happened is one line on the ordinary
 /// screen, and a failure is an [`Error`] returned to `main`, which prints it in
@@ -372,10 +372,10 @@ fn init() -> Result<(), Error> {
     // ancestors.
     let root = repository_root(&working_dir).ok_or(Error::NoRepository {
         start: working_dir,
-        wanted: FOR_AGENTS_MD,
+        wanted: FOR_CLAUDE_MD,
     })?;
 
-    let written = write_agents_md(&root).map_err(|source| Error::AgentsMd { source })?;
+    let written = write_claude_md(&root).map_err(|source| Error::ClaudeMd { source })?;
     // Asked as a question rather than matched arm by arm, because the engine's
     // enum is `#[non_exhaustive]`: there is one thing to distinguish here — a
     // file that did not exist before — and anything it gains later is a file
@@ -511,7 +511,7 @@ fn run() -> Result<(), Error> {
         // it carries the text somebody is typing.
         guard
             .terminal
-            .draw(|frame| draw(frame, &app, Instant::now(), confirm, &prompt))?;
+            .draw(|frame| draw(frame, &app, &scope.chrome, Instant::now(), confirm, &prompt))?;
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
         // sits here, so the wait has to end whether or not anybody presses

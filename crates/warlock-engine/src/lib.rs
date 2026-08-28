@@ -16,7 +16,7 @@
 //! seam, and these tests need no `claude`, no network and no terminal.
 
 mod agent;
-mod agents_md;
+mod claude_md;
 mod clock;
 mod decide;
 mod hash;
@@ -46,18 +46,18 @@ pub use agent::File as AgentFile;
 pub use agent::Request as AgentRequest;
 /// What one model pass produced: the text the model wrote, unparsed.
 pub use agent::Response as AgentResponse;
-/// Everything that can stop an `AGENTS.md` being written, each one naming the
+/// Everything that can stop a `CLAUDE.md` being written, each one naming the
 /// file. A missing file is not in here: that is the case where one is created.
-pub use agents_md::Error as AgentsMdError;
-/// What writing an `AGENTS.md` did — created a file, or brought warlock's
+pub use claude_md::Error as ClaudeMdError;
+/// What writing a `CLAUDE.md` did — created a file, or brought warlock's
 /// section in one that was already there up to date — and which file it was.
-pub use agents_md::Written;
-/// Write `<root>/AGENTS.md`: what warlock is, what a `WARLOCK.md` is, what the
+pub use claude_md::Written;
+/// Write `<root>/CLAUDE.md`: what warlock is, what a `WARLOCK.md` is, what the
 /// colours mean, and to read the documents first, in a delimited section that a
 /// second run replaces in place. Every byte outside the delimiters survives, and
 /// this writes that one file and nothing else — no manifest, no document, no
 /// model pass.
-pub use agents_md::write_agents_md;
+pub use claude_md::write_claude_md;
 /// Now, as the RFC 3339 UTC timestamp a grant records: `2026-08-21T14:03:11Z`.
 /// Computed from the system clock with this crate's own calendar arithmetic —
 /// no date/time dependency — and infallible, because a clock set before 1970 is

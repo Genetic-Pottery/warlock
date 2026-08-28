@@ -957,9 +957,8 @@ fn section_outcome(section: &Section, refusals: &[Refusal], root: &Path) -> Outc
 /// through wants to see where it got to more than a reader of any other run
 /// does. So the rows, the colours and the selection go back to what the manifest
 /// on disk still says, and the panel keeps its account.
-fn restore(app: &mut App, mut before: App, message: impl Into<String>) {
-    before.take_account_from(app);
-    *app = before;
+fn restore(app: &mut App, before: App, message: impl Into<String>) {
+    app.restore_from(before);
     app.set_message(message);
 }
 
@@ -1198,7 +1197,7 @@ mod tests {
         subtree_hash,
     };
     use warlock_tui::{
-        Account, Activities, Activity, App, ClaudeAgent, Line, PactToggle, Run, Section,
+        Account, Activities, Activity, App, Chrome, ClaudeAgent, Line, PactToggle, Run, Section,
     };
 
     use warlock_tui::Cancel;
@@ -1436,8 +1435,9 @@ mod tests {
             load_tree(&scratch.root).expect("a scratch repository with a `.git/` loads");
         let repo_root =
             repository_root(tree.root_path()).expect("the load found a repository root");
-        let app = App::from_tree(&tree).with_scope(&repo_root, tree.root_path());
+        let app = App::from_tree(&tree);
         let scope = Scope {
+            chrome: Chrome::of(&repo_root, tree.root_path()),
             root: tree.root_path().to_path_buf(),
             repo_root,
         };
@@ -1479,6 +1479,7 @@ mod tests {
         Scope {
             root: PathBuf::from("/repo/crates"),
             repo_root: PathBuf::from("/repo"),
+            chrome: Chrome::of("/repo", "/repo/crates"),
         }
     }
 
@@ -4754,7 +4755,6 @@ mod tests {
                 .expect("a row is selected");
             let collapsed = app.collapsed().clone();
             let offset = app.scroll_offset();
-            let header = app.header().to_owned();
             assert!(offset > 0, "the reader scrolled off the first row");
             assert_eq!(
                 state_of(&app, &scratch.path("crates/engine")),
@@ -4793,7 +4793,10 @@ mod tests {
             assert!(app.pacted_only(), "the filter was dropped");
             assert!(app.show_files(), "the file toggle was dropped");
             assert_eq!(app.scroll_offset(), offset, "the window moved");
-            assert_eq!(app.header(), header, "the header was rewritten");
+            // The header used to be asserted here too. It is not an `App`'s to
+            // lose any more — a reload rebuilds the app and never touches the
+            // `Chrome` beside it — so the claim moved to `session`, where the
+            // thing that could drop it lives.
             assert_eq!(app.message(), None, "and nothing went wrong to report");
         }
 

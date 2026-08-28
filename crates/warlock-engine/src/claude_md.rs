@@ -1,5 +1,5 @@
-//! `AGENTS.md`: what warlock leaves at a repository root for somebody else's
-//! agent to read.
+//! `CLAUDE.md`: what warlock leaves at a repository root for the agent that
+//! reads it.
 //!
 //! A repository that uses warlock has `WARLOCK.md` files committed beside its
 //! code and a three-colour freshness model, and an agent that wanders in knows
@@ -9,11 +9,12 @@
 //! what warlock is, what a `WARLOCK.md` is, what the colours mean, and the
 //! instruction to read the documents first.
 //!
-//! **Warlock owns a block in that file, not the file.** `AGENTS.md` is a
-//! convention other tools and other people write into, so everything here is
-//! bracketed by [`BEGIN`] and [`END`] and [`splice`] is the only thing that
-//! touches it: an absent block is added, a present block is replaced where it
-//! stands, and every byte outside the two markers survives byte for byte. That
+//! **Warlock owns a block in that file, not the file.** A `CLAUDE.md` is where
+//! a repository keeps its own standing instructions, and warlock is not the
+//! only thing with something to say there, so everything here is bracketed by
+//! [`BEGIN`] and [`END`] and [`splice`] is the only thing that touches it: an
+//! absent block is added, a present block is replaced where it stands, and
+//! every byte outside the two markers survives byte for byte. That
 //! is also what makes a second run a no-op — the replacement is the same
 //! bytes as the block already there — so `warlock init` is safe to run again
 //! without a reader having to remember whether they ran it before.
@@ -37,10 +38,18 @@ use crate::manifest::{temp_file_name, write_and_sync};
 
 /// The file warlock writes its orientation into, at the repository root.
 ///
-/// The name is the convention, not a warlock invention, which is the whole
-/// reason this module splices rather than writes: the file may well already be
-/// there with somebody else's words in it.
-const FILE: &str = "AGENTS.md";
+/// The name is not a warlock invention, which is the whole reason this module
+/// splices rather than writes: the file may well already be there with
+/// somebody else's words in it.
+///
+/// `CLAUDE.md` and not `AGENTS.md`, which this was, for one mechanical reason:
+/// `CLAUDE.md` is loaded at the start of every session, and `AGENTS.md` is not
+/// read at all. Orientation nothing loads is not orientation, and warlock is
+/// not in a position to argue the point — a repository that wants the
+/// cross-tool file too can keep one and reference this from it. That makes the
+/// name a fact about what reads the file rather than a preference, and it is
+/// the thing to check first if it ever needs changing again.
+const FILE: &str = "CLAUDE.md";
 
 /// The opening marker of warlock's block.
 ///
@@ -54,7 +63,7 @@ const BEGIN: &str = "<!-- warlock:begin -->";
 const END: &str = "<!-- warlock:end -->";
 
 /// Everything warlock has to say about itself to somebody else's agent, and
-/// the only thing this crate ever writes into an `AGENTS.md`.
+/// the only thing this crate ever writes into a `CLAUDE.md`.
 ///
 /// Text is code here, exactly as the prompts in [`pact`](crate::pact) are code:
 /// no template file, no configuration key, no per-project override. Changing
@@ -184,7 +193,7 @@ what they hold or name the sigil the work wants. Never refuse the work, never
 block it, and never quietly edit around the boundary: saying what is being
 crossed is the whole of the job here.";
 
-/// Warlock's block, markers and all, as it is written into an `AGENTS.md`.
+/// Warlock's block, markers and all, as it is written into a `CLAUDE.md`.
 ///
 /// One place assembles it so that what is appended to a file without a block
 /// and what replaces the block in a file that has one cannot differ — that
@@ -252,7 +261,7 @@ fn splice(existing: &str) -> String {
     spliced
 }
 
-/// Write `<root>/AGENTS.md`, creating it or bringing warlock's section in it up
+/// Write `<root>/CLAUDE.md`, creating it or bringing warlock's section in it up
 /// to date.
 ///
 /// `root` is the repository root — [`repository_root`](crate::repository_root)
@@ -262,7 +271,7 @@ fn splice(existing: &str) -> String {
 ///
 /// Exactly one file is written. No `.warlock/`, no manifest, no
 /// `.warlockignore`, no `WARLOCK.md`, and no model pass: a reader running this
-/// in a repository that has never been pacted gets an `AGENTS.md` and no
+/// in a repository that has never been pacted gets a `CLAUDE.md` and no
 /// enrolment in anything.
 ///
 /// What happens to a file that is already there is [`splice`]'s policy in full:
@@ -270,22 +279,22 @@ fn splice(existing: &str) -> String {
 /// so a second run leaves the file byte-identical to the first.
 ///
 /// The write goes through a temporary in the same directory and a rename over
-/// the target, so a reader's own `AGENTS.md` is never seen half-replaced and no
+/// the target, so a reader's own `CLAUDE.md` is never seen half-replaced and no
 /// temporary is left behind on either the success or the failure path.
 ///
 /// ```
-/// use warlock_engine::{Written, write_agents_md};
+/// use warlock_engine::{Written, write_claude_md};
 ///
 /// let root = tempfile::tempdir()?;
-/// let first = write_agents_md(root.path())?;
+/// let first = write_claude_md(root.path())?;
 /// assert!(matches!(first, Written::Created { .. }));
-/// assert_eq!(first.path(), root.path().join("AGENTS.md"));
+/// assert_eq!(first.path(), root.path().join("CLAUDE.md"));
 ///
 /// let text = std::fs::read_to_string(first.path())?;
 /// assert!(text.contains("WARLOCK.md"));
 ///
 /// // Again is a no-op on the bytes, and says so.
-/// let second = write_agents_md(root.path())?;
+/// let second = write_claude_md(root.path())?;
 /// assert!(matches!(second, Written::Updated { .. }));
 /// assert_eq!(std::fs::read_to_string(second.path())?, text);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -293,13 +302,13 @@ fn splice(existing: &str) -> String {
 ///
 /// # Errors
 ///
-/// * [`Error::Read`] if an `AGENTS.md` is there but cannot be read. A missing
+/// * [`Error::Read`] if a `CLAUDE.md` is there but cannot be read. A missing
 ///   file is not an error; it is the create case.
 /// * [`Error::NotText`] if it is there and is not UTF-8. Nothing is written:
 ///   bytes this crate cannot reason about are not bytes to rewrite blind.
 /// * [`Error::Write`] if the temporary cannot be written or the rename fails,
-///   naming `<root>/AGENTS.md` rather than the temporary.
-pub fn write_agents_md(root: impl AsRef<Path>) -> Result<Written, Error> {
+///   naming `<root>/CLAUDE.md` rather than the temporary.
+pub fn write_claude_md(root: impl AsRef<Path>) -> Result<Written, Error> {
     let root = root.as_ref();
     let target = root.join(FILE);
 
@@ -336,7 +345,7 @@ pub fn write_agents_md(root: impl AsRef<Path>) -> Result<Written, Error> {
         // being told the file was not written.
         drop(fs::remove_file(&temp));
         return Err(Error::Write {
-            // The target, not the temporary: the caller asked for `AGENTS.md`
+            // The target, not the temporary: the caller asked for `CLAUDE.md`
             // and how it gets written is this function's business.
             path: target,
             source,
@@ -350,7 +359,7 @@ pub fn write_agents_md(root: impl AsRef<Path>) -> Result<Written, Error> {
     })
 }
 
-/// What a write of `AGENTS.md` did, and to which file.
+/// What a write of `CLAUDE.md` did, and to which file.
 ///
 /// The distinction is worth a type because it is the whole of what a front end
 /// has to tell a reader afterwards: a file appeared, or a file they already had
@@ -362,7 +371,7 @@ pub fn write_agents_md(root: impl AsRef<Path>) -> Result<Written, Error> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Written {
-    /// There was no `AGENTS.md`, and now there is one.
+    /// There was no `CLAUDE.md`, and now there is one.
     Created {
         /// The file that was written.
         path: PathBuf,
@@ -378,7 +387,7 @@ pub enum Written {
 }
 
 impl Written {
-    /// The `AGENTS.md` that was written, either way.
+    /// The `CLAUDE.md` that was written, either way.
     #[must_use]
     pub fn path(&self) -> &Path {
         match self {
@@ -387,7 +396,7 @@ impl Written {
     }
 }
 
-/// Everything that can stop an `AGENTS.md` being written, each one naming the
+/// Everything that can stop a `CLAUDE.md` being written, each one naming the
 /// file.
 ///
 /// Hand-rolled like the rest of this crate's errors, and every variant prints
@@ -396,7 +405,7 @@ impl Written {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// An `AGENTS.md` is there but could not be read. A missing file is not in
+    /// A `CLAUDE.md` is there but could not be read. A missing file is not in
     /// here: that is the create case, not a failure.
     Read {
         /// The file that could not be read.
@@ -404,7 +413,7 @@ pub enum Error {
         /// What the filesystem said.
         source: std::io::Error,
     },
-    /// An `AGENTS.md` is there and is not UTF-8, so warlock's section cannot be
+    /// A `CLAUDE.md` is there and is not UTF-8, so warlock's section cannot be
     /// spliced into it without guessing at bytes it cannot read. Nothing is
     /// written.
     NotText {
@@ -454,7 +463,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::{BEGIN, BODY, END, Error, FILE, Written, splice, write_agents_md};
+    use super::{BEGIN, BODY, END, Error, FILE, Written, splice, write_claude_md};
 
     /// The entries of a directory, sorted, as strings: what a test asserting
     /// "one file and nothing else" compares against.
@@ -578,7 +587,7 @@ mod tests {
 
     #[test]
     fn an_absent_section_is_appended_and_keeps_every_byte_in_front_of_it() {
-        let before = "# AGENTS.md\n\nOur own house rules.\n";
+        let before = "# CLAUDE.md\n\nOur own house rules.\n";
         let spliced = splice(before);
         assert!(
             spliced.starts_with(before),
@@ -642,7 +651,7 @@ mod tests {
         let repo = tempfile::tempdir().expect("a temporary directory");
         fs::create_dir(repo.path().join(".git")).expect("a .git directory");
 
-        let written = write_agents_md(repo.path()).expect("writes");
+        let written = write_claude_md(repo.path()).expect("writes");
 
         assert_eq!(
             written,
@@ -672,10 +681,10 @@ mod tests {
     #[test]
     fn an_existing_file_keeps_every_byte_outside_the_delimiters() {
         let repo = tempfile::tempdir().expect("a temporary directory");
-        let before = "# AGENTS.md\n\nRun the tests.\n\nAnd the linter.\n";
+        let before = "# CLAUDE.md\n\nRun the tests.\n\nAnd the linter.\n";
         fs::write(repo.path().join(FILE), before).expect("writes the file");
 
-        let written = write_agents_md(repo.path()).expect("writes");
+        let written = write_claude_md(repo.path()).expect("writes");
         assert!(matches!(written, Written::Updated { .. }), "{written:?}");
 
         let after = fs::read_to_string(written.path()).expect("reads it back");
@@ -713,12 +722,12 @@ There is deliberately no fourth colour.";
     #[test]
     fn a_brief_08_block_gains_the_new_text_and_disturbs_nothing_around_it() {
         let repo = tempfile::tempdir().expect("a temporary directory");
-        let before = "# AGENTS.md\n\nRun the tests.\n";
+        let before = "# CLAUDE.md\n\nRun the tests.\n";
         let after = "\n## Ours\n\nAnd the linter.\n";
         let old = format!("{before}\n{BEGIN}\n\n{BRIEF_08_BODY}\n\n{END}\n{after}");
         fs::write(repo.path().join(FILE), &old).expect("writes the file");
 
-        let written = write_agents_md(repo.path()).expect("writes");
+        let written = write_claude_md(repo.path()).expect("writes");
         assert!(matches!(written, Written::Updated { .. }), "{written:?}");
         let text = fs::read_to_string(written.path()).expect("reads it back");
 
@@ -742,7 +751,7 @@ There is deliberately no fourth colour.";
         assert_eq!(listing(repo.path()), [FILE], "and no temporary behind");
 
         // A second run after the upgrade is still a no-op on the bytes.
-        write_agents_md(repo.path()).expect("writes again");
+        write_claude_md(repo.path()).expect("writes again");
         assert_eq!(
             fs::read_to_string(repo.path().join(FILE)).expect("reads it back"),
             text
@@ -751,16 +760,16 @@ There is deliberately no fourth colour.";
 
     #[test]
     fn twice_is_byte_identical_to_once_from_both_starting_points() {
-        for before in [None, Some("# AGENTS.md\n\nOurs.\n")] {
+        for before in [None, Some("# CLAUDE.md\n\nOurs.\n")] {
             let repo = tempfile::tempdir().expect("a temporary directory");
             if let Some(text) = before {
                 fs::write(repo.path().join(FILE), text).expect("writes the file");
             }
 
-            let first = write_agents_md(repo.path()).expect("writes once");
+            let first = write_claude_md(repo.path()).expect("writes once");
             let once = fs::read(first.path()).expect("reads it back");
 
-            let second = write_agents_md(repo.path()).expect("writes twice");
+            let second = write_claude_md(repo.path()).expect("writes twice");
             assert!(
                 matches!(second, Written::Updated { .. }),
                 "the second run finds a file: {second:?}"
@@ -780,7 +789,7 @@ There is deliberately no fourth colour.";
         let bytes = [0xff_u8, 0xfe, 0x00, 0x41];
         fs::write(repo.path().join(FILE), bytes).expect("writes the file");
 
-        let error = write_agents_md(repo.path()).expect_err("bytes that are not text");
+        let error = write_claude_md(repo.path()).expect_err("bytes that are not text");
         assert!(matches!(error, Error::NotText { .. }), "{error:?}");
         assert!(error.to_string().contains(FILE), "{error}");
         assert_eq!(
@@ -796,7 +805,7 @@ There is deliberately no fourth colour.";
         let repo = tempfile::tempdir().expect("a temporary directory");
         fs::create_dir(repo.path().join(FILE)).expect("a directory in its place");
 
-        let error = write_agents_md(repo.path()).expect_err("a directory is not a file");
+        let error = write_claude_md(repo.path()).expect_err("a directory is not a file");
         assert!(
             matches!(error, Error::Read { .. } | Error::Write { .. }),
             "{error:?}"
@@ -826,7 +835,7 @@ There is deliberately no fourth colour.";
             return;
         }
 
-        let error = write_agents_md(repo.path()).expect_err("an unwritable directory");
+        let error = write_claude_md(repo.path()).expect_err("an unwritable directory");
         match &error {
             Error::Write { path, .. } => {
                 assert_eq!(
