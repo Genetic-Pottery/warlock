@@ -84,6 +84,9 @@ pub use load::Loaded;
 /// One node a load could not colour properly, and why. Non-fatal by
 /// definition: the load that produced it finished.
 pub use load::Problem as LoadProblem;
+/// Why a node is in a load's problems: a subtree that could not be hashed, or a
+/// manifest entry carrying a string that is not a scope.
+pub use load::ProblemCause as LoadProblemCause;
 /// Build a tree from a directory on disk, coloured by the manifest above it.
 pub use load::load_tree;
 /// The nearest ancestor of a directory that holds a `.git/` directory: the

@@ -15,6 +15,14 @@
 //! refuse to pact such a directory without asking the filesystem, since every
 //! other fact about a node — its state, its document, its files — comes from
 //! the load and this one should too.
+//!
+//! [`Node::scope`] is a third such fact: the boundary written on *this*
+//! directory's own manifest entry, and never one inherited from an ancestor. A
+//! renderer draws the directory that owns a scope, so the node has to know
+//! whether the scope is its own; the question "which scope covers this path"
+//! is a different one, and [`scope_covering`](crate::scope_covering) answers
+//! it by walking upwards. Storing the inherited answer here would make the two
+//! indistinguishable and put one boundary's name on every row below it.
 
 use std::path::{Path, PathBuf};
 
@@ -59,6 +67,26 @@ pub struct Node {
     /// before this field existed still reads back.
     #[serde(default)]
     pub ignored: bool,
+    /// The scope written on this directory's own pact entry, or `None` where it
+    /// has none — which includes every directory nobody pacted, since a scope
+    /// is stored on an entry and a directory with no entry has nowhere to hold
+    /// one.
+    ///
+    /// Its own and never an inherited one. A renderer draws the directory that
+    /// carries a scope, so a row has to be able to say "this boundary starts
+    /// here"; the different question — which scope covers a given path — is
+    /// [`scope_covering`](crate::scope_covering)'s, and it walks upwards to
+    /// answer it. Filling this in with an ancestor's scope would answer the
+    /// second question badly in the place the first one is asked.
+    ///
+    /// A scope the validator refuses reads as `None`: it is reported as a
+    /// problem by the loader and left on disk exactly as somebody wrote it, but
+    /// for as long as it is not a scope the directory is unscoped. Stored
+    /// rather than derived, like [`state`](Node::state), and defaulted on
+    /// deserialisation so a tree written before this field existed still reads
+    /// back.
+    #[serde(default)]
+    pub scope: Option<String>,
     /// Child nodes, in the order they should be rendered. Empty for a leaf.
     pub children: Vec<Node>,
     /// The files sitting directly in this directory, in path order.
@@ -94,7 +122,10 @@ impl Node {
     ///
     /// The node is not [`ignored`](Node::ignored): a directory is content
     /// Warlock covers unless a rule says otherwise, and only a loader that
-    /// consulted the rules can say otherwise — see [`Node::with_ignored`].
+    /// consulted the rules can say otherwise — see [`Node::with_ignored`]. It
+    /// carries no [`scope`](Node::scope) either, for the same reason: a scope
+    /// lives on a manifest entry, and only a loader that read the manifest can
+    /// put one here — see [`Node::with_scope`].
     ///
     /// ```
     /// use warlock_engine::{Node, NodeState};
@@ -113,6 +144,7 @@ impl Node {
             document: document.into_document(),
             state,
             ignored: false,
+            scope: None,
             children: Vec::new(),
             files: Vec::new(),
         }
@@ -182,6 +214,33 @@ impl Node {
     #[must_use]
     pub fn is_ignored(&self) -> bool {
         self.ignored
+    }
+
+    /// The same node carrying — or no longer carrying — the scope written on
+    /// its own manifest entry, the companion to
+    /// [`with_ignored`](Node::with_ignored) for the other fact only a loader
+    /// that read the manifest can know.
+    ///
+    /// This directory's scope and never an ancestor's: see
+    /// [`scope`](Node::scope). Nothing else about the node moves — a scope is a
+    /// label on a row, not a state, not a colour and not a gate — and `None`
+    /// clears it rather than leaving what was there, so the setter sets rather
+    /// than latches.
+    ///
+    /// ```
+    /// use warlock_engine::{Node, NodeState};
+    ///
+    /// let engine = Node::new("repo/engine", "repo/engine/WARLOCK.md", NodeState::PactedFresh)
+    ///     .with_scope(Some("data-plane".to_owned()));
+    /// assert_eq!(engine.scope.as_deref(), Some("data-plane"));
+    /// // Still an ordinary fresh node: a scope gates nothing and colours nothing.
+    /// assert_eq!(engine.state, NodeState::PactedFresh);
+    /// assert_eq!(engine.with_scope(None).scope, None);
+    /// ```
+    #[must_use]
+    pub fn with_scope(mut self, scope: Option<String>) -> Self {
+        self.scope = scope;
+        self
     }
 
     /// Whether this node has no children.
@@ -510,6 +569,68 @@ mod tests {
     }
 
     #[test]
+    fn a_node_carries_its_own_scope_and_only_a_loader_can_put_one_there() {
+        let node = Node::new("a", "a/WARLOCK.md", NodeState::PactedFresh);
+        assert_eq!(
+            node.scope, None,
+            "a scope lives on a manifest entry, so only a loader that read one \
+             can say a directory carries it",
+        );
+
+        let scoped = node.clone().with_scope(Some("data-plane".to_owned()));
+        assert_eq!(scoped.scope.as_deref(), Some("data-plane"));
+        assert_eq!(
+            scoped.state, node.state,
+            "a scope is a label, not a state: the node is fresh either way",
+        );
+        assert_eq!(scoped.document, node.document);
+        assert_eq!(scoped.children, node.children);
+        assert_eq!(scoped.files, node.files);
+        assert_eq!(
+            scoped.with_scope(None).scope,
+            None,
+            "the setter sets rather than latches",
+        );
+    }
+
+    #[test]
+    fn a_node_written_before_the_scope_existed_reads_back_unscoped() {
+        use serde_test::{Token, assert_de_tokens};
+
+        // The round trip below, minus `scope` entirely: a tree serialised by a
+        // build that had no such field. It must still deserialise, and the
+        // missing fact must read as "no scope" rather than fail.
+        assert_de_tokens(
+            &Node::new("repo", "repo/WARLOCK.md", NodeState::PactedFresh),
+            &[
+                Token::Struct {
+                    name: "Node",
+                    len: 6,
+                },
+                Token::Str("path"),
+                Token::Str("repo"),
+                Token::Str("document"),
+                Token::Some,
+                Token::Str("repo/WARLOCK.md"),
+                Token::Str("state"),
+                Token::UnitVariant {
+                    name: "NodeState",
+                    variant: "PactedFresh",
+                },
+                Token::Str("ignored"),
+                Token::Bool(false),
+                Token::Str("children"),
+                Token::Seq { len: Some(0) },
+                Token::SeqEnd,
+                Token::Str("files"),
+                Token::Seq { len: Some(0) },
+                Token::SeqEnd,
+                Token::StructEnd,
+            ],
+        );
+    }
+
+    #[test]
     fn a_node_written_before_the_flag_existed_reads_back_as_covered() {
         use serde_test::{Token, assert_de_tokens};
 
@@ -742,6 +863,7 @@ mod tests {
         // representation.
         let tree = Tree::new(
             Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
+                .with_scope(Some("data-plane".to_owned()))
                 .with_children([Node::new("repo/docs", None, NodeState::Unpacted)
                     .with_ignored(true)
                     .with_files([PathBuf::from("repo/docs/adr.md")])])
@@ -761,7 +883,7 @@ mod tests {
                 Token::Str("root"),
                 Token::Struct {
                     name: "Node",
-                    len: 6,
+                    len: 7,
                 },
                 Token::Str("path"),
                 Token::Str("repo"),
@@ -775,11 +897,14 @@ mod tests {
                 },
                 Token::Str("ignored"),
                 Token::Bool(false),
+                Token::Str("scope"),
+                Token::Some,
+                Token::Str("data-plane"),
                 Token::Str("children"),
                 Token::Seq { len: Some(1) },
                 Token::Struct {
                     name: "Node",
-                    len: 6,
+                    len: 7,
                 },
                 Token::Str("path"),
                 Token::Str("repo/docs"),
@@ -792,6 +917,8 @@ mod tests {
                 },
                 Token::Str("ignored"),
                 Token::Bool(true),
+                Token::Str("scope"),
+                Token::None,
                 Token::Str("children"),
                 Token::Seq { len: Some(0) },
                 Token::SeqEnd,
