@@ -94,8 +94,9 @@ pub use manifest::Error as ManifestError;
 /// The record of which modules are pacted: one `.warlock/pacts.toml` per
 /// repository.
 pub use manifest::Manifest;
-/// One pacted module: its directory, its document, and whatever was granted
-/// to it.
+/// One pacted module: its directory, its document, whatever was granted to it,
+/// and the boundary a person put on it — the only place a scope can be stored,
+/// so a module with no entry has nowhere to hold one.
 pub use manifest::PactEntry;
 /// The manifest schema version this build reads and writes.
 pub use manifest::SCHEMA_VERSION;
