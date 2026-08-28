@@ -193,6 +193,16 @@ const MARK_MARGIN_ROWS: u16 = 1;
 /// The one line naming the tree's root.
 const HEADER_HEIGHT: u16 = 1;
 
+/// What the header's two facts are joined by: which tree is on screen, and what
+/// this machine holds for the repository it came out of.
+///
+/// A dash with a space either side rather than a run of blanks, because the two
+/// are different kinds of fact — a path and a holding — and a gap alone would
+/// read as one sentence that had drifted apart. Unicode, like [`ELLIPSIS`] and
+/// the panel's arrow, and measured with [`display_width`] like everything else
+/// on the line, so what it costs is what the backend will charge for it.
+const HEADER_GAP: &str = " — ";
+
 /// Drawn on the left of every panel line that sits under a section heading, so a
 /// directory and the pass under it read as one block rather than as a list with
 /// a path in the middle of it.
@@ -982,15 +992,58 @@ fn draw_tree_pane(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     draw_tree(frame, rows_area, app, now);
 }
 
-/// Draw the header: which tree this is, as the app state already words it.
+/// Draw the header: which tree this is and what this machine holds for it, as
+/// [`header_line`] composes the two for the width there is.
 ///
 /// Bold rather than coloured, because every colour on this screen already
-/// means a node state and the header is not a node.
+/// means a node state and the header is not a node — and a holding is not one
+/// either, so it is drawn in the header's own weight rather than picking up a
+/// colour or a mark of its own.
 fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(
-        Paragraph::new(Line::from(app.header().to_owned()).bold()),
+        Paragraph::new(Line::from(header_line(app, usize::from(area.width))).bold()),
         area,
     );
+}
+
+/// The header's line for a pane `width` columns wide: the tree on screen, and
+/// what this machine holds stated after it when there is room for both.
+///
+/// Two facts of unequal standing, and this function is the whole of the
+/// inequality. The identity — the module [`App::with_scope`] worded, which is
+/// the answer to "what am I looking at" — is written out as it stands, whatever
+/// the width; the holding is offered the room left over and dropped entirely
+/// when it does not fit. Dropped rather than cut, because half a set of sigils
+/// is a claim about what is held that is not true, while no sigils at all is
+/// the header this screen has always had.
+///
+/// So the decision is made here, on two strings, and never by cutting a joined
+/// one: joining first and truncating after would spend the identity's columns on
+/// the holding and end the line in an [`ELLIPSIS`] where the name of the module
+/// used to be. Nothing is truncated here at all — an identity too long for the
+/// pane is clipped by the widget exactly as it was before there were sigils.
+///
+/// [`Sigils::Nothing`](crate::app::Sigils::Nothing) has no wording
+/// ([`Sigils::line`](crate::app::Sigils::line)), so a machine that
+/// holds nothing gets the identity and nothing else, byte for byte the line it
+/// got before this existed — including the empty one a tree rooted at the
+/// repository root draws.
+fn header_line(app: &App, width: usize) -> String {
+    let identity = app.header();
+    let Some(holding) = app.sigils().line() else {
+        return identity.to_owned();
+    };
+
+    let both = if identity.is_empty() {
+        holding
+    } else {
+        format!("{identity}{HEADER_GAP}{holding}")
+    };
+    if display_width(&both) <= width {
+        both
+    } else {
+        identity.to_owned()
+    }
 }
 
 /// Draw the window onto the flattened tree — the rows from the app's scroll
@@ -1468,15 +1521,15 @@ mod tests {
     use super::{
         Areas, BORDER_THICKNESS, CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN,
         CONFIRM_MARGIN_ROWS, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FOOTER_HEIGHT,
-        GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_HEIGHT, Hit, INDENT, KEYS, LIVE_KEY, MARK,
-        MARK_MARGIN, MARK_MARGIN_ROWS, MAX_KEYS_WIDTH, MOUSE_OFF_KEY, MOUSE_ON_KEY, NO_MARKER,
-        PACTING_KEYS, PANEL_INDENT, QUIT_KEY, SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH,
-        TREE_PERCENT, areas, confirm_area, confirm_size, display_width, draw, guide_prefixes,
-        hit_test, keys_line, mark_area, pane_inner, panel_height, tree_height, tree_rows_area,
-        tree_width, truncated,
+        GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEYS, LIVE_KEY,
+        MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MAX_KEYS_WIDTH, MOUSE_OFF_KEY, MOUSE_ON_KEY,
+        NO_MARKER, PACTING_KEYS, PANEL_INDENT, QUIT_KEY, SCROLLBACK_ARROW, SELECTION_MARKER,
+        TREE_MIN_WIDTH, TREE_PERCENT, areas, confirm_area, confirm_size, display_width, draw,
+        guide_prefixes, hit_test, keys_line, mark_area, pane_inner, panel_height, tree_height,
+        tree_rows_area, tree_width, truncated,
     };
     use crate::account::Outcome;
-    use crate::app::{App, Row};
+    use crate::app::{App, Row, Sigils};
     use crate::claude::Activity;
     use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
     use crate::confirm::{Answer, QuitConfirm};
@@ -1554,6 +1607,16 @@ mod tests {
     /// panel the other fifty: the width the mark has to survive to be drawn on
     /// an ordinary terminal at all.
     const STANDARD_WIDTH: u16 = 80;
+
+    /// A terminal with room on the header for both of its facts: the tree pane
+    /// takes its thirty per cent, forty-eight columns, and the border leaves
+    /// forty-six inside — comfortably more than the thirty-three the fixture's
+    /// identity, the gap and two sigils come to.
+    ///
+    /// Room to spare, and deliberately: what these tests are about is that the
+    /// holding is stated when it fits, so drawing at the threshold would make a
+    /// failure read as a rounding error rather than as the thing under test.
+    const HELD_WIDTH: u16 = 160;
 
     /// The 40-column terminal, where the two panes halve the width and the
     /// panel is twenty columns: too narrow for the mark by a long way, and the
@@ -1693,6 +1756,19 @@ mod tests {
         let area = rows_area(buffer);
 
         text_in(buffer, area, area.y + index)
+    }
+
+    /// The fixture under `crates`, holding `sigils`: the app the header tests
+    /// draw, with both halves of the line set and nothing else about it
+    /// changed.
+    ///
+    /// The holding is handed over as a value, as the app takes it — nothing here
+    /// reads a config, and no test of this module goes anywhere near a home
+    /// directory.
+    fn held_app(sigils: Sigils) -> App {
+        App::from_tree(&fixture::tree())
+            .with_scope("/repo", "/repo/crates")
+            .with_sigils(sigils)
     }
 
     /// The tree pane's header line, as text.
@@ -3077,6 +3153,89 @@ mod tests {
         assert_eq!(header_area(&buffer).height, HEADER_HEIGHT);
         assert_eq!(rows_area(&buffer).y, header_area(&buffer).y + HEADER_HEIGHT);
         assert!(tree_row(&buffer, 0).contains("warlock"));
+    }
+
+    #[test]
+    fn the_header_states_what_this_machine_holds_after_the_tree_it_names() {
+        let app = held_app(Sigils::held(["billing", "web"]));
+
+        let buffer = render(&app, HELD_WIDTH, HEIGHT);
+
+        // One line, both facts, the identity first: what am I looking at, and
+        // then what do I hold for it.
+        assert_eq!(
+            header_text(&buffer),
+            format!("crates{HEADER_GAP}holding `billing`, `web`")
+        );
+        assert_eq!(header_area(&buffer).height, HEADER_HEIGHT);
+    }
+
+    #[test]
+    fn a_config_that_would_not_read_says_so_on_the_header_rather_than_going_quiet() {
+        let buffer = render(&held_app(Sigils::Unknown), HELD_WIDTH, HEIGHT);
+
+        // Broken is never drawn as absent: a reader whose config will not parse
+        // is told, on the same line and in the same row.
+        assert_eq!(
+            header_text(&buffer),
+            format!("crates{HEADER_GAP}holding unknown")
+        );
+        assert_eq!(header_area(&buffer).height, HEADER_HEIGHT);
+    }
+
+    #[test]
+    fn a_machine_holding_nothing_draws_the_frame_it_always_drew() {
+        // Byte for byte, at both widths, in both spellings of nothing: the
+        // reader who never runs `warlock config` must not be able to tell that
+        // any of this arrived.
+        let before = held_app(Sigils::Nothing);
+        let never_told = App::from_tree(&fixture::tree()).with_scope("/repo", "/repo/crates");
+
+        for width in [HELD_WIDTH, NARROW_WIDTH] {
+            let drawn = render(&before, width, HEIGHT);
+
+            assert_eq!(header_text(&drawn), "crates", "at {width} columns");
+            assert_eq!(
+                rows_text(&drawn),
+                rows_text(&render(&never_told, width, HEIGHT)),
+                "at {width} columns"
+            );
+            assert_eq!(
+                rows_text(&drawn),
+                rows_text(&render(
+                    &held_app(Sigils::held(Vec::<String>::new())),
+                    width,
+                    HEIGHT
+                )),
+                "at {width} columns"
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_with_no_room_for_both_drops_the_holding_and_keeps_the_tree_it_names() {
+        let app = held_app(Sigils::held(["billing", "web"]));
+        // Twenty columns of tree pane, eighteen inside it: room for the
+        // identity several times over, and nowhere near room for both.
+        let narrow = pane_inner(areas(Rect::new(0, 0, NARROW_WIDTH, HEIGHT)).tree);
+        assert!(
+            display_width(&format!("crates{HEADER_GAP}holding `billing`, `web`"))
+                > usize::from(narrow.width)
+        );
+
+        let buffer = render(&app, NARROW_WIDTH, HEIGHT);
+
+        // The whole holding is gone rather than half of it: the identity is the
+        // answer to "what am I looking at", so it is never spent on sigils, and
+        // half a set of sigils would be a claim about what is held that is not
+        // true.
+        let header = header_text(&buffer);
+        assert_eq!(header, "crates");
+        assert!(!header.contains(ELLIPSIS), "{header}");
+        assert!(!header.contains("holding"), "{header}");
+        // And the line still keeps its row, so the tree starts where it started.
+        assert_eq!(header_area(&buffer).height, HEADER_HEIGHT);
+        assert_eq!(rows_area(&buffer).y, header_area(&buffer).y + HEADER_HEIGHT);
     }
 
     #[test]

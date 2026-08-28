@@ -136,13 +136,21 @@
 //! attached to the terminal: the arguments are read. Zero of them is the whole
 //! of warlock as it was — the panic hook, the loop, the alternate screen — and
 //! anything else is answered here and exits. `init` writes an `AGENTS.md` at the
-//! repository root and says which file it wrote; `-h` and `--help` print the one
-//! usage line; and every other word, and every second argument, prints that same
-//! line on stderr and fails. Refusing is the point of the last of those: warlock
-//! used to open the tree for `warlock status`, which reads as the typed command
-//! having run. The decision is [`intention_for`], a function of the arguments
-//! alone, so all of it is testable with no terminal, no repository and no
-//! process to spawn.
+//! repository root and says which file it wrote; `config` prints the sigils this
+//! machine holds for this repository and reads a line replacing them
+//! ([`config`]); `-h` and `--help` print the one usage line; and every other
+//! word, and every second argument, prints that same line on stderr and fails.
+//! Refusing is the point of the last of those: warlock used to open the tree for
+//! `warlock status`, which reads as the typed command having run. The decision
+//! is [`intention_for`], a function of the arguments alone, so all of it is
+//! testable with no terminal, no repository and no process to spawn.
+//!
+//! Both subcommands share one rule, and it is why they are dispatched here
+//! rather than anywhere inside [`run`]: neither goes near the terminal. No
+//! alternate screen, no raw mode and no panic hook — the hook exists to restore
+//! a terminal these paths never take, and `config` reads its line in cooked
+//! mode, which is also what makes Ctrl-C at its prompt an ordinary SIGINT that
+//! ends the process before anything is written.
 //!
 //! The reader can hand the pointer back. `m` turns the terminal's reporting off
 //! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
@@ -162,12 +170,14 @@ use ratatui::crossterm::execute;
 use warlock_engine::{Written, repository_root, write_agents_md};
 use warlock_tui::{ClaudeAgent, Focus, QuitConfirm, draw, panel_height, tree_height};
 
+mod config;
 mod error;
 mod input;
 mod pacting;
 mod session;
 mod terminal;
 
+use config::configure;
 use error::Error;
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Running, Work, apply_progress, pact_press, refresh_press, start_run};
@@ -198,11 +208,17 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// have should be shown exactly what a reader who asked for help is shown.
 ///
 /// One line, because that is all there is to say — warlock is a terminal
-/// interface with one subcommand, not a CLI with a manual — and because the
+/// interface with two subcommands, not a CLI with a manual — and because the
 /// refusal path shares it, where several lines of help in answer to a typo would
 /// bury the fact that nothing ran.
-const USAGE: &str = "usage: warlock [init] — no arguments opens the tree; \
-                     `init` writes AGENTS.md at the repository root";
+const USAGE: &str = "usage: warlock [init|config] — no arguments opens the tree; \
+                     `init` writes AGENTS.md at the repository root; `config` sets \
+                     the sigils this machine holds for it";
+
+/// What `warlock init` wants the repository root for, as the tail of
+/// [`Error::NoRepository`]'s sentence. `config`'s own tail is spelled beside
+/// `config`, in its module.
+const FOR_AGENTS_MD: &str = "write `AGENTS.md` at";
 
 /// What `warlock init` says when there was no `AGENTS.md` and now there is one.
 const CREATED: &str = "created";
@@ -226,6 +242,11 @@ fn main() -> ExitCode {
             run()
         }
         Intention::Init => init(),
+        // The second subcommand, dispatched here for the first one's reasons:
+        // it prints on the ordinary screen and reads a line from stdin in cooked
+        // mode, so nothing about it may touch the terminal — including the panic
+        // hook, which exists to restore a terminal this path never takes.
+        Intention::Config => configure(),
         // Asked for, so it goes to stdout and the exit status says it worked.
         Intention::Help => {
             println!("{USAGE}");
@@ -256,14 +277,16 @@ fn main() -> ExitCode {
 
 /// What warlock was asked to do, as decided by its arguments and nothing else.
 ///
-/// Four things, which is all a program with one subcommand has: open the tree,
-/// write the file, say how it is invoked, or say that and fail.
+/// Five things, which is all a program with two subcommands has: open the tree,
+/// write the file, set the sigils, say how it is invoked, or say that and fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Intention {
     /// No arguments: warlock as it has always been.
     Tui,
     /// `warlock init`.
     Init,
+    /// `warlock config`.
+    Config,
     /// `-h` or `--help`: [`USAGE`] on stdout, exit success.
     Help,
     /// Anything else at all: [`USAGE`] on stderr, exit failure.
@@ -275,13 +298,17 @@ enum Intention {
 ///
 /// A handful of string comparisons rather than an argument parser, and
 /// deliberately so: warlock's command line is one optional word, and a
-/// dependency to compare one word against three is a dependency to keep up to
-/// date forever. Pure, so every arm is a test rather than a process to spawn.
+/// dependency to compare one word against four is a dependency to keep up to
+/// date forever. A second subcommand is a second arm below, which is the whole
+/// of what it costs. Pure, so every arm is a test rather than a process to
+/// spawn.
 ///
 /// More than one argument is refused before the first is even looked at, which
 /// is the rule that matters most here: `warlock init extra` typed by somebody
 /// who meant something by `extra` must not run an `init` that silently ignored
-/// it.
+/// it. `warlock config` takes no argument at all — the sigils are typed at its
+/// prompt, where the line that clears them can be explained first — so
+/// `warlock config data-plane` lands in the same refusal.
 fn intention_for(args: impl IntoIterator<Item = impl AsRef<str>>) -> Intention {
     let mut args = args.into_iter();
     let Some(first) = args.next() else {
@@ -293,6 +320,7 @@ fn intention_for(args: impl IntoIterator<Item = impl AsRef<str>>) -> Intention {
 
     match first.as_ref() {
         "init" => Intention::Init,
+        "config" => Intention::Config,
         "-h" | "--help" => Intention::Help,
         // `--version` was considered and is deliberately left out: it lands
         // here, in the refusal, along with everything else warlock does not
@@ -324,7 +352,10 @@ fn init() -> Result<(), Error> {
     // repository that may never have been pacted, and walking the tree to find
     // its root would be reading every directory in it to answer a question about
     // ancestors.
-    let root = repository_root(&working_dir).ok_or(Error::NoRepository { start: working_dir })?;
+    let root = repository_root(&working_dir).ok_or(Error::NoRepository {
+        start: working_dir,
+        wanted: FOR_AGENTS_MD,
+    })?;
 
     let written = write_agents_md(&root).map_err(|source| Error::AgentsMd { source })?;
     // Asked as a question rather than matched arm by arm, because the engine's
@@ -764,8 +795,9 @@ mod tests {
     }
 
     #[test]
-    fn init_is_the_one_subcommand() {
+    fn init_and_config_are_the_subcommands() {
         assert_eq!(intention_for(["init"]), Intention::Init);
+        assert_eq!(intention_for(["config"]), Intention::Config);
     }
 
     #[test]
@@ -797,14 +829,20 @@ mod tests {
         assert_eq!(intention_for(["init", "extra"]), Intention::Refuse);
         assert_eq!(intention_for(["--help", "init"]), Intention::Refuse);
         assert_eq!(intention_for(["init", "init", "init"]), Intention::Refuse);
+        assert_eq!(intention_for(["config", "extra"]), Intention::Refuse);
+        // The one somebody will try: the sigils are typed at the prompt, where
+        // the answer that clears them can be explained before it is given, and
+        // never as an argument.
+        assert_eq!(intention_for(["config", "data-plane"]), Intention::Refuse);
     }
 
     #[test]
-    fn the_usage_line_is_one_line_and_names_the_only_subcommand() {
+    fn the_usage_line_is_one_line_and_names_both_subcommands() {
         // Printed on stdout when asked for and on stderr when not, and a usage
         // line that wraps is a usage line that reads like a crash.
         assert!(!USAGE.contains('\n'), "{USAGE}");
         assert!(USAGE.contains("init"), "{USAGE}");
+        assert!(USAGE.contains("config"), "{USAGE}");
         assert!(USAGE.starts_with("usage: warlock"), "{USAGE}");
     }
 }

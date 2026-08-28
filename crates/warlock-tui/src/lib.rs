@@ -97,6 +97,9 @@ pub use app::Row;
 /// Which kind of run is in flight — a pact or a refresh — which is the one word
 /// of the footer's progress line the two differ by.
 pub use app::Run;
+/// What this machine holds for the repository on screen — sigils, nothing, or a
+/// config that could not be read — as the tree pane's header states it.
+pub use app::Sigils;
 /// Put a view back on top of a tree that has just been read again: same
 /// selection, same collapsed directories, same filters, same window, new rows.
 pub use app::reseat_on;

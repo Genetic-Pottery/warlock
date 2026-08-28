@@ -25,6 +25,7 @@ mod load;
 mod manifest;
 mod pact;
 mod scope;
+mod sigils;
 mod state;
 mod tree;
 
@@ -207,6 +208,28 @@ pub use scope::validate_scope;
 /// anywhere" and is refused on the directory side because blank already says
 /// "open to anyone" there.
 pub use scope::validate_sigil;
+/// Everything that can stop the machine-local sigils being read or written,
+/// each one naming the file. A missing file is in here, as
+/// [`Manifest::load`]'s is: absent and empty are different facts and neither is
+/// invented for the caller.
+pub use sigils::Error as SigilError;
+/// The sigils held for a repository on this machine, read from under a home
+/// directory the caller supplies. Stored strings, unvalidated: a missing file
+/// is [`SigilError::NotFound`] rather than an empty set, and a file that cannot
+/// be read or parsed is a named error rather than either.
+pub use sigils::load_sigils;
+/// The directory name one repository's machine-local config sits in: the
+/// repository root's own name plus a short digest of its canonical absolute
+/// path, so two checkouts of one repository hold sigils separately.
+pub use sigils::project_directory;
+/// Replace the sigils held for a repository on this machine, atomically, under
+/// a home directory the caller supplies. Writes that one file and nothing else
+/// — never anything inside the repository.
+pub use sigils::save_sigils;
+/// Where one repository's machine-local sigils live under a home directory:
+/// `<home>/.warlock/<project>/config.toml`. A join and a derivation; nothing
+/// here reads `HOME`.
+pub use sigils::sigils_path;
 /// The three-state vocabulary every node is coloured by.
 pub use state::NodeState;
 /// A depth-first walk over a tree, yielding each node with its depth.

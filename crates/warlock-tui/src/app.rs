@@ -427,6 +427,88 @@ impl Focus {
     }
 }
 
+/// What this machine holds for the repository on screen, as the header states
+/// it.
+///
+/// A **scope** is a fact about a directory, committed inside the repository; a
+/// **sigil** is what one person on one machine holds, recorded by `warlock
+/// config` at `<home>/.warlock/<project>/config.toml` and never inside a
+/// repository. Nothing here matches the one against the other — this is a
+/// statement, not a rule — and nothing here reads a disk either: whoever loaded
+/// the config turns what they found into one of these three values and hands it
+/// over with [`App::with_sigils`], exactly as the header's text is handed over
+/// finished by [`App::with_scope`].
+///
+/// Three variants because there are exactly three things the header can
+/// honestly say, and the middle one is why this is not an `Option<Vec<String>>`:
+/// a config that is there and will not parse must never look like a machine
+/// that holds nothing, since the two mean opposite things about what is on disk.
+/// The absent file and the empty set are deliberately the *same* value, on the
+/// other hand — both are "nothing is held", and a reader who has never run
+/// `warlock config` should see the header they have always seen.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum Sigils {
+    /// Nothing is held: no config file, an empty set in one, or no home
+    /// directory to look in at all. The header says nothing whatever about
+    /// sigils in this state, which is what makes it the default — an app nobody
+    /// has told is an app with nothing to state.
+    #[default]
+    Nothing,
+    /// The sigils held, in the order the config lists them. Never empty: an
+    /// empty set is [`Sigils::Nothing`], which is what [`Sigils::held`] is for.
+    Held(Vec<String>),
+    /// The config is there and could not be read or understood. Said out loud,
+    /// so broken is never drawn as absent.
+    Unknown,
+}
+
+impl Sigils {
+    /// What was read out of the config, with the empty set folded into
+    /// [`Sigils::Nothing`].
+    ///
+    /// The one constructor for a holding, so the "never empty" invariant on
+    /// [`Sigils::Held`] is kept by construction rather than by every caller
+    /// remembering it. It is the loader's natural shape too: the engine hands
+    /// back a list, and an empty list is a machine that holds nothing.
+    #[must_use]
+    pub fn held(sigils: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let sigils: Vec<String> = sigils.into_iter().map(Into::into).collect();
+        if sigils.is_empty() {
+            return Self::Nothing;
+        }
+        Self::Held(sigils)
+    }
+
+    /// What the header has to say about what is held, or `None` when it has
+    /// nothing to say.
+    ///
+    /// `None` is [`Sigils::Nothing`] and is the whole of the promise that a
+    /// machine holding nothing gets the header it always had: there is no
+    /// wording for it, not even an empty one to be joined onto the line with a
+    /// separator.
+    ///
+    /// The wording is `warlock config`'s own, to the letter: the same word
+    /// "holding", the same backticked sigils in the order the config lists
+    /// them, and the same "unknown" for a config that would not read. The
+    /// subcommand that sets these and the header that states them are
+    /// describing one fact, and two wordings for one fact is one too many.
+    #[must_use]
+    pub fn line(&self) -> Option<String> {
+        match self {
+            Self::Nothing => None,
+            Self::Held(sigils) => Some(format!(
+                "holding {}",
+                sigils
+                    .iter()
+                    .map(|sigil| format!("`{sigil}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Self::Unknown => Some("holding unknown".to_owned()),
+        }
+    }
+}
+
 /// The front end's state: the flattened tree, which of it is collapsed, the
 /// selected row, the slice of rows on screen, the tally the footer shows and
 /// the header line naming what is being shown.
@@ -481,6 +563,16 @@ impl Focus {
 /// The header is carried as finished text for the same reason: the renderer
 /// draws app state and nothing else, so it never has to know what a repository
 /// root is or ask the engine where this tree came from.
+///
+/// `sigils` is what this machine holds for that repository, and it sits beside
+/// the header because it is stated on the same line: see [`Sigils`] and
+/// [`App::with_sigils`]. It is carried as a value rather than as finished text,
+/// which is the one place this type differs from the header — the renderer
+/// composes the line, because whether there is room for the holding is a
+/// question about the width of a pane and nothing here has ever been told one.
+/// It is read once, by whoever loaded the app, and never again: a sigil is a
+/// fact about a machine, so no keystroke, run or reload can change it under a
+/// running warlock.
 ///
 /// The message is the one line the app has to say about the keystroke just
 /// pressed — why a pact was refused, or whatever the caller put there. It is
@@ -581,6 +673,7 @@ pub struct App {
     viewport_height: usize,
     counts: StateCounts,
     header: String,
+    sigils: Sigils,
     message: Option<String>,
     in_flight: Option<InFlight>,
     summarising: Option<Summarising>,
@@ -650,7 +743,11 @@ impl App {
     /// tally to with [`App::with_counts`].
     ///
     /// The header starts empty: an app nobody has told where its tree came
-    /// from has nothing honest to put there. See [`App::with_scope`].
+    /// from has nothing honest to put there. See [`App::with_scope`]. It states
+    /// no sigils either, which is the same answer for the same reason — an app
+    /// nobody has told what this machine holds says nothing about it, and that
+    /// is exactly the header a machine holding nothing gets. See
+    /// [`App::with_sigils`].
     ///
     /// The viewport starts at zero rows tall and the window at the top, which
     /// is what is true of an app that has never been drawn: nothing is on
@@ -698,6 +795,7 @@ impl App {
             viewport_height: 0,
             counts: StateCounts::default(),
             header: String::new(),
+            sigils: Sigils::Nothing,
             message: None,
             in_flight: None,
             summarising: None,
@@ -783,9 +881,48 @@ impl App {
 
     /// The header line: what tree is on screen, as [`App::with_scope`] worded
     /// it, or empty for an app that was never told.
+    ///
+    /// The repository identity alone. What this machine *holds* is stated on the
+    /// same line and is kept apart from it here, because the header states the
+    /// two in order of importance and drops the second when the pane is too
+    /// narrow for both: see [`App::sigils`].
     #[must_use]
     pub fn header(&self) -> &str {
         &self.header
+    }
+
+    /// The same app state, stating `sigils` on its header line.
+    ///
+    /// Beside [`App::with_scope`] because it is the other half of that one line:
+    /// the scope says which tree is on screen, and this says what this machine
+    /// holds for the repository it came out of. Set once, by whoever loaded the
+    /// app — a sigil is written by `warlock config`, on the ordinary screen,
+    /// with warlock not running — so nothing in the event loop ever calls this
+    /// again.
+    ///
+    /// Takes the value rather than a path or a home directory: reading the
+    /// config is the caller's, so this type keeps no filesystem and the three
+    /// states it can be in are three values a test can write down. See
+    /// [`Sigils`] for why there are three of them, and note that
+    /// [`Sigils::Nothing`] leaves the header byte for byte the line it would
+    /// have been if this had never been called.
+    ///
+    /// It states them and nothing else: no row is coloured, filtered, sorted or
+    /// re-ordered by what is held, nothing is refused for it, and no key acts on
+    /// it. Matching a sigil against a scope is not this slice's, and it would not
+    /// be this type's when it is.
+    #[must_use]
+    pub fn with_sigils(mut self, sigils: Sigils) -> Self {
+        self.sigils = sigils;
+        self
+    }
+
+    /// What this machine holds for the repository on screen, as
+    /// [`App::with_sigils`] was told it, or [`Sigils::Nothing`] for an app that
+    /// was never told.
+    #[must_use]
+    pub const fn sigils(&self) -> &Sigils {
+        &self.sigils
     }
 
     /// What the app has to say about the last keystroke, or `None` when it has
@@ -2279,6 +2416,12 @@ pub fn reseat_on(view: &App, tree: &Tree) -> App {
     reseated.show_files = view.show_files;
     reseated.viewport_height = view.viewport_height;
     reseated.header.clone_from(&view.header);
+    // With what is held on it, for the header's other half is no more a fact
+    // about the tree than its first half is: the config was read once, before
+    // the loop started, and a tree being re-read is not a machine changing what
+    // it holds. Lost here, it would be lost on every reload — and a header that
+    // stopped stating a holding after a run would read as a holding dropped.
+    reseated.sigils.clone_from(&view.sigils);
     reseated.message.clone_from(&view.message);
     reseated.in_flight.clone_from(&view.in_flight);
     // With the pass running inside it, for the same reason: the run did not stop
@@ -2709,7 +2852,7 @@ mod tests {
     use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
     use super::{
-        Account, App, Focus, Line, PactToggle, Row, Run, panel_offset_for, reseat_on,
+        Account, App, Focus, Line, PactToggle, Row, Run, Sigils, panel_offset_for, reseat_on,
         scroll_offset_for,
     };
     use crate::claude::Activity;
@@ -3023,6 +3166,103 @@ mod tests {
         assert_eq!(scoped.rows(), app.rows());
         assert_eq!(scoped.counts(), app.counts());
         assert_eq!(scoped.selected(), app.selected());
+    }
+
+    #[test]
+    fn an_app_that_was_never_told_what_is_held_states_nothing() {
+        // The default, and the state a reader who has never run `warlock
+        // config` is in: there is no wording for it at all, so there is nothing
+        // for the header to join onto the line it already had.
+        let app = App::from_rows(three_rows());
+
+        assert_eq!(app.sigils(), &Sigils::Nothing);
+        assert_eq!(app.sigils().line(), None);
+    }
+
+    #[test]
+    fn the_sigils_held_are_listed_in_the_order_the_config_has_them() {
+        let app = App::from_rows(three_rows()).with_sigils(Sigils::held(["billing", "web"]));
+
+        assert_eq!(
+            app.sigils(),
+            &Sigils::Held(vec!["billing".to_owned(), "web".to_owned()])
+        );
+        assert_eq!(app.sigils().line(), Some("holding `billing`, `web`".into()));
+    }
+
+    #[test]
+    fn a_missing_config_and_an_empty_set_are_the_same_nothing() {
+        // Two ways of holding nothing, and the header must not tell them apart:
+        // a machine that cleared its sigils and one that never had any hold the
+        // same nothing.
+        let empty: [String; 0] = [];
+
+        assert_eq!(Sigils::held(empty), Sigils::Nothing);
+        assert_eq!(Sigils::held(Vec::<String>::new()).line(), None);
+    }
+
+    #[test]
+    fn a_config_that_would_not_read_is_said_out_loud_rather_than_looking_absent() {
+        // The whole of why this is not an `Option<Vec<String>>`: broken and
+        // absent mean opposite things about what is on disk, so they must not
+        // draw the same line.
+        let unknown = Sigils::Unknown;
+
+        assert_eq!(unknown.line(), Some("holding unknown".into()));
+        assert_ne!(unknown.line(), Sigils::Nothing.line());
+        assert_ne!(unknown.line(), Sigils::held(["billing"]).line());
+    }
+
+    #[test]
+    fn holding_nothing_leaves_the_header_byte_for_byte_what_it_was() {
+        // The promise the three states are arranged around: a reader who never
+        // runs `warlock config` sees the header they have always seen, in both
+        // spellings of nothing and whether or not anything was ever set.
+        let told = App::from_rows(three_rows()).with_scope("/repo", "/repo/crates/engine");
+        let before = told.header().to_owned();
+
+        for nothing in [Sigils::Nothing, Sigils::held(Vec::<String>::new())] {
+            let app = told.clone().with_sigils(nothing);
+
+            assert_eq!(app.header(), before);
+            assert_eq!(app.sigils().line(), None);
+        }
+    }
+
+    #[test]
+    fn what_is_held_changes_nothing_but_what_the_header_states() {
+        // No row is coloured, filtered, sorted or re-ordered by a holding, and
+        // the identity half of the header is not touched either.
+        let app = App::from_tree(&fixture::tree()).with_scope("/repo", "/repo/crates");
+
+        let holding = app.clone().with_sigils(Sigils::held(["billing"]));
+
+        assert_eq!(holding.header(), app.header());
+        assert_eq!(holding.rows(), app.rows());
+        assert_eq!(holding.counts(), app.counts());
+        assert_eq!(holding.selected(), app.selected());
+    }
+
+    #[test]
+    fn what_is_held_survives_a_re_seat() {
+        // The config is read once, before the loop starts. A reload is a tree
+        // being read again, not a machine changing what it holds — and a header
+        // that stopped stating a holding after a run would read as one dropped.
+        let app = App::from_tree(&fixture::tree())
+            .with_scope("/repo", "/repo/warlock")
+            .with_sigils(Sigils::held(["billing", "web"]));
+
+        let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+
+        assert_eq!(reseated.sigils(), app.sigils());
+        assert_eq!(reseated.header(), app.header());
+        // And the broken state carries too, for the same reason: a reload finds
+        // no config either way.
+        let unknown = App::from_tree(&fixture::tree()).with_sigils(Sigils::Unknown);
+        assert_eq!(
+            reseat_on(&unknown, &fixture::tree_after_a_run()).sigils(),
+            &Sigils::Unknown
+        );
     }
 
     #[test]
