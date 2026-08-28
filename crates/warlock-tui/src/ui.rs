@@ -1172,6 +1172,18 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     let height = usize::from(area.height);
     let pulse = pulse_colour(app, now);
     let guides = guide_prefixes(app.rows(), first, height);
+
+    // The columns a row's own text has to fit a scope label into: the drawn
+    // width of the rows area, less the gutter `List` keeps for
+    // `SELECTION_MARKER`. That gutter is subtracted for *every* row and not
+    // only the selected one, even though the widget only writes the marker into
+    // the selected row's copy of it, because this is the one width the whole
+    // frame is measured against: were it counted per row, moving the selection
+    // onto a row would take two columns off it and a label sitting on the
+    // boundary would appear and disappear as the reader moved. A label that
+    // comes and goes with the cursor reads as a fact about the tree changing,
+    // which it is not.
+    let text_width = usize::from(area.width).saturating_sub(display_width(SELECTION_MARKER));
     let items: Vec<ListItem<'_>> = app.rows()[first..]
         .iter()
         .take(height)
@@ -1183,6 +1195,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
                 app.can_collapse(first + offset),
                 app.is_collapsed(&row.path),
                 pulse.filter(|_| app.in_flight_covers(row)),
+                text_width,
             ))
         })
         .collect();
@@ -1260,12 +1273,29 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
 /// copied onto the row when the tree was flattened (see [`Row::file`]), which is
 /// how the design doc's rule that a file takes its module's colour arrives here
 /// as an ordinary row with an ordinary colour.
+///
+/// A row carrying a scope of its own reads `<name> (<scope>)`, and the label
+/// goes inside that same second span rather than beside it in one of its own:
+/// name, space and parentheses are one run of text in one colour, so there is
+/// nothing here for a fourth colour or a modifier of its own to creep into, and
+/// the label cannot end up styled differently from the name it belongs to. The
+/// row's own scope and nothing else appears — [`Row::scope`] is never an
+/// ancestor's — so a file, a gray unpacted row and a directory covered only from
+/// above all fall out of it being `None` without this asking what they are.
+///
+/// `width` is the columns the row's text has, and a label that does not fit in
+/// them is dropped whole rather than cut: half a scope names a boundary that
+/// does not exist, while no label at all is the row this screen drew before
+/// scopes. The name is handed on untouched either way — it is never shortened to
+/// make room — so a row whose label is dropped is byte for byte the row it
+/// always was.
 fn line(
     row: &Row,
     guides: &str,
     collapsible: bool,
     collapsed: bool,
     pulse: Option<Color>,
+    width: usize,
 ) -> Line<'static> {
     let name = row
         .path
@@ -1278,12 +1308,17 @@ fn line(
         (true, false) => EXPANDED_MARKER,
     };
 
+    let mut text = format!("{marker}{name}");
+    if let Some(scope) = &row.scope {
+        let labelled = format!("{text} ({scope})");
+        if display_width(guides) + display_width(&labelled) <= width {
+            text = labelled;
+        }
+    }
+
     Line::from(vec![
         Span::styled(guides.to_owned(), GUIDE_COLOUR),
-        Span::styled(
-            format!("{marker}{name}"),
-            pulse.unwrap_or(colour_for(row.state)),
-        ),
+        Span::styled(text, pulse.unwrap_or(colour_for(row.state))),
     ])
 }
 
@@ -1849,6 +1884,92 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// The scope the label tests write on a row, and the name of the row it is
+    /// written on.
+    ///
+    /// A name of some length on purpose: the width the labelled row needs has to
+    /// be clear of the floor [`TREE_MIN_WIDTH`] puts under the tree column, or
+    /// the boundary test would be asking for a terminal no width produces.
+    const SCOPED_NAME: &str = "warlock-terminal-ui";
+    /// See [`SCOPED_NAME`].
+    const SCOPE_TEAM: &str = "tui-team";
+    /// What [`SCOPED_NAME`] scoped to [`SCOPE_TEAM`] reads on screen: the
+    /// name, a space, and the scope in parentheses.
+    const SCOPED_LABEL: &str = "warlock-terminal-ui (tui-team)";
+
+    /// A terminal with room to spare for [`SCOPED_LABEL`]: a hundred and sixty
+    /// columns gives the tree forty-eight, which is well over the thirty-four
+    /// the labelled row needs.
+    ///
+    /// Room to spare on purpose — the label tests are about what the row says,
+    /// and drawing them at the threshold would make a failure read as a
+    /// rounding error rather than as the thing under test. The threshold itself
+    /// is what [`terminal_width_for`] is for.
+    const SCOPE_ROOM_WIDTH: u16 = 160;
+
+    /// A root, a directory carrying `scope`, a pacted directory under that one
+    /// with no scope of its own, and a file inside the scoped directory: the
+    /// four rows the label has to tell apart, all in `state`.
+    ///
+    /// Built as rows rather than from a tree, so what is under test is the
+    /// renderer reading [`Row::scope`] and not a loader filling it in. `scope`
+    /// is `None` for the same rows with nothing written on them, which is the
+    /// screen as it was before there were labels.
+    fn labelled_rows(scope: Option<&str>, state: NodeState) -> Vec<Row> {
+        vec![
+            Row::new(0, "warlock", "warlock/WARLOCK.md", NodeState::Unpacted).with_child_count(1),
+            Row::new(
+                1,
+                format!("warlock/{SCOPED_NAME}"),
+                format!("warlock/{SCOPED_NAME}/WARLOCK.md"),
+                state,
+            )
+            .with_scope(scope.map(str::to_owned))
+            .with_child_count(2),
+            Row::new(
+                2,
+                format!("warlock/{SCOPED_NAME}/widgets"),
+                format!("warlock/{SCOPED_NAME}/widgets/WARLOCK.md"),
+                state,
+            ),
+            Row::file(2, format!("warlock/{SCOPED_NAME}/ui.rs"), state),
+        ]
+    }
+
+    /// The colour and the modifiers of every cell `needle` is drawn in on tree
+    /// row `index`.
+    ///
+    /// Read off the buffer cell by cell rather than trusted to a span, because
+    /// what the reader sees is the cells: a label that arrived in a second span
+    /// with a colour or an emphasis of its own would pass an assertion about the
+    /// text and fail here.
+    fn styles_of(buffer: &Buffer, index: u16, needle: &str) -> Vec<(Color, Modifier)> {
+        let area = rows_area(buffer);
+        let start =
+            u16::try_from(column_of(&tree_row(buffer, index), needle)).expect("a narrow terminal");
+        let width = u16::try_from(display_width(needle)).expect("a short needle");
+        (start..start + width)
+            .map(|column| {
+                let cell = &buffer[(area.x + column, area.y + index)];
+                (cell.fg, cell.modifier)
+            })
+            .collect()
+    }
+
+    /// The narrowest terminal whose tree draws its rows into exactly
+    /// `rows_width` columns.
+    ///
+    /// Searched for rather than worked out, so a boundary test asks for the
+    /// width it means — the one the rows are measured against — without
+    /// restating the layout's own arithmetic beside it.
+    fn terminal_width_for(rows_width: u16) -> u16 {
+        (2 * TREE_MIN_WIDTH..=400)
+            .find(|width| {
+                tree_rows_area(areas(Rect::new(0, 0, *width, HEIGHT)).tree).width == rows_width
+            })
+            .unwrap_or_else(|| panic!("no terminal gives the tree's rows {rows_width} columns"))
     }
 
     /// An app of [`MANY`] rows with `selected` selected, measured for a
@@ -2563,6 +2684,143 @@ mod tests {
             colours.iter().any(|colour| *colour != colours[0]),
             "every file was drawn in the same colour: {colours:?}"
         );
+    }
+
+    #[test]
+    fn a_scoped_directory_reads_its_name_and_then_its_scope_in_parentheses() {
+        let app = App::from_rows(labelled_rows(Some(SCOPE_TEAM), NodeState::PactedStale));
+
+        let buffer = render(&app, SCOPE_ROOM_WIDTH, HEIGHT);
+
+        // The row is the row it always was — guide, marker, name — with the
+        // scope stated after the name and nothing else changed about it.
+        assert_eq!(tree_row(&buffer, 1), format!("  └ - {SCOPED_LABEL}"));
+    }
+
+    #[test]
+    fn the_whole_of_a_label_is_drawn_in_the_rows_own_state_colour() {
+        for state in [NodeState::PactedStale, NodeState::PactedFresh] {
+            let app = App::from_rows(labelled_rows(Some(SCOPE_TEAM), state));
+
+            let buffer = render(&app, SCOPE_ROOM_WIDTH, HEIGHT);
+
+            // Name, space and both parentheses: one colour, the row's own, and
+            // no fourth colour or modifier smuggled in with the label.
+            let styles = styles_of(&buffer, 1, SCOPED_LABEL);
+            assert_eq!(styles.len(), display_width(SCOPED_LABEL));
+            for (offset, style) in styles.iter().enumerate() {
+                assert_eq!(
+                    *style,
+                    (colour_for(state), Modifier::empty()),
+                    "column {offset} of {state:?}"
+                );
+            }
+            // And the name the label was appended to is drawn in exactly what
+            // the label is, so neither of them is the odd one out.
+            assert_eq!(
+                styles_of(&buffer, 1, SCOPED_NAME),
+                styles[..SCOPED_NAME.len()]
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_directory_that_owns_a_scope_carries_the_label() {
+        let mut app = App::from_rows(labelled_rows(Some(SCOPE_TEAM), NodeState::PactedStale));
+        app.toggle_files();
+
+        let buffer = render(&app, SCOPE_ROOM_WIDTH, HEIGHT);
+
+        // The scoped directory says so...
+        assert!(tree_row(&buffer, 1).ends_with(SCOPED_LABEL));
+        // ...and the pacted directory under it, covered by that scope but
+        // carrying none of its own, says nothing — nor does the file inside the
+        // scoped directory, which is not a boundary either.
+        for index in [0, 2, 3] {
+            let row = tree_row(&buffer, index);
+            assert!(!row.contains('('), "row {index} carries a label: {row:?}");
+        }
+        assert!(tree_row(&buffer, 2).ends_with("widgets"));
+        assert!(tree_row(&buffer, 3).ends_with("ui.rs"));
+    }
+
+    #[test]
+    fn a_row_with_no_scope_of_its_own_is_drawn_exactly_as_it_was() {
+        let scoped = App::from_rows(labelled_rows(Some(SCOPE_TEAM), NodeState::PactedStale));
+        let plain = App::from_rows(labelled_rows(None, NodeState::PactedStale));
+
+        let with = render(&scoped, SCOPE_ROOM_WIDTH, HEIGHT);
+        let without = render(&plain, SCOPE_ROOM_WIDTH, HEIGHT);
+
+        // The unscoped row is the name and nothing after it...
+        assert_eq!(tree_row(&without, 1), format!("  └ - {SCOPED_NAME}"));
+        // ...and a scope on one row is the whole of the difference between the
+        // two frames: every other row, and the chrome around them, is untouched.
+        for (index, (labelled, bare)) in tree_rows(&with)
+            .into_iter()
+            .zip(tree_rows(&without))
+            .enumerate()
+        {
+            if index == 1 {
+                continue;
+            }
+            assert_eq!(labelled, bare, "row {index}");
+        }
+        assert_eq!(header_and_footer(&with), header_and_footer(&without));
+    }
+
+    #[test]
+    fn a_label_is_there_whether_or_not_its_row_is_selected() {
+        let mut app = App::from_rows(labelled_rows(Some(SCOPE_TEAM), NodeState::PactedStale));
+        let needed = display_width(&tree_row(&render(&app, SCOPE_ROOM_WIDTH, HEIGHT), 1));
+        let needed = u16::try_from(needed).expect("a narrow terminal");
+        let wide = terminal_width_for(needed);
+        let narrow = terminal_width_for(needed - 1);
+
+        // The label-bearing row is row 1, so one press of down selects it.
+        let unselected = [render(&app, wide, HEIGHT), render(&app, narrow, HEIGHT)];
+        app.select_next();
+        assert_eq!(app.selected(), 1);
+        let selected = [render(&app, wide, HEIGHT), render(&app, narrow, HEIGHT)];
+
+        // The two widths straddle the boundary, so this is not two frames that
+        // both happen to have room: the label is on at one of them and off at
+        // the other, and what is under test is that the selection moves neither.
+        assert!(tree_row(&unselected[0], 1).contains(SCOPE_TEAM));
+        assert!(!tree_row(&unselected[1], 1).contains(SCOPE_TEAM));
+
+        // The selection reserves its gutter on every row whether it is on the
+        // row or not, so it never buys a row two columns and never spends them:
+        // present at both widths in both frames, or absent in both.
+        for (index, (moved, still)) in selected.iter().zip(&unselected).enumerate() {
+            assert_eq!(
+                tree_row(moved, 1).contains(SCOPE_TEAM),
+                tree_row(still, 1).contains(SCOPE_TEAM),
+                "width {index} draws the label differently when the row is selected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_label_is_drawn_where_it_fits_and_dropped_whole_where_it_does_not() {
+        let scoped = App::from_rows(labelled_rows(Some(SCOPE_TEAM), NodeState::PactedStale));
+        let plain = App::from_rows(labelled_rows(None, NodeState::PactedStale));
+        let needed = display_width(&tree_row(&render(&scoped, SCOPE_ROOM_WIDTH, HEIGHT), 1));
+        let needed = u16::try_from(needed).expect("a narrow terminal");
+
+        let fits = render(&scoped, terminal_width_for(needed), HEIGHT);
+        let short = render(&scoped, terminal_width_for(needed - 1), HEIGHT);
+
+        // A column wider than the labelled row needs and it is drawn whole...
+        assert_eq!(tree_row(&fits, 1), format!("  └ - {SCOPED_LABEL}"));
+        // ...one column narrower and it is gone entirely, rather than cut to an
+        // ellipsised half-scope, leaving the row the unscoped one draws.
+        assert!(!tree_row(&short, 1).contains(ELLIPSIS));
+        assert_eq!(
+            tree_row(&short, 1),
+            tree_row(&render(&plain, terminal_width_for(needed - 1), HEIGHT), 1)
+        );
+        assert_eq!(tree_row(&short, 1), format!("  └ - {SCOPED_NAME}"));
     }
 
     #[test]

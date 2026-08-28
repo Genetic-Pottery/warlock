@@ -122,6 +122,10 @@ use crate::account::{Account, Line};
 /// same reason the document does: the pact key has to refuse such a row, and
 /// [`App`] touches no filesystem, so the fact has to be here by the time the key
 /// is pressed. See [`Row::is_ignored`].
+///
+/// The scope written on the row's own pact entry comes along for the same reason
+/// again: the renderer draws the label beside the name and has nothing but the
+/// row in its hand. See [`Row::scope`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Row {
     /// How deep the node sits: `0` for the root, `1` for its children.
@@ -152,6 +156,23 @@ pub struct Row {
     /// Warlock, straight from [`warlock_engine::Node::is_ignored`]. Ask it with
     /// [`Row::is_ignored`], and set it with [`Row::with_ignored`].
     pub ignored: bool,
+    /// The scope written on this row's *own* pact entry, straight from
+    /// [`warlock_engine::Node::scope`], or `None` where it has none — which
+    /// includes every unpacted directory, since a scope lives on a pact entry
+    /// and an unpacted directory has none, and every file row, since a file has
+    /// no entry either.
+    ///
+    /// This directory's scope and never an ancestor's. The label in the tree
+    /// marks where a boundary *starts*, so a directory covered only by a scope
+    /// written further up carries `None` here and draws nothing; the different
+    /// question — which scope covers a given path — is
+    /// [`warlock_engine::scope_covering`]'s, and nothing that fills this in may
+    /// ask it, or the two answers would drift.
+    ///
+    /// It colours nothing and gates nothing: a scoped row is drawn in the same
+    /// state colour it would have had unlabelled. Set it with
+    /// [`Row::with_scope`].
+    pub scope: Option<String>,
 }
 
 impl Row {
@@ -170,6 +191,10 @@ impl Row {
     /// claiming a `.warlockignore` keeps it out is a row the pact key refuses
     /// for a reason nobody wrote down. Say otherwise with
     /// [`Row::with_ignored`].
+    ///
+    /// Unscoped is the safe default for the same kind of reason: a scope is
+    /// something somebody wrote on a pact entry, so a row nobody told about one
+    /// has none to draw. Say otherwise with [`Row::with_scope`].
     #[must_use]
     pub fn new(
         depth: usize,
@@ -185,6 +210,7 @@ impl Row {
             children: 0,
             file: false,
             ignored: false,
+            scope: None,
         }
     }
 
@@ -202,6 +228,12 @@ impl Row {
     ///
     /// `depth` is the caller's too, and is one deeper than the directory's, so
     /// the file indents under it.
+    ///
+    /// The state is the only thing a file borrows from the directory holding it.
+    /// The scope is not: a scope lives on a pact entry, a file has none, and the
+    /// label in the tree marks the directory that owns the boundary rather than
+    /// everything under it. So a file row is unscoped even inside a scoped
+    /// directory, and there is no builder call here to make it otherwise.
     #[must_use]
     pub fn file(depth: usize, path: impl Into<PathBuf>, state: NodeState) -> Self {
         Self {
@@ -227,6 +259,22 @@ impl Row {
     #[must_use]
     pub const fn with_ignored(mut self, ignored: bool) -> Self {
         self.ignored = ignored;
+        self
+    }
+
+    /// The same row, carrying — or no longer carrying — the scope written on its
+    /// own pact entry.
+    ///
+    /// [`App::from_tree`] says this from [`warlock_engine::Node::scope`], and it
+    /// is the whole of how the fact reaches the renderer. It is a builder rather
+    /// than an argument to [`Row::new`] so that a test can hand
+    /// [`App::from_rows`] a scoped row without a tree, a loader or a disk behind
+    /// it.
+    ///
+    /// Pass this row's own scope and never an ancestor's: see [`Row::scope`].
+    #[must_use]
+    pub fn with_scope(mut self, scope: Option<String>) -> Self {
+        self.scope = scope;
         self
     }
 
@@ -717,6 +765,13 @@ impl App {
     /// changes no colour and hides no row: an excluded directory keeps its row
     /// and its gray, and the flag is there for [`App::toggle_pact`] to refuse a
     /// press on it without asking the filesystem anything.
+    ///
+    /// Each row is told the scope written on its own node the same way, from the
+    /// node's own field — never an ancestor's, and never by asking
+    /// [`warlock_engine::scope_covering`], because the label in the tree marks
+    /// where a boundary starts. The file rows are told nothing: a file has no
+    /// pact entry to write a scope on, so unlike the state and the exclusion
+    /// flag there is nothing of the directory's to copy down. See [`Row::scope`].
     #[must_use]
     pub fn from_tree(tree: &Tree) -> Self {
         let mut rows = Vec::new();
@@ -724,7 +779,8 @@ impl App {
             rows.push(
                 Row::new(depth, node.path.clone(), node.document.clone(), node.state)
                     .with_child_count(node.children.len())
-                    .with_ignored(node.is_ignored()),
+                    .with_ignored(node.is_ignored())
+                    .with_scope(node.scope.clone()),
             );
             rows.extend(node.files.iter().map(|file| {
                 Row::file(depth + 1, file.clone(), node.state).with_ignored(node.is_ignored())
@@ -4122,6 +4178,83 @@ mod tests {
                 .expect("an excluded row is refused")
                 .contains(".warlockignore")
         );
+    }
+
+    /// A scoped directory holding a file, an unscoped pacted child and an
+    /// unpacted one: every way a row can come out of the flatten with or without
+    /// a scope, in one tree.
+    fn tree_with_one_scoped_directory() -> Tree {
+        Tree::new(
+            Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
+                .with_scope(Some("tui-team".to_owned()))
+                .with_files([PathBuf::from("repo/README.md")])
+                .with_children([
+                    // Pacted, and covered by the scope written above it, which is
+                    // not the same as carrying one.
+                    Node::new(
+                        "repo/crates",
+                        "repo/crates/WARLOCK.md",
+                        NodeState::PactedFresh,
+                    ),
+                    // Nobody pacted it, so there is no entry a scope could be
+                    // written on.
+                    Node::new("repo/notes", None, NodeState::Unpacted),
+                ]),
+        )
+    }
+
+    #[test]
+    fn flattening_a_tree_carries_each_nodes_own_scope_onto_its_row() {
+        let mut app = App::from_tree(&tree_with_one_scoped_directory());
+        app.toggle_files();
+
+        let scoped: Vec<(String, Option<&str>)> = app
+            .rows()
+            .iter()
+            .map(|row| {
+                (
+                    row.path.to_string_lossy().into_owned(),
+                    row.scope.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            scoped,
+            [
+                // The directory the scope was written on, and the only row of
+                // the four with one.
+                ("repo".to_owned(), Some("tui-team")),
+                // A file has no pact entry, so it takes no scope from the
+                // directory listing it — unlike the state and the ignore flag,
+                // which it does take.
+                ("repo/README.md".to_owned(), None),
+                // Covered by the scope above it and carrying none: the label
+                // marks where a boundary starts, so nothing is inherited down.
+                ("repo/crates".to_owned(), None),
+                // Unpacted, so there is no entry to have written one on.
+                ("repo/notes".to_owned(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_scope_on_a_row_moves_no_state_and_needs_no_tree() {
+        let plain = Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale);
+        let scoped = plain.clone().with_scope(Some("tui-team".to_owned()));
+
+        // A row nobody told about a scope has none: the fact comes from a pact
+        // entry somebody wrote, never from the row's own shape.
+        assert_eq!(plain.scope, None);
+        assert_eq!(scoped.scope.as_deref(), Some("tui-team"));
+        // A scope is a label, not a state: nothing else about the row moves, so
+        // a scoped row is drawn in the colour it would have had unlabelled.
+        assert_eq!(scoped.state, plain.state);
+        assert_eq!(scoped.clone().with_scope(None), plain);
+
+        // And the builder is enough on its own: an app can be handed a scoped
+        // row with no tree, loader or disk behind it.
+        let app = App::from_rows(vec![scoped]);
+        assert_eq!(app.rows()[0].scope.as_deref(), Some("tui-team"));
     }
 
     #[test]
