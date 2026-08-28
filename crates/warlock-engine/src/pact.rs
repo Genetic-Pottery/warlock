@@ -327,6 +327,20 @@
 //! the git diff like any other file, and taking back the claim is no reason to
 //! throw away the writing. Un-pacting is pure manifest editing: no walk, no
 //! hash, no agent, no file opened for writing.
+//!
+//! **What it does take is the scope.** An entry is the only home a scope has,
+//! so dropping the entries at and below the un-pacted directory drops their
+//! scopes with them — nothing here special-cases that, and nothing has to. Said
+//! out loud because it is the difference between a boundary that quietly
+//! evaporated and one somebody chose to tear up: un-pacting is the one
+//! operation in this module allowed to lose a scope, and it is a deliberate
+//! press on a directory rather than a side effect of a run. A run cannot lose
+//! one — it hands over run outcomes, and an outcome has nowhere to put a scope,
+//! so a refresh, a pact over a parent, a cancelled run and a partially
+//! completed one all leave every scope exactly as they found it. Re-pacting an
+//! un-pacted directory brings back an entry with no scope on it; the boundary
+//! is written again by the person who wants it, which is the only way one is
+//! ever written.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -339,7 +353,7 @@ use std::str::Utf8Error;
 use ignore::WalkBuilder;
 
 use crate::ignores;
-use crate::manifest::{temp_file_name, write_and_sync};
+use crate::manifest::{ROOT_MODULE, temp_file_name, write_and_sync};
 use crate::{
     Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, HashError, Manifest,
     ManifestError, NodeState, PactEntry, decide_state, now_rfc3339, subtree_hash, to_manifest_path,
@@ -390,10 +404,6 @@ const SUMMARY_KEY_CONTEXT: &str = "warlock summary cache key v1 2026-08-26";
 /// The document a directory is described by, and the only file name a child
 /// directory contributes to its parent's request.
 const DOCUMENT_FILE: &str = "WARLOCK.md";
-
-/// How the repository root itself is spelled as a stored module path, per
-/// [`to_manifest_path`]: the one module that is an ancestor of every other.
-const ROOT_MODULE: &str = ".";
 
 /// How deep the walk goes: the directory itself (0), its own files and its
 /// immediate children (1), and the files directly inside those children (2),
@@ -1245,7 +1255,20 @@ fn rewrite(
 /// selected directory and the repository root, `manifest` is what
 /// `.warlock/pacts.toml` says today, and what comes back is what it should say
 /// tomorrow. Entries outside the subtree are carried through in place,
-/// unchanged, grants and all.
+/// unchanged, grants and scopes and all.
+///
+/// # The scopes go with the entries
+///
+/// An entry at or below `directory` takes its scope with it. The entry is the
+/// only home a scope has, so dropping the entry is dropping the scope, and this
+/// function does not special-case it — but it is worth saying in as many words,
+/// because it is the one place a boundary is lost. It is lost because somebody
+/// pressed a key on the directory holding it, not because a run wandered over
+/// it: no pact operation can touch a scope, since a run hands over outcomes and
+/// an outcome has nowhere to put one. A later re-pact of the same directory
+/// brings back an entry with no scope, to be written again by whoever wants it.
+/// Scopes on entries outside the subtree are untouched, like everything else on
+/// them.
 ///
 /// # What counts as below
 ///
@@ -9282,6 +9305,282 @@ mod tests {
             expected_after_the_refresh(repo.path(), &pacted_at, &refreshed_at),
             "the whole file again: two entries re-granted where they sat, three \
              carried through untouched",
+        );
+    }
+
+    // Scopes: what a run may not touch, and what un-pacting takes with it.
+    //
+    // Every test below passes by construction — a scope lives on an entry, a
+    // run hands over `Outcome`s, and an `Outcome` has nowhere to put one — so
+    // these are regression guards rather than proofs of new code. They are what
+    // fails loudly if somebody ever widens the outcome type, which is the
+    // mistake worth catching early: a run that can write a scope is a run that
+    // can quietly move a boundary somebody drew on purpose.
+
+    /// Every entry's module and the scope written on it, in file order: a
+    /// manifest's boundaries in one comparable value.
+    fn scopes(manifest: &Manifest) -> Vec<(&str, Option<&str>)> {
+        manifest
+            .entries()
+            .iter()
+            .map(|entry| (entry.module(), entry.scope()))
+            .collect()
+    }
+
+    /// `manifest` with a scope written on each named module, the way a person
+    /// would: through the entry, which is a scope's only home.
+    ///
+    /// Every name must already be pacted, because there is deliberately no way
+    /// to scope a module with no entry — a typo here fails the fixture rather
+    /// than quietly testing a manifest with no scopes in it.
+    fn with_scopes(manifest: &Manifest, scoped: &[(&str, &str)]) -> Manifest {
+        for (module, _) in scoped {
+            assert!(
+                manifest.entry(module).is_some(),
+                "`{module}` is not pacted, so nothing can scope it",
+            );
+        }
+        Manifest::with_entries(manifest.entries().iter().map(|entry| {
+            match scoped.iter().find(|(module, _)| *module == entry.module()) {
+                Some((_, scope)) => entry.clone().with_scope(*scope),
+                None => entry.clone(),
+            }
+        }))
+    }
+
+    #[test]
+    fn un_pacting_drops_the_scope_with_the_entry_and_leaves_the_rest_scoped() {
+        let before = with_scopes(
+            &pacted(&[
+                ".",
+                "crates/engine",
+                "crates/engine/src",
+                "crates/engine-tools",
+                "crates/tui",
+            ]),
+            &[
+                (".", "repo"),
+                ("crates/engine", "engine"),
+                ("crates/engine/src", "data-plane"),
+                ("crates/engine-tools", "tooling"),
+                ("crates/tui", "front-end"),
+            ],
+        );
+
+        let left = unpact_subtree("crates/engine", ".", &before).expect("un-pacts");
+
+        assert_eq!(
+            scopes(&left),
+            [
+                (".", Some("repo")),
+                ("crates/engine-tools", Some("tooling")),
+                ("crates/tui", Some("front-end")),
+            ],
+            "the entries at and below the un-pacted directory took their scopes \
+             with them, and every scope outside the subtree is where it was",
+        );
+        assert!(
+            left.entries()
+                .iter()
+                .all(|entry| !matches!(entry.scope(), Some("engine" | "data-plane"))),
+            "and the dropped boundaries are nowhere else in the manifest either",
+        );
+    }
+
+    #[test]
+    fn a_refresh_leaves_every_scope_exactly_as_it_found_it() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let before = with_scopes(
+            &refreshable(repo.path()),
+            &[
+                ("crates/engine", "engine"),
+                ("crates/engine/src", "data-plane"),
+                ("crates/engine/tests", "harness"),
+            ],
+        );
+
+        // One changed file, so the refresh describes the path up from it and
+        // skips `tests/` — both kinds of directory in one run.
+        write(
+            repo.path(),
+            "crates/engine/src/inner/deep.rs",
+            "fn deeper() {}\n",
+        );
+        let agent = Canned::new(document(400));
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut Unwatched)
+            .expect("refreshes");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            described_by(&agent, repo.path()),
+            [
+                "crates/engine/src/inner",
+                "crates/engine/src",
+                "crates/engine",
+            ],
+            "two scoped directories were described and one scoped directory was \
+             skipped, or this proves nothing about either",
+        );
+        assert_eq!(
+            scopes(&manifest),
+            scopes(&before),
+            "a refresh rewrites documents, hashes and timestamps, and no scope: \
+             described and skipped directories alike keep the boundary somebody \
+             drew on them",
+        );
+    }
+
+    #[test]
+    fn a_pact_over_a_parent_of_a_scoped_module_keeps_every_scope() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        // A scoped module inside the subtree about to be re-pacted, its
+        // scoped parent, and a scoped entry outside the subtree entirely.
+        let outside = pacted(&["crates/tui"])
+            .entries()
+            .first()
+            .expect("one entry in, one entry out")
+            .clone()
+            .with_scope("front-end");
+        let before = Manifest::with_entries(
+            std::iter::once(outside).chain(
+                with_scopes(
+                    &refreshable(repo.path()),
+                    &[
+                        ("crates/engine", "engine"),
+                        ("crates/engine/src", "data-plane"),
+                    ],
+                )
+                .entries()
+                .iter()
+                .cloned(),
+            ),
+        );
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &before,
+            &Canned::new(document(500)),
+            &mut Unwatched,
+        )
+        .expect("pacts");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_ne!(
+            manifest.entry("crates/engine/src"),
+            before.entry("crates/engine/src"),
+            "the run really did rewrite the scoped entry — it re-described the \
+             module and re-granted it",
+        );
+        assert_eq!(
+            scopes(&manifest),
+            scopes(&before),
+            "a pact of a parent writes the fields a run owns onto the entries \
+             below it and cannot reach the scope on any of them",
+        );
+    }
+
+    #[test]
+    fn a_cancelled_run_keeps_every_scope() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let before = with_scopes(
+            &refreshable(repo.path()),
+            &[
+                ("crates/engine", "engine"),
+                ("crates/engine/src", "data-plane"),
+                ("crates/engine/src/inner", "deep"),
+                ("crates/engine/tests", "harness"),
+            ],
+        );
+        write(
+            repo.path(),
+            "crates/engine/src/inner/deep.rs",
+            "fn deeper() {}\n",
+        );
+        let agent = Canned::new(document(300));
+        // The same cancellation the refresh tests above use: one directory
+        // described, the next offered and turned down, the rest never asked.
+        let mut observer = Watching::stopping_after(1);
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut observer)
+            .expect("a refresh somebody stopped is not a refresh that failed");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            described_by(&agent, repo.path()),
+            ["crates/engine/src/inner"],
+            "one scoped directory got its pass, and three scoped directories \
+             were cut off mid-run",
+        );
+        assert_eq!(
+            scopes(&manifest),
+            scopes(&before),
+            "stopping a run part way through takes out documents and grants \
+             nobody asked for, and no boundary anybody drew",
+        );
+    }
+
+    #[test]
+    fn a_partly_completed_run_keeps_every_scope() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let before = with_scopes(
+            &refreshable(repo.path()),
+            &[
+                ("crates/engine", "engine"),
+                ("crates/engine/src", "data-plane"),
+                ("crates/engine/src/inner", "deep"),
+                ("crates/engine/tests", "harness"),
+            ],
+        );
+        write(
+            repo.path(),
+            "crates/engine/src/inner/deep.rs",
+            "fn deeper() {}\n",
+        );
+
+        // One pass refuses, so the two directories above it are described and
+        // recorded without a grant: partial completion, the ungranted-entry
+        // path through phase two.
+        let PactedSubtree {
+            manifest, failures, ..
+        } = refresh_subtree(
+            &engine,
+            repo.path(),
+            &before,
+            &FailsFor {
+                directory: engine.join("src").join("inner"),
+                text: document(300),
+            },
+            &mut Unwatched,
+        )
+        .expect("one refused pass does not fail the refresh");
+
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        for above in ["crates/engine/src", "crates/engine"] {
+            let entry = manifest.entry(above).expect("documented, so pacted");
+            assert_eq!(
+                entry.granted_hash(),
+                None,
+                "`{above}` really did come out of the run ungranted, or the \
+                 partial-completion path was never taken",
+            );
+        }
+        assert_eq!(
+            scopes(&manifest),
+            scopes(&before),
+            "the grant is a field a run owns and clears; the scope is not, so a \
+             directory can go yellow without its boundary moving",
         );
     }
 }

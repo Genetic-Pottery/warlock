@@ -72,6 +72,16 @@
 //! and the walk carries on colouring everything else correctly. No error text
 //! and no partial read ever reaches a hash: the failed digest is simply not
 //! there.
+//!
+//! A node's scope arrives the same way its state does: read off the entry the
+//! manifest holds for that directory, and put on [`Node::scope`] as its own —
+//! never an ancestor's, which is [`scope_covering`](crate::scope_covering)'s
+//! question and not a node's. A scope [`validate_scope`] refuses is the other
+//! non-fatal thing a load can report: the node keeps its state, its document,
+//! its files and its children, reads as unscoped, and the string is named in a
+//! [`Problem`] along with the rule it broke. Nothing is corrected — a scope
+//! gates nothing, and taking a whole tree gray over one typo in a label would
+//! cost far more than the label is worth.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -81,8 +91,8 @@ use std::path::{Component, Path, PathBuf};
 use ignore::WalkBuilder;
 
 use crate::{
-    HashError, Manifest, ManifestError, Node, NodeState, Tree, decide_state, ignores, subtree_hash,
-    to_manifest_path,
+    HashError, Manifest, ManifestError, Node, NodeState, ScopeRule, Tree, decide_state, ignores,
+    subtree_hash, to_manifest_path, validate_scope,
 };
 
 /// The directory whose presence marks a repository root. Git's own, read as a
@@ -202,35 +212,76 @@ pub struct Loaded {
 
 /// One thing that went wrong during a load without stopping it.
 ///
-/// Today there is exactly one way to get here: a pacted node whose subtree
-/// could not be hashed, which is coloured [`NodeState::PactedStale`] and
-/// reported rather than silently passed over. Silence is the thing being
-/// avoided — an unreadable file that simply dropped out of a digest would hash
-/// exactly like a deleted one, and could hand back a green nobody earned.
+/// Two ways to get here, both of them a fact about one node that the load went
+/// on around: a pacted node whose subtree could not be hashed, and a directory
+/// whose manifest entry carries a string that is not a scope. Silence is the
+/// thing being avoided in both cases — an unreadable file that simply dropped
+/// out of a digest would hash exactly like a deleted one and could hand back a
+/// green nobody earned, and a scope quietly ignored would leave somebody
+/// believing they had written a boundary they had not.
 #[derive(Debug)]
 pub struct Problem {
     /// The node the problem happened at: the directory whose subtree hash was
-    /// wanted. The offending *file* — which is usually somewhere below it — is
-    /// named by `cause`.
+    /// wanted, or the directory whose entry holds the bad scope. What exactly
+    /// went wrong — the offending file, which is usually somewhere below it, or
+    /// the rule the scope broke — is in `cause`.
     pub path: PathBuf,
-    /// Why that node has no hash.
-    pub cause: HashError,
+    /// What went wrong there.
+    pub cause: ProblemCause,
+}
+
+/// Why a node is in [`Loaded::problems`].
+///
+/// An enum rather than a bare [`HashError`], because the two things a load can
+/// have to report about a node are not the same kind of failure: one is a
+/// digest that could not be taken, the other a label that is not one. Each
+/// keeps its own wording, and neither is dressed up as the other.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ProblemCause {
+    /// The node's subtree could not be hashed, so it is coloured
+    /// [`NodeState::PactedStale`]: content that cannot be read is content that
+    /// cannot be vouched for.
+    Hash(HashError),
+    /// The node's manifest entry carries a string that is not a scope. The node
+    /// keeps its state, its document, its files and its children, and reads as
+    /// unscoped — [`Node::scope`] is `None` — for as long as the string is
+    /// invalid. Nothing is corrected: the bytes stay in the manifest exactly as
+    /// they were written, because rewriting somebody's committed line on the
+    /// next save would put a change in a diff nobody authored.
+    Scope {
+        /// The string as the manifest holds it, unfolded and untrimmed.
+        scope: String,
+        /// The one rule it broke.
+        rule: ScopeRule,
+    },
 }
 
 impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "`{}` could not be hashed and is stale: {}",
-            self.path.display(),
-            self.cause
-        )
+        match &self.cause {
+            ProblemCause::Hash(cause) => write!(
+                f,
+                "`{}` could not be hashed and is stale: {}",
+                self.path.display(),
+                cause
+            ),
+            ProblemCause::Scope { scope, rule } => write!(
+                f,
+                "`{}` carries `{scope}`, which is not a scope, so it reads as \
+                 unscoped: {rule}",
+                self.path.display(),
+            ),
+        }
     }
 }
 
 impl std::error::Error for Problem {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.cause)
+        match &self.cause {
+            ProblemCause::Hash(cause) => Some(cause),
+            ProblemCause::Scope { rule, .. } => Some(rule),
+        }
     }
 }
 
@@ -434,10 +485,14 @@ impl Builder {
         // colour, and only gains the reason it can never be pacted.
         let ignored = found.is_some_and(|directory| directory.ignored);
 
-        Node::new(dir, document, self.state_of(dir, problems))
+        let state = self.state_of(dir, problems);
+        let scope = self.scope_of(dir, problems);
+
+        Node::new(dir, document, state)
             .with_children(children)
             .with_files(files)
             .with_ignored(ignored)
+            .with_scope(scope)
     }
 
     /// The directories directly inside `dir`, in name order.
@@ -486,9 +541,44 @@ impl Builder {
                 // mistaken for a comparison that happened and failed to match.
                 problems.push(Problem {
                     path: dir.to_path_buf(),
-                    cause,
+                    cause: ProblemCause::Hash(cause),
                 });
                 NodeState::PactedStale
+            }
+        }
+    }
+
+    /// The scope written on `dir`'s own manifest entry, or `None` where there
+    /// is no entry, no scope on it, or no scope worth the name.
+    ///
+    /// `dir`'s own and never an ancestor's: a node says which boundary starts
+    /// at it, and [`scope_covering`](crate::scope_covering) answers the other
+    /// question by walking up. A directory nobody pacted therefore has no scope
+    /// here whatever sits above it, which is the same invariant seen from the
+    /// tree: no pact, no scope.
+    ///
+    /// A string the validator refuses is reported as a [`Problem`] and left out
+    /// of the node. Not fatal, not corrected and not silently kept: the load
+    /// finishes, the node keeps its state, document, files and children, the
+    /// manifest keeps the bytes somebody wrote, and the directory reads as
+    /// unscoped for as long as they are not a scope.
+    fn scope_of(&self, dir: &Path, problems: &mut Vec<Problem>) -> Option<String> {
+        // As in `state_of`: a path with no manifest form matches no entry, so
+        // it carries no scope and is nobody's problem.
+        let key = to_manifest_path(&self.repo_root, dir).ok()?;
+        let stored = self.manifest.entry(&key)?.scope()?;
+
+        match validate_scope(stored) {
+            Ok(()) => Some(stored.to_owned()),
+            Err(rule) => {
+                problems.push(Problem {
+                    path: dir.to_path_buf(),
+                    cause: ProblemCause::Scope {
+                        scope: stored.to_owned(),
+                        rule,
+                    },
+                });
+                None
             }
         }
     }
@@ -589,9 +679,10 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{Error, Loaded, load_tree, repository_root};
+    use super::{Error, Loaded, ProblemCause, load_tree, repository_root};
     use crate::{
         HashError, Manifest, NodeState, PactEntry, StateCounts, Tree, manifest_path, subtree_hash,
+        validate_scope,
     };
 
     /// A repository with a `.git/` directory — what makes it a repository — and
@@ -1343,7 +1434,10 @@ mod tests {
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_eq!(problems[0].path, module, "the problem names the node");
         assert!(
-            matches!(problems[0].cause, HashError::Read { .. }),
+            matches!(
+                problems[0].cause,
+                ProblemCause::Hash(HashError::Read { .. })
+            ),
             "{:?}",
             problems[0],
         );
@@ -1516,6 +1610,181 @@ mod tests {
             load_tree(repo.path()),
             Err(Error::Manifest { .. })
         ));
+    }
+
+    /// A manifest written as text, the way somebody with an editor would, with
+    /// a scope on each entry — including one nobody would call a scope.
+    ///
+    /// Hand-written rather than built through [`PactEntry::with_scope`] for the
+    /// same reason [`hand_write_manifest`] is: the invalid cases below cannot
+    /// be produced by any prompt in this workspace, and a person with an editor
+    /// is exactly who produces them.
+    fn hand_write_scoped_manifest(root: &Path, pacts: &[(&str, &str)]) {
+        use std::fmt::Write as _;
+
+        let mut text = String::from("version = 1\n");
+        for (module, scope) in pacts {
+            write!(
+                text,
+                "\n[[pact]]\nmodule = \"{module}\"\ndocument = \"{module}/WARLOCK.md\"\n\
+                 scope = \"{scope}\"\n"
+            )
+            .expect("a string never fails to be written to");
+        }
+        fs::write(manifest_path(root), text).expect("writes the manifest");
+    }
+
+    #[test]
+    fn a_scope_lands_on_the_directory_that_carries_it_and_on_no_other() {
+        let repo = fixture(&["docs/src"], &["docs", "crates/engine"]);
+        hand_write_scoped_manifest(repo.path(), &[("docs", "data-plane")]);
+
+        let tree = tree_of(repo.path());
+
+        let docs = tree
+            .find(repo.path().join("docs"))
+            .expect("the pacted module");
+        assert_eq!(
+            docs.scope.as_deref(),
+            Some("data-plane"),
+            "the scope on a directory's own entry is the scope on its node",
+        );
+        assert_eq!(
+            docs.state,
+            NodeState::PactedStale,
+            "a scope colours nothing: this entry has no grant, so it is stale",
+        );
+
+        for elsewhere in ["", "docs/src", "crates", "crates/engine"] {
+            assert_eq!(
+                tree.find(repo.path().join(elsewhere))
+                    .unwrap_or_else(|| panic!("`{elsewhere}` is a node"))
+                    .scope,
+                None,
+                "`{elsewhere}` carries no scope of its own — a node holds the \
+                 boundary that starts at it, never an inherited one",
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_with_no_entry_carries_no_scope() {
+        // The invariant seen from the tree: a scope lives on a pact entry, so a
+        // directory nobody pacted has nowhere to have got one from.
+        let repo = fixture(&["docs/src"], &["docs"]);
+
+        assert!(
+            tree_of(repo.path())
+                .walk()
+                .all(|(node, _)| node.scope.is_none()),
+        );
+    }
+
+    /// Every string this repository's tests insist is not a scope, each one a
+    /// different rule broken. Written as a manifest a person edited by hand,
+    /// since nothing in this workspace would store them.
+    const NOT_SCOPES: [&str; 7] = [
+        "",
+        "1data",
+        "data-",
+        "*",
+        "aaaaaaaaaaaaaaaaaaaaaaaaa", // Twenty-five characters.
+        "données",
+        "Data-Plane",
+    ];
+
+    #[test]
+    fn an_invalid_scope_is_reported_reads_as_unscoped_and_stops_nothing() {
+        for not_a_scope in NOT_SCOPES {
+            let repo = fixture(&["docs/src"], &["docs"]);
+            let module = repo.path().join("docs");
+            write_file(&module.join("adr.md"), "a decision\n");
+            hand_write_scoped_manifest(repo.path(), &[("docs", not_a_scope)]);
+
+            let Loaded { tree, problems } =
+                load_tree(repo.path()).expect("a scope that is not one is not fatal");
+
+            let docs = tree
+                .find(&module)
+                .expect("the pacted module is still a node");
+            assert_eq!(
+                docs.scope, None,
+                "`{not_a_scope}` is not a scope, so the directory is unscoped",
+            );
+            assert_eq!(
+                docs.state,
+                NodeState::PactedStale,
+                "`{not_a_scope}`: the node keeps the state its entry earned",
+            );
+            assert_eq!(
+                docs.document,
+                Some(module.join("WARLOCK.md")),
+                "`{not_a_scope}`: and its document",
+            );
+            assert_eq!(
+                file_names(&tree, &module),
+                ["WARLOCK.md", "adr.md"],
+                "`{not_a_scope}`: and its files",
+            );
+            assert_eq!(
+                docs.children
+                    .iter()
+                    .map(|child| child.path.clone())
+                    .collect::<Vec<_>>(),
+                [module.join("src")],
+                "`{not_a_scope}`: and its children",
+            );
+
+            assert_eq!(problems.len(), 1, "`{not_a_scope}`: {problems:?}");
+            assert_eq!(
+                problems[0].path, module,
+                "`{not_a_scope}`: the problem names the directory",
+            );
+            let rule = validate_scope(not_a_scope).expect_err("not a scope");
+            assert!(
+                matches!(
+                    &problems[0].cause,
+                    ProblemCause::Scope { scope, rule: broken }
+                        if scope == not_a_scope && *broken == rule
+                ),
+                "`{not_a_scope}`: {:?}",
+                problems[0],
+            );
+            let reported = problems[0].to_string();
+            assert!(
+                reported.contains(&module.display().to_string()),
+                "`{not_a_scope}`: the line names the directory: {reported}",
+            );
+            assert!(
+                reported.contains(&rule.to_string()),
+                "`{not_a_scope}`: the line names the rule broken: {reported}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_bad_scope_on_one_directory_leaves_every_other_scope_alone() {
+        let repo = fixture(&[], &["docs", "crates/engine"]);
+        hand_write_scoped_manifest(
+            repo.path(),
+            &[("docs", "Data-Plane"), ("crates/engine", "billing")],
+        );
+
+        let Loaded { tree, problems } = load_tree(repo.path()).expect("loads");
+
+        assert_eq!(
+            tree.find(repo.path().join("docs")).expect("a node").scope,
+            None,
+        );
+        assert_eq!(
+            tree.find(repo.path().join("crates/engine"))
+                .expect("a node")
+                .scope
+                .as_deref(),
+            Some("billing"),
+            "one typo is one directory's problem, not the tree's",
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
     }
 
     #[test]

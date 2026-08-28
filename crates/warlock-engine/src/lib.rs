@@ -24,6 +24,7 @@ mod ignores;
 mod load;
 mod manifest;
 mod pact;
+mod scope;
 mod state;
 mod tree;
 
@@ -83,6 +84,9 @@ pub use load::Loaded;
 /// One node a load could not colour properly, and why. Non-fatal by
 /// definition: the load that produced it finished.
 pub use load::Problem as LoadProblem;
+/// Why a node is in a load's problems: a subtree that could not be hashed, or a
+/// manifest entry carrying a string that is not a scope.
+pub use load::ProblemCause as LoadProblemCause;
 /// Build a tree from a directory on disk, coloured by the manifest above it.
 pub use load::load_tree;
 /// The nearest ancestor of a directory that holds a `.git/` directory: the
@@ -93,8 +97,9 @@ pub use manifest::Error as ManifestError;
 /// The record of which modules are pacted: one `.warlock/pacts.toml` per
 /// repository.
 pub use manifest::Manifest;
-/// One pacted module: its directory, its document, and whatever was granted
-/// to it.
+/// One pacted module: its directory, its document, whatever was granted to it,
+/// and the boundary a person put on it — the only place a scope can be stored,
+/// so a module with no entry has nowhere to hold one.
 pub use manifest::PactEntry;
 /// The manifest schema version this build reads and writes.
 pub use manifest::SCHEMA_VERSION;
@@ -179,6 +184,29 @@ pub use pact::refresh_subtree;
 /// leave every `WARLOCK.md` on disk, byte for byte. Returns the manifest to save
 /// and saves nothing itself.
 pub use pact::unpact_subtree;
+/// The one rule a string broke on its way to not being a scope, renderable as
+/// a single line for a prompt to refuse with or a load to report.
+pub use scope::Rule as ScopeRule;
+/// The scope covering a path: the one on the nearest pacted directory at or
+/// above it that carries a valid scope, and at most one — nearest wins, so an
+/// inner scope replaces an outer one outright and the outer one is a *default*
+/// for what has said nothing below it, never a second gate to also satisfy. A
+/// scope [`validate_scope`] refuses is stepped over as if it were not written,
+/// so the answer is never a string that is not a scope. Nothing in this
+/// workspace calls it yet: it exists so the matcher has one home when it is
+/// written, rather than three callers each walking up the tree their own way.
+pub use scope::scope_covering;
+/// Whether a string is a scope a pacted directory may carry: 1 to 24
+/// characters of ASCII lowercase letters, digits, `-` and `_`, beginning with a
+/// letter and not ending with a separator. Judges only — it never lower-cases,
+/// trims or otherwise repairs what it was handed, so folding case stays with
+/// the callers that take the string from a person.
+pub use scope::validate_scope;
+/// Whether a string is a sigil a person may hold: everything
+/// [`validate_scope`] accepts, plus the wildcard `*`, which means "may work
+/// anywhere" and is refused on the directory side because blank already says
+/// "open to anyone" there.
+pub use scope::validate_sigil;
 /// The three-state vocabulary every node is coloured by.
 pub use state::NodeState;
 /// A depth-first walk over a tree, yielding each node with its depth.

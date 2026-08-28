@@ -23,6 +23,13 @@
 //! * **Paths are stored relative to the manifest's own directory, with forward
 //!   slashes.** Two clones of the same commit sitting at different absolute
 //!   paths, on different operating systems, produce the same bytes.
+//! * **What a person wrote here is read back exactly as written.** An entry's
+//!   optional `scope` is stored, never validated and never normalised on the
+//!   way in or out, so a load-then-save of a hand-edited manifest reproduces it
+//!   byte for byte — including a scope this crate would call malformed. The
+//!   rules for a well-formed one live in
+//!   [`validate_scope`](crate::validate_scope), and are asked by whoever acts
+//!   on the answer.
 
 use std::fmt;
 use std::fs;
@@ -40,6 +47,15 @@ const MANIFEST_DIR: &str = ".warlock";
 
 /// The manifest's file name inside [`MANIFEST_DIR`].
 const MANIFEST_FILE: &str = "pacts.toml";
+
+/// How the repository root itself is spelled as a stored path, per
+/// [`to_manifest_path`]: the one module that is an ancestor of every other.
+///
+/// Spelled once, here, because two things walk stored paths against each other
+/// — un-pacting a subtree and asking which scope covers a path — and a root
+/// that meant `"."` to one of them and something else to the other would make
+/// them disagree about the one directory everything sits under.
+pub(crate) const ROOT_MODULE: &str = ".";
 
 /// The schema version this build reads and writes.
 ///
@@ -316,6 +332,22 @@ pub struct PactEntry {
     /// separately from `module` because the file name is not Warlock's to
     /// assume.
     document: String,
+    /// The boundary this module belongs to — `data-plane`, `billing` — or
+    /// `None` for a module that belongs to no particular one.
+    ///
+    /// A person's field, not a run's: it is only ever written by somebody
+    /// saying so, which is why no run can reach it (see
+    /// [`PactEntry::overwrite_run_fields`]) and why an entry that has none
+    /// omits the key entirely rather than writing `scope = ""`.
+    ///
+    /// Stored exactly as written, and **not validated here**. Whether a string
+    /// is a well-formed scope is [`validate_scope`](crate::validate_scope)'s
+    /// question, asked by whoever wants to act on the answer; a scope this
+    /// crate would refuse is still read back byte for byte, because these bytes
+    /// are committed and a load-then-save that rewrote them would put a line in
+    /// a diff nobody authored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
     /// The subtree hash captured when freshness was last granted. Opaque here:
     /// this crate neither computes nor verifies it. Absent means never judged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,6 +393,7 @@ impl PactEntry {
         Ok(Self {
             module: to_manifest_path(root, module)?,
             document: to_manifest_path(root, document)?,
+            scope: None,
             granted_hash: None,
             granted_at: None,
         })
@@ -390,8 +423,46 @@ impl PactEntry {
         self
     }
 
-    /// A never-judged entry whose paths are **already** in the form this
-    /// manifest stores — relative, forward slashes, `"."` for the root.
+    /// The same entry carrying `scope` as its boundary.
+    ///
+    /// Stored as given: nothing here validates it, lower-cases it or trims it.
+    /// A caller that wants a well-formed scope asks
+    /// [`validate_scope`](crate::validate_scope) *before* getting here, and a
+    /// caller taking the string from a person folds its case there too — this
+    /// is the store, not the gate.
+    ///
+    /// The grant is untouched, in both directions: putting a boundary on a
+    /// module says nothing about whether its document is still true.
+    ///
+    /// ```
+    /// use warlock_engine::PactEntry;
+    ///
+    /// let entry = PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?
+    ///     .with_grant("d0f5a1", "2026-08-19T07:32:00Z")
+    ///     .with_scope("data-plane");
+    ///
+    /// assert_eq!(entry.scope(), Some("data-plane"));
+    /// assert_eq!(entry.granted_hash(), Some("d0f5a1"));
+    /// assert_eq!(entry.clone().without_scope().scope(), None);
+    /// assert_eq!(entry.without_scope().granted_hash(), Some("d0f5a1"));
+    /// # Ok::<(), warlock_engine::ManifestError>(())
+    /// ```
+    #[must_use]
+    pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
+        self.scope = Some(scope.into());
+        self
+    }
+
+    /// The same entry with any scope dropped, i.e. belonging to no particular
+    /// boundary. The grant and both paths are untouched.
+    #[must_use]
+    pub fn without_scope(mut self) -> Self {
+        self.scope = None;
+        self
+    }
+
+    /// A never-judged, unscoped entry whose paths are **already** in the form
+    /// this manifest stores — relative, forward slashes, `"."` for the root.
     ///
     /// [`PactEntry::new`]'s job less the normalising, for the one caller that
     /// has done that normalising itself: a pact run, which spells its stored
@@ -399,10 +470,16 @@ impl PactEntry {
     /// to blame if one cannot be spelled. Crate-private for the same reason
     /// `module` and `document` are private — nothing outside this crate should
     /// be trusted to have got the form right.
+    ///
+    /// There is deliberately no scope parameter: a run has no scope to hand
+    /// over, so the entry a run creates starts with none and the only way one
+    /// ever appears is a person putting it there with
+    /// [`PactEntry::with_scope`].
     pub(crate) fn stored(module: String, document: String) -> Self {
         Self {
             module,
             document,
+            scope: None,
             granted_hash: None,
             granted_at: None,
         }
@@ -418,9 +495,11 @@ impl PactEntry {
     /// earned.
     ///
     /// Crate-private, and written as a mutation rather than as a fresh entry to
-    /// swap in, precisely so that a field added to `PactEntry` later — one a
-    /// person owns rather than a run — survives every pact and every refresh
-    /// without anyone having to remember to carry it across.
+    /// swap in, precisely so that a field a person owns rather than a run
+    /// survives every pact and every refresh without anyone having to remember
+    /// to carry it across. `scope` is the first such field: it is not a
+    /// parameter here and is not assigned below, so no run can write one and no
+    /// run can clear one.
     pub(crate) fn overwrite_run_fields(
         &mut self,
         module: String,
@@ -445,6 +524,17 @@ impl PactEntry {
     #[must_use]
     pub fn document(&self) -> &str {
         &self.document
+    }
+
+    /// The boundary this module belongs to, exactly as stored, or `None`.
+    ///
+    /// As stored means as written: a hand-edited manifest can hold a string
+    /// this crate would refuse, and it comes back from here unchanged rather
+    /// than corrected or dropped. A caller that needs a *valid* scope asks
+    /// [`validate_scope`](crate::validate_scope) about what it gets.
+    #[must_use]
+    pub fn scope(&self) -> Option<&str> {
+        self.scope.as_deref()
     }
 
     /// The module directory as a path under `root`.
@@ -541,7 +631,7 @@ pub fn to_manifest_path(root: impl AsRef<Path>, path: impl AsRef<Path>) -> Resul
 
     if parts.is_empty() {
         // `root` itself: the repository root can be a pacted module too.
-        return Ok(".".to_owned());
+        return Ok(ROOT_MODULE.to_owned());
     }
     Ok(parts.join("/"))
 }
@@ -879,6 +969,195 @@ mod tests {
         );
         assert!(parsed.entries()[0].is_judged());
         assert_eq!(parsed.to_toml_string().expect("re-serialises"), text);
+    }
+
+    #[test]
+    fn an_unscoped_entry_omits_the_scope_key() {
+        let manifest = Manifest::with_entries([unjudged(), judged()]);
+        let text = manifest.to_toml_string().expect("serialises");
+
+        assert!(!text.contains("scope"), "{text}");
+        assert_eq!(
+            text,
+            concat!(
+                "version = 1\n\n",
+                "[[pact]]\n",
+                "module = \"crates/warlock-engine\"\n",
+                "document = \"crates/warlock-engine/WARLOCK.md\"\n\n",
+                "[[pact]]\n",
+                "module = \"crates/warlock-engine\"\n",
+                "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+                "granted_hash = \"d0f5a1\"\n",
+                "granted_at = \"2026-08-19T07:32:00Z\"\n",
+            ),
+            "an entry with no scope serialises to exactly the bytes it did \
+             before the field existed"
+        );
+
+        let parsed = Manifest::from_toml_str(&text).expect("parses");
+        assert_eq!(parsed, manifest);
+        assert_eq!(parsed.entries()[0].scope(), None);
+        assert_eq!(parsed.entries()[1].scope(), None);
+    }
+
+    #[test]
+    fn a_manifest_written_before_scopes_existed_loads_unscoped() {
+        // Byte for byte the shape a previous build wrote: no `scope` key
+        // anywhere, and no version bump to say the schema moved.
+        let root = a_root();
+        let original = concat!(
+            "version = 1\n\n",
+            "[[pact]]\n",
+            "module = \"crates/warlock-engine\"\n",
+            "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+            "granted_hash = \"d0f5a1\"\n",
+            "granted_at = \"2026-08-19T07:32:00Z\"\n\n",
+            "[[pact]]\n",
+            "module = \"crates/warlock-tui\"\n",
+            "document = \"crates/warlock-tui/WARLOCK.md\"\n",
+        );
+        hand_write(root.path(), original);
+
+        let loaded = Manifest::load(root.path()).expect("loads without a scope key in sight");
+        assert_eq!(loaded.version(), SCHEMA_VERSION);
+        assert!(
+            loaded.entries().iter().all(|entry| entry.scope().is_none()),
+            "every entry reads as unscoped"
+        );
+
+        loaded.save(root.path()).expect("saves");
+        assert_eq!(
+            fs::read_to_string(manifest_path(root.path())).expect("reads"),
+            original,
+            "and saving it back does not add the new key"
+        );
+    }
+
+    #[test]
+    fn a_scoped_entry_round_trips_byte_for_byte() {
+        let root = a_root();
+        // Hand-written, so this says where the key sits in the file and not
+        // merely that the serialiser agrees with itself.
+        let original = concat!(
+            "version = 1\n\n",
+            "[[pact]]\n",
+            "module = \"crates/warlock-engine\"\n",
+            "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+            "scope = \"data-plane\"\n",
+            "granted_hash = \"d0f5a1\"\n",
+            "granted_at = \"2026-08-19T07:32:00Z\"\n",
+        );
+        hand_write(root.path(), original);
+
+        let loaded = Manifest::load(root.path()).expect("loads");
+        assert_eq!(
+            loaded,
+            Manifest::with_entries([judged().with_scope("data-plane")]),
+            "the file and the constructed entry are the same manifest"
+        );
+        assert_eq!(loaded.entries()[0].scope(), Some("data-plane"));
+
+        loaded.save(root.path()).expect("saves");
+        assert_eq!(
+            fs::read_to_string(manifest_path(root.path())).expect("reads"),
+            original,
+            "a load-then-save is a no-op on the bytes of a scoped entry too"
+        );
+    }
+
+    #[test]
+    fn an_invalid_scope_loads_untouched_and_is_written_back_unchanged() {
+        // The reader validates nothing and normalises nothing: these bytes are
+        // committed, and correcting them on somebody's next save would put a
+        // line in a diff they did not author. Whether a scope is well formed is
+        // `validate_scope`'s question, asked elsewhere.
+        let invalid = [
+            "",
+            "1data",
+            "data-",
+            "*",
+            "abcdefghijklmnopqrstuvwxy", // 25 characters
+            "données",
+            "Data-Plane",
+        ];
+
+        for scope in invalid {
+            let root = a_root();
+            let original = format!(
+                concat!(
+                    "version = 1\n\n",
+                    "[[pact]]\n",
+                    "module = \"crates/warlock-engine\"\n",
+                    "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+                    "scope = \"{}\"\n",
+                    "granted_hash = \"d0f5a1\"\n",
+                    "granted_at = \"2026-08-19T07:32:00Z\"\n",
+                ),
+                scope
+            );
+            hand_write(root.path(), &original);
+
+            let loaded = Manifest::load(root.path())
+                .unwrap_or_else(|error| panic!("`{scope}` is not fatal, got {error:?}"));
+            let entry = &loaded.entries()[0];
+            assert_eq!(entry.module(), "crates/warlock-engine", "for `{scope}`");
+            assert_eq!(
+                entry.document(),
+                "crates/warlock-engine/WARLOCK.md",
+                "for `{scope}`"
+            );
+            assert_eq!(entry.granted_hash(), Some("d0f5a1"), "for `{scope}`");
+            assert_eq!(
+                entry.granted_at(),
+                Some("2026-08-19T07:32:00Z"),
+                "for `{scope}`"
+            );
+            assert_eq!(
+                entry.scope(),
+                Some(scope),
+                "read back as written, not repaired and not dropped"
+            );
+
+            loaded.save(root.path()).expect("saves");
+            assert_eq!(
+                fs::read_to_string(manifest_path(root.path())).expect("reads"),
+                original,
+                "the invalid line survives a load-then-save byte for byte"
+            );
+        }
+    }
+
+    #[test]
+    fn setting_or_clearing_a_scope_leaves_the_rest_of_the_entry_alone() {
+        let before = judged();
+        let scoped = before.clone().with_scope("data-plane");
+        let rescoped = scoped.clone().with_scope("billing");
+        let unscoped = rescoped.clone().without_scope();
+
+        for entry in [&scoped, &rescoped, &unscoped] {
+            assert_eq!(entry.module(), before.module());
+            assert_eq!(entry.document(), before.document());
+            assert_eq!(entry.granted_hash(), before.granted_hash());
+            assert_eq!(entry.granted_at(), before.granted_at());
+            assert!(entry.is_judged());
+        }
+
+        assert_eq!(scoped.scope(), Some("data-plane"));
+        assert_eq!(rescoped.scope(), Some("billing"), "one scope, replaced");
+        assert_eq!(unscoped.scope(), None);
+        // Clearing a scope that was never set is the entry it started as.
+        assert_eq!(unscoped, before);
+        assert_eq!(before.clone().without_scope(), before);
+    }
+
+    #[test]
+    fn a_scope_is_stored_as_written_however_odd() {
+        // No folding, no trimming, no rejection: `with_scope` is the store, not
+        // the gate. Two spellings staying two spellings is exactly why the
+        // folding belongs where a person types.
+        for scope in ["Data-Plane", " data-plane ", "*", ""] {
+            assert_eq!(judged().with_scope(scope).scope(), Some(scope));
+        }
     }
 
     #[test]
