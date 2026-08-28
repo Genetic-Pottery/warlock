@@ -113,13 +113,15 @@
 //! it is a question. Esc and `q` no longer return from [`run`]: with nothing
 //! running they open the quit confirmation ([`QuitConfirm`]), which is drawn
 //! over the frame and answered from the keyboard, and only a Yes returns. The
-//! decision is [`press_for`]'s and not this file's — a key, the question's state
-//! and whether a run is in flight go in, and what the loop is to do comes out —
-//! so the whole gate is testable with nothing attached to stdout, and the arms
-//! below are the three things that can come of a keystroke: leave, move the
-//! question, or hand the key to the app. While the question is up the app hears
-//! nothing at all, the pointer included: mouse events are read and dropped, so a
-//! click cannot select a row behind a window that is about to close.
+//! decision is [`press_for`]'s and not this file's — a key, the question's
+//! state, the scope prompt's and whether a run is in flight go in, and what the
+//! loop is to do comes out — so the whole gate is testable with nothing attached
+//! to stdout, and the arms below are the four things that can come of a
+//! keystroke: leave, move the question, type into the scope prompt — which this
+//! loop does not open yet, so that road lands in the arm that does nothing — or
+//! hand the key to the app. While either window is up the app hears nothing, the
+//! pointer included: mouse events are read and dropped, so a click cannot select
+//! a row behind a window that is about to close.
 //!
 //! Two keystrokes are deliberately outside the gate. Ctrl-C is answered before
 //! the question is consulted, because in raw mode it is a key event rather than
@@ -513,7 +515,7 @@ fn run() -> Result<(), Error> {
                 // asks about quitting when there is not — and the question on
                 // screen is what every key reads differently while it is up.
                 // See [`press_for`], which owns both readings.
-                Event::Key(key) => match press_for(key, confirm, pact.is_some()) {
+                Event::Key(key) => match press_for(key, confirm, &prompt, pact.is_some()) {
                     // Returning is the whole of quitting, and it is enough even
                     // with a pact in flight. `pact` drops on the way out, which
                     // cancels the run and kills the `claude` it was waiting on
@@ -688,8 +690,16 @@ fn run() -> Result<(), Error> {
                         mouse_captured = !mouse_captured;
                     }
                     // A key nothing is bound to, or one whose press has already
-                    // been answered where it was decided.
-                    Pressed::Nothing => {}
+                    // been answered where it was decided — and, for now, the
+                    // two roads the scope prompt is on. `s` asks for a prompt
+                    // this loop does not yet open, and a key typed into one is
+                    // therefore unreachable: reading the entry, putting the
+                    // window up and saving the manifest on Enter is the slice
+                    // after this one, and until it lands the honest answer is
+                    // the same nothing an unbound key gets. Nothing is invented
+                    // in the meantime — a message standing in for the missing
+                    // window would be one more thing to take out again.
+                    Pressed::Act(Action::OpenScope) | Pressed::Scope(_) | Pressed::Nothing => {}
                 },
                 // The pointer, answered in the same shape and for the same
                 // reasons. [`mouse_action`] is handed the event, the size this
@@ -705,7 +715,7 @@ fn run() -> Result<(), Error> {
                 // and dropped, because the dialog has no clickable answers and a
                 // click on the tree behind it would move a selection the reader
                 // cannot see.
-                Event::Mouse(mouse) => match mouse_action(mouse, size, &app, confirm) {
+                Event::Mouse(mouse) => match mouse_action(mouse, size, &app, confirm, &prompt) {
                     // The wheel over the tree column, whichever pane the keys
                     // are pointed at: the selection moves and the window
                     // follows it, exactly as it does for a movement key.
