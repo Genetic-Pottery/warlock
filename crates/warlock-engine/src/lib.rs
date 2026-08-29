@@ -159,9 +159,18 @@ pub use pact::REQUEST_BYTE_CAP;
 /// Why a model pass produced no document: the agent failed, or the answer was
 /// too short to be one. The whole rejection policy, in two variants.
 pub use pact::Refusal;
+/// Why a file has no text to show: it could not be read, or it is not text.
+/// Two answers because they are worth different words in front of a person, and
+/// neither is fatal. The per-file cap is not in here: a file cut at the cap is
+/// a [`Viewed`], not a failure.
+pub use pact::Unviewable;
 /// The [`PactObserver`] for a caller with nothing to show and nothing to
 /// cancel: every directory is pacted and nothing is reported.
 pub use pact::Unwatched;
+/// What reading a file to look at produced: its text, cut at the same per-file
+/// cap a request is built under, and whether the cap cut it. No marker line and
+/// no lines at all — the caller words the cut and splits the text.
+pub use pact::Viewed;
 /// Build the request for one model pass over one directory: its own files, its
 /// children's documents, and what the byte caps left out.
 pub use pact::gather_request;
@@ -185,6 +194,10 @@ pub use pact::refresh_subtree;
 /// leave every `WARLOCK.md` on disk, byte for byte. Returns the manifest to save
 /// and saves nothing itself.
 pub use pact::unpact_subtree;
+/// Read one file for a person to look at: its text from the first byte, at most
+/// [`PER_FILE_BYTE_CAP`] bytes of it, and the fact that there is more when
+/// there is. Writes nothing, runs nothing, and never cuts a character in half.
+pub use pact::view_file;
 /// The rules a scope keeps, as one line for a prompt to show before anything is
 /// typed: the length and the character class, worded here so that nothing that
 /// asks for a scope has to describe one for itself.

@@ -347,6 +347,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
 
@@ -1826,6 +1827,115 @@ pub fn gather_request(
     })
 }
 
+/// Read one file for a person to look at: its text, cut at
+/// [`PER_FILE_BYTE_CAP`].
+///
+/// The same cap [`gather_request`] sends a file under, with no second constant
+/// anywhere: what a reader is shown of a file is exactly what a model is shown
+/// of it. For a file at or under the cap that is byte for byte the bytes its
+/// [`AgentFile`] carries. Above the cap the two diverge in the only way they
+/// can — a request drops the file's contents and lists its size, while a reader
+/// gets the first `PER_FILE_BYTE_CAP` bytes and is told they are not all of it.
+///
+/// Nothing is written and nothing is run: this opens the file, reads at most
+/// one byte past the cap, and closes it. The file's bytes are the same
+/// afterwards, and an enormous file is never held whole in memory on the way.
+///
+/// # The cut is a fact, not a sentence
+///
+/// [`Viewed::cut`] is a `bool`, and there is no marker line anywhere in
+/// [`Viewed::text`]. **The caller words the cut.** The words belong to whatever
+/// is showing the file — a panel says it in its own voice, at its own width, in
+/// the vocabulary its other lines use — and a sentence of the engine's mixed
+/// into the text would be a line the file does not have, indistinguishable from
+/// one it does. The text is the file's bytes and nothing else; splitting it
+/// into lines is the caller's too.
+///
+/// # The cut never splits a character
+///
+/// The cap counts bytes, so it can land inside a multi-byte character. That
+/// character is dropped rather than replaced: the text ends at the last
+/// character boundary at or before the cap, so it is a prefix of the file in
+/// characters as well as in bytes, at most three bytes shorter than the cap,
+/// and no `U+FFFD` is ever manufactured.
+///
+/// ```
+/// use std::fs;
+/// use warlock_engine::{Viewed, view_file};
+///
+/// let dir = tempfile::tempdir()?;
+/// let path = dir.path().join("WARLOCK.md");
+/// fs::write(&path, "# engine\n\nThe core.\n")?;
+///
+/// let Viewed { text, cut } = view_file(&path)?;
+/// assert_eq!(text, "# engine\n\nThe core.\n");
+/// assert!(!cut);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+///
+/// Two answers, because they call for different words:
+///
+/// * [`Unviewable::Unreadable`] if the file cannot be read — it is not there,
+///   it is a directory, the permissions say no, or it vanished since something
+///   listed it.
+/// * [`Unviewable::NotText`] if the bytes read are not UTF-8. There is no text
+///   in this case and none is invented: no replacement characters, and not even
+///   the part that did decode, because half a binary shown as text is a worse
+///   answer than none. A file whose bytes stop being text only past the cap is
+///   not this case — what was read is text, and it is all that was ever going
+///   to be shown.
+pub fn view_file(path: impl AsRef<Path>) -> Result<Viewed, Unviewable> {
+    let path = path.as_ref();
+    let mut bytes = read_capped(path).map_err(|source| Unviewable::Unreadable {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    // The read stops one byte past the cap, so one byte over is the whole of
+    // "there is more to this file": dropping it leaves exactly the first
+    // `PER_FILE_BYTE_CAP` bytes, with no cast from the cap's `u64` to an index.
+    let cut = byte_count(bytes.len()) > PER_FILE_BYTE_CAP;
+    if cut {
+        bytes.truncate(bytes.len() - 1);
+    }
+
+    let text = match str::from_utf8(&bytes) {
+        Ok(text) => text,
+        // A cut inside a character is the cap's doing, not the file's, so it
+        // costs that one character and nothing else. Everything before
+        // `valid_up_to` was just checked, which is why the second look cannot
+        // fail; the floor is unreachable rather than a fallback.
+        Err(source) if cut && source.error_len().is_none() => {
+            str::from_utf8(&bytes[..source.valid_up_to()]).unwrap_or_default()
+        }
+        Err(source) => {
+            return Err(Unviewable::NotText {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
+    .to_owned();
+
+    Ok(Viewed { text, cut })
+}
+
+/// The first [`PER_FILE_BYTE_CAP`] bytes of `path`, plus one more if there is
+/// one.
+///
+/// The extra byte is how the caller knows the file went on, and reading through
+/// [`std::io::Read::take`] is how a four-megabyte lockfile is never pulled into memory
+/// to have all but the first 128 KiB of it thrown away.
+fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(PER_FILE_BYTE_CAP + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// Turn the biggest files into names and sizes until `carried` is inside
 /// [`REQUEST_BYTE_CAP`], reporting each one.
 ///
@@ -3167,6 +3277,101 @@ pub struct Gathered {
     pub problems: Vec<Problem>,
 }
 
+/// What [`view_file`] read: the file's text, and whether the cap cut it short.
+///
+/// A plain pair like [`Gathered`], and for the same reason: the text is the
+/// thing to show, the cut is the thing to say once. `cut` is deliberately a
+/// fact rather than a sentence — see [`view_file`] for why the words belong to
+/// whatever is drawing the text — and `text` is the file's own bytes with
+/// nothing added to them, so `cut` is the only place the cap is admitted to.
+#[derive(Debug)]
+pub struct Viewed {
+    /// The file's text, from its first byte, at most [`PER_FILE_BYTE_CAP`]
+    /// bytes of it and never a byte that is not the file's own. Unsplit: a
+    /// caller wanting lines makes them.
+    pub text: String,
+    /// Whether the file goes on past what `text` holds, because it is larger
+    /// than [`PER_FILE_BYTE_CAP`]. `false` means `text` is the whole file.
+    pub cut: bool,
+}
+
+/// Why there is no text to show for a file.
+///
+/// Two cases and no more, because the two call for different words in front of
+/// a person: one is the filesystem saying no, which is a thing to go and look
+/// at, and the other is a file doing nothing wrong at all — a PNG, a compiled
+/// artefact — that simply has no text in it to show. Neither is fatal to
+/// anything: a caller that shows a line about it and carries on has responded
+/// fully.
+///
+/// Both variants name the file, reachable uniformly through
+/// [`Unviewable::path`], so a caller can word the failure without matching on
+/// the variant to find out which file it is about.
+///
+/// Not an [`Omission`]: that type is about what a *request* did not carry and
+/// its causes include the byte caps, while nothing here is a cap — a file cut
+/// at [`PER_FILE_BYTE_CAP`] is a [`Viewed`] with `cut` set, not an error.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Unviewable {
+    /// The file could not be read: it is not there, it is a directory, the
+    /// permissions say no, or it vanished since something listed it.
+    Unreadable {
+        /// The file that could not be read.
+        path: PathBuf,
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
+    /// The bytes read are not valid UTF-8, so there is no text to show and none
+    /// is invented.
+    ///
+    /// Separate from [`Unviewable::Unreadable`] because nothing is wrong: the
+    /// read worked, and what came back is a file that is not text. The same
+    /// judgement [`Omission::NotText`] makes about summarising, made for the
+    /// same reason.
+    NotText {
+        /// The file that is not text.
+        path: PathBuf,
+        /// Where the bytes stopped being text, as [`std::str::from_utf8`]
+        /// reported it.
+        source: Utf8Error,
+    },
+}
+
+impl Unviewable {
+    /// The file this failure is about, whichever way it failed.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Unreadable { path, .. } | Self::NotText { path, .. } => path,
+        }
+    }
+}
+
+impl fmt::Display for Unviewable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unreadable { path, source } => {
+                write!(f, "could not read `{}`: {source}", path.display())
+            }
+            Self::NotText { path, source } => write!(
+                f,
+                "`{}` is not text ({source}), so there is nothing to show",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Unviewable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unreadable { source, .. } => Some(source),
+            Self::NotText { source, .. } => Some(source),
+        }
+    }
+}
+
 /// One file left out of a request, and why.
 ///
 /// The shape [`LoadProblem`](crate::LoadProblem) established — a path, a cause,
@@ -3649,10 +3854,10 @@ mod tests {
         CHUNK_BYTE_CAP, CHUNK_COUNT_CEILING, DOCUMENT_FILE, Failure, Gathered, MANIFEST_DIR,
         MAP_PROMPT, MINIMUM_DOCUMENT_BYTES, MINIMUM_SUMMARY_BYTES, Observer, Omission,
         PER_FILE_BYTE_CAP, Pacted, PactedSubtree, Pacting, Problem, REDUCE_PROMPT,
-        REQUEST_BYTE_CAP, Refusal, Unwatched, byte_count, cache_summary, cached_summary,
-        chunk_utf8, gather_request, pact_directory, pact_directory_watched, pact_subtree,
-        pactable_directories, refresh_subtree, summarise_file, summary_dir, summary_file_name,
-        summary_key, unpact_subtree,
+        REQUEST_BYTE_CAP, Refusal, Unviewable, Unwatched, Viewed, byte_count, cache_summary,
+        cached_summary, chunk_utf8, gather_request, pact_directory, pact_directory_watched,
+        pact_subtree, pactable_directories, refresh_subtree, summarise_file, summary_dir,
+        summary_file_name, summary_key, unpact_subtree, view_file,
     };
     use crate::{
         Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, AgentResponse, Loaded,
@@ -9581,6 +9786,255 @@ mod tests {
             scopes(&before),
             "the grant is a field a run owns and clears; the scope is not, so a \
              directory can go yellow without its boundary moving",
+        );
+    }
+
+    /// The per-file cap as an index, for the tests that slice a fixture at it.
+    fn cap() -> usize {
+        usize::try_from(PER_FILE_BYTE_CAP).expect("the cap fits an index")
+    }
+
+    /// Insist `path` still holds exactly `contents`: viewing a file writes no
+    /// byte of it, whichever way the view turned out.
+    fn untouched(path: &Path, contents: &[u8]) {
+        assert_eq!(
+            fs::read(path).expect("the file is still there"),
+            contents,
+            "`{}` was changed by being looked at",
+            path.display(),
+        );
+    }
+
+    #[test]
+    fn a_view_of_an_ordinary_file_is_the_whole_of_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let contents = "# engine\n\nThe core.\n";
+        let path = write(dir.path(), "WARLOCK.md", contents);
+
+        let Viewed { text, cut } = view_file(&path).expect("an ordinary file reads");
+
+        assert_eq!(text, contents);
+        assert!(!cut, "a file under the cap is not cut");
+        untouched(&path, contents.as_bytes());
+    }
+
+    #[test]
+    fn an_empty_file_is_an_empty_view_rather_than_a_failure() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = write(dir.path(), "empty.rs", "");
+
+        let Viewed { text, cut } = view_file(&path).expect("an empty file reads");
+
+        assert!(text.is_empty(), "{text:?}");
+        assert!(!cut, "there is nothing past nothing");
+        untouched(&path, b"");
+    }
+
+    #[test]
+    fn a_file_over_the_cap_is_cut_at_the_cap_and_says_so() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mut contents = filler(PER_FILE_BYTE_CAP);
+        contents.extend_from_slice(b"and there is more after the cap\n");
+        let path = write(dir.path(), "Cargo.lock", &contents);
+
+        let Viewed { text, cut } = view_file(&path).expect("a huge file still reads");
+
+        assert!(cut, "the file goes on past what was read");
+        assert_eq!(
+            byte_count(text.len()),
+            PER_FILE_BYTE_CAP,
+            "exactly the cap, not the cap plus the byte that proved there was more",
+        );
+        assert_eq!(
+            text.as_bytes(),
+            &contents[..cap()],
+            "the first {PER_FILE_BYTE_CAP} bytes of the file, verbatim",
+        );
+        assert!(
+            !text.contains("cut") && !text.ends_with('\u{2026}'),
+            "the cut is a fact on `Viewed`, never a sentence in the text",
+        );
+        untouched(&path, &contents);
+    }
+
+    #[test]
+    fn a_view_is_the_bytes_the_same_file_puts_in_a_request() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let contents = "//! Core engine.\n\nfn describe() {}\n";
+        let path = write(dir.path(), "lib.rs", contents);
+
+        let request = request_for(dir.path());
+        let carried = file(&request, "lib.rs")
+            .bytes()
+            .expect("a file under the cap is sent whole");
+        let Viewed { text, cut } = view_file(&path).expect("reads");
+
+        // Only meaningful at or under the cap, which is the whole of the
+        // parity: `gather_request` leaves an over-cap file's contents out
+        // entirely — a name and a size, no bytes at all — so there is nothing
+        // above the cap for a view to be equal to. What a reader is shown of a
+        // file a model reads is exactly what the model reads.
+        assert_eq!(text.as_bytes(), carried);
+        assert!(!cut);
+        untouched(&path, contents.as_bytes());
+    }
+
+    #[test]
+    fn a_file_of_exactly_the_cap_is_whole_and_uncut_on_both_sides_of_the_seam() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let contents = filler(PER_FILE_BYTE_CAP);
+        let path = write(dir.path(), "generated.rs", &contents);
+
+        let request = request_for(dir.path());
+        let Viewed { text, cut } = view_file(&path).expect("reads");
+
+        assert!(
+            !cut,
+            "the cap is a ceiling the file reaches, not one it passes"
+        );
+        assert_eq!(text.as_bytes(), &contents[..]);
+        assert_eq!(
+            file(&request, "generated.rs").bytes(),
+            Some(text.as_bytes()),
+            "the last size at which a reader and a model see the same file",
+        );
+        untouched(&path, &contents);
+    }
+
+    #[test]
+    fn the_cut_drops_a_split_character_rather_than_replacing_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // The last character starting inside the cap is two bytes long and its
+        // second byte is one past it, so cutting on the byte count alone lands
+        // in the middle of it.
+        let mut contents = filler(PER_FILE_BYTE_CAP - 1);
+        contents.extend_from_slice("é and more after the cap\n".as_bytes());
+        let path = write(dir.path(), "notes.md", &contents);
+
+        let Viewed { text, cut } = view_file(&path).expect("reads");
+
+        assert!(cut);
+        assert_eq!(
+            byte_count(text.len()),
+            PER_FILE_BYTE_CAP - 1,
+            "the split character costs itself and nothing else",
+        );
+        assert!(
+            !text.contains('\u{fffd}'),
+            "a cut inside a character is never patched up with a replacement one",
+        );
+        assert!(
+            String::from_utf8(contents.clone())
+                .expect("the fixture is text")
+                .starts_with(&text),
+            "what came back is still a prefix of the file",
+        );
+        untouched(&path, &contents);
+    }
+
+    #[test]
+    fn bytes_that_are_not_text_come_back_as_no_text_at_all() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let contents = not_text(4 * 1024);
+        let path = write(dir.path(), "logo.png", &contents);
+
+        let error = view_file(&path).expect_err("there is no text in it to show");
+
+        assert!(
+            matches!(error, Unviewable::NotText { .. }),
+            "not the filesystem's fault: {error:?}",
+        );
+        assert_eq!(error.path(), path);
+        let said = error.to_string();
+        assert!(said.contains(&path.display().to_string()), "{said}");
+        assert!(
+            !said.contains('\u{fffd}'),
+            "not even the message shows a replacement character: {said}",
+        );
+        assert!(error.source().is_some(), "the UTF-8 error is kept");
+        untouched(&path, &contents);
+    }
+
+    #[test]
+    fn a_file_that_is_not_there_is_a_read_failure_naming_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("gone.rs");
+
+        let error = view_file(&path).expect_err("nothing to read");
+
+        assert!(matches!(error, Unviewable::Unreadable { .. }), "{error:?}");
+        assert_eq!(error.path(), path);
+        assert!(
+            error.to_string().contains(&path.display().to_string()),
+            "{error}",
+        );
+    }
+
+    /// Only on unix, because there is no portable way to make a file
+    /// unreadable. What is under test — that permission to read is the
+    /// filesystem saying no rather than a file that is not text — is not
+    /// platform-specific.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_may_not_be_read_is_a_read_failure_naming_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let contents = "# engine\n\nThe core.\n";
+        let path = write(dir.path(), "WARLOCK.md", contents);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmods");
+        if fs::read(&path).is_ok() {
+            // Running as root: no file is unreadable, so there is nothing here
+            // to assert against.
+            return;
+        }
+
+        let error = view_file(&path).expect_err("the permissions say no");
+
+        assert!(matches!(error, Unviewable::Unreadable { .. }), "{error:?}");
+        assert_eq!(error.path(), path);
+        assert!(
+            error.to_string().contains(&path.display().to_string()),
+            "{error}",
+        );
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmods back");
+        untouched(&path, contents.as_bytes());
+    }
+
+    #[test]
+    fn a_directory_is_a_read_failure_naming_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "src/lib.rs", "//! Core engine.\n");
+        let path = dir.path().join("src");
+
+        let error = view_file(&path).expect_err("a directory has no text");
+
+        assert!(
+            matches!(error, Unviewable::Unreadable { .. }),
+            "a directory is the filesystem saying no, not a file that is not text: {error:?}",
+        );
+        assert_eq!(error.path(), path);
+        assert!(
+            error.to_string().contains(&path.display().to_string()),
+            "{error}",
+        );
+        untouched(&path.join("lib.rs"), b"//! Core engine.\n");
+    }
+
+    #[test]
+    fn a_second_view_reads_the_file_as_it_is_now() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = write(dir.path(), "WARLOCK.md", "# engine\n");
+
+        let first = view_file(&path).expect("reads").text;
+        fs::write(&path, "# engine\n\nRewritten.\n").expect("rewrites the file");
+        let second = view_file(&path).expect("reads again").text;
+
+        assert_eq!(first, "# engine\n");
+        assert_eq!(
+            second, "# engine\n\nRewritten.\n",
+            "every view is a read from disk, so nothing is cached to go stale",
         );
     }
 }
