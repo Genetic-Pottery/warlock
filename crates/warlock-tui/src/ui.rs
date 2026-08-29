@@ -234,9 +234,42 @@ const SCROLLBACK_ARROW: &str = "↓";
 /// back to live would be a run with a mode in it.
 const LIVE_KEY: &str = "G";
 
+/// The `k`/`j` key pair, which moves the selection one row.
+const ROW_KEY: &str = "k/j: row";
+
+/// The page keys, which move the selection one screenful.
+const PAGE_KEYS: &str = "PgUp/PgDn";
+
+/// The `g`/`G` pair, which goes to the top of the list or the bottom of it.
+const ENDS_KEY: &str = "g/G: ends";
+
+/// The space key, which hides the subtree under the selected row or shows it
+/// again.
+const FOLD_KEY: &str = "space: fold";
+
+/// The `o` key, which hides everything warlock is not managing.
+const PACTS_KEY: &str = "o: pacts";
+
+/// The `f` key, which puts the files inside a directory on screen.
+const FILES_KEY: &str = "f: files";
+
+/// The `p` key, which makes a pact with the selected directory or gives one up.
+const PACT_KEY: &str = "p: pact";
+
+/// The `r` key, which runs a pass over what is stale.
+const REFRESH_KEY: &str = "r: refresh";
+
+/// The `s` key, which opens the scope prompt on a directory already pacted.
+const SCOPE_KEY: &str = "s: scope";
+
 /// The keys line of the footer, up to the one key whose name depends on what it
-/// would do next: every key that does something, in one line, and assembled by
-/// [`keys_line`].
+/// would do next: every key that does something, in the order [`keys_line`]
+/// assembles them.
+///
+/// A sequence of names rather than one joined string, because the line is laid
+/// out for the width the terminal actually has: [`laid_out_keys`] gives names up
+/// whole until what is left fits, and a name buried inside a joined string is a
+/// name it cannot give up.
 ///
 /// The movement keys first and together, in the order a reader reaches for
 /// them: one row, one screen, the whole tree. Then the three keys that move
@@ -269,10 +302,20 @@ const LIVE_KEY: &str = "G";
 /// was bought with `up/down k/j: move` and `g/G: first/last`, and `s: scope`
 /// with `k/j: move` → `k/j: row`, `PgUp/PgDn: page` → `PgUp/PgDn`,
 /// `space: collapse` → `space: fold` and `o: pacted` → `o: pacts` — twelve
-/// columns for a twelve-column key. See [`MAX_KEYS_WIDTH`].
-const KEYS: &str = "k/j: row    PgUp/PgDn    g/G: ends    \
-                    space: fold    o: pacts    f: files    p: pact    \
-                    r: refresh    s: scope";
+/// columns for a twelve-column key. Those shortenings are still worth making,
+/// but they are no longer the only thing standing between a narrow terminal and
+/// the way out: see [`KEY_DROP_ORDER`].
+const KEYS: &[&str] = &[
+    ROW_KEY,
+    PAGE_KEYS,
+    ENDS_KEY,
+    FOLD_KEY,
+    PACTS_KEY,
+    FILES_KEY,
+    PACT_KEY,
+    REFRESH_KEY,
+    SCOPE_KEY,
+];
 
 /// What separates one key's name from the next on the keys line.
 ///
@@ -304,68 +347,151 @@ const MOUSE_ON_KEY: &str = "m: mouse on";
 /// and the first thing they have to be able to find.
 const QUIT_KEY: &str = "q/Esc/Ctrl-C: quit";
 
-/// The widest the assembled [`keys_line`] is allowed to be: what it measures
-/// today, and not one column more.
+/// The `v` key's name, reserved in [`KEY_DROP_ORDER`] before the key exists.
 ///
-/// A budget, not a measurement. The line may not grow: [`draw_footer`] draws it
-/// without wrapping, so every column past the terminal's width is cut off the
-/// right-hand end, and the end is where the way out is. A new key is therefore
-/// paid for out of the names already on the line — shorten them until the new
-/// one fits — and a key that cannot be afforded that way is a key the line has
-/// no room for. `r: refresh` was bought with `up/down k/j: move` and
-/// `g/G: first/last`; `s: scope`, and the gap in front of it, cost twelve
-/// columns and was bought with four more of the same kind — `k/j: move` →
-/// `k/j: row`, `PgUp/PgDn: page` → `PgUp/PgDn`, `space: collapse` →
-/// `space: fold` and `o: pacted` → `o: pacts`. See [`KEYS`], which records
-/// which shortening paid for what.
-///
-/// Known defect, recorded rather than fixed here: 148 columns is already wider
-/// than an eighty-column terminal, and what falls off such a terminal is the
-/// tail of the line — which is [`QUIT_KEY`], the one name a stuck reader is
-/// looking for. Shortening the quit key would be the wrong saving for the same
-/// reason. The fix is a footer that lays the keys out for the width it has, and
-/// that is not this constant's job; holding the line still is.
-///
-/// The tests' render canvas is wider than this on purpose, so that a line which
-/// outgrew its budget is asserted against rather than silently truncated. That
-/// canvas is not the budget.
-const MAX_KEYS_WIDTH: usize = 148;
+/// Not on the line: naming a key warlock does not have would be the footer
+/// lying. Its place in the order is here so that the slice which adds the key
+/// adds a name to [`KEYS`] and nothing else.
+const VIEW_KEY: &str = "v: view";
 
-/// The budget, enforced where a name is edited rather than where it is drawn: a
-/// line that outgrew it does not compile.
-///
-/// Bytes, which is the only length available in a const, and the same number as
-/// columns while every name on the line is ASCII — which they are, and which is
-/// the point of holding them to it. The measure that counts columns properly is
-/// [`display_width`], in
-/// `tests::the_keys_line_is_no_wider_than_its_budget_in_either_mouse_state`.
-/// [`MOUSE_OFF_KEY`] because it is the longer of the two names [`keys_line`]
-/// picks between, so the line it makes is the widest one there is.
-const _: () = assert!(
-    KEYS.len() + KEY_GAP.len() + MOUSE_OFF_KEY.len() + KEY_GAP.len() + QUIT_KEY.len()
-        <= MAX_KEYS_WIDTH,
-    "the keys line is over budget: shorten a name rather than widening the line"
-);
+/// The `e` key's name, reserved the same way and for the same reason as
+/// [`VIEW_KEY`].
+const EDIT_KEY: &str = "e: edit";
 
-/// The whole keys line for a terminal that is reporting its mouse or one that is
-/// not.
+/// The order the idle keys line gives its names up in, first dropped to last
+/// kept.
 ///
-/// The only thing that varies is the `m` key's name, and it varies the way
-/// [`KEYS`] and [`PACTING_KEYS`] do: the line says what the next press will do,
-/// so the state capture is in is read off the key that changes it rather than
-/// announced on the message line — which the next keystroke would wipe, while
-/// capture stays off until somebody presses `m` again.
+/// A terminal too narrow for the whole line has to lose something, and this is
+/// where which something is decided. Left to the right-hand edge the line loses
+/// its tail, and its tail is [`QUIT_KEY`] — the one name a stuck reader is
+/// looking for, gone on the eighty-column terminal where being stuck is most
+/// likely. So the line is laid out for the width it has, by [`laid_out_keys`],
+/// and gives up the names a reader is least likely to need told first.
 ///
-/// Whichever name it picks, what comes back is no wider than
-/// [`MAX_KEYS_WIDTH`], which is what pins the length of the pieces it is made
-/// of.
-fn keys_line(mouse_captured: bool) -> String {
+/// Movement goes first, all of it: `PgUp/PgDn`, then `g/G: ends`, then
+/// `k/j: row`. The arrows are what a reader presses before reading anything at
+/// all, and j/k and the page keys are the guesses anyone who has used a pager
+/// already has — a movement key nobody names is a movement key most people find
+/// anyway. The view toggles go next — `f: files`, `o: pacts`, `space: fold` —
+/// because each of them is undone by pressing it again, so a reader who trips
+/// over one is a single keystroke from the screen they had.
+///
+/// The verbs go late — `s: scope`, `r: refresh`, `p: pact` — because nobody
+/// guesses p/r/s/v/e. They are the names that are only known if they are read,
+/// so they are the last ones worth spending columns on, and `p` outlasts the
+/// other two because a pact is the thing the other two are about.
+///
+/// The `m` key is in this order twice, and the asymmetry is the point.
+/// [`MOUSE_OFF_KEY`] drops early, with the view toggles: while capture is on the
+/// wheel works, and a reader who never learns it can be stopped has lost
+/// nothing. [`MOUSE_ON_KEY`] is the last name kept before the way out, because
+/// capture off is the state a reader can be surprised by — the wheel does
+/// nothing, and this name is the only thing on screen that says how to get it
+/// back.
+///
+/// [`QUIT_KEY`] is not in this order at all, which is how it is never dropped.
+const KEY_DROP_ORDER: &[&str] = &[
+    PAGE_KEYS,
+    ENDS_KEY,
+    ROW_KEY,
+    FILES_KEY,
+    PACTS_KEY,
+    FOLD_KEY,
+    MOUSE_OFF_KEY,
+    EDIT_KEY,
+    VIEW_KEY,
+    SCOPE_KEY,
+    REFRESH_KEY,
+    PACT_KEY,
+    MOUSE_ON_KEY,
+];
+
+/// `pieces` joined by [`KEY_GAP`] into a line of at most `width` columns, giving
+/// names up in `drop_order` until what is left fits.
+///
+/// Arithmetic, and all of it here: measure, drop the next name the order names,
+/// measure again. A name goes with its gap because the gap is what joins it to
+/// its neighbour, and four columns of nothing between two keys would be the
+/// dropped name still costing what it cost.
+///
+/// Whole names or nothing. Half a key's text is a key nobody can press, so a
+/// name that does not fit is not abbreviated or ellipsised, it is left off, and
+/// the reader is told fewer true things rather than one untrue one.
+///
+/// Measured with [`display_width`], which is what the backend will charge for
+/// the row, rather than with `str::len`, which is only the same number while
+/// every name is ASCII.
+///
+/// A name not in `drop_order` is never dropped. When only those are left and
+/// they still do not fit, the line is cut to the width by [`clipped`] — which is
+/// [`QUIT_KEY`] on a terminal narrower than the way out itself, where the start
+/// of the name is more use than a blank line.
+fn laid_out_keys(width: usize, pieces: &[&str], drop_order: &[&str]) -> String {
+    let mut kept: Vec<&str> = pieces.to_vec();
+    let mut order = drop_order.iter();
+    while display_width(&kept.join(KEY_GAP)) > width {
+        let Some(name) = order.next() else {
+            break;
+        };
+        if let Some(at) = kept.iter().position(|piece| piece == name) {
+            kept.remove(at);
+        }
+    }
+
+    clipped(&kept.join(KEY_GAP), width)
+}
+
+/// `text`, cut to `width` columns with nothing put in place of what was cut.
+///
+/// [`truncated`] with the [`ELLIPSIS`] left off, and the difference is what the
+/// cut means. There it says a path goes on past the edge of the panel; here the
+/// only thing ever cut is [`QUIT_KEY`] on a terminal narrower than that name, and
+/// a mark saying the key goes on would cost a column of the key it was marking.
+///
+/// Cut on a character boundary, so this cannot panic on text that is not ASCII.
+fn clipped(text: &str, width: usize) -> String {
+    if display_width(text) <= width {
+        return text.to_owned();
+    }
+
+    let mut taken = 0;
+    let mut end = 0;
+    for (index, character) in text.char_indices() {
+        let next = index + character.len_utf8();
+        let columns = display_width(&text[index..next]);
+        if taken + columns > width {
+            break;
+        }
+        taken += columns;
+        end = next;
+    }
+
+    text[..end].to_owned()
+}
+
+/// The keys line for a terminal `width` columns wide that is reporting its mouse
+/// or one that is not.
+///
+/// The only name that varies with the state is the `m` key's, and it varies the
+/// way [`KEYS`] and [`PACTING_KEYS`] do: the line says what the next press will
+/// do, so the state capture is in is read off the key that changes it rather
+/// than announced on the message line — which the next keystroke would wipe,
+/// while capture stays off until somebody presses `m` again.
+///
+/// What comes back is no wider than `width`, whichever name it picked and
+/// however narrow the terminal: which names survive that is [`KEY_DROP_ORDER`]'s
+/// business and fitting them is [`laid_out_keys`]'.
+fn keys_line(mouse_captured: bool, width: usize) -> String {
     let mouse = if mouse_captured {
         MOUSE_OFF_KEY
     } else {
         MOUSE_ON_KEY
     };
-    format!("{KEYS}{KEY_GAP}{mouse}{KEY_GAP}{QUIT_KEY}")
+
+    let mut pieces = KEYS.to_vec();
+    pieces.push(mouse);
+    pieces.push(QUIT_KEY);
+    laid_out_keys(width, &pieces, KEY_DROP_ORDER)
 }
 
 /// The keys line while a pact is running: the same line's job, for the mode the
@@ -1482,6 +1608,11 @@ fn pulse_colour(app: &App, now: Instant) -> Option<Color> {
 /// is always the end of a line that is lost. Which end is worth losing is the
 /// app's business and not decided here — [`App::pact_line`] puts the part that
 /// answers a keystroke last for exactly this reason.
+///
+/// The keys line is the one line that never reaches that edge: it is laid out
+/// for `area.width` by [`keys_line`], which gives whole names up in
+/// [`KEY_DROP_ORDER`] until what is left fits. Cut at the edge instead, the name
+/// it would lose first is the way out.
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let counts = app.counts();
     let mut tally = Vec::new();
@@ -1498,7 +1629,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let keys = Line::from(if app.is_pacting() {
         PACTING_KEYS.to_owned()
     } else {
-        keys_line(app.mouse_captured())
+        keys_line(app.mouse_captured(), usize::from(area.width))
     })
     .dim();
 
@@ -1757,11 +1888,11 @@ mod tests {
         Areas, BORDER_THICKNESS, CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN,
         CONFIRM_MARGIN_ROWS, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FOOTER_HEIGHT,
         GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEYS, LIVE_KEY,
-        MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MAX_KEYS_WIDTH, MOUSE_OFF_KEY, MOUSE_ON_KEY,
-        NO_MARKER, PACTING_KEYS, PANEL_INDENT, QUIT_KEY, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT,
-        SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER,
-        TREE_MIN_WIDTH, TREE_PERCENT, areas, centred, confirm_area, confirm_size, display_width,
-        draw, guide_prefixes, hit_test, keys_line, mark_area, pane_inner, panel_height, scope_size,
+        MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY, NO_MARKER, PACTING_KEYS,
+        PANEL_INDENT, QUIT_KEY, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES,
+        SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH,
+        TREE_PERCENT, areas, centred, confirm_area, confirm_size, display_width, draw,
+        guide_prefixes, hit_test, keys_line, mark_area, pane_inner, panel_height, scope_size,
         tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::account::Outcome;
@@ -3193,9 +3324,13 @@ mod tests {
             // it: the tally and the keys are on it, wherever it puts them. Not
             // every line of it: the message line is blank while the app has
             // nothing to say, which is the whole of this walk.
+            //
+            // The way out rather than a movement key, because this terminal is
+            // narrower than the whole keys line and the movement names are the
+            // first the layout gives up — see `KEY_DROP_ORDER`.
             assert!(
                 footer.iter().any(|line| line.contains("unpacted"))
-                    && footer.iter().any(|line| line.contains("k/j: row")),
+                    && footer.iter().any(|line| line.contains(QUIT_KEY)),
                 "footer {footer:?} at selection {selected}"
             );
             assert!(
@@ -3279,7 +3414,10 @@ mod tests {
         // Every key, in full: equality rather than a bag of substrings, so a
         // line that has grown past the width it is drawn at fails here instead
         // of quietly losing whatever sat on the right-hand end of it.
-        assert_eq!(keys, keys_line(app.mouse_captured()));
+        assert_eq!(
+            keys,
+            keys_line(app.mouse_captured(), usize::from(KEYS_WIDTH))
+        );
         // "p: pact" and not the bare "p", which "PgUp" would satisfy.
         for key in [
             "k/j: row",
@@ -3554,13 +3692,16 @@ mod tests {
         // Byte for byte today's line with no pact running, and the pacting line
         // whole while one is: equality, so a line that outgrew the terminal it
         // is drawn on fails here rather than losing its right-hand end quietly.
-        assert_eq!(row_text(&idle, y), keys_line(app.mouse_captured()));
+        assert_eq!(
+            row_text(&idle, y),
+            keys_line(app.mouse_captured(), usize::from(KEYS_WIDTH))
+        );
         assert_eq!(row_text(&pacting, y), PACTING_KEYS);
         // Esc means two things, and the line says which one it means now.
         let said = row_text(&pacting, y);
         assert!(said.contains("Esc: cancel"), "{said:?}");
         assert!(!said.contains("Esc/Ctrl-C: quit"), "{said:?}");
-        assert!(keys_line(true).contains("Esc/Ctrl-C: quit"));
+        assert!(keys_line(true, usize::from(KEYS_WIDTH)).contains("Esc/Ctrl-C: quit"));
 
         // The line is short enough to survive the narrow terminal the other
         // footer tests draw on, because it is the line that answers "how do I
@@ -3572,38 +3713,8 @@ mod tests {
         app.clear_pact_in_flight();
         assert_eq!(
             row_text(&render(&app, KEYS_WIDTH, height), y),
-            keys_line(app.mouse_captured())
+            keys_line(app.mouse_captured(), usize::from(KEYS_WIDTH))
         );
-    }
-
-    #[test]
-    fn the_keys_line_is_no_wider_than_its_budget_in_either_mouse_state() {
-        // Both states, because the two `m` names are different lengths and the
-        // budget has to hold for the longer one as well as the shorter.
-        for captured in [true, false] {
-            let line = keys_line(captured);
-            // The crate's own measure, the one `truncated` and `draw_footer`
-            // count in: columns on a terminal, not bytes and not `char`s.
-            let width = display_width(&line);
-            assert!(
-                width <= MAX_KEYS_WIDTH,
-                "the keys line is {width} columns with mouse capture {captured} \
-                 and may not be wider than {MAX_KEYS_WIDTH}: a new key is paid \
-                 for by shortening the names already on the line, not by \
-                 letting it grow — {line:?}"
-            );
-            // And the newest key is on the line in both states, whole: the
-            // budget is kept by shortening other names, so a `s: scope` that
-            // went missing to make room would be the wrong way to pass this.
-            assert!(
-                line.contains("s: scope"),
-                "the keys line does not name `s` with mouse capture \
-                 {captured} — {line:?}"
-            );
-            // Nor did the quit key pay for it: it is still whole and still the
-            // last thing on the line, which is where a stuck reader looks.
-            assert!(line.ends_with(QUIT_KEY), "{line:?}");
-        }
     }
 
     #[test]
@@ -3617,7 +3728,7 @@ mod tests {
         app.set_mouse_captured(true);
         let capturing = render(&app, KEYS_WIDTH, height);
         let keys = row_text(&capturing, y);
-        assert_eq!(keys, keys_line(true));
+        assert_eq!(keys, keys_line(true, usize::from(KEYS_WIDTH)));
         assert!(keys.contains(MOUSE_OFF_KEY), "{keys:?}");
         assert!(!keys.contains(MOUSE_ON_KEY), "{keys:?}");
 
@@ -3627,7 +3738,7 @@ mod tests {
         app.set_mouse_captured(false);
         let released = render(&app, KEYS_WIDTH, height);
         let keys = row_text(&released, y);
-        assert_eq!(keys, keys_line(false));
+        assert_eq!(keys, keys_line(false, usize::from(KEYS_WIDTH)));
         assert!(keys.contains(MOUSE_ON_KEY), "{keys:?}");
         assert!(!keys.contains(MOUSE_OFF_KEY), "{keys:?}");
 
@@ -4810,10 +4921,7 @@ mod tests {
         // Anything the frame underneath had put in these columns would be a
         // fourth thing here.
         let said = [String::new(), CONFIRM_QUESTION.to_owned(), answers_text()];
-        let keys = KEYS
-            .split_whitespace()
-            .next()
-            .expect("the keys line has keys");
+        let keys = *KEYS.first().expect("the keys line has keys");
         for (index, row) in confirm_rows(&open).iter().enumerate() {
             assert!(
                 said.contains(&inside_the_border(row)),
@@ -4967,7 +5075,9 @@ mod tests {
             assert_eq!(row_text(&open, y), row_text(&closed, y), "footer row {y}");
         }
         let keys = row_text(&open, footer.y + 1);
-        assert!(keys.contains(KEYS), "{keys:?}");
+        for name in KEYS {
+            assert!(keys.contains(name), "{keys:?} is missing {name}");
+        }
         assert!(keys.contains(QUIT_KEY), "{keys:?}");
     }
 

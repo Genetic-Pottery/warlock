@@ -95,14 +95,20 @@ on the same action as one that does not.
 The footer's keys line is shorter than that list on purpose. It reads
 `k/j: row` and not `up/down k/j: move`, `g/G: ends` and not `g/G: first/last`,
 and `PgUp/PgDn` with no label at all, because the label was the word already
-inside the keys' own names: the line has a fixed width it may not grow past, so
-a new key is paid for by shortening the names already on it, and each of those
-shortenings bought one. The arrows keep working exactly as described above;
-they are unnamed on the line, not unbound. That line is still wider than
-an eighty-column terminal, and the footer does not wrap, so a terminal that
-narrow loses the right-hand end of it — including the quit key. Known, written
-down here, and not fixed by shortening the one name a stuck reader is looking
-for.
+inside the keys' own names: shorter names fit more keys on the line, and each of
+those shortenings bought one. The arrows keep working exactly as described
+above; they are unnamed on the line, not unbound.
+
+The whole line is wider than an eighty-column terminal, and the footer does not
+wrap, so a narrow terminal cannot have all of it. It is laid out for the width
+it has rather than cut off at the right-hand edge: names are given up whole,
+in a fixed order — the movement keys first, because arrows and j/k are what a
+reader guesses anyway; the view toggles next, because each is undone by pressing
+it again; the verbs last, because nobody guesses `p`, `r` or `s`. `m: mouse on`
+outlasts `m: mouse off`, because capture being off is the state a reader can be
+surprised by. The quit key is never given up: on a terminal narrower than that
+one name it is cut rather than dropped, so the way out is always the thing still
+on screen.
 
 ## The pact key
 
