@@ -294,11 +294,18 @@ impl Section {
     }
 }
 
-/// One drawable row of an account.
+/// One drawable row of the panel: of an account, or of a file somebody asked to
+/// read.
 ///
 /// Flat rather than nested, because the panel is a list and scrolling it is
 /// counting: a section heading takes a row like anything else, so the number of
 /// rows above and below a window is arithmetic rather than a walk.
+///
+/// The panel holds one thing at a time — an account or a document, never both —
+/// so the rows of the two share one type and one window rather than the panel
+/// growing a second list and a second offset. [`Line::Text`] is the document's
+/// only shape, because a file's line is a file's line and nothing here knows
+/// what any of it means.
 ///
 /// The text is whole. Cutting it to a width belongs to whoever knows the width.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -320,6 +327,17 @@ pub enum Line {
     /// The one line the whole run ends with.
     Summary {
         /// Directories, wall clock and money — see [`Account::finish`].
+        text: String,
+    },
+    /// One line of a file somebody asked to read, or the one line said about
+    /// that reading — that the file was cut at the cap, which is the only thing
+    /// ever added to a document.
+    ///
+    /// No clock: a file did not happen at a time. No path either — which file
+    /// this is was answered by the keystroke that asked for it, and repeating it
+    /// on every row would spend the panel's width saying the same thing.
+    Text {
+        /// The line, exactly as the file has it, or the sentence about the cut.
         text: String,
     },
 }
@@ -730,7 +748,9 @@ mod tests {
             .map(|line| match line {
                 Line::Directory { path } => path.display().to_string(),
                 Line::Clocked { clock, text } => format!("{clock} {text}"),
-                Line::Summary { text } => text,
+                // An account never yields a document's line; it is here so this
+                // helper words every row of the panel and not most of them.
+                Line::Summary { text } | Line::Text { text } => text,
             })
             .collect()
     }
