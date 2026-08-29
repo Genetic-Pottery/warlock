@@ -10,7 +10,8 @@
 //! This file is the loop itself; each of the loop's concerns lives in a
 //! sibling module. What a keystroke or a click means is [`input`]'s, running a
 //! pact on a worker thread and applying what it says is [`pacting`]'s, asking
-//! for a scope and writing it is [`scoping`]'s, where
+//! for a scope and writing it is [`scoping`]'s, reading a file into the panel is
+//! [`viewing`]'s, where
 //! the tree came from and when it is re-read is [`session`]'s, the terminal's
 //! setup and restoration is [`terminal`]'s, and the one-line errors `main`
 //! prints are [`error`]'s. The paragraphs below describe how the loop drives
@@ -193,6 +194,7 @@ mod pacting;
 mod scoping;
 mod session;
 mod terminal;
+mod viewing;
 
 use config::configure;
 use error::Error;
@@ -201,6 +203,7 @@ use pacting::{Running, Work, apply_progress, pact_press, refresh_press, start_ru
 use scoping::{scope_edit, scope_press};
 use session::{Watched, load_app, load_manifest, note};
 use terminal::{TerminalGuard, install_panic_hook};
+use viewing::view_press;
 
 /// How long the loop waits for a keystroke before going round again.
 ///
@@ -682,6 +685,24 @@ fn run() -> Result<(), Error> {
                             ));
                         }
                     }
+                    // The one key that reads a file and the only one that shows
+                    // anything a model wrote. It is done here, on this thread,
+                    // between two frames: a read capped at a few kilobytes is
+                    // over inside a frame, so there is no worker, no channel and
+                    // no account, and nothing to reload afterwards because
+                    // reading a file changes nothing about the tree.
+                    //
+                    // It needs no answer of its own, for the reason the scope
+                    // key's arm needs none: everything this press can refuse it
+                    // refuses inside `view_press` — a directory row through
+                    // `App::message` — and every way the read itself can fail
+                    // ends as one line on that same footer with the panel left
+                    // as it was. So the loop goes round again after a failure
+                    // exactly as it does after a success. Unlike `p`, `r` and
+                    // `s` it is not handed the run: a read races nothing, so
+                    // there is nothing for a run in flight to refuse. See
+                    // `viewing::view_press`.
+                    Pressed::Act(Action::ViewFile) => view_press(&mut app),
                     // The one key that answers to the terminal rather than to
                     // the app. The sequence is written first and the flag moved
                     // only if it went out, so what this thread believes about

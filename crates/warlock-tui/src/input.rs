@@ -97,6 +97,23 @@ pub(crate) enum Action {
     /// they are for [`Action::TogglePact`] and [`Action::Refresh`]. This
     /// function's business is that the key was pressed.
     OpenScope,
+    /// Read the selected file and put its lines in the panel.
+    ///
+    /// The first action here that shows a file rather than describing one: every
+    /// colour in the tree is a claim about a `WARLOCK.md`, and this is how the
+    /// document behind a claim gets on screen without leaving warlock.
+    ///
+    /// It writes nothing and starts nothing. A capped read is over inside a
+    /// frame, so there is no thread, no channel and no progress line — which is
+    /// also why a run in flight is no reason to refuse it, and why this key,
+    /// like every one but Esc, means the same thing during a pact as outside
+    /// one.
+    ///
+    /// What a row that is not a file comes to is the app's answer, exactly as it
+    /// is for [`Action::TogglePact`] and [`Action::OpenScope`]: a directory is
+    /// refused in the terms its own row makes available. This function's
+    /// business is that the key was pressed.
+    ViewFile,
     /// Stop the terminal reporting its mouse, or ask it to start again if it has
     /// been stopped.
     ///
@@ -206,7 +223,14 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
         // a run is a reason to refuse the prompt, and refusing is the loop's
         // answer to give, exactly as it is for a second `p`.
         KeyCode::Char('s') => Some(Action::OpenScope),
-        // Lower case only, like the three above it. The mnemonic is "mouse",
+        // Lower case only, like the four above it: the mnemonic is "view", and
+        // `V` is a different keystroke that means nothing here. Like every key
+        // but Esc it reads the same way with a run in flight as without one, and
+        // here there is nothing for the mode to change even in principle: a read
+        // is not a run — it writes nothing, starts nothing and is over inside a
+        // frame — so there is no second run for it to be refused as.
+        KeyCode::Char('v') => Some(Action::ViewFile),
+        // Lower case only, like the four above it. The mnemonic is "mouse",
         // and the key means the same thing whether or not a pact is in flight:
         // giving the terminal its own text selection back is exactly the thing a
         // reader wants during a long run, when there is output on screen worth
@@ -574,6 +598,7 @@ mod tests {
             KeyCode::Char('p'),
             KeyCode::Char('r'),
             KeyCode::Char('s'),
+            KeyCode::Char('v'),
             KeyCode::Tab,
             KeyCode::Char('x'),
         ];
@@ -1089,6 +1114,82 @@ mod tests {
     }
 
     #[test]
+    fn v_asks_to_read_the_selected_file_with_a_run_in_flight_or_without_one() {
+        // Like `p`, `r` and `s`, and like every key but Esc, `v` means one
+        // thing in both situations — and here the mode has nothing it could
+        // change even in principle: a read is not a run, so there is no second
+        // run for it to be refused as.
+        for in_flight in [false, true] {
+            assert_eq!(
+                action_for(press(KeyCode::Char('v')), in_flight),
+                Some(Action::ViewFile),
+                "v should ask for the file with a run in flight = {in_flight}"
+            );
+        }
+    }
+
+    #[test]
+    fn upper_v_asks_for_nothing() {
+        // Lower case only, like `o`, `f`, `p`, `r`, `s` and `m`: the upper-case
+        // letter is a different keystroke, and leaving it unbound keeps it free
+        // for a later one.
+        for in_flight in [false, true] {
+            assert_eq!(action_for(press(KeyCode::Char('V')), in_flight), None);
+        }
+    }
+
+    #[test]
+    fn releases_and_repeats_of_v_read_nothing() {
+        // The same rule as the keys above. Nothing is written by this one, so a
+        // stray read costs no manifest — but a held `v` would re-read the file
+        // from disk as fast as the terminal repeats, and throw the panel's
+        // window back to the top of it every time.
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                KeyCode::Char('v'),
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                action_for(event, false),
+                None,
+                "{kind:?} of v should read nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn v_is_the_only_key_that_reads_a_file() {
+        // Its neighbours on the keyboard, the keys it sits between in the match
+        // arms above, and its upper-case self, which this binding does not
+        // answer to.
+        for code in [
+            KeyCode::Char('c'),
+            KeyCode::Char('b'),
+            KeyCode::Char('p'),
+            KeyCode::Char('r'),
+            KeyCode::Char('s'),
+            KeyCode::Char('m'),
+            KeyCode::Char('V'),
+            KeyCode::Char(' '),
+            KeyCode::Enter,
+        ] {
+            assert_ne!(
+                action_for(press(code), false),
+                Some(Action::ViewFile),
+                "{code:?} should not read a file"
+            );
+            assert_ne!(
+                action_for(press(code), true),
+                Some(Action::ViewFile),
+                "{code:?} should not read a file mid-run"
+            );
+        }
+    }
+
+    #[test]
     fn m_toggles_the_mouse_with_a_pact_in_flight_or_without_one() {
         // The one key here that is about the terminal rather than the tree, and
         // it reads the same way in both situations — like everything but Esc.
@@ -1129,6 +1230,7 @@ mod tests {
                 Action::TogglePact,
                 Action::Refresh,
                 Action::OpenScope,
+                Action::ViewFile,
             ] {
                 assert_ne!(action, Some(other), "m should not mean {other:?}");
             }
@@ -1244,7 +1346,7 @@ mod tests {
         /// Every key the tree answers to, plus a character bound to nothing:
         /// the list either window has to swallow whole, so that no keystroke
         /// reaches the app behind it.
-        const INERT: [KeyCode; 17] = [
+        const INERT: [KeyCode; 18] = [
             KeyCode::Char('j'),
             KeyCode::Char('k'),
             KeyCode::Char('g'),
@@ -1255,6 +1357,7 @@ mod tests {
             KeyCode::Char('p'),
             KeyCode::Char('r'),
             KeyCode::Char('s'),
+            KeyCode::Char('v'),
             KeyCode::Char('m'),
             KeyCode::Tab,
             KeyCode::PageUp,
@@ -1413,6 +1516,7 @@ mod tests {
                     | Action::TogglePact
                     | Action::Refresh
                     | Action::OpenScope
+                    | Action::ViewFile
                     | Action::ToggleMouseCapture),
                 ) => panic!("{action:?} reached the app"),
                 Pressed::Nothing => {}
