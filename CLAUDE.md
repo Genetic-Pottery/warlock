@@ -43,6 +43,17 @@ whether a particular change warrants a documentation update was always a
 judgement call, and warlock makes the change visible rather than pretending
 to make that call for you.
 
+**Editing a `WARLOCK.md` by hand makes its own directory stale.** The
+document sits in the directory it describes, so its own bytes are part of
+that directory's digest: the moment an edit is saved the hash stops
+matching the one recorded when the document was granted, and the directory
+is stale again. That is the ledger being honest rather than something going
+wrong. The only road back to fresh is another model pass over that
+directory — `r` in warlock's tree — because fresh is only ever granted, and
+nothing records a hash without a pass having read the directory first. So
+correct a document where it is wrong, and say that the directory it
+describes is now owed a pass.
+
 ## Scopes and sigils
 
 A pacted directory may carry one **scope**: a short label — `data-plane`,

@@ -18,12 +18,18 @@
 //!
 //! ## What editing a document costs
 //!
-//! A `WARLOCK.md` is an ordinary file in its own directory's walk, so saving one
-//! restales the very directory it describes: the subtree hash the pact was
-//! granted against no longer matches, and the row goes yellow. That is not a bug
-//! to route around — it is the ledger being honest — and the only road back to
-//! green is `r` and a pass. There is no key that records a hash without
-//! describing a directory, and there will not be one.
+//! A `WARLOCK.md` is an ordinary file in the walk
+//! [`subtree_hash`](warlock_engine::subtree_hash) makes of its own directory —
+//! nothing exempts the document from the digest of the thing it describes — so
+//! an edit restales the very directory the document is about, the moment it is
+//! saved. The hash the pact was granted against no longer matches, and the row
+//! goes yellow before the reader has pressed another key. That is not a bug to
+//! route around — it is the ledger being honest — and the only road back to
+//! green is `r` and a pass: fresh is only ever granted, so there is no key that
+//! records a hash without a pass having described the directory, and there will
+//! not be one. Every press of `e` on a document should be expected to cost a
+//! pass, and [`came_back`] makes warlock say so straight away rather than at the
+//! reader's next keystroke.
 //!
 //! ## The app words the row, this file does the process
 //!
