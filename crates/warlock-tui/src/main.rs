@@ -703,6 +703,21 @@ fn run() -> Result<(), Error> {
                     // there is nothing for a run in flight to refuse. See
                     // `viewing::view_press`.
                     Pressed::Act(Action::ViewFile) => view_press(&mut app),
+                    // PLACEHOLDER, and not the finished key: WAR-55.02 replaces
+                    // this arm with the whole of the editor road — the terminal
+                    // given back through the guard, `$EDITOR` run on the
+                    // selected file as a foreground child, the terminal taken
+                    // again afterwards on all three outcomes, the tree reloaded
+                    // and the document card re-read. Until it lands, the binding
+                    // exists so that the key is decided in one place
+                    // (`action_for`), and the press says the one true thing
+                    // there is to say about it rather than doing nothing
+                    // quietly: a key that looks broken is better than a key that
+                    // looks unbound, and the shipped `e` is not allowed to be a
+                    // silent no-op.
+                    Pressed::Act(Action::EditFile) => {
+                        app.set_message("e: the editor is not wired up yet");
+                    }
                     // The panel's other card, and nothing else: the account if
                     // the document is up, the document if the account is. It is
                     // done here, on this thread, without reading anything —
