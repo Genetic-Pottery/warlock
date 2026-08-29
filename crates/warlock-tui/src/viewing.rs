@@ -38,9 +38,10 @@
 //! documents and the same manifest; a read races nothing, writes nothing and is
 //! done before the next frame. So `v` means the same thing during a pact as
 //! outside one, which is also what [`action_for`](crate::input::action_for)
-//! says about it. The panel is a shared surface and a document does displace a
-//! running account there — but which card the panel shows, and the promise that
-//! a run never changes it, belong to the slice that gives the panel two of them.
+//! says about it. The panel is a shared surface, but a shared surface with two
+//! cards on it: a document shows over a running account rather than taking the
+//! slot from it, so the run goes on writing its own card behind the file. The
+//! key that swaps the two back and forth is not here.
 //!
 //! ## A failed read is a line, not an end
 //!
@@ -234,11 +235,10 @@ mod tests {
         app_on(root, &root.join("crates/engine").join(file))
     }
 
-    /// What the panel is holding, as the rows it draws as.
+    /// What the panel is showing, as the rows it draws as.
     ///
     /// A document draws as text and nothing else — no clock, no heading, no
-    /// summary — so anything else here is a document that came out of the wrong
-    /// half of the panel.
+    /// summary — so anything else here is the panel showing the wrong card.
     fn panel_text(app: &App) -> Vec<String> {
         app.panel_lines(Instant::now())
             .into_iter()

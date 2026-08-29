@@ -71,9 +71,10 @@
 //!
 //! What that pact has been *doing* is the same kind of thing again, held one
 //! field along: the [`Account`] of the run, or nothing at all before the first
-//! pact of the session. The account is the panel's contents and the panel's
-//! window onto it is view state exactly as the tree's is — a height set per
-//! frame, an offset, and one bit saying whether the window is following the
+//! pact of the session. The account is one of the panel's two cards — the other
+//! is the document last read — and the window onto each is view state exactly as
+//! the tree's is: a height set per frame for the slot they share, and an offset
+//! and one bit apiece saying whether that window is following the
 //! newest line. Following is not a mode the app has to be reminded of on every
 //! appended line: while the flag is on, the offset *is* the end of the account,
 //! computed when it is asked for, so a line arriving during a redraw pins itself
@@ -501,8 +502,9 @@ pub enum Focus {
     #[default]
     Tree,
     /// The panel beside it. The same movement keys scroll the panel's window
-    /// over the account of the pact — see [`App::panel_scroll_offset`] — and the
-    /// tree's selection stays exactly where the reader left it.
+    /// over whichever of its two cards is showing — the account of the pact or
+    /// the document last read, see [`App::panel_scroll_offset`] — and the tree's
+    /// selection stays exactly where the reader left it.
     Panel,
 }
 
@@ -727,9 +729,9 @@ impl Chrome {
 /// puts a reader back on a tree that has just been read again — used to be
 /// twenty assignments that named each field by hand and could not be checked.
 /// The three groups are `Viewpoint`, what the reader has done to the view;
-/// `Status`, what the footer is saying right now; and `Panel`, the account
-/// of the run and the window onto it. Each carries whole across a reload, so
-/// there is nothing inside them for that function to forget.
+/// `Status`, what the footer is saying right now; and `Panel`, the two cards of
+/// the slot beside the tree with a window onto each. Each carries whole across a
+/// reload, so there is nothing inside them for that function to forget.
 ///
 /// What is *not* here is the header line, and its absence is deliberate: see
 /// [`Chrome`]. Both halves of it are resolved once and cannot change while
@@ -901,7 +903,8 @@ struct Status {
     mouse_captured: bool,
 }
 
-/// The account of the run, and the window the panel shows it through.
+/// One slot, two cards: the account of the run and the document somebody asked
+/// to read, with a window apiece and one bit saying which of them is on screen.
 ///
 /// The group that survives everything. A reload carries it, because the tree is
 /// read again *because* a run finished and dropping it would wipe the record at
@@ -912,80 +915,226 @@ struct Status {
 /// live app and steal back the four fields that must not roll back. It is a
 /// field move now.
 ///
-/// `content` is what the panel is holding: the account of a pact, the lines of a
-/// file somebody asked to read, or nothing at all. It is [`Content::Nothing`]
-/// until the first pact or the first read of the session, which is not the same
-/// as an empty account: an app that has never run a pact has nothing to draw in
-/// the panel at all, not even a heading, and the difference between "no account"
-/// and "an account with no lines yet" is the difference between a blank panel
-/// and one that has started. [`App::start_account`] is what turns the one into
-/// the other, and a second pact starts a second account rather than appending to
-/// the first: one pact, one account.
+/// `account` and `document` are the two cards, and there are exactly two: no
+/// list, no stack, no history and no third card, so "which card is showing" is
+/// [`Showing`]'s two variants and nothing anybody can cycle. Each card is either
+/// empty or filled — filled by [`App::start_account`] and [`App::show_document`]
+/// respectively — and a filled card stays filled: reading a file does not throw
+/// the account away and a pact starting does not throw the document away. That
+/// is the whole point of the slot being two cards rather than one thing at a
+/// time: a reader with a document up keeps it while a run goes on filling the
+/// card behind it.
 ///
-/// `height`, `offset` and `follows` are that content's window, and are to the
-/// panel what `viewport_height` and `scroll_offset` are to the tree — with one
-/// difference, which is the flag. The tree's window is dragged about by a
-/// selection; the panel has no selection, so its window is either pinned to the
-/// newest line or parked where the reader put it, and `follows` says which.
-/// While it is set, `offset` is not read at all: the offset is the end of the
-/// content, worked out from the line count at the moment it is asked for, so
-/// appending a line moves the window without anybody having to tell the window
-/// that a line was appended. See [`App::panel_scroll_offset`].
+/// A card being filled is not the same as it having lines. An app that has never
+/// run a pact has nothing to draw in the panel at all, not even a heading, while
+/// an account that has started and recorded nothing yet is a run under way — and
+/// the difference between the two is a blank panel and one that has started. A
+/// second pact starts a second account rather than appending to the first: one
+/// pact, one account.
+///
+/// `showing` is which card the panel draws, and it moves for exactly two
+/// reasons: a document arriving shows itself, and the swap key. A run never
+/// moves it — a run fills its own card wherever the reader is looking.
+///
+/// Each card carries its own `offset` and `follows`, which is what lets the
+/// account go on following the newest line while the document is up and lets the
+/// reader come back to the line they left. `height` is the one thing the two
+/// share, because there is one panel and it is as tall as the frame says.
+/// Together they are to the panel what `viewport_height` and `scroll_offset` are
+/// to the tree — with one difference, which is the flag. The tree's window is
+/// dragged about by a selection; the panel has no selection, so a card's window
+/// is either pinned to the newest line or parked where the reader put it, and
+/// `follows` says which. While it is set, `offset` is not read at all: the
+/// offset is the end of the card, worked out from the line count at the moment
+/// it is asked for, so appending a line moves the window without anybody having
+/// to tell the window that a line was appended. See
+/// [`App::panel_scroll_offset`].
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Panel {
-    content: Content,
+    account: Card<Account>,
+    document: Card<Vec<Line>>,
+    showing: Showing,
     height: usize,
+}
+
+/// Which of the panel's two cards is on screen.
+///
+/// Two variants and no third, exactly as [`Focus`] is two panes and no third:
+/// the panel holds an account and a document, so "which card is showing" is a
+/// bit, not an index into a list somebody could grow. There is no `Nothing`
+/// here — a slot with an empty card showing draws warlock's mark, which is a
+/// fact about the card rather than a third thing to be showing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+enum Showing {
+    /// The account of the pact running now, or of the last one to run, or the
+    /// empty card an app that has run no pact opens on.
+    #[default]
+    Account,
+    /// The document last read. Only [`App::show_document`] puts the panel here,
+    /// and only the swap key takes it back.
+    Document,
+}
+
+/// One card of the panel: what it holds, if anything, and where its window sits
+/// over it.
+///
+/// Generic over what is on the card because the window rule is not: an offset,
+/// a follow flag and a height decide where a list of lines is cut, whether that
+/// list is an account being written or a file that was read once. What differs
+/// is only how the lines are counted and produced, which is [`Shown`]'s two
+/// implementations.
+///
+/// `held` is `None` for a card nothing has filled yet, and that is not the same
+/// as a card holding an empty list: an unfilled card is a panel with nothing to
+/// say, and an empty account or an empty file is something having happened. See
+/// [`App::has_panel_content`].
+#[derive(Debug, Clone, PartialEq)]
+struct Card<T> {
+    held: Option<T>,
     offset: usize,
     follows: bool,
 }
 
-/// What the panel is holding: nothing, the account of a pact, or a document
-/// somebody asked to read.
+/// An empty card whose window is at the top and following nothing: what both
+/// cards of a freshly built [`App`] are.
 ///
-/// One thing at a time, said as an enum rather than as two `Option` fields, so
-/// that "the panel is showing the account *and* a file" is not a state this can
-/// be in at all. Reading a file over an account throws the account away and a
-/// pact starting throws the document away, and neither of those is a decision
-/// any caller gets to half-make.
-///
-/// A document is its lines, already worded — the file's own lines, and the one
-/// sentence about a read the cap cut short, which is the only line in here the
-/// file did not write. [`App`] never holds the path it came from and never opens
-/// anything: what reaches it is text, from whoever did the reading.
-#[derive(Debug, Clone, Default, PartialEq)]
-enum Content {
-    /// Nothing has happened yet: no pact has run this session and no file has
-    /// been read. The panel draws warlock's mark and not one word.
-    #[default]
-    Nothing,
-    /// The account of the pact running now, or of the last one to run.
-    Account(Account),
-    /// The lines of the file last read, from its first line.
-    Document(Vec<Line>),
+/// Written out rather than derived because a derived `Default` would demand one
+/// of `T` as well, and [`Account`] has none: an account is a run that started at
+/// some instant, and there is no default instant.
+impl<T> Default for Card<T> {
+    fn default() -> Self {
+        Self {
+            held: None,
+            offset: 0,
+            follows: false,
+        }
+    }
 }
 
-impl Content {
-    /// How many rows this draws as: an account's lines, a document's lines, or
-    /// none at all.
+impl<T: Shown> Card<T> {
+    /// Put `held` on the card, with its window at the top and `follows` saying
+    /// whether it is pinned to the newest line.
+    ///
+    /// Whatever the card was holding goes: one pact is one account, and one
+    /// press of the view key is one document.
+    fn place(&mut self, held: T, follows: bool) {
+        self.held = Some(held);
+        self.offset = 0;
+        self.follows = follows;
+    }
+
+    /// How many lines the card draws as, or none at all while nothing has filled
+    /// it.
     fn line_count(&self) -> usize {
-        match self {
-            Self::Nothing => 0,
-            Self::Account(account) => account.line_count(),
-            Self::Document(lines) => lines.len(),
+        self.held.as_ref().map_or(0, Shown::line_count)
+    }
+
+    /// Which line of the card is drawn at the top row of a window `height` lines
+    /// tall.
+    fn scroll_offset(&self, height: usize) -> usize {
+        panel_offset_for(self.line_count(), height, self.offset, self.follows)
+    }
+
+    /// The `height` lines the card's window covers, with every clock measured
+    /// against `now`.
+    fn window(&self, height: usize, now: Instant) -> Vec<Line> {
+        self.held.as_ref().map_or_else(Vec::new, |held| {
+            held.window(self.scroll_offset(height), height, now)
+        })
+    }
+
+    /// How many of the card's lines sit below a window `height` lines tall.
+    fn lines_below(&self, height: usize) -> usize {
+        self.line_count()
+            .saturating_sub(self.scroll_offset(height) + height)
+    }
+
+    /// Park the card's window at `offset`, or as near to it as the card's own
+    /// length allows, and say whether that is still following.
+    fn scroll_to(&mut self, offset: usize, height: usize) {
+        // Where the end is, asked of the one function that decides it, so that
+        // "as far down as this card goes" means the same thing to a keystroke as
+        // it does to the frame being drawn.
+        let end = panel_offset_for(self.line_count(), height, 0, true);
+        self.offset = offset.min(end);
+        self.follows = self.offset == end;
+    }
+}
+
+/// What a card can hold: something with lines the panel can count and cut a
+/// window out of.
+///
+/// The two implementations are the two cards — an [`Account`], which words its
+/// own lines and has clocks in them, and a document, which is the lines
+/// themselves. A document has no clock, so `now` reaches only the account; the
+/// panel draws one list either way, and which list it is is this trait's
+/// business rather than the renderer's.
+trait Shown {
+    /// How many lines this draws as.
+    fn line_count(&self) -> usize;
+
+    /// The `height` lines starting at `offset`, with any clocks measured against
+    /// `now`.
+    fn window(&self, offset: usize, height: usize, now: Instant) -> Vec<Line>;
+}
+
+impl Shown for Account {
+    fn line_count(&self) -> usize {
+        Self::line_count(self)
+    }
+
+    fn window(&self, offset: usize, height: usize, now: Instant) -> Vec<Line> {
+        Self::window(self, offset, height, now)
+    }
+}
+
+/// A document is its lines, already worded — the file's own lines, and the one
+/// sentence about a read the cap cut short, which is the only line in it the
+/// file did not write. [`App`] never holds the path it came from and never opens
+/// anything: what reaches it is text, from whoever did the reading.
+impl Shown for Vec<Line> {
+    fn line_count(&self) -> usize {
+        self.len()
+    }
+
+    fn window(&self, offset: usize, height: usize, _now: Instant) -> Vec<Line> {
+        self.iter().skip(offset).take(height).cloned().collect()
+    }
+}
+
+impl Panel {
+    /// Which line of the showing card is drawn at the panel's top row.
+    fn scroll_offset(&self) -> usize {
+        match self.showing {
+            Showing::Account => self.account.scroll_offset(self.height),
+            Showing::Document => self.document.scroll_offset(self.height),
         }
     }
 
-    /// The `height` rows starting at `offset`, with any clocks measured against
-    /// `now`.
-    ///
-    /// A document has no clock in it, so `now` reaches only the account — which
-    /// is why the window is asked of the content rather than of the account: the
-    /// panel draws one list, and which list it is is this type's business.
-    fn window(&self, offset: usize, height: usize, now: Instant) -> Vec<Line> {
-        match self {
-            Self::Nothing => Vec::new(),
-            Self::Account(account) => account.window(offset, height, now),
-            Self::Document(lines) => lines.iter().skip(offset).take(height).cloned().collect(),
+    /// The lines the panel draws now, from the showing card.
+    fn window(&self, now: Instant) -> Vec<Line> {
+        match self.showing {
+            Showing::Account => self.account.window(self.height, now),
+            Showing::Document => self.document.window(self.height, now),
+        }
+    }
+
+    /// How many of the showing card's lines sit below the panel.
+    fn lines_below(&self) -> usize {
+        match self.showing {
+            Showing::Account => self.account.lines_below(self.height),
+            Showing::Document => self.document.lines_below(self.height),
+        }
+    }
+
+    /// Move the showing card's window, and only that card's: the other keeps the
+    /// line the reader left it on, and an account left following goes on
+    /// following.
+    fn scroll_to(&mut self, offset: usize) {
+        let height = self.height;
+        match self.showing {
+            Showing::Account => self.account.scroll_to(offset, height),
+            Showing::Document => self.document.scroll_to(offset, height),
         }
     }
 }
@@ -1058,11 +1207,12 @@ impl App {
     /// so nothing has been refused for one running either, see
     /// [`App::set_pact_refused`].
     ///
-    /// And there is no account: no pact has run this session, so the panel has
-    /// nothing whatever to draw, which is a different state from a run that has
-    /// started and done nothing yet. See [`App::start_account`]. Its window
-    /// starts the way the tree's does — no height, no offset — since nothing has
-    /// been drawn.
+    /// Both of the panel's cards are empty: no pact has run this session and no
+    /// file has been read, so the panel has nothing whatever to draw, which is a
+    /// different state from a run that has started and done nothing yet. See
+    /// [`App::start_account`]. The account is the card showing, as it is on every
+    /// app until a document arrives, and both windows start the way the tree's
+    /// does — no height, no offset — since nothing has been drawn.
     ///
     /// The tree has the focus, so the movement keys move its selection from the
     /// first keystroke on. See [`App::focus`].
@@ -1108,10 +1258,18 @@ impl App {
                 mouse_captured: false,
             },
             panel: Panel {
-                content: Content::Nothing,
+                account: Card {
+                    held: None,
+                    offset: 0,
+                    follows: false,
+                },
+                document: Card {
+                    held: None,
+                    offset: 0,
+                    follows: false,
+                },
+                showing: Showing::Account,
                 height: 0,
-                offset: 0,
-                follows: false,
             },
         };
         // The rows handed over may hold file rows, which the file toggle starts
@@ -1438,17 +1596,19 @@ impl App {
     /// run — so it neither says anything nor takes down what the last keystroke
     /// said.
     ///
-    /// A document in the panel goes here: the panel holds one thing at a time,
-    /// and what a run is doing now is the thing a reader who just started one is
-    /// looking for.
+    /// A document in the panel stays exactly where it is, and stays showing. The
+    /// panel is two cards in one slot: this one fills the account's card,
+    /// wherever the reader happens to be looking, because which card is on
+    /// screen is the reader's and a run that took the slot would take a document
+    /// out of their hands mid-sentence. The account goes on being written behind
+    /// the document, following its own newest line, and is there the moment they
+    /// swap back.
     pub fn start_account(&mut self, at: Instant) {
-        self.panel.content = Content::Account(Account::new(at));
-        self.panel.offset = 0;
-        self.panel.follows = true;
+        self.panel.account.place(Account::new(at), true);
     }
 
-    /// Put the lines of a file in the panel, from its first line, throwing away
-    /// whatever was there.
+    /// Put the lines of a file on the panel's document card, from its first
+    /// line, and show it.
     ///
     /// The read happened somewhere else. What arrives here is text — the file's
     /// own lines, in order — and a yes-or-no about whether the cap cut the read
@@ -1462,11 +1622,16 @@ impl App {
     /// rather than by the reader because the words are the screen's: the engine
     /// hands over the fact and nothing else.
     ///
-    /// The window goes to the top and does not follow. A file is read from its
-    /// first line — a document pinned to its own last line would be a log — and
-    /// the follow rule that keeps a live account's newest line on the bottom row
-    /// has nothing to be true of here, since nothing is appended to a file that
-    /// has been read.
+    /// The document's window goes to the top and does not follow. A file is read
+    /// from its first line — a document pinned to its own last line would be a
+    /// log — and the follow rule that keeps a live account's newest line on the
+    /// bottom row has nothing to be true of here, since nothing is appended to a
+    /// file that has been read.
+    ///
+    /// The account's card is left alone, lines, window and all: this is the one
+    /// thing that shows the document card, and showing it puts the account
+    /// behind it rather than throwing it out. A run under way goes on filling
+    /// that card, and a swap comes back to it where it was.
     ///
     /// Not a keystroke's whole answer: it neither says anything nor takes down
     /// what the last keystroke said, exactly as [`App::start_account`] does not.
@@ -1480,69 +1645,73 @@ impl App {
                 text: cut_at_cap_message(),
             });
         }
-        self.panel.content = Content::Document(lines);
-        self.panel.offset = 0;
-        self.panel.follows = false;
+        self.panel.document.place(lines, false);
+        self.panel.showing = Showing::Document;
     }
 
     /// Whether a pact has run this session, and so whether the panel has an
-    /// account to draw.
+    /// account card to draw.
     ///
-    /// `false` until [`App::start_account`], and `true` until a document takes
-    /// the panel: an account that has finished is still an account, and it stays
-    /// on screen to be read once the run that made it is over.
+    /// `false` until [`App::start_account`] and `true` from then on, whichever
+    /// card is showing: an account that has finished is still an account, and an
+    /// account behind a document is still an account. It is a question about
+    /// what the panel *holds*, not about what is on screen.
     #[must_use]
     pub const fn has_account(&self) -> bool {
-        matches!(self.panel.content, Content::Account(_))
+        self.panel.account.held.is_some()
     }
 
-    /// Whether the panel is holding a file somebody asked to read.
+    /// Whether a file somebody asked to read is on the panel's document card.
     ///
-    /// The other half of [`App::has_account`], and never `true` at the same
-    /// time: the panel holds one thing at a time. `false` until the first
-    /// [`App::show_document`], and `false` again from the moment a pact starts an
-    /// account.
+    /// The same question of the other card, and the two are freely both `true`:
+    /// the slot holds two cards, so a run started under a document fills one
+    /// without emptying the other. `false` until the first
+    /// [`App::show_document`] of the session.
     #[must_use]
     pub const fn has_document(&self) -> bool {
-        matches!(self.panel.content, Content::Document(_))
+        self.panel.document.held.is_some()
     }
 
-    /// Whether the panel has anything at all to draw, of either kind.
+    /// Whether the card the panel is showing has anything to draw.
     ///
     /// What the renderer asks before it draws warlock's mark instead: the mark is
-    /// what is there while nothing has happened, and either an account or a
-    /// document is something having happened.
+    /// what is there while the showing card is empty, and a card somebody has
+    /// filled is something having happened. Asked of the showing card and not of
+    /// the slot, because a document held behind an account nobody has started is
+    /// not on screen and cannot be what the panel draws.
     #[must_use]
     pub const fn has_panel_content(&self) -> bool {
-        !matches!(self.panel.content, Content::Nothing)
+        match self.panel.showing {
+            Showing::Account => self.has_account(),
+            Showing::Document => self.has_document(),
+        }
     }
 
     /// The account of the pact running now, or of the last one to run, or `None`
-    /// before the first pact of the session and while a document has the panel.
+    /// before the first pact of the session.
+    ///
+    /// Reaches the account card whichever card is showing: a run appends to its
+    /// own card while the reader looks at a document, and the pulse in the tree
+    /// is a fact about the run rather than about what is on screen.
     #[must_use]
     pub const fn account(&self) -> Option<&Account> {
-        match &self.panel.content {
-            Content::Account(account) => Some(account),
-            Content::Nothing | Content::Document(_) => None,
-        }
+        self.panel.account.held.as_ref()
     }
 
     /// The same account, to record what the run has just been seen doing.
     ///
     /// The account words its own lines — see [`Account`] — so this hands it over
     /// rather than wrapping each of its five mutators in a method here that
-    /// would only forward. Nothing needs doing afterwards: while the panel is
-    /// following, its window is the end of the account computed on demand, so a
-    /// line recorded through here is on screen at the bottom of the next frame
-    /// without this type being told about it.
+    /// would only forward. Nothing needs doing afterwards: while the account's
+    /// card is following, its window is the end of the account computed on
+    /// demand, so a line recorded through here is on screen at the bottom of the
+    /// next frame without this type being told about it.
     ///
     /// `None` before the first pact, where there is nothing to record against,
-    /// and `None` while a document has the panel.
+    /// and only then: a run reports into its own card while a document is up,
+    /// and finds the account it left there.
     pub const fn account_mut(&mut self) -> Option<&mut Account> {
-        match &mut self.panel.content {
-            Content::Account(account) => Some(account),
-            Content::Nothing | Content::Document(_) => None,
-        }
+        self.panel.account.held.as_mut()
     }
 
     /// Put `view` back in place of this app, keeping this app's panel.
@@ -1587,9 +1756,10 @@ impl App {
         self.panel.height = usize::from(height);
     }
 
-    /// Whether the panel is following the newest line of the account.
+    /// Whether the showing card's window is following the newest line of what is
+    /// on it.
     ///
-    /// `true` while the window sits at the end, which is where a fresh account
+    /// `true` while that window sits at the end, which is where a fresh account
     /// starts and where the end-of-list movement key puts it back. `false` from
     /// the moment the reader scrolls up, until they scroll back down to the end
     /// or ask for it outright. See [`App::select_last`].
@@ -1597,53 +1767,54 @@ impl App {
     /// `false` for a document from the moment it arrives, wherever its window
     /// is: nothing is ever appended to a file that has been read, so there is no
     /// newest line to be pinned to.
+    ///
+    /// The card that is not showing keeps its own answer, and it is not this
+    /// one: an account left following goes on following behind a document, which
+    /// is what puts the newest line of a run on screen when the reader swaps
+    /// back to it.
     #[must_use]
     pub const fn panel_follows(&self) -> bool {
-        self.panel.follows
+        match self.panel.showing {
+            Showing::Account => self.panel.account.follows,
+            Showing::Document => self.panel.document.follows,
+        }
     }
 
-    /// Which line of what the panel holds is drawn at its top row.
+    /// Which line of the showing card is drawn at the panel's top row.
     ///
-    /// Derived rather than stored while the panel is following: the answer is
+    /// Derived rather than stored while that card is following: the answer is
     /// then the end of the account, which changes every time a line is
     /// appended, and computing it here is what keeps the newest line pinned to
     /// the bottom without anything having to be recomputed as the run reports.
     /// Parked, it is where the reader left the window, clamped to what the
-    /// content's length allows — which is where a document starts, since a file
-    /// is read from its first line and nothing follows it.
+    /// card's length allows — which is where a document starts, since a file is
+    /// read from its first line and nothing follows it.
     ///
-    /// `0` for an app with an empty panel, and for a panel shorter than the
-    /// account it holds is the first line of the last screenful.
+    /// `0` for an app whose showing card is empty, and for a panel shorter than
+    /// the account it holds is the first line of the last screenful.
     #[must_use]
     pub fn panel_scroll_offset(&self) -> usize {
-        panel_offset_for(
-            self.panel_line_count(),
-            self.panel.height,
-            self.panel.offset,
-            self.panel.follows,
-        )
+        self.panel.scroll_offset()
     }
 
     /// The lines the panel draws now, with every clock measured against `now`.
     ///
     /// The window [`App::panel_scroll_offset`] describes, [`App::panel_height`]
-    /// lines of it, and empty for an app whose panel holds nothing. `now` is the
-    /// caller's, because the newest line of a live section counts up between
-    /// events and the only thing that knows what the time is when a frame is
-    /// drawn is whoever is drawing it. A document has no clock in it and so does
-    /// not move with `now` at all.
+    /// lines of it, taken from the showing card, and empty for an app whose
+    /// showing card is empty. `now` is the caller's, because the newest line of a
+    /// live section counts up between events and the only thing that knows what
+    /// the time is when a frame is drawn is whoever is drawing it. A document has
+    /// no clock in it and so does not move with `now` at all.
     #[must_use]
     pub fn panel_lines(&self, now: Instant) -> Vec<Line> {
-        self.panel
-            .content
-            .window(self.panel_scroll_offset(), self.panel.height, now)
+        self.panel.window(now)
     }
 
-    /// How many lines of what the panel holds sit below its window.
+    /// How many lines of the showing card sit below the panel's window.
     ///
-    /// `0` while the panel is showing the end of the account, which is what an
+    /// `0` while the panel is showing the end of that card, which is what an
     /// indicator saying how far back the reader has scrolled is switched off by,
-    /// and `0` for an app whose panel holds nothing at all. Independent of `now`:
+    /// and `0` for an app whose showing card is empty. Independent of `now`:
     /// the clocks move, the number of lines does not.
     ///
     /// A panel nobody has measured draws nothing, so the whole of it is below
@@ -1651,14 +1822,7 @@ impl App {
     /// the app how tall the panel it is drawing is.
     #[must_use]
     pub fn panel_lines_below(&self) -> usize {
-        self.panel_line_count()
-            .saturating_sub(self.panel_scroll_offset() + self.panel.height)
-    }
-
-    /// How many lines what the panel holds draws as, or none where it holds
-    /// nothing.
-    fn panel_line_count(&self) -> usize {
-        self.panel.content.line_count()
+        self.panel.lines_below()
     }
 
     /// Every row that is drawn, in the order it is drawn: the engine's walk
@@ -2154,22 +2318,21 @@ impl App {
         }
     }
 
-    /// Park the panel's window at `offset`, or as near to it as the account
+    /// Park the showing card's window at `offset`, or as near to it as that card
     /// allows, and say whether that is still following.
     ///
     /// The one place the follow flag is decided by a keystroke, and it is
     /// decided by where the window ended up rather than by which key was
-    /// pressed: following the newest line *is* sitting at the end of the
-    /// account, so scrolling up breaks it and scrolling back down restores it,
-    /// with no key having to mean "and start following again" as well as what it
-    /// already means.
+    /// pressed: following the newest line *is* sitting at the end of the card,
+    /// so scrolling up breaks it and scrolling back down restores it, with no key
+    /// having to mean "and start following again" as well as what it already
+    /// means.
+    ///
+    /// The card that is not showing does not move. A key is about what is on
+    /// screen, and a reader scrolling a document has said nothing whatever about
+    /// where the account behind it should sit.
     fn scroll_panel_to(&mut self, offset: usize) {
-        // Where the end is, asked of the one function that decides it, so that
-        // "as far down as the account goes" means the same thing to a keystroke
-        // as it does to the frame being drawn.
-        let end = panel_offset_for(self.panel_line_count(), self.panel.height, 0, true);
-        self.panel.offset = offset.min(end);
-        self.panel.follows = self.panel.offset == end;
+        self.panel.scroll_to(offset);
     }
 
     /// How many rows one page key moves the tree by: a windowful, or a single
@@ -2824,8 +2987,8 @@ fn file_row_position(rows: &[Row], directory: usize, depth: usize, path: &Path) 
 /// `tree`: every row, every state on one, and [`App::counts`]. What comes from
 /// `view`: which node is selected, which directories are collapsed, the
 /// pacted-only and file flags, the scroll offset and the viewport height, the
-/// header, the focus, the message, the pact in flight if there is one, and the
-/// account of the pact with the panel's window onto it.
+/// header, the focus, the message, the pact in flight if there is one, and both
+/// of the panel's cards with the window onto each and which of them is showing.
 ///
 /// The account has to be carried for the plainest of reasons: the tree is read
 /// again *because* a pact has just finished, so a re-seat that dropped it would
@@ -7420,30 +7583,142 @@ mod tests {
         assert_eq!(panel_text(&app, now), document_lines());
     }
 
+    /// Where the account's card would be if the reader swapped to it: the line
+    /// at the top of its window, and whether it is still following its newest
+    /// one.
+    ///
+    /// Asked of the card rather than of [`App::panel_scroll_offset`], because
+    /// the point of every test below is what the card that is *not* showing is
+    /// doing.
+    fn account_window(app: &App) -> (usize, bool) {
+        (
+            app.panel.account.scroll_offset(app.panel.height),
+            app.panel.account.follows,
+        )
+    }
+
+    /// The same of the document's card.
+    fn document_window(app: &App) -> (usize, bool) {
+        (
+            app.panel.document.scroll_offset(app.panel.height),
+            app.panel.document.follows,
+        )
+    }
+
     #[test]
-    fn a_document_and_an_account_take_the_panel_from_each_other() {
+    fn a_document_shows_over_the_account_rather_than_taking_the_panel_from_it() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
         assert!(app.has_account());
 
         app.show_document(document_lines(), false);
 
-        // One thing at a time: the account is gone, and gone from the getters
-        // that hand it out as well as from the panel.
+        // Two cards in one slot: the document is what is drawn, and the account
+        // is still there behind it — held, handed out by the getters, and with
+        // its own window exactly where it was.
         assert!(app.has_document());
-        assert!(!app.has_account());
-        assert_eq!(app.account(), None);
-        assert_eq!(app.account_mut(), None);
+        assert!(app.has_account());
+        assert_eq!(app.account().map(Account::line_count), Some(10));
+        assert!(app.account_mut().is_some());
         assert!(app.has_panel_content());
         assert_eq!(panel_text(&app, at(base, 9))[0], "line 0");
+        assert_eq!(account_window(&app), (10 - usize::from(PANEL), true));
+    }
 
-        // And a pact starting takes it back, on the account's own terms: empty,
-        // at the top, following.
+    #[test]
+    fn a_pact_started_under_a_document_fills_the_card_behind_it() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        app.show_document(document_lines(), false);
+        let shown = panel_text(&app, at(base, 9));
+
         app.start_account(at(base, 100));
+
+        // The run took nothing: the document is still the card on screen, and
+        // the account started behind it on its own terms — empty, at the top,
+        // following.
+        assert!(app.has_document());
+        assert_eq!(panel_text(&app, at(base, 100)), shown);
+        assert_eq!(app.panel_scroll_offset(), 0);
+        assert!(!app.panel_follows());
         assert!(app.has_account());
-        assert!(!app.has_document());
-        assert_eq!(app.panel_lines(at(base, 100)), Vec::new());
+        assert_eq!(app.account().map(Account::line_count), Some(0));
+        assert_eq!(account_window(&app), (0, true));
+
+        // And the run goes on reporting into that card while the reader reads,
+        // with its window following the newest line for when they swap to it.
+        let account = app.account_mut().expect("the run has its own card");
+        account.open_section("crates/tui", at(base, 100));
+        for line in 0..9 {
+            account.record(&Activity::Thinking, at(base, 101 + line));
+        }
+        assert_eq!(app.account().map(Account::line_count), Some(2));
+        assert_eq!(panel_text(&app, at(base, 120)), shown);
+        assert_eq!(account_window(&app), (0, true));
+    }
+
+    #[test]
+    fn each_card_keeps_a_window_of_its_own() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+
+        // The account parked six lines down, and then a document over it.
+        app.select_first();
+        app.select_next();
+        assert_eq!(account_window(&app), (1, false));
+
+        app.show_document(document_lines(), false);
+        assert_eq!(document_window(&app), (0, false));
+
+        // Moving the document's window moves the document's window: the account
+        // is where the reader left it, still parked.
+        app.select_next();
+        assert_eq!(document_window(&app), (1, false));
+        assert_eq!(app.panel_scroll_offset(), 1);
+        assert_eq!(account_window(&app), (1, false));
+
+        // Including when the movement takes the document to its own end, which
+        // is the one thing that sets a follow flag.
+        app.select_last();
+        assert_eq!(document_window(&app), (5 - usize::from(PANEL), true));
         assert!(app.panel_follows());
+        assert_eq!(account_window(&app), (1, false));
+    }
+
+    #[test]
+    fn a_movement_at_the_panel_moves_only_the_card_that_is_showing() {
+        let base = Instant::now();
+
+        for (name, movement) in MOVEMENTS {
+            let mut app = app_pacting(9, base);
+            app.select_first();
+            app.show_document(document_lines(), false);
+            let parked = account_window(&app);
+
+            movement(&mut app);
+
+            assert_eq!(account_window(&app), parked, "{name} moved the account");
+            assert_eq!(
+                app.panel_scroll_offset(),
+                document_window(&app).0,
+                "{name} scrolled something other than the document"
+            );
+        }
+
+        // And the wheel, which names the pane rather than accepting the focus,
+        // reads the same way.
+        for lines in [1, 3, 99] {
+            let mut app = app_pacting(9, base);
+            app.select_first();
+            app.show_document(document_lines(), false);
+            let parked = account_window(&app);
+
+            app.scroll_panel_down(lines);
+            assert_eq!(account_window(&app), parked, "a wheel moved the account");
+            app.scroll_panel_up(lines);
+            assert_eq!(account_window(&app), parked, "a wheel moved the account");
+            assert_eq!(document_window(&app), (0, false));
+        }
     }
 
     #[test]
