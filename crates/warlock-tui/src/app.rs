@@ -1699,8 +1699,9 @@ impl App {
     /// This is the question the collapse key asks, and it is a question about
     /// the view rather than about the tree. A directory holding nothing but
     /// files has no children in the tree and has rows under it whenever the file
-    /// toggle is on; a directory whose children the pacted-only filter has taken
-    /// away has children in the tree and nothing under it on screen. Asking
+    /// toggle is on — and a documented one has its document row under it even
+    /// when the toggle is off; a directory whose children the pacted-only filter
+    /// has taken away has children in the tree and nothing under it. Asking
     /// [`Row::children`] instead gets both of those wrong, in opposite
     /// directions — the first as a key that silently does nothing, the second as
     /// a marker promising something to unfold.
@@ -2214,9 +2215,16 @@ impl App {
     ///
     /// The three filters are applied in that order and never as one pass. Files
     /// go first, so that with the toggle off the two passes below it see the
-    /// list of nodes and only that: both of them reason by depth, and a file row
-    /// sits deeper than the directory holding it, so a hidden file left in the
-    /// list would be a row those passes had to reason around for no reason.
+    /// nodes and, under each documented one, the single file row that is its own
+    /// `WARLOCK.md` — see [`node_rows`], which is the only pass that reads what a
+    /// row *is*. Both passes below reason by depth, and a surviving document row
+    /// is one they are right about without being told: it carries its directory's
+    /// state, so pactedness keeps it wherever it keeps that directory for being
+    /// pacted and never lets it rescue an ancestor; and it sits one level under
+    /// its directory, so collapsing takes it away with everything else of that
+    /// directory's. Every other file row is gone, and would have been a row those
+    /// passes had to reason around for no reason.
+    ///
     /// Then pactedness: what is pacted, and what is on the way to something
     /// pacted, is read off the whole walk, so a directory that is collapsed over
     /// the only pacted node below it still earns its row; deciding pactedness
@@ -2934,17 +2942,36 @@ fn walk_of(tree: &Tree) -> Vec<Row> {
     rows
 }
 
-/// Which of `all` stand for nodes: the walk with every file row dropped, which
-/// is what the view shows when the file toggle is off.
+/// Which of `all` the view keeps when the file toggle is off: every node, and
+/// under each documented one the single file row that is its own `WARLOCK.md`.
+///
+/// Every other file row goes. The document stays because it is the one file
+/// Warlock wrote and the whole point of the tool, and a directory that showed no
+/// sign of it would leave the reader nothing to land on and read; it is drawn as
+/// the plain file row `f` already produces for it, with no colour, shade, marker
+/// or label of its own. A node has at most one document, so a directory gains at
+/// most one row, and an undocumented one gains none.
 ///
 /// The one filter here that is about what a row *is* rather than about where it
-/// sits, which is why it runs before the other two: the passes below reason
-/// about depth alone, and they are owed a list in which every depth belongs to
-/// a node.
+/// sits, which is why it runs before the other two. What they are owed is not
+/// quite a list of nodes any more, so it is worth saying why neither minds the
+/// document rows that survive. A document row carries its directory's state (see
+/// [`walk_of`]), so under [`pacted_rows`] it is kept exactly where its directory
+/// is kept for being pacted, and it can never rescue an ancestor that its own
+/// directory would not have rescued — while a leftover document under a gray
+/// directory kept only as the way in to something pacted is dropped, like any
+/// other unpacted row that is nobody's way in. And it sits directly under its
+/// directory, one level deeper, so under [`drawn_rows`] it is a descendant of
+/// that directory and of nothing else: collapsing the directory takes it away
+/// with the rest, and it makes a documented directory with no children hold
+/// something, which is exactly what [`App::can_collapse`] should say of it.
 ///
 /// Pure, and deliberately free of [`App`]: rows in, rows out.
 fn node_rows(all: &[Row]) -> Vec<Row> {
-    all.iter().filter(|row| !row.is_file()).cloned().collect()
+    all.iter()
+        .filter(|row| !row.is_file() || row.is_document())
+        .cloned()
+        .collect()
 }
 
 /// Put every row inside the subtree at `path` into `state`: the directory
@@ -3493,9 +3520,14 @@ mod tests {
     /// The tally the rows actually add up to, counted here rather than asked
     /// of the app: a test that recomputes is the only way to catch the app's
     /// carried counts drifting from the rows they claim to describe.
+    ///
+    /// Node rows only. The counts are a count of directories, and a file row —
+    /// including the document row the default view now draws under a documented
+    /// directory — carries its directory's state rather than one of its own, so
+    /// counting it would count that directory twice.
     fn tally(app: &App) -> StateCounts {
         let mut counts = StateCounts::default();
-        for row in app.rows() {
+        for row in app.rows().iter().filter(|row| !row.is_file()) {
             match row.state {
                 NodeState::Unpacted => counts.unpacted += 1,
                 NodeState::PactedStale => counts.pacted_stale += 1,
@@ -3541,6 +3573,17 @@ mod tests {
             .collect()
     }
 
+    /// The drawn rows that stand for directories, by path: what `drawn` used to
+    /// give back before the default view started drawing a document row under
+    /// each documented directory, for the tests that are about the nodes.
+    fn node_paths(app: &App) -> Vec<String> {
+        app.rows()
+            .iter()
+            .filter(|row| !row.is_file())
+            .map(|row| row.path.to_string_lossy().into_owned())
+            .collect()
+    }
+
     /// The drawn rows, by path and state, for a test that is about which rows
     /// changed colour and which were left alone.
     fn states(app: &App) -> Vec<(&str, NodeState)> {
@@ -3552,25 +3595,71 @@ mod tests {
 
     /// The whole fixture, in walk order: what an app with nothing collapsed
     /// draws.
+    ///
+    /// Every node, and under each documented one its own `WARLOCK.md` — the
+    /// default view hides the files a directory merely holds, not the one
+    /// Warlock wrote. `crates/` has no document in this fixture and so draws
+    /// nothing under it.
     fn whole_fixture() -> Vec<String> {
         vec![
             "warlock".to_owned(),
+            "warlock/WARLOCK.md".to_owned(),
             "warlock/crates".to_owned(),
             "warlock/crates/engine".to_owned(),
+            "warlock/crates/engine/WARLOCK.md".to_owned(),
             "warlock/crates/tui".to_owned(),
+            "warlock/crates/tui/WARLOCK.md".to_owned(),
             "warlock/assets".to_owned(),
+            "warlock/assets/WARLOCK.md".to_owned(),
         ]
     }
 
     /// The fixture under the pacted-only filter: the two pacted leaves, the
     /// pacted root, and the undocumented `crates/` that is the only way down to
-    /// them. `assets/` is unpacted and has nothing pacted below it, so it goes.
+    /// them, each documented one still followed by its own `WARLOCK.md`.
+    /// `assets/` is unpacted and has nothing pacted below it, so it and the
+    /// document row under it both go — a document row carries its directory's
+    /// state, so it is kept and dropped with the directory it belongs to.
     fn pacted_fixture() -> Vec<String> {
         vec![
             "warlock".to_owned(),
+            "warlock/WARLOCK.md".to_owned(),
             "warlock/crates".to_owned(),
             "warlock/crates/engine".to_owned(),
+            "warlock/crates/engine/WARLOCK.md".to_owned(),
             "warlock/crates/tui".to_owned(),
+            "warlock/crates/tui/WARLOCK.md".to_owned(),
+        ]
+    }
+
+    /// [`whole_fixture`] one load later: [`fixture::tree_after_a_run`] drawn in
+    /// the default view, where the `WARLOCK.md` the run wrote under `crates/`
+    /// gives that directory a document row it did not have before.
+    fn whole_fixture_after_a_run() -> Vec<String> {
+        vec![
+            "warlock".to_owned(),
+            "warlock/WARLOCK.md".to_owned(),
+            "warlock/crates".to_owned(),
+            "warlock/crates/WARLOCK.md".to_owned(),
+            "warlock/crates/engine".to_owned(),
+            "warlock/crates/engine/WARLOCK.md".to_owned(),
+            "warlock/crates/tui".to_owned(),
+            "warlock/crates/tui/WARLOCK.md".to_owned(),
+            "warlock/assets".to_owned(),
+            "warlock/assets/WARLOCK.md".to_owned(),
+        ]
+    }
+
+    /// The default view with `crates/` collapsed: the two modules under it go,
+    /// and so do their document rows, which are descendants of `crates/` like
+    /// anything else one level under a directory it holds.
+    fn collapsed_over_crates() -> Vec<String> {
+        vec![
+            "warlock".to_owned(),
+            "warlock/WARLOCK.md".to_owned(),
+            "warlock/crates".to_owned(),
+            "warlock/assets".to_owned(),
+            "warlock/assets/WARLOCK.md".to_owned(),
         ]
     }
 
@@ -3658,8 +3747,10 @@ mod tests {
 
         let app = App::from_tree(&tree);
 
-        assert_eq!(app.rows().len(), tree.counts().total());
-        for row in app.rows() {
+        // The default view draws a document row under each documented
+        // directory too, so the nodes are the rows that are not files.
+        assert_eq!(node_paths(&app).len(), tree.counts().total());
+        for row in app.rows().iter().filter(|row| !row.is_file()) {
             let node = tree.find(&row.path).expect("row came from the tree");
             assert_eq!(row.state, node.state);
         }
@@ -3672,7 +3763,9 @@ mod tests {
         let app = App::from_tree(&tree);
 
         assert_eq!(app.counts(), tree.counts());
-        assert_eq!(app.counts().total(), app.rows().len());
+        // Directories are what is counted, and the document rows beside them
+        // are not: see [`tally`].
+        assert_eq!(app.counts().total(), node_paths(&app).len());
     }
 
     #[test]
@@ -4123,7 +4216,7 @@ mod tests {
 
         let app = App::from_tree(&tree);
 
-        for row in app.rows() {
+        for row in app.rows().iter().filter(|row| !row.is_file()) {
             let node = tree.find(&row.path).expect("row came from the tree");
             assert_eq!(
                 row.document,
@@ -4132,6 +4225,14 @@ mod tests {
                 row.path.display()
             );
         }
+        // The document rows drawn beside them stand for a file and so document
+        // nothing themselves — a directory *has* a document and is not one.
+        assert!(
+            app.rows()
+                .iter()
+                .filter(|row| row.is_file())
+                .all(|row| row.document.is_none() && row.is_document())
+        );
         // Including `crates/`, whose document is honestly absent.
         assert!(
             app.rows()
@@ -4334,15 +4435,20 @@ mod tests {
         app.toggle_pact().expect("a directory can be pacted");
 
         // The directory the key was pressed on and both modules under it, and
-        // nothing outside the subtree.
+        // nothing outside the subtree. The document rows take their
+        // directory's colour, here as everywhere.
         assert_eq!(
             states(&app),
             [
                 ("warlock", NodeState::PactedStale),
+                ("warlock/WARLOCK.md", NodeState::PactedStale),
                 ("warlock/crates", NodeState::PactedStale),
                 ("warlock/crates/engine", NodeState::PactedStale),
+                ("warlock/crates/engine/WARLOCK.md", NodeState::PactedStale),
                 ("warlock/crates/tui", NodeState::PactedStale),
+                ("warlock/crates/tui/WARLOCK.md", NodeState::PactedStale),
                 ("warlock/assets", NodeState::Unpacted),
+                ("warlock/assets/WARLOCK.md", NodeState::Unpacted),
             ]
         );
         assert_eq!(app.counts(), tally(&app));
@@ -4394,10 +4500,14 @@ mod tests {
             states(&app),
             [
                 ("warlock", NodeState::PactedStale),
+                ("warlock/WARLOCK.md", NodeState::PactedStale),
                 ("warlock/crates", NodeState::PactedFresh),
                 ("warlock/crates/engine", NodeState::PactedFresh),
+                ("warlock/crates/engine/WARLOCK.md", NodeState::PactedFresh),
                 ("warlock/crates/tui", NodeState::PactedFresh),
+                ("warlock/crates/tui/WARLOCK.md", NodeState::PactedFresh),
                 ("warlock/assets", NodeState::Unpacted),
+                ("warlock/assets/WARLOCK.md", NodeState::Unpacted),
             ]
         );
         assert_eq!(app.counts(), tally(&app));
@@ -4407,10 +4517,10 @@ mod tests {
     #[test]
     fn a_subtree_state_reaches_the_rows_no_view_is_drawing() {
         let mut app = App::from_tree(&fixture::tree()).with_collapsed(["warlock/crates"]);
-        assert_eq!(drawn(&app), ["warlock", "warlock/crates", "warlock/assets"]);
+        assert_eq!(drawn(&app), collapsed_over_crates());
 
         app.set_subtree_state("warlock/crates", NodeState::PactedFresh);
-        app.select_next();
+        let mut app = select(app, "warlock/crates");
         app.toggle_collapsed();
 
         // Hidden under a collapsed directory while the state was set, and still
@@ -5566,8 +5676,10 @@ mod tests {
 
         assert!(app.collapsed().is_empty());
         assert_eq!(drawn(&app), whole_fixture());
-        // And it knows which of those rows could be collapsed at all.
-        for row in app.rows() {
+        // And it knows which of those rows could be collapsed at all. The
+        // document rows drawn beside them stand for files, which the tree knows
+        // nothing about and which hold nothing.
+        for row in app.rows().iter().filter(|row| !row.is_file()) {
             assert_eq!(
                 row.children,
                 children_in_fixture(&row.path),
@@ -5594,7 +5706,7 @@ mod tests {
 
         app.toggle_collapsed();
 
-        assert_eq!(drawn(&app), ["warlock", "warlock/crates", "warlock/assets"]);
+        assert_eq!(drawn(&app), collapsed_over_crates());
         assert!(app.is_collapsed("warlock/crates"));
         // The directory itself keeps its place and the selection.
         assert_eq!(
@@ -5619,7 +5731,7 @@ mod tests {
         // under the selection.
         let mut app = app_selecting("warlock/crates/tui").with_collapsed(["warlock/crates"]);
 
-        assert_eq!(drawn(&app), ["warlock", "warlock/crates", "warlock/assets"]);
+        assert_eq!(drawn(&app), collapsed_over_crates());
         assert_eq!(
             app.selected_row().map(|row| row.path.clone()),
             Some(PathBuf::from("warlock/crates"))
@@ -5672,12 +5784,13 @@ mod tests {
     #[test]
     fn a_collapse_above_the_selection_leaves_it_on_the_same_node() {
         let app = app_selecting("warlock/assets");
-        assert_eq!(app.selected(), 4);
+        assert_eq!(app.selected(), 7);
 
         let app = app.with_collapsed(["warlock/crates"]);
 
-        // Two rows fewer above it, and the same node under it.
-        assert_eq!(app.selected(), 2);
+        // Four rows fewer above it — two modules and the document row under
+        // each — and the same node under it.
+        assert_eq!(app.selected(), 3);
         assert_eq!(
             app.selected_row().map(|row| row.path.clone()),
             Some(PathBuf::from("warlock/assets"))
@@ -5696,10 +5809,7 @@ mod tests {
         assert_eq!(rebuilt.rows(), app.rows());
         assert_eq!(rebuilt.collapsed(), app.collapsed());
         // Filtered on the way in, not at the next keystroke.
-        assert_eq!(
-            drawn(&rebuilt),
-            ["warlock", "warlock/crates", "warlock/assets"]
-        );
+        assert_eq!(drawn(&rebuilt), collapsed_over_crates());
     }
 
     #[test]
@@ -5712,8 +5822,17 @@ mod tests {
     }
 
     #[test]
-    fn toggling_a_childless_node_changes_nothing_at_all() {
-        let mut app = app_selecting("warlock/assets");
+    fn toggling_a_node_with_nothing_under_it_changes_nothing_at_all() {
+        // Undocumented as well as childless: every leaf in the shared fixture
+        // has a document, and the default view draws that document under it, so
+        // a leaf there is a row with something under it now.
+        let mut app = select(
+            App::from_rows(vec![
+                Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale).with_child_count(1),
+                Row::new(1, "repo/crates", None, NodeState::Unpacted),
+            ]),
+            "repo/crates",
+        );
         app.set_message("something from the last keystroke");
         let before = app.clone();
 
@@ -5723,7 +5842,7 @@ mod tests {
         // key that did something.
         assert_eq!(app, before);
         assert!(app.collapsed().is_empty());
-        assert_eq!(drawn(&app), whole_fixture());
+        assert_eq!(drawn(&app), ["repo", "repo/crates"]);
     }
 
     #[test]
@@ -5901,7 +6020,7 @@ mod tests {
         assert_eq!(
             app.rows()
                 .iter()
-                .filter(|row| row.state.is_pacted())
+                .filter(|row| !row.is_file() && row.state.is_pacted())
                 .count(),
             fixture::tree()
                 .walk()
@@ -5930,15 +6049,19 @@ mod tests {
             .map(|row| (row.depth, row.path.to_str().expect("ascii path")))
             .collect();
         // `engine` and `tui` still sit at depth 2 under a `crates` that is only
-        // drawn as their way in: the filter narrows the view, it does not
-        // reparent anything.
+        // drawn as their way in, and each document row still sits one level
+        // under the directory that owns it: the filter narrows the view, it does
+        // not reparent anything.
         assert_eq!(
             seen,
             [
                 (0, "warlock"),
+                (1, "warlock/WARLOCK.md"),
                 (1, "warlock/crates"),
                 (2, "warlock/crates/engine"),
+                (3, "warlock/crates/engine/WARLOCK.md"),
                 (2, "warlock/crates/tui"),
+                (3, "warlock/crates/tui/WARLOCK.md"),
             ]
         );
     }
@@ -5964,9 +6087,15 @@ mod tests {
         let mut app = app_selecting("warlock/assets");
         app.toggle_pacted_only();
 
-        // Down to the last row the narrowed view has, which is a node the wide
-        // view puts somewhere else entirely.
+        // Down to the last row the narrowed view has — `tui`'s document — and
+        // then up onto the node holding it, which the wide view puts somewhere
+        // else entirely.
         app.select_last();
+        assert_eq!(
+            app.selected_row().map(|row| row.path.clone()),
+            Some(PathBuf::from("warlock/crates/tui/WARLOCK.md"))
+        );
+        app.select_previous();
         assert_eq!(
             app.selected_row().map(|row| row.path.clone()),
             Some(PathBuf::from("warlock/crates/tui"))
@@ -5989,9 +6118,11 @@ mod tests {
 
         app.toggle_pacted_only();
 
-        // A row fewer on screen, and the same five nodes tallied: the footer
-        // describes the tree, not the view.
-        assert_eq!(app.rows().len(), 4);
+        // Two rows fewer on screen — `assets` and the document row that goes
+        // with it — and the same five nodes tallied: the footer describes the
+        // tree, not the view.
+        assert_eq!(drawn(&app), pacted_fixture());
+        assert_eq!(node_paths(&app).len(), 4);
         assert_eq!(app.counts(), before);
         assert_eq!(app.counts(), tree.counts());
         assert_eq!(app.counts().total(), 5);
@@ -6006,20 +6137,23 @@ mod tests {
     fn a_directory_collapsed_before_the_filter_is_still_collapsed_after_it() {
         let mut app = app_selecting("warlock/crates");
         app.toggle_collapsed();
-        assert_eq!(drawn(&app), ["warlock", "warlock/crates", "warlock/assets"]);
+        assert_eq!(drawn(&app), collapsed_over_crates());
 
         app.toggle_pacted_only();
 
         // `crates` is unpacted and its descendants are hidden, but it is still
         // the way to them, so it keeps its row: what survives the filter is read
         // off the whole walk, not off what collapsing left drawn.
-        assert_eq!(drawn(&app), ["warlock", "warlock/crates"]);
+        assert_eq!(
+            drawn(&app),
+            ["warlock", "warlock/WARLOCK.md", "warlock/crates"]
+        );
         assert!(app.is_collapsed("warlock/crates"));
 
         app.toggle_pacted_only();
 
         assert!(app.is_collapsed("warlock/crates"));
-        assert_eq!(drawn(&app), ["warlock", "warlock/crates", "warlock/assets"]);
+        assert_eq!(drawn(&app), collapsed_over_crates());
 
         // And the collapse is still a collapse afterwards, not a filter
         // casualty: expanding puts the descendants back.
@@ -6068,16 +6202,22 @@ mod tests {
 
         app.toggle_pacted_only();
 
-        // Newly pacted, so newly worth drawing: the filter reads the states as
-        // they are now, not as the tree was loaded with them.
+        // Newly pacted, so newly worth drawing — and the document row under it
+        // comes back with it, carrying the state that saved them both: the
+        // filter reads the states as they are now, not as the tree was loaded
+        // with them.
         assert_eq!(
             drawn(&app),
             [
                 "warlock",
+                "warlock/WARLOCK.md",
                 "warlock/crates",
                 "warlock/crates/engine",
+                "warlock/crates/engine/WARLOCK.md",
                 "warlock/crates/tui",
+                "warlock/crates/tui/WARLOCK.md",
                 "warlock/assets",
+                "warlock/assets/WARLOCK.md",
             ]
         );
     }
@@ -6118,18 +6258,196 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_app_draws_the_directories_and_not_the_files_in_them() {
+    fn a_fresh_app_draws_the_directories_and_no_file_but_each_ones_document() {
         let app = App::from_tree(&fixture::tree());
 
         assert!(!app.show_files());
         assert_eq!(drawn(&app), whole_fixture());
-        assert!(app.rows().iter().all(|row| !row.is_file()));
-        // Not because the fixture has no files: they are held, and hidden.
+        // Every file row drawn is the document of the directory above it, and
+        // no other file the fixture lists is anywhere on screen.
+        assert!(app.rows().iter().filter(|row| row.is_file()).count() > 0);
+        assert!(
+            app.rows()
+                .iter()
+                .filter(|row| row.is_file())
+                .all(Row::is_document)
+        );
+        for held in ["warlock/README.md", "warlock/assets/logo.svg"] {
+            assert!(
+                !drawn(&app).iter().any(|path| path == held),
+                "{held} is held by a directory, not written by Warlock"
+            );
+        }
+        // And they are hidden rather than absent: the fixture holds them.
         assert!(
             fixture::tree()
                 .walk()
                 .any(|(node, _)| !node.files.is_empty())
         );
+    }
+
+    #[test]
+    fn a_documented_directory_draws_its_document_beneath_it_and_an_undocumented_one_draws_nothing()
+    {
+        // A documented root, an undocumented directory under it, and a
+        // documented one a `.warlockignore` excludes.
+        let tree = Tree::new(
+            Node::new("repo", "repo/WARLOCK.md", NodeState::PactedFresh)
+                .with_files([
+                    PathBuf::from("repo/README.md"),
+                    PathBuf::from("repo/WARLOCK.md"),
+                ])
+                .with_children([
+                    Node::new("repo/crates", None, NodeState::Unpacted),
+                    Node::new("repo/vendor", "repo/vendor/WARLOCK.md", NodeState::Unpacted)
+                        .with_files([PathBuf::from("repo/vendor/WARLOCK.md")])
+                        .with_ignored(true),
+                ]),
+        );
+
+        let app = App::from_tree(&tree);
+
+        assert!(!app.show_files());
+        assert_eq!(
+            drawn(&app),
+            [
+                "repo",
+                "repo/WARLOCK.md",
+                // Nothing under `crates`, which has no document to draw.
+                "repo/crates",
+                "repo/vendor",
+                "repo/vendor/WARLOCK.md",
+            ]
+        );
+        // Exactly the row `f` draws for the same file: a file row, one level
+        // under its directory, carrying that directory's state and its
+        // exclusion flag, and documenting nothing itself.
+        for (directory, document) in [(0, 1), (3, 4)] {
+            let directory = app.rows()[directory].clone();
+            let document = &app.rows()[document];
+            assert_eq!(document.path, directory.path.join("WARLOCK.md"));
+            assert_eq!(
+                Some(document.path.as_path()),
+                directory.document.as_deref(),
+                "the row is the document the node names"
+            );
+            assert_eq!(document.depth, directory.depth + 1);
+            assert!(document.is_file());
+            assert!(document.is_document());
+            assert_eq!(document.state, directory.state);
+            assert_eq!(document.is_ignored(), directory.is_ignored());
+            assert_eq!(document.document, None);
+            assert!(!document.has_children());
+        }
+        assert!(app.rows()[4].is_ignored(), "the excluded one is excluded");
+
+        // And it is the same row, field for field, as the one the file toggle
+        // shows: hiding the files changes which rows are kept, not what a row is.
+        let mut shown = App::from_tree(&tree);
+        shown.toggle_files();
+        for row in app.rows().iter().filter(|row| row.is_file()) {
+            assert!(
+                shown.rows().contains(row),
+                "{} is not the row `f` draws",
+                row.path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn the_filter_keeps_a_pacted_directorys_document_and_drops_a_leftover_one() {
+        // `repo/left` is gray with a `WARLOCK.md` an un-pact left on disk, and
+        // is drawn only as the way down to the pacted node below it.
+        let tree = Tree::new(
+            Node::new("repo", None, NodeState::Unpacted).with_children([Node::new(
+                "repo/left",
+                "repo/left/WARLOCK.md",
+                NodeState::Unpacted,
+            )
+            .with_files([PathBuf::from("repo/left/WARLOCK.md")])
+            .with_children([Node::new(
+                "repo/left/deep",
+                "repo/left/deep/WARLOCK.md",
+                NodeState::PactedFresh,
+            )
+            .with_files([PathBuf::from("repo/left/deep/WARLOCK.md")])])]),
+        );
+        let mut app = App::from_tree(&tree);
+        assert_eq!(
+            drawn(&app),
+            [
+                "repo",
+                "repo/left",
+                "repo/left/WARLOCK.md",
+                "repo/left/deep",
+                "repo/left/deep/WARLOCK.md",
+            ]
+        );
+
+        app.toggle_pacted_only();
+
+        // The pacted directory keeps its document; the gray one keeps its own
+        // row as the way in and loses the leftover document, which carries that
+        // gray state and so has nothing to save it — and could not have saved
+        // the directory above it either.
+        assert_eq!(
+            drawn(&app),
+            [
+                "repo",
+                "repo/left",
+                "repo/left/deep",
+                "repo/left/deep/WARLOCK.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn collapsing_a_documented_directory_takes_its_document_row_with_it() {
+        let mut app = app_selecting("warlock/crates/engine");
+
+        app.toggle_collapsed();
+
+        // The directory keeps its row and its document goes with the rest of
+        // what was under it, because that is where the document row sits.
+        assert_eq!(
+            drawn(&app),
+            [
+                "warlock",
+                "warlock/WARLOCK.md",
+                "warlock/crates",
+                "warlock/crates/engine",
+                "warlock/crates/tui",
+                "warlock/crates/tui/WARLOCK.md",
+                "warlock/assets",
+                "warlock/assets/WARLOCK.md",
+            ]
+        );
+
+        app.toggle_collapsed();
+
+        assert_eq!(drawn(&app), whole_fixture());
+    }
+
+    #[test]
+    fn a_documented_childless_directory_collapses_with_the_files_hidden() {
+        // `warlock/assets` has no child directories, and the tree still says
+        // so — but the default view now draws its document under it, and a row
+        // with something under it is a row the collapse key has work to do on.
+        let mut app = app_selecting("warlock/assets");
+
+        assert!(app.selected_row().is_some_and(|row| !row.has_children()));
+        assert!(app.can_collapse(app.selected()));
+
+        app.toggle_collapsed();
+
+        // Everything but the last row: `assets` keeps its place and its
+        // document is hidden under it.
+        assert_eq!(drawn(&app), whole_fixture()[..8]);
+        assert!(app.is_collapsed("warlock/assets"));
+
+        app.toggle_collapsed();
+
+        assert_eq!(drawn(&app), whole_fixture());
     }
 
     #[test]
@@ -6408,11 +6726,16 @@ mod tests {
 
     #[test]
     fn a_directory_holding_only_files_collapses_exactly_when_the_files_are_shown() {
-        // `warlock/assets` has no child directories and lists two files, so
-        // whether anything is under it is the file toggle's answer and not the
-        // tree's. Asking the tree — `Row::children`, which is 0 here — is what
-        // used to leave the key doing nothing at all on such a row.
-        let mut app = select(App::from_tree(&fixture::tree()), "warlock/assets");
+        // `repo/assets` has no child directories, no document and lists one
+        // file, so whether anything is under it is the file toggle's answer and
+        // not the tree's. Asking the tree — `Row::children`, which is 0 here —
+        // is what used to leave the key doing nothing at all on such a row.
+        let tree = Tree::new(
+            Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
+                .with_children([Node::new("repo/assets", None, NodeState::Unpacted)
+                    .with_files([PathBuf::from("repo/assets/logo.svg")])]),
+        );
+        let mut app = select(App::from_tree(&tree), "repo/assets");
         let selected = app.selected();
 
         assert!(!app.can_collapse(selected), "nothing is drawn under it");
@@ -6424,7 +6747,7 @@ mod tests {
         app.toggle_files();
         let selected = app.selected();
 
-        assert!(app.can_collapse(selected), "now two file rows are");
+        assert!(app.can_collapse(selected), "now a file row is");
         app.toggle_collapsed();
         assert_eq!(
             app.collapsed().len(),
@@ -6474,11 +6797,12 @@ mod tests {
 
     #[test]
     fn hiding_the_files_under_the_selection_lands_it_on_the_directory() {
-        let mut app = app_with_files_selecting("warlock/crates/engine/WARLOCK.md");
+        let mut app = app_with_files_selecting("warlock/crates/engine/Cargo.toml");
 
         app.toggle_files();
 
-        // The file's row is gone, and what it went behind is the directory that
+        // The file's row is gone — it is an ordinary file, not the document the
+        // hidden view keeps — and what it went behind is the directory that
         // held it.
         assert_eq!(
             app.selected_row().map(|row| row.path.clone()),
@@ -7540,9 +7864,10 @@ mod tests {
         let reseated = reseat_on(&app, &fixture::tree_after_a_run());
 
         // The same five nodes, and the one the run worked on carrying the
-        // document it wrote, in the state the new tree gives it.
-        assert_eq!(drawn(&reseated), whole_fixture());
-        let crates = &reseated.rows()[1];
+        // document it wrote, in the state the new tree gives it — and drawing
+        // that document beneath it, which is the row the whole view is for.
+        assert_eq!(drawn(&reseated), whole_fixture_after_a_run());
+        let crates = &reseated.rows()[2];
         assert_eq!(crates.path, PathBuf::from("warlock/crates"));
         assert_eq!(
             crates.document,
@@ -7552,8 +7877,9 @@ mod tests {
         assert_eq!(crates.state, NodeState::PactedFresh);
         // The old app still says what it always said: a re-seat builds a new
         // value rather than editing the one it was handed.
-        assert_eq!(app.rows()[1].document, None);
-        assert_eq!(app.rows()[1].state, NodeState::Unpacted);
+        assert_eq!(app.rows()[2].path, PathBuf::from("warlock/crates"));
+        assert_eq!(app.rows()[2].document, None);
+        assert_eq!(app.rows()[2].state, NodeState::Unpacted);
 
         assert_eq!(reseated.counts(), fixture::tree_after_a_run().counts());
         assert_eq!(tally(&reseated), reseated.counts());
