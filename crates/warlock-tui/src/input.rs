@@ -114,6 +114,27 @@ pub(crate) enum Action {
     /// refused in the terms its own row makes available. This function's
     /// business is that the key was pressed.
     ViewFile,
+    /// Show the panel's other card: the account if the document is up, the
+    /// document if the account is.
+    ///
+    /// One action rather than a show-the-account and a show-the-document, for
+    /// [`Action::ToggleFocus`]'s reason: the panel is one slot holding two
+    /// cards, so "show the other one" is the whole of what a reader can mean by
+    /// pressing the key, and a pair of actions would be two names for the same
+    /// keystroke read twice.
+    ///
+    /// It is the only thing besides [`Action::ViewFile`] that decides which card
+    /// is on screen, which is what makes a document survive a pact starting,
+    /// finishing, failing or being cancelled underneath it. It reads nothing,
+    /// writes nothing and starts nothing — the cards are already in hand — so a
+    /// run in flight is no reason to refuse it, and it means the same thing
+    /// during a pact as outside one.
+    ///
+    /// The one refusal it can come to — no document read yet this session, so
+    /// there is no second card to swap to — is the app's answer, exactly as a
+    /// directory row is for [`Action::ViewFile`]. This function's business is
+    /// that the key was pressed.
+    SwapCard,
     /// Stop the terminal reporting its mouse, or ask it to start again if it has
     /// been stopped.
     ///
@@ -173,12 +194,21 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
         // stops being a way out for as long as there is a run to stop.
         KeyCode::Esc if in_flight => Some(Action::CancelPact),
         KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
-        // Tab is the key every two-pane program moves focus with, and it is the
-        // only new binding here: it takes no argument and asks no question, so
-        // it means the same thing whether or not a pact is in flight, exactly
-        // like every key below it. Shift-Tab is a different keystroke and is not
-        // bound — with two panes there is no "backwards" for it to mean.
+        // Tab is the key every two-pane program moves focus with: it takes no
+        // argument and asks no question, so it means the same thing whether or
+        // not a pact is in flight, exactly like every key below it.
         KeyCode::Tab => Some(Action::ToggleFocus),
+        // Shift-Tab is a different keystroke, and crossterm spells it
+        // `BackTab` — the terminal sends its own code for it, so there is no
+        // shift riding along on a `Tab` to match against and nothing here that
+        // could confuse the two. It is the panel's key rather than focus's: with
+        // two panes there is no "backwards" for it to mean, and with two cards
+        // in one slot there is exactly one other thing a reader can be asking
+        // for. Like every key but Esc it reads the same way with a run in flight
+        // as without one — the cards are already in hand, so there is nothing
+        // for a run to race — and what a session with no document read yet comes
+        // to is the app's answer, exactly as a directory row is for `v`.
+        KeyCode::BackTab => Some(Action::SwapCard),
         KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectPrevious),
         KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
         KeyCode::PageUp => Some(Action::SelectPageUp),
@@ -600,6 +630,7 @@ mod tests {
             KeyCode::Char('s'),
             KeyCode::Char('v'),
             KeyCode::Tab,
+            KeyCode::BackTab,
             KeyCode::Char('x'),
         ];
 
@@ -677,7 +708,8 @@ mod tests {
     fn tab_is_the_only_key_that_moves_focus() {
         // Its neighbours on the keyboard and the keys it sits between in the
         // match arms above, plus the back-tab a terminal sends for Shift-Tab,
-        // which is a keystroke of its own and is not bound.
+        // which is a keystroke of its own: it swaps the panel's card, and moving
+        // focus is the one thing it must not be confused with.
         for code in [
             KeyCode::BackTab,
             KeyCode::Esc,
@@ -1190,6 +1222,70 @@ mod tests {
     }
 
     #[test]
+    fn shift_tab_swaps_the_panel_card_with_a_run_in_flight_or_without_one() {
+        // Crossterm spells Shift-Tab `BackTab`, and like every key but Esc it
+        // means one thing in both situations — here there is nothing the mode
+        // could change even in principle: both cards are already in the app, so
+        // a swap races nothing and there is no run for it to be refused as. A
+        // run that could take a document off the screen is the whole thing this
+        // binding exists to prevent.
+        for in_flight in [false, true] {
+            assert_eq!(
+                action_for(press(KeyCode::BackTab), in_flight),
+                Some(Action::SwapCard),
+                "Shift-Tab should swap the card with a run in flight = {in_flight}"
+            );
+        }
+    }
+
+    #[test]
+    fn releases_and_repeats_of_shift_tab_swap_nothing() {
+        // The same rule as Tab, and with the same consequence: a release acted
+        // on would swap straight back to the card the press had just left, so
+        // one keystroke would look like none at all.
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                KeyCode::BackTab,
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                action_for(event, false),
+                None,
+                "{kind:?} of Shift-Tab should swap nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn shift_tab_is_the_only_key_that_swaps_the_card() {
+        // Tab first, because the two are one shift apart and a terminal that
+        // reported the modifier on an ordinary `Tab` is the accident worth
+        // catching; then the keys it sits between in the match arms above and
+        // `v`, which is the other key that decides what the panel shows.
+        for code in [
+            KeyCode::Tab,
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Char('v'),
+            KeyCode::Char(' '),
+        ] {
+            assert_ne!(
+                action_for(press(code), false),
+                Some(Action::SwapCard),
+                "{code:?} should not swap the panel's card"
+            );
+            assert_ne!(
+                action_for(press(code), true),
+                Some(Action::SwapCard),
+                "{code:?} should not swap the panel's card mid-run"
+            );
+        }
+    }
+
+    #[test]
     fn m_toggles_the_mouse_with_a_pact_in_flight_or_without_one() {
         // The one key here that is about the terminal rather than the tree, and
         // it reads the same way in both situations — like everything but Esc.
@@ -1231,6 +1327,7 @@ mod tests {
                 Action::Refresh,
                 Action::OpenScope,
                 Action::ViewFile,
+                Action::SwapCard,
             ] {
                 assert_ne!(action, Some(other), "m should not mean {other:?}");
             }
@@ -1346,7 +1443,7 @@ mod tests {
         /// Every key the tree answers to, plus a character bound to nothing:
         /// the list either window has to swallow whole, so that no keystroke
         /// reaches the app behind it.
-        const INERT: [KeyCode; 18] = [
+        const INERT: [KeyCode; 19] = [
             KeyCode::Char('j'),
             KeyCode::Char('k'),
             KeyCode::Char('g'),
@@ -1360,6 +1457,7 @@ mod tests {
             KeyCode::Char('v'),
             KeyCode::Char('m'),
             KeyCode::Tab,
+            KeyCode::BackTab,
             KeyCode::PageUp,
             KeyCode::PageDown,
             KeyCode::Up,
@@ -1511,6 +1609,14 @@ mod tests {
                 Pressed::Act(Action::ToggleCollapsed) => app.toggle_collapsed(),
                 Pressed::Act(Action::TogglePactedOnly) => app.toggle_pacted_only(),
                 Pressed::Act(Action::ToggleFiles) => app.toggle_files(),
+                // With the plain arms rather than the panicking ones below: a
+                // swap is answered by the app between two frames, like a
+                // collapse or a filter, and it starts no worker, opens no window
+                // and writes nothing to the terminal. What matters here is that
+                // it is done at all — a Shift-Tab that leaked past either window
+                // would change the card under it, which is exactly what the
+                // `app == before` assertions are watching for.
+                Pressed::Act(Action::SwapCard) => app.swap_card(),
                 Pressed::Act(
                     action @ (Action::CancelPact
                     | Action::TogglePact
