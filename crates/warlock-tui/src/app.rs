@@ -854,30 +854,82 @@ struct Status {
 /// live app and steal back the four fields that must not roll back. It is a
 /// field move now.
 ///
-/// `account` is what the pact running now, or the last one to run, has been seen
-/// doing. It is `None` until the first pact of the session, which is not the
-/// same as an empty account: an app that has never run a pact has nothing to
-/// draw in the panel at all, not even a heading, and the difference between "no
-/// account" and "an account with no lines yet" is the difference between a blank
-/// panel and one that has started. [`App::start_account`] is what turns the one
-/// into the other, and a second pact starts a second account rather than
-/// appending to the first: one pact, one account.
+/// `content` is what the panel is holding: the account of a pact, the lines of a
+/// file somebody asked to read, or nothing at all. It is [`Content::Nothing`]
+/// until the first pact or the first read of the session, which is not the same
+/// as an empty account: an app that has never run a pact has nothing to draw in
+/// the panel at all, not even a heading, and the difference between "no account"
+/// and "an account with no lines yet" is the difference between a blank panel
+/// and one that has started. [`App::start_account`] is what turns the one into
+/// the other, and a second pact starts a second account rather than appending to
+/// the first: one pact, one account.
 ///
-/// `height`, `offset` and `follows` are that account's window, and are to the
+/// `height`, `offset` and `follows` are that content's window, and are to the
 /// panel what `viewport_height` and `scroll_offset` are to the tree — with one
 /// difference, which is the flag. The tree's window is dragged about by a
 /// selection; the panel has no selection, so its window is either pinned to the
 /// newest line or parked where the reader put it, and `follows` says which.
 /// While it is set, `offset` is not read at all: the offset is the end of the
-/// account, worked out from the line count at the moment it is asked for, so
+/// content, worked out from the line count at the moment it is asked for, so
 /// appending a line moves the window without anybody having to tell the window
 /// that a line was appended. See [`App::panel_scroll_offset`].
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Panel {
-    account: Option<Account>,
+    content: Content,
     height: usize,
     offset: usize,
     follows: bool,
+}
+
+/// What the panel is holding: nothing, the account of a pact, or a document
+/// somebody asked to read.
+///
+/// One thing at a time, said as an enum rather than as two `Option` fields, so
+/// that "the panel is showing the account *and* a file" is not a state this can
+/// be in at all. Reading a file over an account throws the account away and a
+/// pact starting throws the document away, and neither of those is a decision
+/// any caller gets to half-make.
+///
+/// A document is its lines, already worded — the file's own lines, and the one
+/// sentence about a read the cap cut short, which is the only line in here the
+/// file did not write. [`App`] never holds the path it came from and never opens
+/// anything: what reaches it is text, from whoever did the reading.
+#[derive(Debug, Clone, Default, PartialEq)]
+enum Content {
+    /// Nothing has happened yet: no pact has run this session and no file has
+    /// been read. The panel draws warlock's mark and not one word.
+    #[default]
+    Nothing,
+    /// The account of the pact running now, or of the last one to run.
+    Account(Account),
+    /// The lines of the file last read, from its first line.
+    Document(Vec<Line>),
+}
+
+impl Content {
+    /// How many rows this draws as: an account's lines, a document's lines, or
+    /// none at all.
+    fn line_count(&self) -> usize {
+        match self {
+            Self::Nothing => 0,
+            Self::Account(account) => account.line_count(),
+            Self::Document(lines) => lines.len(),
+        }
+    }
+
+    /// The `height` rows starting at `offset`, with any clocks measured against
+    /// `now`.
+    ///
+    /// A document has no clock in it, so `now` reaches only the account — which
+    /// is why the window is asked of the content rather than of the account: the
+    /// panel draws one list, and which list it is is this type's business.
+    fn window(&self, offset: usize, height: usize, now: Instant) -> Vec<Line> {
+        match self {
+            Self::Nothing => Vec::new(),
+            Self::Account(account) => account.window(offset, height, now),
+            Self::Document(lines) => lines.iter().skip(offset).take(height).cloned().collect(),
+        }
+    }
 }
 
 impl App {
@@ -998,7 +1050,7 @@ impl App {
                 mouse_captured: false,
             },
             panel: Panel {
-                account: None,
+                content: Content::Nothing,
                 height: 0,
                 offset: 0,
                 follows: false,
@@ -1327,28 +1379,94 @@ impl App {
     /// Not a keystroke — the pact key reaches this by way of whoever starts the
     /// run — so it neither says anything nor takes down what the last keystroke
     /// said.
+    ///
+    /// A document in the panel goes here: the panel holds one thing at a time,
+    /// and what a run is doing now is the thing a reader who just started one is
+    /// looking for.
     pub fn start_account(&mut self, at: Instant) {
-        self.panel.account = Some(Account::new(at));
+        self.panel.content = Content::Account(Account::new(at));
         self.panel.offset = 0;
         self.panel.follows = true;
     }
 
-    /// Whether a pact has run this session, and so whether the panel has
-    /// anything at all to draw.
+    /// Put the lines of a file in the panel, from its first line, throwing away
+    /// whatever was there.
     ///
-    /// `false` until [`App::start_account`], and `true` for ever after: an
-    /// account that has finished is still an account, and it stays on screen to
-    /// be read once the run that made it is over.
+    /// The read happened somewhere else. What arrives here is text — the file's
+    /// own lines, in order — and a yes-or-no about whether the cap cut the read
+    /// short; never a path, because a path is something that would have to be
+    /// opened later and [`App`] opens nothing. Whoever pressed the key did the
+    /// reading, worded any failure on [`App::message`], and calls this only when
+    /// there is something to show.
+    ///
+    /// `cut` adds one line under the last of the file's own, saying so. It is the
+    /// only line in the panel a document did not write, and it is added here
+    /// rather than by the reader because the words are the screen's: the engine
+    /// hands over the fact and nothing else.
+    ///
+    /// The window goes to the top and does not follow. A file is read from its
+    /// first line — a document pinned to its own last line would be a log — and
+    /// the follow rule that keeps a live account's newest line on the bottom row
+    /// has nothing to be true of here, since nothing is appended to a file that
+    /// has been read.
+    ///
+    /// Not a keystroke's whole answer: it neither says anything nor takes down
+    /// what the last keystroke said, exactly as [`App::start_account`] does not.
+    pub fn show_document(&mut self, lines: impl IntoIterator<Item = impl Into<String>>, cut: bool) {
+        let mut lines: Vec<Line> = lines
+            .into_iter()
+            .map(|text| Line::Text { text: text.into() })
+            .collect();
+        if cut {
+            lines.push(Line::Text {
+                text: cut_at_cap_message(),
+            });
+        }
+        self.panel.content = Content::Document(lines);
+        self.panel.offset = 0;
+        self.panel.follows = false;
+    }
+
+    /// Whether a pact has run this session, and so whether the panel has an
+    /// account to draw.
+    ///
+    /// `false` until [`App::start_account`], and `true` until a document takes
+    /// the panel: an account that has finished is still an account, and it stays
+    /// on screen to be read once the run that made it is over.
     #[must_use]
     pub const fn has_account(&self) -> bool {
-        self.panel.account.is_some()
+        matches!(self.panel.content, Content::Account(_))
+    }
+
+    /// Whether the panel is holding a file somebody asked to read.
+    ///
+    /// The other half of [`App::has_account`], and never `true` at the same
+    /// time: the panel holds one thing at a time. `false` until the first
+    /// [`App::show_document`], and `false` again from the moment a pact starts an
+    /// account.
+    #[must_use]
+    pub const fn has_document(&self) -> bool {
+        matches!(self.panel.content, Content::Document(_))
+    }
+
+    /// Whether the panel has anything at all to draw, of either kind.
+    ///
+    /// What the renderer asks before it draws warlock's mark instead: the mark is
+    /// what is there while nothing has happened, and either an account or a
+    /// document is something having happened.
+    #[must_use]
+    pub const fn has_panel_content(&self) -> bool {
+        !matches!(self.panel.content, Content::Nothing)
     }
 
     /// The account of the pact running now, or of the last one to run, or `None`
-    /// before the first pact of the session.
+    /// before the first pact of the session and while a document has the panel.
     #[must_use]
     pub const fn account(&self) -> Option<&Account> {
-        self.panel.account.as_ref()
+        match &self.panel.content {
+            Content::Account(account) => Some(account),
+            Content::Nothing | Content::Document(_) => None,
+        }
     }
 
     /// The same account, to record what the run has just been seen doing.
@@ -1360,9 +1478,13 @@ impl App {
     /// line recorded through here is on screen at the bottom of the next frame
     /// without this type being told about it.
     ///
-    /// `None` before the first pact, where there is nothing to record against.
+    /// `None` before the first pact, where there is nothing to record against,
+    /// and `None` while a document has the panel.
     pub const fn account_mut(&mut self) -> Option<&mut Account> {
-        self.panel.account.as_mut()
+        match &mut self.panel.content {
+            Content::Account(account) => Some(account),
+            Content::Nothing | Content::Document(_) => None,
+        }
     }
 
     /// Put `view` back in place of this app, keeping this app's panel.
@@ -1385,14 +1507,14 @@ impl App {
         self.panel = panel;
     }
 
-    /// How many lines of account fit in the panel, as last set by
+    /// How many lines of whatever the panel holds fit in it, as last set by
     /// [`App::set_panel_height`].
     #[must_use]
     pub const fn panel_height(&self) -> usize {
         self.panel.height
     }
 
-    /// Tell the app how many lines of account fit in the panel.
+    /// Tell the app how many lines fit in the panel.
     ///
     /// The panel's [`App::set_viewport_height`], and a field for the same reason:
     /// only the layout knows the height, only the frame knows when it changed,
@@ -1413,26 +1535,31 @@ impl App {
     /// starts and where the end-of-list movement key puts it back. `false` from
     /// the moment the reader scrolls up, until they scroll back down to the end
     /// or ask for it outright. See [`App::select_last`].
+    ///
+    /// `false` for a document from the moment it arrives, wherever its window
+    /// is: nothing is ever appended to a file that has been read, so there is no
+    /// newest line to be pinned to.
     #[must_use]
     pub const fn panel_follows(&self) -> bool {
         self.panel.follows
     }
 
-    /// Which line of the account is drawn at the top of the panel.
+    /// Which line of what the panel holds is drawn at its top row.
     ///
     /// Derived rather than stored while the panel is following: the answer is
     /// then the end of the account, which changes every time a line is
     /// appended, and computing it here is what keeps the newest line pinned to
     /// the bottom without anything having to be recomputed as the run reports.
     /// Parked, it is where the reader left the window, clamped to what the
-    /// account's length allows.
+    /// content's length allows — which is where a document starts, since a file
+    /// is read from its first line and nothing follows it.
     ///
-    /// `0` for an app with no account, and for a panel shorter than the account
-    /// it holds is the first line of the last screenful.
+    /// `0` for an app with an empty panel, and for a panel shorter than the
+    /// account it holds is the first line of the last screenful.
     #[must_use]
     pub fn panel_scroll_offset(&self) -> usize {
         panel_offset_for(
-            self.account_line_count(),
+            self.panel_line_count(),
             self.panel.height,
             self.panel.offset,
             self.panel.follows,
@@ -1442,39 +1569,38 @@ impl App {
     /// The lines the panel draws now, with every clock measured against `now`.
     ///
     /// The window [`App::panel_scroll_offset`] describes, [`App::panel_height`]
-    /// lines of it, and empty for an app with no account. `now` is the caller's,
-    /// because the newest line of a live section counts up between events and the
-    /// only thing that knows what the time is when a frame is drawn is whoever is
-    /// drawing it.
+    /// lines of it, and empty for an app whose panel holds nothing. `now` is the
+    /// caller's, because the newest line of a live section counts up between
+    /// events and the only thing that knows what the time is when a frame is
+    /// drawn is whoever is drawing it. A document has no clock in it and so does
+    /// not move with `now` at all.
     #[must_use]
     pub fn panel_lines(&self, now: Instant) -> Vec<Line> {
         self.panel
-            .account
-            .as_ref()
-            .map_or_else(Vec::new, |account| {
-                account.window(self.panel_scroll_offset(), self.panel.height, now)
-            })
+            .content
+            .window(self.panel_scroll_offset(), self.panel.height, now)
     }
 
-    /// How many lines of the account sit below the panel's window.
+    /// How many lines of what the panel holds sit below its window.
     ///
     /// `0` while the panel is showing the end of the account, which is what an
     /// indicator saying how far back the reader has scrolled is switched off by,
-    /// and `0` for an app with no account at all. Independent of `now`: the
-    /// clocks move, the number of lines does not.
+    /// and `0` for an app whose panel holds nothing at all. Independent of `now`:
+    /// the clocks move, the number of lines does not.
     ///
-    /// A panel nobody has measured draws nothing, so the whole account is below
+    /// A panel nobody has measured draws nothing, so the whole of it is below
     /// it — which no frame ever sees, since a frame that asks this has just told
     /// the app how tall the panel it is drawing is.
     #[must_use]
     pub fn panel_lines_below(&self) -> usize {
-        self.account_line_count()
+        self.panel_line_count()
             .saturating_sub(self.panel_scroll_offset() + self.panel.height)
     }
 
-    /// How many lines the account draws as, or none where there is no account.
-    fn account_line_count(&self) -> usize {
-        self.panel.account.as_ref().map_or(0, Account::line_count)
+    /// How many lines what the panel holds draws as, or none where it holds
+    /// nothing.
+    fn panel_line_count(&self) -> usize {
+        self.panel.content.line_count()
     }
 
     /// Every row that is drawn, in the order it is drawn: the engine's walk
@@ -1982,7 +2108,7 @@ impl App {
         // Where the end is, asked of the one function that decides it, so that
         // "as far down as the account goes" means the same thing to a keystroke
         // as it does to the frame being drawn.
-        let end = panel_offset_for(self.account_line_count(), self.panel.height, 0, true);
+        let end = panel_offset_for(self.panel_line_count(), self.panel.height, 0, true);
         self.panel.offset = offset.min(end);
         self.panel.follows = self.panel.offset == end;
     }
@@ -2349,6 +2475,54 @@ impl App {
             // is written on. Not a line of state is touched on the way out.
             NodeState::PactedFresh | NodeState::PactedStale => Some(path),
         }
+    }
+
+    /// Say which file the view key would read, and say why not when there is
+    /// none.
+    ///
+    /// [`App::scope_target`]'s shape for the other key: it decides what the press
+    /// means on the row the selection is on, words any refusal, and hands the
+    /// file back for whoever actually opens it and puts its lines in the panel
+    /// with [`App::show_document`]. `None` means nothing should be read.
+    ///
+    /// A file row is the yes, and it is the only one. Warlock reads a file, and
+    /// the design doc's rule that a file has no state of its own is not bent
+    /// here: a `WARLOCK.md` is an ordinary file row, so the document of a pacted
+    /// directory is read by pressing the key on the document's own row, in
+    /// whatever state or colour that row is drawn.
+    ///
+    /// A directory is the no, and it is refused in the terms the row it is on
+    /// makes available, each said through [`App::message`]:
+    ///
+    /// - a directory that has a `WARLOCK.md` is one keystroke away from what the
+    ///   reader wanted, so the refusal names that document — the row beneath the
+    ///   directory — rather than only saying no;
+    /// - a directory with no `WARLOCK.md` has nothing to read at all, so the
+    ///   refusal names `p`, exactly as [`unpacted_scope_message`] does: a pact is
+    ///   what would write the document this key would then read.
+    ///
+    /// A press that goes through changes *nothing whatever*, [`App::scope_target`]
+    /// fashion, and that includes the message line and the panel: the reading has
+    /// not happened yet, and a panel cleared here would blank on a read that then
+    /// failed. Nothing is repainted, no tally moves, no selection moves and no run
+    /// is touched.
+    ///
+    /// Nothing here opens, reads or writes anything: this is app state, and the
+    /// path handed back is the row's own — the only filesystem fact in the answer
+    /// is the one the walk already put on the row.
+    pub fn view_target(&mut self) -> Option<PathBuf> {
+        let row = self.rows.get(self.selected)?;
+        let path = row.path.clone();
+        let document = row.document.clone();
+
+        if row.is_file() {
+            return Some(path);
+        }
+        self.status.message = Some(document.map_or_else(
+            || undocumented_view_message(&self.label_for(&path)),
+            |document| directory_view_message(&self.label_for(&path), &self.label_for(&document)),
+        ));
+        None
     }
 
     /// Put the directory at `path`, every directory below it and every file
@@ -3056,6 +3230,48 @@ fn unpacted_scope_message(label: &str) -> String {
     format!("{label} is not pacted — press p to pact it, and there will be a pact to scope")
 }
 
+/// What the app says when the view key is pressed on a directory that has a
+/// `WARLOCK.md`, naming the directory as `label` and its document as `document`.
+///
+/// The refusal names the row that would have worked, because it is directly
+/// beneath this one and the reader is one keystroke from what they asked for. A
+/// directory is not a thing there is text of — the text is in the document — and
+/// this is the whole of how that is told, in the shape [`unpacted_scope_message`]
+/// established: the fact about the row, then the key or the row that would help.
+fn directory_view_message(label: &str, document: &str) -> String {
+    format!("{label} is a directory — press v on {document}, the row beneath it, to read it")
+}
+
+/// What the app says when the view key is pressed on a directory with no
+/// `WARLOCK.md`, naming it as `label`.
+///
+/// [`directory_view_message`] with nothing to point at, so it points at the key
+/// that would make something to point at: a pact is what writes a document, and
+/// a directory with none has nothing whatever to read. Named `p` for
+/// [`unpacted_message`]'s reason — the reader is one keystroke from the thing
+/// they wanted to exist, and the two keys sit next to each other in the footer.
+///
+/// This is the answer for an unpacted directory and for a pacted one whose
+/// document has not been written yet alike: what decides the wording is whether
+/// there is a document to read, which is the question the key asks.
+fn undocumented_view_message(label: &str) -> String {
+    format!(
+        "{label} is a directory with no WARLOCK.md — press p to pact it, and there will be a document to read"
+    )
+}
+
+/// The one line a document gets that the file did not write: that the read
+/// stopped at the cap and the file goes on past it.
+///
+/// Worded here rather than by whoever did the reading, because the engine hands
+/// over the cut as a fact and the words on a screen are the screen's. It names
+/// no size: the cap is a number the reader cannot do anything with, while "there
+/// is more of this file than you are looking at" is the whole of what they need
+/// to know before judging what they are reading.
+fn cut_at_cap_message() -> String {
+    "— cut here: the file goes on past this line, and Warlock reads no further".to_owned()
+}
+
 /// What the app says while a summarising pass over the file named `label` is
 /// running inside the directory `pacting` — a line from [`pacting_message`] or
 /// [`refreshing_message`] — is about: that same line with
@@ -3142,8 +3358,8 @@ mod tests {
     use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
     use super::{
-        Account, App, Chrome, Focus, Line, PactToggle, Row, Run, Sigils, panel_offset_for,
-        reseat_on, scroll_offset_for,
+        Account, App, Chrome, Focus, Line, PactToggle, Row, Run, Sigils, cut_at_cap_message,
+        panel_offset_for, reseat_on, scroll_offset_for,
     };
     use crate::claude::Activity;
     use crate::fixture;
@@ -6380,7 +6596,9 @@ mod tests {
             .into_iter()
             .map(|line| match line {
                 Line::Directory { path } => path.display().to_string(),
-                Line::Clocked { text, .. } | Line::Summary { text } => text,
+                // A document's line is its own text and nothing else, which is
+                // exactly what a test asserting on what is drawn wants back.
+                Line::Clocked { text, .. } | Line::Summary { text } | Line::Text { text } => text,
             })
             .collect()
     }
@@ -6615,6 +6833,178 @@ mod tests {
             assert_eq!(panel_offset_for(0, 3, 2, following), 0);
             assert_eq!(panel_offset_for(10, 0, 2, following), 0);
         }
+    }
+
+    /// The lines of a small file, as whoever read it would hand them over.
+    fn document_lines() -> Vec<String> {
+        (0..5).map(|line| format!("line {line}")).collect()
+    }
+
+    #[test]
+    fn a_document_is_drawn_from_its_first_line_in_the_order_it_was_given() {
+        let now = Instant::now();
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_panel_height(PANEL);
+
+        app.show_document(document_lines(), false);
+
+        // The window is the top of the file: a file is read from its first line,
+        // and nothing is appended to it for the panel to follow.
+        assert!(app.has_document());
+        assert!(!app.panel_follows());
+        assert_eq!(app.panel_scroll_offset(), 0);
+        assert_eq!(panel_text(&app, now), ["line 0", "line 1", "line 2"]);
+        // And the count agrees with what was handed over: five lines, three of
+        // them on screen.
+        assert_eq!(app.panel_lines_below(), 5 - usize::from(PANEL));
+
+        // A panel tall enough for the whole file draws the whole file, in order,
+        // with nothing below it.
+        app.set_panel_height(9);
+        assert_eq!(panel_text(&app, now), document_lines());
+        assert_eq!(app.panel_lines_below(), 0);
+    }
+
+    #[test]
+    fn a_read_the_cap_cut_short_says_so_under_the_last_line_it_got() {
+        let now = Instant::now();
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_panel_height(9);
+
+        app.show_document(document_lines(), true);
+
+        // One line more than the file's own, and it is the last one: what the
+        // reader is looking at stops here and the file does not.
+        let drawn = panel_text(&app, now);
+        assert_eq!(drawn.len(), document_lines().len() + 1);
+        assert_eq!(drawn[..5], document_lines()[..]);
+        let cut = drawn.last().expect("a cut read says so");
+        assert!(cut.contains("cut"), "{cut}");
+        assert_eq!(cut, &cut_at_cap_message());
+
+        // A read that fitted says nothing at all: the line is about the cut and
+        // not about the reading.
+        app.show_document(document_lines(), false);
+        assert_eq!(panel_text(&app, now), document_lines());
+    }
+
+    #[test]
+    fn a_document_and_an_account_take_the_panel_from_each_other() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        assert!(app.has_account());
+
+        app.show_document(document_lines(), false);
+
+        // One thing at a time: the account is gone, and gone from the getters
+        // that hand it out as well as from the panel.
+        assert!(app.has_document());
+        assert!(!app.has_account());
+        assert_eq!(app.account(), None);
+        assert_eq!(app.account_mut(), None);
+        assert!(app.has_panel_content());
+        assert_eq!(panel_text(&app, at(base, 9))[0], "line 0");
+
+        // And a pact starting takes it back, on the account's own terms: empty,
+        // at the top, following.
+        app.start_account(at(base, 100));
+        assert!(app.has_account());
+        assert!(!app.has_document());
+        assert_eq!(app.panel_lines(at(base, 100)), Vec::new());
+        assert!(app.panel_follows());
+    }
+
+    #[test]
+    fn an_empty_document_is_still_something_the_panel_is_holding() {
+        let now = Instant::now();
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_panel_height(PANEL);
+
+        app.show_document(Vec::<String>::new(), false);
+
+        // An empty file read is not the same as nothing having happened: the
+        // panel is holding it, so the mark does not come back.
+        assert!(app.has_document());
+        assert!(app.has_panel_content());
+        assert_eq!(app.panel_lines(now), Vec::new());
+        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(app.panel_scroll_offset(), 0);
+    }
+
+    #[test]
+    fn a_file_row_hands_its_own_path_to_the_view_key_and_changes_nothing() {
+        // A `WARLOCK.md` is an ordinary file row, so both kinds are the yes.
+        for path in ["warlock/assets/logo.svg", "warlock/crates/tui/WARLOCK.md"] {
+            let mut app = app_with_files_selecting(path);
+            app.set_message("something the last keystroke said");
+            let before = app.clone();
+
+            let asked = app.view_target();
+
+            assert_eq!(asked, Some(PathBuf::from(path)), "{path}");
+            // Nothing moved — not the message, not the panel, nothing: the
+            // reading has not happened yet.
+            assert_eq!(app, before, "an accepted press moved something on {path}");
+            assert!(!app.has_panel_content(), "{path} drew something");
+        }
+    }
+
+    #[test]
+    fn a_documented_directory_is_refused_by_the_view_key_naming_its_document() {
+        // Pacted or not: what decides the wording is whether there is a document
+        // to read, and `warlock/assets` has one without a manifest entry.
+        for (path, document) in [
+            ("warlock/crates/tui", "warlock/crates/tui/WARLOCK.md"),
+            ("warlock/assets", "warlock/assets/WARLOCK.md"),
+        ] {
+            let mut app = app_selecting(path);
+            let mut before = app.clone();
+
+            assert_eq!(app.view_target(), None, "{path} was read");
+
+            let message = app.message().expect("a directory row is refused");
+            assert!(
+                message.starts_with(&format!("{path} is a directory")),
+                "{message}"
+            );
+            // The row that would have worked is named, because it is the next
+            // one down.
+            assert!(message.contains(document), "{message}");
+            // The message is the whole of what the press changed, and the panel
+            // is untouched.
+            before.set_message(message);
+            assert_eq!(app, before, "refusing {path} moved something else");
+            assert!(!app.has_panel_content(), "{path} drew something");
+        }
+    }
+
+    #[test]
+    fn an_undocumented_directory_is_refused_by_the_view_key_naming_the_pact_key() {
+        let mut app = app_selecting("warlock/crates");
+        let mut before = app.clone();
+
+        assert_eq!(app.view_target(), None, "an undocumented row was read");
+
+        let message = app.message().expect("a directory row is refused");
+        assert!(
+            message.starts_with("warlock/crates is a directory"),
+            "{message}"
+        );
+        // Nothing to point at, so it points at the key that would make
+        // something to point at.
+        assert!(message.contains("press p to pact it"), "{message}");
+        before.set_message(message);
+        assert_eq!(app, before, "refusing a directory moved something else");
+        assert!(!app.has_panel_content(), "the refusal drew something");
+    }
+
+    #[test]
+    fn an_app_with_no_rows_views_nothing() {
+        let mut app = App::from_rows(Vec::new());
+
+        assert_eq!(app.view_target(), None);
+        assert_eq!(app.message(), None);
+        assert!(!app.has_panel_content());
     }
 
     /// How many rows or lines the tests below move by where they stand in for

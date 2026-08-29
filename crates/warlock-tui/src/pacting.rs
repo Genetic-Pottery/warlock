@@ -1465,7 +1465,9 @@ mod tests {
             .map(|line| match line {
                 Line::Directory { path } => path.display().to_string(),
                 Line::Clocked { clock, text } => format!("{clock} {text}"),
-                Line::Summary { text } => text.clone(),
+                // An account never yields a document's line; the arm is here so
+                // the match is over the whole of what the panel can draw.
+                Line::Summary { text } | Line::Text { text } => text.clone(),
             })
             .collect()
     }

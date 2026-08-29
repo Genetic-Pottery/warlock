@@ -95,8 +95,9 @@ mod watch;
 /// Everything one pact did, in the order it did it: a section per directory, a
 /// line per thing a pass was seen doing, and a clock on every line.
 pub use account::Account;
-/// One drawable row of an [`Account`]: a section heading, a clocked line, or the
-/// run's closing summary.
+/// One drawable row of the panel: a section heading, a clocked line or the run's
+/// closing summary of an [`Account`], or one line of a file somebody asked to
+/// read.
 pub use account::Line;
 /// How a directory's pass ended, in the words it ends its section with.
 pub use account::Outcome;

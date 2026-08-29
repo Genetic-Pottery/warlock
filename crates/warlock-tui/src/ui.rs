@@ -1063,26 +1063,28 @@ fn pane_block(focused: bool) -> Block<'static> {
     Block::bordered().border_style(style)
 }
 
-/// Draw the panel: the window onto the account of the pact, one row per line,
-/// inside its border.
+/// Draw the panel: the window onto what it holds — the account of the pact, or a
+/// file somebody asked to read — one row per line, inside its border.
 ///
-/// Before the first pact there is no account, and what this draws inside the
-/// border is [`MARK`], centred and dim: warlock's own `W` and not one word — no
-/// heading, no title, no welcome, no key hints. A screen that said something
-/// before anything had happened would be saying it about nothing; a screen
-/// carrying the program's mark is saying whose screen it is, which is true
-/// before anything happens and stops being worth the room the moment there is an
-/// account to put there. [`App::has_account`] is the switch, and not the number
-/// of lines: an account that has started and has nothing in it yet is a pact
-/// under way, and the mark does not come back for it. A panel too small for the
-/// mark and its margins draws the bare border, exactly as it always did.
+/// Before the first pact and the first read the panel holds nothing, and what
+/// this draws inside the border is [`MARK`], centred and dim: warlock's own `W`
+/// and not one word — no heading, no title, no welcome, no key hints. A screen
+/// that said something before anything had happened would be saying it about
+/// nothing; a screen carrying the program's mark is saying whose screen it is,
+/// which is true before anything happens and stops being worth the room the
+/// moment there is something to put there. [`App::has_panel_content`] is the
+/// switch, and not the number of lines: an account that has started and has
+/// nothing in it yet is a pact under way, and the mark does not come back for it.
+/// A panel too small for the mark and its margins draws the bare border, exactly
+/// as it always did.
 ///
 /// With an account, every row is one line of it: a section heading naming a
 /// directory, or one thing that pass was seen doing with the elapsed clock of
-/// its own section in front of it, or the line the run finished with. Which
-/// lines those are is [`App::panel_lines`]'s answer, window and all — the app
-/// owns the scrolling, exactly as it owns the tree's — and this only words them
-/// and cuts them to the width.
+/// its own section in front of it, or the line the run finished with. With a
+/// document, every row is one line of the file, from its first. Which lines those
+/// are is [`App::panel_lines`]'s answer, window and all — the app owns the
+/// scrolling, exactly as it owns the tree's — and this only words them and cuts
+/// them to the width.
 ///
 /// A [`Paragraph`] with no [`Wrap`](ratatui::widgets::Wrap): every row is one
 /// row, whatever is on it. A line that wrapped would put one activity on two
@@ -1111,7 +1113,7 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     let inner = pane_inner(area);
     frame.render_widget(block, area);
 
-    if !app.has_account() {
+    if !app.has_panel_content() {
         draw_mark(frame, inner);
         return;
     }
@@ -1185,12 +1187,17 @@ fn scrollback(below: usize) -> String {
     format!(" {SCROLLBACK_ARROW} {below} more ({LIVE_KEY}) ")
 }
 
-/// One line of the account as one row of the panel, cut to `width`.
+/// One line of the panel's contents as one row of it, cut to `width`.
 ///
 /// A heading is the directory's path, bold and flush left; a clocked line is its
 /// elapsed time and what happened, indented under the heading it belongs to; the
 /// summary is the run's last word, flush left and bold like a heading because it
 /// is about the whole run rather than about any one directory.
+///
+/// A line of a document is the file's own text, flush left, unindented and
+/// unstyled — nothing is added to it and nothing is taken off it, and it is cut
+/// to the width like every other row rather than wrapped, so one line of the file
+/// is one row of the panel. See [`App::show_document`].
 ///
 /// The row is built whole and cut once, rather than assembled from a styled
 /// clock and a styled text: the width is a fact about the row, and two spans
@@ -1205,6 +1212,7 @@ fn panel_row(line: &Entry, width: u16) -> Line<'static> {
             Line::from(truncated(&format!("{PANEL_INDENT}{clock} {text}"), width))
         }
         Entry::Summary { text } => Line::from(truncated(text, width)).bold(),
+        Entry::Text { text } => Line::from(truncated(text, width)),
     }
 }
 
@@ -4883,6 +4891,102 @@ mod tests {
         for y in inner.y..inner.y + inner.height {
             assert_eq!(buffer[(border, y)].symbol(), "│", "at row {y}");
         }
+    }
+
+    /// The lines of a small document, one of them longer than a narrow panel and
+    /// one of them empty, measured for a `width`×`height` terminal the way the
+    /// binary measures one.
+    ///
+    /// `cut` is the read that stopped at the cap, which puts one line more on
+    /// screen than the file has.
+    fn viewing_app(width: u16, height: u16, cut: bool) -> App {
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_viewport_height(tree_height(Size::new(width, height)));
+        app.set_panel_height(panel_height(Size::new(width, height)));
+        app.show_document(
+            [
+                "# The engine",
+                "",
+                "It walks the tree and writes what it finds.",
+            ],
+            cut,
+        );
+        app
+    }
+
+    #[test]
+    fn a_document_gets_one_row_per_line_from_its_first_cut_at_the_panels_width() {
+        // The same narrow terminal the account's truncation is pinned at: the
+        // panel gets half of forty columns, less its border.
+        let narrow = 40;
+        let now = Instant::now();
+        let app = viewing_app(narrow, FIXTURE_HEIGHT, false);
+
+        let buffer = render_at(&app, narrow, FIXTURE_HEIGHT, now);
+
+        let inner = panel_area(&buffer);
+        assert_eq!(inner.width, 18, "the terminal is the narrow one");
+        let drawn = panel_rows(&buffer);
+        // The file's own lines, from the first, one row apiece, flush left and
+        // unindented — and the long one cut with the ellipsis rather than
+        // wrapped onto a row of its own.
+        assert_eq!(
+            drawn[..3],
+            [
+                "# The engine".to_owned(),
+                String::new(),
+                format!("It walks the tree{ELLIPSIS}"),
+            ],
+        );
+        for row in &drawn {
+            assert!(
+                display_width(row) <= usize::from(inner.width),
+                "row {row:?} is wider than the panel"
+            );
+        }
+        // Three lines, three rows and no more: nothing wrapped, and nothing was
+        // drawn that the document does not hold.
+        assert_eq!(app.panel_lines(now).len(), 3);
+        for (index, row) in drawn.iter().enumerate().skip(3) {
+            assert_eq!(row, "", "panel row {index} should be blank");
+        }
+        // And nothing spilled onto the tree pane's border beside it.
+        let border = inner.x + inner.width;
+        for y in inner.y..inner.y + inner.height {
+            assert_eq!(buffer[(border, y)].symbol(), "│", "at row {y}");
+        }
+    }
+
+    #[test]
+    fn a_read_the_cap_cut_short_draws_a_last_row_saying_so() {
+        // Wide enough that the sentence is on screen whole, and with all the
+        // room in the world for the mark: what keeps the mark off is the
+        // document, exactly as an account keeps it off.
+        let now = Instant::now();
+        let app = viewing_app(MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, true);
+
+        let buffer = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, now);
+
+        let drawn = panel_rows(&buffer);
+        assert_eq!(drawn[0], "# The engine");
+        assert_eq!(drawn[2], "It walks the tree and writes what it finds.");
+        // One row under the last of the file's own, saying the file goes on.
+        assert!(drawn[3].contains("cut"), "{:?}", drawn[3]);
+        assert!(drawn[3].contains("the file goes on"), "{:?}", drawn[3]);
+        for (index, row) in drawn.iter().enumerate().skip(4) {
+            assert_eq!(row, "", "panel row {index} should be blank");
+        }
+        assert_no_mark(&buffer);
+
+        // A read that fitted draws the file and not a word more.
+        let whole = panel_rows(&render_at(
+            &viewing_app(MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, false),
+            MARK_ROOM_WIDTH,
+            MARK_ROOM_HEIGHT,
+            now,
+        ));
+        assert_eq!(whole[..3], drawn[..3]);
+        assert_eq!(whole[3], "");
     }
 
     #[test]
