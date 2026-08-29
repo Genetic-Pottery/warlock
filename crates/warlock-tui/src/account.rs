@@ -301,11 +301,11 @@ impl Section {
 /// counting: a section heading takes a row like anything else, so the number of
 /// rows above and below a window is arithmetic rather than a walk.
 ///
-/// The panel holds one thing at a time — an account or a document, never both —
-/// so the rows of the two share one type and one window rather than the panel
-/// growing a second list and a second offset. [`Line::Text`] is the document's
-/// only shape, because a file's line is a file's line and nothing here knows
-/// what any of it means.
+/// The panel's two cards — the account and the document — draw one card at a
+/// time and draw it the same way, so the rows of both are this one type and the
+/// window rule over them is one rule, whichever card the reader is looking at.
+/// [`Line::Text`] is the document's only shape, because a file's line is a
+/// file's line and nothing here knows what any of it means.
 ///
 /// The text is whole. Cutting it to a width belongs to whoever knows the width.
 #[derive(Debug, Clone, PartialEq, Eq)]

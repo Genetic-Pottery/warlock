@@ -703,6 +703,22 @@ fn run() -> Result<(), Error> {
                     // there is nothing for a run in flight to refuse. See
                     // `viewing::view_press`.
                     Pressed::Act(Action::ViewFile) => view_press(&mut app),
+                    // The panel's other card, and nothing else: the account if
+                    // the document is up, the document if the account is. It is
+                    // done here, on this thread, without reading anything —
+                    // both cards are already in the app, so a swap is one field
+                    // moved and the next frame drawing the other one.
+                    //
+                    // It needs no answer of its own, for `v`'s reason: the one
+                    // thing this press can refuse — a session with no document
+                    // read yet — it refuses inside `App::swap_card`, which
+                    // leaves the panel on the account and puts a line on the
+                    // footer naming the key that would make a second card. A
+                    // swap that worked says nothing, because the reader can see
+                    // it. Unlike `p`, `r` and `s` it is not handed the run: a
+                    // swap races nothing, and a run that changed which card is
+                    // showing would take a document out of the reader's hands.
+                    Pressed::Act(Action::SwapCard) => app.swap_card(),
                     // The one key that answers to the terminal rather than to
                     // the app. The sequence is written first and the flag moved
                     // only if it went out, so what this thread believes about

@@ -1458,18 +1458,38 @@ mod tests {
     /// tests are about is what the run put into the panel and not how much
     /// of it fits.
     fn panel_text(app: &App, now: Instant) -> Vec<String> {
-        app.account()
-            .map(|account| account.lines(now))
-            .unwrap_or_default()
+        as_text(
+            &app.account()
+                .map(|account| account.lines(now))
+                .unwrap_or_default(),
+        )
+    }
+
+    /// The same reading of `lines`, whichever card they came off: what the
+    /// panel draws is one list of [`Line`]s and one way of putting it into
+    /// words, and the two callers differ only in where they got the list.
+    fn as_text(lines: &[Line]) -> Vec<String> {
+        lines
             .iter()
             .map(|line| match line {
                 Line::Directory { path } => path.display().to_string(),
                 Line::Clocked { clock, text } => format!("{clock} {text}"),
-                // An account never yields a document's line; the arm is here so
-                // the match is over the whole of what the panel can draw.
+                // A summary is the account's last line; a text line is a
+                // document's own, and the only thing on that card.
                 Line::Summary { text } | Line::Text { text } => text.clone(),
             })
             .collect()
+    }
+
+    /// The window the reader is actually looking at, as plain strings: whichever
+    /// of the panel's two cards is showing, cut to the panel's height.
+    ///
+    /// [`panel_text`] answers what the run wrote; this answers what is on
+    /// screen, which is the whole question of the tests below. The panel these
+    /// tests give the app is [`WHOLE_PANEL`] lines tall, so the two agree
+    /// exactly whenever the account is the card showing.
+    fn shown(app: &App, now: Instant) -> Vec<String> {
+        as_text(&app.panel_lines(now))
     }
 
     /// A scope for a tree that is not on disk anywhere.
@@ -4045,6 +4065,264 @@ mod tests {
         }
         // And the footer says what it has always said about a stopped run.
         assert_eq!(app.message(), Some(PACT_CANCELLED));
+    }
+
+    /// A panel tall enough to draw the whole of either card in the tests below,
+    /// so what is on screen is what the card holds and no assertion here is
+    /// really about a window.
+    const WHOLE_PANEL: u16 = 40;
+
+    /// The lines of a small file, as whoever pressed the view key would hand
+    /// them over: text and nothing else, since nothing about a file that has
+    /// been read is clocked.
+    fn document_lines() -> Vec<String> {
+        (0..4).map(|line| format!("line {line}")).collect()
+    }
+
+    /// Put a file somebody read on the panel of `app`, with room to draw the
+    /// whole of either card.
+    ///
+    /// The state every test below drives a run from: the reader is reading, and
+    /// the run reports into the card behind what they are reading. Some of them
+    /// read before the pact starts and some during it, since the reader's card
+    /// is theirs either way round.
+    fn reading_a_file(app: &mut App) {
+        app.set_panel_height(WHOLE_PANEL);
+        app.show_document(document_lines(), false);
+    }
+
+    /// Assert that the run that has just ended left the reader's document on
+    /// screen and the account of that run on the card behind it. What the
+    /// account says, for the caller to go on and assert on.
+    ///
+    /// The whole of "a run never changes which card is showing", written once
+    /// because four different endings are held to it: a run that finished, one
+    /// the reader stopped, one a pass failed in, and one whose end put the view
+    /// back. Every one of them fills the account and none of them may take the
+    /// slot.
+    ///
+    /// Swaps twice, which is how the card behind is reached at all, and leaves
+    /// `app` showing the document again — so an assertion after this one is
+    /// about the same screen as the assertions inside it.
+    fn document_survived(app: &mut App, now: Instant) -> Vec<String> {
+        assert_eq!(
+            shown(app, now),
+            document_lines(),
+            "the run took the panel from the reader"
+        );
+        assert!(app.has_document(), "the run threw the document away");
+        assert!(app.has_account(), "the run left no account behind it");
+
+        app.swap_card();
+        let account = shown(app, now);
+        assert_eq!(
+            account,
+            panel_text(app, now),
+            "the account behind the document is not what the run wrote"
+        );
+
+        app.swap_card();
+        assert_eq!(
+            shown(app, now),
+            document_lines(),
+            "the document did not come back whole"
+        );
+        account
+    }
+
+    #[test]
+    fn a_run_that_finishes_under_a_document_leaves_it_showing_and_fills_the_card_behind() {
+        // A pact is in flight and the reader opens a file to read while it
+        // works. Everything the run says lands on the account's card, one line
+        // at a time, and the slot goes on showing what they are reading — line
+        // by line through the run, and after the outcome closes it off.
+        let base = Instant::now();
+        let (mut app, _before, mut manifest, events, running) = a_run_in_flight(base);
+        let mut pact = Some(running);
+        reading_a_file(&mut app);
+
+        // A directory opening a section, and then a line under it.
+        events
+            .send(PactEvent::Starting {
+                directory: PathBuf::from("/repo/crates/engine"),
+                position: 1,
+                total: 1,
+            })
+            .expect("the loop is still listening");
+        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+        assert_eq!(
+            shown(&app, at(base, 2)),
+            document_lines(),
+            "the section that opened took the panel"
+        );
+
+        events
+            .send(PactEvent::Doing(Activity::Thinking))
+            .expect("the loop is still listening");
+        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 4));
+        assert!(pact.is_some(), "a run that is talking is still running");
+        assert_eq!(
+            shown(&app, at(base, 4)),
+            document_lines(),
+            "a line appended behind the document took the panel"
+        );
+
+        // And the outcome, which is where the run is closed off and summed up.
+        events
+            .send(PactEvent::Finished(Ok(Toggled {
+                manifest: Manifest::new(),
+                granted: true,
+                message: None,
+                refusals: Vec::new(),
+            })))
+            .expect("the loop is still listening");
+        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 6));
+        assert!(pact.is_none(), "the run is over");
+
+        let account = document_survived(&mut app, at(base, 6));
+        assert_eq!(
+            account,
+            [
+                "engine",
+                // The line the run left ticking, stopped where the section was
+                // closed rather than where it was appended.
+                "0:06 thinking",
+                "0:06 refused — no document was written",
+                "pact finished — 1 directory, 0:06, $0.00 \
+                     (incomplete: 1 pass reported no cost)",
+            ],
+            "the whole run is there to be read behind the document"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_run_under_a_document_leaves_it_showing_too() {
+        // Esc during a run the reader started with a file already up. The
+        // account says where it got to and what stopped it; the slot says what
+        // they were reading, from before the pact began to after it was
+        // stopped.
+        let scratch = one_crate_to_load("cancelled-under-a-document");
+        let (mut app, scope) = load(&scratch);
+        let mut manifest = Manifest::new();
+        let base = Instant::now();
+        reading_a_file(&mut app);
+        app.start_account(base);
+        assert_eq!(
+            shown(&app, base),
+            document_lines(),
+            "the run starting took the panel"
+        );
+
+        let guard = CancelGuard::new();
+        let cancel = guard.handle();
+        let said = recorded(&scratch, "crates/engine", &cancel, |events| {
+            Canned::new(&scratch, [])
+                .reporting(activity_port(events))
+                .cancelling_at("crates/engine/src", cancel.clone())
+        });
+        replay(&mut app, &mut manifest, &scope, guard, said, base);
+
+        assert_eq!(app.message(), Some(PACT_CANCELLED), "the run was stopped");
+        let account = document_survived(&mut app, at(base, 10_000));
+        assert!(
+            account.iter().any(|line| line.contains("cancelled")),
+            "the account of the stopped run says so: {account:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_a_pass_failed_in_under_a_document_leaves_it_showing_too() {
+        // The engine turns down the only answer it got. The failure is on the
+        // footer and in the account, which is where a run's failures have always
+        // gone — and not in the slot, which is the reader's.
+        let scratch = one_crate_to_load("refused-under-a-document");
+        let (mut app, scope) = load(&scratch);
+        let mut manifest = Manifest::new();
+        let base = Instant::now();
+        reading_a_file(&mut app);
+        app.start_account(base);
+        assert_eq!(
+            shown(&app, base),
+            document_lines(),
+            "the run starting took the panel"
+        );
+
+        let said = recorded(&scratch, "crates/engine", &Cancel::new(), |events| {
+            Canned::new(&scratch, ["crates/engine/src"]).reporting(activity_port(events))
+        });
+        replay(
+            &mut app,
+            &mut manifest,
+            &scope,
+            CancelGuard::new(),
+            said,
+            base,
+        );
+
+        let message = app.message().expect("a partial run reports it");
+        assert!(
+            message.contains("crates/engine/src"),
+            "the failing directory is named: {message}"
+        );
+        let account = document_survived(&mut app, at(base, 10_000));
+        assert!(
+            account.iter().any(|line| line.contains("refused")),
+            "the account of the failed run says why: {account:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_whose_end_puts_the_view_back_leaves_the_document_showing() {
+        // The two endings that go through `App::restore_from`: an outcome that
+        // recorded nothing, and a worker that died without one. Both roll the
+        // rows back to what the manifest on disk still says, and neither may
+        // roll back the panel — the account of what the run managed is the thing
+        // this reader most wants, and the card they are reading is still theirs.
+        for failure in [Some("the manifest could not be saved"), None] {
+            let base = Instant::now();
+            let (mut app, before, mut manifest, events, running) = a_run_in_flight(base);
+            let mut pact = Some(running);
+            reading_a_file(&mut app);
+
+            events
+                .send(PactEvent::Starting {
+                    directory: PathBuf::from("/repo/crates/engine"),
+                    position: 1,
+                    total: 2,
+                })
+                .expect("the loop is still listening");
+            events
+                .send(PactEvent::Doing(Activity::Thinking))
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+            assert_eq!(shown(&app, base), document_lines(), "{failure:?}");
+
+            match failure {
+                Some(reason) => events
+                    .send(PactEvent::Finished(Err(reason.to_owned())))
+                    .expect("the loop is still listening"),
+                // The worker goes away with nothing behind it.
+                None => drop(events),
+            }
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 5));
+
+            assert!(pact.is_none(), "the run is over, however it ended");
+            assert_eq!(app.message(), Some(failure.unwrap_or(PACT_LOST)));
+            assert_eq!(app.rows(), before.rows(), "the rows match the manifest");
+
+            let account = document_survived(&mut app, at(base, 5));
+            assert_eq!(
+                account,
+                [
+                    "engine",
+                    "0:05 thinking",
+                    "0:05 refused — no document was written",
+                    "pact finished — 1 directory, 0:05, $0.00 \
+                         (incomplete: 1 pass reported no cost)",
+                ],
+                "the restore took the account of the run with the rows: {failure:?}"
+            );
+        }
     }
 
     /// A repository of eight crates, sixteen directories under the one they
