@@ -7671,6 +7671,28 @@ mod tests {
         )
     }
 
+    /// Every line the document's card holds, whole, whatever the panel's window
+    /// is over and whichever card is showing.
+    ///
+    /// What a snapshot is asserted with: [`panel_text`] is the window a reader
+    /// would see, and this is the card underneath it, so a test can say that the
+    /// lines themselves never changed rather than that a cut of them looked the
+    /// same.
+    fn document_text(app: &App) -> Vec<String> {
+        app.panel
+            .document
+            .held
+            .iter()
+            .flatten()
+            .map(|line| match line {
+                Line::Directory { path } => path.display().to_string(),
+                Line::Clocked { text, .. } | Line::Summary { text } | Line::Text { text } => {
+                    text.clone()
+                }
+            })
+            .collect()
+    }
+
     #[test]
     fn a_document_shows_over_the_account_rather_than_taking_the_panel_from_it() {
         let base = Instant::now();
@@ -7924,6 +7946,53 @@ mod tests {
                 at(base, line + 1),
             );
         }
+    }
+
+    #[test]
+    fn the_document_card_is_a_snapshot_of_what_was_read_and_nothing_rewrites_it() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        app.set_panel_height(9);
+        app.show_document(document_lines(), false);
+        assert_eq!(document_text(&app), document_lines());
+
+        // Everything a session does that is not another read: the reader walks
+        // the tree, reshapes it, scrolls both cards, swaps between them, and a
+        // second run starts and reports behind the document all the while.
+        app.toggle_focus();
+        app.select_next();
+        app.select_last();
+        app.toggle_collapsed();
+        app.toggle_files();
+        app.toggle_pacted_only();
+        app.toggle_focus();
+        app.select_next();
+        app.swap_card();
+        app.select_next();
+        app.swap_card();
+        app.start_account(at(base, 100));
+        app.account_mut()
+            .expect("a second run has started")
+            .open_section("crates/tui", at(base, 100));
+        record_lines(&mut app, 0..4, at(base, 100));
+        app.set_message("something the last keystroke said");
+
+        // The card holds the lines it was handed, in the order it was handed
+        // them: it does not follow the selection, it is not appended to by the
+        // run, and no window the reader moved has edited what it is a window
+        // over.
+        assert_eq!(document_text(&app), document_lines());
+        assert_eq!(panel_text(&app, at(base, 200)), document_lines());
+        assert_eq!(
+            app.account().map(Account::line_count),
+            Some(5),
+            "the run behind the document recorded nothing"
+        );
+
+        // The only thing that writes the card is another read, which replaces it
+        // whole rather than adding to it.
+        app.show_document(["a line of another file"], false);
+        assert_eq!(document_text(&app), ["a line of another file"]);
     }
 
     #[test]
@@ -8356,6 +8425,42 @@ mod tests {
         assert_eq!(reseated.panel_scroll_offset(), 0);
         assert!(!reseated.panel_follows());
         assert_eq!(panel_text(&reseated, at(base, 9)), before);
+    }
+
+    #[test]
+    fn a_re_seat_under_a_document_leaves_it_showing_with_the_account_behind_it() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        app.show_document(document_lines(), false);
+        // A line down the document, so what carries is the reader's window and
+        // not the top of the card, which a rebuild would arrive at by accident.
+        app.select_next();
+        let showing = panel_text(&app, at(base, 9));
+        assert_eq!(document_window(&app), (1, false));
+
+        // What the watcher does when something on disk changed: a new tree,
+        // everything else carried.
+        let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+
+        // The same card is on screen, on the same line of it. A reload that put
+        // the account back would take a document out of the reader's hands at
+        // exactly the moment they were reading it.
+        assert_eq!(reseated.panel.showing, Showing::Document);
+        assert!(reseated.has_document());
+        assert_eq!(panel_text(&reseated, at(base, 9)), showing);
+        assert_eq!(document_window(&reseated), document_window(&app));
+        // And the account is intact behind it, lines, window and all.
+        assert!(reseated.has_account());
+        assert_eq!(reseated.account(), app.account());
+        assert_eq!(account_window(&reseated), account_window(&app));
+        // The card is a snapshot: the reload rewrote none of its lines, and the
+        // swap still comes back to the whole of what was read.
+        assert_eq!(document_text(&reseated), document_lines());
+        let mut reseated = reseated;
+        reseated.swap_card();
+        reseated.swap_card();
+        assert_eq!(document_text(&reseated), document_lines());
+        assert_eq!(panel_text(&reseated, at(base, 9)), showing);
     }
 
     /// The fixture's shape with `warlock/crates/tui` gone, and its files with
