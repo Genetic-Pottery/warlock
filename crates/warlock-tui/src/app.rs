@@ -124,6 +124,11 @@ use crate::account::{Account, Line};
 /// [`App`] touches no filesystem, so the fact has to be here by the time the key
 /// is pressed. See [`Row::is_ignored`].
 ///
+/// Whether a file row is its directory's own `WARLOCK.md` comes along for a
+/// related reason: the fact is a comparison against the node's document, the tree
+/// is gone by the time anything asks, and the only way to answer it later would
+/// be to spell the file's name a second time. See [`Row::is_document`].
+///
 /// The scope written on the row's own pact entry comes along for the same reason
 /// again: the renderer draws the label beside the name and has nothing but the
 /// row in its hand. See [`Row::scope`].
@@ -153,6 +158,21 @@ pub struct Row {
     /// and ask it with [`Row::is_file`] rather than reading this: what the flag
     /// *means* is the interesting part.
     pub file: bool,
+    /// Whether this file row is the `WARLOCK.md` of the directory listing it —
+    /// the one file in that listing Warlock wrote. Ask it with
+    /// [`Row::is_document`], and set it with [`Row::with_document_row`].
+    ///
+    /// Never true on a directory row: a directory *has* a document (see
+    /// [`Row::document`]) and is not one.
+    ///
+    /// Carried rather than worked out where it is wanted, for the reason every
+    /// other fact on a row is carried: the answer is a comparison against
+    /// [`warlock_engine::Node::document`], the tree the rows were flattened from
+    /// is not kept, and the alternative — matching the row's file name against
+    /// the literal `WARLOCK.md` — would be a second spelling of a name the engine
+    /// owns and would call any stray `WARLOCK.md` a document even where the load
+    /// found none.
+    pub document_row: bool,
     /// Whether the repository's `.warlockignore` keeps this row's content out of
     /// Warlock, straight from [`warlock_engine::Node::is_ignored`]. Ask it with
     /// [`Row::is_ignored`], and set it with [`Row::with_ignored`].
@@ -210,6 +230,7 @@ impl Row {
             state,
             children: 0,
             file: false,
+            document_row: false,
             ignored: false,
             scope: None,
         }
@@ -235,6 +256,11 @@ impl Row {
     /// label in the tree marks the directory that owns the boundary rather than
     /// everything under it. So a file row is unscoped even inside a scoped
     /// directory, and there is no builder call here to make it otherwise.
+    ///
+    /// An ordinary file is the safe default in one more way: a row nobody told
+    /// otherwise is not the holding directory's document, because deciding that
+    /// takes the directory's [`warlock_engine::Node::document`] and this knows
+    /// nothing of any node. Say otherwise with [`Row::with_document_row`].
     #[must_use]
     pub fn file(depth: usize, path: impl Into<PathBuf>, state: NodeState) -> Self {
         Self {
@@ -260,6 +286,21 @@ impl Row {
     #[must_use]
     pub const fn with_ignored(mut self, ignored: bool) -> Self {
         self.ignored = ignored;
+        self
+    }
+
+    /// The same row, standing for the document of the directory listing it, or
+    /// not.
+    ///
+    /// [`App::from_tree`] says this by comparing the file's path against the
+    /// holding node's [`warlock_engine::Node::document`], which is the whole of
+    /// how the fact reaches a row: nothing downstream re-derives it, and nothing
+    /// downstream spells `WARLOCK.md`. It is a builder rather than an argument to
+    /// [`Row::file`] so that a test can hand a row over without a tree, a loader
+    /// or a disk behind it.
+    #[must_use]
+    pub const fn with_document_row(mut self, document_row: bool) -> Self {
+        self.document_row = document_row;
         self
     }
 
@@ -299,6 +340,21 @@ impl Row {
     #[must_use]
     pub const fn is_file(&self) -> bool {
         self.file
+    }
+
+    /// Whether this row is the `WARLOCK.md` of the directory listing it: the one
+    /// row under a directory that Warlock itself wrote.
+    ///
+    /// A fact carried from the load, never worked out here — see
+    /// [`Row::document_row`] for why. True only on file rows, and on at most one
+    /// file row per directory, since a node has at most one document.
+    ///
+    /// It says nothing about how the row is drawn: a document row takes its
+    /// directory's colour like every other file row, and has no colour, shade,
+    /// marker or label of its own.
+    #[must_use]
+    pub const fn is_document(&self) -> bool {
+        self.document_row
     }
 
     /// Whether a `.warlockignore` in the repository keeps this row's content out
@@ -2850,6 +2906,16 @@ pub fn reseat_on(view: &App, tree: &Tree) -> App {
 /// a boundary starts. The file rows are told nothing: a file has no pact entry
 /// to write a scope on, so unlike the state and the exclusion flag there is
 /// nothing of the directory's to copy down. See [`Row::scope`].
+///
+/// Each file row is also told whether it is the holding directory's own
+/// document, by comparing its whole path against that node's
+/// [`warlock_engine::Node::document`] — whole paths, not file names, and the
+/// node's own document rather than any name the walk happened to list. A node
+/// has at most one document, so at most one file row under a directory is told
+/// yes, and a directory whose load found no document has none among its files
+/// however they are spelled. That field is presence-on-disk, so a `WARLOCK.md` an
+/// un-pact left behind still compares equal and still gives a document row: the
+/// tree says what is there. See [`Row::is_document`].
 fn walk_of(tree: &Tree) -> Vec<Row> {
     let mut rows = Vec::new();
     for (node, depth) in tree.walk() {
@@ -2860,7 +2926,9 @@ fn walk_of(tree: &Tree) -> Vec<Row> {
                 .with_scope(node.scope.clone()),
         );
         rows.extend(node.files.iter().map(|file| {
-            Row::file(depth + 1, file.clone(), node.state).with_ignored(node.is_ignored())
+            Row::file(depth + 1, file.clone(), node.state)
+                .with_ignored(node.is_ignored())
+                .with_document_row(node.document.as_deref() == Some(file.as_path()))
         }));
     }
     rows
@@ -4070,6 +4138,117 @@ mod tests {
                 .iter()
                 .any(|row| row.document.is_none() && row.path == Path::new("warlock/crates"))
         );
+    }
+
+    /// Every drawn row by path, depth and whether it stands for a file: the
+    /// shape of the flattening, rather than only its order.
+    fn shape(app: &App) -> Vec<(String, usize, bool)> {
+        app.rows()
+            .iter()
+            .map(|row| {
+                (
+                    row.path.to_string_lossy().into_owned(),
+                    row.depth,
+                    row.is_file(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn showing_files_draws_every_file_once_under_its_directory_at_one_more_depth() {
+        let mut app = App::from_tree(&fixture::tree());
+        app.toggle_files();
+
+        // Pinned whole: every file the fixture lists — the documents among them
+        // — once each, in path order, directly after the directory listing it
+        // and one level deeper. Nothing about documents may move this.
+        assert_eq!(
+            shape(&app),
+            [
+                ("warlock".to_owned(), 0, false),
+                ("warlock/README.md".to_owned(), 1, true),
+                ("warlock/WARLOCK.md".to_owned(), 1, true),
+                ("warlock/crates".to_owned(), 1, false),
+                ("warlock/crates/engine".to_owned(), 2, false),
+                ("warlock/crates/engine/Cargo.toml".to_owned(), 3, true),
+                ("warlock/crates/engine/WARLOCK.md".to_owned(), 3, true),
+                ("warlock/crates/tui".to_owned(), 2, false),
+                ("warlock/crates/tui/WARLOCK.md".to_owned(), 3, true),
+                ("warlock/assets".to_owned(), 1, false),
+                ("warlock/assets/WARLOCK.md".to_owned(), 2, true),
+                ("warlock/assets/logo.svg".to_owned(), 2, true),
+            ]
+        );
+        // And no path drawn twice, which the list above pins only as long as
+        // somebody reads it carefully.
+        let mut paths = drawn(&app);
+        let drawn_count = paths.len();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), drawn_count);
+    }
+
+    #[test]
+    fn only_a_directorys_own_document_is_flagged_as_one() {
+        let mut app = App::from_tree(&fixture::tree());
+        app.toggle_files();
+
+        let flagged: Vec<(String, bool)> = app
+            .rows()
+            .iter()
+            .map(|row| (row.path.to_string_lossy().into_owned(), row.is_document()))
+            .collect();
+
+        assert_eq!(
+            flagged,
+            [
+                ("warlock".to_owned(), false),
+                // A README documents nothing as far as the tree is concerned.
+                ("warlock/README.md".to_owned(), false),
+                ("warlock/WARLOCK.md".to_owned(), true),
+                // No document loaded, so nothing under it could be one.
+                ("warlock/crates".to_owned(), false),
+                ("warlock/crates/engine".to_owned(), false),
+                ("warlock/crates/engine/Cargo.toml".to_owned(), false),
+                ("warlock/crates/engine/WARLOCK.md".to_owned(), true),
+                ("warlock/crates/tui".to_owned(), false),
+                ("warlock/crates/tui/WARLOCK.md".to_owned(), true),
+                ("warlock/assets".to_owned(), false),
+                // Unpacted and documented: presence on disk, not pactedness, is
+                // what the flag follows.
+                ("warlock/assets/WARLOCK.md".to_owned(), true),
+                ("warlock/assets/logo.svg".to_owned(), false),
+            ]
+        );
+        // Said again as the two rules it stands for: a directory is never a
+        // document, and each documented directory has exactly one.
+        assert!(
+            app.rows()
+                .iter()
+                .all(|row| !row.is_document() || row.is_file())
+        );
+        for (node, _) in fixture::tree().walk() {
+            let documents = app
+                .rows()
+                .iter()
+                .filter(|row| row.is_document() && row.path.parent() == Some(node.path.as_path()))
+                .count();
+            assert_eq!(documents, usize::from(node.document.is_some()));
+        }
+    }
+
+    #[test]
+    fn a_row_handed_over_without_a_tree_is_no_document() {
+        // The safe default: `from_rows` tests hand rows over with no node
+        // behind them, and a row nobody told about a document has none.
+        assert!(!Row::file(1, "repo/WARLOCK.md", NodeState::PactedFresh).is_document());
+        assert!(
+            Row::file(1, "repo/WARLOCK.md", NodeState::PactedFresh)
+                .with_document_row(true)
+                .is_document()
+        );
+        assert!(!Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedFresh).is_document());
     }
 
     #[test]
