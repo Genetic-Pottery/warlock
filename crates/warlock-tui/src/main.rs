@@ -11,7 +11,8 @@
 //! sibling module. What a keystroke or a click means is [`input`]'s, running a
 //! pact on a worker thread and applying what it says is [`pacting`]'s, asking
 //! for a scope and writing it is [`scoping`]'s, reading a file into the panel is
-//! [`viewing`]'s, where
+//! [`viewing`]'s, handing one to `$EDITOR` and taking the terminal back
+//! afterwards is [`editing`]'s, where
 //! the tree came from and when it is re-read is [`session`]'s, the terminal's
 //! setup and restoration is [`terminal`]'s, and the one-line errors `main`
 //! prints are [`error`]'s. The paragraphs below describe how the loop drives
@@ -188,6 +189,7 @@ use warlock_tui::{
 };
 
 mod config;
+mod editing;
 mod error;
 mod input;
 mod pacting;
@@ -197,6 +199,7 @@ mod terminal;
 mod viewing;
 
 use config::configure;
+use editing::edit_press;
 use error::Error;
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Running, Work, apply_progress, pact_press, refresh_press, start_run};
@@ -703,20 +706,37 @@ fn run() -> Result<(), Error> {
                     // there is nothing for a run in flight to refuse. See
                     // `viewing::view_press`.
                     Pressed::Act(Action::ViewFile) => view_press(&mut app),
-                    // PLACEHOLDER, and not the finished key: WAR-55.02 replaces
-                    // this arm with the whole of the editor road — the terminal
-                    // given back through the guard, `$EDITOR` run on the
-                    // selected file as a foreground child, the terminal taken
-                    // again afterwards on all three outcomes, the tree reloaded
-                    // and the document card re-read. Until it lands, the binding
-                    // exists so that the key is decided in one place
-                    // (`action_for`), and the press says the one true thing
-                    // there is to say about it rather than doing nothing
-                    // quietly: a key that looks broken is better than a key that
-                    // looks unbound, and the shipped `e` is not allowed to be a
-                    // silent no-op.
+                    // The one key that gives the screen away, and the only one
+                    // whose answer is measured in minutes of somebody typing
+                    // rather than in frames. The loop stops here for the whole
+                    // of it: the terminal is put back the way warlock found it,
+                    // `$EDITOR` is run on the selected file as a foreground
+                    // child, the child is waited on, and the terminal is taken
+                    // again — every one of those through the guard this loop
+                    // already holds, so there is one spelling of teardown and
+                    // one of setup (see `TerminalGuard::suspended`). Nothing is
+                    // drawn behind the editor and no progress event is drained
+                    // while it runs, which is the honest shape of handing the
+                    // terminal to somebody else.
+                    //
+                    // `mouse_captured` is handed over because it is this
+                    // thread's only record of what `m` last did: resuming
+                    // without it would switch reporting back on behind a reader
+                    // who turned it off.
+                    //
+                    // It needs no answer of its own, for the reason `v`'s and
+                    // `s`'s arms need none: everything this press can refuse it
+                    // refuses inside `edit_press` — a directory row in the very
+                    // words `v` uses, a run in flight on the progress line, an
+                    // `$EDITOR` naming nothing on the footer — and both ways the
+                    // child itself can go wrong end as one line on that footer
+                    // with the loop going round again. The `?` is the terminal
+                    // and only the terminal: a screen that could not be taken
+                    // back is not news for a footer nobody could read, so it
+                    // leaves through the guard like every other terminal
+                    // failure. See `editing::edit_press`.
                     Pressed::Act(Action::EditFile) => {
-                        app.set_message("e: the editor is not wired up yet");
+                        edit_press(&mut app, &mut guard, mouse_captured, pact.is_some())?;
                     }
                     // The panel's other card, and nothing else: the account if
                     // the document is up, the document if the account is. It is

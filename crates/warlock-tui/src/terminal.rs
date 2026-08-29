@@ -6,6 +6,16 @@
 //! first two by ownership, [`install_panic_hook`] covers the third, and both
 //! run through the same [`restore_terminal`], so there is exactly one spelling
 //! of what "put it back" means.
+//!
+//! There is a fourth way out now, and it is the only one warlock comes back
+//! from: [`TerminalGuard::suspended`] gives the terminal up for as long as a
+//! child process needs it and takes it again afterwards. It is not a second
+//! lifecycle. Giving up is the same [`restore_terminal`] every other way out
+//! runs through, and taking back is the same [`take_terminal`]
+//! [`TerminalGuard::enter`] takes it with in the first place — so "put it back"
+//! and "take it" are each spelled exactly once in this crate, and a child that
+//! panics the process, or takes it down with it, is still covered by the hook
+//! that was installed before any of this.
 
 use std::io::{self, Stdout};
 use std::panic;
@@ -45,13 +55,17 @@ impl TerminalGuard {
     /// its mouse.
     ///
     /// On failure part-way through, the guard never exists and so never drops,
-    /// which is why this undoes its own work before returning the error — and
-    /// why capture is turned on in the same [`execute!`] as the alternate
-    /// screen: whichever of the two fails, the restoration below undoes both,
-    /// because every step of it is attempted whether or not it was ever needed.
+    /// which is why this undoes its own work before returning the error: every
+    /// step of [`restore_terminal`] is attempted whether or not it was ever
+    /// needed, so whichever step of [`take_terminal`] failed, what it did get
+    /// done is undone.
+    ///
+    /// A session always starts with the pointer reported — `m` is the one thing
+    /// that changes that, and it cannot have been pressed yet — which is the
+    /// whole of why this reads as a `true` and [`TerminalGuard::suspended`]
+    /// does not.
     pub(crate) fn enter() -> io::Result<Self> {
-        enable_raw_mode()?;
-        if let Err(error) = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture) {
+        if let Err(error) = take_terminal(true) {
             restore_terminal();
             return Err(error);
         }
@@ -63,6 +77,82 @@ impl TerminalGuard {
             }
         }
     }
+
+    /// Give the terminal back for as long as `body` runs, take it again
+    /// afterwards, and hand over whatever `body` said.
+    ///
+    /// The one thing in warlock that hands the screen to somebody else and
+    /// expects it back: `e` runs `$EDITOR` as a foreground child, and an editor
+    /// wants a terminal in its own mode, on the ordinary screen, with the
+    /// keyboard to itself. What that costs is spelled here rather than at the
+    /// keystroke, so the key module can be about the editor and this one stays
+    /// the only place that knows what warlock does to a terminal.
+    ///
+    /// Neither half is new. Giving up is [`restore_terminal`], which is what a
+    /// quit, an error and a panic already run through, so a child inherits a
+    /// terminal in exactly the state warlock would have left it in had the
+    /// reader pressed `q`. Taking back is [`take_terminal`], which is what
+    /// [`TerminalGuard::enter`] took it with — with one thing passed in rather
+    /// than assumed: `mouse` says whether the terminal was reporting its
+    /// pointer when it was given up. `m` may have turned reporting off, and the
+    /// event loop's flag is the only record of that, so resuming without asking
+    /// would quietly switch back on something the reader turned off.
+    ///
+    /// `body` gets a value out rather than a `?`, and that is deliberate: there
+    /// is no road from the teardown above to the setup below that skips the
+    /// setup, because there is no `?` between them. A caller with something to
+    /// say about how the child went says it afterwards, with the screen back.
+    ///
+    /// The repaint is not decoration. Ratatui draws by diffing against the
+    /// frame it last drew, and what the child left on the screen is not that
+    /// frame — so without this the first frame back would repaint only the
+    /// cells warlock thinks changed, onto an alternate screen the terminal has
+    /// just re-created empty. Resizing to the size the terminal has right now
+    /// is how that is said: it clears the viewport and throws the remembered
+    /// frame away, so the next `draw` writes every cell. `Terminal::clear` does
+    /// the same and one thing more — it asks the terminal where its cursor is
+    /// and puts it back — and that question is a write and a read with a
+    /// timeout on it, asked of a terminal a foreign program has just been
+    /// typing on, whose answer warlock has nothing to do with. Not asking it is
+    /// both cheaper and one fewer way for coming back to fail.
+    ///
+    /// Failing to take the terminal back is the one error here, and it leaves
+    /// through [`restore_terminal`] as well: whatever the setup managed is
+    /// undone before the error goes up, so the caller returning it prints on a
+    /// terminal that works.
+    pub(crate) fn suspended<T>(&mut self, mouse: bool, body: impl FnOnce() -> T) -> io::Result<T> {
+        restore_terminal();
+        let said = body();
+        if let Err(error) = take_terminal(mouse) {
+            restore_terminal();
+            return Err(error);
+        }
+        let area = self.terminal.size()?.into();
+        self.terminal.resize(area)?;
+        Ok(said)
+    }
+}
+
+/// Take the terminal: raw mode, the alternate screen, and the pointer reported
+/// if `mouse` says it should be.
+///
+/// The one spelling of setup, as [`restore_terminal`] is the one spelling of
+/// teardown, and for the same reason: a session that is taken one way and
+/// resumed another is a session where `m` silently un-presses itself, or where
+/// the second alternate screen is not the first one's twin.
+///
+/// Reporting is asked for in a statement of its own rather than in the same
+/// [`execute!`] as the screen, because it is now conditional. Nothing is lost by
+/// that: both callers undo the whole of a part-done setup with
+/// [`restore_terminal`], every step of which is attempted whether or not it was
+/// ever needed.
+fn take_terminal(mouse: bool) -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    if mouse {
+        execute!(io::stdout(), EnableMouseCapture)?;
+    }
+    Ok(())
 }
 
 impl Drop for TerminalGuard {
