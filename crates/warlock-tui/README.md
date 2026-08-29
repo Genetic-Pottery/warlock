@@ -110,6 +110,13 @@ surprised by. The quit key is never given up: on a terminal narrower than that
 one name it is cut rather than dropped, so the way out is always the thing still
 on screen.
 
+The line shown while a pact runs is laid out the same way, by the same rule and
+with its own order: `up/down k/j: move` goes first and `space: collapse` next,
+while `Esc: cancel` and `q/Ctrl-C: quit` are never given up. It is short enough
+that no ordinary terminal drops any of it, but this is the line that answers
+"how do I stop this?", so which part of it survives a narrow one is decided
+rather than left to the right-hand edge.
+
 ## The pact key
 
 `p` is the one keystroke that writes anything, and what it writes is a subtree:

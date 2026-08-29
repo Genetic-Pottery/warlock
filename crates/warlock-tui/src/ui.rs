@@ -424,8 +424,8 @@ const KEY_DROP_ORDER: &[&str] = &[
 ///
 /// A name not in `drop_order` is never dropped. When only those are left and
 /// they still do not fit, the line is cut to the width by [`clipped`] — which is
-/// [`QUIT_KEY`] on a terminal narrower than the way out itself, where the start
-/// of the name is more use than a blank line.
+/// a terminal narrower than [`QUIT_KEY`] itself, or than [`CANCEL_KEY`] and the
+/// way out together, where the start of a name is more use than a blank line.
 fn laid_out_keys(width: usize, pieces: &[&str], drop_order: &[&str]) -> String {
     let mut kept: Vec<&str> = pieces.to_vec();
     let mut order = drop_order.iter();
@@ -445,8 +445,10 @@ fn laid_out_keys(width: usize, pieces: &[&str], drop_order: &[&str]) -> String {
 ///
 /// [`truncated`] with the [`ELLIPSIS`] left off, and the difference is what the
 /// cut means. There it says a path goes on past the edge of the panel; here the
-/// only thing ever cut is [`QUIT_KEY`] on a terminal narrower than that name, and
-/// a mark saying the key goes on would cost a column of the key it was marking.
+/// only thing ever cut is the tail of a keys line that has already given up
+/// every name it is allowed to — [`QUIT_KEY`], or [`CANCEL_KEY`] and the way out
+/// of a run — and a mark saying the key goes on would cost a column of the key
+/// it was marking.
 ///
 /// Cut on a character boundary, so this cannot panic on text that is not ASCII.
 fn clipped(text: &str, width: usize) -> String {
@@ -508,7 +510,58 @@ fn keys_line(mouse_captured: bool, width: usize) -> String {
 /// since launch. Short also means it survives a narrow terminal whole, which
 /// matters more here than there: this is the line that answers "how do I stop
 /// this?", and an answer truncated off the right-hand edge is no answer.
-const PACTING_KEYS: &str = "up/down k/j: move    space: collapse    Esc: cancel    q/Ctrl-C: quit";
+///
+/// Names rather than one joined string for the reason [`KEYS`] is: a terminal
+/// narrow enough to lose part of even this line loses whole names, in
+/// [`PACTING_KEY_DROP_ORDER`], rather than losing its right-hand end.
+///
+/// The names are longer than their counterparts on [`KEYS`] — the movement key
+/// is spelled `up/down k/j: move` where the idle line says `k/j: row` — and can
+/// afford to be, because there are only four of them. A reader who has just
+/// started a run is reading this line for the first time; the idle line they
+/// have had on screen since launch.
+const PACTING_KEYS: &[&str] = &[MOVE_KEYS, COLLAPSE_KEY, CANCEL_KEY, PACTING_QUIT_KEY];
+
+/// The movement keys while a pact runs, arrows and j/k named together.
+///
+/// Both halves named, unlike [`ROW_KEY`] on the idle line, because this line has
+/// the columns for it: see [`PACTING_KEYS`].
+const MOVE_KEYS: &str = "up/down k/j: move";
+
+/// The space key while a pact runs: what it does, spelled out.
+const COLLAPSE_KEY: &str = "space: collapse";
+
+/// Esc while a pact runs, which is the whole reason this line differs from
+/// [`KEYS`]: the key that means quit there means stop the run here.
+const CANCEL_KEY: &str = "Esc: cancel";
+
+/// The way out while a pact runs, with Esc left off it because Esc is spoken for
+/// by [`CANCEL_KEY`].
+const PACTING_QUIT_KEY: &str = "q/Ctrl-C: quit";
+
+/// The order the pacting keys line gives its names up in, first dropped to last
+/// kept.
+///
+/// [`KEY_DROP_ORDER`]'s reasoning, applied to a line with four names on it.
+/// [`MOVE_KEYS`] goes first: the arrows and j/k are what a reader presses
+/// without being told, and a look around the tree is the least of what they came
+/// to this line for. [`COLLAPSE_KEY`] next, because folding a subtree is undone
+/// by pressing the same key again.
+///
+/// [`CANCEL_KEY`] and [`PACTING_QUIT_KEY`] are not in this order at all, which is
+/// how neither is ever dropped. This is the line that answers "how do I stop
+/// this?" and both of its answers outlast every other name on it — the run's own
+/// stop first, then the way out of warlock entirely.
+const PACTING_KEY_DROP_ORDER: &[&str] = &[MOVE_KEYS, COLLAPSE_KEY];
+
+/// The keys line for a terminal `width` columns wide while a pact is running.
+///
+/// [`keys_line`]'s job for [`PACTING_KEYS`], and the same [`laid_out_keys`] doing
+/// it: nothing about this line varies with app state, so the width is the only
+/// thing it is told.
+fn pacting_keys_line(width: usize) -> String {
+    laid_out_keys(width, PACTING_KEYS, PACTING_KEY_DROP_ORDER)
+}
 
 /// The tally line, the keys line and the message line.
 ///
@@ -1591,7 +1644,7 @@ fn pulse_colour(app: &App, now: Instant) -> Option<Color> {
 /// A pact in flight takes both of the lower two lines and adds neither: the
 /// progress line goes on the message line ahead of any message (the precedence
 /// is [`App::pact_line`]'s, decided with the rest of the display state rather
-/// than here) and the keys line becomes [`PACTING_KEYS`]. Same three lines,
+/// than here) and the keys line becomes [`pacting_keys_line`]'s. Same three lines,
 /// same heights, same places — a footer that grew while a pact ran would reflow
 /// the tree under it on a keystroke that changed nothing about the tree, and
 /// would do it in the middle of the one operation the reader is watching.
@@ -1610,9 +1663,10 @@ fn pulse_colour(app: &App, now: Instant) -> Option<Color> {
 /// answers a keystroke last for exactly this reason.
 ///
 /// The keys line is the one line that never reaches that edge: it is laid out
-/// for `area.width` by [`keys_line`], which gives whole names up in
-/// [`KEY_DROP_ORDER`] until what is left fits. Cut at the edge instead, the name
-/// it would lose first is the way out.
+/// for `area.width` by [`keys_line`] or [`pacting_keys_line`], which give whole
+/// names up in [`KEY_DROP_ORDER`] and [`PACTING_KEY_DROP_ORDER`] until what is
+/// left fits. Cut at the edge instead, the name each would lose first is the way
+/// out of warlock and the way out of the run.
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let counts = app.counts();
     let mut tally = Vec::new();
@@ -1626,10 +1680,11 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ));
     }
 
+    let width = usize::from(area.width);
     let keys = Line::from(if app.is_pacting() {
-        PACTING_KEYS.to_owned()
+        pacting_keys_line(width)
     } else {
-        keys_line(app.mouse_captured(), usize::from(area.width))
+        keys_line(app.mouse_captured(), width)
     })
     .dim();
 
@@ -1885,15 +1940,16 @@ mod tests {
     use warlock_engine::{NodeState, SCOPE_RULES};
 
     use super::{
-        Areas, BORDER_THICKNESS, CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN,
-        CONFIRM_MARGIN_ROWS, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FOOTER_HEIGHT,
-        GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEYS, LIVE_KEY,
-        MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY, NO_MARKER, PACTING_KEYS,
-        PANEL_INDENT, QUIT_KEY, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES,
-        SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH,
-        TREE_PERCENT, areas, centred, confirm_area, confirm_size, display_width, draw,
-        guide_prefixes, hit_test, keys_line, mark_area, pane_inner, panel_height, scope_size,
-        tree_height, tree_rows_area, tree_width, truncated,
+        Areas, BORDER_THICKNESS, CANCEL_KEY, COLLAPSE_KEY, CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT,
+        CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS, CONFIRM_NO, CONFIRM_QUESTION,
+        CONFIRM_YES, ELLIPSIS, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP,
+        HEADER_HEIGHT, Hit, INDENT, KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS,
+        MOUSE_OFF_KEY, MOUSE_ON_KEY, MOVE_KEYS, NO_MARKER, PACTING_KEYS, PANEL_INDENT, QUIT_KEY,
+        SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS,
+        SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas, centred,
+        confirm_area, confirm_size, display_width, draw, guide_prefixes, hit_test, keys_line,
+        mark_area, pacting_keys_line, pane_inner, panel_height, scope_size, tree_height,
+        tree_rows_area, tree_width, truncated,
     };
     use crate::account::Outcome;
     use crate::app::{App, Chrome, Row, Sigils};
@@ -3570,7 +3626,10 @@ mod tests {
         );
         // The keys line is untouched — a pass running is not a key to press —
         // and so is the tally above it.
-        assert_eq!(row_text(&buffer, height - FOOTER_HEIGHT + 1), PACTING_KEYS);
+        assert_eq!(
+            row_text(&buffer, height - FOOTER_HEIGHT + 1),
+            pacting_keys_line(usize::from(KEYS_WIDTH))
+        );
         assert_eq!(
             row_text(&buffer, height - FOOTER_HEIGHT),
             row_text(&quiet, height - FOOTER_HEIGHT)
@@ -3613,7 +3672,10 @@ mod tests {
         );
         // The keys line is still the pacting one: a press that started nothing
         // does not change what the keys do, and Esc still says cancel.
-        assert_eq!(row_text(&buffer, height - FOOTER_HEIGHT + 1), PACTING_KEYS);
+        assert_eq!(
+            row_text(&buffer, height - FOOTER_HEIGHT + 1),
+            pacting_keys_line(usize::from(KEYS_WIDTH))
+        );
         // The tally is untouched, on the first line of the footer.
         assert_eq!(
             row_text(&buffer, height - FOOTER_HEIGHT),
@@ -3661,7 +3723,15 @@ mod tests {
                 "the suffix wrapped onto row {y}"
             );
         }
-        assert!(row_text(&buffer, height - FOOTER_HEIGHT + 1).starts_with("up/down"));
+        // The keys line is still on the middle line of a three-line footer, laid
+        // out for this width rather than cut off at it: `fits` is narrower than
+        // the whole pacting line, so what is on it is what survived — the two
+        // names that answer "how do I stop this?".
+        assert_eq!(
+            row_text(&buffer, height - FOOTER_HEIGHT + 1),
+            pacting_keys_line(usize::from(fits))
+        );
+        assert!(row_text(&buffer, height - FOOTER_HEIGHT + 1).contains(CANCEL_KEY));
         assert_eq!(buffer.area.height, height);
 
         // The cut is at the right edge and column by column: two columns wider
@@ -3696,7 +3766,10 @@ mod tests {
             row_text(&idle, y),
             keys_line(app.mouse_captured(), usize::from(KEYS_WIDTH))
         );
-        assert_eq!(row_text(&pacting, y), PACTING_KEYS);
+        assert_eq!(
+            row_text(&pacting, y),
+            pacting_keys_line(usize::from(KEYS_WIDTH))
+        );
         // Esc means two things, and the line says which one it means now.
         let said = row_text(&pacting, y);
         assert!(said.contains("Esc: cancel"), "{said:?}");
@@ -3704,10 +3777,13 @@ mod tests {
         assert!(keys_line(true, usize::from(KEYS_WIDTH)).contains("Esc/Ctrl-C: quit"));
 
         // The line is short enough to survive the narrow terminal the other
-        // footer tests draw on, because it is the line that answers "how do I
-        // stop this?".
+        // footer tests draw on whole, because it is the line that answers "how
+        // do I stop this?": every name on it, in order, laid out or not.
         let narrow = render(&app, 120, height);
-        assert_eq!(row_text(&narrow, y), PACTING_KEYS);
+        assert_eq!(
+            row_text(&narrow, y),
+            "up/down k/j: move    space: collapse    Esc: cancel    q/Ctrl-C: quit"
+        );
 
         // And the run ending puts today's line back, exactly.
         app.clear_pact_in_flight();
@@ -3715,6 +3791,57 @@ mod tests {
             row_text(&render(&app, KEYS_WIDTH, height), y),
             keys_line(app.mouse_captured(), usize::from(KEYS_WIDTH))
         );
+    }
+
+    #[test]
+    fn the_pacting_keys_line_gives_movement_up_before_either_way_out() {
+        // What the line reads on a terminal with room for all of it, spelled
+        // out here rather than assembled, so a name that changed has to be
+        // changed here too.
+        let whole = "up/down k/j: move    space: collapse    Esc: cancel    q/Ctrl-C: quit";
+        assert_eq!(PACTING_KEYS.join(KEY_GAP), whole);
+        let fits = display_width(whole);
+
+        // Exactly today's line at any width that can hold it, down to the
+        // column.
+        assert_eq!(pacting_keys_line(usize::from(KEYS_WIDTH)), whole);
+        assert_eq!(pacting_keys_line(fits), whole);
+
+        // A column short of it and movement is what goes: the arrows and j/k
+        // are the guesses a reader already has.
+        assert_eq!(
+            pacting_keys_line(fits - 1),
+            "space: collapse    Esc: cancel    q/Ctrl-C: quit"
+        );
+        // Narrower still and the fold goes too, leaving both answers to "how do
+        // I stop this?" — the run's own stop and the way out of warlock.
+        assert_eq!(
+            pacting_keys_line(
+                display_width("space: collapse    Esc: cancel    q/Ctrl-C: quit") - 1
+            ),
+            "Esc: cancel    q/Ctrl-C: quit"
+        );
+        // And below even those two, they are cut rather than dropped: half a
+        // name is still the start of the answer.
+        assert_eq!(
+            pacting_keys_line(display_width("Esc: cancel    q/Ctrl-C: quit") - 1),
+            "Esc: cancel    q/Ctrl-C: qui"
+        );
+
+        // At every width from wider than the line down to nothing: what is
+        // drawn fits, and no name outlives one that is kept after it.
+        for width in 0..=fits + 8 {
+            let line = pacting_keys_line(width);
+            assert!(display_width(&line) <= width, "{width} columns: {line:?}");
+            assert!(
+                !line.contains(MOVE_KEYS) || line.contains(COLLAPSE_KEY),
+                "{width} columns kept movement over the fold: {line:?}"
+            );
+            assert!(
+                !line.contains(COLLAPSE_KEY) || line.contains(CANCEL_KEY),
+                "{width} columns kept the fold over cancel: {line:?}"
+            );
+        }
     }
 
     #[test]
@@ -3760,10 +3887,11 @@ mod tests {
         // short line that answers "how do I stop this?" is not the place for a
         // key about the pointer, and `PACTING_KEYS` says so by not naming it.
         app.set_pact_in_flight("warlock/crates/engine", 3, 12);
-        assert_eq!(row_text(&render(&app, KEYS_WIDTH, height), y), PACTING_KEYS);
+        let pacting = pacting_keys_line(usize::from(KEYS_WIDTH));
+        assert_eq!(row_text(&render(&app, KEYS_WIDTH, height), y), pacting);
         app.set_mouse_captured(true);
-        assert_eq!(row_text(&render(&app, KEYS_WIDTH, height), y), PACTING_KEYS);
-        assert!(!PACTING_KEYS.contains("mouse"));
+        assert_eq!(row_text(&render(&app, KEYS_WIDTH, height), y), pacting);
+        assert!(!pacting.contains("mouse"));
     }
 
     #[test]
