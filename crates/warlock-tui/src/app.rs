@@ -975,6 +975,21 @@ enum Showing {
     Document,
 }
 
+impl Showing {
+    /// The other card: what [`App::swap_card`] shows.
+    ///
+    /// [`Focus::other`] for the slot, and written the same way and for the same
+    /// reason — "the panel is showing one of these two" stays the thing the type
+    /// says, so a third card would be a compile error here rather than a swap
+    /// that quietly went nowhere.
+    const fn other(self) -> Self {
+        match self {
+            Self::Account => Self::Document,
+            Self::Document => Self::Account,
+        }
+    }
+}
+
 /// One card of the panel: what it holds, if anything, and where its window sits
 /// over it.
 ///
@@ -1647,6 +1662,43 @@ impl App {
         }
         self.panel.document.place(lines, false);
         self.panel.showing = Showing::Document;
+    }
+
+    /// Show the other card of the panel: the account if the document is up, the
+    /// document if the account is.
+    ///
+    /// The whole of what the swap key does, and the only thing besides
+    /// [`App::show_document`] that decides which card is on screen — which is
+    /// what makes a document survive a pact starting, finishing, failing or
+    /// being cancelled underneath it. A toggle rather than a pair of "show the
+    /// account" / "show the document" calls, for [`App::toggle_focus`]'s reason:
+    /// there are two cards and one key, and a toggle cannot be asked for a
+    /// third.
+    ///
+    /// Nothing else moves. The focus stays on the pane it was on, the tree's
+    /// selection and window stay where the reader left them, each card keeps its
+    /// own window — so scrolling a card, swapping away and swapping back lands
+    /// on the line they left, while an account left following goes on following
+    /// and shows the newest line of a run that reported while the document was
+    /// up — and the last keystroke's message stays exactly as it was. A swap
+    /// that worked says nothing: the panel is now drawing the other card, which
+    /// the reader can see, and a footer line announcing it would only push aside
+    /// something they had not finished reading.
+    ///
+    /// The one thing it says is the refusal. Before the first
+    /// [`App::show_document`] of the session there is no second card to swap to,
+    /// so the panel stays on the account and the footer names the key that would
+    /// make one — the shape every refusal here takes, a fact about what is there
+    /// and then the keystroke that helps.
+    ///
+    /// Reads no file and asks the engine nothing: the cards are already in hand,
+    /// and this only picks which of them is drawn.
+    pub fn swap_card(&mut self) {
+        if !self.has_document() {
+            self.set_message(no_document_message());
+            return;
+        }
+        self.panel.showing = self.panel.showing.other();
     }
 
     /// Whether a pact has run this session, and so whether the panel has an
@@ -3549,6 +3601,20 @@ fn cut_at_cap_message() -> String {
     "— cut here: the file goes on past this line, and Warlock reads no further".to_owned()
 }
 
+/// What the app says when the swap key is pressed before anything has been read
+/// this session.
+///
+/// The slot holds two cards and one of them is empty, so there is nowhere to
+/// swap to: said out loud rather than swallowed, because a key that did nothing
+/// and reported nothing is indistinguishable from a key that is broken. In the
+/// shape [`undocumented_view_message`] and `scoping::no_pact_message` share —
+/// the fact about what is there, then the key that would make the thing the
+/// reader asked for — and it names `v`, since a document on the other card is
+/// one press of it away.
+fn no_document_message() -> String {
+    "nothing has been read this session — press v on a file row, and there will be a document to swap to".to_owned()
+}
+
 /// What the app says while a summarising pass over the file named `label` is
 /// running inside the directory `pacting` — a line from [`pacting_message`] or
 /// [`refreshing_message`] — is about: that same line with
@@ -3635,8 +3701,8 @@ mod tests {
     use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
     use super::{
-        Account, App, Chrome, Focus, Line, PactToggle, Row, Run, Sigils, cut_at_cap_message,
-        panel_offset_for, reseat_on, scroll_offset_for,
+        Account, App, Chrome, Focus, Line, PactToggle, Row, Run, Showing, Sigils,
+        cut_at_cap_message, no_document_message, panel_offset_for, reseat_on, scroll_offset_for,
     };
     use crate::claude::Activity;
     use crate::fixture;
@@ -7736,6 +7802,167 @@ mod tests {
         assert_eq!(app.panel_lines(now), Vec::new());
         assert_eq!(app.panel_lines_below(), 0);
         assert_eq!(app.panel_scroll_offset(), 0);
+    }
+
+    #[test]
+    fn the_swap_shows_the_other_card_and_the_next_swap_shows_it_back() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        let account = panel_text(&app, at(base, 9));
+
+        app.show_document(document_lines(), false);
+        let document = panel_text(&app, at(base, 9));
+        assert_ne!(document, account, "the two cards draw the same thing");
+
+        // Both directions, because a swap that only went one way would strand a
+        // reader on whichever card they were not reading.
+        app.swap_card();
+        assert_eq!(panel_text(&app, at(base, 9)), account);
+        assert!(app.has_panel_content());
+
+        app.swap_card();
+        assert_eq!(panel_text(&app, at(base, 9)), document);
+        assert!(app.has_panel_content());
+    }
+
+    #[test]
+    fn a_swap_moves_nothing_but_which_card_is_showing() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        app.show_document(document_lines(), false);
+        // A window of the document's own, then the focus and a selection of the
+        // tree's own, then something on the footer: everything a swap could
+        // disturb, put somewhere a default would not be.
+        app.select_next();
+        app.toggle_focus();
+        app.select_next();
+        app.set_message("something the last keystroke said");
+        let mut before = app.clone();
+
+        app.swap_card();
+
+        // The whole of what changed is the bit saying which card is drawn: the
+        // focus, the selection, both windows and the footer are the app's own
+        // clone, untouched — and nothing announces the swap, because the reader
+        // can see it.
+        before.panel.showing = Showing::Account;
+        assert_eq!(app, before, "the swap moved something other than the card");
+    }
+
+    #[test]
+    fn each_cards_window_survives_a_swap_away_and_back() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+
+        // The account parked a line down from the top, and a document over it
+        // parked a line down from its own.
+        app.select_first();
+        app.select_next();
+        let parked = account_window(&app);
+        assert_eq!(parked, (1, false));
+
+        app.show_document(document_lines(), false);
+        app.select_next();
+        let left = document_window(&app);
+        assert_eq!(left, (1, false));
+
+        // Away: the account's window is the one the reader left it on, not the
+        // top and not the end.
+        app.swap_card();
+        assert_eq!(app.panel_scroll_offset(), parked.0);
+        assert_eq!(panel_text(&app, at(base, 9))[0], "Read line 0");
+
+        // And back: the document is on the line they left it on.
+        app.swap_card();
+        assert_eq!(document_window(&app), left);
+        assert_eq!(app.panel_scroll_offset(), left.0);
+        assert_eq!(
+            panel_text(&app, at(base, 9)),
+            ["line 1", "line 2", "line 3"]
+        );
+    }
+
+    #[test]
+    fn the_account_shows_its_newest_line_on_return_unless_it_was_parked() {
+        let base = Instant::now();
+
+        // Following: a run that went on reporting while the document was up is
+        // at its newest line the moment the reader swaps to it.
+        let mut app = app_pacting(9, base);
+        app.show_document(document_lines(), false);
+        record_lines(&mut app, 9..12, base);
+
+        app.swap_card();
+        let drawn = panel_text(&app, at(base, 20));
+        assert!(app.panel_follows());
+        assert_eq!(drawn.last().expect("the account has lines"), "Read line 11");
+
+        // Parked: the reader put that window where it is, and lines arriving
+        // behind a document do not take it off the line they chose.
+        let mut app = app_pacting(9, base);
+        app.select_first();
+        app.show_document(document_lines(), false);
+        record_lines(&mut app, 9..12, base);
+
+        app.swap_card();
+        assert!(!app.panel_follows());
+        assert_eq!(app.panel_scroll_offset(), 0);
+        assert_eq!(panel_text(&app, at(base, 20))[0], "crates/engine");
+    }
+
+    /// Record one numbered tool line per second of `lines` on `app`'s account,
+    /// the way [`app_pacting`] fills one, so a test can go on writing a run that
+    /// started before it.
+    fn record_lines(app: &mut App, lines: std::ops::Range<u64>, base: Instant) {
+        let account = app.account_mut().expect("a run has started");
+        for line in lines {
+            account.record(
+                &Activity::Tool {
+                    name: "Read".to_owned(),
+                    detail: Some(format!("line {line}")),
+                },
+                at(base, line + 1),
+            );
+        }
+    }
+
+    #[test]
+    fn a_swap_before_any_document_is_refused_naming_the_view_key() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        app.set_message("something the last keystroke said");
+        let account = panel_text(&app, at(base, 9));
+        let mut before = app.clone();
+
+        app.swap_card();
+
+        // There is no second card, so the panel stays on the account and the
+        // footer names the key that would make one.
+        let message = app.message().expect("a swap with nothing read is refused");
+        assert_eq!(message, no_document_message(), "{message}");
+        assert!(message.contains("press v"), "{message}");
+        assert_eq!(panel_text(&app, at(base, 9)), account);
+        // And the message is the whole of what the press changed.
+        before.set_message(message);
+        assert_eq!(app, before, "the refusal moved something else");
+    }
+
+    #[test]
+    fn a_swap_with_nothing_in_the_panel_at_all_is_refused_the_same_way() {
+        let mut app = App::from_rows(three_rows());
+        app.set_panel_height(PANEL);
+        let mut before = app.clone();
+
+        app.swap_card();
+
+        // An app that has run no pact and read no file has one empty card
+        // showing and nothing behind it: the mark stays up, and the refusal is
+        // about the document because the document is what the key is for.
+        let message = app.message().expect("a swap with nothing read is refused");
+        assert_eq!(message, no_document_message(), "{message}");
+        assert!(!app.has_panel_content());
+        before.set_message(message);
+        assert_eq!(app, before, "the refusal moved something else");
     }
 
     #[test]
