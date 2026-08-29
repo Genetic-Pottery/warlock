@@ -2006,9 +2006,35 @@ mod tests {
     /// window happened to stop.
     const FILES_HEIGHT: u16 = 20;
 
-    /// Tall enough for the whole fixture's directories on screen, chrome
-    /// included: five rows and then some.
-    const FIXTURE_HEIGHT: u16 = 12;
+    /// Tall enough for the whole of the fixture's default view on screen,
+    /// chrome included: its five directories, the four document rows drawn
+    /// under the documented ones, and then some.
+    ///
+    /// Nine rows rather than five, because the view the app opens on draws each
+    /// directory's own `WARLOCK.md` under it — see [`WHOLE_FIXTURE`].
+    const FIXTURE_HEIGHT: u16 = 16;
+
+    /// Every line the fixture's default view draws, in order, exactly as it
+    /// reaches the screen: the selection's gutter, the guides, the collapse
+    /// marker's two columns and the name.
+    ///
+    /// Nine lines for five directories. The four that carry a document draw it
+    /// under them as the ordinary file row `f` has always produced — one indent
+    /// deeper than the directory, no collapse marker, nothing added to the name
+    /// — and `crates/`, which has no document, draws nothing under itself. The
+    /// three directories that hold only a document are marked expanded here
+    /// because there is now something under them to hide.
+    const WHOLE_FIXTURE: [&str; 9] = [
+        "> - warlock",
+        "  ├   WARLOCK.md",
+        "  ├ - crates",
+        "  │ ├ - engine",
+        "  │ │ └   WARLOCK.md",
+        "  │ └ - tui",
+        "  │   └   WARLOCK.md",
+        "  └ - assets",
+        "    └   WARLOCK.md",
+    ];
 
     /// The narrowest terminal the mark is drawn on: a hundred and fifty-one
     /// columns gives the tree forty-five and the panel a hundred and six, whose
@@ -2537,6 +2563,22 @@ mod tests {
         u16::try_from(index).expect("the fixture tree is small")
     }
 
+    /// `app` with the row for `path` selected, reached by stepping down to it
+    /// the way the movement keys do.
+    ///
+    /// Named rather than counted, for the same reason [`row_index`] is: the
+    /// default view draws a document row under each documented directory, so
+    /// which press of `down` lands on which directory is a fact about the
+    /// fixture that no test of this module is about.
+    fn select(mut app: App, path: &str) -> App {
+        while app.selected_row().expect("the app has rows").path != Path::new(path) {
+            let before = app.selected();
+            app.select_next();
+            assert_ne!(app.selected(), before, "no row for {path}");
+        }
+        app
+    }
+
     /// The rows of `buffer` — counted from the top of the screen — drawn with
     /// the selection's highlight.
     ///
@@ -2677,16 +2719,75 @@ mod tests {
             .into_iter()
             .take(app.rows().len())
             .collect();
-        assert_eq!(
-            drawn,
-            [
-                "> - warlock",
-                "  ├ - crates",
-                "  │ ├   engine",
-                "  │ └   tui",
-                "  └   assets",
-            ]
-        );
+        // Every directory of the walk, in walk order, with the document row
+        // each documented one draws under it: see [`WHOLE_FIXTURE`].
+        assert_eq!(drawn, WHOLE_FIXTURE);
+    }
+
+    #[test]
+    fn a_documented_directorys_document_is_drawn_under_it_like_any_other_file_row() {
+        let tree = fixture::tree();
+        let app = App::from_tree(&tree);
+
+        let buffer = render(&app, WIDTH, FIXTURE_HEIGHT);
+
+        // The whole default view, line by line: four `WARLOCK.md` rows drawn
+        // by the same rule as any file row, and nothing under `crates/`, which
+        // has no document to draw.
+        let drawn: Vec<String> = tree_rows(&buffer)
+            .into_iter()
+            .take(app.rows().len())
+            .collect();
+        assert_eq!(drawn, WHOLE_FIXTURE);
+
+        for directory in [
+            "warlock",
+            "warlock/crates/engine",
+            "warlock/crates/tui",
+            "warlock/assets",
+        ] {
+            let above = row_index(&app, directory);
+            let index = row_index(&app, &format!("{directory}/WARLOCK.md"));
+            // Directly beneath its directory, one indent deeper, with the
+            // name in the column a childless sibling's would start in: the
+            // marker's two blanks and no marker, because nothing is under a
+            // file to hide.
+            assert_eq!(index, above + 1, "{directory}");
+            let line = tree_row(&buffer, index);
+            let level = u16::try_from(INDENT.chars().count()).expect("a two-column indent");
+            assert_eq!(
+                column_of(&line, "WARLOCK.md"),
+                column_of(&tree_row(&buffer, above), directory_name(directory))
+                    + usize::from(level),
+                "{directory}"
+            );
+            assert!(
+                !line.contains('+') && !line.contains('-'),
+                "the document row carries a collapse marker: {line:?}"
+            );
+            // Its directory's colour and no shade of its own, and the name is
+            // the whole of what it says: no marker, no label, nothing to tell
+            // it from the row `f` draws for the same file.
+            let node = tree.find(directory).expect("the fixture has it");
+            assert_eq!(
+                first_glyph_colour(&buffer, index),
+                colour_for(node.state),
+                "{directory}"
+            );
+            assert_eq!(
+                styles_of(&buffer, index, "WARLOCK.md"),
+                vec![(colour_for(node.state), Modifier::empty()); "WARLOCK.md".len()],
+                "{directory}"
+            );
+            assert!(line.trim_end().ends_with("WARLOCK.md"), "{line:?}");
+        }
+    }
+
+    /// The last component of `path`: what a directory's row draws as.
+    fn directory_name(path: &str) -> &str {
+        path.rsplit('/')
+            .next()
+            .expect("a path has a last component")
     }
 
     #[test]
@@ -2706,13 +2807,15 @@ mod tests {
         // the level blank.
         let gutter = u16::try_from(SELECTION_MARKER.chars().count()).expect("a two-char marker");
         let level = u16::try_from(INDENT.chars().count()).expect("a two-column indent");
-        assert_eq!(guide_columns(&buffer, 1), [gutter]);
+        let crates = row_index(&app, "warlock/crates");
+        assert_eq!(guide_columns(&buffer, crates), [gutter]);
         // `engine`, two levels down: two guides, one level apart — the vertical
         // carrying `crates` on past it and then its own corner — and its name
         // still starts one marker past the last of them.
-        assert_eq!(guide_columns(&buffer, 2), [gutter, gutter + level]);
+        let engine = row_index(&app, "warlock/crates/engine");
+        assert_eq!(guide_columns(&buffer, engine), [gutter, gutter + level]);
         assert_eq!(
-            column_of(&tree_row(&buffer, 2), "engine"),
+            column_of(&tree_row(&buffer, engine), "engine"),
             usize::from(gutter + 2 * level) + NO_MARKER.chars().count()
         );
     }
@@ -2780,8 +2883,7 @@ mod tests {
     #[test]
     fn the_pulse_takes_the_row_in_flight_and_leaves_its_guides_alone() {
         let base = Instant::now();
-        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
-        app.select_next();
+        let mut app = select(pacting_app(base, WIDTH, FIXTURE_HEIGHT), "warlock/crates");
         assert!(app.toggle_pact().is_some(), "the crates row takes a pact");
         app.account_mut()
             .expect("a pact has started")
@@ -2811,18 +2913,18 @@ mod tests {
 
     #[test]
     fn the_selections_highlight_covers_the_guides_in_front_of_the_selected_row() {
-        let mut app = App::from_tree(&fixture::tree());
         // Down onto `crates`, which is one level in and so has a guide in front
         // of it for the highlight to reach over.
-        app.select_next();
+        let app = select(App::from_tree(&fixture::tree()), "warlock/crates");
 
         let buffer = render(&app, WIDTH, FIXTURE_HEIGHT);
 
         let area = rows_area(&buffer);
-        let columns = guide_columns(&buffer, 1);
+        let index = row_index(&app, "warlock/crates");
+        let columns = guide_columns(&buffer, index);
         assert_eq!(columns.len(), 1, "the fixture's crates sits at depth 1");
         for column in columns {
-            let cell = &buffer[(area.x + column, area.y + 1)];
+            let cell = &buffer[(area.x + column, area.y + index)];
             assert!(
                 cell.modifier.contains(Modifier::REVERSED),
                 "the highlight stops short of the guides: {cell:?}"
@@ -2842,27 +2944,58 @@ mod tests {
 
         // Same directory, same indent, same name, and the one thing that
         // differs is the marker saying whether anything is under it.
-        assert_eq!(tree_row(&before, 1), "  ├ - crates");
-        assert_eq!(tree_row(&after, 1), "  ├ + crates");
+        let index = row_index(&expanded, "warlock/crates");
+        assert_eq!(tree_row(&before, index), "  ├ - crates");
+        assert_eq!(
+            tree_row(&after, row_index(&collapsed, "warlock/crates")),
+            "  ├ + crates"
+        );
         // And what it was hiding is gone from the screen, leaving the root's
-        // other child where the children were.
+        // other child where the children were — the root's own document row
+        // above it and `assets`' below it, neither of which `crates` hid.
         let drawn: Vec<String> = tree_rows(&after)
             .into_iter()
             .take(collapsed.rows().len())
             .collect();
-        assert_eq!(drawn, ["> - warlock", "  ├ + crates", "  └   assets"]);
+        assert_eq!(
+            drawn,
+            [
+                "> - warlock",
+                "  ├   WARLOCK.md",
+                "  ├ + crates",
+                "  └ - assets",
+                "    └   WARLOCK.md",
+            ]
+        );
     }
 
     #[test]
     fn a_directory_with_nothing_under_it_carries_neither_marker() {
-        let app = App::from_tree(&fixture::tree());
+        // Written out here rather than taken from the fixture: every leaf there
+        // has a document, and the default view draws that document under it, so
+        // no fixture directory is a row with nothing under it any more.
+        let rows = || {
+            vec![
+                Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale).with_child_count(2),
+                Row::new(1, "repo/crates", None, NodeState::Unpacted).with_child_count(1),
+                Row::new(
+                    2,
+                    "repo/crates/engine",
+                    "repo/crates/engine/WARLOCK.md",
+                    NodeState::PactedFresh,
+                ),
+                Row::new(1, "repo/assets", None, NodeState::Unpacted),
+            ]
+        };
+        let app = App::from_rows(rows());
 
         let buffer = render(&app, WIDTH, FIXTURE_HEIGHT);
 
-        // `assets` has no children, so it is neither collapsed nor expanded and
-        // says so by carrying no marker — while still lining its name up with
-        // the marked rows at its own depth.
-        let leaf = tree_row(&buffer, 4);
+        // `assets` has nothing under it — no children and no document row — so
+        // it is neither collapsed nor expanded and says so by carrying no
+        // marker, while still lining its name up with the marked rows at its
+        // own depth.
+        let leaf = tree_row(&buffer, 3);
         assert_eq!(leaf, "  └   assets");
         assert!(!leaf.contains('+') && !leaf.contains('-'), "{leaf:?}");
         assert_eq!(
@@ -2871,7 +3004,7 @@ mod tests {
             "a leaf's name should start where a sibling directory's does"
         );
         // Pressing space on it changes nothing on screen: nothing to hide.
-        let pressed = App::from_tree(&fixture::tree()).with_collapsed(["warlock/assets"]);
+        let pressed = App::from_rows(rows()).with_collapsed(["repo/assets"]);
         assert_eq!(
             rows_text(&render(&pressed, WIDTH, FIXTURE_HEIGHT)),
             rows_text(&buffer)
@@ -3074,10 +3207,9 @@ mod tests {
     #[test]
     fn the_row_in_flight_alternates_between_the_stale_and_the_fresh_colour() {
         let base = Instant::now();
-        let mut app = pacting_app(base, WIDTH, FILES_HEIGHT);
         // The keypress first, as the reader makes it: a pact on `crates`
         // covers everything below it and paints the lot stale.
-        app.select_next();
+        let mut app = select(pacting_app(base, WIDTH, FILES_HEIGHT), "warlock/crates");
         assert!(app.toggle_pact().is_some(), "the crates row takes a pact");
         app.toggle_files();
         // Then the run reaching its first directory, the way the progress
@@ -3150,8 +3282,7 @@ mod tests {
     #[test]
     fn each_directorys_pulse_starts_over_on_the_stale_colour() {
         let base = Instant::now();
-        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
-        app.select_next();
+        let mut app = select(pacting_app(base, WIDTH, FIXTURE_HEIGHT), "warlock/crates");
         assert!(app.toggle_pact().is_some(), "the crates row takes a pact");
         app.account_mut()
             .expect("a pact has started")
@@ -3201,8 +3332,7 @@ mod tests {
     #[test]
     fn a_pact_in_flight_with_no_open_section_draws_a_steady_stale_row() {
         let base = Instant::now();
-        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
-        app.select_next();
+        let mut app = select(pacting_app(base, WIDTH, FIXTURE_HEIGHT), "warlock/crates");
         assert!(app.toggle_pact().is_some(), "the crates row takes a pact");
         // The moment between the keypress and the first progress event: a path
         // in flight and no section to measure a phase against yet.
@@ -3331,13 +3461,15 @@ mod tests {
 
     #[test]
     fn the_selection_marker_moves_with_the_selection() {
-        let mut app = App::from_tree(&fixture::tree());
-        app.select_next();
+        let app = select(App::from_tree(&fixture::tree()), "warlock/crates");
 
         let buffer = render(&app, WIDTH, FIXTURE_HEIGHT);
 
         assert!(!tree_row(&buffer, 0).starts_with(SELECTION_MARKER));
-        assert_eq!(tree_row(&buffer, 1), "> ├ - crates");
+        assert_eq!(
+            tree_row(&buffer, row_index(&app, "warlock/crates")),
+            "> ├ - crates"
+        );
     }
 
     #[test]
