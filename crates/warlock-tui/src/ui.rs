@@ -1943,13 +1943,13 @@ mod tests {
         Areas, BORDER_THICKNESS, CANCEL_KEY, COLLAPSE_KEY, CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT,
         CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS, CONFIRM_NO, CONFIRM_QUESTION,
         CONFIRM_YES, ELLIPSIS, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP,
-        HEADER_HEIGHT, Hit, INDENT, KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS,
-        MOUSE_OFF_KEY, MOUSE_ON_KEY, MOVE_KEYS, NO_MARKER, PACTING_KEYS, PANEL_INDENT, QUIT_KEY,
-        SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS,
-        SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas, centred,
-        confirm_area, confirm_size, display_width, draw, guide_prefixes, hit_test, keys_line,
-        mark_area, pacting_keys_line, pane_inner, panel_height, scope_size, tree_height,
-        tree_rows_area, tree_width, truncated,
+        HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN,
+        MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY, MOVE_KEYS, NO_MARKER, PACTING_KEYS,
+        PACTING_QUIT_KEY, PAGE_KEYS, PANEL_INDENT, QUIT_KEY, SCOPE_CURSOR, SCOPE_HEADING,
+        SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW,
+        SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas, centred, confirm_area, confirm_size,
+        display_width, draw, guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line,
+        pane_inner, panel_height, scope_size, tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::account::Outcome;
     use crate::app::{App, Chrome, Row, Sigils};
@@ -1983,6 +1983,15 @@ mod tests {
     /// a narrower terminal than it needs would be compared against its own
     /// truncation.
     const KEYS_WIDTH: u16 = 160;
+
+    /// The terminal the footer has to survive: eighty columns, which is what a
+    /// split window on a laptop is and has been the default width of a terminal
+    /// for longer than any of this.
+    ///
+    /// Narrower than the whole keys line by some way, so the line drawn here is
+    /// one that has given names up — and the point of the tests that draw at
+    /// this width is which name it kept.
+    const EIGHTY_COLUMNS: u16 = 80;
 
     /// Tall enough for the whole fixture with its files on screen, chrome
     /// included, so a file test asserts about rows rather than about where the
@@ -3842,6 +3851,281 @@ mod tests {
                 "{width} columns kept the fold over cancel: {line:?}"
             );
         }
+    }
+
+    /// The names the idle keys line carries while the mouse key reads one way or
+    /// the other: [`KEYS`], that name, and the way out, in the order
+    /// [`keys_line`] assembles them.
+    ///
+    /// Joined by [`KEY_GAP`] this is the whole line, so its width is the width
+    /// the line needs — which is what the tests below shrink a terminal down
+    /// from.
+    fn idle_keys(mouse_captured: bool) -> Vec<&'static str> {
+        let mut pieces = KEYS.to_vec();
+        pieces.push(if mouse_captured {
+            MOUSE_OFF_KEY
+        } else {
+            MOUSE_ON_KEY
+        });
+        pieces.push(QUIT_KEY);
+        pieces
+    }
+
+    #[test]
+    fn the_footer_keeps_the_whole_way_out_on_an_eighty_column_terminal() {
+        let mut app = App::from_tree(&fixture::tree());
+        let height = 10;
+        let y = height - FOOTER_HEIGHT + 1;
+        let columns = usize::from(EIGHTY_COLUMNS);
+
+        // Eighty columns is narrower than the whole keys line, so this is a line
+        // that has given names up — and the name it keeps is the one a stuck
+        // reader is looking for, whichever way the mouse key reads.
+        for captured in [true, false] {
+            app.set_mouse_captured(captured);
+
+            let keys = row_text(&render(&app, EIGHTY_COLUMNS, height), y);
+
+            // Whole, not the first few characters of it: `contains` of the
+            // entire name, with nothing after it on the line.
+            assert!(
+                keys.contains(QUIT_KEY),
+                "mouse captured {captured}: {keys:?}"
+            );
+            assert!(
+                keys.ends_with(QUIT_KEY),
+                "mouse captured {captured}: {keys:?}"
+            );
+            assert!(
+                display_width(&keys) <= columns,
+                "mouse captured {captured}: {keys:?}"
+            );
+            // And it really did have to give something up to keep it: this is
+            // not a width the whole line fits in.
+            assert!(
+                !keys.contains(PAGE_KEYS),
+                "mouse captured {captured}: {keys:?}"
+            );
+        }
+
+        // While a pact runs the way out is `PACTING_QUIT_KEY` — Esc is spoken
+        // for by `CANCEL_KEY` — and both of the line's answers to "how do I stop
+        // this?" are on eighty columns whole.
+        app.set_pact_in_flight("warlock/crates/engine", 3, 12);
+        for captured in [true, false] {
+            app.set_mouse_captured(captured);
+
+            let keys = row_text(&render(&app, EIGHTY_COLUMNS, height), y);
+
+            assert!(
+                keys.contains(PACTING_QUIT_KEY),
+                "mouse captured {captured}: {keys:?}"
+            );
+            assert!(
+                keys.ends_with(PACTING_QUIT_KEY),
+                "mouse captured {captured}: {keys:?}"
+            );
+            assert!(
+                keys.contains(CANCEL_KEY),
+                "mouse captured {captured}: {keys:?}"
+            );
+            assert!(
+                display_width(&keys) <= columns,
+                "mouse captured {captured}: {keys:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_drawn_keys_line_never_outgrows_the_terminal_it_is_drawn_on() {
+        let mut app = App::from_tree(&fixture::tree());
+        let height = 10;
+        let y = height - FOOTER_HEIGHT + 1;
+
+        // Every width from one column up to wider than the whole line, in both
+        // mouse states and with a pact running and without: measured in columns
+        // by `display_width`, which is what the backend charges for the row,
+        // rather than in bytes.
+        //
+        // The line the layout produced and the line on screen, both: a row read
+        // off the buffer fits the buffer whatever the widget did to it, so the
+        // fit is asserted about the laid-out line and the row is asserted to be
+        // that line — which is what says the backend cut nothing off the end.
+        for pacting in [false, true] {
+            if pacting {
+                app.set_pact_in_flight("warlock/crates/engine", 3, 12);
+            }
+            for captured in [true, false] {
+                app.set_mouse_captured(captured);
+                for width in 1..=KEYS_WIDTH {
+                    let columns = usize::from(width);
+                    let laid_out = if pacting {
+                        pacting_keys_line(columns)
+                    } else {
+                        keys_line(captured, columns)
+                    };
+
+                    let keys = row_text(&render(&app, width, height), y);
+
+                    assert!(
+                        display_width(&laid_out) <= columns,
+                        "{width} columns, pacting {pacting}, captured {captured}: {laid_out:?}"
+                    );
+                    // Trailing blanks are trimmed off a row and off nothing
+                    // else, so the row is the line with its own tail intact.
+                    assert_eq!(
+                        keys,
+                        laid_out.trim_end(),
+                        "{width} columns, pacting {pacting}, captured {captured}"
+                    );
+                    assert!(
+                        display_width(&keys) <= columns,
+                        "{width} columns, pacting {pacting}, captured {captured}: {keys:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_keys_line_gives_its_names_up_in_order_rather_than_losing_its_tail() {
+        for captured in [true, false] {
+            let pieces = idle_keys(captured);
+            let whole = pieces.join(KEY_GAP);
+            let full = display_width(&whole);
+            // A terminal with room for all of it gets all of it.
+            assert_eq!(keys_line(captured, full), whole, "captured {captured}");
+
+            // The order this line's names are expected to go in: the documented
+            // one, less the two reserved for keys that do not exist yet and the
+            // mouse name this state does not use.
+            let expected: Vec<&str> = KEY_DROP_ORDER
+                .iter()
+                .copied()
+                .filter(|name| pieces.contains(name))
+                .collect();
+            assert_eq!(
+                expected.first(),
+                Some(&PAGE_KEYS),
+                "the page keys go first: {expected:?}"
+            );
+
+            // Column by column down from the whole line, noting each name as it
+            // disappears. What comes out is the order they went in.
+            let mut present = pieces.clone();
+            let mut dropped: Vec<&str> = Vec::new();
+            for width in (0..=full).rev() {
+                let line = keys_line(captured, width);
+
+                for name in &expected {
+                    if present.contains(name) && !line.contains(name) {
+                        dropped.push(name);
+                        present.retain(|kept| kept != name);
+                    }
+                }
+                assert!(
+                    display_width(&line) <= width,
+                    "{width} columns, captured {captured}: {line:?}"
+                );
+                // And the way out is whole at every width that could hold it,
+                // however much else has gone.
+                if width >= display_width(QUIT_KEY) {
+                    assert!(
+                        line.contains(QUIT_KEY),
+                        "{width} columns, captured {captured}: {line:?}"
+                    );
+                }
+            }
+            assert_eq!(dropped, expected, "captured {captured}");
+
+            // Which is a different line from the one a terminal that cut at its
+            // right-hand edge would draw: that line is a prefix of the whole,
+            // and this one is not — it kept its tail and lost its middle.
+            let narrow = keys_line(captured, usize::from(EIGHTY_COLUMNS));
+            assert!(
+                narrow.ends_with(QUIT_KEY),
+                "captured {captured}: {narrow:?}"
+            );
+            assert!(
+                !whole.starts_with(&narrow),
+                "captured {captured}: {narrow:?} is the whole line cut at the edge"
+            );
+        }
+    }
+
+    #[test]
+    fn the_way_out_is_cut_rather_than_dropped_on_a_terminal_narrower_than_its_name() {
+        let quit = display_width(QUIT_KEY);
+
+        for captured in [true, false] {
+            // Exactly the width of the name and nothing to spare: the name, and
+            // only it.
+            assert_eq!(keys_line(captured, quit), QUIT_KEY, "captured {captured}");
+
+            // Below that there is nothing left to give up, so the name is cut —
+            // the start of the way out rather than a blank line — down to the
+            // terminal a single column wide.
+            for width in 0..quit {
+                assert_eq!(
+                    keys_line(captured, width),
+                    QUIT_KEY[..width],
+                    "{width} columns, captured {captured}"
+                );
+            }
+        }
+
+        // And that is what is drawn, not just what is assembled: a terminal
+        // thirteen columns wide says as much of the way out as it has room for.
+        let cut = "q/Esc/Ctrl-C:";
+        let width = u16::try_from(display_width(cut)).expect("a footer line's worth of columns");
+        let height = 10;
+
+        let buffer = render(&App::from_tree(&fixture::tree()), width, height);
+
+        assert_eq!(row_text(&buffer, height - FOOTER_HEIGHT + 1), cut);
+    }
+
+    #[test]
+    fn a_footer_with_room_for_every_key_draws_three_dim_lines_and_gives_nothing_up() {
+        let tree = fixture::tree();
+        let mut app = App::from_tree(&tree);
+        app.set_message("nothing to refresh");
+        let height = 10;
+
+        let buffer = render(&app, KEYS_WIDTH, height);
+
+        // Three lines and no more, where they have always been.
+        let footer = areas(buffer.area).footer;
+        assert_eq!(footer.height, FOOTER_HEIGHT);
+        assert_eq!(footer.y, height - FOOTER_HEIGHT);
+
+        // The tally, the whole keys line with nothing given up, and the message.
+        let tally: Vec<String> = NodeState::ALL
+            .iter()
+            .map(|state| format!("{} {}", tree.counts().get(*state), super::noun(*state)))
+            .collect();
+        assert_eq!(row_text(&buffer, footer.y), tally.join("  "));
+        assert_eq!(
+            row_text(&buffer, footer.y + 1),
+            idle_keys(app.mouse_captured()).join(KEY_GAP)
+        );
+        assert_eq!(row_text(&buffer, footer.y + 2), "nothing to refresh");
+
+        // The keys and the message are dim, every column of them, and the tally
+        // is not: its colours are the node states', which dimness would mute.
+        for y in [footer.y + 1, footer.y + 2] {
+            let text = row_text(&buffer, y);
+            let columns = u16::try_from(display_width(&text)).expect("a line's worth of columns");
+            for x in footer.x..footer.x + columns {
+                assert!(
+                    buffer[(x, y)].modifier.contains(Modifier::DIM),
+                    "({x}, {y}) is not dim"
+                );
+            }
+        }
+        let first = &buffer[(footer.x, footer.y)];
+        assert!(!first.modifier.contains(Modifier::DIM));
+        assert_eq!(first.fg, colour_for(NodeState::Unpacted));
     }
 
     #[test]
