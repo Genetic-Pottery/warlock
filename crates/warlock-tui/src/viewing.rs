@@ -189,15 +189,21 @@ mod tests {
     }
 
     /// A file comfortably past [`PER_FILE_BYTE_CAP`], in lines long enough that
-    /// the whole of it still fits in a panel: a thousand characters and a
-    /// newline apiece, numbered so that no two lines are the same.
+    /// the whole of it still fits in a panel: a hundred and twenty-eighth of the
+    /// cap apiece, numbered so that no two lines are the same.
+    ///
+    /// The line length is a fraction of the cap rather than a number of
+    /// characters, so that a cap raised in a one-line diff does not turn this
+    /// fixture into a file with more lines than [`PANEL`] has rows — which is a
+    /// test failing on its own scaffolding rather than on what it is about.
     fn over_the_cap() -> String {
-        let cap = usize::try_from(PER_FILE_BYTE_CAP).expect("the cap is a few kilobytes");
+        let cap = usize::try_from(PER_FILE_BYTE_CAP).expect("the cap fits in memory");
+        let width = cap / 128;
         let mut text = String::new();
         for line in 0.. {
             let number = format!("{line:04} ");
             text.push_str(&number);
-            text.push_str(&"x".repeat(1000 - number.len()));
+            text.push_str(&"x".repeat(width - number.len()));
             text.push('\n');
             if text.len() > cap + 4096 {
                 break;

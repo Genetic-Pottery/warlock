@@ -418,23 +418,45 @@ const WALK_DEPTH: usize = 2;
 /// The most bytes one file may contribute before it is listed instead of sent:
 /// 128 KiB.
 ///
-/// Roughly 37,000 tokens of source at the ~3.5 bytes per token that code
-/// tokenises at — comfortably more than any hand-written source file (the
-/// largest module in this repository is under 50 KiB), and comfortably less
-/// than the generated artefacts this cap exists for: lockfiles, vendored
-/// bundles, checked-in schemas, minified assets. A file that trips this cap is
-/// almost never a file a model needed to read line by line; its name, and the
-/// fact that it is enormous, is the part worth documenting.
-pub const PER_FILE_BYTE_CAP: u64 = 128 * 1024;
-
-/// The most bytes one whole request may carry: 256 KiB.
+/// Roughly 300,000 tokens of source at the ~3.5 bytes per token that code
+/// tokenises at — comfortably more than any hand-written source file, and
+/// comfortably less than the generated artefacts this cap exists for:
+/// lockfiles, vendored bundles, checked-in schemas, minified assets. A file
+/// that trips this cap is almost never a file a model needed to read line by
+/// line; its name, and the fact that it is enormous, is the part worth
+/// documenting.
 ///
-/// About 75,000 tokens by the same measure — a large but workable share of a
-/// 200,000-token window, leaving the prompt, the children's documents and the
-/// answer itself room to breathe. Twice [`PER_FILE_BYTE_CAP`] on purpose: even
-/// a directory holding two maximal files still sends both, while the directory
-/// that trips this cap is one holding hundreds of ordinary files, where sending
-/// every one of them buys less than it costs.
+/// It was 128 KiB, against an assumed 200,000-token window and a claim that the
+/// largest module in this repository was under 50 KiB. Both had stopped being
+/// true — the windows the front end's [`Agent`] reaches are measured in
+/// millions of tokens now, and this repository's own `app.rs` is over 400
+/// KiB — so hand-written source was tripping a cap sized
+/// to catch minified bundles, and paying for it in the worst currency there is:
+/// one model pass per 96 KiB chunk, serially, while somebody watched. Pacting
+/// `crates/warlock-tui/src` cost fifteen passes and 8m55s, of which fourteen
+/// passes were summarising three ordinary Rust files.
+///
+/// What the raise buys is not only time. A document written from summaries of
+/// chunks of a file is a worse document than one written from the file, and at
+/// 1 MiB the source goes to the pass that describes it.
+pub const PER_FILE_BYTE_CAP: u64 = 1024 * 1024;
+
+/// The most bytes one whole request may carry: 2 MiB.
+///
+/// About 570,000 tokens by the same measure — a large but workable share of a
+/// 1,000,000-token window, leaving the prompt, the children's documents and the
+/// answer itself room to breathe. Twice [`PER_FILE_BYTE_CAP`]
+/// on purpose: even a directory holding two maximal files still sends both,
+/// while the directory that trips this cap is one holding hundreds of ordinary
+/// files, where sending every one of them buys less than it costs.
+///
+/// This is the one cap that is a budget rather than a capability. The window
+/// would take more; what stops it is that a request is paid for by the byte, so
+/// this number is how much a caller is willing to spend describing one
+/// directory. It was 256 KiB when the window was assumed to be 200,000 tokens.
+/// The engine names no model — which window a pass actually gets is the
+/// [`Agent`]'s business — so this number is a budget the caller sets and not a
+/// limit anything here can measure.
 ///
 /// The budget counts everything the request carries: the bytes of the files
 /// sent whole, the accounts of the ones summarised, and the text of the
@@ -444,7 +466,7 @@ pub const PER_FILE_BYTE_CAP: u64 = 128 * 1024;
 /// still over the cap with every account in it. [`gather_request`] makes the
 /// first answer with no model pass at all, and [`demote_to_budget`] is that
 /// answer reconsidered once summaries exist.
-pub const REQUEST_BYTE_CAP: u64 = 256 * 1024;
+pub const REQUEST_BYTE_CAP: u64 = 2 * 1024 * 1024;
 
 /// The fewest bytes an answer may come to, once surrounding whitespace is
 /// trimmed, and still be written as a document: 200.
@@ -467,32 +489,36 @@ pub const REQUEST_BYTE_CAP: u64 = 256 * 1024;
 /// stop the case where there is no document at all.
 pub const MINIMUM_DOCUMENT_BYTES: usize = 200;
 
-/// The most bytes of a file's text one map pass is handed: 96 KiB.
+/// The most bytes of a file's text one map pass is handed: 768 KiB.
 ///
-/// Three quarters of [`PER_FILE_BYTE_CAP`], and strictly below it on purpose. A
-/// file sent whole is the whole of what its entry in a request carries; a chunk
-/// is never alone in its window. It arrives with the map prompt, the file's
-/// name and which part of how many it is, and the pass then has to write an
-/// account of it in what is left. The 32 KiB this keeps back under the per-file
-/// cap is that room — a margin, deliberately not a figure computed from the
-/// length of a prompt that is free to change in a diff.
+/// Three quarters of [`PER_FILE_BYTE_CAP`], as it has always been, and strictly
+/// below it on purpose. A file sent whole is the whole of what its entry in a
+/// request carries; a chunk is never alone in its window. It arrives with the
+/// map prompt, the file's name and which part of how many it is, and the pass
+/// then has to write an account of it in what is left. The 256 KiB this keeps
+/// back under the per-file cap is that room — a margin, deliberately not a
+/// figure computed from the length of a prompt that is free to change in a diff.
 ///
 /// It is a target rather than a limit, because chunks split on line boundaries
 /// and a file's lines are its own: see [`chunk_utf8`] for the one case that
 /// goes over, and why going over beats cutting.
-const CHUNK_BYTE_CAP: usize = 96 * 1024;
+const CHUNK_BYTE_CAP: usize = 768 * 1024;
 
 /// The most chunks one file may become before it is left as a name and a size:
-/// 32.
+/// 8.
 ///
 /// What this protects against is one file quietly becoming hundreds of model
 /// passes. A pact is already minutes of passes per directory, and summarising
 /// is per file on top of that: with no ceiling, one checked-in 40 MB bundle
 /// turns a single directory's pact into four hundred passes, spending a
 /// caller's money and an hour of wall clock on the least interesting file in
-/// the repository. Thirty-two chunks is a little over 3 MB of text at
-/// [`CHUNK_BYTE_CAP`], plus one reduce: thirty-three passes, which is the most
-/// any one file is worth.
+/// the repository. Eight chunks is 6 MB of text at [`CHUNK_BYTE_CAP`], plus one
+/// reduce: nine passes, which is the most any one file is worth.
+///
+/// It was thirty-two when a chunk was 96 KiB — the same 3 MB of file, cut into
+/// four times as many passes. A bigger chunk is why the count comes down: what
+/// this ceiling is really counting is passes somebody has to wait through, and
+/// the byte ceiling it works out to went *up*.
 ///
 /// That covers what summarising exists for — a megabyte-scale lockfile or
 /// generated schema is a handful of chunks — and stops at the artefacts nobody
@@ -504,7 +530,7 @@ const CHUNK_BYTE_CAP: usize = 96 * 1024;
 /// a pure function over bytes already in memory. So this ceiling is checked for
 /// free, and can never be hit half way through a file with passes already paid
 /// for.
-const CHUNK_COUNT_CEILING: usize = 32;
+const CHUNK_COUNT_CEILING: usize = 8;
 
 /// The fewest bytes a map or reduce answer may come to, once surrounding
 /// whitespace is trimmed, and still be used as an account of a file: 80.
@@ -3931,6 +3957,25 @@ mod tests {
         vec![b'x'; usize::try_from(size).expect("a test file fits in memory")]
     }
 
+    /// `percent` of [`REQUEST_BYTE_CAP`], in bytes.
+    ///
+    /// Every fixture below that is about the budget biting is written in these
+    /// rather than in kibibytes, because what those tests are about is a size
+    /// *relative to the cap* — three files at 39% apiece are over budget and two
+    /// are not, whatever the cap happens to be this year. They used to be
+    /// absolute, against a 256 KiB cap, and raising that cap turned a directory
+    /// that was deliberately over budget into one that fit, which is a fixture
+    /// silently ceasing to test what it was written for rather than a test
+    /// failing honestly.
+    fn share(percent: u64) -> u64 {
+        REQUEST_BYTE_CAP * percent / 100
+    }
+
+    /// The same share, as the `usize` a document's length is measured in.
+    fn share_bytes(percent: u64) -> usize {
+        usize::try_from(share(percent)).expect("a share of the cap fits in memory")
+    }
+
     /// `size` bytes that are not text: what a checked-in PNG, a compiled
     /// artefact or a fixture of random bytes looks like to the chunker.
     ///
@@ -4225,13 +4270,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         // Named so that alphabetical order is the reverse of size order: a
         // gather that dropped files in path order would fail here.
-        let sizes = [
-            ("a.bin", 80 * 1024),
-            ("b.bin", 90 * 1024),
-            ("c.bin", 100 * 1024),
-            ("d.bin", 110 * 1024),
-            ("e.bin", 120 * 1024),
-        ];
+        let sizes = fat();
         for (name, size) in sizes {
             write(dir.path(), name, filler(size));
         }
@@ -4630,10 +4669,21 @@ mod tests {
                  which describes a whole directory",
             );
         }
-        assert!(
-            (12..=64).contains(&CHUNK_COUNT_CEILING),
-            "a few dozen: enough for a lockfile, far short of hundreds of passes",
-        );
+        // The rule this holds is about two numbers, and neither of them is the
+        // chunk count on its own: a file of a few megabytes still gets
+        // described, and no file ever becomes hundreds of passes. Written as a
+        // reach in bytes and a count of passes, so that moving either cap moves
+        // this test's meaning with it rather than past it.
+        const {
+            assert!(
+                CHUNK_COUNT_CEILING * CHUNK_BYTE_CAP >= 4 * 1024 * 1024,
+                "a lockfile of a few megabytes has to still be describable",
+            );
+            assert!(
+                CHUNK_COUNT_CEILING >= 2 && CHUNK_COUNT_CEILING <= 64,
+                "more than one pass, and far short of hundreds of them",
+            );
+        }
     }
 
     #[test]
@@ -5708,20 +5758,29 @@ mod tests {
         );
     }
 
-    /// A fat directory: five files that come to twice the request cap between
-    /// them, named so that alphabetical order is the reverse of size order —
-    /// an operation that gave files up in path order would fail on it.
-    const FAT: [(&str, u64); 5] = [
-        ("a.bin", 80 * 1024),
-        ("b.bin", 90 * 1024),
-        ("c.bin", 100 * 1024),
-        ("d.bin", 110 * 1024),
-        ("e.bin", 120 * 1024),
+    /// A fat directory: five files that come to nearly twice the request cap
+    /// between them, named so that alphabetical order is the reverse of size
+    /// order — an operation that gave files up in path order would fail on it.
+    ///
+    /// Written in [`share`]s of the cap, for the reason given there. The
+    /// thirty-one-to-forty-seven spread leaves the two smallest fitting and the
+    /// third not.
+    const FAT_SHARES: [(&str, u64); 5] = [
+        ("a.bin", 31),
+        ("b.bin", 35),
+        ("c.bin", 39),
+        ("d.bin", 43),
+        ("e.bin", 47),
     ];
 
-    /// The files of [`FAT`], written into `dir`.
+    /// The files of [`FAT_SHARES`], with their sizes, in the same order.
+    fn fat() -> [(&'static str, u64); 5] {
+        FAT_SHARES.map(|(name, percent)| (name, share(percent)))
+    }
+
+    /// The files of [`FAT_SHARES`], written into `dir`.
     fn fat_directory(dir: &Path) {
-        for (name, size) in FAT {
+        for (name, size) in fat() {
             write(dir, name, filler(size));
         }
     }
@@ -5797,7 +5856,7 @@ mod tests {
             "and nothing fell all the way, because the accounts fitted: {:?}",
             listed(pass),
         );
-        for (name, size) in FAT {
+        for (name, size) in fat() {
             assert_eq!(
                 file(pass, name).size(),
                 size,
@@ -5851,7 +5910,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         // The same five files, none of them text: the ladder's bottom rung is
         // exactly where it always was, and the cause says which rung failed.
-        for (name, size) in FAT {
+        for (name, size) in fat() {
             write(dir.path(), name, not_text(size));
         }
         let agent = Counting::new(document(300));
@@ -5895,13 +5954,13 @@ mod tests {
         // Three files of one size: the budget takes one of them, and which one
         // is decided by path because the sizes cannot decide it.
         for name in ["a.bin", "b.bin", "c.bin"] {
-            write(dir.path(), name, filler(100 * 1024));
+            write(dir.path(), name, filler(share(39)));
         }
         // An account far too long to fit in what is left of the budget: two
         // files of 100 KiB are already in the request. One pass makes it —
         // filler has no line to cut on, so a file of it is one chunk and one
         // chunk is one map pass with no reduce over it.
-        let agent = Counting::new(document(300)).scripted([Ok(document(80 * 1024))]);
+        let agent = Counting::new(document(300)).scripted([Ok(document(share_bytes(31)))]);
 
         let Pacted { problems, .. } = pact_directory(dir.path(), dir.path(), &agent)
             .expect("an account with nowhere to go is not a failure");
@@ -5926,7 +5985,7 @@ mod tests {
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_eq!(problems[0].path, dir.path().join("a.bin"));
         assert!(
-            matches!(problems[0].cause, Omission::OverBudget { size } if size == 100 * 1024),
+            matches!(problems[0].cause, Omission::OverBudget { size } if size == share(39)),
             "the cause is the whole-request cap, which is what there was no room in: {:?}",
             problems[0],
         );
@@ -6002,7 +6061,7 @@ mod tests {
     /// is not the answer: only the relative path is left to decide which of them
     /// the budget takes.
     fn tied_pair(dir: &Path) -> u64 {
-        let size = 100 * 1024;
+        let size = share(39);
         let mut other = filler(size);
         other[0] = b'y';
         write(dir, "omega.bin", other);
@@ -6017,8 +6076,10 @@ mod tests {
         tied_pair(dir.path());
         // A long account of the over-cap file, and an ordinary one of whichever
         // of the pair the budget picks.
-        let agent = Counting::new(document(300))
-            .scripted([Ok(document(60 * 1024)), Ok(account("one of the pair"))]);
+        let agent = Counting::new(document(300)).scripted([
+            Ok(document(share_bytes(23))),
+            Ok(account("one of the pair")),
+        ]);
 
         let Pacted { problems, .. } =
             pact_directory(dir.path(), dir.path(), &agent).expect("pacts");
@@ -6062,8 +6123,10 @@ mod tests {
         over_cap_file(dir.path());
         tied_pair(dir.path());
 
-        let first = Counting::new(document(300))
-            .scripted([Ok(document(60 * 1024)), Ok(account("one of the pair"))]);
+        let first = Counting::new(document(300)).scripted([
+            Ok(document(share_bytes(23))),
+            Ok(account("one of the pair")),
+        ]);
         pact_directory(dir.path(), dir.path(), &first).expect("pacts");
         assert_eq!(
             first.passes(),
@@ -6102,9 +6165,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let size = over_cap_file(dir.path());
         for (name, bytes) in [
-            ("a.bin", 60 * 1024),
-            ("b.bin", 70 * 1024),
-            ("c.bin", 80 * 1024),
+            ("a.bin", share(23)),
+            ("b.bin", share(27)),
+            ("c.bin", share(31)),
         ] {
             write(dir.path(), name, filler(bytes));
         }
@@ -6113,10 +6176,10 @@ mod tests {
         // still leaves the request over the cap and the bottom rung is really
         // reached.
         let agent = Counting::new(document(300)).scripted([
-            Ok(document(150 * 1024)),
-            Ok(document(40 * 1024)),
-            Ok(document(40 * 1024)),
-            Ok(document(40 * 1024)),
+            Ok(document(share_bytes(59))),
+            Ok(document(share_bytes(16))),
+            Ok(document(share_bytes(16))),
+            Ok(document(share_bytes(16))),
         ]);
 
         let Pacted { problems, .. } = pact_directory(dir.path(), dir.path(), &agent)
@@ -6174,14 +6237,14 @@ mod tests {
         // over gather's cliff, two of those come back as accounts, and the one
         // that cannot be described stays where the cliff left it.
         for (name, bytes) in [
-            ("a.bin", 80 * 1024),
-            ("c.bin", 100 * 1024),
-            ("e.bin", 120 * 1024),
+            ("a.bin", share(31)),
+            ("c.bin", share(39)),
+            ("e.bin", share(47)),
         ] {
             write(dir.path(), name, filler(bytes));
         }
-        write(dir.path(), "b.bin", filler(90 * 1024));
-        write(dir.path(), "d.bin", not_text(110 * 1024));
+        write(dir.path(), "b.bin", filler(share(35)));
+        write(dir.path(), "d.bin", not_text(share(43)));
         let agent = Counting::new(document(300)).scripted([
             Ok(account("the largest file")),
             Ok(account("the third largest file")),
@@ -6233,13 +6296,13 @@ mod tests {
         // Three files the budget will reach for in size order — c, then b, then
         // a — each declining in a different way: bytes that are not text, an
         // answer too short to be an account, and a pass that fails outright.
-        write(dir.path(), "a.bin", filler(40 * 1024));
-        write(dir.path(), "b.bin", filler(50 * 1024));
-        write(dir.path(), "c.bin", not_text(60 * 1024));
+        write(dir.path(), "a.bin", filler(share(16)));
+        write(dir.path(), "b.bin", filler(share(20)));
+        write(dir.path(), "c.bin", not_text(share(23)));
         // Annotated because a closure only becomes a function pointer where the
         // type it is going into says so.
         let script: [Result<String, fn() -> AgentError>; 3] = [
-            Ok(document(250 * 1024)),
+            Ok(document(share_bytes(98))),
             Ok("too short to be an account".to_owned()),
             Err(|| AgentError::EmptyOutput),
         ];
@@ -6296,7 +6359,7 @@ mod tests {
             "reported in the order they were given up, largest first",
         );
         assert!(
-            matches!(problems[0].cause, Omission::NotText { size, .. } if size == 60 * 1024),
+            matches!(problems[0].cause, Omission::NotText { size, .. } if size == share(23)),
             "bytes that are not text say so: {:?}",
             problems[0],
         );
@@ -6306,7 +6369,7 @@ mod tests {
                 Omission::Unsummarised {
                     size,
                     source: None
-                } if size == 50 * 1024
+                } if size == share(20)
             ),
             "an answer too short to be an account is an account nobody got: {:?}",
             problems[1],
@@ -6317,7 +6380,7 @@ mod tests {
                 Omission::Unsummarised {
                     size,
                     source: Some(_)
-                } if size == 40 * 1024
+                } if size == share(16)
             ),
             "and a pass that failed keeps what the agent said under it: {:?}",
             problems[2],
@@ -6334,7 +6397,7 @@ mod tests {
         let parts = CHUNK_COUNT_CEILING + 1;
         let bundle = write(dir.path(), "bundle.js", text_of_chunks(parts));
         for name in ["a.bin", "b.bin", "c.bin"] {
-            write(dir.path(), name, filler(100 * 1024));
+            write(dir.path(), name, filler(share(39)));
         }
         let agent = Counting::new(document(300)).scripted([Ok(account("the file the cliff took"))]);
 
