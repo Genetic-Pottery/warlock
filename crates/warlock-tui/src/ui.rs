@@ -1063,28 +1063,38 @@ fn pane_block(focused: bool) -> Block<'static> {
     Block::bordered().border_style(style)
 }
 
-/// Draw the panel: the window onto what it holds — the account of the pact, or a
-/// file somebody asked to read — one row per line, inside its border.
+/// Draw the panel: the window onto the card it is showing, one row per line,
+/// inside its border.
 ///
-/// Before the first pact and the first read the panel holds nothing, and what
-/// this draws inside the border is [`MARK`], centred and dim: warlock's own `W`
-/// and not one word — no heading, no title, no welcome, no key hints. A screen
-/// that said something before anything had happened would be saying it about
-/// nothing; a screen carrying the program's mark is saying whose screen it is,
-/// which is true before anything happens and stops being worth the room the
-/// moment there is something to put there. [`App::has_panel_content`] is the
-/// switch, and not the number of lines: an account that has started and has
-/// nothing in it yet is a pact under way, and the mark does not come back for it.
-/// A panel too small for the mark and its margins draws the bare border, exactly
-/// as it always did.
+/// One slot and two cards. The panel holds the account of the pact and the
+/// document somebody asked to read, and draws whichever of them is showing —
+/// which is the app's answer and never this function's. [`App::panel_lines`]
+/// hands over the showing card's window and [`App::panel_lines_below`] counts
+/// what is under it, so a swap (see [`App::swap_card`]) changes what reaches the
+/// screen without changing a line of the drawing. Both cards are drawn the same
+/// way, in the same border, cut at the same width, under the same indicator: the
+/// difference between an account and a document is what the lines say, not how
+/// the panel says them.
 ///
-/// With an account, every row is one line of it: a section heading naming a
-/// directory, or one thing that pass was seen doing with the elapsed clock of
-/// its own section in front of it, or the line the run finished with. With a
-/// document, every row is one line of the file, from its first. Which lines those
-/// are is [`App::panel_lines`]'s answer, window and all — the app owns the
-/// scrolling, exactly as it owns the tree's — and this only words them and cuts
-/// them to the width.
+/// While neither card has anything in it — before the first pact and the first
+/// read — what this draws inside the border is [`MARK`], centred and dim:
+/// warlock's own `W` and not one word — no heading, no title, no welcome, no key
+/// hints. A screen that said something before anything had happened would be
+/// saying it about nothing; a screen carrying the program's mark is saying whose
+/// screen it is, which is true before anything happens and stops being worth the
+/// room the moment there is something to put there. [`App::has_panel_content`]
+/// is the switch, and not the number of lines: an account that has started and
+/// has nothing in it yet is a pact under way, and the mark does not come back
+/// for it. A panel too small for the mark and its margins draws the bare border,
+/// exactly as it always did.
+///
+/// With the account showing, every row is one line of it: a section heading
+/// naming a directory, or one thing that pass was seen doing with the elapsed
+/// clock of its own section in front of it, or the line the run finished with.
+/// With the document showing, every row is one line of the file, from its first.
+/// Which lines those are is [`App::panel_lines`]'s answer, window and all — the
+/// app owns the scrolling, exactly as it owns the tree's — and this only words
+/// them and cuts them to the width.
 ///
 /// A [`Paragraph`] with no [`Wrap`](ratatui::widgets::Wrap): every row is one
 /// row, whatever is on it. A line that wrapped would put one activity on two
@@ -1092,12 +1102,15 @@ fn pane_block(focused: bool) -> Block<'static> {
 /// that happened and moves every row beneath it for a reason that has nothing to
 /// do with the run.
 ///
-/// While the window is scrolled back, the bottom edge of the border says how
-/// much is below it and which key returns to live. It goes on the border rather
-/// than on a row of its own, because a row of its own would be a row taken off
-/// the account by the act of looking at it — and it goes away the moment the
-/// panel is back at the end, since an indicator that always says `0 more` is
-/// furniture rather than information.
+/// While the showing card's window is scrolled back, the bottom edge of the
+/// border says how much of *that* card is below it and which key returns to
+/// live. It goes on the border rather than on a row of its own, because a row of
+/// its own would be a row taken off the card by the act of looking at it — and
+/// it goes away the moment the window is back at the end, since an indicator
+/// that always says `0 more` is furniture rather than information. It counts the
+/// card on screen and not the slot: what is under the card behind is no part of
+/// what the reader is scrolling through, so a swap changes the number on the
+/// edge or takes it away.
 ///
 /// No colour anywhere in here. The three node-state colours are the tree's and
 /// [`FOCUS_COLOUR`] is the border's; a fourth meaning for colour would cost both
@@ -4754,8 +4767,12 @@ mod tests {
         // Both focus states and a tree with something in it: whatever the app is
         // doing, the panel has nothing to say until a pact says it, so what is
         // inside its border is warlock's mark and blank rows either side of it.
+        // Neither card holds anything, which is the whole of what puts the mark
+        // there: one slot with two empty cards in it draws no lines at all.
         let mut app = App::from_tree(&fixture::tree());
         assert!(!app.has_account());
+        assert!(!app.has_document());
+        assert!(!app.has_panel_content());
         for _ in 0..2 {
             let buffer = render(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT);
 
@@ -5119,6 +5136,139 @@ mod tests {
         ));
         assert_eq!(whole[..3], drawn[..3]);
         assert_eq!(whole[3], "");
+    }
+
+    /// An app whose panel holds both cards: an account of a pact that started at
+    /// `base`, with one section and one thing recorded in it, and a document
+    /// showing over the top of it.
+    ///
+    /// Both filled on purpose — the slot holds two cards, and a document placed
+    /// over a run puts the account behind it rather than throwing it out — so a
+    /// test can swap between them and assert what reaches the screen.
+    fn two_card_app(base: Instant, width: u16, height: u16) -> App {
+        let mut app = pacting_app(base, width, height);
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section("crates/engine", base);
+        account.record(&Activity::Thinking, at(base, 1));
+        app.show_document(["# The engine", "", "It walks the tree."], false);
+        app
+    }
+
+    #[test]
+    fn the_panel_draws_the_card_that_is_showing_and_a_swap_draws_the_other() {
+        let base = Instant::now();
+        let mut app = two_card_app(base, WIDTH, FIXTURE_HEIGHT);
+
+        // The document is up: the file's own lines, from its first, and not one
+        // row of the account behind it.
+        let up = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+        let document = panel_rows(&up);
+        assert_eq!(
+            document[..3],
+            [
+                "# The engine".to_owned(),
+                String::new(),
+                "It walks the tree.".to_owned(),
+            ],
+        );
+        assert!(
+            !document.iter().any(|row| row.contains("crates/engine")),
+            "the account was drawn under the document: {document:?}"
+        );
+        assert_no_mark(&up);
+
+        // A swap, and the same panel draws the other card: the account's heading
+        // and its clocked line, the clock still counting up to the instant the
+        // frame was drawn at, and nothing left of the document on screen.
+        app.swap_card();
+        let swapped = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+        let account = panel_rows(&swapped);
+        assert_eq!(
+            account[..2],
+            [
+                "crates/engine".to_owned(),
+                format!("{PANEL_INDENT}0:09 thinking"),
+            ],
+        );
+        assert!(
+            !account.iter().any(|row| row.contains("It walks the tree")),
+            "the document was drawn under the account: {account:?}"
+        );
+        assert_no_mark(&swapped);
+
+        // And back: one slot and two cards, so the frame that comes back is the
+        // frame that was there before the swap.
+        app.swap_card();
+        assert_eq!(
+            panel_rows(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9))),
+            document
+        );
+    }
+
+    #[test]
+    fn the_scrollback_indicator_reports_the_card_that_is_showing() {
+        let base = Instant::now();
+        let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT)));
+
+        // An account longer than the panel, parked at its first line by the
+        // ordinary movement keys, with a document shorter than the panel over
+        // the top of it.
+        let mut app = pacting_app(base, WIDTH, HEIGHT);
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section("crates/engine", base);
+        for line in 0..height * 3 {
+            account.record(&numbered(line), at(base, line as u64 + 1));
+        }
+        app.toggle_focus();
+        app.select_first();
+        let parked = app.panel_lines_below();
+        assert!(parked > 0, "the account should be scrolled back");
+        app.show_document(["# The engine", "It walks the tree."], false);
+
+        // The document is showing and the whole of it is on screen, so the edge
+        // says nothing — whatever is under the account behind it.
+        let showing_document = render_at(&app, WIDTH, HEIGHT, at(base, 99));
+        assert_eq!(app.panel_lines_below(), 0);
+        let edge = panel_bottom_edge(&showing_document);
+        assert!(!edge.contains(SCROLLBACK_ARROW), "{edge:?}");
+        assert!(!edge.contains("more"), "{edge:?}");
+
+        // Swap, and the indicator comes back counting the account's lines: the
+        // number on the edge is the showing card's and follows it across.
+        app.swap_card();
+        let showing_account = render_at(&app, WIDTH, HEIGHT, at(base, 99));
+        assert_eq!(app.panel_lines_below(), parked);
+        let edge = panel_bottom_edge(&showing_account);
+        assert!(
+            edge.contains(&format!("{SCROLLBACK_ARROW} {parked} more ({LIVE_KEY})")),
+            "{edge:?}"
+        );
+
+        // The other way round, on a fresh app: a document longer than the panel
+        // at its first line, over an account that is following its newest one.
+        let mut app = pacting_app(base, WIDTH, HEIGHT);
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section("crates/engine", base);
+        for line in 0..height * 3 {
+            account.record(&numbered(line), at(base, line as u64 + 1));
+        }
+        app.show_document((0..height * 3).map(|line| format!("line {line}")), false);
+
+        let below = app.panel_lines_below();
+        assert_eq!(below, height * 3 - height);
+        let edge = panel_bottom_edge(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
+        assert!(
+            edge.contains(&format!("{SCROLLBACK_ARROW} {below} more ({LIVE_KEY})")),
+            "{edge:?}"
+        );
+
+        // And swapping to an account that is following takes it away again, even
+        // though the card left behind has most of itself below the window.
+        app.swap_card();
+        assert_eq!(app.panel_lines_below(), 0);
+        let edge = panel_bottom_edge(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
+        assert!(!edge.contains(SCROLLBACK_ARROW), "{edge:?}");
+        assert!(!edge.contains("more"), "{edge:?}");
     }
 
     #[test]
