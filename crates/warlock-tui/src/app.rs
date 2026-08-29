@@ -933,8 +933,10 @@ struct Status {
 /// pact, one account.
 ///
 /// `showing` is which card the panel draws, and it moves for exactly two
-/// reasons: a document arriving shows itself, and the swap key. A run never
-/// moves it — a run fills its own card wherever the reader is looking.
+/// reasons: the view key bringing a document to the front ([`App::show_document`])
+/// and the swap key. A run never moves it — a run fills its own card wherever the
+/// reader is looking — and neither does a document being read again under the
+/// reader after `$EDITOR` rewrote it ([`App::refill_document`]).
 ///
 /// Each card carries its own `offset` and `follows`, which is what lets the
 /// account go on following the newest line while the document is up and lets the
@@ -1650,7 +1652,50 @@ impl App {
     ///
     /// Not a keystroke's whole answer: it neither says anything nor takes down
     /// what the last keystroke said, exactly as [`App::start_account`] does not.
+    ///
+    /// The one other way lines reach this card is [`App::refill_document`],
+    /// which is this method minus the last line of it: a file read again because
+    /// something changed it under the reader does not get to decide what they
+    /// are looking at.
     pub fn show_document(&mut self, lines: impl IntoIterator<Item = impl Into<String>>, cut: bool) {
+        self.refill_document(lines, cut);
+        self.panel.showing = Showing::Document;
+    }
+
+    /// Put the lines of a file on the document card again, leaving which card is
+    /// showing exactly as it was.
+    ///
+    /// [`App::show_document`] without the one thing the view key does, and the
+    /// two are one method plus a line for that reason: `v` is a reader asking to
+    /// look at a file, so it brings the file to the front; this is the file
+    /// somebody has just edited being read again underneath them, and a panel
+    /// that flipped to the document because a `WARLOCK.md` was saved would take
+    /// the account of a run out of the reader's hands without their having
+    /// pressed anything. So the bit that says which card is drawn is not touched
+    /// here at all: a document showing stays showing, an account showing stays
+    /// showing, and the card behind is filled either way.
+    ///
+    /// *Which* file the card holds is not known here and is deliberately not kept
+    /// here: what arrives is text and a `cut`, never a path, exactly as
+    /// [`App::show_document`] documents — [`App`] opens nothing, so a path on it
+    /// would be a path something later had to open. Whoever pressed the key knows
+    /// which file it read, and it is that caller who decides this is the same
+    /// file and calls this rather than leaving the card alone.
+    ///
+    /// The window goes back to the top and follows nothing, which is
+    /// [`App::show_document`]'s rule and not a second one. The reader's line is
+    /// deliberately not kept: the file has been rewritten under them, so line
+    /// forty of the file they were reading is not line forty of the file that is
+    /// there now, and parking the window at a number would point it at a line
+    /// nobody chose. The top of the file is somewhere they can see they are.
+    ///
+    /// Says nothing and takes down nothing the last keystroke said, for
+    /// [`App::show_document`]'s reason: it is not a keystroke's whole answer.
+    pub fn refill_document(
+        &mut self,
+        lines: impl IntoIterator<Item = impl Into<String>>,
+        cut: bool,
+    ) {
         let mut lines: Vec<Line> = lines
             .into_iter()
             .map(|text| Line::Text { text: text.into() })
@@ -1661,7 +1706,6 @@ impl App {
             });
         }
         self.panel.document.place(lines, false);
-        self.panel.showing = Showing::Document;
     }
 
     /// Show the other card of the panel: the account if the document is up, the
@@ -7869,6 +7913,110 @@ mod tests {
         // can see it.
         before.panel.showing = Showing::Account;
         assert_eq!(app, before, "the swap moved something other than the card");
+    }
+
+    /// The file the tests below re-read, as whoever read it again would hand it
+    /// over: the same document rewritten by somebody else's editor, so that a
+    /// card holding the new lines cannot be mistaken for one holding the old.
+    fn rewritten_lines() -> Vec<String> {
+        ["# Rewritten", "by somebody else"]
+            .map(str::to_owned)
+            .to_vec()
+    }
+
+    #[test]
+    fn a_re_read_fills_the_document_card_without_bringing_it_to_the_front() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        // A document read once and then left: the reader is on the account,
+        // which is where a run they are watching puts them.
+        app.show_document(document_lines(), false);
+        app.swap_card();
+        let account = panel_text(&app, at(base, 9));
+
+        app.refill_document(rewritten_lines(), false);
+
+        // The panel is exactly where they left it. The new lines are on the card
+        // behind it, waiting for the swap they will ask for themselves — a file
+        // being saved in an editor is not a reason to take a run off the screen.
+        assert_eq!(panel_text(&app, at(base, 9)), account);
+        assert!(app.has_document());
+        assert_eq!(document_text(&app), rewritten_lines());
+
+        app.swap_card();
+        assert_eq!(panel_text(&app, at(base, 9)), rewritten_lines());
+    }
+
+    #[test]
+    fn a_re_read_under_a_showing_document_leaves_it_showing_from_its_first_line() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        app.show_document(document_lines(), false);
+        // Parked at the end of the file that was there before, which is the
+        // window a re-read has to decide what to do with.
+        app.select_last();
+        assert!(app.panel_follows());
+        let parked = account_window(&app);
+
+        app.refill_document(rewritten_lines(), false);
+
+        // Still the card on screen — nothing about which card is showing moved —
+        // and showing the new file from its first line: line five of what was
+        // there is not line five of what is there now.
+        assert_eq!(panel_text(&app, at(base, 9)), rewritten_lines());
+        assert_eq!(app.panel_scroll_offset(), 0);
+        assert!(!app.panel_follows());
+        // And the account behind it is where it was, still following its own
+        // newest line.
+        assert_eq!(account_window(&app), parked);
+    }
+
+    #[test]
+    fn a_re_read_the_cap_cut_short_says_so_exactly_as_the_first_read_did() {
+        let now = Instant::now();
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_panel_height(9);
+        app.show_document(document_lines(), false);
+
+        app.refill_document(document_lines(), true);
+
+        // The one line a document did not write, added here for the same reason
+        // it is added to a first read: the words are the screen's.
+        let drawn = panel_text(&app, now);
+        assert_eq!(drawn.len(), document_lines().len() + 1);
+        assert_eq!(drawn.last(), Some(&cut_at_cap_message()));
+    }
+
+    #[test]
+    fn a_re_read_moves_nothing_but_the_document_card() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        app.show_document(document_lines(), false);
+        // A window of the document's own, the focus and a selection of the
+        // tree's own, and something on the footer: everything a re-read could
+        // disturb, put somewhere a default would not be.
+        app.select_next();
+        app.toggle_focus();
+        app.select_next();
+        app.set_message("something the last keystroke said");
+        let mut before = app.clone();
+
+        app.refill_document(rewritten_lines(), false);
+
+        // The whole of what changed is what is on the one card: the account, the
+        // focus, the selection, the tree's window, the bit saying which card is
+        // drawn and the footer are all the app's own clone, untouched.
+        before.panel.document.place(
+            rewritten_lines()
+                .into_iter()
+                .map(|text| Line::Text { text })
+                .collect(),
+            false,
+        );
+        assert_eq!(
+            app, before,
+            "the re-read moved something other than the card"
+        );
     }
 
     #[test]

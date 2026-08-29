@@ -90,6 +90,15 @@ const END: &str = "<!-- warlock:end -->";
 /// instruction, which is to read the documents first and to treat a stale one
 /// as possibly behind the code it describes.
 ///
+/// Then what editing one of those documents costs, because an agent that fixes
+/// a `WARLOCK.md` in passing will otherwise be surprised by the consequence: a
+/// document is an ordinary file in the directory it describes, so it is inside
+/// that directory's [`subtree_hash`](crate::subtree_hash), and saving an edit
+/// restales the directory there and then. The road back is a pass and nothing
+/// else — `r` in warlock's tree — because fresh is only ever granted, and an
+/// agent that knows this can say the directory is owed a pass instead of
+/// treating the yellow row it just caused as a fault.
+///
 /// Then scopes and sigils, the vocabulary of who a piece of work belongs to: a
 /// pacted directory may carry one scope, recorded in `.warlock/pacts.toml`
 /// beside the grant and shown in the tree; a scope covers everything beneath it
@@ -161,6 +170,17 @@ the document is owed a look. It never decides that a document is *wrong* —
 whether a particular change warrants a documentation update was always a
 judgement call, and warlock makes the change visible rather than pretending
 to make that call for you.
+
+**Editing a `WARLOCK.md` by hand makes its own directory stale.** The
+document sits in the directory it describes, so its own bytes are part of
+that directory's digest: the moment an edit is saved the hash stops
+matching the one recorded when the document was granted, and the directory
+is stale again. That is the ledger being honest rather than something going
+wrong. The only road back to fresh is another model pass over that
+directory — `r` in warlock's tree — because fresh is only ever granted, and
+nothing records a hash without a pass having read the directory first. So
+correct a document where it is wrong, and say that the directory it
+describes is now owed a pass.
 
 ## Scopes and sigils
 
@@ -497,6 +517,27 @@ mod tests {
             "mechanical",
             "granted",
             "trigger, not the judgement",
+        ] {
+            assert!(BODY.contains(phrase), "the body should mention {phrase:?}");
+        }
+    }
+
+    #[test]
+    fn the_body_says_what_editing_a_document_costs() {
+        // The one consequence an agent discovers the hard way if nobody writes
+        // it down: it edits a `WARLOCK.md`, the directory goes stale under it,
+        // and it has no idea whether that is a fault it caused or the system
+        // working. Each phrase is one link of that chain — the edit, why the
+        // hash moves, that it is not breakage, and that only a pass undoes it.
+        for phrase in [
+            "Editing a `WARLOCK.md` by hand makes its own directory stale",
+            "sits in the directory it describes",
+            "own bytes are part of\nthat directory's digest",
+            "the moment an edit is saved",
+            "ledger being honest",
+            "road back to fresh is another model pass",
+            "`r` in warlock's tree",
+            "owed a pass",
         ] {
             assert!(BODY.contains(phrase), "the body should mention {phrase:?}");
         }

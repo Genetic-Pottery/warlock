@@ -114,6 +114,33 @@ pub(crate) enum Action {
     /// refused in the terms its own row makes available. This function's
     /// business is that the key was pressed.
     ViewFile,
+    /// Hand the selected file to `$EDITOR`, and take the terminal back when the
+    /// editor is done with it.
+    ///
+    /// [`Action::ViewFile`]'s other half, and section 9's escape hatch given a
+    /// keystroke: a reader who sees a `WARLOCK.md` that is wrong should not have
+    /// to leave warlock, find the path again and come back. Warlock still writes
+    /// no byte of it — the editor does, and the workspace's writers are still
+    /// the pact, the refresh, the manifest, the scope key and `warlock init`.
+    ///
+    /// The only action here that gives the screen away. What the loop does with
+    /// it is put the terminal back the way it found it, run the editor as a
+    /// foreground child, wait for it, and re-enter raw mode, the alternate
+    /// screen and mouse reporting afterwards — so it is also the only one whose
+    /// answer is measured in whole minutes rather than in frames.
+    ///
+    /// And it has a cost worth saying out loud: a `WARLOCK.md` is an ordinary
+    /// file in its own directory's walk, so saving one restales the very
+    /// directory it describes, and the only road back to green is `r` and a
+    /// pass.
+    ///
+    /// The refusals a press can come to are the app's answer and the loop's,
+    /// exactly as they are for [`Action::TogglePact`] and [`Action::OpenScope`]:
+    /// a row that is not a file is refused in the same words [`Action::ViewFile`]
+    /// refuses it in, and a run in flight is refused where every other mid-run
+    /// refusal is. This function's business is that the key was pressed, which
+    /// is why the key means the same thing during a pact as outside one.
+    EditFile,
     /// Show the panel's other card: the account if the document is up, the
     /// document if the account is.
     ///
@@ -260,7 +287,15 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
         // is not a run — it writes nothing, starts nothing and is over inside a
         // frame — so there is no second run for it to be refused as.
         KeyCode::Char('v') => Some(Action::ViewFile),
-        // Lower case only, like the four above it. The mnemonic is "mouse",
+        // Lower case only, like the five above it: the mnemonic is "edit", and
+        // `E` is a different keystroke that means nothing here. Like every key
+        // but Esc it reads the same way with a run in flight as without one — a
+        // run is a reason to refuse the editor, because the terminal cannot be
+        // handed away from under a pass that is still drawing its account on it,
+        // and refusing is the loop's answer to give, exactly as it is for a
+        // second `p`.
+        KeyCode::Char('e') => Some(Action::EditFile),
+        // Lower case only, like the five above it. The mnemonic is "mouse",
         // and the key means the same thing whether or not a pact is in flight:
         // giving the terminal its own text selection back is exactly the thing a
         // reader wants during a long run, when there is output on screen worth
@@ -629,6 +664,7 @@ mod tests {
             KeyCode::Char('r'),
             KeyCode::Char('s'),
             KeyCode::Char('v'),
+            KeyCode::Char('e'),
             KeyCode::Tab,
             KeyCode::BackTab,
             KeyCode::Char('x'),
@@ -1222,6 +1258,84 @@ mod tests {
     }
 
     #[test]
+    fn e_asks_to_edit_the_selected_file_with_a_run_in_flight_or_without_one() {
+        // Like `p`, `r`, `s` and `v`, and like every key but Esc, `e` means one
+        // thing in both situations. A run in flight is a reason to refuse the
+        // editor — the terminal cannot be handed to a child while a pass is
+        // still drawing on it — but refusing is the loop's answer to give, in
+        // the same place a second `p` is refused, and not this function's.
+        for in_flight in [false, true] {
+            assert_eq!(
+                action_for(press(KeyCode::Char('e')), in_flight),
+                Some(Action::EditFile),
+                "e should ask for the editor with a run in flight = {in_flight}"
+            );
+        }
+    }
+
+    #[test]
+    fn upper_e_asks_for_nothing() {
+        // Lower case only, like `o`, `f`, `p`, `r`, `s`, `v` and `m`: the
+        // upper-case letter is a different keystroke, and leaving it unbound
+        // keeps it free for a later one.
+        for in_flight in [false, true] {
+            assert_eq!(action_for(press(KeyCode::Char('E')), in_flight), None);
+        }
+    }
+
+    #[test]
+    fn releases_and_repeats_of_e_start_nothing() {
+        // The same rule as the keys above, and it matters here as much as it
+        // does for `p`: a release acted on would hand the terminal to a second
+        // editor the moment the first one was asked for, and a held `e` would
+        // suspend warlock as fast as the terminal repeats.
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                KeyCode::Char('e'),
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                action_for(event, false),
+                None,
+                "{kind:?} of e should start nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn e_is_the_only_key_that_edits_a_file() {
+        // Its neighbours on the keyboard, the keys it sits beside in the match
+        // arms above — `v` first, since viewing a file and editing one are the
+        // two halves this binding must not blur — and its upper-case self,
+        // which this binding does not answer to.
+        for code in [
+            KeyCode::Char('v'),
+            KeyCode::Char('w'),
+            KeyCode::Char('r'),
+            KeyCode::Char('p'),
+            KeyCode::Char('s'),
+            KeyCode::Char('m'),
+            KeyCode::Char('E'),
+            KeyCode::Char(' '),
+            KeyCode::Enter,
+        ] {
+            assert_ne!(
+                action_for(press(code), false),
+                Some(Action::EditFile),
+                "{code:?} should not edit a file"
+            );
+            assert_ne!(
+                action_for(press(code), true),
+                Some(Action::EditFile),
+                "{code:?} should not edit a file mid-run"
+            );
+        }
+    }
+
+    #[test]
     fn shift_tab_swaps_the_panel_card_with_a_run_in_flight_or_without_one() {
         // Crossterm spells Shift-Tab `BackTab`, and like every key but Esc it
         // means one thing in both situations — here there is nothing the mode
@@ -1327,6 +1441,7 @@ mod tests {
                 Action::Refresh,
                 Action::OpenScope,
                 Action::ViewFile,
+                Action::EditFile,
                 Action::SwapCard,
             ] {
                 assert_ne!(action, Some(other), "m should not mean {other:?}");
@@ -1623,6 +1738,7 @@ mod tests {
                     | Action::Refresh
                     | Action::OpenScope
                     | Action::ViewFile
+                    | Action::EditFile
                     | Action::ToggleMouseCapture),
                 ) => panic!("{action:?} reached the app"),
                 Pressed::Nothing => {}
