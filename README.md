@@ -112,6 +112,24 @@ The guiding principle is narrow on purpose:
 See [`docs/warlock-design-doc.md`](docs/warlock-design-doc.md) for the full model: pacts,
 freshness, gating, and where the boundaries are drawn.
 
+## Troubleshooting
+
+**Why are my borders not even?**
+
+Your terminal is almost certainly falling back to a second font. Warlock draws
+its panes with Unicode box-drawing characters, one per cell, and a font with no
+glyphs for them hands the job to whichever font the terminal finds next — whose
+glyphs are rarely exactly one cell wide or aligned on the same baseline. The
+result is segments that sit slightly high, low or short, and corners that do not
+meet. Nothing is wrong with the layout: every border is a single character in a
+single cell, and it lines up the moment the font can draw it.
+
+Use a monospace font with box-drawing coverage — most programming fonts have it
+— or turn on your terminal's own line-drawing, which some emulators offer as a
+setting for exactly this reason. If it is only *some* rows that are off, check
+whether your terminal is configured to treat ambiguous-width characters as
+double width.
+
 ## Contributing
 
 Run these three checks before pushing. CI runs exactly the same three commands on
