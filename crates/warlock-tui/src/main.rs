@@ -68,7 +68,7 @@
 //! it runs here on the loop's thread and never on the worker's, and a load that
 //! fails this late keeps the tree already drawn instead of ending the loop.
 //!
-//! The third and last reason to reload is that the disk moved without anybody
+//! The third reason to reload is that the disk moved without anybody
 //! here pressing a key, and it is what [`Watched`] is for. A watcher started
 //! beside the first load reports every path that changes under the tree's root
 //! and at `.warlock/pacts.toml`; the loop drains it once a round, holds each
@@ -84,6 +84,16 @@
 //! the trigger is remembered and nothing is read twice; and warlock itself,
 //! since a watcher that will not start is one line on the footer rather than a
 //! way out of [`run`] — warlock with no live updates is warlock as it was.
+//!
+//! The fourth and last is the disk having moved because this loop asked somebody
+//! else to move it: `e` hands a file to `$EDITOR`, and whatever was saved in
+//! there is on disk before the terminal comes back. So the same [`reload_tree`]
+//! runs on the way in, inside [`editing::edit_press`] — a `WARLOCK.md` that was
+//! edited restales its own directory, and a row that only went yellow at the
+//! reader's next keystroke would be warlock knowing something and not saying it.
+//! The panel is read again there too, and only in one case: when the document
+//! card is holding the very file that was edited, which is what `document` below
+//! is kept for. Which card is showing never moves for it.
 //!
 //! A run that takes minutes has to be stoppable, and there are two ways to stop
 //! one, which this file keeps apart on purpose. Esc *cancels*: the descent ends
@@ -177,13 +187,15 @@
 //! through [`restore_terminal`], which turns reporting off whichever state the
 //! toggle was left in.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use std::{env, io};
 
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use ratatui::crossterm::execute;
-use warlock_engine::{Written, repository_root, write_claude_md};
+use ratatui::layout::Size;
+use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
 use warlock_tui::{
     App, ClaudeAgent, Focus, QuitConfirm, ScopePrompt, draw, panel_height, tree_height,
 };
@@ -204,7 +216,7 @@ use error::Error;
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Running, Work, apply_progress, pact_press, refresh_press, start_run};
 use scoping::{scope_edit, scope_press};
-use session::{Watched, load_app, load_manifest, note};
+use session::{Scope, Watched, load_app, load_manifest, note};
 use terminal::{TerminalGuard, install_panic_hook};
 use viewing::view_press;
 
@@ -482,42 +494,30 @@ fn run() -> Result<(), Error> {
     // session's — the repo root and what warlock was pointed at — and two things
     // by that name in one loop is one of them being read as the other.
     let mut prompt = ScopePrompt::default();
+    // Which file the panel's document card is holding, and the only record of
+    // it: `None` until the first `v` of the session that read something. It
+    // lives here rather than on the app for the reason `mouse_captured` does —
+    // the app is handed lines and never a path, because a path on it would be a
+    // path something later had to open (see `App::show_document`) — and it is
+    // read by exactly one keystroke, `e`, which re-reads the card only when the
+    // file it handed to an editor is the file on it.
+    let mut document: Option<PathBuf> = None;
 
     loop {
-        // Told before it is drawn, and every frame rather than on resize: the
-        // scroll offset is only right if it was computed against the height
-        // this frame gives the tree, and `tree_height` is the same layout the
-        // frame is cut by. A terminal resized between frames is handled by that
-        // alone — the next frame measures again, and the next frame is at most
-        // one `POLL_INTERVAL` away.
+        // Measured once a round, and here rather than inside `draw_frame`,
+        // because the round needs it twice: it is what the app is told to
+        // scroll against and what a click landing on this frame is hit-tested
+        // against, and those two have to be the one answer.
         let size = guard.terminal.size()?;
-        app.set_viewport_height(tree_height(size));
-        // The panel's window is measured the same way and for the same reason,
-        // off the same size: `panel_height` and `tree_height` are two answers
-        // from the one layout, so both panes are scrolled by the height this
-        // frame is about to give them.
-        app.set_panel_height(panel_height(size));
-        // And told what the terminal is doing with the pointer, for the same
-        // reason and in the same place: the footer names the `m` key by what the
-        // next press of it will do, and the app cannot see a terminal. Every
-        // frame rather than at the keystroke, so a view restored from the copy
-        // taken before a pact — which is a copy of a flag that may have been
-        // toggled since — is put right before it is drawn.
+        // Told what the terminal is doing with the pointer, here rather than in
+        // there because the flag is this thread's and not the frame's: the
+        // footer names the `m` key by what the next press of it will do, and the
+        // app cannot see a terminal. Every frame rather than at the keystroke,
+        // so a view restored from the copy taken before a pact — which is a copy
+        // of a flag that may have been toggled since — is put right before it is
+        // drawn.
         app.set_mouse_captured(mouse_captured);
-        // The instant this frame is being drawn at, read once and handed to the
-        // renderer: the panel's newest clock counts up against it, so a frame
-        // drawn with no event waiting still shows a run that is moving. See
-        // `draw`.
-        //
-        // The gate on the way out is handed in beside the app because the app
-        // has never heard of it (see `QuitConfirm`): closed, it changes nothing
-        // about the frame; open, it is a small window drawn over the middle of
-        // it with everything behind it cleared. The scope prompt goes in beside
-        // it for the same reason and is drawn the same way — by reference, since
-        // it carries the text somebody is typing.
-        guard
-            .terminal
-            .draw(|frame| draw(frame, &app, &scope.chrome, Instant::now(), confirm, &prompt))?;
+        draw_frame(&mut app, &mut guard, &scope, size, confirm, &prompt)?;
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
         // sits here, so the wait has to end whether or not anybody presses
@@ -705,7 +705,18 @@ fn run() -> Result<(), Error> {
                     // `s` it is not handed the run: a read races nothing, so
                     // there is nothing for a run in flight to refuse. See
                     // `viewing::view_press`.
-                    Pressed::Act(Action::ViewFile) => view_press(&mut app),
+                    //
+                    // What comes back is the file that is now on the document
+                    // card, and it is kept here because the app is never told:
+                    // `App::show_document` takes lines and never a path, so
+                    // "which file the panel is holding" is this loop's to know.
+                    // The one thing that asks for it is the edit key, which
+                    // re-reads the card only when the file it just handed to an
+                    // editor is the file on it. A press that read nothing —
+                    // refused, or a read that failed — leaves the card holding
+                    // what it held, which is why what was remembered before is
+                    // what a `None` falls back to rather than being cleared.
+                    Pressed::Act(Action::ViewFile) => document = view_press(&mut app).or(document),
                     // The one key that gives the screen away, and the only one
                     // whose answer is measured in minutes of somebody typing
                     // rather than in frames. The loop stops here for the whole
@@ -735,8 +746,22 @@ fn run() -> Result<(), Error> {
                     // back is not news for a footer nobody could read, so it
                     // leaves through the guard like every other terminal
                     // failure. See `editing::edit_press`.
+                    //
+                    // Two things are read again on the way back, and both are
+                    // inside `edit_press`: the tree, so a directory whose file
+                    // changed goes yellow without a further keystroke, and the
+                    // document card — but only when the file just edited is the
+                    // one on it, which is what `document` is kept for. Which
+                    // card is showing does not move for either.
                     Pressed::Act(Action::EditFile) => {
-                        edit_press(&mut app, &mut guard, mouse_captured, pact.is_some())?;
+                        edit_press(
+                            &mut app,
+                            &mut guard,
+                            &scope,
+                            document.as_deref(),
+                            mouse_captured,
+                            pact.is_some(),
+                        )?;
                     }
                     // The panel's other card, and nothing else: the account if
                     // the document is up, the document if the account is. It is
@@ -834,36 +859,101 @@ fn run() -> Result<(), Error> {
             }
         }
 
-        // The clock is read here rather than inside the two calls below for the
-        // same reason it is read before the draw: this file owns the clock and
-        // everything under it is a function of the instant it is handed. What
-        // that instant means is when the events being drained now landed on
-        // screen, which is within one `POLL_INTERVAL` of when they were sent.
-        let now = Instant::now();
-
-        // Read before the drain, because the drain is what ends a run: a pact
-        // that is `Some` here and `None` below finished in this round, and its
-        // own reload has already read the tree.
-        let running = pact.is_some();
-        // Every frame, whether or not a key was pressed: this is the only place
-        // anything the worker says reaches the screen, and it has to keep up
-        // with a thread that is not waiting for it. The scope the app was
-        // loaded at is handed to it because the end of a run re-reads the tree
-        // — see [`reload_tree`].
-        let reloaded = apply_progress(&mut pact, &mut app, &mut manifest, &scope, now);
-        if running && pact.is_none() {
-            // The run's documents are exactly the sort of thing the watcher
-            // reports, so the events it set off are already sitting in the
-            // policy. They are answered by the reload that just happened rather
-            // than by one of their own, and the tree it read becomes the filter.
-            watched.caught_up(reloaded.as_ref(), now);
-        }
-        // And then what everything else did to the disk. Nothing is read again
-        // while a pact is in flight — the trigger keeps until the run's own
-        // reload above — and nothing at all is read when the disk has been
-        // still, which is almost every round.
-        watched.round(&mut app, &scope, pact.is_some(), now);
+        // And then everything that happened off this thread: what a run has
+        // said since the last round, and what the disk did while this one was
+        // waiting on a keystroke. See `keep_up`, which reads the clock the
+        // round is measured against — the instant the events being drained now
+        // land on screen, within one `POLL_INTERVAL` of when they were sent.
+        keep_up(&mut pact, &mut app, &mut manifest, &scope, &mut watched);
     }
+}
+
+/// Tell the app how big the frame it is about to be drawn in is, and draw it.
+///
+/// Told before it is drawn, and every frame rather than on resize: the scroll
+/// offset is only right if it was computed against the height this frame gives
+/// the tree, and [`tree_height`] is the same layout the frame is cut by. A
+/// terminal resized between frames is handled by that alone — the next frame
+/// measures again, and the next frame is at most one [`POLL_INTERVAL`] away.
+/// The panel's window is measured the same way and for the same reason, off the
+/// same size: [`panel_height`] and [`tree_height`] are two answers from the one
+/// layout, so both panes are scrolled by the height this frame is about to give
+/// them.
+///
+/// `size` is the caller's rather than measured here, because the round needs it
+/// again: a click is hit-tested against the size of the frame it landed on, and
+/// measuring twice would be two answers where the hit test needs one.
+///
+/// What the terminal is doing with the pointer is *not* here: it is a flag the
+/// loop keeps about a terminal rather than anything this frame measures, so the
+/// app is told it beside the size, one line above the call.
+///
+/// The instant the frame is drawn at is read here and handed to the renderer:
+/// the panel's newest clock counts up against it, so a frame drawn with no event
+/// waiting still shows a run that is moving. See [`draw`].
+///
+/// The gate on the way out is handed in beside the app because the app has never
+/// heard of it (see [`QuitConfirm`]): closed, it changes nothing about the frame;
+/// open, it is a small window drawn over the middle of it with everything behind
+/// it cleared. The scope prompt goes in beside it for the same reason and is
+/// drawn the same way — by reference, since it carries the text somebody is
+/// typing.
+fn draw_frame(
+    app: &mut App,
+    guard: &mut TerminalGuard,
+    scope: &Scope,
+    size: Size,
+    confirm: QuitConfirm,
+    prompt: &ScopePrompt,
+) -> io::Result<()> {
+    app.set_viewport_height(tree_height(size));
+    app.set_panel_height(panel_height(size));
+    guard
+        .terminal
+        .draw(|frame| draw(frame, app, &scope.chrome, Instant::now(), confirm, prompt))?;
+    Ok(())
+}
+
+/// Keep up with what is happening off this thread: the run's progress, and the
+/// disk moving under the tree.
+///
+/// The bottom of every round, whether or not a key was pressed. [`apply_progress`]
+/// is the only place anything the worker says reaches the screen, and it has to
+/// keep up with a thread that is not waiting for it; the scope is handed to it
+/// because the end of a run re-reads the tree.
+///
+/// Whether a run was in flight is read *before* the drain, because the drain is
+/// what ends one: a pact that is `Some` on the way in and `None` on the way out
+/// finished in this round, and its own reload has already read the tree. The
+/// documents it wrote are exactly the sort of thing the watcher reports, so the
+/// events they set off are already sitting in the policy — they are answered by
+/// the reload that just happened rather than by one of their own, and the tree it
+/// read becomes the next round's filter.
+///
+/// Then what everything else did to the disk. Nothing is read again while a pact
+/// is in flight — the trigger keeps until the run's own reload above — and
+/// nothing at all is read when the disk has been still, which is almost every
+/// round.
+///
+/// The clock is read once, here, and handed to everything under this: the round
+/// is measured against one instant, which is when the events being drained now
+/// land on screen — within one [`POLL_INTERVAL`] of when they were sent. It is
+/// read at the top rather than per call for the reason the frame reads its own:
+/// two readings a round would be two answers to one question.
+fn keep_up(
+    pact: &mut Option<Running>,
+    app: &mut App,
+    manifest: &mut Manifest,
+    scope: &Scope,
+    watched: &mut Watched,
+) {
+    let now = Instant::now();
+    let running = pact.is_some();
+    let reloaded = apply_progress(pact, app, manifest, scope, now);
+    if running && pact.is_none() {
+        watched.caught_up(reloaded.as_ref(), now);
+    }
+    watched.round(app, scope, pact.is_some(), now);
 }
 
 /// Do to the app whatever the pointer just asked for.

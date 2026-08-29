@@ -1,7 +1,10 @@
 //! The view key, from the keystroke to the lines in the panel.
 //!
 //! One press, one read, one thing on screen: [`view_press`] asks the app which
-//! file the selection is on, reads it, and hands the lines over. It is the
+//! file the selection is on, reads it, hands the lines over and says which file
+//! they came out of — the one thing about the panel the app is deliberately not
+//! told, since a path on it would be a path something later had to open. It is
+//! the
 //! smallest of the three key modules — [`mod@crate::pacting`] runs a thread and
 //! [`mod@crate::scoping`] writes a file — because reading is the smallest thing
 //! a key here can ask for.
@@ -54,6 +57,8 @@
 //! the document a reader was looking at, so nothing is cleared until there are
 //! lines to put there.
 
+use std::path::PathBuf;
+
 use warlock_engine::{Viewed, view_file};
 use warlock_tui::App;
 
@@ -86,22 +91,42 @@ use crate::error::one_line;
 ///
 /// Takes no run and no manifest: see the module docs for why a read is neither
 /// refused mid-run nor followed by a reload.
-pub(crate) fn view_press(app: &mut App) {
+///
+/// What comes back is the file that is now on the document card, and `None` for
+/// a press that put nothing there — a row that was refused, or a read that
+/// failed and left the card holding whatever it held before. It is handed back
+/// because somebody has to know which file the panel is showing and it is not
+/// going to be [`App`]: a path kept there would be a path something later had to
+/// open, and [`App::show_document`] takes lines for exactly that reason. The
+/// loop keeps it, and the edit key asks for it — a file rewritten by `$EDITOR`
+/// is re-read only when it is the one on the card (see
+/// [`edit_press`](crate::editing::edit_press)).
+///
+/// Nothing else about the press changed for it. A refusal is still worded by
+/// [`App::view_target`], a failed read still leaves one line on the footer and
+/// the panel exactly as it was, and neither of those is a file the caller should
+/// start remembering: `None` means the card is holding what it was already
+/// holding.
+pub(crate) fn view_press(app: &mut App) -> Option<PathBuf> {
     // Every row-level refusal leaves through here, having already said its
     // piece: there is one place that decides what this press means over a row,
     // and it is not this file.
-    let Some(path) = app.view_target() else {
-        return;
-    };
+    let path = app.view_target()?;
 
     match view_file(&path) {
-        Ok(Viewed { text, cut }) => app.show_document(text.lines(), cut),
+        Ok(Viewed { text, cut }) => {
+            app.show_document(text.lines(), cut);
+            Some(path)
+        }
         // The engine's own wording — it names the file and says which of the two
         // ways it went — flattened onto the footer's single line the way every
         // other non-fatal failure in this binary is. The panel is not touched:
         // a reader who could not read this file is still looking at whatever
         // they were looking at before they asked.
-        Err(error) => app.set_message(one_line(&error.to_string())),
+        Err(error) => {
+            app.set_message(one_line(&error.to_string()));
+            None
+        }
     }
 }
 
@@ -254,8 +279,11 @@ mod tests {
         let repo = a_repo();
         let mut app = app_on_file(repo.path(), "WARLOCK.md");
 
-        view_press(&mut app);
+        let read = view_press(&mut app);
 
+        // The file that is now on the card, said out loud: the app is never told
+        // which file it is holding, so the press has to say.
+        assert_eq!(read, Some(repo.path().join("crates/engine/WARLOCK.md")));
         assert!(app.has_document(), "nothing was read");
         assert_eq!(
             panel_text(&app),
@@ -281,8 +309,9 @@ mod tests {
         let repo = a_repo();
         let mut app = app_on_file(repo.path(), "notes.txt");
 
-        view_press(&mut app);
+        let read = view_press(&mut app);
 
+        assert_eq!(read, Some(repo.path().join("crates/engine/notes.txt")));
         assert_eq!(panel_text(&app), ["one", "two", "three"]);
     }
 
@@ -292,7 +321,9 @@ mod tests {
         let mut app = app_on(repo.path(), &repo.path().join("crates/engine"));
         let mut before = app.clone();
 
-        view_press(&mut app);
+        // Nothing was read, so nothing is named: the card is holding whatever it
+        // held before this press.
+        assert_eq!(view_press(&mut app), None);
 
         let message = app.message().expect("a directory row is refused");
         assert!(message.contains("is a directory"), "{message}");
@@ -309,7 +340,7 @@ mod tests {
         let mut app = app_on(repo.path(), &repo.path().join("crates"));
         let mut before = app.clone();
 
-        view_press(&mut app);
+        assert_eq!(view_press(&mut app), None);
 
         let message = app.message().expect("a directory row is refused");
         assert!(message.contains("is a directory"), "{message}");
@@ -326,7 +357,11 @@ mod tests {
         let repo = a_repo();
         let mut app = app_on_file(repo.path(), "huge.txt");
 
-        view_press(&mut app);
+        assert_eq!(
+            view_press(&mut app),
+            Some(repo.path().join("crates/engine/huge.txt")),
+            "a read the cap cut short is still a file on the card"
+        );
 
         let drawn = panel_text(&app);
         // Exactly the text the engine read under the one cap, split into rows,
@@ -361,7 +396,7 @@ mod tests {
     /// document a reader would have lost rather than about emptiness.
     fn app_holding_a_document_on(root: &Path, file: &Path) -> App {
         let mut app = app_on_file(root, "WARLOCK.md");
-        view_press(&mut app);
+        assert!(view_press(&mut app).is_some(), "the fixture read nothing");
         assert!(app.has_document(), "the fixture read nothing");
         select(&mut app, file);
         // After the selection, because moving the selection is what takes a
@@ -391,7 +426,9 @@ mod tests {
         let shown = panel_text(&app);
         let before = app.clone();
 
-        view_press(&mut app);
+        // A read that failed names no file: the card is still holding the one it
+        // was holding, so the caller has nothing new to remember.
+        assert_eq!(view_press(&mut app), None);
 
         assert_failed_read(&app, &before, &shown, "logo.png");
         let message = app.message().expect("a file that is not text says so");
@@ -415,7 +452,7 @@ mod tests {
         let shown = panel_text(&app);
         let before = app.clone();
 
-        view_press(&mut app);
+        assert_eq!(view_press(&mut app), None);
 
         assert_failed_read(&app, &before, &shown, "gone.txt");
     }
@@ -440,7 +477,7 @@ mod tests {
         let shown = panel_text(&app);
         let before = app.clone();
 
-        view_press(&mut app);
+        assert_eq!(view_press(&mut app), None);
 
         assert_failed_read(&app, &before, &shown, "notes.txt");
     }
@@ -453,11 +490,12 @@ mod tests {
         let repo = a_repo();
         let mut app = app_on_file(repo.path(), "logo.png");
 
-        view_press(&mut app);
+        assert_eq!(view_press(&mut app), None);
         assert!(!app.has_panel_content(), "the failed read drew something");
 
-        select(&mut app, &repo.path().join("crates/engine/notes.txt"));
-        view_press(&mut app);
+        let notes = repo.path().join("crates/engine/notes.txt");
+        select(&mut app, &notes);
+        assert_eq!(view_press(&mut app), Some(notes));
 
         assert_eq!(panel_text(&app), ["one", "two", "three"]);
     }
@@ -469,8 +507,8 @@ mod tests {
         let before = fs::read(&path).expect("the fixture's document");
         let mut app = app_on_file(repo.path(), "WARLOCK.md");
 
-        view_press(&mut app);
-        view_press(&mut app);
+        assert_eq!(view_press(&mut app), Some(path.clone()));
+        assert_eq!(view_press(&mut app), Some(path.clone()));
 
         assert_eq!(
             fs::read(&path).expect("the document is still there"),
@@ -485,12 +523,12 @@ mod tests {
         let path = repo.path().join("crates/engine/WARLOCK.md");
         let mut app = app_on_file(repo.path(), "WARLOCK.md");
 
-        view_press(&mut app);
+        assert_eq!(view_press(&mut app), Some(path.clone()));
         assert_eq!(panel_text(&app)[0], "# The engine");
 
         // The file rewritten under the reader, as a pass would rewrite it.
         fs::write(&path, "# Rewritten\n\nBy something else.\n").expect("the document rewrites");
-        view_press(&mut app);
+        assert_eq!(view_press(&mut app), Some(path.clone()));
 
         assert_eq!(
             panel_text(&app),

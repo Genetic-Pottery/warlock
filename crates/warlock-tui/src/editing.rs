@@ -73,15 +73,40 @@
 //! one line on [`App::message`](warlock_tui::App::message) naming the program
 //! warlock tried to run, where every other non-fatal failure in this binary goes;
 //! neither is fatal and neither leaves the event loop.
+//!
+//! ## And what warlock has to read again on the way back in
+//!
+//! Two things moved while the screen was somebody else's, and [`came_back`] is
+//! both of them. The tree is read again through the same
+//! [`reload_tree`](crate::session::reload_tree) a run ends with, because the
+//! whole point of the section above is that a saved `WARLOCK.md` restales its
+//! directory — a row that only went yellow at the reader's next keystroke would
+//! be warlock knowing something and not saying it. And the document card is read
+//! again *if it is holding the file that was just edited*, so that a reader who
+//! pressed `v`, then `e`, is looking at what they saved rather than at what they
+//! opened; a card holding any other file is left byte for byte as it was, because
+//! nothing happened to that file.
+//!
+//! Which file the card is holding is not asked of the app, because the app does
+//! not know: it is handed lines and never a path (see
+//! [`App::show_document`](warlock_tui::App::show_document)). The loop keeps it,
+//! from what [`view_press`](crate::viewing::view_press) hands back, and passes it
+//! in here. And the re-read goes through
+//! [`App::refill_document`](warlock_tui::App::refill_document) rather than
+//! `show_document`, which is the same filling minus the one line that decides
+//! what is on screen: an edit is not the reader asking to look at something, so
+//! the panel stays on whichever card it was on.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, io};
 
+use warlock_engine::{Viewed, view_file};
 use warlock_tui::App;
 
 use crate::error::one_line;
+use crate::session::{Scope, note, reload_tree};
 use crate::terminal::TerminalGuard;
 
 /// The one environment variable this key reads.
@@ -140,9 +165,22 @@ struct Editor {
 /// goes up to `main` through the guard like every other terminal failure. How
 /// the *editor* went is never an error here: both ways it can go wrong come back
 /// from [`run_editor`] as a line for the footer.
+///
+/// `showing` is which file the panel's document card is holding, or `None` for a
+/// session in which nothing has been read yet. It is passed in rather than asked
+/// of the app for the reason the app is never handed a path at all — see the
+/// module docs — and it is the whole of what decides whether the card is read
+/// again on the way back.
+///
+/// The child's line is said *before* [`came_back`] reads anything, so that the
+/// housekeeping in there gives way to it: [`note`] writes only onto a footer
+/// nobody else has claimed, which is the same precedence a run and its own
+/// reload have.
 pub(crate) fn edit_press(
     app: &mut App,
     guard: &mut TerminalGuard,
+    scope: &Scope,
+    showing: Option<&Path>,
     mouse: bool,
     in_flight: bool,
 ) -> io::Result<()> {
@@ -162,7 +200,65 @@ pub(crate) fn edit_press(
     if let Some(line) = guard.suspended(mouse, || run_editor(&editor, &path))? {
         app.set_message(line);
     }
+    came_back(app, scope, &path, showing);
     Ok(())
+}
+
+/// What the editor left behind, read again: the tree, and the document card when
+/// it is the edited file that is on it.
+///
+/// The half of the key that happens after the screen is warlock's again, kept
+/// out of [`edit_press`] so that it is a function of an app, a scope and two
+/// paths — no guard, no terminal and no child — and so can be driven over a
+/// repository of a test's own.
+///
+/// The tree first, and on every outcome. A `WARLOCK.md` that was saved has
+/// restaled its own directory and the row is owed its colour now rather than at
+/// the reader's next keystroke; a file that was not a document may have appeared,
+/// gone or changed under a directory that hashes it. Telling the three outcomes
+/// apart to skip the walk after one of them was considered and left out: an
+/// editor that exited non-zero may still have saved before it did, an editor that
+/// never started leaves a reload that reads back the tree already on screen, and
+/// the saving is one directory walk on a keystroke that has just cost minutes.
+/// One road back in beats a cheaper one that has to be kept true.
+///
+/// Then the card, and only when `showing` is the very file that was edited. Any
+/// other file was not touched by this press, so re-reading it would be spending a
+/// read to redraw the same lines — and, worse, would put a reader who had parked
+/// the window somewhere back at the top of a file nobody changed.
+///
+/// Which card is on screen does not move either way: the re-read goes through
+/// [`App::refill_document`](warlock_tui::App::refill_document), which fills the
+/// card and stops there.
+///
+/// A re-read that fails — the editor deleted the file, saved something that is
+/// not text, or wrote it unreadable — leaves the card holding what it held, the
+/// way a failed `v` does, and says so through [`note`]: it is a fact about the
+/// view, so it gives way to whatever the run or the child has already put on the
+/// footer.
+///
+/// The watcher is not told about any of this. The editor's own write set off
+/// events that are sitting in [`Watched`](crate::session::Watched)'s channel
+/// while this thread was blocked, so the loop may well read the tree once more a
+/// round or two later — the reload here answers those events in fact, though not
+/// in the policy's bookkeeping, and a second walk of a repository is a harmless
+/// price for this function not having to reach into the watcher. Compare
+/// `watched.caught_up`, which is how a *run* discharges the same debt: a run ends
+/// inside the loop, where the watcher is, and this ends inside a keystroke.
+fn came_back(app: &mut App, scope: &Scope, edited: &Path, showing: Option<&Path>) {
+    // The tree it read is not kept: nothing here filters on a walk, and the
+    // watcher's own filter is caught up by the reload it does for itself.
+    let _ = reload_tree(app, scope);
+
+    if showing != Some(edited) {
+        return;
+    }
+    match view_file(edited) {
+        Ok(Viewed { text, cut }) => app.refill_document(text.lines(), cut),
+        // The engine's wording, flattened onto one line exactly as `view_press`
+        // flattens it — the same failure, reached without a keystroke of its own.
+        Err(error) => note(app, one_line(&error.to_string())),
+    }
 }
 
 /// Which file this press would edit, or `None` for a press that has already been
@@ -284,7 +380,7 @@ mod tests {
     use warlock_engine::{Node, NodeState, Tree};
     use warlock_tui::App;
 
-    use super::{Editor, NO_EDITOR, edit_target, editor_command, run_editor};
+    use super::{Editor, NO_EDITOR, came_back, edit_target, editor_command, run_editor};
 
     /// The line the last keystroke left on the footer, so that "the refusal did
     /// not go through the message line" is an assertion about a line that is
@@ -584,6 +680,293 @@ mod tests {
             assert!(line.contains(NOT_A_PROGRAM), "{line}");
             assert!(line.contains("$EDITOR"), "{line}");
             assert!(!line.contains('\n'), "the footer is one line: {line}");
+        }
+    }
+
+    /// The other half of the key: what warlock reads again once the screen is
+    /// its own.
+    ///
+    /// Driven over a repository of the test's own under the temporary
+    /// directory, because [`came_back`] is the half that touches disk — the
+    /// files are really written, the manifest is really saved, the subtree is
+    /// really hashed and the tree is really walked again. The edit is made by
+    /// this thread rather than by a child, which is not a stand-in for
+    /// anything: what these tests are about is the state of the disk when
+    /// warlock takes the terminal back, and by then the editor has exited.
+    mod back {
+        use std::fs;
+        use std::path::Path;
+        use std::time::Instant;
+
+        use tempfile::TempDir;
+        use warlock_engine::{
+            Loaded, Manifest, NodeState, PactEntry, load_tree, repository_root, subtree_hash,
+        };
+        use warlock_tui::{App, Chrome, Line};
+
+        use super::came_back;
+        use crate::session::Scope;
+
+        /// Room for more lines than any file here has, so that what a test
+        /// reads off the panel is the whole card rather than a screenful of it.
+        /// One test narrows it, because parking a window needs one to park in.
+        const PANEL: u16 = 400;
+
+        /// The document the fixture's pact was granted over.
+        const DOCUMENT: &str = "# The engine\n\nIt walks the tree and writes what it finds.\n";
+
+        /// The same document as an editor left it: different bytes, so the
+        /// subtree hashes differently and the lines on a card differ too.
+        const REWRITTEN: &str = "# The engine\n\nRewritten in somebody else's editor.\n";
+
+        /// A plain file beside it that nothing below ever edits — the other
+        /// file a document card can be holding when `e` is pressed.
+        const NOTES: &str = "one\ntwo\nthree\n";
+
+        /// When the fixture's pact was granted. Nothing here reads it —
+        /// freshness is the hash — and it is written because a grant is a hash
+        /// *and* a time.
+        const GRANTED_AT: &str = "2026-08-19T07:32:00Z";
+
+        /// A repository of this test's own, pacted and green, removed when the
+        /// test that made it ends.
+        ///
+        /// One documented directory holding the document and one plain file,
+        /// and a manifest granting that directory over the bytes just written
+        /// — so the directory loads fresh, and an edit under it has something
+        /// to cost.
+        fn a_repo() -> TempDir {
+            let repo = tempfile::tempdir().expect("a temporary directory");
+            let engine = repo.path().join("crates/engine");
+            fs::create_dir_all(&engine).expect("the fixture's directories");
+            fs::write(engine.join("WARLOCK.md"), DOCUMENT).expect("the document");
+            fs::write(engine.join("notes.txt"), NOTES).expect("a plain file");
+            // A load walks up looking for a `.git/` and refuses without one.
+            // Nothing inside it is ever read: the walk skips hidden
+            // directories, this one and `.warlock/` alike.
+            fs::create_dir_all(repo.path().join(".git")).expect("the repository marker");
+            fs::write(repo.path().join(".git/HEAD"), "ref: refs/heads/main\n").expect("a HEAD");
+
+            let hash = subtree_hash(&engine).expect("a directory just written hashes");
+            Manifest::with_entries([PactEntry::new(
+                repo.path(),
+                &engine,
+                engine.join("WARLOCK.md"),
+            )
+            .expect("a module inside the root")
+            .with_grant(hash, GRANTED_AT)])
+            .save(repo.path())
+            .expect("a manifest that writes");
+            repo
+        }
+
+        /// The app and the [`Scope`] the event loop would hold for `repo`,
+        /// built the way `load_app` builds them.
+        fn loaded(repo: &TempDir) -> (App, Scope) {
+            let Loaded { tree, problems } =
+                load_tree(repo.path()).expect("a scratch repository with a `.git/` loads");
+            assert!(problems.is_empty(), "the fixture does not read cleanly");
+            let repo_root =
+                repository_root(tree.root_path()).expect("the load found a repository root");
+            let mut app = App::from_tree(&tree);
+            app.set_panel_height(PANEL);
+            let scope = Scope {
+                chrome: Chrome::of(&repo_root, tree.root_path()),
+                root: tree.root_path().to_path_buf(),
+                repo_root,
+            };
+            (app, scope)
+        }
+
+        /// The colour the app is showing for the node at `path`, or `None`
+        /// when no row stands for it.
+        fn state_of(app: &App, path: &Path) -> Option<NodeState> {
+            app.rows()
+                .iter()
+                .find(|row| row.path == path)
+                .map(|row| row.state)
+        }
+
+        /// What the panel is drawing at `now`, whichever card is showing: a
+        /// document's own text, or the account's headings and clocked lines.
+        fn shown(app: &App, now: Instant) -> Vec<String> {
+            app.panel_lines(now)
+                .into_iter()
+                .map(|line| match line {
+                    Line::Directory { path } => path.display().to_string(),
+                    Line::Clocked { clock, text } => format!("{clock} {text}"),
+                    Line::Summary { text } | Line::Text { text } => text,
+                })
+                .collect()
+        }
+
+        /// Whether the card on screen is the document one.
+        ///
+        /// Asked of what is drawn rather than of a flag, because what the
+        /// tests below are about is what the reader is looking at: a document
+        /// draws as text and an account never does.
+        fn is_document(app: &App, now: Instant) -> bool {
+            matches!(app.panel_lines(now).first(), Some(Line::Text { .. }))
+        }
+
+        /// `text` as the lines a card holding it draws.
+        fn lines_of(text: &str) -> Vec<String> {
+            text.lines().map(str::to_owned).collect()
+        }
+
+        /// Give `app` the account of a run, opened at `at`.
+        ///
+        /// One section and no entries, which is the smallest account that
+        /// draws anything — and drawing something is the point: a card that is
+        /// showing and empty cannot be told from the other one.
+        fn with_an_account(app: &mut App, at: Instant) {
+            app.start_account(at);
+            app.account_mut()
+                .expect("the press that started the run opened one")
+                .open_section("crates/engine", at);
+        }
+
+        #[test]
+        fn an_edit_that_changed_a_file_leaves_the_directory_yellow_with_no_further_keystroke() {
+            let repo = a_repo();
+            let (mut app, scope) = loaded(&repo);
+            let engine = repo.path().join("crates/engine");
+            let edited = engine.join("WARLOCK.md");
+            assert_eq!(
+                state_of(&app, &engine),
+                Some(NodeState::PactedFresh),
+                "the fixture does not start green"
+            );
+
+            // What the editor did while warlock had no screen.
+            fs::write(&edited, REWRITTEN).expect("the document rewrites");
+            came_back(&mut app, &scope, &edited, None);
+
+            // The tree was read again on the way in: the subtree hashes
+            // differently now, so the row says so without the reader having to
+            // press anything for it.
+            assert_eq!(state_of(&app, &engine), Some(NodeState::PactedStale));
+        }
+
+        #[test]
+        fn the_card_holding_the_edited_file_is_read_again_and_goes_on_showing() {
+            let repo = a_repo();
+            let (mut app, scope) = loaded(&repo);
+            let now = Instant::now();
+            let edited = repo.path().join("crates/engine/WARLOCK.md");
+            // A run behind the document, so that "the document is still
+            // showing" is a claim about two cards rather than about the only
+            // one there is.
+            with_an_account(&mut app, now);
+            app.show_document(lines_of(DOCUMENT), false);
+            assert!(is_document(&app, now), "the fixture is not on the document");
+
+            fs::write(&edited, REWRITTEN).expect("the document rewrites");
+            came_back(&mut app, &scope, &edited, Some(&edited));
+
+            assert!(
+                is_document(&app, now),
+                "the re-read took the reader off the document"
+            );
+            assert_eq!(
+                shown(&app, now),
+                lines_of(REWRITTEN),
+                "the card is still holding what the editor opened"
+            );
+        }
+
+        #[test]
+        fn a_re_read_under_the_account_fills_the_card_behind_it_and_leaves_the_run_showing() {
+            let repo = a_repo();
+            let (mut app, scope) = loaded(&repo);
+            let now = Instant::now();
+            let edited = repo.path().join("crates/engine/WARLOCK.md");
+            with_an_account(&mut app, now);
+            app.show_document(lines_of(DOCUMENT), false);
+            app.swap_card();
+            let account = shown(&app, now);
+            assert!(!is_document(&app, now), "the fixture is not on the run");
+
+            fs::write(&edited, REWRITTEN).expect("the document rewrites");
+            came_back(&mut app, &scope, &edited, Some(&edited));
+
+            // The panel is exactly where the reader left it: a file being
+            // saved in an editor is not a reason to take a run off the screen.
+            assert!(!is_document(&app, now), "the re-read flipped the panel");
+            assert_eq!(shown(&app, now), account);
+            // And the new lines are on the card behind it, waiting for the
+            // swap the reader will ask for themselves.
+            app.swap_card();
+            assert_eq!(shown(&app, now), lines_of(REWRITTEN));
+        }
+
+        #[test]
+        fn a_card_holding_another_file_is_left_exactly_as_it_was() {
+            let repo = a_repo();
+            let (mut app, scope) = loaded(&repo);
+            let now = Instant::now();
+            let edited = repo.path().join("crates/engine/WARLOCK.md");
+            let notes = repo.path().join("crates/engine/notes.txt");
+            // A panel small enough to have a window to park, and a reader who
+            // has parked it: a card read again for no reason would put them
+            // back at the top of a file nobody changed.
+            app.set_panel_height(2);
+            app.show_document(lines_of(NOTES), false);
+            app.scroll_panel_down(1);
+            let before = shown(&app, now);
+            let parked = app.panel_scroll_offset();
+
+            fs::write(&edited, REWRITTEN).expect("the document rewrites");
+            came_back(&mut app, &scope, &edited, Some(&notes));
+
+            assert!(is_document(&app, now), "the re-read flipped the panel");
+            assert_eq!(
+                shown(&app, now),
+                before,
+                "a file this press never touched was read again"
+            );
+            assert_eq!(app.panel_scroll_offset(), parked, "the reader's line moved");
+        }
+
+        #[test]
+        fn a_card_holding_nothing_is_the_same_as_a_card_holding_another_file() {
+            // The state a session is in until its first `v`: nothing has been
+            // read, so there is nothing to read again, and the edit is the
+            // tree's business alone.
+            let repo = a_repo();
+            let (mut app, scope) = loaded(&repo);
+            let now = Instant::now();
+            let edited = repo.path().join("crates/engine/WARLOCK.md");
+
+            fs::write(&edited, REWRITTEN).expect("the document rewrites");
+            came_back(&mut app, &scope, &edited, None);
+
+            assert!(!app.has_document(), "a card nobody asked for was filled");
+            assert!(!app.has_panel_content(), "the panel drew something");
+            assert!(shown(&app, now).is_empty());
+        }
+
+        #[test]
+        fn a_re_read_that_will_not_read_leaves_the_card_holding_what_it_held_and_says_so() {
+            let repo = a_repo();
+            let (mut app, scope) = loaded(&repo);
+            let now = Instant::now();
+            let edited = repo.path().join("crates/engine/WARLOCK.md");
+            app.show_document(lines_of(DOCUMENT), false);
+
+            // An editor that took the file with it, which is the same failure
+            // a `v` over a vanished path meets.
+            fs::remove_file(&edited).expect("the document goes");
+            came_back(&mut app, &scope, &edited, Some(&edited));
+
+            assert_eq!(
+                shown(&app, now),
+                lines_of(DOCUMENT),
+                "the card that could not be read was emptied"
+            );
+            let message = app.message().expect("a read that failed says so");
+            assert!(message.contains("WARLOCK.md"), "{message}");
+            assert!(!message.contains('\n'), "the footer is one line: {message}");
         }
     }
 }
