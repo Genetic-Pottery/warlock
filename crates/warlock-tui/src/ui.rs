@@ -21,10 +21,12 @@
 //! with it — a screen saying something before anything has happened would be
 //! saying it about nothing, where a mark only says whose screen this is. A panel
 //! with no room for the whole mark draws the bare border, which on a narrow
-//! terminal is every panel there is. Every row is exactly
-//! one row: a path longer
-//! than the panel is cut with an ellipsis rather than wrapped, so the number of
-//! rows on screen is the number of things that happened. See [`draw_panel`].
+//! terminal is every panel there is. Every row of an account is exactly one row:
+//! a path longer than the panel is cut with an ellipsis rather than wrapped, so
+//! the number of rows on screen is the number of things that happened. The
+//! panel's other card is not cut but wrapped, and not here — a document arrives
+//! already in the rows its width needs (see [`mod@crate::wrap`]), so this module
+//! draws the rows it is handed either way. See [`draw_panel`].
 //!
 //! The tree area is a window onto the flattened rows: it draws the slice
 //! starting at the app's scroll offset and running for as many rows as the area
@@ -935,6 +937,20 @@ pub fn panel_height(size: Size) -> u16 {
     pane_inner(areas(Rect::from(size)).panel).height
 }
 
+/// How many columns wide the panel's contents are in a terminal of `size`, once
+/// the panel's own border has taken its two.
+///
+/// [`panel_height`]'s counterpart and public for the counterpart of its reason:
+/// a document is drawn in as many rows as its lines need at the panel's width
+/// (see [`mod@crate::wrap`]), so the app can only say how many rows it holds if
+/// it was told the width the next frame is about to draw them at. Measured off
+/// the same [`areas`] call, so the width wrapped at is the width drawn at and a
+/// row that fits one fits the other.
+#[must_use]
+pub fn panel_width(size: Size) -> u16 {
+    pane_inner(areas(Rect::from(size)).panel).width
+}
+
 /// What is drawn at the point [`hit_test`] was asked about.
 ///
 /// One variant per thing a pointer can be over, because the answers are acted on
@@ -1096,11 +1112,15 @@ fn pane_block(focused: bool) -> Block<'static> {
 /// app owns the scrolling, exactly as it owns the tree's — and this only words
 /// them and cuts them to the width.
 ///
-/// A [`Paragraph`] with no [`Wrap`](ratatui::widgets::Wrap): every row is one
-/// row, whatever is on it. A line that wrapped would put one activity on two
-/// rows, which makes the count of rows on screen stop being the count of things
-/// that happened and moves every row beneath it for a reason that has nothing to
-/// do with the run.
+/// A [`Paragraph`] with no [`Wrap`](ratatui::widgets::Wrap): every line handed
+/// over is one row, whatever is on it. Wrapping here would be the widget
+/// deciding how many rows the panel holds, which is the app's answer — it is
+/// what the window is cut out of and what the scrollback counts — so a document
+/// arrives already broken into the rows its width needs and an account arrives
+/// meaning to be cut. A row of an account that wrapped would put one activity on
+/// two rows, which makes the count of rows on screen stop being the count of
+/// things that happened and moves every row beneath it for a reason that has
+/// nothing to do with the run.
 ///
 /// While the showing card's window is scrolled back, the bottom edge of the
 /// border says how much of *that* card is below it and which key returns to
@@ -1208,9 +1228,14 @@ fn scrollback(below: usize) -> String {
 /// is about the whole run rather than about any one directory.
 ///
 /// A line of a document is the file's own text, flush left, unindented and
-/// unstyled — nothing is added to it and nothing is taken off it, and it is cut
-/// to the width like every other row rather than wrapped, so one line of the file
-/// is one row of the panel. See [`App::show_document`].
+/// unstyled — nothing is added to it and nothing is taken off it. It arrives cut
+/// to no width and wrapped to this one already, one row per row the app counted
+/// (see [`mod@crate::wrap`]), so on the frames the binary draws — which tell the
+/// app the width first, every time — [`truncated`] takes nothing off it. The
+/// call stays because [`draw`] takes an [`App`] rather than a promise about one:
+/// a caller that never measured the panel, or measured a different one, gets a
+/// row inside the border rather than a row over it. See
+/// [`App::show_document`].
 ///
 /// The row is built whole and cut once, rather than assembled from a styled
 /// clock and a styled text: the width is a fact about the row, and two spans
@@ -1272,7 +1297,7 @@ fn truncated(text: &str, width: usize) -> String {
 /// that measuring costs no allocation: the renderer's own measurement is the one
 /// that decides whether a row fits, so a second opinion about it would only ever
 /// be wrong.
-fn display_width(text: &str) -> usize {
+pub(crate) fn display_width(text: &str) -> usize {
     Span::raw(text).width()
 }
 
@@ -1970,7 +1995,8 @@ mod tests {
         SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW,
         SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas, centred, confirm_area, confirm_size,
         display_width, draw, guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line,
-        pane_inner, panel_height, scope_size, tree_height, tree_rows_area, tree_width, truncated,
+        pane_inner, panel_height, panel_width, scope_size, tree_height, tree_rows_area, tree_width,
+        truncated,
     };
     use crate::account::Outcome;
     use crate::app::{App, Chrome, Row, Sigils};
@@ -2263,6 +2289,7 @@ mod tests {
         let mut app = App::from_tree(&fixture::tree());
         app.set_viewport_height(tree_height(Size::new(width, height)));
         app.set_panel_height(panel_height(Size::new(width, height)));
+        app.set_panel_width(panel_width(Size::new(width, height)));
         app.start_account(base);
         app
     }
@@ -5044,7 +5071,8 @@ mod tests {
 
     /// The lines of a small document, one of them longer than a narrow panel and
     /// one of them empty, measured for a `width`×`height` terminal the way the
-    /// binary measures one.
+    /// binary measures one — height *and* width, since a document is wrapped to
+    /// the width the frame gives the panel.
     ///
     /// `cut` is the read that stopped at the cap, which puts one line more on
     /// screen than the file has.
@@ -5052,6 +5080,7 @@ mod tests {
         let mut app = App::from_tree(&fixture::tree());
         app.set_viewport_height(tree_height(Size::new(width, height)));
         app.set_panel_height(panel_height(Size::new(width, height)));
+        app.set_panel_width(panel_width(Size::new(width, height)));
         app.show_document(
             [
                 "# The engine",
@@ -5064,7 +5093,7 @@ mod tests {
     }
 
     #[test]
-    fn a_document_gets_one_row_per_line_from_its_first_cut_at_the_panels_width() {
+    fn a_document_line_too_long_for_the_panel_is_wrapped_rather_than_cut() {
         // The same narrow terminal the account's truncation is pinned at: the
         // panel gets half of forty columns, less its border.
         let narrow = 40;
@@ -5076,16 +5105,24 @@ mod tests {
         let inner = panel_area(&buffer);
         assert_eq!(inner.width, 18, "the terminal is the narrow one");
         let drawn = panel_rows(&buffer);
-        // The file's own lines, from the first, one row apiece, flush left and
-        // unindented — and the long one cut with the ellipsis rather than
-        // wrapped onto a row of its own.
+        // The file's own lines, from the first, flush left and unindented — and
+        // the long one broken at spaces onto rows of its own, continuations
+        // included, so the end of the sentence is on screen rather than behind
+        // an ellipsis. This is the one thing the panel's two cards do
+        // differently: the account above is cut, a document is wrapped.
         assert_eq!(
-            drawn[..3],
+            drawn[..5],
             [
-                "# The engine".to_owned(),
-                String::new(),
-                format!("It walks the tree{ELLIPSIS}"),
+                "# The engine",
+                "",
+                "It walks the tree",
+                "and writes what it",
+                "finds.",
             ],
+        );
+        assert!(
+            !drawn.iter().any(|row| row.contains(ELLIPSIS)),
+            "a document row was cut: {drawn:?}"
         );
         for row in &drawn {
             assert!(
@@ -5093,10 +5130,11 @@ mod tests {
                 "row {row:?} is wider than the panel"
             );
         }
-        // Three lines, three rows and no more: nothing wrapped, and nothing was
-        // drawn that the document does not hold.
-        assert_eq!(app.panel_lines(now).len(), 3);
-        for (index, row) in drawn.iter().enumerate().skip(3) {
+        // Three lines, five rows: what a wrapped line costs is rows of the
+        // panel, which is what the window is cut out of and what the scrollback
+        // counts.
+        assert_eq!(app.panel_lines(now).len(), 5);
+        for (index, row) in drawn.iter().enumerate().skip(5) {
             assert_eq!(row, "", "panel row {index} should be blank");
         }
         // And nothing spilled onto the tree pane's border beside it.
@@ -5349,6 +5387,32 @@ mod tests {
         let back = render_at(&app, WIDTH, HEIGHT, at(base, 99));
         assert_eq!(app.panel_lines_below(), 0);
         assert_eq!(rows_text(&back), rows_text(&live));
+    }
+
+    #[test]
+    fn the_panel_width_the_app_is_told_is_the_width_the_frame_gives_the_panel() {
+        // The wide terminal, the narrow one the truncation tests are pinned at,
+        // and the widths either side of the point the tree gives up its floor.
+        for width in [MARK_ROOM_WIDTH, WIDTH, 80, 41, 40, 20, 4, 0] {
+            let measured = panel_width(Size::new(width, FIXTURE_HEIGHT));
+            let app = viewing_app(width, FIXTURE_HEIGHT, false);
+
+            let buffer = render_at(&app, width, FIXTURE_HEIGHT, Instant::now());
+
+            // The same columns the frame is cut by, so a row wrapped to this
+            // width is a row that fits between the panel's borders.
+            assert_eq!(
+                measured,
+                panel_area(&buffer).width,
+                "measured {width} columns wide"
+            );
+            for row in panel_rows(&buffer) {
+                assert!(
+                    display_width(&row) <= usize::from(measured),
+                    "row {row:?} is wider than the panel at {width} columns"
+                );
+            }
+        }
     }
 
     #[test]

@@ -86,8 +86,11 @@ use crate::error::one_line;
 /// this function invents none.
 ///
 /// Splitting the text into lines is [`str::lines`] and nothing more elaborate:
-/// one line of the file is one row of the panel, `\r\n` and `\n` alike, and a
-/// file's trailing newline is not a blank row at the end of it.
+/// what is handed over is the file's own lines, `\r\n` and `\n` alike, and a
+/// file's trailing newline is not a blank line at the end of them. How many
+/// *rows* one of those lines is drawn in is not decided here and is nothing this
+/// key knows: a line too long for the panel is wrapped to its width when the
+/// frame is drawn, at whatever width the frame is then.
 ///
 /// Takes no run and no manifest: see the module docs for why a read is neither
 /// refused mid-run nor followed by a reload.

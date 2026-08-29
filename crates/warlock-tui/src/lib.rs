@@ -91,6 +91,7 @@ mod fixture;
 mod prompt;
 mod ui;
 mod watch;
+mod wrap;
 
 /// Everything one pact did, in the order it did it: a section per directory, a
 /// line per thing a pass was seen doing, and a clock on every line.
@@ -190,6 +191,9 @@ pub use ui::hit_test;
 /// How many lines of the pact's account a terminal of a given size has room for
 /// in the panel.
 pub use ui::panel_height;
+/// How many columns wide the panel's contents are in a terminal of a given
+/// size, which is the width a document in it is wrapped to.
+pub use ui::panel_width;
 /// How many rows of tree a terminal of a given size has room for.
 pub use ui::tree_height;
 /// How many further reloads the events arriving during a reload are worth: one,

@@ -96,6 +96,7 @@ use std::time::Instant;
 use warlock_engine::{IntoDocument, NodeState, StateCounts, Tree, to_manifest_path};
 
 use crate::account::{Account, Line};
+use crate::wrap::wrapped;
 
 /// One line of the flattened tree: what to draw, how far to indent it, and
 /// which colour it takes.
@@ -940,8 +941,12 @@ struct Status {
 ///
 /// Each card carries its own `offset` and `follows`, which is what lets the
 /// account go on following the newest line while the document is up and lets the
-/// reader come back to the line they left. `height` is the one thing the two
-/// share, because there is one panel and it is as tall as the frame says.
+/// reader come back to the line they left. `height` and `width` are the two things both
+/// cards share, because there is one panel and it is as tall and as wide as the
+/// frame says. The width is only ever *used* by one of them — a document is
+/// wrapped to it, where an account is cut to it by the renderer instead (see
+/// [`mod@crate::wrap`]) — but it is a fact about the panel rather than about
+/// either card, and it sits beside the height for that reason.
 /// Together they are to the panel what `viewport_height` and `scroll_offset` are
 /// to the tree — with one difference, which is the flag. The tree's window is
 /// dragged about by a selection; the panel has no selection, so a card's window
@@ -957,6 +962,7 @@ struct Panel {
     document: Card<Vec<Line>>,
     showing: Showing,
     height: usize,
+    width: usize,
 }
 
 /// Which of the panel's two cards is on screen.
@@ -1040,39 +1046,44 @@ impl<T: Shown> Card<T> {
         self.follows = follows;
     }
 
-    /// How many lines the card draws as, or none at all while nothing has filled
-    /// it.
-    fn line_count(&self) -> usize {
-        self.held.as_ref().map_or(0, Shown::line_count)
+    /// How many rows the card draws as at `width`, or none at all while nothing
+    /// has filled it.
+    ///
+    /// A count of rows on screen rather than of lines held: a document line too
+    /// long for the width is drawn in several rows, and this is what the window
+    /// is cut out of, so it is the wrapped count or the arithmetic below it
+    /// would be about a screen nobody is looking at.
+    fn line_count(&self, width: usize) -> usize {
+        self.held.as_ref().map_or(0, |held| held.line_count(width))
     }
 
-    /// Which line of the card is drawn at the top row of a window `height` lines
-    /// tall.
-    fn scroll_offset(&self, height: usize) -> usize {
-        panel_offset_for(self.line_count(), height, self.offset, self.follows)
+    /// Which row of the card is drawn at the top row of a window `height` rows
+    /// tall and `width` columns wide.
+    fn scroll_offset(&self, height: usize, width: usize) -> usize {
+        panel_offset_for(self.line_count(width), height, self.offset, self.follows)
     }
 
-    /// The `height` lines the card's window covers, with every clock measured
+    /// The `height` rows the card's window covers, with every clock measured
     /// against `now`.
-    fn window(&self, height: usize, now: Instant) -> Vec<Line> {
+    fn window(&self, height: usize, width: usize, now: Instant) -> Vec<Line> {
         self.held.as_ref().map_or_else(Vec::new, |held| {
-            held.window(self.scroll_offset(height), height, now)
+            held.window(self.scroll_offset(height, width), height, width, now)
         })
     }
 
-    /// How many of the card's lines sit below a window `height` lines tall.
-    fn lines_below(&self, height: usize) -> usize {
-        self.line_count()
-            .saturating_sub(self.scroll_offset(height) + height)
+    /// How many of the card's rows sit below a window `height` rows tall.
+    fn lines_below(&self, height: usize, width: usize) -> usize {
+        self.line_count(width)
+            .saturating_sub(self.scroll_offset(height, width) + height)
     }
 
     /// Park the card's window at `offset`, or as near to it as the card's own
     /// length allows, and say whether that is still following.
-    fn scroll_to(&mut self, offset: usize, height: usize) {
+    fn scroll_to(&mut self, offset: usize, height: usize, width: usize) {
         // Where the end is, asked of the one function that decides it, so that
         // "as far down as this card goes" means the same thing to a keystroke as
         // it does to the frame being drawn.
-        let end = panel_offset_for(self.line_count(), height, 0, true);
+        let end = panel_offset_for(self.line_count(width), height, 0, true);
         self.offset = offset.min(end);
         self.follows = self.offset == end;
     }
@@ -1087,20 +1098,24 @@ impl<T: Shown> Card<T> {
 /// panel draws one list either way, and which list it is is this trait's
 /// business rather than the renderer's.
 trait Shown {
-    /// How many lines this draws as.
-    fn line_count(&self) -> usize;
+    /// How many rows this draws as in a panel `width` columns wide.
+    fn line_count(&self, width: usize) -> usize;
 
-    /// The `height` lines starting at `offset`, with any clocks measured against
-    /// `now`.
-    fn window(&self, offset: usize, height: usize, now: Instant) -> Vec<Line>;
+    /// The `height` rows starting at `offset` in a panel `width` columns wide,
+    /// with any clocks measured against `now`.
+    fn window(&self, offset: usize, height: usize, width: usize, now: Instant) -> Vec<Line>;
 }
 
+/// An account is not wrapped, so the width does not reach it: one thing that
+/// happened is one row, and a line too long for the panel is cut there with an
+/// ellipsis (see [`crate::ui`]). Its rows move with the clock instead, which is
+/// the half of the pair a document has no use for.
 impl Shown for Account {
-    fn line_count(&self) -> usize {
+    fn line_count(&self, _width: usize) -> usize {
         Self::line_count(self)
     }
 
-    fn window(&self, offset: usize, height: usize, now: Instant) -> Vec<Line> {
+    fn window(&self, offset: usize, height: usize, _width: usize, now: Instant) -> Vec<Line> {
         Self::window(self, offset, height, now)
     }
 }
@@ -1109,38 +1124,65 @@ impl Shown for Account {
 /// sentence about a read the cap cut short, which is the only line in it the
 /// file did not write. [`App`] never holds the path it came from and never opens
 /// anything: what reaches it is text, from whoever did the reading.
+///
+/// It is the card the width reaches, and a line of it is drawn in as many rows
+/// as the width needs — see [`mod@crate::wrap`] for why a file is wrapped where
+/// an account is cut. The lines held are the file's own either way: wrapping
+/// happens on the way to the screen, at whatever width the frame is, so a
+/// terminal made narrower re-flows the document a reader is looking at rather
+/// than re-reading it.
 impl Shown for Vec<Line> {
-    fn line_count(&self) -> usize {
-        self.len()
+    fn line_count(&self, width: usize) -> usize {
+        self.iter().map(|line| rows_of(line, width).len()).sum()
     }
 
-    fn window(&self, offset: usize, height: usize, _now: Instant) -> Vec<Line> {
-        self.iter().skip(offset).take(height).cloned().collect()
+    fn window(&self, offset: usize, height: usize, width: usize, _now: Instant) -> Vec<Line> {
+        self.iter()
+            .flat_map(|line| rows_of(line, width))
+            .skip(offset)
+            .take(height)
+            .collect()
+    }
+}
+
+/// The rows one line of a document draws as at `width`.
+///
+/// One row per line for everything but text, which is everything a document is
+/// not: [`App::refill_document`] words every line of a document as a
+/// [`Line::Text`], so the arm below it is there to keep this total rather than
+/// because a heading or a clock could ever reach it.
+fn rows_of(line: &Line, width: usize) -> Vec<Line> {
+    match line {
+        Line::Text { text } => wrapped(text, width)
+            .into_iter()
+            .map(|text| Line::Text { text })
+            .collect(),
+        other => vec![other.clone()],
     }
 }
 
 impl Panel {
-    /// Which line of the showing card is drawn at the panel's top row.
+    /// Which row of the showing card is drawn at the panel's top row.
     fn scroll_offset(&self) -> usize {
         match self.showing {
-            Showing::Account => self.account.scroll_offset(self.height),
-            Showing::Document => self.document.scroll_offset(self.height),
+            Showing::Account => self.account.scroll_offset(self.height, self.width),
+            Showing::Document => self.document.scroll_offset(self.height, self.width),
         }
     }
 
-    /// The lines the panel draws now, from the showing card.
+    /// The rows the panel draws now, from the showing card.
     fn window(&self, now: Instant) -> Vec<Line> {
         match self.showing {
-            Showing::Account => self.account.window(self.height, now),
-            Showing::Document => self.document.window(self.height, now),
+            Showing::Account => self.account.window(self.height, self.width, now),
+            Showing::Document => self.document.window(self.height, self.width, now),
         }
     }
 
-    /// How many of the showing card's lines sit below the panel.
+    /// How many of the showing card's rows sit below the panel.
     fn lines_below(&self) -> usize {
         match self.showing {
-            Showing::Account => self.account.lines_below(self.height),
-            Showing::Document => self.document.lines_below(self.height),
+            Showing::Account => self.account.lines_below(self.height, self.width),
+            Showing::Document => self.document.lines_below(self.height, self.width),
         }
     }
 
@@ -1148,10 +1190,10 @@ impl Panel {
     /// line the reader left it on, and an account left following goes on
     /// following.
     fn scroll_to(&mut self, offset: usize) {
-        let height = self.height;
+        let (height, width) = (self.height, self.width);
         match self.showing {
-            Showing::Account => self.account.scroll_to(offset, height),
-            Showing::Document => self.document.scroll_to(offset, height),
+            Showing::Account => self.account.scroll_to(offset, height, width),
+            Showing::Document => self.document.scroll_to(offset, height, width),
         }
     }
 }
@@ -1287,6 +1329,7 @@ impl App {
                 },
                 showing: Showing::Account,
                 height: 0,
+                width: 0,
             },
         };
         // The rows handed over may hold file rows, which the file toggle starts
@@ -1850,6 +1893,43 @@ impl App {
     /// shows the newest line at the bottom.
     pub fn set_panel_height(&mut self, height: u16) {
         self.panel.height = usize::from(height);
+    }
+
+    /// How many columns wide the panel is, as last set by
+    /// [`App::set_panel_width`].
+    ///
+    /// `0` for a panel nothing has measured, which is not a width to wrap a
+    /// document at: see [`App::set_panel_width`].
+    #[must_use]
+    pub const fn panel_width(&self) -> usize {
+        self.panel.width
+    }
+
+    /// Tell the app how many columns wide the panel is.
+    ///
+    /// [`App::set_panel_height`]'s counterpart, for the same reason and safe to
+    /// call every frame in the same way: only the layout knows the width, and a
+    /// line of a document is drawn in as many rows as that width needs, so how
+    /// many rows the window is cut out of depends on it exactly as the size of
+    /// the window depends on the height.
+    ///
+    /// Nothing is brought back into line afterwards, and here that is worth
+    /// saying out loud: a terminal made narrower gives a document more rows than
+    /// it had, so the offset the reader parked at is a row further up the file
+    /// than it was. The alternative is remembering which line of the file the
+    /// top row came from and re-deriving the offset from it on every resize,
+    /// which is a second window to keep in step for something a reader sees once
+    /// per drag of a terminal's corner. The offset is clamped when it is read,
+    /// so what a resize can cost is a reader's place, never a panel scrolled off
+    /// the end of what it holds.
+    ///
+    /// A width of `0` — a panel nobody has measured — wraps nothing: the
+    /// document's lines are drawn as they are and cut to the width by the
+    /// renderer, which is what the panel did before it was ever wrapped. Every
+    /// frame measures, so that is the state of an app between being built and
+    /// being drawn, and of a test that only cares about the height.
+    pub fn set_panel_width(&mut self, width: u16) {
+        self.panel.width = usize::from(width);
     }
 
     /// Whether the showing card's window is following the newest line of what is
@@ -7693,6 +7773,119 @@ mod tests {
         assert_eq!(panel_text(&app, now), document_lines());
     }
 
+    /// A document with one line in it far too long for [`NARROW`], and two short
+    /// ones either side of it, so a test can say which rows came from wrapping.
+    fn a_long_line() -> Vec<String> {
+        [
+            "# The engine",
+            "It walks the tree and writes what it finds.",
+            "done",
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    }
+
+    /// A panel narrow enough that the long line above needs three rows of it.
+    const NARROW: u16 = 18;
+
+    #[test]
+    fn a_document_line_wider_than_the_panel_is_drawn_in_as_many_rows_as_it_needs() {
+        let now = Instant::now();
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_panel_height(9);
+        app.set_panel_width(NARROW);
+
+        app.show_document(a_long_line(), false);
+
+        // Three lines, five rows: the long one broken at spaces, the short ones
+        // exactly as they were, and the whole of the file's text on screen.
+        assert_eq!(
+            panel_text(&app, now),
+            [
+                "# The engine",
+                "It walks the tree",
+                "and writes what it",
+                "finds.",
+                "done",
+            ]
+        );
+        assert_eq!(app.panel_lines_below(), 0);
+    }
+
+    #[test]
+    fn a_panel_nobody_has_measured_wraps_nothing() {
+        // What an app is between being built and being drawn: every frame tells
+        // it the width, and until one has, a line is the row it arrived as.
+        let now = Instant::now();
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_panel_height(9);
+
+        app.show_document(a_long_line(), false);
+
+        assert_eq!(app.panel_width(), 0);
+        assert_eq!(panel_text(&app, now), a_long_line());
+    }
+
+    #[test]
+    fn the_rows_a_document_draws_as_follow_the_width_the_panel_was_last_told() {
+        // The reader drags the terminal narrower with a file up: the document
+        // re-flows to the width of the frame it is drawn in, from the lines it
+        // has always held, without anything being read again.
+        let now = Instant::now();
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_panel_height(9);
+        app.set_panel_width(80);
+        app.show_document(a_long_line(), false);
+        assert_eq!(panel_text(&app, now), a_long_line());
+
+        app.set_panel_width(NARROW);
+
+        assert_eq!(panel_text(&app, now).len(), 5);
+        // And wider again is the document it was: nothing was lost on the way
+        // through the narrow panel, because the lines held are the file's.
+        app.set_panel_width(80);
+        assert_eq!(panel_text(&app, now), a_long_line());
+    }
+
+    #[test]
+    fn the_panel_scrolls_by_rows_of_a_wrapped_document_rather_than_by_its_lines() {
+        let now = Instant::now();
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_panel_height(2);
+        app.set_panel_width(NARROW);
+        app.show_document(a_long_line(), false);
+
+        // Five rows in a panel two tall: what is below the window is counted in
+        // rows, so a reader scrolling past a wrapped line scrolls through it.
+        assert_eq!(app.panel_lines_below(), 3);
+        assert_eq!(panel_text(&app, now), ["# The engine", "It walks the tree"]);
+
+        app.scroll_panel_down(1);
+
+        assert_eq!(app.panel_scroll_offset(), 1);
+        assert_eq!(
+            panel_text(&app, now),
+            ["It walks the tree", "and writes what it"]
+        );
+        assert_eq!(app.panel_lines_below(), 2);
+    }
+
+    #[test]
+    fn an_account_is_not_wrapped_however_narrow_the_panel_is() {
+        // The panel's other card, at a width that would break every line of it:
+        // one thing that happened is one row, and the renderer cuts it. See
+        // [`mod@crate::wrap`].
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        let wide = panel_text(&app, at(base, 9));
+        let below = app.panel_lines_below();
+
+        app.set_panel_width(1);
+
+        assert_eq!(panel_text(&app, at(base, 9)), wide);
+        assert_eq!(app.panel_lines_below(), below, "the account was re-flowed");
+    }
+
     /// Where the account's card would be if the reader swapped to it: the line
     /// at the top of its window, and whether it is still following its newest
     /// one.
@@ -7702,7 +7895,9 @@ mod tests {
     /// doing.
     fn account_window(app: &App) -> (usize, bool) {
         (
-            app.panel.account.scroll_offset(app.panel.height),
+            app.panel
+                .account
+                .scroll_offset(app.panel.height, app.panel.width),
             app.panel.account.follows,
         )
     }
@@ -7710,7 +7905,9 @@ mod tests {
     /// The same of the document's card.
     fn document_window(app: &App) -> (usize, bool) {
         (
-            app.panel.document.scroll_offset(app.panel.height),
+            app.panel
+                .document
+                .scroll_offset(app.panel.height, app.panel.width),
             app.panel.document.follows,
         )
     }

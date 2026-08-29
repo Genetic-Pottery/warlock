@@ -197,7 +197,7 @@ use ratatui::crossterm::execute;
 use ratatui::layout::Size;
 use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
 use warlock_tui::{
-    App, ClaudeAgent, Focus, QuitConfirm, ScopePrompt, draw, panel_height, tree_height,
+    App, ClaudeAgent, Focus, QuitConfirm, ScopePrompt, draw, panel_height, panel_width, tree_height,
 };
 
 mod config;
@@ -908,6 +908,7 @@ fn draw_frame(
 ) -> io::Result<()> {
     app.set_viewport_height(tree_height(size));
     app.set_panel_height(panel_height(size));
+    app.set_panel_width(panel_width(size));
     guard
         .terminal
         .draw(|frame| draw(frame, app, &scope.chrome, Instant::now(), confirm, prompt))?;
