@@ -293,7 +293,9 @@ impl Row {
     /// not.
     ///
     /// [`App::from_tree`] says this by comparing the file's path against the
-    /// holding node's [`warlock_engine::Node::document`], which is the whole of
+    /// holding node's [`warlock_engine::Node::document`], and
+    /// [`App::insert_file_row`] says it of every row it splices, since its caller
+    /// hands over the document by construction. Between them that is the whole of
     /// how the fact reaches a row: nothing downstream re-derives it, and nothing
     /// downstream spells `WARLOCK.md`. It is a builder rather than an argument to
     /// [`Row::file`] so that a test can hand a row over without a tree, a loader
@@ -2671,6 +2673,17 @@ impl App {
     /// the directory, and so before the rows for any of its subdirectories. A
     /// mid-run tree and the reload that follows the run therefore agree.
     ///
+    /// The row it splices is the directory's *document*, and is marked as one
+    /// ([`Row::is_document`]). That is the contract rather than a guess: the one
+    /// caller is the pact observer, which passes the path the pass has just
+    /// written on the engine's word that it wrote it, so there is nothing to
+    /// compare and no `WARLOCK.md` to spell here. Nor could it be worked out from
+    /// the holder row, whose [`Row::document`] is the *pre-run* tree's and is
+    /// `None` for exactly the directory this method exists for: the one the run
+    /// has this moment documented for the first time. So a caller that hands over
+    /// some other file is not listing a file, it is saying that file is the
+    /// document now, and gets a document row.
+    ///
     /// The row carries the directory's state *now*, and its `.warlockignore`
     /// flag, for the reason [`Row::file`] gives: a file is drawn in its module's
     /// colour, and the module's colour is whatever the run has just made it.
@@ -2712,17 +2725,23 @@ impl App {
 
         let holder = &self.all_rows[index];
         let depth = holder.depth + 1;
-        let row = Row::file(depth, path, holder.state).with_ignored(holder.is_ignored());
+        let row = Row::file(depth, path, holder.state)
+            .with_ignored(holder.is_ignored())
+            .with_document_row(true);
         let at = file_row_position(&self.all_rows, index, depth, path);
         self.all_rows.insert(at, row.clone());
 
-        // The drawn half, which is conditional: `rows` holds file rows only
-        // while the toggle is on, holds a file under a pacted directory only
-        // under the pacted-only filter, and holds nothing at all under a
-        // directory that is collapsed or filtered away. Asking those three
-        // questions is what keeps this insertion and the next `reflow` from
-        // disagreeing about what is on screen.
-        if !self.viewpoint.show_files
+        // The drawn half, which is conditional: `rows` holds an ordinary file
+        // row only while the toggle is on — but it holds a *document* row either
+        // way, because `node_rows` keeps each directory's own `WARLOCK.md` when
+        // files are hidden, so the row spliced here is drawn then and there in
+        // the view warlock opens on rather than waiting for `f`. It holds a file
+        // under an unpacted directory not at all under the pacted-only filter,
+        // and holds nothing at all under a directory that is collapsed or
+        // filtered away. Asking those three questions in the shape the three
+        // filters ask them is what keeps this insertion and the next `reflow`
+        // from disagreeing about what is on screen.
+        if (!self.viewpoint.show_files && !row.is_document())
             || (self.viewpoint.pacted_only && !row.state.is_pacted())
             || self.viewpoint.collapsed.contains(directory)
         {
@@ -3570,6 +3589,16 @@ mod tests {
         app.rows()
             .iter()
             .map(|row| row.path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Rows by path and depth, for a test comparing two views that are two
+    /// accounts of the same rows rather than the same value — a mid-run tree and
+    /// the tree the reload after it finds. Takes a list rather than an app so
+    /// that the walk behind the screen can be compared as well as the screen.
+    fn paths_and_depths(rows: &[Row]) -> Vec<(String, usize)> {
+        rows.iter()
+            .map(|row| (row.path.to_string_lossy().into_owned(), row.depth))
             .collect()
     }
 
@@ -8045,11 +8074,34 @@ mod tests {
         node.children.iter_mut().any(|child| list_file(child, path))
     }
 
-    /// The fixture with its files shown, which is the view an insertion is
-    /// visible in at all.
+    /// The fixture with its files shown, which is the view every file an
+    /// insertion names is visible in.
     fn app_with_files() -> App {
         let mut app = App::from_tree(&fixture::tree());
         app.toggle_files();
+        app
+    }
+
+    /// `app` with the row for `path` calling itself the document of the
+    /// directory holding it, in the walk and in the drawn rows both.
+    ///
+    /// The one field a load and an insertion disagree about, and they disagree on
+    /// purpose. A load reads the tree, where `index.html` is an ordinary file
+    /// nobody documented anything with; an insertion is the pact observer's word
+    /// that the file it names is the document the pass has just written, which is
+    /// a fact no tree the app can see holds yet (see `App::insert_file_row`). So
+    /// a reloaded app is brought into line by marking the row the insertion
+    /// marked, rather than by leaving that difference unasserted.
+    fn as_the_document(mut app: App, path: &str) -> App {
+        let path = Path::new(path);
+        let mut found = false;
+        for row in app.all_rows.iter_mut().chain(app.rows.iter_mut()) {
+            if row.path == path {
+                row.document_row = true;
+                found = true;
+            }
+        }
+        assert!(found, "no row for {}", path.display());
         app
     }
 
@@ -8065,8 +8117,9 @@ mod tests {
         expected.toggle_files();
         assert_eq!(drawn(&app), drawn(&expected));
         // Every field, not only the drawn paths: the depth, the state and the
-        // whole walk behind the drawn rows are the load's as well.
-        assert_eq!(app, expected);
+        // whole walk behind the drawn rows are the load's as well — bar the
+        // document flag, which an insertion decides for itself.
+        assert_eq!(app, as_the_document(expected, "warlock/assets/index.html"));
     }
 
     #[test]
@@ -8080,7 +8133,7 @@ mod tests {
 
         let mut expected = App::from_tree(&tree_listing("warlock/zzz.md"));
         expected.toggle_files();
-        assert_eq!(app, expected);
+        assert_eq!(app, as_the_document(expected, "warlock/zzz.md"));
         assert_eq!(
             &drawn(&app)[..4],
             [
@@ -8221,20 +8274,64 @@ mod tests {
     }
 
     #[test]
-    fn with_files_hidden_an_insertion_shows_nothing_until_the_toggle() {
+    fn with_files_hidden_a_document_written_mid_run_is_drawn_at_once() {
+        // The case the first clause of the guard exists for. `crates/` had no
+        // document, a pass has this moment written one, and the reader is in the
+        // default view — the one warlock opens on, where the files a directory
+        // merely holds are hidden. The row goes in there and then rather than
+        // waiting for `f` or for the reload at the end of the run.
         let mut app = App::from_tree(&fixture::tree());
-        let before = app.clone();
+        app.set_subtree_state("warlock/crates", NodeState::PactedFresh);
+
+        app.insert_file_row("warlock/crates/WARLOCK.md");
+
+        // What the reload at the end of that run draws, reached the way the
+        // front end reaches it: the view carried onto the tree a second load
+        // finds. Path and depth, because the two apps are two accounts of the
+        // same screen and not the same value — the reload knows `crates/` has a
+        // document and the mid-run tree does not.
+        let reloaded = reseat_on(&app, &fixture::tree_after_a_run());
+        assert_eq!(
+            paths_and_depths(app.rows()),
+            paths_and_depths(reloaded.rows())
+        );
+        // And the walk behind them, which is what the next rebuild of the drawn
+        // rows will be made from: the row went in at the load's index there too,
+        // among the files the load would have listed and not merely on screen.
+        assert_eq!(
+            paths_and_depths(&app.all_rows),
+            paths_and_depths(&reloaded.all_rows)
+        );
+        assert_eq!(drawn(&app), whole_fixture_after_a_run());
+        // Nothing else came with it: this is one row, not the file toggle.
+        assert!(!app.show_files());
+        assert!(!drawn(&app).contains(&"warlock/README.md".to_owned()));
+    }
+
+    #[test]
+    fn an_insertion_is_the_documents_row_whatever_the_file_is_called() {
+        // `insert_file_row` is not "the loader listed one more file". Its caller
+        // is the pact observer, which passes the `WARLOCK.md` a pass has just
+        // written, so the row is a document row by construction — no name is
+        // compared, here or anywhere in this crate — and it is drawn with files
+        // hidden like every other document row.
+        let mut app = App::from_tree(&fixture::tree());
 
         app.insert_file_row("warlock/assets/index.html");
 
-        assert_eq!(app.rows(), before.rows());
-        assert_eq!(drawn(&app), whole_fixture());
-
-        app.toggle_files();
-
-        let mut expected = App::from_tree(&tree_listing("warlock/assets/index.html"));
-        expected.toggle_files();
-        assert_eq!(drawn(&app), drawn(&expected));
+        let row = app
+            .rows()
+            .iter()
+            .find(|row| row.path == Path::new("warlock/assets/index.html"))
+            .expect("a document row is drawn with files hidden");
+        assert!(row.is_document());
+        assert!(row.is_file());
+        assert_eq!(row.depth, 2);
+        // And the whole of what the default view gained is that one row, in
+        // path order among the rows `assets/` already had.
+        let mut expected = whole_fixture();
+        expected.push("warlock/assets/index.html".to_owned());
+        assert_eq!(drawn(&app), expected);
     }
 
     #[test]

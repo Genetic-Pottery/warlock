@@ -3401,15 +3401,26 @@ mod tests {
         );
 
         assert!(pact.is_some(), "the run is still going");
-        // Files are hidden, so the reader's tree has not moved a row — the
-        // insertion went into the walk and waits there for the toggle.
+        // Files are hidden — this is the view warlock opens on — and the
+        // document is drawn all the same, because the default view keeps each
+        // directory's own `WARLOCK.md`. The one row is the whole of the change:
+        // the files `engine/` merely holds are still hidden.
         assert_eq!(
-            app.rows()
-                .iter()
-                .map(|row| row.path.clone())
-                .collect::<Vec<_>>(),
-            on_screen,
-            "the same rows in the same order: nothing new is drawn"
+            drawn(&app),
+            [
+                ("/repo/crates", stale),
+                ("/repo/crates/engine", NodeState::PactedFresh),
+                ("/repo/crates/engine/WARLOCK.md", NodeState::PactedFresh),
+                ("/repo/crates/engine/src", NodeState::PactedFresh),
+                ("/repo/crates/tui", stale),
+            ]
+            .map(|(path, state)| (PathBuf::from(path), state)),
+            "the document the pass wrote, under its directory and in its colour"
+        );
+        assert_eq!(
+            app.rows().len(),
+            on_screen.len() + 1,
+            "one row is news and nothing else moved"
         );
         assert_eq!(
             app.counts().total(),
