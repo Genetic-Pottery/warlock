@@ -143,6 +143,10 @@ pub use app::Row;
 /// Which kind of run is in flight — a pact or a refresh — which is the one word
 /// of the footer's progress line the two differ by.
 pub use app::Run;
+/// The run in flight in parts rather than in words — which run, the directory it
+/// is working spelled for the tree on screen, and its position out of the run's
+/// total — for whatever draws a header over the panel.
+pub use app::RunHeader;
 /// What this machine holds for the repository on screen — sigils, nothing, or a
 /// config that could not be read — as the tree pane's header states it.
 pub use app::Sigils;
