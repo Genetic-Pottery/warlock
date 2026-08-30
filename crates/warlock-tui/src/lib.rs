@@ -48,12 +48,30 @@
 //! a value — when no watcher could be started, because warlock without live
 //! updates is still warlock.
 //!
-//! The other exception is [`ClaudeAgent`], which owns a child process: it
-//! implements the engine's [`Agent`](warlock_engine::Agent) port by running the
-//! `claude` CLI, because the engine spawns nothing and something has to. Its
-//! module is the only module in this crate that runs anything, it decides
-//! nothing about what a prompt says, and it needs no terminal either — its tests
-//! point it at stand-ins and pass on a machine with no `claude` installed.
+//! The other exception is the two agents, which own child processes.
+//! [`ClaudeAgent`] implements the engine's [`Agent`](warlock_engine::Agent) port
+//! by running the `claude` CLI, because the engine spawns nothing and something
+//! has to. It decides nothing about what a prompt says, and it needs no terminal
+//! either — its tests point it at stand-ins and pass on a machine with no
+//! `claude` installed.
+//!
+//! [`ChatAgent`] is the second one: the same CLI and the same transport, run for
+//! a different kind of work. A pact is a pass per directory that writes
+//! documents; a turn here is one message somebody typed at the foot of the panel,
+//! answered in prose for the panel. That is why it is not an
+//! [`Agent`](warlock_engine::Agent) at all — a request names a directory and
+//! carries the files under it, and a typed sentence names nothing and carries
+//! nothing, so a turn is a message rather than a request and the port is left to
+//! the runs that fit it. What goes to the child is that message and nothing else:
+//! no tree dump, no repository contents, no transcript warlock kept, because one
+//! session serves the life of the process and the model remembers its own
+//! conversation. And a turn is read-only by construction rather than by
+//! intention — the vector grants `Read`, `Grep` and `Glob` and nothing that
+//! writes, edits, runs a shell or reaches the network — so a question about the
+//! repository is answered out of the repository and the repository is left
+//! exactly as it was. Both agents live in the one module here that runs
+//! anything; everything else in this crate is still data and functions over
+//! data.
 //!
 //! The gate on the way out is data too. [`QuitConfirm`] is whether the quit
 //! confirmation is up and which of its two answers is lit, and [`answer_for`]
@@ -165,6 +183,10 @@ pub use claude::Activity;
 /// A handle for stopping a model pass from another thread: it kills the child
 /// running now and refuses to start another.
 pub use claude::Cancel;
+/// The reading half of the model seam: a conversation with the `claude` CLI, one
+/// session for the life of the agent, where a turn is a message rather than a
+/// request and the model may read the repository but never write to it.
+pub use claude::ChatAgent;
 /// The engine's model-pass port, implemented by running the `claude` CLI as a
 /// child process.
 pub use claude::ClaudeAgent;
