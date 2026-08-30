@@ -89,10 +89,18 @@ impl Chat {
     /// this moment: every turn of this warlock is one conversation, and a second
     /// warlock in another terminal is another.
     pub(crate) fn new() -> Self {
-        Self {
-            agent: ChatAgent::new(),
-            turn: None,
-        }
+        Self::with_agent(ChatAgent::new())
+    }
+
+    /// A conversation with nothing asked yet, over `agent`.
+    ///
+    /// [`Chat::new`]'s body with the one thing that varies handed in, so that a
+    /// test can drive the very value the loop keeps — the agent and the turn
+    /// together — against a stand-in program. A conversation whose failures
+    /// could only be asserted through the pieces underneath it would be a
+    /// conversation nothing had ever run twice.
+    fn with_agent(agent: ChatAgent) -> Self {
+        Self { agent, turn: None }
     }
 
     /// Whether a question is out and being answered.
@@ -607,6 +615,49 @@ mod tests {
     }
 
     #[test]
+    fn a_cancel_keeps_every_line_that_arrived_before_it_and_adds_one() {
+        // What Ctrl-C during a turn leaves behind. The work the model was seen
+        // doing really happened, so it stays where it is; the cancel is one more
+        // line under it, in the ordinary shape of an ending. A cancel that
+        // cleared the turn would throw away the two tool calls the reader was
+        // watching, which is the reader's evidence for what they just stopped.
+        let base = Instant::now();
+        let (mut app, events, mut chat) = asking(base);
+
+        for name in ["Read", "Grep"] {
+            events
+                .send(TurnEvent::Doing(Activity::Tool {
+                    name: name.to_owned(),
+                    detail: Some("src/lib.rs".to_owned()),
+                }))
+                .expect("the loop is still listening");
+        }
+        apply_turn(&mut chat, &mut app, at(base, 2));
+        assert!(chat.is_some(), "the turn is still in flight");
+
+        // And then the cancel, which arrives as the worker's one ending like
+        // any other — the loop does not take the turn down at the keystroke.
+        events
+            .send(TurnEvent::Finished(Err(Ending::Cancelled)))
+            .expect("the loop is still listening");
+        apply_turn(&mut chat, &mut app, at(base, 4));
+
+        assert!(chat.is_none(), "a cancelled turn is still in flight");
+        assert_eq!(
+            rows(&app, at(base, 30)),
+            vec![
+                said(),
+                clocked(2, "Read src/lib.rs"),
+                // The line that was newest when the cancel landed, frozen at
+                // the moment it landed: it had been ticking since the drain
+                // above, which is the clock rule the account already follows.
+                clocked(4, "Grep src/lib.rs"),
+                clocked(4, &Ending::Cancelled.line()),
+            ]
+        );
+    }
+
+    #[test]
     fn a_worker_that_dies_without_saying_how_it_went_still_ends_the_turn() {
         let base = Instant::now();
         let (mut app, events, mut chat) = asking(base);
@@ -693,8 +744,8 @@ mod tests {
 
         use warlock_tui::{Activity, App, Cancel, ChatAgent, Ending};
 
-        use super::super::{TurnEvent, apply_turn, run_turn, spawn_turn, start_turn, wired};
-        use super::{ASKED, at, chatting, rows, said};
+        use super::super::{Chat, TurnEvent, apply_turn, run_turn, spawn_turn, start_turn, wired};
+        use super::{ASKED, at, chatting, clocked, rows, said};
 
         /// How long a test waits for a child to say it is running, or for a
         /// turn to come back, before giving up. Generous, because it is only
@@ -827,6 +878,22 @@ mod tests {
         /// How big `path` is, or nothing if it is not there yet.
         fn size(path: &Path) -> Option<u64> {
             fs::metadata(path).ok().map(|file| file.len())
+        }
+
+        /// Go round the loop's bottom end until the turn has ended, or give up
+        /// after [`AT_MOST`].
+        ///
+        /// [`Chat::keep_up`] and nothing else, which is exactly what `keep_up`
+        /// in the event loop calls: nothing here waits on the worker, joins a
+        /// thread or receives from a channel — the round polls and comes back,
+        /// and the turn ending is the drain taking it down.
+        fn settle(chat: &mut Chat, app: &mut App, now: Instant) {
+            let waited = Instant::now();
+            while chat.answering() && waited.elapsed() < AT_MOST {
+                chat.keep_up(app, now);
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(!chat.answering(), "the turn never ended");
         }
 
         /// Wait until `path` exists, or give up after [`AT_MOST`].
@@ -1026,6 +1093,104 @@ mod tests {
             );
             // A turn that worked says nothing on the footer.
             assert_eq!(app.message(), None);
+        }
+
+        #[test]
+        fn stopping_a_turn_ends_it_as_cancelled_and_hands_the_field_back() {
+            // Ctrl-C with a question out, end to end and through the value the
+            // loop holds: `Chat::stop` is what that key comes to, and it kills
+            // the `claude` the turn is waiting on rather than leaving warlock.
+            // The stand-in never returns on its own and the agent's timeout is
+            // the real five minutes, so the cancel is the only thing that can
+            // end this within the test's patience.
+            let base = Instant::now();
+            let mut app = App::default();
+            let mut chat = Chat::with_agent(stand_in("sleep 300"));
+
+            chat.ask(&mut app, ASKED, base);
+            chat.stop();
+            // Still in flight at the keystroke: the worker has one thing left to
+            // say, and the drain is where it says it.
+            assert!(chat.answering(), "the turn was taken down at the keystroke");
+            settle(&mut chat, &mut app, at(base, 3));
+
+            assert_eq!(
+                rows(&app, at(base, 30)),
+                vec![said(), clocked(3, &Ending::Cancelled.line())]
+            );
+            assert_eq!(app.message(), Some(Ending::Cancelled.line().as_str()));
+            // And the field is live again, on the strength of the drain alone.
+            assert!(!chat.answering());
+        }
+
+        #[test]
+        fn a_failed_turn_leaves_the_conversation_usable_for_the_next_question() {
+            // The promise a failure has to keep, driven through the very value
+            // the event loop holds: a turn that went wrong is one line on the
+            // thread and one on the footer, the turn is taken down — which is
+            // what unmutes the field — and the question after it runs as if
+            // nothing had happened. One `Chat`, as the loop has one, so the
+            // second question is genuinely the next turn of the conversation the
+            // first one failed in.
+            const AGAIN: &str = "and which of those is the biggest?";
+
+            let directory = scratch("usable");
+            let asked_once = directory.join("asked-once");
+            // Fails the first time it is asked and answers the second.
+            let script = format!(
+                "if [ -f '{marker}' ]; then {answer}; else : > '{marker}'; echo boom >&2; exit 3; fi",
+                marker = asked_once.display(),
+                answer = printing(&TURN),
+            );
+            let base = Instant::now();
+            let mut app = App::default();
+            let mut chat = Chat::with_agent(stand_in(&script));
+
+            chat.ask(&mut app, ASKED, base);
+            assert!(
+                chat.answering(),
+                "the field is muted for as long as a question is out"
+            );
+            settle(&mut chat, &mut app, at(base, 1));
+
+            // One line either side, in the same words, and no error anywhere:
+            // `keep_up` returns nothing at all, so there is nothing for the loop
+            // to have propagated.
+            let line = app
+                .message()
+                .expect("a failed turn says so on the footer")
+                .to_owned();
+            assert!(line.contains("exit status 3"), "{line}");
+            assert_eq!(rows(&app, at(base, 30)), vec![said(), clocked(1, &line)]);
+
+            chat.ask(&mut app, AGAIN, at(base, 10));
+            assert!(chat.answering(), "the next question started");
+            settle(&mut chat, &mut app, at(base, 12));
+
+            // The failed turn is still on the card above the answered one, and
+            // the answered one is whole: the work as it arrived, the answer, and
+            // what this turn cost.
+            assert_eq!(
+                rows(&app, at(base, 12)),
+                vec![
+                    said(),
+                    clocked(1, &line),
+                    warlock_tui::Line::Said {
+                        text: AGAIN.to_owned()
+                    },
+                    clocked(2, "Read src/lib.rs"),
+                    clocked(2, "thinking"),
+                    clocked(2, "writing"),
+                    warlock_tui::Line::Text {
+                        text: ANSWER.to_owned()
+                    },
+                    warlock_tui::Line::Summary {
+                        text: "this turn cost $0.01 — chat, never added to a pact's total"
+                            .to_owned()
+                    },
+                ]
+            );
+            clean_up(&directory);
         }
     }
 }

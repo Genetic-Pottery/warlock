@@ -1770,9 +1770,10 @@ fn mark_area(inner: Rect) -> Option<Rect> {
 /// The caret is a reversed [`COMPOSER_CURSOR`] after the last character, drawn
 /// only while the field is live: it says where the next character lands, and
 /// while the keys are somewhere else — or the field is not hearing them —
-/// nothing is landing. It is dropped rather than wrapped when the last row fills the width — a caret is not text,
-/// and a row of its own for a cursor would take a row off the draft and move
-/// everything above it while somebody is typing.
+/// nothing is landing. It is dropped rather than wrapped when the last row
+/// fills the width — a caret is not text, and a row of its own for a cursor
+/// would take a row off the draft and move everything above it while somebody
+/// is typing.
 ///
 /// No colour and no prompt glyph. The panel above spends none, the draft is the
 /// reader's own words, and a `>` in front of them would be a column off every

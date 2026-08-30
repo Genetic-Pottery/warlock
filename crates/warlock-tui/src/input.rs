@@ -2201,7 +2201,14 @@ mod tests {
                 for composer in [None, Some(&draft)] {
                     for in_flight in [false, true] {
                         assert_eq!(
-                            press_for(ctrl_c(), confirm, &ScopePrompt::Closed, composer, in_flight, true),
+                            press_for(
+                                ctrl_c(),
+                                confirm,
+                                &ScopePrompt::Closed,
+                                composer,
+                                in_flight,
+                                true
+                            ),
                             Pressed::CancelTurn,
                             "Ctrl-C should stop the turn with {confirm:?}, {composer:?} and a run \
                              in flight = {in_flight}"
@@ -2215,7 +2222,7 @@ mod tests {
                 press_for(
                     ctrl_c(),
                     QuitConfirm::Closed,
-                    &ScopePrompt::Open(Field::new(DIRECTORY, "web")),
+                    &ScopePrompt::Open(ScopeField::new(DIRECTORY, "web")),
                     None,
                     false,
                     true
@@ -2916,6 +2923,143 @@ mod tests {
                 assert_eq!(app, untouched, "nothing reached the app underneath");
                 assert_eq!(confirm, QuitConfirm::Closed, "and no question was opened");
                 assert_eq!(prompt, ScopePrompt::Closed, "and no prompt");
+            }
+
+            #[test]
+            fn every_key_a_muted_field_is_given_neither_types_nor_acts() {
+                // One question at a time, and the half of it that has teeth: a
+                // muted field is one whose last question is still being
+                // answered, and a letter pressed at it must not fall through to
+                // the tree's bindings. A `p` that did would start a pact over
+                // whatever row happened to be selected — the very accident the
+                // field was built to stop, arriving by the other road.
+                let mut muted = Composer::new(TYPED);
+                muted.set_muted(true);
+
+                let mut app = app_composing();
+                let untouched = app.clone();
+                let mut confirm = QuitConfirm::Closed;
+                let mut prompt = ScopePrompt::Closed;
+
+                // Every letter of both cases, the digits, and the rest of the
+                // list the tree answers to: the whole keyboard, so a binding
+                // added later is covered by the loop rather than by somebody
+                // remembering to add it here.
+                let letters = ('a'..='z').chain('A'..='Z').chain('0'..='9');
+                let codes = letters
+                    .map(KeyCode::Char)
+                    .chain(INERT)
+                    .chain([KeyCode::Enter, KeyCode::Esc])
+                    .filter(|code| *code != KeyCode::Tab);
+
+                for code in codes {
+                    let mut composer = muted.clone();
+
+                    assert_eq!(
+                        press_for(
+                            press(code),
+                            QuitConfirm::Closed,
+                            &ScopePrompt::Closed,
+                            Some(&composer),
+                            false,
+                            true
+                        ),
+                        Pressed::Nothing,
+                        "{code:?} did something at a muted field"
+                    );
+                    // And through the loop's own round, which panics on the
+                    // four keys that start a run or open a window: a `p` that
+                    // leaked past the muting would be caught there rather than
+                    // quietly passing here.
+                    assert_eq!(
+                        round_composing(
+                            &mut app,
+                            &mut confirm,
+                            &mut prompt,
+                            &mut composer,
+                            press(code)
+                        ),
+                        Round::Stayed,
+                        "{code:?} ended the session from a muted field"
+                    );
+                    assert_eq!(composer, muted, "{code:?} moved a muted draft");
+                }
+
+                assert_eq!(app, untouched, "a key reached the app behind a muted field");
+                assert_eq!(confirm, QuitConfirm::Closed, "and opened no question");
+                assert_eq!(prompt, ScopePrompt::Closed, "and no prompt");
+            }
+
+            #[test]
+            fn the_two_keys_a_muted_field_does_not_swallow_are_tab_and_ctrl_c() {
+                // Muting is about the letters. Tab is outside the field
+                // altogether — it is the key that moves the keyboard, and a
+                // field that ate it while refusing to be typed in would have no
+                // way out until the model answered — and Ctrl-C is answered
+                // before the field is consulted at all, which is what makes it
+                // the way to take a question back.
+                let mut muted = Composer::new(TYPED);
+                muted.set_muted(true);
+
+                assert_eq!(
+                    press_for(
+                        press(KeyCode::Tab),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&muted),
+                        false,
+                        true
+                    ),
+                    Pressed::Act(Action::ToggleFocus),
+                );
+                assert_eq!(
+                    press_for(
+                        ctrl_c(),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&muted),
+                        false,
+                        true
+                    ),
+                    Pressed::CancelTurn,
+                );
+            }
+
+            #[test]
+            fn the_field_types_again_the_moment_the_turn_ends() {
+                // The other half of the muting, and the one that matters to
+                // somebody waiting: the flag is set once a round off the turn in
+                // flight, so a turn that ended in any of its five ways leaves a
+                // field that hears the next key. Same field, same draft, one
+                // flag down.
+                let mut composer = Composer::new(TYPED);
+                composer.set_muted(true);
+
+                assert_eq!(
+                    press_for(
+                        press(KeyCode::Char('p')),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&composer),
+                        false,
+                        true
+                    ),
+                    Pressed::Nothing,
+                );
+
+                composer.set_muted(false);
+
+                assert_eq!(
+                    press_for(
+                        press(KeyCode::Char('p')),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&composer),
+                        false,
+                        false
+                    ),
+                    Pressed::Compose(Composed::Typing(Composer::new(format!("{TYPED}p")))),
+                );
             }
 
             #[test]
