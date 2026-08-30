@@ -3400,6 +3400,398 @@ mod tests {
             cancel.cancel();
             assert!(cancel.is_cancelled());
         }
+
+        /// The same transport, driven the other way: a turn rather than a pass.
+        ///
+        /// A child module rather than a sibling so that every stand-in above is
+        /// reusable here — the pid file instead of a sleep, the scratch
+        /// directory, `printing`, `AT_MOST` — because what is being tested is
+        /// the same machinery reached through a different door, and writing a
+        /// second set of helpers would let the two drift.
+        ///
+        /// What differs from the tests above is *where* a stand-in is pointed.
+        /// A pass runs in the directory its request names, so its scripts can
+        /// say `pid` and mean a file in a scratch directory; a turn runs
+        /// wherever warlock does, which is this crate's own source tree, so
+        /// every script here names its files by absolute path and leaves
+        /// nothing behind in the repository.
+        mod turns {
+            use std::sync::mpsc;
+            use std::time::{Duration, Instant};
+            use std::{fs, thread};
+
+            use warlock_engine::AgentError;
+
+            use super::super::NOT_A_PROGRAM;
+            use super::{AT_MOST, clean_up, drained, is_cancelled, pid, printing, scratch};
+            use crate::{Activities, Activity, Cancel, ChatAgent};
+
+            /// The lines of a turn, in miniature: the session's opening line, a
+            /// look at the repository, a thought, the answer starting, the
+            /// answer itself, and the result line carrying it and what the turn
+            /// cost.
+            ///
+            /// [`PASS`](super::PASS)'s counterpart, and deliberately not the
+            /// same canned stream. A turn is the first run in warlock's history
+            /// that can call a tool, and it says one thing a toolless pass never
+            /// does — the moment it stops thinking and starts writing — so the
+            /// `content_block_start` line is here and the tool is one of the
+            /// three a turn is actually granted.
+            const TURN: [&str; 6] = [
+                r#"{"type":"system","subtype":"init","tools":["Read","Grep","Glob"]}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Grep","input":{"pattern":"fn load"}}]}}"#,
+                r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":113,"estimated_tokens_delta":63}"#,
+                r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The loader is in src/load.rs."}]}}"#,
+                r#"{"type":"result","subtype":"success","result":"The loader is in src/load.rs.","total_cost_usd":0.0042}"#,
+            ];
+
+            /// The answer [`TURN`]'s result line carries.
+            const ANSWER: &str = "The loader is in src/load.rs.";
+
+            /// What [`TURN`] reports, in order: the tool with its one
+            /// whitelisted argument, the bare fact of the thought, the answer
+            /// starting, and the cost. Not the answer itself — that is the
+            /// turn's return value, and it appears in exactly one place.
+            fn reported() -> Vec<Activity> {
+                vec![
+                    Activity::Tool {
+                        name: "Grep".to_owned(),
+                        detail: Some("fn load".to_owned()),
+                    },
+                    Activity::Thinking,
+                    Activity::Writing,
+                    Activity::Cost { usd: 0.0042 },
+                ]
+            }
+
+            /// A chat agent whose `claude` is `sh -c script`.
+            fn stand_in(script: &str) -> ChatAgent {
+                ChatAgent::new()
+                    .with_program("/bin/sh")
+                    .with_args(["-c", script])
+            }
+
+            /// The same agent, reporting into a channel this test can read.
+            fn listening(agent: ChatAgent) -> (ChatAgent, mpsc::Receiver<Activity>) {
+                let (sender, received) = mpsc::channel();
+                let agent = agent.with_activities(Activities::new(move |activity| {
+                    let _ = sender.send(activity);
+                }));
+                (agent, received)
+            }
+
+            #[test]
+            fn a_turns_stdin_is_the_message_and_not_one_byte_more() {
+                // The promise the whole thread card rests on: what reaches the
+                // model is the sentence somebody typed, with no tree dump, no
+                // repository contents and no transcript warlock appended. So
+                // the stand-in keeps its stdin instead of describing it, and
+                // the bytes are compared with the message as written —
+                // including the absence of a trailing newline, which is the
+                // easiest thing for a transport to add without meaning to.
+                let directory = scratch("turn-stdin");
+                let captured = directory.join("stdin");
+                let message =
+                    "where is the loader?\n\nand a second paragraph, with a 'quote' in it";
+                let script = format!("cat > '{}'; {}", captured.display(), printing(&TURN[5..]));
+
+                let answer = stand_in(&script)
+                    .turn(message)
+                    .expect("the stand-in exits cleanly and prints a result line");
+
+                assert_eq!(answer, ANSWER);
+                assert_eq!(
+                    fs::read(&captured).expect("the stand-in kept its stdin"),
+                    message.as_bytes(),
+                    "something other than the message reached the child",
+                );
+
+                // And `cat` says the other half of it. It answers with what it
+                // was given and returns only at EOF, so a turn that comes back
+                // at all is a turn whose stdin was written *and closed* —
+                // without the close, this call would hang until the timeout.
+                let echoed = ChatAgent::new()
+                    .with_program("/bin/cat")
+                    .with_args(Vec::<&str>::new())
+                    .turn(&format!("{}\n", TURN[5]))
+                    .expect("cat exits cleanly once its stdin is closed");
+
+                assert_eq!(echoed, ANSWER);
+                clean_up(&directory);
+            }
+
+            #[test]
+            fn a_whole_turn_reports_what_it_did_and_returns_the_answer() {
+                // The four kinds of sign of life a turn gives, out of one
+                // canned stream and through a real pipe: the tool it reached
+                // for, that it thought, that it began writing, and what it
+                // cost.
+                let (agent, received) = listening(stand_in(&printing(&TURN)));
+
+                let answer = agent
+                    .turn("where is the loader?")
+                    .expect("the canned turn exits cleanly and prints an answer");
+
+                assert_eq!(answer, ANSWER);
+                let activities = drained(&received);
+                assert_eq!(activities, reported());
+                // The other half of the promise, and the one worth saying
+                // twice: the answer is the turn's return value, and no part of
+                // it went out over the port. A panel that showed the prose
+                // would be a viewer rather than a ledger.
+                let seen = format!("{activities:?}");
+                assert!(!seen.contains("The loader"), "{seen}");
+                assert!(!seen.contains("src/load.rs"), "{seen}");
+            }
+
+            #[test]
+            fn a_missing_binary_is_reported_by_name_not_as_an_errno() {
+                // No `claude` needed to test the no-`claude` case, which is the
+                // point: this is the state of every machine that has never
+                // installed it. And a turn names no directory of its own, so
+                // there is no second thing a `NotFound` could have been.
+                let error = ChatAgent::new()
+                    .with_program(NOT_A_PROGRAM)
+                    .turn("anything")
+                    .expect_err("nothing by that name can be on PATH");
+
+                match error {
+                    AgentError::NotFound { program } => assert_eq!(program, NOT_A_PROGRAM),
+                    other => panic!("expected a missing binary, got {other:?}"),
+                }
+            }
+
+            #[test]
+            fn a_turn_that_refuses_carries_its_status_and_its_stderr() {
+                let error = stand_in("echo boom >&2; exit 3")
+                    .turn("anything")
+                    .expect_err("this stand-in refuses");
+
+                match error {
+                    AgentError::Failed { code, stderr } => {
+                        assert_eq!(code, Some(3));
+                        assert_eq!(stderr.trim(), "boom", "stderr is captured, not dropped");
+                    }
+                    other => panic!("expected a non-zero exit, got {other:?}"),
+                }
+            }
+
+            #[test]
+            fn a_turn_that_says_nothing_is_empty_output() {
+                // The same four silences a pass has: nothing at all, blank
+                // lines, a stream that never reached a result line, and a
+                // result line whose answer is whitespace.
+                let scripts = [
+                    "exit 0".to_owned(),
+                    "printf '\\n  \\n'".to_owned(),
+                    printing(&TURN[..5]),
+                    printing(&[r#"{"type":"result","result":"  \n\t"}"#]),
+                ];
+
+                for script in scripts {
+                    let error = stand_in(&script)
+                        .turn("anything")
+                        .expect_err("there is no answer in silence");
+
+                    assert!(
+                        matches!(error, AgentError::EmptyOutput),
+                        "`{script}` gave {error:?}"
+                    );
+                }
+            }
+
+            #[test]
+            fn a_hanging_turn_times_out_and_its_child_stops() {
+                let directory = scratch("turn-hang");
+                let ticks = directory.join("ticks");
+                // Never exits on its own, and says so in a file: whether it is
+                // still running after the call is a question the test can ask.
+                let agent = stand_in(&format!(
+                    "while :; do echo tick >> '{}'; sleep 0.05; done",
+                    ticks.display()
+                ))
+                .with_timeout(Duration::from_millis(250));
+
+                let started = Instant::now();
+                let error = agent
+                    .turn("anything")
+                    .expect_err("this stand-in never finishes");
+                let elapsed = started.elapsed();
+
+                match error {
+                    AgentError::TimedOut { after } => {
+                        assert_eq!(after, Duration::from_millis(250));
+                    }
+                    other => panic!("expected a timeout, got {other:?}"),
+                }
+                assert!(
+                    elapsed < Duration::from_secs(10),
+                    "the call waited {elapsed:?}, far past its timeout"
+                );
+
+                let before = fs::metadata(&ticks).map_or(0, |file| file.len());
+                thread::sleep(Duration::from_millis(300));
+                let after = fs::metadata(&ticks).map_or(0, |file| file.len());
+                assert_eq!(
+                    before, after,
+                    "the child outlived the turn that gave up on it"
+                );
+                clean_up(&directory);
+            }
+
+            /// The kill is only half of it, here as for a pass: a child nobody
+            /// waits on stays in the process table as a zombie, and `/proc` is
+            /// where that is visible.
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn a_timed_out_turns_child_is_reaped_not_left_a_zombie() {
+                let directory = scratch("turn-reap");
+                let pid_file = directory.join("pid");
+                let agent = stand_in(&format!("echo $$ > '{}'; sleep 30", pid_file.display()))
+                    .with_timeout(Duration::from_millis(250));
+
+                let error = agent
+                    .turn("anything")
+                    .expect_err("this stand-in sleeps far past its timeout");
+
+                assert!(matches!(error, AgentError::TimedOut { .. }), "{error:?}");
+                let pid = pid(&pid_file).expect("the child wrote its pid");
+                assert!(
+                    !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                    "process {pid} is still in the table: killed but never reaped"
+                );
+                clean_up(&directory);
+            }
+
+            #[test]
+            fn a_cancel_from_another_thread_ends_a_turn_promptly() {
+                let directory = scratch("turn-cancel");
+                let pid_file = directory.join("pid");
+                let cancel = Cancel::new();
+                // The real five-minute timeout: the only thing that can end
+                // this call in time is the cancel.
+                let agent = stand_in(&format!("echo $$ > '{}'; sleep 30", pid_file.display()))
+                    .with_cancel(cancel.clone());
+
+                let stopper = {
+                    let pid_file = pid_file.clone();
+                    thread::spawn(move || {
+                        // Stopped once it is genuinely running, which it says
+                        // by writing its pid — a sleep here would be a race
+                        // dressed up as a delay.
+                        let waited = Instant::now();
+                        while pid(&pid_file).is_none() && waited.elapsed() < AT_MOST {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        cancel.cancel();
+                    })
+                };
+
+                let started = Instant::now();
+                let error = agent
+                    .turn("anything")
+                    .expect_err("a cancelled turn has no answer");
+                let elapsed = started.elapsed();
+                stopper.join().expect("the cancelling thread ran");
+
+                assert!(is_cancelled(&error), "{error:?}");
+                assert!(
+                    elapsed < Duration::from_secs(20),
+                    "the call sat out the sleep it was told to cut short: {elapsed:?}"
+                );
+                clean_up(&directory);
+            }
+
+            /// Killing is half of it here too: see
+            /// [`a_timed_out_turns_child_is_reaped_not_left_a_zombie`].
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn a_cancelled_turns_process_is_gone_afterwards() {
+                let directory = scratch("turn-cancel-reap");
+                let pid_file = directory.join("pid");
+                let cancel = Cancel::new();
+                let agent = stand_in(&format!("echo $$ > '{}'; sleep 30", pid_file.display()))
+                    .with_cancel(cancel.clone());
+
+                let stopper = {
+                    let pid_file = pid_file.clone();
+                    thread::spawn(move || {
+                        let waited = Instant::now();
+                        while pid(&pid_file).is_none() && waited.elapsed() < AT_MOST {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        cancel.cancel();
+                    })
+                };
+
+                let error = agent
+                    .turn("anything")
+                    .expect_err("a cancelled turn has no answer");
+                stopper.join().expect("the cancelling thread ran");
+
+                assert!(is_cancelled(&error), "{error:?}");
+                let pid = pid(&pid_file).expect("the child wrote its pid before it was stopped");
+                assert!(
+                    !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                    "process {pid} survived the cancel, or was killed and never reaped"
+                );
+                clean_up(&directory);
+            }
+
+            #[test]
+            fn a_turn_started_after_a_cancel_spawns_nothing_at_all() {
+                let directory = scratch("turn-never-started");
+                let marker = directory.join("marker");
+                let cancel = Cancel::new();
+                cancel.cancel();
+                // Anything that ran would leave a file behind, and a turn only
+                // returns once its child has exited — so a missing marker is a
+                // child that never existed, not one that has not got there yet.
+                let agent = stand_in(&format!("touch '{}'", marker.display())).with_cancel(cancel);
+
+                let error = agent
+                    .turn("anything")
+                    .expect_err("a cancelled agent takes no turns");
+
+                assert!(is_cancelled(&error), "{error:?}");
+                assert!(!marker.exists(), "a cancelled agent spawned a child anyway");
+                clean_up(&directory);
+            }
+
+            #[test]
+            fn a_turn_nobody_listens_to_runs_exactly_as_it_did_before() {
+                // The port is a side channel here too. Every kind of ending a
+                // turn has — an answer, a refusal, a silence, a stream that
+                // never reached its result line — run twice, once with a
+                // listener and once without, and compared as a caller would
+                // see them.
+                let endings = [
+                    printing(&TURN),
+                    "echo boom >&2; exit 3".to_owned(),
+                    "exit 0".to_owned(),
+                    printing(&TURN[..5]),
+                ];
+
+                for script in endings {
+                    let deaf = stand_in(&script).turn("anything");
+                    let (agent, received) = listening(stand_in(&script));
+                    let heard = agent.turn("anything");
+
+                    // `AgentError` is not comparable — it carries an
+                    // `io::Error` — so the two endings are compared as they are
+                    // written down.
+                    assert_eq!(
+                        format!("{deaf:?}"),
+                        format!("{heard:?}"),
+                        "`{script}` ended differently with somebody listening"
+                    );
+                    if script == printing(&TURN) {
+                        assert_eq!(drained(&received), reported());
+                    }
+                }
+            }
+        }
     }
 
     #[test]
