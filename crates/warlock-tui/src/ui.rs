@@ -272,6 +272,32 @@ const HEADER_GAP: &str = " — ";
 /// under a heading, and a change to either has nothing to say about the other.
 const PANEL_INDENT: &str = "  ";
 
+/// What the panel's top edge says while the conversation is the card on screen.
+///
+/// The one card that is named on the border, because it is the one card a reader
+/// could otherwise mistake for another: an account says what it is in every row
+/// it draws — a directory and a clock — and a document is the file's own text,
+/// where a question and an answer are neither, and a reader who swapped one card
+/// too far would have to read the prose to find out where they had landed. A
+/// word costs nothing off the window: a title sits on the border row the panel
+/// was drawing anyway, so the thread has exactly the rows the account has.
+///
+/// Padded a column each side so it does not sit against the corner, like
+/// [`scrollback`]'s indicator on the opposite edge. No colour, for the reason
+/// written out at [`draw_panel`]: bold is what a heading gets here.
+const THREAD_TITLE: &str = " thread ";
+
+/// Drawn on the left of the reader's own words in the thread, so a question
+/// reads as a question rather than as the first line of an answer.
+///
+/// The turn's own heading, and marked rather than indented for the same reason
+/// [`PANEL_INDENT`] indents what sits under a heading: the question is what the
+/// rest of the turn is about, and everything under it belongs to it. Not
+/// [`SELECTION_MARKER`], which is the tree's `>` and says where the keyboard is
+/// — nothing is selected in the panel — and not a colour, which is a node
+/// state's.
+const SAID_MARKER: &str = "› ";
+
 /// What a truncated panel line ends with, in place of what was cut off.
 ///
 /// One column rather than three dots, because the columns it takes are columns
@@ -1470,18 +1496,26 @@ fn pane_block(focused: bool) -> Block<'static> {
 /// Draw the panel: the window onto the card it is showing, one row per line,
 /// inside its border.
 ///
-/// One slot and two cards. The panel holds the account of the pact and the
-/// document somebody asked to read, and draws whichever of them is showing —
-/// which is the app's answer and never this function's. [`App::panel_lines`]
-/// hands over the showing card's window and [`App::panel_lines_below`] counts
-/// what is under it, so a swap (see [`App::swap_card`]) changes what reaches the
-/// screen without changing a line of the drawing. Both cards are drawn the same
-/// way, in the same border, cut at the same width, under the same indicator: the
-/// difference between an account and a document is what the lines say, not how
-/// the panel says them.
+/// One slot and three cards. The panel holds the account of the pact, the
+/// conversation somebody is having and the document they asked to read, and
+/// draws whichever of them is showing — which is the app's answer and never this
+/// function's. [`App::panel_lines`] hands over the showing card's window and
+/// [`App::panel_lines_below`] counts what is under it, so a swap (see
+/// [`App::swap_card`]) changes what reaches the screen without changing a line of
+/// the drawing. All three are drawn in the same border, at the same width, under
+/// the same indicator: what mostly differs between them is what the lines say,
+/// not how the panel says them.
 ///
-/// While neither card has anything in it — before the first pact and the first
-/// read — what this draws inside the border is [`MARK`], centred and dim:
+/// Mostly, and not entirely, because a reader has to be able to tell which card
+/// they are on. The thread is named on the top edge with [`THREAD_TITLE`] and
+/// the other two are not, which is one word on a row the border already owns —
+/// and its rows say it a second time, since a question carries [`SAID_MARKER`]
+/// and nothing on an account ever does (see [`panel_row`]). No colour does any
+/// of this work: see the note at the end of this comment.
+///
+/// While no card has anything in it — before the first pact, the first question
+/// and the first read — what this draws inside the border is [`MARK`], centred
+/// and dim:
 /// warlock's own `W` and not one word — no heading, no title, no welcome, no key
 /// hints. A screen that said something before anything had happened would be
 /// saying it about nothing; a screen carrying the program's mark is saying whose
@@ -1495,20 +1529,23 @@ fn pane_block(focused: bool) -> Block<'static> {
 /// With the account showing, every row is one line of it: a section heading
 /// naming a directory, or one thing that pass was seen doing with the elapsed
 /// clock of its own section in front of it, or the line the run finished with.
-/// With the document showing, every row is one line of the file, from its first.
-/// Which lines those are is [`App::panel_lines`]'s answer, window and all — the
-/// app owns the scrolling, exactly as it owns the tree's — and this only words
-/// them and cuts them to the width.
+/// With the thread showing, every row is one line of the conversation: a
+/// question somebody typed, one thing the model was seen doing while it answered,
+/// a row of the answer itself, or what the turn cost. With the document showing,
+/// every row is one line of the file, from its first. Which lines those are is
+/// [`App::panel_lines`]'s answer, window and all — the app owns the scrolling,
+/// exactly as it owns the tree's — and this only words them and cuts them to the
+/// width.
 ///
 /// A [`Paragraph`] with no [`Wrap`](ratatui::widgets::Wrap): every line handed
 /// over is one row, whatever is on it. Wrapping here would be the widget
 /// deciding how many rows the panel holds, which is the app's answer — it is
 /// what the window is cut out of and what the scrollback counts — so a document
-/// arrives already broken into the rows its width needs and an account arrives
-/// meaning to be cut. A row of an account that wrapped would put one activity on
-/// two rows, which makes the count of rows on screen stop being the count of
-/// things that happened and moves every row beneath it for a reason that has
-/// nothing to do with the run.
+/// and a model's answer arrive already broken into the rows their width needs
+/// and an account arrives meaning to be cut. A row of an account that wrapped
+/// would put one activity on two rows, which makes the count of rows on screen
+/// stop being the count of things that happened and moves every row beneath it
+/// for a reason that has nothing to do with the run.
 ///
 /// While the showing card's window is scrolled back, the bottom edge of the
 /// border says how much of *that* card is below it and which key returns to
@@ -1532,11 +1569,18 @@ fn pane_block(focused: bool) -> Block<'static> {
 ///
 /// No colour anywhere in here. The three node-state colours are the tree's and
 /// [`FOCUS_COLOUR`] is the border's; a fourth meaning for colour would cost both
-/// of those their meaning. Bold, which is not a colour, is all the headings get,
-/// and dim, which is not one either, is all the mark gets.
+/// of those their meaning. Bold, which is not a colour, is all the headings get
+/// — the account's, the run's, the thread's title and a reader's question — and
+/// dim, which is not one either, is all the mark and the indicator get. Telling
+/// the cards apart is a word and a marker for that reason: a card that was
+/// recognised by its colour would be a card nobody could recognise on a terminal
+/// without one.
 fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     let below = app.panel_lines_below();
     let mut block = pane_block(app.focus() == Focus::Panel);
+    if app.showing_thread() {
+        block = block.title_top(Line::from(THREAD_TITLE).bold());
+    }
     if below > 0 {
         block = block.title_bottom(Line::from(scrollback(below)).right_aligned().dim());
     }
@@ -1769,6 +1813,20 @@ fn scrollback(below: usize) -> String {
 /// row inside the border rather than a row over it. See
 /// [`App::show_document`].
 ///
+/// A model's answer is that same arm and gets that same treatment — plain text,
+/// flush left, unstyled, already wrapped to the panel's width — because it is
+/// prose and prose is prose. It is the one thing on this screen a model wrote in
+/// its own words, and it reaches here only on the thread's card: nothing an
+/// [`Account`] holds is a [`Entry::Text`], so no arrangement of runs and swaps
+/// can put a sentence of a model's on the account.
+///
+/// What the reader typed is its own arm and leads with [`SAID_MARKER`], bold
+/// like the headings it stands among: it is the heading of its turn, and a
+/// question that drew exactly like the answer under it would leave a reader
+/// working out from the words which of them had said what. It is cut and never
+/// wrapped, like an account's line — the reader has their own question already,
+/// and what the width is spent on is the answer.
+///
 /// The row is built whole and cut once, rather than assembled from a styled
 /// clock and a styled text: the width is a fact about the row, and two spans
 /// each guessing at their share of it is how a line ends up one column too wide.
@@ -1782,7 +1840,10 @@ fn panel_row(line: &Entry, width: u16) -> Line<'static> {
             Line::from(truncated(&format!("{PANEL_INDENT}{clock} {text}"), width))
         }
         Entry::Summary { text } => Line::from(truncated(text, width)).bold(),
-        Entry::Text { text } | Entry::Said { text } => Line::from(truncated(text, width)),
+        Entry::Said { text } => {
+            Line::from(truncated(&format!("{SAID_MARKER}{text}"), width)).bold()
+        }
+        Entry::Text { text } => Line::from(truncated(text, width)),
     }
 }
 
@@ -2525,12 +2586,12 @@ mod tests {
         INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LEAVE_KEY, LIVE_KEY, MARK, MARK_MARGIN,
         MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY, MOVE_KEYS, NO_MARKER, PACTING_KEYS,
         PACTING_QUIT_KEY, PACTING_RUN, PAGE_KEYS, PANEL_INDENT, QUIT_KEY, REFRESHING_RUN,
-        RUN_HEADER_HEIGHT, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN,
-        SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas,
-        centred, composer_height, composer_on_screen, confirm_area, confirm_size, display_width,
-        draw, guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line, pane_inner,
-        panel_height, panel_width, run_header_height, scope_size, tree_height, tree_rows_area,
-        tree_width, truncated,
+        RUN_HEADER_HEIGHT, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES,
+        SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER, THREAD_TITLE,
+        TREE_MIN_WIDTH, TREE_PERCENT, areas, centred, composer_height, composer_on_screen,
+        confirm_area, confirm_size, display_width, draw, guide_prefixes, hit_test, keys_line,
+        mark_area, pacting_keys_line, pane_inner, panel_height, panel_width, run_header_height,
+        scope_size, tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::COMPOSER_MAX_ROWS;
     use crate::account::Outcome;
@@ -2853,6 +2914,14 @@ mod tests {
         let panel = areas(buffer.area, None).panel;
 
         text_in(buffer, panel, panel.y + panel.height - 1)
+    }
+
+    /// The panel's top border row, as text: the edge the thread's own name is
+    /// written on, border glyphs and all.
+    fn panel_top_edge(buffer: &Buffer) -> String {
+        let panel = areas(buffer.area, None).panel;
+
+        text_in(buffer, panel, panel.y)
     }
 
     /// Where the tree's rows land in a buffer of this size: inside the tree
@@ -5912,6 +5981,334 @@ mod tests {
             panel_rows(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9))),
             document
         );
+    }
+
+    /// The words the account's heading and the thread's question both carry in
+    /// the test below: a directory, because a heading is one.
+    ///
+    /// The point of saying the very same thing on both cards is that the frames
+    /// still differ. Two cards that only looked different because their contents
+    /// differ would be two cards a reader could be fooled by, and the question
+    /// "which card am I on?" would be answerable only by reading the rows.
+    const SAME_WORDS: &str = "crates/engine";
+
+    /// The message the thread tests ask, and the sentence that comes back.
+    ///
+    /// The answer is prose in the model's own words, which is the one kind of
+    /// text that must never reach the account's card: it is asserted for by
+    /// substring, so a row that carried any of it anywhere on the frame fails.
+    const QUESTION: &str = "what does the engine do?";
+    /// See [`QUESTION`].
+    const ANSWER: &str = "It walks the tree and writes what it finds.";
+
+    #[test]
+    fn the_thread_and_the_account_do_not_draw_alike_with_the_same_words_on_them() {
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section(SAME_WORDS, base);
+        account.record(&Activity::Thinking, base);
+
+        // The account: a heading and one thing seen happening under it.
+        let showing_account = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+        assert_eq!(
+            panel_rows(&showing_account)[..2],
+            [
+                SAME_WORDS.to_owned(),
+                format!("{PANEL_INDENT}0:09 thinking"),
+            ],
+        );
+
+        // The same two things said on the thread — the question is word for
+        // word the account's heading, and the same activity is recorded at the
+        // same instant — and the card still does not draw like the account.
+        app.start_turn(SAME_WORDS, base);
+        app.record_turn(&Activity::Thinking, base);
+        let showing_thread = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+        assert_eq!(
+            panel_rows(&showing_thread)[..2],
+            [
+                format!("{SAID_MARKER}{SAME_WORDS}"),
+                format!("{PANEL_INDENT}0:09 thinking"),
+            ],
+        );
+        assert_ne!(rows_text(&showing_thread), rows_text(&showing_account));
+
+        // Two things say it. The reader's own words are marked, where nothing an
+        // account draws ever is...
+        assert!(!panel_rows(&showing_account)[0].contains(SAID_MARKER));
+        // ...and the panel names the card on its top edge, which the account's
+        // does not.
+        assert!(
+            panel_top_edge(&showing_thread).contains(THREAD_TITLE.trim()),
+            "{:?}",
+            panel_top_edge(&showing_thread)
+        );
+        assert!(
+            !panel_top_edge(&showing_account).contains(THREAD_TITLE.trim()),
+            "{:?}",
+            panel_top_edge(&showing_account)
+        );
+
+        // The title is on the border and not on a row of the card: the thread
+        // draws exactly the rows the account draws.
+        assert_eq!(
+            panel_rows(&showing_thread).len(),
+            panel_rows(&showing_account).len()
+        );
+        assert!(
+            !panel_rows(&showing_thread)
+                .iter()
+                .any(|row| row.contains(THREAD_TITLE.trim())),
+            "the title took a row of the thread"
+        );
+    }
+
+    #[test]
+    fn the_thread_says_which_card_it_is_with_the_question_scrolled_off_the_top() {
+        let base = Instant::now();
+        let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None, None));
+        let mut app = pacting_app(base, WIDTH, HEIGHT);
+        app.start_turn(QUESTION, base);
+        for line in 0..height * 3 {
+            app.record_turn(&numbered(line), at(base, line as u64 + 1));
+        }
+
+        // Following the newest line, so what is on screen is work lines: the one
+        // marked row is above the window and there is no prose yet either.
+        let buffer = render_at(&app, WIDTH, HEIGHT, at(base, 99));
+        let drawn = panel_rows(&buffer);
+        assert!(app.panel_lines_below() == 0 && drawn.len() == height);
+        assert!(
+            !drawn.iter().any(|row| row.contains(SAID_MARKER)),
+            "the question should be off the top: {drawn:?}"
+        );
+        // And the edge still says which card these rows belong to.
+        assert!(
+            panel_top_edge(&buffer).contains(THREAD_TITLE.trim()),
+            "{:?}",
+            panel_top_edge(&buffer)
+        );
+    }
+
+    #[test]
+    fn no_model_prose_is_ever_drawn_on_the_account_card() {
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section(SAME_WORDS, base);
+        account.record(&Activity::Thinking, at(base, 1));
+
+        // A turn asked and answered while the run is still going, so both cards
+        // are being written and the answer is on one of them.
+        app.start_turn(QUESTION, at(base, 2));
+        app.record_turn(&Activity::Thinking, at(base, 3));
+        app.answer_turn(ANSWER, at(base, 4));
+
+        // The thread came to the front when the question was asked: the answer
+        // is there, whole, in the model's own words.
+        assert!(app.showing_thread());
+        let showing_thread = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+        assert!(
+            panel_rows(&showing_thread)
+                .iter()
+                .any(|row| row.contains(ANSWER)),
+            "{:?}",
+            panel_rows(&showing_thread)
+        );
+
+        // Swap round to the account — past the document card, which nothing has
+        // filled — and not a word of the model's prose is anywhere on the frame.
+        app.swap_card();
+        assert!(!app.showing_thread());
+        let showing_account = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+        for row in rows_text(&showing_account) {
+            assert!(!row.contains(ANSWER), "{row:?}");
+            assert!(!row.contains("walks the tree"), "{row:?}");
+            assert!(!row.contains(QUESTION), "{row:?}");
+            assert!(!row.contains(SAID_MARKER), "{row:?}");
+        }
+        // What is on the account is what the run put there, and only that.
+        assert_eq!(
+            panel_rows(&showing_account)[..2],
+            [
+                SAME_WORDS.to_owned(),
+                format!("{PANEL_INDENT}0:09 thinking"),
+            ],
+        );
+
+        // And the run going on afterwards puts nothing of the conversation on
+        // it either: a second directory, its own lines, no prose.
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section("crates/tui", at(base, 10));
+        account.record(&Activity::Writing, at(base, 11));
+        for row in rows_text(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 20))) {
+            assert!(!row.contains("walks the tree"), "{row:?}");
+        }
+    }
+
+    #[test]
+    fn the_answer_is_drawn_as_plain_text_wrapped_to_the_panels_width() {
+        // The same narrow terminal the document's wrapping is pinned at: the
+        // panel gets half of forty columns, less its border.
+        let narrow = 40;
+        let base = Instant::now();
+        let mut app = pacting_app(base, narrow, FIXTURE_HEIGHT);
+        app.start_turn(QUESTION, base);
+        app.answer_turn(ANSWER, at(base, 1));
+
+        let buffer = render_at(&app, narrow, FIXTURE_HEIGHT, at(base, 2));
+
+        let inner = panel_area(&buffer);
+        assert_eq!(inner.width, 18, "the terminal is the narrow one");
+        let drawn = panel_rows(&buffer);
+        // The question cut to the width behind its marker, the placeholder for
+        // a turn that heard nothing, and then the answer broken at spaces onto
+        // rows of its own — wrapped like a document and not cut like an account,
+        // so the end of the sentence is on screen.
+        assert_eq!(
+            drawn[..5],
+            [
+                format!("{SAID_MARKER}what does the e{ELLIPSIS}"),
+                format!("{PANEL_INDENT}0:01 waiting"),
+                "It walks the tree".to_owned(),
+                "and writes what it".to_owned(),
+                "finds.".to_owned(),
+            ],
+        );
+        for row in &drawn {
+            assert!(
+                display_width(row) <= usize::from(inner.width),
+                "row {row:?} is wider than the panel"
+            );
+        }
+
+        // The answer's rows are plain: no colour, no modifier, nothing added to
+        // the left of them — where the question above them is bold, which is
+        // what a heading gets here and what no prose does.
+        for index in 2..5 {
+            for x in inner.x..inner.x + inner.width {
+                let cell = &buffer[(x, inner.y + index)];
+                assert_eq!(cell.fg, Color::Reset, "at ({x}, {index})");
+                assert_eq!(cell.modifier, Modifier::empty(), "at ({x}, {index})");
+            }
+        }
+        assert!(
+            buffer[(inner.x, inner.y)].modifier.contains(Modifier::BOLD),
+            "the question should be bold"
+        );
+    }
+
+    #[test]
+    fn the_mark_is_drawn_while_the_card_on_screen_is_unfilled_thread_or_not() {
+        let base = Instant::now();
+        let size = Size::new(MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT);
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_viewport_height(tree_height(size));
+        app.set_panel_height(panel_height(size, None, None));
+        app.set_panel_width(panel_width(size));
+
+        // Nothing has happened at all: no pact, no question, no read, and the
+        // panel is warlock's mark on a border with nothing written on it.
+        let empty = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, base);
+        assert_mark_drawn(&empty);
+        assert!(
+            !panel_top_edge(&empty).contains(THREAD_TITLE.trim()),
+            "{:?}",
+            panel_top_edge(&empty)
+        );
+
+        // A question fills the thread and brings it to the front: the mark is
+        // gone and the edge says which card took its place.
+        app.start_turn(QUESTION, base);
+        let asked = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 1));
+        assert_no_mark(&asked);
+        assert_eq!(
+            panel_rows(&asked)[..2],
+            [
+                format!("{SAID_MARKER}{QUESTION}"),
+                format!("{PANEL_INDENT}0:01 waiting"),
+            ],
+        );
+        assert!(panel_top_edge(&asked).contains(THREAD_TITLE.trim()));
+
+        // Swapping back to the account, which no pact has filled, brings the
+        // mark back and takes the title away: the mark is about the card on
+        // screen, exactly as it always was.
+        app.swap_card();
+        let swapped = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 1));
+        assert!(!app.showing_thread());
+        assert_mark_drawn(&swapped);
+        assert!(!panel_top_edge(&swapped).contains(THREAD_TITLE.trim()));
+
+        // And a pact starting under the thread does not move the panel or the
+        // mark: the account it fills is the card behind.
+        app.swap_card();
+        app.start_account(at(base, 2));
+        let running = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 3));
+        assert!(app.showing_thread());
+        assert_no_mark(&running);
+    }
+
+    #[test]
+    fn the_scrollback_and_the_run_header_reach_the_thread_as_they_reach_the_account() {
+        let base = Instant::now();
+        let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None, None));
+        let mut app = pacting_app(base, WIDTH, HEIGHT);
+        app.start_turn(QUESTION, base);
+        for line in 0..height * 3 {
+            app.record_turn(&numbered(line), at(base, line as u64 + 1));
+        }
+
+        // Following the newest line: nothing below the view, so the edge says
+        // nothing about scrollback and names the card and nothing else.
+        let live = render_at(&app, WIDTH, HEIGHT, at(base, 99));
+        assert_eq!(app.panel_lines_below(), 0);
+        assert!(!panel_bottom_edge(&live).contains(SCROLLBACK_ARROW));
+
+        // Scrolled back by the ordinary movement keys, the indicator counts the
+        // thread's rows on the bottom edge while the top edge goes on naming it.
+        app.toggle_focus();
+        app.select_first();
+        let scrolled = render_at(&app, WIDTH, HEIGHT, at(base, 99));
+        let below = app.panel_lines_below();
+        assert!(below > 0);
+        let edge = panel_bottom_edge(&scrolled);
+        assert!(
+            edge.contains(&format!("{SCROLLBACK_ARROW} {below} more ({LIVE_KEY})")),
+            "{edge:?}"
+        );
+        assert!(panel_top_edge(&scrolled).contains(THREAD_TITLE.trim()));
+        assert_eq!(panel_rows(&scrolled).len(), height);
+        app.select_last();
+        app.toggle_focus();
+
+        // A run starting behind the thread puts its header on the panel's top
+        // row, as it does behind any card, and the thread keeps the rest.
+        app.set_run_in_flight(Run::Pact, RUNNING_ON, 1, 2);
+        measure_panel(&mut app, WIDTH, HEIGHT);
+        let running = render_at(&app, WIDTH, HEIGHT, at(base, 99));
+        let rows = panel_rows(&running);
+        assert!(
+            rows[0].starts_with(&format!("{PACTING_RUN} {RUNNING_LABEL} (1/2)")),
+            "{:?}",
+            rows[0]
+        );
+        // The header takes one of the rows the panel already had, exactly as it
+        // does behind the account: the inside of the border is the height it
+        // always was, and the thread is drawn one row shorter under it.
+        assert_eq!(rows.len(), height);
+        assert_eq!(
+            rows.len() - usize::from(RUN_HEADER_HEIGHT),
+            usize::from(panel_height(
+                Size::new(WIDTH, HEIGHT),
+                None,
+                app.run_header().as_ref()
+            )),
+        );
+        // The rows under it are the thread's own, and the edge still says so.
+        assert!(rows[1].contains("Read line"), "{:?}", rows[1]);
+        assert!(panel_top_edge(&running).contains(THREAD_TITLE.trim()));
     }
 
     #[test]

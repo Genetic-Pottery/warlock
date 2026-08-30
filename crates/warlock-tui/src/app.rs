@@ -2252,6 +2252,24 @@ impl App {
         }
     }
 
+    /// Whether the card on screen is the conversation.
+    ///
+    /// The one question the renderer asks about *which* card is showing, and it
+    /// is asked for one reason: a reader must be able to tell the thread from
+    /// the account without reading the rows, so the panel says which card it is
+    /// on its own edge (see [`draw_panel`](crate::ui)). A run's card and a
+    /// file's card each say what they are in every row they draw — a directory
+    /// heading and a clock, or the file's own text — where a conversation could
+    /// be either at a glance, and the answer to that is a word on the border
+    /// rather than a fourth thing colour is made to mean.
+    ///
+    /// About the slot and not about the thread: a session with ten turns in it
+    /// answers `false` here while the reader is looking at the account.
+    #[must_use]
+    pub const fn showing_thread(&self) -> bool {
+        matches!(self.panel.showing, Showing::Thread)
+    }
+
     /// The account of the pact running now, or of the last one to run, or `None`
     /// before the first pact of the session.
     ///
