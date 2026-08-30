@@ -80,7 +80,7 @@ use warlock_engine::{NodeState, SCOPE_RULES};
 // and the account's `Line` is what a row says. Both names are right where they
 // live, and this module is the one place both are in scope.
 use crate::account::{Account, Line as Entry};
-use crate::app::{App, Chrome, Focus, Row};
+use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
 use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
 use crate::composer::Composer;
 use crate::confirm::{Answer, QuitConfirm};
@@ -207,6 +207,51 @@ const MARK_MARGIN_ROWS: u16 = 1;
 
 /// The one line naming the tree's root.
 const HEADER_HEIGHT: u16 = 1;
+
+/// The one line naming the run in flight, inside the panel's border and above
+/// its window.
+///
+/// One row, like the tree's header, and for the same reason: every row it takes
+/// is a row of the account the reader no longer has, and the run says what it is
+/// doing in one line or it is not worth a second — see [`run_header_line`].
+const RUN_HEADER_HEIGHT: u16 = 1;
+
+/// What the run header calls a pact.
+///
+/// The footer's own verb, because it is the same run said twice on one screen
+/// and a header that called it something else would be a second name for one
+/// thing. It is repeated here rather than borrowed because
+/// [`App::pact_line`](crate::app::App::pact_line) hands over a finished
+/// sentence and a header sets its parts in different places; what is shared is
+/// the vocabulary, not the wording.
+const PACTING_RUN: &str = "pacting";
+
+/// What the run header calls a refresh: [`PACTING_RUN`]'s counterpart, and the
+/// one word the two runs differ by, exactly as on the footer.
+const REFRESHING_RUN: &str = "refreshing";
+
+/// One column of the bar the run header ends with that the run has reached.
+///
+/// A full block, so the fill reads as a quantity at a glance and on a terminal
+/// with no colour — the bar carries none, like everything else in the panel.
+const BAR_FILLED: &str = "█";
+
+/// One column of the run header's bar the run has not reached: the same block
+/// shaded, so the bar's whole length is visible and the fill is read against it
+/// rather than against the border.
+const BAR_EMPTY: &str = "░";
+
+/// What the run header's line and its bar are held apart by.
+const BAR_GAP: &str = " ";
+
+/// The fewest columns of bar worth drawing.
+///
+/// Below this the bar is dropped whole and the line keeps the columns, the way
+/// the tree header drops its sigils: a bar three columns long cannot show a
+/// fraction — every position in a run of any length would fill the same one or
+/// two of them — so it would be furniture in place of the directory name it
+/// crowded out.
+const BAR_MIN_WIDTH: usize = 4;
 
 /// What the header's two facts are joined by: which tree is on screen, and what
 /// this machine holds for the repository it came out of.
@@ -1040,6 +1085,46 @@ fn tree_rows_area(tree: Rect) -> Rect {
     rows
 }
 
+/// Cut the run's header off the top of `panel`, the panel pane's area, and give
+/// back the row it got and the rows the account window keeps.
+///
+/// [`tree_rows_area`]'s counterpart, and the panel's one cut: the header is a
+/// fixed line inside the border and above the window, so the window is what the
+/// border and the header leave. Everything that has to agree about it comes
+/// through here — what [`draw_panel`] draws, what [`panel_height`] tells the app
+/// to scroll the account by, what [`run_header_height`] says that cost, and what
+/// [`hit_test`] is pointing at — because a header measured in one place and
+/// drawn from another is an account scrolled by rows it does not have.
+///
+/// `header` is the run in flight as the next frame has it, or `None` when no run
+/// is running, which is when the window keeps the whole inside of the border. It
+/// is the header's own value rather than a flag because the caller drawing the
+/// row holds it anyway and a second question would be a second answer.
+///
+/// A header is only cut when a row is left over for the account under it. A
+/// panel one row tall would otherwise be a header over nothing — a run reporting
+/// its progress into a window with no room to report anything in — so such a
+/// panel degrades to the bare account, exactly as it was before there was a
+/// header to pay for.
+fn panel_split(panel: Rect, header: Option<&RunHeader>) -> (Option<Rect>, Rect) {
+    let inner = pane_inner(panel);
+    if header.is_none() || inner.height <= RUN_HEADER_HEIGHT {
+        return (None, inner);
+    }
+
+    let [header, rows] =
+        Layout::vertical([Constraint::Length(RUN_HEADER_HEIGHT), Constraint::Min(0)]).areas(inner);
+
+    (Some(header), rows)
+}
+
+/// The rows of `panel` the account's window is drawn into: what the border and
+/// the run's header leave. The cut is [`panel_split`]'s and is written out
+/// there.
+fn panel_rows_area(panel: Rect, header: Option<&RunHeader>) -> Rect {
+    panel_split(panel, header).1
+}
+
 /// How many rows of tree a terminal of `size` has room for, once the footer, the
 /// tree pane's border and its header have taken theirs.
 ///
@@ -1056,23 +1141,46 @@ pub fn tree_height(size: Size) -> u16 {
 }
 
 /// How many lines of account a terminal of `size` has room for in the panel,
-/// once the footer, the panel's own border and the composer under it have taken
-/// theirs.
+/// once the footer, the panel's own border, the composer under it and the run's
+/// header above it have taken theirs.
 ///
 /// [`tree_height`]'s counterpart, public for the same reason and measured the
-/// same way: off the very [`areas`] call the frame is cut by, so the height the
-/// app scrolls the panel's window by is the height the next frame draws it at.
-/// The panel has no header of its own, so it keeps everything inside its border
-/// that the composer has not taken.
+/// same way: off the very [`areas`] call the frame is cut by and through the
+/// very [`panel_rows_area`] cut the frame draws the window into, so the height
+/// the app scrolls the panel's window by is the height the next frame draws it
+/// at.
 ///
 /// `composer` is the field the next frame will draw, or `None` for a frame with
 /// no composer on it — which is what the panel gets back while the document card
-/// is showing. What it costs is [`composer_height`], and the two of them come to
-/// what the panel's column has inside it: a row is either the panel's or the
-/// composer's and never neither.
+/// is showing. `header` is the run the next frame will report, or `None` when no
+/// run is in flight, which is when the account has those rows back too (see
+/// [`App::run_header`]).
+///
+/// What the two of them cost is [`composer_height`] and [`run_header_height`],
+/// and the three come to what the panel's column has inside it: a row is the
+/// account's, the field's or the header's and never none of them.
 #[must_use]
-pub fn panel_height(size: Size, composer: Option<&Composer>) -> u16 {
-    pane_inner(areas(Rect::from(size), composer).panel).height
+pub fn panel_height(size: Size, composer: Option<&Composer>, header: Option<&RunHeader>) -> u16 {
+    panel_rows_area(areas(Rect::from(size), composer).panel, header).height
+}
+
+/// How many rows of `size`'s panel the run's header takes, and zero on a frame
+/// with no run in flight — or one with no room for a header and an account both.
+///
+/// [`composer_height`]'s counterpart for the row above the window rather than
+/// the pane below it, and measured off the same cut for the same reason:
+/// `panel_height(size, composer, header) + run_header_height(size, composer,
+/// header) + composer_height(size, composer)` is the height the panel's column
+/// had inside it before either was paid for, at every terminal size.
+#[must_use]
+pub fn run_header_height(
+    size: Size,
+    composer: Option<&Composer>,
+    header: Option<&RunHeader>,
+) -> u16 {
+    panel_split(areas(Rect::from(size), composer).panel, header)
+        .0
+        .map_or(0, |area| area.height)
 }
 
 /// How many rows of `size`'s panel column the composer takes, its border
@@ -1157,8 +1265,18 @@ pub enum Hit {
     /// rather than quietly hand out a row offset the tree's window does not
     /// have.
     TreeBelowRows,
+    /// The one line naming the run in flight, inside the panel's border and
+    /// above its window.
+    ///
+    /// [`Hit::TreeHeader`]'s counterpart and there for the same reason: the
+    /// header is not a line of the account, so a point on it is not a line
+    /// offset — answering with one would hand out the account's first line for a
+    /// point drawn on a row the account does not own. Nothing lands here on a
+    /// frame with no run in flight, because on such a frame no header is drawn
+    /// and the window has the row.
+    PanelHeader,
     /// A line of the panel's window: `offset` lines below the first one on
-    /// screen. The whole inside of the panel answers this, drawn on or not — the
+    /// screen. The whole of the window answers this, drawn on or not — the
     /// panel has no selection, so a point in it is a point in the panel.
     PanelLine {
         /// How many lines below the top of the panel's window the point is.
@@ -1187,10 +1305,10 @@ pub enum Hit {
 /// click lands on is what the reader saw at that point rather than what a second
 /// opinion about the layout thinks is there.
 ///
-/// A function of three numbers and the draft under the panel. No frame, no app
-/// state, no terminal — which is what lets the event loop's answer to a click be
-/// tested with nothing attached to stdout, and what keeps this file from needing
-/// to know what a row of the tree is.
+/// A function of three numbers, the draft under the panel and the run reported
+/// above it. No frame, no app state, no terminal — which is what lets the event
+/// loop's answer to a click be tested with nothing attached to stdout, and what
+/// keeps this file from needing to know what a row of the tree is.
 ///
 /// `composer` is here for one reason: the rows it takes are rows the panel no
 /// longer has, so a hit test that did not know about the draft would hand out
@@ -1199,12 +1317,25 @@ pub enum Hit {
 /// hands over the one the round measured, so the answer is about the frame the
 /// reader is pointing at.
 ///
+/// `header` is here for the same reason at the other end of the panel: the row
+/// the run's header takes is a row the account gave up, so the line offsets are
+/// counted from the top of the window the header left rather than from the top
+/// of the border, and the header's own row answers [`Hit::PanelHeader`]. It is
+/// the run the frame was drawn with, or `None` on a frame with no run in flight,
+/// when the offsets are what they always were.
+///
 /// Every case is asked of a [`Rect`] the layout produced, so a terminal too
 /// short for a tree row, too short for a header, or too short for anything but a
 /// footer answers what it has rather than underflowing its way to a row that is
 /// not there.
 #[must_use]
-pub fn hit_test(column: u16, row: u16, size: Size, composer: Option<&Composer>) -> Hit {
+pub fn hit_test(
+    column: u16,
+    row: u16,
+    size: Size,
+    composer: Option<&Composer>,
+    header: Option<&RunHeader>,
+) -> Hit {
     let point = Position::new(column, row);
     let screen = Rect::from(size);
     if !screen.contains(point) {
@@ -1221,10 +1352,13 @@ pub fn hit_test(column: u16, row: u16, size: Size, composer: Option<&Composer>) 
         return Hit::Footer;
     }
 
-    let inside = pane_inner(panel);
-    if inside.contains(point) {
+    if pane_inner(panel).contains(point) {
+        let rows = panel_rows_area(panel, header);
+        if row < rows.y {
+            return Hit::PanelHeader;
+        }
         return Hit::PanelLine {
-            offset: row.saturating_sub(inside.y),
+            offset: row.saturating_sub(rows.y),
         };
     }
 
@@ -1321,6 +1455,16 @@ fn pane_block(focused: bool) -> Block<'static> {
 /// what the reader is scrolling through, so a swap changes the number on the
 /// edge or takes it away.
 ///
+/// While a run is in flight the top row inside the border is not the window at
+/// all but the run's header — which run, which directory, how far through, and a
+/// bar filled to that fraction (see [`draw_run_header`]). It is fixed there: the
+/// window under it is a row shorter for as long as the run lasts, so scrolling
+/// the account back moves the lines and leaves the header where it is. The cut
+/// is [`panel_split`]'s, which is also what told the app how tall its window is,
+/// so the header costs the account exactly the row it takes and no line is
+/// scrolled past unseen. The moment the run is over there is no header, and the
+/// window has the row back.
+///
 /// No colour anywhere in here. The three node-state colours are the tree's and
 /// [`FOCUS_COLOUR`] is the border's; a fourth meaning for colour would cost both
 /// of those their meaning. Bold, which is not a colour, is all the headings get,
@@ -1332,8 +1476,13 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
         block = block.title_bottom(Line::from(scrollback(below)).right_aligned().dim());
     }
 
-    let inner = pane_inner(area);
+    let header = app.run_header();
+    let (header_area, inner) = panel_split(area, header.as_ref());
     frame.render_widget(block, area);
+
+    if let (Some(area), Some(header)) = (header_area, header.as_ref()) {
+        draw_run_header(frame, area, header);
+    }
 
     if !app.has_panel_content() {
         draw_mark(frame, inner);
@@ -1346,6 +1495,85 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
         .map(|line| panel_row(line, inner.width))
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);
+}
+
+/// Draw the run's header: the one line [`run_header_line`] words for the width
+/// there is.
+///
+/// Bold, like the account's own headings and like the tree's header, and for the
+/// same reason: it is a heading rather than a thing that happened, and every
+/// colour on this screen already means a node state. Nothing here reads a clock
+/// and nothing is handed one — what the line says is what the run has said, so
+/// two frames drawn at two instants with no event in between draw the same row.
+fn draw_run_header(frame: &mut Frame<'_>, area: Rect, header: &RunHeader) {
+    frame.render_widget(
+        Paragraph::new(Line::from(run_header_line(header, usize::from(area.width))).bold()),
+        area,
+    );
+}
+
+/// The run header's line for a panel `width` columns wide: which run is going,
+/// the directory it is working, its position out of the run's total, and a bar
+/// filled to that fraction in the columns left over.
+///
+/// Two facts of unequal standing, like the tree header's, and the same rule
+/// settles them. The words are written out as they stand — the verb, the
+/// directory as [`App::label_for`] spells it, and the fraction in the
+/// parentheses the footer puts it in — and the bar is offered the room left over
+/// after them and a column of gap. Below [`BAR_MIN_WIDTH`] there is no bar at
+/// all rather than a stub of one, and the words keep the width; the whole row is
+/// then cut once, by [`panel_row`]'s [`truncated`], so a directory too long for
+/// the panel costs the line its tail rather than the row its shape.
+///
+/// The bar is `position/total` of the columns it was given, rounded down, and is
+/// nothing else: no clock is read, no instant is taken, nothing is interpolated
+/// between two fractions and nothing is estimated from them. Rounded down so
+/// that a full bar means a run that has reached its last directory and never
+/// merely one that is near it; and `position` is the run's high-water mark (see
+/// [`RunHeader`]), so within one run the fill cannot fall back. A `total` of
+/// none is a run with nothing to count, drawn empty rather than divided by.
+fn run_header_line(header: &RunHeader, width: usize) -> String {
+    let words = format!(
+        "{} {} ({}/{})",
+        run_word(header.run()),
+        header.directory(),
+        header.position(),
+        header.total(),
+    );
+
+    let room = width
+        .saturating_sub(display_width(&words))
+        .saturating_sub(display_width(BAR_GAP));
+    if room < BAR_MIN_WIDTH {
+        return truncated(&words, width);
+    }
+
+    truncated(&format!("{words}{BAR_GAP}{}", bar(header, room)), width)
+}
+
+/// The word the header calls `run` by: the footer's verb for the same run.
+const fn run_word(run: Run) -> &'static str {
+    match run {
+        Run::Pact => PACTING_RUN,
+        Run::Refresh => REFRESHING_RUN,
+    }
+}
+
+/// A bar `columns` wide, filled to `header`'s fraction of it. The rule is
+/// [`run_header_line`]'s and is written out there.
+fn bar(header: &RunHeader, columns: usize) -> String {
+    let filled = header
+        .position()
+        .saturating_mul(columns)
+        .checked_div(header.total())
+        .unwrap_or(0)
+        .min(columns);
+
+    format!(
+        "{}{}",
+        BAR_FILLED.repeat(filled),
+        BAR_EMPTY.repeat(columns - filled)
+    )
 }
 
 /// Draw [`MARK`] in the middle of `inner`, or draw nothing if it does not fit.
@@ -2225,21 +2453,22 @@ mod tests {
     use warlock_engine::{NodeState, SCOPE_RULES};
 
     use super::{
-        Areas, BORDER_THICKNESS, CANCEL_KEY, COLLAPSE_KEY, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP,
-        CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS, CONFIRM_NO,
-        CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST,
-        HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY, MARK,
-        MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY, MOVE_KEYS, NO_MARKER,
-        PACTING_KEYS, PACTING_QUIT_KEY, PAGE_KEYS, PANEL_INDENT, QUIT_KEY, SCOPE_CURSOR,
-        SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS,
-        SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas, centred,
-        composer_height, composer_on_screen, confirm_area, confirm_size, display_width, draw,
-        guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line, pane_inner,
-        panel_height, panel_width, scope_size, tree_height, tree_rows_area, tree_width, truncated,
+        Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, CANCEL_KEY, COLLAPSE_KEY,
+        COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN,
+        CONFIRM_MARGIN_ROWS, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FOOTER_HEIGHT,
+        GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER,
+        KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY,
+        MOVE_KEYS, NO_MARKER, PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PAGE_KEYS, PANEL_INDENT,
+        QUIT_KEY, REFRESHING_RUN, RUN_HEADER_HEIGHT, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT,
+        SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER,
+        TREE_MIN_WIDTH, TREE_PERCENT, areas, centred, composer_height, composer_on_screen,
+        confirm_area, confirm_size, display_width, draw, guide_prefixes, hit_test, keys_line,
+        mark_area, pacting_keys_line, pane_inner, panel_height, panel_width, run_header_height,
+        scope_size, tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::COMPOSER_MAX_ROWS;
     use crate::account::Outcome;
-    use crate::app::{App, Chrome, Focus, Row, Sigils};
+    use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
     use crate::claude::Activity;
     use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
     use crate::composer::Composer;
@@ -2530,14 +2759,15 @@ mod tests {
     fn pacting_app(base: Instant, width: u16, height: u16) -> App {
         let mut app = App::from_tree(&fixture::tree());
         app.set_viewport_height(tree_height(Size::new(width, height)));
-        app.set_panel_height(panel_height(Size::new(width, height), None));
+        app.set_panel_height(panel_height(Size::new(width, height), None, None));
         app.set_panel_width(panel_width(Size::new(width, height)));
         app.start_account(base);
         app
     }
 
-    /// Where the panel's lines land in a buffer of this size: inside the
-    /// panel's border, which is the whole of the pane — the panel has no header.
+    /// Where the panel's lines land in a buffer of this size: the whole inside
+    /// of the panel's border, which is the account's window and — while a run is
+    /// in flight — the run's header on the top row of it.
     fn panel_area(buffer: &Buffer) -> Rect {
         pane_inner(areas(buffer.area, None).panel)
     }
@@ -4869,7 +5099,7 @@ mod tests {
     fn a_point_is_answered_with_whatever_the_frame_draws_at_it() {
         let size = Size::new(WIDTH, HEIGHT);
         let panes = areas(Rect::from(size), None);
-        let hit = |x, y| hit_test(x, y, size, None);
+        let hit = |x, y| hit_test(x, y, size, None, None);
 
         // The footer runs the full width, all three of its lines, and belongs
         // to neither pane.
@@ -4912,7 +5142,7 @@ mod tests {
         // And the whole inside of the panel is a line of its window, drawn on
         // or not: the panel has no selection for a point to land on.
         let inside = pane_inner(panes.panel);
-        assert_eq!(inside.height, panel_height(size, None));
+        assert_eq!(inside.height, panel_height(size, None, None));
         for offset in 0..inside.height {
             for x in [inside.x, inside.x + inside.width - 1] {
                 assert_eq!(hit(x, inside.y + offset), Hit::PanelLine { offset });
@@ -4932,7 +5162,7 @@ mod tests {
         assert!(rows.height > 1, "the window should hold more than one row");
         for offset in 0..rows.height {
             assert_eq!(
-                hit_test(rows.x, rows.y + offset, size, None),
+                hit_test(rows.x, rows.y + offset, size, None, None),
                 Hit::TreeRow { offset }
             );
             assert_eq!(
@@ -4943,7 +5173,10 @@ mod tests {
         }
         // The header is the line the frame drew the tree's name on, not a row.
         let header = header_area(&buffer);
-        assert_eq!(hit_test(header.x, header.y, size, None), Hit::TreeHeader);
+        assert_eq!(
+            hit_test(header.x, header.y, size, None, None),
+            Hit::TreeHeader
+        );
         // Blank, because this frame was drawn through `render`, which passes
         // the default `Chrome`: the line is not the app's to fill any more.
         assert_eq!(header_text(&buffer), "");
@@ -4957,7 +5190,7 @@ mod tests {
 
             for y in 0..height {
                 for x in 0..WIDTH {
-                    let hit = hit_test(x, y, size, None);
+                    let hit = hit_test(x, y, size, None, None);
                     assert!(
                         !matches!(hit, Hit::TreeRow { .. }),
                         "({x}, {y}) of {height} rows answered {hit:?}"
@@ -4972,12 +5205,15 @@ mod tests {
         let header = Size::new(WIDTH, CHROME_HEIGHT);
         let inside = pane_inner(areas(Rect::from(header), None).tree);
         assert_eq!(inside.height, HEADER_HEIGHT);
-        assert_eq!(hit_test(inside.x, inside.y, header, None), Hit::TreeHeader);
+        assert_eq!(
+            hit_test(inside.x, inside.y, header, None, None),
+            Hit::TreeHeader
+        );
         for height in 0..CHROME_HEIGHT - HEADER_HEIGHT {
             let size = Size::new(WIDTH, height);
             for y in 0..height {
                 for x in 0..WIDTH {
-                    let hit = hit_test(x, y, size, None);
+                    let hit = hit_test(x, y, size, None, None);
                     assert!(
                         matches!(hit, Hit::Footer | Hit::Border),
                         "({x}, {y}) of {height} rows answered {hit:?}"
@@ -5005,7 +5241,7 @@ mod tests {
             let inside = pane_inner(panes.panel);
             let rows = tree_rows_area(panes.tree);
             assert_eq!(
-                hit_test(inside.x, inside.y, size, None),
+                hit_test(inside.x, inside.y, size, None, None),
                 Hit::PanelLine { offset: 0 },
                 "at {width} columns"
             );
@@ -5014,6 +5250,7 @@ mod tests {
                     inside.x + inside.width - 1,
                     inside.y + inside.height - 1,
                     size,
+                    None,
                     None
                 ),
                 Hit::PanelLine {
@@ -5022,7 +5259,7 @@ mod tests {
                 "at {width} columns"
             );
             assert_eq!(
-                hit_test(rows.x, rows.y, size, None),
+                hit_test(rows.x, rows.y, size, None, None),
                 Hit::TreeRow { offset: 0 },
                 "at {width} columns"
             );
@@ -5030,7 +5267,7 @@ mod tests {
             // sides of the join, whichever pane owns which.
             for x in [inside.x + inside.width, rows.x - 1] {
                 assert_eq!(
-                    hit_test(x, rows.y, size, None),
+                    hit_test(x, rows.y, size, None, None),
                     Hit::Border,
                     "at {width} columns"
                 );
@@ -5051,16 +5288,16 @@ mod tests {
             let size = Size::new(width, height);
             for y in 0..height {
                 for x in 0..width {
-                    match hit_test(x, y, size, None) {
+                    match hit_test(x, y, size, None, None) {
                         Hit::TreeRow { offset } => assert!(
                             offset < tree_height(size),
                             "({x}, {y}) of {width}x{height} is row {offset} of a window {} tall",
                             tree_height(size)
                         ),
                         Hit::PanelLine { offset } => assert!(
-                            offset < panel_height(size, None),
+                            offset < panel_height(size, None, None),
                             "({x}, {y}) of {width}x{height} is line {offset} of a window {} tall",
-                            panel_height(size, None)
+                            panel_height(size, None, None)
                         ),
                         _ => {}
                     }
@@ -5069,9 +5306,12 @@ mod tests {
 
             // And a point off the end of the frame is nothing warlock drew,
             // rather than the nearest thing it did draw.
-            assert_eq!(hit_test(width, 0, size, None), Hit::Offscreen);
-            assert_eq!(hit_test(0, height, size, None), Hit::Offscreen);
-            assert_eq!(hit_test(u16::MAX, u16::MAX, size, None), Hit::Offscreen);
+            assert_eq!(hit_test(width, 0, size, None, None), Hit::Offscreen);
+            assert_eq!(hit_test(0, height, size, None, None), Hit::Offscreen);
+            assert_eq!(
+                hit_test(u16::MAX, u16::MAX, size, None, None),
+                Hit::Offscreen
+            );
         }
     }
 
@@ -5365,7 +5605,7 @@ mod tests {
     fn viewing_app(width: u16, height: u16, cut: bool) -> App {
         let mut app = App::from_tree(&fixture::tree());
         app.set_viewport_height(tree_height(Size::new(width, height)));
-        app.set_panel_height(panel_height(Size::new(width, height), None));
+        app.set_panel_height(panel_height(Size::new(width, height), None, None));
         app.set_panel_width(panel_width(Size::new(width, height)));
         app.show_document(
             [
@@ -5532,7 +5772,7 @@ mod tests {
     #[test]
     fn the_scrollback_indicator_reports_the_card_that_is_showing() {
         let base = Instant::now();
-        let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None));
+        let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None, None));
 
         // An account longer than the panel, parked at its first line by the
         // ordinary movement keys, with a document shorter than the panel over
@@ -5626,7 +5866,7 @@ mod tests {
     fn a_scrolled_back_panel_says_what_is_below_it_and_the_key_back_to_live() {
         let base = Instant::now();
         let mut app = pacting_app(base, WIDTH, HEIGHT);
-        let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None));
+        let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None, None));
         let account = app.account_mut().expect("a pact has started");
         account.open_section("crates/engine", base);
         for line in 0..height * 3 {
@@ -5707,7 +5947,7 @@ mod tests {
         // the way up, and the two the other tests draw at.
         let chrome = FOOTER_HEIGHT + 2 * BORDER_THICKNESS;
         for height in [chrome + 1, chrome + 2, HEIGHT, FIXTURE_HEIGHT, 24] {
-            let measured = panel_height(Size::new(WIDTH, height), None);
+            let measured = panel_height(Size::new(WIDTH, height), None, None);
             let base = Instant::now();
             let mut app = pacting_app(base, WIDTH, height);
             let account = app.account_mut().expect("a pact has started");
@@ -5731,11 +5971,292 @@ mod tests {
         // rather than underflowing.
         for height in 0..=chrome {
             assert_eq!(
-                panel_height(Size::new(WIDTH, height), None),
+                panel_height(Size::new(WIDTH, height), None, None),
                 0,
                 "in {height} rows"
             );
         }
+    }
+
+    /// The directory the run-header tests report: a node of the fixture's tree,
+    /// so the header names something the reader can see on screen beside it.
+    const RUNNING_ON: &str = "warlock/crates/engine";
+
+    /// How [`RUNNING_ON`] reaches the header, spelled by the one speller the
+    /// footer uses: the fixture's paths are already relative to its root, so
+    /// they are handed back as they stand.
+    const RUNNING_LABEL: &str = RUNNING_ON;
+
+    /// Tell `app` how many lines of account its window has, the way the event
+    /// loop's `draw_frame` does: what is inside the panel's border, less the
+    /// rows the run's header is about to take.
+    ///
+    /// Measured off the app's own header, and *before* the frame is drawn, which
+    /// is the whole point — an app told the taller number would scroll its
+    /// account by a row the header owns.
+    fn measure_panel(app: &mut App, width: u16, height: u16) {
+        let header = app.run_header();
+        app.set_panel_height(panel_height(
+            Size::new(width, height),
+            None,
+            header.as_ref(),
+        ));
+    }
+
+    /// [`pacting_app`] with a run of `total` directories in flight, `position`
+    /// of the way through [`RUNNING_ON`], measured the way the binary measures
+    /// one.
+    fn running_app(
+        base: Instant,
+        width: u16,
+        height: u16,
+        run: Run,
+        position: usize,
+        total: usize,
+    ) -> App {
+        let mut app = pacting_app(base, width, height);
+        app.set_run_in_flight(run, RUNNING_ON, position, total);
+        measure_panel(&mut app, width, height);
+        app
+    }
+
+    /// Put `lines` numbered activities in `app`'s account, one a second from
+    /// `base`, under a section for the directory the run is working.
+    fn fill_account(app: &mut App, base: Instant, lines: usize) {
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section(RUNNING_LABEL, base);
+        for line in 0..lines {
+            account.record(&numbered(line), at(base, line as u64 + 1));
+        }
+    }
+
+    /// The run header's row of a frame drawn at `now`: the top row inside the
+    /// panel's border, which is the header's while a run is in flight.
+    fn run_header_row(app: &App, width: u16, height: u16, now: Instant) -> String {
+        panel_rows(&render_at(app, width, height, now))
+            .first()
+            .expect("a panel with rows")
+            .clone()
+    }
+
+    #[test]
+    fn the_run_header_takes_the_panels_top_row_and_the_account_keeps_the_rest() {
+        let base = Instant::now();
+        let size = Size::new(WIDTH, HEIGHT);
+        let window = panel_height(size, None, None);
+
+        for (run, word) in [(Run::Pact, PACTING_RUN), (Run::Refresh, REFRESHING_RUN)] {
+            // The same account either way, longer than the window and following
+            // its newest line: what differs between the two frames below is a
+            // run in flight and nothing else.
+            let mut app = pacting_app(base, WIDTH, HEIGHT);
+            fill_account(&mut app, base, usize::from(window) * 2);
+
+            // With no run in flight there is no header and the window is the
+            // whole inside of the border.
+            let without = panel_rows(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
+            assert_eq!(run_header_height(size, None, None), 0);
+            assert_eq!(without.len(), usize::from(window));
+
+            app.set_run_in_flight(run, RUNNING_ON, 2, 5);
+            let header = app.run_header().expect("a run in flight has a header");
+            assert_eq!(
+                run_header_height(size, None, Some(&header)),
+                RUN_HEADER_HEIGHT
+            );
+            assert_eq!(
+                panel_height(size, None, Some(&header)) + RUN_HEADER_HEIGHT,
+                window,
+                "the account should lose exactly the rows the header takes"
+            );
+            measure_panel(&mut app, WIDTH, HEIGHT);
+
+            let with = panel_rows(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
+
+            // The top row inside the border is the run: which run it is, the
+            // directory it is working spelled against the tree on screen, where
+            // it is in the run, and a bar in what is left over.
+            assert!(
+                with[0].starts_with(&format!("{word} {RUNNING_LABEL} (2/5)")),
+                "{:?}",
+                with[0]
+            );
+            assert!(with[0].contains(BAR_FILLED), "{:?}", with[0]);
+            assert!(with[0].contains(BAR_EMPTY), "{:?}", with[0]);
+
+            // And the account under it is what it was, one line shorter: it is
+            // still following its newest line, so the row the header took is the
+            // one that was at the top and every other line is where it was.
+            assert_eq!(with.len(), without.len());
+            assert_eq!(
+                with.len() - usize::from(RUN_HEADER_HEIGHT),
+                usize::from(panel_height(size, None, Some(&header))),
+                "the window drew a different number of lines than it was measured at"
+            );
+            assert_eq!(with[1..], without[1..]);
+        }
+    }
+
+    #[test]
+    fn the_run_headers_bar_is_the_fraction_and_moves_only_when_the_run_does() {
+        let base = Instant::now();
+        let total = 5;
+        let mut app = running_app(base, WIDTH, HEIGHT, Run::Pact, 0, total);
+        fill_account(&mut app, base, usize::from(HEIGHT) * 2);
+
+        // Several frames, seconds and then an hour apart, with nothing arriving
+        // in between: the header is drawn from the run's own counting, so the
+        // row is the same bytes every time. Nothing here reads a clock, creeps,
+        // or interpolates between two fractions.
+        let first = run_header_row(&app, WIDTH, HEIGHT, at(base, 1));
+        for seconds in [2, 9, 65, 3_600] {
+            assert_eq!(
+                run_header_row(&app, WIDTH, HEIGHT, at(base, seconds)),
+                first,
+                "the header moved between frames drawn {seconds}s apart"
+            );
+        }
+
+        // Empty at the start of the run, and the bar is worth drawing at this
+        // width.
+        let columns = first.matches(BAR_FILLED).count() + first.matches(BAR_EMPTY).count();
+        assert!(columns >= BAR_MIN_WIDTH, "{first:?}");
+        assert_eq!(first.matches(BAR_FILLED).count(), 0, "{first:?}");
+
+        // Filling to exactly `position/total` of it as the run reports its way
+        // through, never less than it was...
+        let mut filled = 0;
+        for position in 1..=total {
+            app.set_run_in_flight(Run::Pact, RUNNING_ON, position, total);
+            let row = run_header_row(&app, WIDTH, HEIGHT, at(base, 99));
+            let drawn = row.matches(BAR_FILLED).count();
+
+            assert!(drawn >= filled, "the bar fell back at {position}/{total}");
+            assert_eq!(drawn, position * columns / total, "at {position}/{total}");
+            assert_eq!(row.matches(BAR_EMPTY).count(), columns - drawn);
+            assert!(row.contains(&format!("({position}/{total})")), "{row:?}");
+            filled = drawn;
+        }
+
+        // ...and full at the end of it, and only there.
+        assert_eq!(filled, columns);
+    }
+
+    #[test]
+    fn the_run_header_stays_where_it_is_while_the_account_is_scrolled_back() {
+        let base = Instant::now();
+        let mut app = running_app(base, WIDTH, HEIGHT, Run::Pact, 2, 5);
+        let window = usize::from(panel_height(
+            Size::new(WIDTH, HEIGHT),
+            None,
+            app.run_header().as_ref(),
+        ));
+        fill_account(&mut app, base, window * 3);
+
+        let live = panel_rows(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
+        assert_eq!(app.panel_lines_below(), 0, "the account is following");
+
+        // Scrolled back through the account by the ordinary movement keys.
+        app.toggle_focus();
+        app.select_first();
+        let scrolled = panel_rows(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
+
+        // The window is the one the header left, so what is below it counts the
+        // lines the reader has yet to come back down through — and not the row
+        // the header is sitting on.
+        assert_eq!(app.panel_lines_below(), window * 3 + 1 - window);
+        // The header is not a line of the account: it is byte for byte where it
+        // was, and everything that moved is under it.
+        assert_eq!(scrolled.len(), live.len());
+        assert_eq!(scrolled[0], live[0]);
+        assert_ne!(scrolled[1..], live[1..]);
+        assert!(
+            scrolled[1..].iter().all(|row| row != &live[0]),
+            "the header was drawn into the account: {scrolled:?}"
+        );
+    }
+
+    #[test]
+    fn a_point_on_the_run_header_is_not_a_line_of_the_account() {
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
+        let header = app.run_header().expect("a run in flight has a header");
+        let size = Size::new(WIDTH, FIXTURE_HEIGHT);
+        let panel = pane_inner(areas(Rect::from(size), None).panel);
+        let window = panel_height(size, None, Some(&header));
+
+        // The top row inside the border is the header's, and answers as itself
+        // rather than as the account's first line.
+        for x in panel.x..panel.x + panel.width {
+            assert_eq!(
+                hit_test(x, panel.y, size, None, Some(&header)),
+                Hit::PanelHeader,
+                "at {x},{}",
+                panel.y
+            );
+        }
+
+        // And every row under it is the account line the reader is looking at:
+        // the offsets are counted from beneath the header, so they point at the
+        // line drawn on that row and stay inside the window the app was told
+        // about.
+        for y in panel.y + RUN_HEADER_HEIGHT..panel.y + panel.height {
+            let hit = hit_test(panel.x, y, size, None, Some(&header));
+
+            assert_eq!(
+                hit,
+                Hit::PanelLine {
+                    offset: y - panel.y - RUN_HEADER_HEIGHT
+                }
+            );
+            assert!(matches!(hit, Hit::PanelLine { offset } if offset < window));
+        }
+
+        // The row the header took would have been the account's, and the hit
+        // test knows it: the same point answers differently on a frame with no
+        // run in flight.
+        assert_eq!(
+            hit_test(panel.x, panel.y, size, None, None),
+            Hit::PanelLine { offset: 0 }
+        );
+    }
+
+    #[test]
+    fn a_panel_with_no_room_for_a_header_and_an_account_both_draws_the_account() {
+        let base = Instant::now();
+        let chrome = FOOTER_HEIGHT + 2 * BORDER_THICKNESS;
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
+        let header = app.run_header().expect("a run in flight has a header");
+
+        // A panel with one row inside its border, or none: a header there would
+        // be a run reporting its progress into a window with no room to report
+        // anything in, so there is none and the account keeps what it had.
+        for height in 0..=chrome + RUN_HEADER_HEIGHT {
+            let size = Size::new(WIDTH, height);
+
+            assert_eq!(
+                run_header_height(size, None, Some(&header)),
+                0,
+                "in {height} rows"
+            );
+            assert_eq!(
+                panel_height(size, None, Some(&header)),
+                panel_height(size, None, None),
+                "in {height} rows"
+            );
+        }
+
+        // And the one row such a panel has is a line of the account rather than
+        // a header drawn over nothing.
+        let height = chrome + RUN_HEADER_HEIGHT;
+        let mut app = running_app(base, WIDTH, height, Run::Pact, 2, 5);
+        fill_account(&mut app, base, 4);
+        let drawn = panel_rows(&render_at(&app, WIDTH, height, at(base, 99)));
+
+        assert_eq!(drawn.len(), 1);
+        assert!(!drawn[0].contains(PACTING_RUN), "{:?}", drawn[0]);
+        assert!(!drawn[0].contains(BAR_EMPTY), "{:?}", drawn[0]);
     }
 
     /// The drafts the layout tests are run against: nothing typed, one row,
@@ -5774,8 +6295,11 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_and_the_composer_come_to_the_column_the_panel_had_to_itself() {
+    fn the_panel_the_header_and_the_composer_come_to_the_column_the_panel_had() {
         let chrome = FOOTER_HEIGHT + 2 * BORDER_THICKNESS;
+        let mut running = App::from_tree(&fixture::tree());
+        running.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
+        let header = running.run_header().expect("a run in flight has a header");
         // Every height either side of the point there is room for a field at
         // all, the ones the other tests draw at, and a tall one.
         let heights = [
@@ -5794,17 +6318,25 @@ mod tests {
             for width in [WIDTH, 80, 40, 20, 4, 0] {
                 let size = Size::new(width, height);
                 // What the panel had before there was a composer to pay for.
-                let before = panel_height(size, None);
+                let before = panel_height(size, None, None);
                 assert_eq!(composer_height(size, None), 0, "{width}x{height}");
+                assert_eq!(run_header_height(size, None, None), 0, "{width}x{height}");
 
                 for composer in &drafts() {
                     let field = Some(composer);
-                    assert_eq!(
-                        panel_height(size, field) + composer_height(size, field),
-                        before,
-                        "{width}x{height} does not add up with {:?} in the field",
-                        composer.draft()
-                    );
+                    // With a run in flight and without: a row of the column is
+                    // the account's, the header's or the field's, and never none
+                    // of the three.
+                    for run in [None, Some(&header)] {
+                        assert_eq!(
+                            panel_height(size, field, run)
+                                + run_header_height(size, field, run)
+                                + composer_height(size, field),
+                            before,
+                            "{width}x{height} does not add up with {:?} in the field",
+                            composer.draft()
+                        );
+                    }
                     // And the width is untouched: the field takes rows off the
                     // panel and never a column, which is why a document wrapped
                     // at `panel_width` is wrapped at the width it is drawn at.
@@ -5929,8 +6461,8 @@ mod tests {
 
         assert_eq!(field, None, "a document takes the whole column");
         assert_eq!(
-            panel_height(size, field),
-            panel_height(size, None),
+            panel_height(size, field, None),
+            panel_height(size, None, None),
             "the panel should have the rows the field was taking"
         );
         assert_eq!(composer_height(size, field), 0);
@@ -5955,18 +6487,22 @@ mod tests {
         let inside = pane_inner(area);
         for y in inside.y..inside.y + inside.height {
             for x in inside.x..inside.x + inside.width {
-                assert_eq!(hit_test(x, y, size, field), Hit::Composer, "at {x},{y}");
+                assert_eq!(
+                    hit_test(x, y, size, field, None),
+                    Hit::Composer,
+                    "at {x},{y}"
+                );
             }
         }
         // Its border is a border, like either pane's.
-        assert_eq!(hit_test(area.x, area.y, size, field), Hit::Border);
+        assert_eq!(hit_test(area.x, area.y, size, field, None), Hit::Border);
 
         // And the panel's lines are the lines the panel has: every offset the
         // hit test hands out is inside the window the app was told about.
         let panel = pane_inner(cut.panel);
-        let height = panel_height(size, field);
+        let height = panel_height(size, field, None);
         for y in panel.y..panel.y + panel.height {
-            let hit = hit_test(panel.x, y, size, field);
+            let hit = hit_test(panel.x, y, size, field, None);
             assert_eq!(
                 hit,
                 Hit::PanelLine {
@@ -5978,7 +6514,7 @@ mod tests {
         // The rows the field took would have been the panel's, and the hit test
         // knows it: the same points answer differently on a frame with no field.
         assert_eq!(
-            hit_test(inside.x, inside.y, size, None),
+            hit_test(inside.x, inside.y, size, None, None),
             Hit::PanelLine {
                 offset: inside.y - panel.y
             }
@@ -5998,8 +6534,8 @@ mod tests {
             let size = Size::new(WIDTH, height);
             assert_eq!(composer_height(size, field), 0, "in {height} rows");
             assert_eq!(
-                panel_height(size, field),
-                panel_height(size, None),
+                panel_height(size, field, None),
+                panel_height(size, None, None),
                 "in {height} rows"
             );
         }
@@ -6007,7 +6543,7 @@ mod tests {
         // And the first height it does fit in, it fits in whole.
         let size = Size::new(WIDTH, chrome + COMPOSER_MIN_HEIGHT);
         assert_eq!(composer_height(size, field), COMPOSER_MIN_HEIGHT);
-        assert_eq!(panel_height(size, field), 0);
+        assert_eq!(panel_height(size, field, None), 0);
     }
 
     #[test]
