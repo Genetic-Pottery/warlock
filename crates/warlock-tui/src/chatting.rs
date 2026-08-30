@@ -35,15 +35,6 @@
 //! with it and reports to nobody, which is the whole reason the handle is a
 //! guard rather than a flag somebody has to remember.
 
-// Every function below is called by this module's tests and, once the event
-// loop keeps a `Chatting` beside its `Running`, by the loop that submits a
-// message and drains what comes back. Until that wiring lands, a binary crate's
-// reachability analysis starts at `main` and finds none of it — so the choice
-// here is this one line or a half-written loop, and a module that is finished
-// and tested is the better half to land first. The line goes when the loop
-// calls `start_turn`.
-#![allow(dead_code)]
-
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Instant;
@@ -63,6 +54,111 @@ use crate::pacting::CancelGuard;
 /// nothing to put back — the conversation keeps every line that arrived before
 /// the silence, and the next question runs as if this one had merely failed.
 const TURN_LOST: &str = "it stopped without saying how it went";
+
+/// The whole of the conversation the event loop keeps: who to ask, and the one
+/// question currently out.
+///
+/// Two things, and the reason they are one value is that neither is any use
+/// without the other. The agent is built once for the life of the process —
+/// a [`ChatAgent`] carries the session id that makes the second question a reply
+/// to the first, so one per turn would be a conversation that forgot itself
+/// between two Enters — and the turn is `Some` for the seconds one is in flight.
+/// Keeping them together is what lets the loop ask "is a question out?" in one
+/// word ([`Chat::answering`]) at the two places that decide it: the field's
+/// muting, and what Ctrl-C means.
+///
+/// It holds no draft and no thread. What has been typed is the loop's
+/// [`Composer`](warlock_tui::Composer), which a run must not be able to reach,
+/// and the conversation itself is on the app's thread card, where the panel can
+/// draw it — this value is the *machinery*, and machinery that also held the
+/// text would be a second copy of the conversation for somebody to keep in step.
+pub(crate) struct Chat {
+    /// Who is asked, and the session every turn belongs to. Never spoken to
+    /// directly: each turn works off a copy of it wired to that turn's own
+    /// cancel and activity port (see [`wired`]).
+    agent: ChatAgent,
+    /// The turn being answered, if one is. `None` is the ordinary state and the
+    /// state a session starts and ends in.
+    turn: Option<Chatting>,
+}
+
+impl Chat {
+    /// A conversation with nothing asked yet.
+    ///
+    /// The agent is made here, once, and the session id it names is fixed from
+    /// this moment: every turn of this warlock is one conversation, and a second
+    /// warlock in another terminal is another.
+    pub(crate) fn new() -> Self {
+        Self {
+            agent: ChatAgent::new(),
+            turn: None,
+        }
+    }
+
+    /// Whether a question is out and being answered.
+    ///
+    /// The one fact the rest of the loop asks for, and it is asked twice a
+    /// round: the composer is muted for exactly as long as this is true — one
+    /// question at a time — and Ctrl-C stops the turn rather than the session
+    /// for exactly as long as it is true. Both readings come from here so that
+    /// the key and the field cannot disagree about whether anything is running.
+    pub(crate) const fn answering(&self) -> bool {
+        self.turn.is_some()
+    }
+
+    /// Ask `message`, at `now`: on the thread card, and on a worker thread.
+    ///
+    /// The two halves of a submitted draft, in the order the reader experiences
+    /// them. The question goes on the card first, which is also what brings the
+    /// thread to the front, so somebody who has just asked something is looking
+    /// at it from the instant they asked rather than from whenever the model
+    /// first says anything. Then the worker, which owns its own copy of the
+    /// message and of the agent and is never joined (see [`start_turn`]).
+    ///
+    /// `now` is the caller's clock — the instant the key was pressed — because
+    /// that is what the turn's work lines are clocked from: a turn is as old as
+    /// the question that asked it, not as old as the first thing the model got
+    /// round to saying.
+    ///
+    /// Nothing stops a caller asking twice, because nothing has to: the field is
+    /// muted for the whole of a turn, so the Enter that would ask a second
+    /// question never becomes a submit. If one ever did, the second turn would
+    /// simply replace the first — and the first's [`CancelGuard`] would drop and
+    /// take its `claude` with it, which is the safe way for that accident to go.
+    pub(crate) fn ask(&mut self, app: &mut App, message: &str, now: Instant) {
+        app.start_turn(message, now);
+        self.turn = Some(start_turn(message, &self.agent));
+    }
+
+    /// Stop the turn in flight, if there is one.
+    ///
+    /// What Ctrl-C comes to while a question is out. The turn is deliberately
+    /// not taken down here: the worker still has one thing to say — that it was
+    /// cancelled — and it says it through [`Chat::keep_up`] like any other
+    /// ending, which is what puts the cancelled line under the work that had
+    /// already arrived and hands the keyboard back to the field.
+    ///
+    /// Nothing at all with no turn in flight, which is a state this is never
+    /// called in: the key means "leave" then, and the loop reads that off
+    /// [`Chat::answering`] before it ever gets here.
+    pub(crate) fn stop(&self) {
+        if let Some(chatting) = self.turn.as_ref() {
+            chatting.cancel.cancel();
+        }
+    }
+
+    /// Apply everything the turn has said since the last frame.
+    ///
+    /// [`apply_turn`] against the turn this value holds, so the loop's bottom
+    /// end is one call rather than a field reached into. It never blocks and it
+    /// is what ends a turn: the moment it takes the turn down, the top of the
+    /// next round finds [`Chat::answering`] false and gives the field back —
+    /// which is how "the composer is live again the moment the turn ends,
+    /// however it ends" is one rule rather than five.
+    pub(crate) fn keep_up(&mut self, app: &mut App, now: Instant) {
+        apply_turn(&mut self.turn, app, now);
+    }
+}
 
 /// A turn being answered by a worker thread, from the point of view of the
 /// thread drawing the screen.

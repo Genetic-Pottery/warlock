@@ -981,7 +981,14 @@ pub fn draw(
 
     draw_panel(frame, panel, app, now);
     if let (Some(area), Some(composer)) = (field, composer) {
-        draw_composer(frame, area, composer, app.focus() == Focus::Composer);
+        // Two things have to be true for the field to be drawn as the place the
+        // next character lands: the keys have to be pointed at it, and it has to
+        // be taking them. A muted field is one a turn is being answered over
+        // (see [`Composer::is_muted`]), and it is drawn exactly as a field
+        // nobody is pointed at — dim, and with no caret — because that is what
+        // is true of it.
+        let live = app.focus() == Focus::Composer && !composer.is_muted();
+        draw_composer(frame, area, composer, live);
     }
     draw_tree_pane(frame, tree, app, chrome, now);
     draw_footer(frame, footer, app);
@@ -1737,12 +1744,21 @@ fn mark_area(inner: Rect) -> Option<Rect> {
 }
 
 /// Draw the composer: the tail of the draft, one row per row it wraps to, inside
-/// a border lit exactly when the keyboard is pointed at it.
+/// a border lit exactly when the field is `live` — the keys pointed at it and it
+/// taking them.
 ///
 /// [`pane_block`] and no other border, so the field is lit and dimmed by the
 /// rule the two panes above it already follow — three places the keys can be and
 /// one lit border between them, which is what makes the focus readable at all
 /// (see [`Focus`]).
+///
+/// `live` rather than `focused`, and that is the whole of what muting looks
+/// like: while a turn is being answered the field keeps the keyboard and hears
+/// nothing with it, so it is drawn as a field nobody is pointed at — dim border,
+/// no caret — and lights again the moment the answer lands. It is drawn rather
+/// than announced: there is no second wording for it and no placeholder in the
+/// box, because a line of prose explaining a dim border would be warlock talking
+/// about itself over the answer somebody is waiting for.
 ///
 /// The rows are [`Composer::window`]'s: the *tail* of the draft, so the row the
 /// cursor is on is the last row drawn and a draft past
@@ -1752,18 +1768,18 @@ fn mark_area(inner: Rect) -> Option<Rect> {
 /// the bottom again, and for the same reason.
 ///
 /// The caret is a reversed [`COMPOSER_CURSOR`] after the last character, drawn
-/// only while the field has the focus: it says where the next character lands,
-/// and while the keys are somewhere else nothing is landing. It is dropped
-/// rather than wrapped when the last row fills the width — a caret is not text,
+/// only while the field is live: it says where the next character lands, and
+/// while the keys are somewhere else — or the field is not hearing them —
+/// nothing is landing. It is dropped rather than wrapped when the last row fills the width — a caret is not text,
 /// and a row of its own for a cursor would take a row off the draft and move
 /// everything above it while somebody is typing.
 ///
 /// No colour and no prompt glyph. The panel above spends none, the draft is the
 /// reader's own words, and a `>` in front of them would be a column off every
 /// row of a field this narrow for the sake of saying what the lit border says.
-fn draw_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, focused: bool) {
+fn draw_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, live: bool) {
     let inner = pane_inner(area);
-    frame.render_widget(pane_block(focused), area);
+    frame.render_widget(pane_block(live), area);
 
     let rows = composer.window(inner.width);
     let from = rows.len().saturating_sub(usize::from(inner.height));
@@ -1773,7 +1789,7 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, focused
         .is_some_and(|row| u16::try_from(display_width(row)).unwrap_or(u16::MAX) < inner.width);
 
     let mut lines: Vec<Line<'static>> = rows.iter().map(|row| Line::raw(row.clone())).collect();
-    if focused
+    if live
         && room
         && let Some(last) = lines.last_mut()
     {
@@ -7114,6 +7130,72 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_muted_field_is_drawn_dim_and_with_no_caret_while_a_turn_is_answered() {
+        // One question at a time: while a turn is being answered the field keeps
+        // the keyboard and hears nothing with it, so it is drawn as a field
+        // nobody is pointed at. The border is where it has to show — the draft
+        // is cleared by the submit, so an empty box is what the reader is
+        // looking at — and the caret goes with it, because nothing is landing.
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_focus(Focus::Composer);
+        assert_eq!(app.focus(), Focus::Composer, "the field has the keyboard");
+
+        let live = Composer::new("what does the engine do?");
+        let mut muted = live.clone();
+        muted.set_muted(true);
+
+        // The border's corner and the cell the caret sits in: the column after
+        // the last character of the draft, on the draft's own row.
+        let drawn = |composer: &Composer| {
+            let buffer = render_composer(&app, composer, WIDTH, FIXTURE_HEIGHT);
+            let field = areas(buffer.area, Some(composer))
+                .composer
+                .expect("a field on this frame");
+            let inner = pane_inner(field);
+            let caret = u16::try_from(display_width(composer.draft())).expect("a short draft");
+            let border = &buffer[(field.x, field.y)];
+            (
+                (border.fg, border.modifier),
+                buffer[(inner.x + caret, inner.y)].modifier,
+                composer_rows(&buffer, composer),
+            )
+        };
+
+        let ((lit_fg, lit_modifier), live_caret, live_rows) = drawn(&live);
+        let ((dim_fg, dim_modifier), muted_caret, muted_rows) = drawn(&muted);
+
+        assert_eq!(
+            (lit_fg, lit_modifier),
+            (FOCUS_COLOUR, Modifier::BOLD),
+            "a live field the keys are in is lit"
+        );
+        assert_ne!(
+            dim_fg, FOCUS_COLOUR,
+            "a muted field is lit as if it listens"
+        );
+        assert!(
+            dim_modifier.contains(Modifier::DIM),
+            "a muted field should be dim: {dim_modifier:?}"
+        );
+
+        // The caret says where the next character lands, and while the field is
+        // muted nothing is landing.
+        assert!(
+            live_caret.contains(Modifier::REVERSED),
+            "a live field draws its caret: {live_caret:?}"
+        );
+        assert!(
+            !muted_caret.contains(Modifier::REVERSED),
+            "a muted field drew a caret: {muted_caret:?}"
+        );
+
+        // And the draft itself is untouched by muting: the same characters in
+        // the same rows, still there when the answer lands.
+        assert_eq!(live_rows, muted_rows);
+        assert_eq!(muted_rows.last().map(String::as_str), Some(live.draft()));
     }
 
     #[test]

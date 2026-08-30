@@ -56,6 +56,14 @@
 //! carrying Ctrl is not text somebody typed; if it were, the one keystroke every
 //! reader trusts to get them out would put a `c` in the draft.
 //!
+//! Muting, too. A field is muted for as long as the answer to the last question
+//! is on its way — one question at a time — and both halves of that are
+//! somewhere else: the loop owns the turn, so it owns the flag
+//! ([`Composer::set_muted`]), and the keyboard's gate is what declines to ask
+//! this function anything while the flag is up. So [`compose_for`] behaves
+//! identically either way and simply carries the flag through, which is what
+//! keeps "what a key does to a draft" one set of rules rather than two.
+//!
 //! Where the draft is kept between keystrokes, which pane has the focus, and
 //! what a submitted draft is *for* are all somebody else's business. Nothing
 //! here reads a terminal, draws anything, or takes an [`App`](crate::App): a key
@@ -94,29 +102,72 @@ const CHORD: KeyModifiers = KeyModifiers::CONTROL
 /// What has been typed into the composer, with the cursor after its last
 /// character.
 ///
-/// One string and nothing else. There is no cursor field because nothing can
+/// One string and one flag. There is no cursor field because nothing can
 /// move a cursor, no scroll offset because the window is always the tail (see
 /// [`Composer::window`]), and no width because the width belongs to the frame
 /// and is handed in by whoever is drawing — so a composer can be driven through
 /// every width a terminal has in one test without a terminal.
+///
+/// The flag is [`Composer::is_muted`], and it is a fact about the session rather
+/// than about the draft: one question at a time, so while an answer is on its
+/// way the field takes no keys and is drawn to say so. Which is also why it is
+/// carried here rather than worked out where it is read — the loop knows whether
+/// a turn is in flight, and it tells the field once a round, exactly as it tells
+/// the app what the terminal is doing with the pointer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Composer {
     /// What has been typed. Newlines are in it as `\n`; the cursor sits after
     /// its last character, always.
     draft: String,
+    /// Whether the field is taking keys at all. `false` for the whole of a
+    /// session that never asks anything; `true` only for as long as a turn is
+    /// being answered somewhere else.
+    muted: bool,
 }
 
 impl Composer {
-    /// A composer holding `draft`.
+    /// A composer holding `draft`, live.
     ///
     /// [`Composer::default`] is the empty one a session starts on. This is for
     /// putting a composer back where it was — and for tests, which is most of
-    /// what a value with one field wants a constructor for.
+    /// what a value this small wants a constructor for. Muting is not a
+    /// constructor's business: it is set and unset as turns come and go, by
+    /// [`Composer::set_muted`].
     #[must_use]
     pub fn new(draft: impl Into<String>) -> Self {
         Self {
             draft: draft.into(),
+            muted: false,
         }
+    }
+
+    /// Say whether the field is taking keys.
+    ///
+    /// Told rather than worked out, and told by the one thread that knows: the
+    /// event loop holds the turn in flight, so it holds this fact, and it hands
+    /// it over once a round the way it hands the app what the terminal is doing
+    /// with the pointer (see [`App::set_mouse_captured`](crate::App::set_mouse_captured)).
+    /// Every round rather than at the two keystrokes that change it, so a turn
+    /// that ended in any of its five ways leaves a live field behind it without
+    /// each of those ways having to remember to say so.
+    ///
+    /// Nothing about the draft moves here. A muted field is the same characters
+    /// in the same order, still there when the answer lands — muting is about
+    /// which keys it hears, not about what somebody has written.
+    pub const fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
+    }
+
+    /// Whether the field is muted: `true` while a turn is being answered.
+    ///
+    /// Asked twice a round and nowhere else. The keyboard asks so that a key
+    /// pressed at a muted field neither types nor acts (see `press_for` in the
+    /// binary), and the drawing asks so that the field is visibly dim while it
+    /// is not listening — a border lit over a field that swallows keys would be
+    /// warlock pointing at somewhere nothing happens.
+    #[must_use]
+    pub const fn is_muted(&self) -> bool {
+        self.muted
     }
 
     /// What has been typed so far, newlines included, with the cursor at its
@@ -253,7 +304,14 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
     }
 
     let unchanged = || Composed::Typing(composer.clone());
-    let typed = |draft| Composed::Typing(Composer { draft });
+    // Muted or not comes through with the draft: this function is not where a
+    // turn starts or ends, so a field that arrived muted goes back muted.
+    let typed = |draft| {
+        Composed::Typing(Composer {
+            draft,
+            muted: composer.muted,
+        })
+    };
 
     match key.code {
         // Before the plain Enter below it, which is the point of the pair: the
@@ -365,6 +423,52 @@ mod tests {
         assert_eq!(fresh.draft(), "");
         assert!(!fresh.is_submittable());
         assert_eq!(fresh, composer(""));
+    }
+
+    #[test]
+    fn a_composer_is_live_until_the_loop_says_otherwise() {
+        // Muting is a fact about a turn in flight, and a session that has never
+        // asked anything has never had one: the field a session starts on hears
+        // every key it is given.
+        let mut current = composer("web");
+
+        assert!(!Composer::default().is_muted());
+        assert!(!current.is_muted());
+
+        current.set_muted(true);
+        assert!(current.is_muted());
+        current.set_muted(false);
+        assert!(!current.is_muted());
+    }
+
+    #[test]
+    fn muting_moves_no_character_and_changes_no_row() {
+        // What somebody typed is worth more than the keystroke that stopped
+        // them typing it, and a turn is not even a keystroke: the draft is the
+        // same string, at the same height, in the same rows.
+        let live = composer("It walks the tree and writes what it finds.");
+        let mut muted = live.clone();
+        muted.set_muted(true);
+
+        assert_eq!(muted.draft(), live.draft());
+        assert_eq!(muted.is_submittable(), live.is_submittable());
+        assert_eq!(muted.height(18), live.height(18));
+        assert_eq!(muted.window(18), live.window(18));
+    }
+
+    #[test]
+    fn a_muted_field_carries_its_muting_through_a_keystroke() {
+        // This function is not where a turn starts or ends. It is never asked
+        // anything while the flag is up — the loop's gate sees to that — and if
+        // it is, what comes back is the same field, still muted, rather than a
+        // field that quietly went live between two keys.
+        let mut before = composer("we");
+        before.set_muted(true);
+
+        let next = after(press(KeyCode::Char('b')), &before);
+
+        assert_eq!(next.draft(), "web");
+        assert!(next.is_muted(), "a keystroke unmuted the field");
     }
 
     #[test]

@@ -335,6 +335,20 @@ pub(crate) enum Pressed {
     /// the run's handle drops and takes a running `claude` with it, and the
     /// terminal guard puts the screen back.
     Leave,
+    /// Stop the chat turn that is being answered, and stay.
+    ///
+    /// Ctrl-C with a turn in flight, and the one situation in which that key
+    /// does not end the session. It is [`Action::CancelPact`]'s opposite number
+    /// for the conversation and works the same way — the turn's own handle,
+    /// latched and its `claude` killed — but it is a [`Pressed`] rather than an
+    /// [`Action`] because a turn is not something the app is running: the loop
+    /// holds it, the way it holds the run, and the app hears about it when the
+    /// cancelled turn's last line lands on the thread.
+    ///
+    /// Never produced with nothing in flight. The keystroke is one key with one
+    /// meaning either way — stop what I asked for — and with nothing to stop
+    /// that is the session itself, which is [`Pressed::Leave`] above.
+    CancelTurn,
     /// The gate had the key: the confirmation is `.0` from here on, and nothing
     /// else happened. It covers opening the question, moving its highlight,
     /// closing it again, and the keys that leave it exactly where it was.
@@ -406,10 +420,11 @@ fn is_tab(key: KeyEvent) -> bool {
 }
 
 /// What `key` comes to with the confirmation at `confirm`, the scope prompt at
-/// `prompt`, the composer at `composer` and a run `in_flight`.
+/// `prompt`, the composer at `composer`, a run `in_flight` and a turn being
+/// `answered`.
 ///
-/// The gate itself, and it is a function of a key and four situations so that
-/// every rule below is one assertion with no terminal attached. Five roads out
+/// The gate itself, and it is a function of a key and five situations so that
+/// every rule below is one assertion with no terminal attached. Six roads out
 /// of it, in the order they are decided.
 ///
 /// **Ctrl-C first, always.** It is a key event and not a signal — raw mode is
@@ -417,9 +432,25 @@ fn is_tab(key: KeyEvent) -> bool {
 /// nothing here answers it, nothing does. Routed through the question it would
 /// arrive at [`answer_for`] as an ordinary `c` with a modifier riding along,
 /// i.e. one of the keys that change nothing, and the last resort of a reader
-/// who wants out would be the one keystroke the dialog swallowed. So it leaves
-/// with the question up and with it closed, and during a run as well as outside
-/// one, exactly as it always has.
+/// who wants out would be the one keystroke the dialog swallowed. So it is
+/// answered with the question up and with it closed, and during a run as well as
+/// outside one, exactly as it always has been.
+///
+/// What it *means* is the one thing about it that now reads two ways, and
+/// `answered` is what decides it. With a turn in flight it stops that turn and
+/// nothing else; with none it leaves, as it always did. One key, one meaning —
+/// stop what I asked for — and the difference is only whether there is anything
+/// to stop short of the session. A turn is one `claude` and seconds of waiting,
+/// so the reader who presses it twice gets the cancel and then the way out; a
+/// turn that could only be escaped by leaving warlock would be a question the
+/// reader cannot take back. It is deliberately answered before the confirmation
+/// is consulted, for the reason the key is answered first at all: a Ctrl-C that
+/// meant one thing with a window up and another with it down would be the
+/// keystroke of last resort behaving differently depending on what is on screen.
+/// Esc is *not* this key — with a run in flight it cancels the run, and while a
+/// field has the keyboard it belongs to that field — because a turn and a run
+/// are two things and the key that stops one must not stop the other by
+/// accident.
 ///
 /// **Then the question, if it is up.** Every other key goes to [`answer_for`]
 /// and *only* to it: this is where "nothing reaches the app underneath" is
@@ -460,6 +491,19 @@ fn is_tab(key: KeyEvent) -> bool {
 /// answered by the field the reader is in, exactly as it is while the scope
 /// prompt is up, and the next one cancels the run.
 ///
+/// A muted composer is the same road with nothing at the end of it. While the
+/// last question is being answered the field takes no keys — one question at a
+/// time — and a key aimed at it comes to [`Pressed::Nothing`]: not typed, and
+/// not passed down to [`action_for`] either, since a letter that fell through a
+/// dead field would arrive at the tree's bindings as the pact key or the refresh
+/// key. Muting is read off the field ([`Composer::is_muted`]) rather than passed
+/// in beside `answered`, because it is the *field* that is muted and the loop is
+/// what says so: a turn asked from the tree leaves an unfocused field, which is
+/// already `None` here. Tab is outside it for the reason it is outside the
+/// composer at all — it is the key that moves the keyboard, it is not text on
+/// any terminal, and a field that ate it while it was refusing to be typed in
+/// would be a field with no way out until the model answered.
+///
 /// **Then the keys, as they have always been read.** [`action_for`] answers,
 /// and the one answer this function re-reads is [`Action::Quit`]: with nothing
 /// running it opens the question instead of leaving, and with a run in flight it
@@ -481,9 +525,14 @@ pub(crate) fn press_for(
     prompt: &ScopePrompt,
     composer: Option<&Composer>,
     in_flight: bool,
+    answered: bool,
 ) -> Pressed {
     if is_ctrl_c(key) {
-        return Pressed::Leave;
+        return if answered {
+            Pressed::CancelTurn
+        } else {
+            Pressed::Leave
+        };
     }
 
     if let Some(highlighted) = confirm.highlighted() {
@@ -501,6 +550,16 @@ pub(crate) fn press_for(
     if let Some(draft) = composer
         && !is_tab(key)
     {
+        // A muted field is one whose last question is still being answered, and
+        // the key that arrives at it does nothing at all: it is not typed, and
+        // it is emphatically not handed on to `action_for` underneath, because
+        // a `p` swallowed by a dead field and re-read as the pact key would be
+        // the worst possible answer to a keystroke aimed at a draft. Nothing is
+        // said about it either — the dim border says it, once, rather than the
+        // footer saying it again per keystroke.
+        if draft.is_muted() {
+            return Pressed::Nothing;
+        }
         return Pressed::Compose(compose_for(key, draft));
     }
 
@@ -1836,8 +1895,17 @@ mod tests {
             composer: &mut Composer,
             key: KeyEvent,
         ) -> Round {
-            match press_for(key, *confirm, prompt, offered(app, composer), false) {
+            // Two falses, and they are the two situations this round is never
+            // in: no run in flight — the question cannot be up during one — and
+            // no turn being answered, which is what the tests further down that
+            // *are* about a turn hand in for themselves.
+            match press_for(key, *confirm, prompt, offered(app, composer), false, false) {
                 Pressed::Leave | Pressed::Act(Action::Quit) => return Round::Left,
+                // Never reached from a round with nothing being answered, and
+                // panicking rather than leaving quietly for the reason the four
+                // arms below do: a cancel conjured out of a session with no
+                // question out is the gate reading a situation nobody is in.
+                Pressed::CancelTurn => panic!("a turn was cancelled with none in flight"),
                 Pressed::Confirm(next) => *confirm = next,
                 Pressed::Scope(Edited::Open(field)) => *prompt = ScopePrompt::Open(field),
                 Pressed::Scope(Edited::Close) => *prompt = ScopePrompt::Closed,
@@ -1974,6 +2042,7 @@ mod tests {
                             QuitConfirm::Open(lit),
                             &ScopePrompt::Closed,
                             None,
+                            false,
                             false
                         ),
                         Pressed::Confirm(QuitConfirm::Open(lit)),
@@ -2002,12 +2071,12 @@ mod tests {
                 let mut confirm = QuitConfirm::Open(Answer::Yes);
 
                 assert_eq!(
-                    press_for(key, confirm, &ScopePrompt::Closed, None, false),
+                    press_for(key, confirm, &ScopePrompt::Closed, None, false, false),
                     Pressed::Leave
                 );
                 assert_eq!(
-                    press_for(key, confirm, &ScopePrompt::Closed, None, false),
-                    press_for(ctrl_c(), confirm, &ScopePrompt::Closed, None, false)
+                    press_for(key, confirm, &ScopePrompt::Closed, None, false, false),
+                    press_for(ctrl_c(), confirm, &ScopePrompt::Closed, None, false, false)
                 );
                 assert_eq!(round(&mut app, &mut confirm, key), Round::Left);
             }
@@ -2087,7 +2156,14 @@ mod tests {
                 for composer in [None, Some(&draft)] {
                     for in_flight in [false, true] {
                         assert_eq!(
-                            press_for(ctrl_c(), confirm, &ScopePrompt::Closed, composer, in_flight),
+                            press_for(
+                                ctrl_c(),
+                                confirm,
+                                &ScopePrompt::Closed,
+                                composer,
+                                in_flight,
+                                false
+                            ),
                             Pressed::Leave,
                             "Ctrl-C should leave with {confirm:?}, {composer:?} and a run in \
                              flight = {in_flight}"
@@ -2102,6 +2178,148 @@ mod tests {
         }
 
         #[test]
+        fn ctrl_c_stops_the_turn_rather_than_the_session_while_one_is_answered() {
+            // The one situation the key does not end the session in, and the
+            // whole of what decides it: a question is out. A turn is one
+            // `claude` and seconds of waiting, so the reader who wants it back
+            // presses this; a turn escapable only by leaving warlock would be a
+            // question nobody can take back.
+            //
+            // The same matrix the answer above is pinned across, because the
+            // reading must not depend on any of it: the question up or down, the
+            // keyboard in the field or not, a run in flight or not. It is
+            // answered before the confirmation for the reason it is answered
+            // first at all — a Ctrl-C that meant one thing with a window up and
+            // another with it down would be the keystroke of last resort
+            // behaving differently depending on what is on screen.
+            let draft = Composer::new("web");
+            for confirm in [
+                QuitConfirm::Closed,
+                QuitConfirm::Open(Answer::No),
+                QuitConfirm::Open(Answer::Yes),
+            ] {
+                for composer in [None, Some(&draft)] {
+                    for in_flight in [false, true] {
+                        assert_eq!(
+                            press_for(ctrl_c(), confirm, &ScopePrompt::Closed, composer, in_flight, true),
+                            Pressed::CancelTurn,
+                            "Ctrl-C should stop the turn with {confirm:?}, {composer:?} and a run \
+                             in flight = {in_flight}"
+                        );
+                    }
+                }
+            }
+
+            // And the scope prompt, the other window it goes round.
+            assert_eq!(
+                press_for(
+                    ctrl_c(),
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Open(Field::new(DIRECTORY, "web")),
+                    None,
+                    false,
+                    true
+                ),
+                Pressed::CancelTurn
+            );
+
+            // The press after it leaves, because by then nothing is being
+            // answered: one key, one meaning — stop what I asked for — and the
+            // reader who presses it twice gets the cancel and then the way out.
+            assert_eq!(
+                press_for(
+                    ctrl_c(),
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Closed,
+                    None,
+                    false,
+                    false
+                ),
+                Pressed::Leave
+            );
+        }
+
+        #[test]
+        fn a_turn_being_answered_changes_no_other_key_at_all() {
+            // Ctrl-C is the only key a turn is allowed to re-read. `q` still
+            // asks the question it has always asked and Esc still means what the
+            // run in flight says it means, because a turn is not a run: it
+            // writes nothing, so there is nothing for the keys that guard a
+            // pact to guard.
+            for in_flight in [false, true] {
+                for code in INERT {
+                    assert_eq!(
+                        press_for(
+                            press(code),
+                            QuitConfirm::Closed,
+                            &ScopePrompt::Closed,
+                            None,
+                            in_flight,
+                            true
+                        ),
+                        press_for(
+                            press(code),
+                            QuitConfirm::Closed,
+                            &ScopePrompt::Closed,
+                            None,
+                            in_flight,
+                            false
+                        ),
+                        "{code:?} read differently with a turn being answered"
+                    );
+                }
+
+                for code in [KeyCode::Char('q'), KeyCode::Esc] {
+                    assert_eq!(
+                        press_for(
+                            press(code),
+                            QuitConfirm::Closed,
+                            &ScopePrompt::Closed,
+                            None,
+                            in_flight,
+                            true
+                        ),
+                        press_for(
+                            press(code),
+                            QuitConfirm::Closed,
+                            &ScopePrompt::Closed,
+                            None,
+                            in_flight,
+                            false
+                        ),
+                        "{code:?} read differently with a turn being answered"
+                    );
+                }
+            }
+
+            // Said plainly as well as by comparison, because it is the promise:
+            // `q` with a turn out and nothing running still asks first, and `q`
+            // with a run in flight still leaves outright.
+            assert_eq!(
+                press_for(
+                    press(KeyCode::Char('q')),
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Closed,
+                    None,
+                    false,
+                    true
+                ),
+                Pressed::Confirm(QuitConfirm::open())
+            );
+            assert_eq!(
+                press_for(
+                    press(KeyCode::Char('q')),
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Closed,
+                    None,
+                    true,
+                    true
+                ),
+                Pressed::Leave
+            );
+        }
+
+        #[test]
         fn a_run_in_flight_puts_no_question_in_front_of_anybody() {
             // Esc still cancels the run and `q` still leaves, pinned at both
             // settings of the flag: the gate is for the twitch that follows a
@@ -2112,7 +2330,8 @@ mod tests {
                     QuitConfirm::Closed,
                     &ScopePrompt::Closed,
                     None,
-                    true
+                    true,
+                    false
                 ),
                 Pressed::Act(Action::CancelPact),
             );
@@ -2122,7 +2341,8 @@ mod tests {
                     QuitConfirm::Closed,
                     &ScopePrompt::Closed,
                     None,
-                    true
+                    true,
+                    false
                 ),
                 Pressed::Leave,
             );
@@ -2135,6 +2355,7 @@ mod tests {
                     QuitConfirm::Closed,
                     &ScopePrompt::Closed,
                     None,
+                    false,
                     false
                 ),
                 Pressed::Confirm(QuitConfirm::open()),
@@ -2145,6 +2366,7 @@ mod tests {
                     QuitConfirm::Closed,
                     &ScopePrompt::Closed,
                     None,
+                    false,
                     false
                 ),
                 Pressed::Confirm(QuitConfirm::open()),
@@ -2164,7 +2386,8 @@ mod tests {
                             QuitConfirm::Closed,
                             &ScopePrompt::Closed,
                             None,
-                            in_flight
+                            in_flight,
+                            false
                         ),
                         action_for(press(code), in_flight).map_or(Pressed::Nothing, Pressed::Act),
                         "{code:?} should read as it always has, in flight = {in_flight}"
@@ -2189,12 +2412,26 @@ mod tests {
                     );
 
                     assert_eq!(
-                        press_for(key, QuitConfirm::Closed, &ScopePrompt::Closed, None, false),
+                        press_for(
+                            key,
+                            QuitConfirm::Closed,
+                            &ScopePrompt::Closed,
+                            None,
+                            false,
+                            false
+                        ),
                         Pressed::Nothing,
                         "{kind:?} of {code:?} should open nothing"
                     );
                     assert_eq!(
-                        press_for(key, QuitConfirm::open(), &ScopePrompt::Closed, None, false),
+                        press_for(
+                            key,
+                            QuitConfirm::open(),
+                            &ScopePrompt::Closed,
+                            None,
+                            false,
+                            false
+                        ),
                         Pressed::Confirm(QuitConfirm::open()),
                         "{kind:?} of {code:?} should answer nothing"
                     );
@@ -2224,7 +2461,7 @@ mod tests {
 
                 for code in INERT {
                     let key = press(code);
-                    let pressed = press_for(key, QuitConfirm::Closed, &prompt, None, false);
+                    let pressed = press_for(key, QuitConfirm::Closed, &prompt, None, false, false);
 
                     assert_eq!(
                         pressed,
@@ -2263,6 +2500,7 @@ mod tests {
                     QuitConfirm::Closed,
                     &prompt,
                     None,
+                    false,
                     false
                 ),
                 Pressed::Scope(Edited::Open(ScopeField::new(DIRECTORY, "webq"))),
@@ -2274,6 +2512,7 @@ mod tests {
                     QuitConfirm::Closed,
                     &prompt,
                     None,
+                    false,
                     false
                 ),
                 Pressed::Scope(Edited::Close),
@@ -2310,7 +2549,14 @@ mod tests {
             ] {
                 for in_flight in [false, true] {
                     assert_eq!(
-                        press_for(ctrl_c(), QuitConfirm::Closed, &prompt, None, in_flight),
+                        press_for(
+                            ctrl_c(),
+                            QuitConfirm::Closed,
+                            &prompt,
+                            None,
+                            in_flight,
+                            false
+                        ),
                         Pressed::Leave,
                         "Ctrl-C should leave with {prompt:?} up and a run in flight = {in_flight}"
                     );
@@ -2341,19 +2587,26 @@ mod tests {
             // Ctrl-C, over all three at once. It is a key event and not a
             // signal, so if the gate does not answer it here nothing does.
             assert_eq!(
-                press_for(ctrl_c(), question, &prompt, Some(&draft), false),
+                press_for(ctrl_c(), question, &prompt, Some(&draft), false, false),
                 Pressed::Leave
             );
             // Then the question, which is drawn over everything else on the
             // frame: a key cannot be both typed into a field and answered by the
             // dialog covering it.
             assert_eq!(
-                press_for(key, question, &prompt, Some(&draft), false),
+                press_for(key, question, &prompt, Some(&draft), false, false),
                 Pressed::Confirm(question)
             );
             // Then the prompt, over the composer, for the same reason again.
             assert_eq!(
-                press_for(key, QuitConfirm::Closed, &prompt, Some(&draft), false),
+                press_for(
+                    key,
+                    QuitConfirm::Closed,
+                    &prompt,
+                    Some(&draft),
+                    false,
+                    false
+                ),
                 Pressed::Scope(edit_for(key, prompt.field().expect("the prompt is up")))
             );
             // Then the composer, over the keys: this is where `j` stops being a
@@ -2364,13 +2617,21 @@ mod tests {
                     QuitConfirm::Closed,
                     &ScopePrompt::Closed,
                     Some(&draft),
+                    false,
                     false
                 ),
                 Pressed::Compose(Composed::Typing(Composer::new("webj")))
             );
             // And then the keys, as they have always been read.
             assert_eq!(
-                press_for(key, QuitConfirm::Closed, &ScopePrompt::Closed, None, false),
+                press_for(
+                    key,
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Closed,
+                    None,
+                    false,
+                    false
+                ),
                 Pressed::Act(Action::SelectNext)
             );
         }
@@ -2442,6 +2703,7 @@ mod tests {
                         QuitConfirm::Closed,
                         &ScopePrompt::Closed,
                         Some(&before),
+                        false,
                         false
                     ),
                     Pressed::Compose(Composed::Typing(typed.clone())),
@@ -2487,6 +2749,7 @@ mod tests {
                             QuitConfirm::Closed,
                             &ScopePrompt::Closed,
                             offered(&app, &composer),
+                            false,
                             false
                         ),
                         Pressed::Act(action),
@@ -2631,6 +2894,7 @@ mod tests {
                         &ScopePrompt::Closed,
                         Some(&composer),
                         false,
+                        false,
                     );
 
                     assert!(
@@ -2667,6 +2931,7 @@ mod tests {
                         QuitConfirm::Closed,
                         &ScopePrompt::Closed,
                         Some(&composer),
+                        false,
                         false
                     ),
                     Pressed::Act(Action::ToggleFocus)
@@ -2701,6 +2966,7 @@ mod tests {
                         QuitConfirm::Closed,
                         &ScopePrompt::Closed,
                         Some(&composer),
+                        false,
                         false
                     ),
                     Pressed::Compose(Composed::Leave),
@@ -2744,7 +3010,8 @@ mod tests {
                         QuitConfirm::Closed,
                         &ScopePrompt::Closed,
                         Some(&composer),
-                        true
+                        true,
+                        false
                     ),
                     Pressed::Compose(Composed::Leave)
                 );
@@ -2754,7 +3021,8 @@ mod tests {
                         QuitConfirm::Closed,
                         &ScopePrompt::Closed,
                         None,
-                        true
+                        true,
+                        false
                     ),
                     Pressed::Act(Action::CancelPact)
                 );
@@ -2775,6 +3043,7 @@ mod tests {
                         QuitConfirm::Closed,
                         &ScopePrompt::Closed,
                         Some(&composer),
+                        false,
                         false
                     ),
                     Pressed::Compose(Composed::Submit)
@@ -2858,7 +3127,8 @@ mod tests {
                                 QuitConfirm::Closed,
                                 &ScopePrompt::Closed,
                                 Some(&composer),
-                                in_flight
+                                in_flight,
+                                false
                             ),
                             Pressed::Leave,
                             "Ctrl-C should leave from {draft:?} with a run in flight = {in_flight}"
