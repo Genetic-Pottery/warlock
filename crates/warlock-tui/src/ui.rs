@@ -4693,6 +4693,85 @@ mod tests {
         }
     }
 
+    /// What eighty columns costs, now that the composer has names on the line:
+    /// its three and no other name before them, with the way out still whole.
+    ///
+    /// The assertions are about the row the footer drew rather than about what
+    /// [`keys_line`] returned, because "nothing moves off the footer" is a claim
+    /// about the screen: a line that fit the layout and was then cut by the
+    /// backend would pass the one and fail the other.
+    #[test]
+    fn the_composers_names_are_the_first_the_eighty_column_footer_gives_up() {
+        let mut app = App::from_tree(&fixture::tree());
+        let height = 10;
+        let y = height - FOOTER_HEIGHT + 1;
+        let columns = usize::from(EIGHTY_COLUMNS);
+        // In the order `KEY_DROP_ORDER` loses them, which is not the order
+        // `KEYS` lists them in.
+        let composer = [COMPOSE_KEYS, LEAVE_KEY, FOCUS_KEY];
+
+        for captured in [true, false] {
+            app.set_mouse_captured(captured);
+            let pieces = idle_keys(captured);
+
+            let keys = row_text(&render(&app, EIGHTY_COLUMNS, height), y);
+
+            // The names this width could not afford, in the order the line is
+            // documented to give them up in.
+            let dropped: Vec<&str> = KEY_DROP_ORDER
+                .iter()
+                .copied()
+                .filter(|name| pieces.contains(name) && !keys.contains(name))
+                .collect();
+            // The composer's three are the first names gone, and nothing else
+            // went before them: the names given up are a prefix of the order,
+            // so no name that outranks them was spent instead.
+            let order: Vec<&str> = KEY_DROP_ORDER
+                .iter()
+                .copied()
+                .filter(|name| pieces.contains(name))
+                .collect();
+            assert!(
+                dropped.len() >= composer.len(),
+                "captured {captured}: {keys:?} gave up less than the composer"
+            );
+            assert_eq!(
+                dropped,
+                order[..dropped.len()].to_vec(),
+                "captured {captured}: {keys:?} skipped a name in the drop order"
+            );
+            assert_eq!(
+                dropped[..composer.len()].to_vec(),
+                composer.to_vec(),
+                "captured {captured}: {keys:?}"
+            );
+            for name in composer {
+                assert!(!keys.contains(name), "captured {captured}: {keys:?}");
+            }
+
+            // What is left is whole names joined by `KEY_GAP` and nothing else
+            // — no half-drawn name, no leftover gap where one used to be.
+            let survivors: Vec<&str> = pieces
+                .iter()
+                .copied()
+                .filter(|name| !dropped.contains(name))
+                .collect();
+            assert_eq!(keys, survivors.join(KEY_GAP), "captured {captured}");
+            for name in &survivors {
+                assert!(keys.contains(name), "captured {captured}: {keys:?}");
+            }
+
+            // And the way out is on it, whole and at the end of it, inside the
+            // eighty columns the footer was given.
+            assert!(keys.contains(QUIT_KEY), "captured {captured}: {keys:?}");
+            assert!(keys.ends_with(QUIT_KEY), "captured {captured}: {keys:?}");
+            assert!(
+                display_width(&keys) <= columns,
+                "captured {captured}: {keys:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_drawn_keys_line_never_outgrows_the_terminal_it_is_drawn_on() {
         let mut app = App::from_tree(&fixture::tree());
