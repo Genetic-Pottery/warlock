@@ -9,7 +9,9 @@
 //!
 //! This file is the loop itself; each of the loop's concerns lives in a
 //! sibling module. What a keystroke or a click means is [`input`]'s, running a
-//! pact on a worker thread and applying what it says is [`pacting`]'s, asking
+//! pact on a worker thread and applying what it says is [`pacting`]'s, running
+//! one chat turn the same way and putting the answer on the thread card is
+//! [`chatting`]'s, asking
 //! for a scope and writing it is [`scoping`]'s, reading a file into the panel is
 //! [`viewing`]'s, handing one to `$EDITOR` and taking the terminal back
 //! afterwards is [`editing`]'s, where
@@ -214,6 +216,7 @@ use warlock_tui::{
     draw, panel_height, panel_width, tree_height,
 };
 
+mod chatting;
 mod config;
 mod editing;
 mod error;
@@ -224,6 +227,7 @@ mod session;
 mod terminal;
 mod viewing;
 
+use chatting::Chat;
 use config::configure;
 use editing::edit_press;
 use error::Error;
@@ -466,9 +470,12 @@ fn run() -> Result<(), Error> {
     // and keeps the front end from reaching into the loader's internals for a
     // value it needs to keep and edit.
     let mut manifest = load_manifest(&scope.repo_root)?;
-    // The one thing in this binary that runs a model, built once because it is
-    // a command line and a timeout rather than a connection: nothing is spawned
-    // until a pact actually asks for a pass.
+    // The one thing in this binary that runs a model for a pact, built once
+    // because it is a command line and a timeout rather than a connection:
+    // nothing is spawned until a pact actually asks for a pass. The other one,
+    // which answers questions, is inside the `Chat` below and is built once for
+    // the same reason and one more — the session it names is what makes a
+    // conversation a conversation.
     let agent = ClaudeAgent::new();
     // Asked for once, over the tree the load just produced, and kept for as
     // long as warlock runs — dropping it stops the watch. Whether it was
@@ -488,6 +495,13 @@ fn run() -> Result<(), Error> {
     // needs to keep about a run it is not performing. `None` is the ordinary
     // state, and it is what the pact key checks before starting anything.
     let mut pact: Option<Running> = None;
+    // The conversation, and the turn being answered somewhere else when one is:
+    // `pact`'s opposite number, beside it rather than folded into it because a
+    // turn and a run are two different things that can be in flight at the same
+    // time — a reader can ask a question while a pact descends, and the key that
+    // stops one must not stop the other. See [`Chat`], which is the agent and
+    // the turn together because neither is any use without the other.
+    let mut chat = Chat::new();
     // The gate on the way out, closed as every session starts. It lives here
     // rather than on the app because it is state about this keystroke and the
     // next one rather than about what warlock is showing — which is also what
@@ -535,6 +549,15 @@ fn run() -> Result<(), Error> {
         // of a flag that may have been toggled since — is put right before it is
         // drawn.
         app.set_mouse_captured(mouse_captured);
+        // And the field is told whether it is listening, here and every round,
+        // for the reason the flag above is set every round: a turn ends in five
+        // different ways and none of them should have to remember to give the
+        // keyboard back. One question at a time is the whole rule — while
+        // `turn` is `Some` the field neither types nor acts (`press_for`) and is
+        // drawn dim with no caret (`draw_composer`) — and the moment the drain
+        // at the bottom of the round takes the turn down, the next round hands
+        // the field back.
+        composer.set_muted(chat.answering());
         // The draft goes in beside the two questions: it is a pane cut off the
         // bottom of the panel's column, so the panel is drawn and scrolled a few
         // rows shorter for as long as there is a field on screen. Whether there
@@ -562,15 +585,27 @@ fn run() -> Result<(), Error> {
             // there is no draft to type into, and every letter is the command it
             // has always been.
             let typing = (app.focus() == Focus::Composer).then_some(&composer);
+            // The other three facts a key is read against, taken here for the
+            // same reason and once each: a run in flight, a question being
+            // answered, and the instant the event arrived — which is the instant
+            // anything this key starts is as old as. One reading apiece, so the
+            // arms below cannot disagree with the gate above them about what was
+            // going on when the key was pressed.
+            let running = pact.is_some();
+            let asked = chat.answering();
+            let now = Instant::now();
             match event::read()? {
-                // Three situations are passed in rather than read out of the
+                // Four situations are passed in rather than read out of the
                 // app, and each answers a set of keys. Whether a run is in
                 // flight is what Esc reads two ways — it cancels a run when
                 // there is one and asks about quitting when there is not — the
                 // question on screen is what every key reads differently while
-                // it is up, and the composer is what turns the letters into
-                // text. See [`press_for`], which owns all three readings.
-                Event::Key(key) => match press_for(key, confirm, &prompt, typing, pact.is_some()) {
+                // it is up, the composer is what turns the letters into text,
+                // and whether a turn is being answered is what Ctrl-C reads two
+                // ways: it stops the turn when there is one and leaves when
+                // there is not. See [`press_for`], which owns all four
+                // readings.
+                Event::Key(key) => match press_for(key, confirm, &prompt, typing, running, asked) {
                     // Returning is the whole of quitting, and it is enough even
                     // with a pact in flight. `pact` drops on the way out, which
                     // cancels the run and kills the `claude` it was waiting on
@@ -608,6 +643,20 @@ fn run() -> Result<(), Error> {
                             running.cancel.cancel();
                         }
                     }
+                    // Ctrl-C with a turn being answered, and the one keystroke
+                    // in warlock that stops something without leaving. The
+                    // handle is the turn's own — the same `Cancel` a run is
+                    // stopped through — so it kills the `claude` this turn is
+                    // waiting on and the worker comes back within milliseconds.
+                    //
+                    // The turn is deliberately *not* taken down here, exactly as
+                    // a cancelled pact is not: the worker still has one thing to
+                    // say, and it says it at the bottom of this loop like any
+                    // other ending. That is what puts the cancelled line under
+                    // whatever work had already arrived and gives the field the
+                    // keyboard back — a turn forgotten here would leave the
+                    // composer muted for the rest of the session.
+                    Pressed::CancelTurn => chat.stop(),
                     // Nothing but a bit of view state moves here, and deliberately
                     // so: focus decides which border the next frame lights and which
                     // pane a movement key is about, and both of those questions are
@@ -653,78 +702,21 @@ fn run() -> Result<(), Error> {
                     // keeps the selection and the scroll offset in range; the next
                     // frame draws the longer or shorter list.
                     Pressed::Act(Action::ToggleFiles) => app.toggle_files(),
-                    // The one keystroke that writes anything, and the one that
-                    // takes longer than a frame — so it is the one that is not done
-                    // here. The subtree pact goes to a worker thread and this arm
-                    // keeps the receipt: what the app looked like before the toggle
-                    // painted it, and which subtree was painted. Everything the run
-                    // produces arrives at the bottom of this loop, one directory at
-                    // a time and finally as an outcome, and until it does the loop
-                    // goes round as usual — drawing, scrolling, filtering.
+                    // The two keystrokes that write anything, and the two that
+                    // take longer than a frame — so they are the ones that are
+                    // not done here. Both go to a worker thread and both fill
+                    // the same `Option<Running>`, which is what makes them
+                    // refuse each other; everything they produce arrives at the
+                    // bottom of this loop, one directory at a time and finally
+                    // as an outcome, and until it does the loop goes round as
+                    // usual — drawing, scrolling, filtering.
                     //
-                    // `None` needs nothing done about it, and it covers two cases
-                    // that are alike in exactly this way: both have already said
-                    // their piece on the app, and the next frame draws it. A refused
-                    // toggle put its sentence in `App::message`; a press while a
-                    // pact is in flight started nothing — a second pact over a tree
-                    // the first one is still writing to would be two runs racing for
-                    // the same documents and the same manifest — and said so by
-                    // setting the flag that words `App::pact_line` as already
-                    // running. Neither is this arm's to explain — see `pact_press`.
-                    Pressed::Act(Action::TogglePact) => {
-                        // Copied before the toggle paints anything, because the
-                        // toggle is no longer its own undo: it puts a whole subtree
-                        // into one state, and the states it painted over were not
-                        // all the same one. The copy is a list of rows and a tally,
-                        // and it is taken once per press of one key.
-                        let before = app.clone();
-                        // The instant the key was pressed is the instant the run
-                        // starts, and the account counts its clocks from it: a run
-                        // is as old as the keystroke that asked for it, not as old
-                        // as the first thing the model got round to saying.
-                        if let Some(toggle) = pact_press(&mut app, pact.is_some(), Instant::now()) {
-                            // The worker, the channel and the say-when, in the one
-                            // value this loop keeps about a run it is not doing —
-                            // see [`start_run`], which is where both keys start
-                            // theirs.
-                            pact = Some(start_run(
-                                Work::Pact(toggle),
-                                before,
-                                &manifest,
-                                &scope.repo_root,
-                                &agent,
-                            ));
-                        }
-                    }
-                    // The same arm again with one word changed, and that is the
-                    // point of it: a refresh is a run like a pact — one worker,
-                    // one channel, one account, one say-when — over the stale
-                    // directories of the subtree rather than all of them, and
-                    // which those are is the engine's judgement and not this
-                    // loop's. So the copy is taken the same way, the press
-                    // decides the same three things ([`refresh_press`]), and
-                    // what comes back fills the very same `Option<Running>`,
-                    // which is what makes the two keys refuse each other: the
-                    // in-flight check both of them go through is `pact.is_some()`
-                    // here, whichever run is the one in flight.
-                    //
-                    // `None` needs nothing done about it here either, for
-                    // `TogglePact`'s two reasons: a row the app turned down has
-                    // its sentence in `App::message` already, and a press while
-                    // a run is going said so on that run's progress line.
-                    Pressed::Act(Action::Refresh) => {
-                        let before = app.clone();
-                        if let Some(directory) =
-                            refresh_press(&mut app, pact.is_some(), Instant::now())
-                        {
-                            pact = Some(start_run(
-                                Work::Refresh(directory),
-                                before,
-                                &manifest,
-                                &scope.repo_root,
-                                &agent,
-                            ));
-                        }
+                    // One arm for the two of them because they were already one
+                    // arm with one word changed, and the word is which press
+                    // decides. Both of them, and everything they refuse, is
+                    // [`start_press`]'s.
+                    Pressed::Act(action @ (Action::TogglePact | Action::Refresh)) => {
+                        start_press(action, &mut app, &mut pact, &manifest, &scope, &agent, now);
                     }
                     // The one key that reads a file and the only one that shows
                     // anything a model wrote. It is done here, on this thread,
@@ -798,7 +790,7 @@ fn run() -> Result<(), Error> {
                             &scope,
                             document.as_deref(),
                             mouse_captured,
-                            pact.is_some(),
+                            running,
                         )?;
                     }
                     // The panel's other card, and nothing else: the account if
@@ -845,7 +837,7 @@ fn run() -> Result<(), Error> {
                     // a prompt that is still closed, so this arm needs no
                     // `None` case of its own. See `scoping::scope_press`.
                     Pressed::Act(Action::OpenScope) => {
-                        prompt = scope_press(&mut app, &manifest, &scope.repo_root, pact.is_some());
+                        prompt = scope_press(&mut app, &manifest, &scope.repo_root, running);
                     }
                     // Somebody typing into that window: a character more or
                     // less in the field, the window abandoned, or — on Enter —
@@ -867,7 +859,15 @@ fn run() -> Result<(), Error> {
                     // is [`apply_compose`], which is handed the local above
                     // rather than reaching for anything on the app — what is in
                     // the draft is not a fact about the tree.
-                    Pressed::Compose(outcome) => apply_compose(&mut app, &mut composer, outcome),
+                    //
+                    // The last of the three is now a worker thread, so the agent
+                    // and the turn go in with it, and the instant the key was
+                    // pressed goes in as well for the pact key's reason: a turn
+                    // is as old as the question that asked it, not as old as the
+                    // first thing the model got round to saying.
+                    Pressed::Compose(outcome) => {
+                        apply_compose(&mut app, &mut composer, outcome, &mut chat, now);
+                    }
                     // A key nothing is bound to, or one whose press has already
                     // been answered where it was decided.
                     Pressed::Nothing => {}
@@ -897,7 +897,14 @@ fn run() -> Result<(), Error> {
         // waiting on a keystroke. See `keep_up`, which reads the clock the
         // round is measured against — the instant the events being drained now
         // land on screen, within one `POLL_INTERVAL` of when they were sent.
-        keep_up(&mut pact, &mut app, &mut manifest, &scope, &mut watched);
+        keep_up(
+            &mut pact,
+            &mut chat,
+            &mut app,
+            &mut manifest,
+            &scope,
+            &mut watched,
+        );
     }
 }
 
@@ -981,8 +988,8 @@ fn draw_frame(
     Ok(())
 }
 
-/// Keep up with what is happening off this thread: the run's progress, and the
-/// disk moving under the tree.
+/// Keep up with what is happening off this thread: the run's progress, the
+/// turn's, and the disk moving under the tree.
 ///
 /// The bottom of every round, whether or not a key was pressed. [`apply_progress`]
 /// is the only place anything the worker says reaches the screen, and it has to
@@ -1002,6 +1009,17 @@ fn draw_frame(
 /// nothing at all is read when the disk has been still, which is almost every
 /// round.
 ///
+/// The turn is drained last and by exactly the same rules: [`apply_turn`] takes
+/// whatever the worker has said since the last frame and returns rather than
+/// waiting, so the frame goes on redrawing while a question is being answered
+/// and a burst of tool calls that arrived between two frames lands in the order
+/// it happened. Last rather than first only because the two are independent —
+/// a turn writes no file, changes no row and reloads nothing, so there is no
+/// order between it and the run for the screen to disagree about. It is where
+/// the muting ends: the drain is what takes `turn` down, however the turn
+/// finished, and the top of the next round hands the field back on the strength
+/// of that alone.
+///
 /// The clock is read once, here, and handed to everything under this: the round
 /// is measured against one instant, which is when the events being drained now
 /// land on screen — within one [`POLL_INTERVAL`] of when they were sent. It is
@@ -1009,6 +1027,7 @@ fn draw_frame(
 /// two readings a round would be two answers to one question.
 fn keep_up(
     pact: &mut Option<Running>,
+    chat: &mut Chat,
     app: &mut App,
     manifest: &mut Manifest,
     scope: &Scope,
@@ -1021,6 +1040,7 @@ fn keep_up(
         watched.caught_up(reloaded.as_ref(), now);
     }
     watched.round(app, scope, pact.is_some(), now);
+    chat.keep_up(app, now);
 }
 
 /// Do to the app whatever the pointer just asked for.
@@ -1122,26 +1142,114 @@ fn apply_mouse(
 /// looking at and what the movement keys they press next should be about. Tab
 /// from there is one press back into the field.
 ///
-/// **Submit** is a draft offered up, and deliberately offered to nobody. This
-/// slice builds the field and routes the keyboard through it; what a submitted
-/// draft is *for* is the next one's. So this arm starts nothing, spawns nothing,
-/// writes nothing and says nothing on the footer — an Enter that announced a
-/// submission nothing received would be warlock claiming to have done something.
-/// The draft is left exactly as it is rather than cleared, which is the honest
-/// half of that: clearing it would be the one place in here that can lose
-/// somebody's typing, and it would lose it to a consumer that does not exist
-/// yet. When there is one, this is where the draft is taken and the field reset
-/// in the same breath. An empty or whitespace-only draft never arrives here at
-/// all — [`compose_for`] answers that Enter with the draft unchanged — so a
-/// submission with nothing in it is a keystroke rather than a mistake and has
-/// nothing to report.
+/// **Submit** is a draft offered up, and it is now the one thing in this
+/// function that costs anything. Three statements in one breath: the draft is
+/// taken, the field is left empty, and the message goes on the thread as a new
+/// turn — which is also what brings the thread card to the front, so the reader
+/// is looking at the conversation from the instant they asked rather than from
+/// whenever the model first says something (see [`App::start_turn`]). Then the
+/// worker: [`chatting::start_turn`] owns the channel, the say-when and this
+/// turn's copy of the agent, and what comes back is the one value the loop keeps
+/// about a turn it is not performing. Nothing is waited for here — everything
+/// the turn produces arrives at the bottom of the loop, exactly as a run's does.
+///
+/// Cleared rather than kept, which is the one place in here that can lose
+/// somebody's typing and is now honest: the words are on the thread card a row
+/// above the field, so nothing is lost, and a field still holding the question
+/// that is being answered would be a field the next Enter asked it from again.
+/// Nothing is said on the footer either — the question is on screen, and warlock
+/// announcing what the reader can read would be warlock talking about itself.
+///
+/// An empty or whitespace-only draft never arrives here at all — [`compose_for`]
+/// answers that Enter with the draft unchanged — so a submission with nothing in
+/// it is a keystroke rather than a mistake and has nothing to report. Neither
+/// does a submit while a turn is already in flight: the field is muted for the
+/// whole of one, so the Enter that would ask a second question is swallowed
+/// before it ever becomes a [`Composed`] (see [`press_for`]).
+///
+/// Nothing chat-shaped goes anywhere near the engine. The message is handed to
+/// the chat agent and to the thread card, and to nothing else: the request a
+/// pact builds is what it always was, and a run is never told a word of this.
 ///
 /// [`compose_for`]: warlock_tui::compose_for
-fn apply_compose(app: &mut App, composer: &mut Composer, outcome: Composed) {
+fn apply_compose(
+    app: &mut App,
+    composer: &mut Composer,
+    outcome: Composed,
+    chat: &mut Chat,
+    now: Instant,
+) {
     match outcome {
         Composed::Typing(next) => *composer = next,
         Composed::Leave => app.set_focus(Focus::Panel),
-        Composed::Submit => {}
+        Composed::Submit => {
+            // Taken before the field is emptied, and emptied by replacing it
+            // outright: the muting is put back at the top of the next round from
+            // the turn alone, which is what makes "however the turn ends, the
+            // field comes back" one line in the loop rather than a flag to unset
+            // on five paths.
+            let message = composer.draft().to_owned();
+            *composer = Composer::default();
+            chat.ask(app, &message, now);
+        }
+    }
+}
+
+/// Start the run one of the two long keystrokes is asking for, if it is asking
+/// for one.
+///
+/// The pact key and the refresh key, in one place because they were already one
+/// arm with one word changed: a refresh is a run like a pact — one worker, one
+/// channel, one account, one say-when — over the stale directories of a subtree
+/// rather than all of them, and which those are is the engine's judgement and
+/// not this loop's. The word that changes is which press decides; everything
+/// either side of it is the same three statements.
+///
+/// The copy is taken before the press paints anything, because the toggle is no
+/// longer its own undo: it puts a whole subtree into one state, and the states
+/// it painted over were not all the same one. The copy is a list of rows and a
+/// tally, and it is taken once per press of one key.
+///
+/// `now` is the instant the key was pressed, and the account counts its clocks
+/// from it: a run is as old as the keystroke that asked for it, not as old as
+/// the first thing the model got round to saying.
+///
+/// `None` from either press needs nothing done about it, and it covers two cases
+/// that are alike in exactly this way: both have already said their piece on the
+/// app, and the next frame draws it. A refused toggle put its sentence in
+/// [`App::message`](warlock_tui::App::message); a press while a run is in flight
+/// started nothing — a second run over a tree the first one is still writing to
+/// would be two of them racing for the same documents and the same manifest —
+/// and said so by setting the flag that words `App::pact_line` as already
+/// running. Which is also what makes the two keys refuse each other: the
+/// in-flight check both of them go through is this one `Option<Running>`,
+/// whichever run is the one in flight.
+///
+/// `action` is one of the two run keys and nothing else, because the one arm
+/// that calls this names both of them in its pattern; anything else would be the
+/// pact key, which is the safe half of that pair to be wrong in — it refuses
+/// every row a refresh would have refused and says so.
+fn start_press(
+    action: Action,
+    app: &mut App,
+    pact: &mut Option<Running>,
+    manifest: &Manifest,
+    scope: &Scope,
+    agent: &ClaudeAgent,
+    now: Instant,
+) {
+    let before = app.clone();
+    let running = pact.is_some();
+    let work = if action == Action::Refresh {
+        refresh_press(app, running, now).map(Work::Refresh)
+    } else {
+        pact_press(app, running, now).map(Work::Pact)
+    };
+    if let Some(work) = work {
+        // The worker, the channel and the say-when, in the one value the loop
+        // keeps about a run it is not doing — see [`start_run`], which is where
+        // both keys start theirs.
+        *pact = Some(start_run(work, before, manifest, &scope.repo_root, agent));
     }
 }
 

@@ -801,7 +801,7 @@ mod tests {
                 .map(|line| match line {
                     Line::Directory { path } => path.display().to_string(),
                     Line::Clocked { clock, text } => format!("{clock} {text}"),
-                    Line::Summary { text } | Line::Text { text } => text,
+                    Line::Summary { text } | Line::Text { text } | Line::Said { text } => text,
                 })
                 .collect()
         }

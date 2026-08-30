@@ -96,6 +96,8 @@ use std::time::Instant;
 use warlock_engine::{IntoDocument, NodeState, StateCounts, Tree, to_manifest_path};
 
 use crate::account::{Account, Line};
+use crate::claude::Activity;
+use crate::thread::{Ending, Thread};
 use crate::wrap::wrapped;
 
 /// One line of the flattened tree: what to draw, how far to indent it, and
@@ -1034,8 +1036,9 @@ struct Status {
     mouse_captured: bool,
 }
 
-/// One slot, two cards: the account of the run and the document somebody asked
-/// to read, with a window apiece and one bit saying which of them is on screen.
+/// One slot, three cards: the account of the run, the conversation somebody is
+/// having, and the document somebody asked to read, with a window apiece and
+/// one bit saying which of them is on screen.
 ///
 /// The group that survives everything. A reload carries it, because the tree is
 /// read again *because* a run finished and dropping it would wipe the record at
@@ -1046,37 +1049,43 @@ struct Status {
 /// live app and steal back the four fields that must not roll back. It is a
 /// field move now.
 ///
-/// `account` and `document` are the two cards, and there are exactly two: no
-/// list, no stack, no history and no third card, so "which card is showing" is
-/// [`Showing`]'s two variants and nothing anybody can cycle. Each card is either
-/// empty or filled — filled by [`App::start_account`] and [`App::show_document`]
-/// respectively — and a filled card stays filled: reading a file does not throw
-/// the account away and a pact starting does not throw the document away. That
-/// is the whole point of the slot being two cards rather than one thing at a
-/// time: a reader with a document up keeps it while a run goes on filling the
-/// card behind it.
+/// `account`, `thread` and `document` are the cards, and there are exactly
+/// three: no list, no stack, no history and no fourth card, so "which card is
+/// showing" is [`Showing`]'s three variants and nothing anybody can grow. Each
+/// card is either empty or filled — filled by [`App::start_account`],
+/// [`App::start_turn`] and [`App::show_document`] respectively — and a filled
+/// card stays filled: reading a file does not throw the account away, a pact
+/// starting does not throw the document away, and neither of them touches the
+/// conversation. That is the whole point of the slot being three cards rather
+/// than one thing at a time: a reader with a document up keeps it while a run
+/// goes on filling the card behind it, and the answer to a question they asked
+/// a minute ago is still there when they swap back to it.
 ///
 /// A card being filled is not the same as it having lines. An app that has never
 /// run a pact has nothing to draw in the panel at all, not even a heading, while
 /// an account that has started and recorded nothing yet is a run under way — and
 /// the difference between the two is a blank panel and one that has started. A
 /// second pact starts a second account rather than appending to the first: one
-/// pact, one account.
+/// pact, one account. The thread is the one card that is the other way round —
+/// one session, one conversation, so a second question goes under the first
+/// rather than in place of it. See `Card::accrue`.
 ///
-/// `showing` is which card the panel draws, and it moves for exactly two
-/// reasons: the view key bringing a document to the front ([`App::show_document`])
-/// and the swap key. A run never moves it — a run fills its own card wherever the
+/// `showing` is which card the panel draws, and it moves for exactly three
+/// reasons: the view key bringing a document to the front ([`App::show_document`]),
+/// a message submitted below bringing the thread to it ([`App::start_turn`]), and
+/// the swap key. A run never moves it — a run fills its own card wherever the
 /// reader is looking — and neither does a document being read again under the
-/// reader after `$EDITOR` rewrote it ([`App::refill_document`]).
+/// reader after `$EDITOR` rewrote it ([`App::refill_document`]), nor anything a
+/// turn already under way reports.
 ///
 /// Each card carries its own `offset` and `follows`, which is what lets the
 /// account go on following the newest line while the document is up and lets the
-/// reader come back to the line they left. `height` and `width` are the two things both
-/// cards share, because there is one panel and it is as tall and as wide as the
-/// frame says. The width is only ever *used* by one of them — a document is
-/// wrapped to it, where an account is cut to it by the renderer instead (see
-/// [`mod@crate::wrap`]) — but it is a fact about the panel rather than about
-/// either card, and it sits beside the height for that reason.
+/// reader come back to the line they left. `height` and `width` are the two things all
+/// three cards share, because there is one panel and it is as tall and as wide as the
+/// frame says. The width is only ever *used* by two of them — a document is
+/// wrapped to it and so is an answer, where an account is cut to it by the
+/// renderer instead (see [`mod@crate::wrap`]) — but it is a fact about the panel
+/// rather than about any one card, and it sits beside the height for that reason.
 /// Together they are to the panel what `viewport_height` and `scroll_offset` are
 /// to the tree — with one difference, which is the flag. The tree's window is
 /// dragged about by a selection; the panel has no selection, so a card's window
@@ -1089,40 +1098,48 @@ struct Status {
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Panel {
     account: Card<Account>,
+    thread: Card<Thread>,
     document: Card<Vec<Line>>,
     showing: Showing,
     height: usize,
     width: usize,
 }
 
-/// Which of the panel's two cards is on screen.
+/// Which of the panel's three cards is on screen.
 ///
-/// Two variants and no third, for [`Focus`]'s reason: the panel holds an
-/// account and a document, so "which card is showing" is a
-/// bit, not an index into a list somebody could grow. There is no `Nothing`
-/// here — a slot with an empty card showing draws warlock's mark, which is a
-/// fact about the card rather than a third thing to be showing.
+/// Three variants and no fourth, for [`Focus`]'s reason: the panel holds an
+/// account, a conversation and a document, so "which card is showing" is one of
+/// three named things, not an index into a list somebody could grow. There is no
+/// `Nothing` here — a slot with an empty card showing draws warlock's mark,
+/// which is a fact about the card rather than a fourth thing to be showing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 enum Showing {
     /// The account of the pact running now, or of the last one to run, or the
     /// empty card an app that has run no pact opens on.
     #[default]
     Account,
+    /// The conversation: every question typed below and what came back. Only
+    /// [`App::start_turn`] brings it to the front, and the swap key takes it
+    /// either way.
+    Thread,
     /// The document last read. Only [`App::show_document`] puts the panel here,
     /// and only the swap key takes it back.
     Document,
 }
 
 impl Showing {
-    /// The other card: what [`App::swap_card`] shows.
+    /// The card after this one: what [`App::swap_card`] shows next.
     ///
     /// [`Focus::next`] for the slot, and written the same way and for the same
-    /// reason — "the panel is showing one of these two" stays the thing the type
-    /// says, so a third card would be a compile error here rather than a swap
-    /// that quietly went nowhere.
-    const fn other(self) -> Self {
+    /// reason — an arm per card, so "the panel is showing one of these" stays
+    /// the thing the type says and a fourth card is a compile error here rather
+    /// than a swap that quietly went nowhere. The order is the order the reader
+    /// reads them in: the run, then the conversation about it, then the file it
+    /// wrote.
+    const fn next(self) -> Self {
         match self {
-            Self::Account => Self::Document,
+            Self::Account => Self::Thread,
+            Self::Thread => Self::Document,
             Self::Document => Self::Account,
         }
     }
@@ -1176,6 +1193,28 @@ impl<T: Shown> Card<T> {
         self.follows = follows;
     }
 
+    /// What is on the card, ready to be added to, filling an empty card first
+    /// and pinning its window to the newest line.
+    ///
+    /// The append path, and deliberately not a second [`Card::place`]: `place`
+    /// drops what the card held, which is right for a run and for a read and
+    /// wrong for a conversation. One session is one thread, so a question asked
+    /// ten minutes in goes under the nine before it rather than in place of
+    /// them, and only the first of them fills the card at all.
+    ///
+    /// It follows, every time. Somebody who has just asked something is asking
+    /// to see the answer, so the window goes back to the newest line even if
+    /// they had scrolled up to re-read an older turn — the one thing that moves
+    /// a card's window without the reader having pressed a movement key, and it
+    /// is their own keystroke that does it.
+    fn accrue(&mut self) -> &mut T
+    where
+        T: Default,
+    {
+        self.follows = true;
+        self.held.get_or_insert_with(T::default)
+    }
+
     /// How many rows the card draws as at `width`, or none at all while nothing
     /// has filled it.
     ///
@@ -1222,11 +1261,12 @@ impl<T: Shown> Card<T> {
 /// What a card can hold: something with lines the panel can count and cut a
 /// window out of.
 ///
-/// The two implementations are the two cards — an [`Account`], which words its
-/// own lines and has clocks in them, and a document, which is the lines
-/// themselves. A document has no clock, so `now` reaches only the account; the
-/// panel draws one list either way, and which list it is is this trait's
-/// business rather than the renderer's.
+/// The three implementations are the three cards — an [`Account`], which words
+/// its own lines and has clocks in them, a [`Thread`], which has both clocks and
+/// prose, and a document, which is the lines themselves. A document has no
+/// clock, so `now` reaches only the other two; the panel draws one list whichever
+/// card is up, and which list it is is this trait's business rather than the
+/// renderer's.
 trait Shown {
     /// How many rows this draws as in a panel `width` columns wide.
     fn line_count(&self, width: usize) -> usize;
@@ -1247,6 +1287,44 @@ impl Shown for Account {
 
     fn window(&self, offset: usize, height: usize, _width: usize, now: Instant) -> Vec<Line> {
         Self::window(self, offset, height, now)
+    }
+}
+
+/// A thread is both at once, and which half a row belongs to is decided by what
+/// kind of line it is. The work lines are the account's own lines, worded by the
+/// account's own function, so they count one row each and are cut to the width
+/// by the renderer exactly as a run's are. The answer is prose — the only prose
+/// warlock draws — so it is wrapped to the panel's width through the same
+/// `rows_of` a document goes through, and a terminal dragged narrower re-flows
+/// an answer the reader is looking at rather than asking the model again.
+///
+/// The question is not wrapped: it is what the reader typed, in the rows they
+/// typed it in, and a line of it too long for the panel is cut like an account's.
+/// What they came back to read is the answer, and it is the answer the width is
+/// spent on.
+impl Shown for Thread {
+    fn line_count(&self, width: usize) -> usize {
+        // Counted from the rows themselves rather than from a second formula
+        // over the turns, so the count and the window cannot come to disagree
+        // about what a width does. Any instant answers: `now` decides what a
+        // clock *says* and never whether it is a row, and nothing else in a
+        // turn moves — so the first turn's own start, the one instant a thread
+        // that has rows can always name, is as good as the frame's.
+        self.turns().first().map_or(0, |first| {
+            self.lines(first.started())
+                .iter()
+                .map(|line| rows_of(line, width).len())
+                .sum()
+        })
+    }
+
+    fn window(&self, offset: usize, height: usize, width: usize, now: Instant) -> Vec<Line> {
+        self.lines(now)
+            .iter()
+            .flat_map(|line| rows_of(line, width))
+            .skip(offset)
+            .take(height)
+            .collect()
     }
 }
 
@@ -1275,12 +1353,13 @@ impl Shown for Vec<Line> {
     }
 }
 
-/// The rows one line of a document draws as at `width`.
+/// The rows one line of a document or a thread draws as at `width`.
 ///
-/// One row per line for everything but text, which is everything a document is
-/// not: [`App::refill_document`] words every line of a document as a
-/// [`Line::Text`], so the arm below it is there to keep this total rather than
-/// because a heading or a clock could ever reach it.
+/// One row per line for everything but text, and text is the prose: every line
+/// of a document ([`App::refill_document`] words them all as [`Line::Text`]) and
+/// a turn's answer. The other arm is a heading, a clock, a summary or a question
+/// somebody typed, each of which is one thing that happened or one thing that
+/// was said and so one row, cut to the width by the renderer.
 fn rows_of(line: &Line, width: usize) -> Vec<Line> {
     match line {
         Line::Text { text } => wrapped(text, width)
@@ -1296,6 +1375,7 @@ impl Panel {
     fn scroll_offset(&self) -> usize {
         match self.showing {
             Showing::Account => self.account.scroll_offset(self.height, self.width),
+            Showing::Thread => self.thread.scroll_offset(self.height, self.width),
             Showing::Document => self.document.scroll_offset(self.height, self.width),
         }
     }
@@ -1304,6 +1384,7 @@ impl Panel {
     fn window(&self, now: Instant) -> Vec<Line> {
         match self.showing {
             Showing::Account => self.account.window(self.height, self.width, now),
+            Showing::Thread => self.thread.window(self.height, self.width, now),
             Showing::Document => self.document.window(self.height, self.width, now),
         }
     }
@@ -1312,17 +1393,19 @@ impl Panel {
     fn lines_below(&self) -> usize {
         match self.showing {
             Showing::Account => self.account.lines_below(self.height, self.width),
+            Showing::Thread => self.thread.lines_below(self.height, self.width),
             Showing::Document => self.document.lines_below(self.height, self.width),
         }
     }
 
-    /// Move the showing card's window, and only that card's: the other keeps the
-    /// line the reader left it on, and an account left following goes on
-    /// following.
+    /// Move the showing card's window, and only that card's: the other two keep
+    /// the line the reader left them on, and an account or a thread left
+    /// following goes on following.
     fn scroll_to(&mut self, offset: usize) {
         let (height, width) = (self.height, self.width);
         match self.showing {
             Showing::Account => self.account.scroll_to(offset, height, width),
+            Showing::Thread => self.thread.scroll_to(offset, height, width),
             Showing::Document => self.document.scroll_to(offset, height, width),
         }
     }
@@ -1396,12 +1479,13 @@ impl App {
     /// so nothing has been refused for one running either, see
     /// [`App::set_pact_refused`].
     ///
-    /// Both of the panel's cards are empty: no pact has run this session and no
-    /// file has been read, so the panel has nothing whatever to draw, which is a
-    /// different state from a run that has started and done nothing yet. See
-    /// [`App::start_account`]. The account is the card showing, as it is on every
-    /// app until a document arrives, and both windows start the way the tree's
-    /// does — no height, no offset — since nothing has been drawn.
+    /// All three of the panel's cards are empty: no pact has run this session,
+    /// nobody has asked anything and no file has been read, so the panel has
+    /// nothing whatever to draw, which is a different state from a run that has
+    /// started and done nothing yet. See [`App::start_account`]. The account is
+    /// the card showing, as it is on every app until a document or a question
+    /// arrives, and all three windows start the way the tree's does — no height,
+    /// no offset — since nothing has been drawn.
     ///
     /// The tree has the focus, so the movement keys move its selection from the
     /// first keystroke on. See [`App::focus`].
@@ -1448,6 +1532,11 @@ impl App {
             },
             panel: Panel {
                 account: Card {
+                    held: None,
+                    offset: 0,
+                    follows: false,
+                },
+                thread: Card {
                     held: None,
                     offset: 0,
                     follows: false,
@@ -1939,16 +2028,117 @@ impl App {
         self.panel.document.place(lines, false);
     }
 
-    /// Show the other card of the panel: the account if the document is up, the
-    /// document if the account is.
+    /// Put `message` on the thread as a new turn asked at `at`, and show it.
+    ///
+    /// What a submitted composer comes to. The message is the reader's own text,
+    /// exactly as they typed it and never a path or a prompt this type built:
+    /// [`App`] runs nothing and asks nobody, so whoever took the draft starts the
+    /// worker themselves and reports back through the three methods below.
+    ///
+    /// This is the only way an app comes to have a thread at all, and the only
+    /// thing besides [`App::show_document`] that decides which card is drawn:
+    /// somebody who has just asked a question is looking for the answer, so the
+    /// thread comes to the front and its window goes to the newest line. The card
+    /// accumulates rather than being replaced — one session, one conversation, so
+    /// the turn goes under every turn before it — which is `Card::accrue`'s whole
+    /// reason for existing beside `Card::place`.
+    ///
+    /// The other two cards are left exactly as they are, lines and windows and
+    /// all: a run goes on filling the account behind the conversation, and a
+    /// document read an hour ago is still on the line the reader left it on.
+    /// The composer is on screen over the thread as it is over the account, so
+    /// nothing here touches the focus.
+    ///
+    /// Not a keystroke's whole answer: it says nothing and takes down nothing
+    /// the last keystroke said, exactly as [`App::start_account`] does not.
+    pub fn start_turn(&mut self, message: impl Into<String>, at: Instant) {
+        self.panel.thread.accrue().ask(message, at);
+        self.panel.showing = Showing::Thread;
+    }
+
+    /// Record what the live turn was seen doing at `at`.
+    ///
+    /// The tool calls, the thinking and the writing, as they arrive off whatever
+    /// channel the turn is reporting over — one clocked line each, in the
+    /// account's own words, with no tool result and no fragment of the answer
+    /// among them. See [`Thread::record`], which decides all of that; this only
+    /// finds the card.
+    ///
+    /// A no-op when nothing has been asked yet, and when the live turn is over
+    /// already — the same rule, one level down, that keeps a late event from
+    /// contradicting a line the reader can already see.
+    pub fn record_turn(&mut self, activity: &Activity, at: Instant) {
+        if let Some(thread) = self.panel.thread.held.as_mut() {
+            thread.record(activity, at);
+        }
+    }
+
+    /// Land `answer` on the live turn at `at` and close it.
+    ///
+    /// The one piece of prose warlock draws, kept whole and unwrapped here and
+    /// wrapped to the panel's width on the way to the screen. A model that
+    /// finished with nothing to say ends the turn instead of answering it — see
+    /// [`Thread::answer`] — so a caller with an empty answer in hand needs no
+    /// arm of its own.
+    ///
+    /// A no-op with no live turn, for [`App::record_turn`]'s reason.
+    pub fn answer_turn(&mut self, answer: impl Into<String>, at: Instant) {
+        if let Some(thread) = self.panel.thread.held.as_mut() {
+            thread.answer(answer, at);
+        }
+    }
+
+    /// Close the live turn at `at` with the one line `ending` makes.
+    ///
+    /// The cancel and every failure come through here, and every one of them is
+    /// one line under whatever had already arrived: a turn stopped after two
+    /// tool calls still shows those two tool calls. Nothing is returned and
+    /// nothing is thrown: a turn that could not be run is a row in the panel,
+    /// which is why [`Ending`] is a value and not an error.
+    ///
+    /// A no-op with no live turn, for [`App::record_turn`]'s reason, and on a
+    /// turn that has ended already — the first ending wins, because it is the
+    /// one on screen.
+    pub fn end_turn(&mut self, ending: &Ending, at: Instant) {
+        if let Some(thread) = self.panel.thread.held.as_mut() {
+            thread.end(ending, at);
+        }
+    }
+
+    /// The conversation this session has had, or `None` before the first
+    /// question.
+    ///
+    /// Reaches the thread card whichever card is showing, exactly as
+    /// [`App::account`] reaches the account: a turn goes on being answered while
+    /// the reader looks at a run, and whether one is in flight is a fact about
+    /// the conversation rather than about what is on screen. Read-only — the
+    /// four methods above are the whole of how a turn is written — and it is
+    /// what a test asks when it wants the turns themselves rather than the rows
+    /// the panel would draw them in.
+    #[must_use]
+    pub const fn thread(&self) -> Option<&Thread> {
+        self.panel.thread.held.as_ref()
+    }
+
+    /// Show the next card of the panel: the account, then the thread, then the
+    /// document, then the account again.
     ///
     /// The whole of what the swap key does, and the only thing besides
-    /// [`App::show_document`] that decides which card is on screen — which is
-    /// what makes a document survive a pact starting, finishing, failing or
-    /// being cancelled underneath it. A toggle rather than a pair of "show the
-    /// account" / "show the document" calls, for [`App::toggle_focus`]'s reason:
-    /// there are two cards and one key, and a toggle cannot be asked for a
-    /// third.
+    /// [`App::show_document`] and [`App::start_turn`] that decides which card is
+    /// on screen — which is what makes a document survive a pact starting,
+    /// finishing, failing or being cancelled underneath it. A cycle rather than
+    /// three "show the account" / "show the thread" / "show the document" calls,
+    /// for [`App::toggle_focus`]'s reason: there are three cards and one key, and
+    /// a cycle cannot be asked for a fourth.
+    ///
+    /// A card nothing has filled is stepped over rather than shown, so the key
+    /// never spends a press on warlock's mark: a session that has read no file
+    /// swaps between the run and the conversation, and one that has asked
+    /// nothing swaps between the run and the file exactly as it did when there
+    /// were two cards. The account is the exception and is never stepped over —
+    /// it is the card the panel opens on and the one the composer is drawn
+    /// under, so it is the way back from a document to a screen the reader can
+    /// type on.
     ///
     /// Nothing else moves, with one exception. The focus stays on the pane it
     /// was on — unless it was on the composer and this is the swap that brings
@@ -1956,28 +2146,60 @@ impl App {
     /// as it does for [`App::show_document`]; see `rescue_focus`. The tree's
     /// selection and window stay where the reader left them, each card keeps its
     /// own window — so scrolling a card, swapping away and swapping back lands
-    /// on the line they left, while an account left following goes on following
-    /// and shows the newest line of a run that reported while the document was
-    /// up — and the last keystroke's message stays exactly as it was. A swap
-    /// that worked says nothing: the panel is now drawing the other card, which
-    /// the reader can see, and a footer line announcing it would only push aside
-    /// something they had not finished reading.
+    /// on the line they left, while an account or a thread left following goes on
+    /// following and shows the newest line of whatever reported while the
+    /// document was up — and the last keystroke's message stays exactly as it
+    /// was. A swap that worked says nothing: the panel is now drawing another
+    /// card, which the reader can see, and a footer line announcing it would only
+    /// push aside something they had not finished reading.
     ///
-    /// The one thing it says is the refusal. Before the first
-    /// [`App::show_document`] of the session there is no second card to swap to,
-    /// so the panel stays on the account and the footer names the key that would
-    /// make one — the shape every refusal here takes, a fact about what is there
-    /// and then the keystroke that helps.
+    /// The one thing it says is the refusal, and there is one case left that can
+    /// reach it: the account showing with nothing asked and nothing read, where
+    /// every other card is empty and the swap has nowhere to go. The panel stays
+    /// where it is and the footer names the key that would make a second card —
+    /// the shape every refusal here takes, a fact about what is there and then
+    /// the keystroke that helps.
     ///
     /// Reads no file and asks the engine nothing: the cards are already in hand,
     /// and this only picks which of them is drawn.
     pub fn swap_card(&mut self) {
-        if !self.has_document() {
+        let Some(card) = self.next_card() else {
             self.set_message(no_document_message());
             return;
-        }
-        self.panel.showing = self.panel.showing.other();
+        };
+        self.panel.showing = card;
         self.rescue_focus();
+    }
+
+    /// The card a swap from the one showing lands on, or `None` when there is
+    /// nowhere to go.
+    ///
+    /// Round the cycle, stopping at the first card the swap will stop on. Two
+    /// steps and no loop: [`Showing::next`] is a three-way cycle, so the two
+    /// cards after this one are the other two, and a `find` over them is the
+    /// whole search.
+    fn next_card(&self) -> Option<Showing> {
+        let next = self.panel.showing.next();
+        [next, next.next()]
+            .into_iter()
+            .find(|&card| self.stops_on(card))
+    }
+
+    /// Whether the swap key stops on `card`.
+    ///
+    /// On anything filled, and on the account whether it is filled or not. The
+    /// account is where the panel opens, where warlock's mark is drawn and where
+    /// the composer is drawn under, so a reader who has read a file with no run
+    /// behind it still has one press back to a screen they can type on. The
+    /// other two are worth a press only once something is on them: a swap onto
+    /// an empty thread or an empty document would spend a keystroke showing the
+    /// mark, which is a thing the reader can already see on the account.
+    const fn stops_on(&self, card: Showing) -> bool {
+        match card {
+            Showing::Account => true,
+            Showing::Thread => self.has_thread(),
+            Showing::Document => self.has_document(),
+        }
     }
 
     /// Whether a pact has run this session, and so whether the panel has an
@@ -1992,11 +2214,22 @@ impl App {
         self.panel.account.held.is_some()
     }
 
+    /// Whether anybody has asked anything this session, and so whether the panel
+    /// has a thread card to draw.
+    ///
+    /// `false` until the first [`App::start_turn`] and `true` from then on. A
+    /// conversation is not started again, so this goes from `false` to `true`
+    /// once and never back: a second question goes under the first.
+    #[must_use]
+    pub const fn has_thread(&self) -> bool {
+        self.panel.thread.held.is_some()
+    }
+
     /// Whether a file somebody asked to read is on the panel's document card.
     ///
-    /// The same question of the other card, and the two are freely both `true`:
-    /// the slot holds two cards, so a run started under a document fills one
-    /// without emptying the other. `false` until the first
+    /// The same question of the third card, and all three are freely `true` at
+    /// once: the slot holds three cards, so a run started under a document fills
+    /// one without emptying the others. `false` until the first
     /// [`App::show_document`] of the session.
     #[must_use]
     pub const fn has_document(&self) -> bool {
@@ -2014,8 +2247,27 @@ impl App {
     pub const fn has_panel_content(&self) -> bool {
         match self.panel.showing {
             Showing::Account => self.has_account(),
+            Showing::Thread => self.has_thread(),
             Showing::Document => self.has_document(),
         }
+    }
+
+    /// Whether the card on screen is the conversation.
+    ///
+    /// The one question the renderer asks about *which* card is showing, and it
+    /// is asked for one reason: a reader must be able to tell the thread from
+    /// the account without reading the rows, so the panel says which card it is
+    /// on its own edge (see [`draw_panel`](crate::ui)). A run's card and a
+    /// file's card each say what they are in every row they draw — a directory
+    /// heading and a clock, or the file's own text — where a conversation could
+    /// be either at a glance, and the answer to that is a word on the border
+    /// rather than a fourth thing colour is made to mean.
+    ///
+    /// About the slot and not about the thread: a session with ten turns in it
+    /// answers `false` here while the reader is looking at the account.
+    #[must_use]
+    pub const fn showing_thread(&self) -> bool {
+        matches!(self.panel.showing, Showing::Thread)
     }
 
     /// The account of the pact running now, or of the last one to run, or `None`
@@ -2149,6 +2401,7 @@ impl App {
     pub const fn panel_follows(&self) -> bool {
         match self.panel.showing {
             Showing::Account => self.panel.account.follows,
+            Showing::Thread => self.panel.thread.follows,
             Showing::Document => self.panel.document.follows,
         }
     }
@@ -2462,7 +2715,9 @@ impl App {
     /// same answer for both, and it is here rather than in either of them
     /// because it is a fact about which card the panel is showing: the composer
     /// is hidden while the document card is up, so a file being read gives the
-    /// panel those rows back.
+    /// panel those rows back. It is on screen over the thread for the opposite
+    /// reason — the thread is what the field writes into, and a conversation
+    /// with no way to add to it would be a transcript.
     ///
     /// The rule is about the *card*, not about the draft. A composer holding
     /// nothing is still showable — that is the one empty row somebody types the
@@ -2471,7 +2726,7 @@ impl App {
     #[must_use]
     pub const fn composer_showable(&self) -> bool {
         match self.panel.showing {
-            Showing::Account => true,
+            Showing::Account | Showing::Thread => true,
             Showing::Document => false,
         }
     }
@@ -4099,6 +4354,7 @@ mod tests {
     };
     use crate::claude::Activity;
     use crate::fixture;
+    use crate::thread::Ending;
 
     /// How many rows the scrolling tests work with, and how tall the window
     /// onto them is. A tree comfortably taller than its window, so there is a
@@ -8033,7 +8289,10 @@ mod tests {
                 Line::Directory { path } => path.display().to_string(),
                 // A document's line is its own text and nothing else, which is
                 // exactly what a test asserting on what is drawn wants back.
-                Line::Clocked { text, .. } | Line::Summary { text } | Line::Text { text } => text,
+                Line::Clocked { text, .. }
+                | Line::Summary { text }
+                | Line::Text { text }
+                | Line::Said { text } => text,
             })
             .collect()
     }
@@ -8551,6 +8810,16 @@ mod tests {
         )
     }
 
+    /// The same of the thread's card.
+    fn thread_window(app: &App) -> (usize, bool) {
+        (
+            app.panel
+                .thread
+                .scroll_offset(app.panel.height, app.panel.width),
+            app.panel.thread.follows,
+        )
+    }
+
     /// The same of the document's card.
     fn document_window(app: &App) -> (usize, bool) {
         (
@@ -8576,9 +8845,10 @@ mod tests {
             .flatten()
             .map(|line| match line {
                 Line::Directory { path } => path.display().to_string(),
-                Line::Clocked { text, .. } | Line::Summary { text } | Line::Text { text } => {
-                    text.clone()
-                }
+                Line::Clocked { text, .. }
+                | Line::Summary { text }
+                | Line::Text { text }
+                | Line::Said { text } => text.clone(),
             })
             .collect()
     }
@@ -9026,6 +9296,315 @@ mod tests {
         assert!(!app.has_panel_content());
         before.set_message(message);
         assert_eq!(app, before, "the refusal moved something else");
+    }
+
+    /// What the thread tests ask.
+    const QUESTION: &str = "what does the engine do?";
+    /// What comes back: prose, and long enough that [`NARROW`] has to break it
+    /// over three rows — the same sentence [`a_long_line`] wraps, so the two
+    /// tests agree about what wrapping does.
+    const ANSWER: &str = "It walks the tree and writes what it finds.";
+
+    /// Put one whole turn on `app`'s thread: the question a second past `base`,
+    /// three tool calls under it, then the answer.
+    ///
+    /// Five rows, so a [`PANEL`]-tall window over it has a top and a bottom that
+    /// are not the same row, and every row says which one it is.
+    fn ask_and_answer(app: &mut App, base: Instant) {
+        app.start_turn(QUESTION, at(base, 1));
+        for line in 0..3 {
+            app.record_turn(
+                &Activity::Tool {
+                    name: "Grep".to_owned(),
+                    detail: Some(format!("thread line {line}")),
+                },
+                at(base, line + 2),
+            );
+        }
+        app.answer_turn(ANSWER, at(base, 5));
+    }
+
+    #[test]
+    fn the_swap_key_goes_round_all_three_cards_and_leaves_none_unreachable() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        let account = panel_text(&app, at(base, 9));
+
+        // A question brings the thread to the front by itself, the way a read
+        // brings the document; both cards are filled behind whatever is drawn.
+        ask_and_answer(&mut app, base);
+        assert!(app.has_thread());
+        let thread = panel_text(&app, at(base, 9));
+        app.show_document(document_lines(), false);
+        let document = panel_text(&app, at(base, 9));
+
+        // Three cards drawing three different things, so a swap landing on the
+        // wrong one could not pass for the right one.
+        assert_ne!(thread, account, "the run and the conversation draw alike");
+        assert_ne!(document, thread, "the conversation and the file draw alike");
+        assert_ne!(document, account, "the run and the file draw alike");
+
+        // Round twice from the document: the cycle is a cycle, every card is
+        // reachable from every other, and none of the three is skipped.
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            app.swap_card();
+            seen.push(panel_text(&app, at(base, 9)));
+        }
+        assert_eq!(
+            seen,
+            [
+                account.clone(),
+                thread.clone(),
+                document.clone(),
+                account,
+                thread,
+                document,
+            ]
+        );
+        // And nothing was said about any of it: the reader can see which card
+        // they are on.
+        assert!(app.message().is_none(), "a swap that worked said something");
+    }
+
+    #[test]
+    fn a_swap_with_a_thread_and_no_document_goes_between_those_two() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        let account = panel_text(&app, at(base, 9));
+        ask_and_answer(&mut app, base);
+        let thread = panel_text(&app, at(base, 9));
+        assert!(!app.has_document());
+
+        // The empty card is stepped over rather than shown, so the key never
+        // spends a press on warlock's mark — and it is never refused either,
+        // because there is somewhere to go.
+        app.swap_card();
+        assert_eq!(panel_text(&app, at(base, 9)), account);
+        app.swap_card();
+        assert_eq!(panel_text(&app, at(base, 9)), thread);
+        assert!(app.message().is_none(), "a swap that worked said something");
+    }
+
+    #[test]
+    fn showing_one_card_throws_neither_of_the_other_two_away() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+
+        // The account parked a line down from its top, then a thread over it
+        // parked a line down from its own, then a document over that.
+        app.select_first();
+        app.select_next();
+        assert_eq!(account_window(&app), (1, false));
+
+        ask_and_answer(&mut app, base);
+        app.select_first();
+        app.select_next();
+        assert_eq!(thread_window(&app), (1, false));
+
+        app.show_document(document_lines(), false);
+        app.select_next();
+        assert_eq!(document_window(&app), (1, false));
+
+        // Every card is still filled and every window is still where it was
+        // left: showing one card neither empties the others nor moves them.
+        assert!(app.has_account());
+        assert!(app.has_thread());
+        assert!(app.has_document());
+        assert_eq!(account_window(&app), (1, false));
+        assert_eq!(thread_window(&app), (1, false));
+        assert_eq!(document_window(&app), (1, false));
+
+        // And round the cycle: each card draws from the line the reader left it
+        // on rather than from its top or its end.
+        app.swap_card();
+        assert_eq!(panel_text(&app, at(base, 9))[0], "Read line 0");
+        app.swap_card();
+        assert_eq!(panel_text(&app, at(base, 9))[0], "Grep thread line 0");
+        app.swap_card();
+        assert_eq!(
+            panel_text(&app, at(base, 9)),
+            ["line 1", "line 2", "line 3"]
+        );
+    }
+
+    #[test]
+    fn each_of_the_three_cards_keeps_its_own_follow_flag() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        // The account parked, the thread left following, the document at the
+        // top of a file it was never following: three cards, three answers.
+        app.select_first();
+        ask_and_answer(&mut app, base);
+        app.show_document(document_lines(), false);
+
+        assert_eq!(account_window(&app), (0, false));
+        assert_eq!(thread_window(&app), (2, true));
+        assert_eq!(document_window(&app), (0, false));
+
+        // Whichever card is showing is the one the panel answers about, and the
+        // other two go on being what they were.
+        assert!(!app.panel_follows());
+        assert_eq!(app.panel_scroll_offset(), 0);
+        app.swap_card();
+        assert!(!app.panel_follows());
+        assert_eq!(app.panel_scroll_offset(), 0);
+        app.swap_card();
+        assert!(app.panel_follows());
+        assert_eq!(app.panel_scroll_offset(), 2);
+
+        // A turn already under way goes on being answered behind a document,
+        // and the document does not move an inch while it is.
+        app.start_turn("and how long does it take?", at(base, 6));
+        app.swap_card();
+        assert_eq!(
+            panel_text(&app, at(base, 9)),
+            ["line 0", "line 1", "line 2"]
+        );
+        app.answer_turn("About a second.", at(base, 7));
+        assert_eq!(
+            panel_text(&app, at(base, 9)),
+            ["line 0", "line 1", "line 2"]
+        );
+
+        // And the thread is at its newest row the moment the reader swaps back
+        // to it, exactly as a run left following is.
+        app.swap_card();
+        app.swap_card();
+        assert!(app.panel_follows());
+        assert_eq!(
+            panel_text(&app, at(base, 9)).last().map(String::as_str),
+            Some("About a second.")
+        );
+    }
+
+    #[test]
+    fn an_answer_wider_than_the_panel_is_drawn_in_as_many_rows_as_it_needs() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        app.set_panel_height(9);
+        ask_and_answer(&mut app, base);
+
+        // Nobody has measured the panel yet, so nothing is wrapped: five lines,
+        // five rows.
+        assert_eq!(app.panel_width(), 0);
+        assert_eq!(panel_text(&app, at(base, 5)).len(), 5);
+
+        app.set_panel_width(NARROW);
+
+        // Seven rows now. The answer is prose and is broken at spaces into
+        // three; the question and the work lines are one row each, however long
+        // they are, because a thing said and a thing done are cut rather than
+        // wrapped.
+        assert_eq!(
+            panel_text(&app, at(base, 5)),
+            [
+                QUESTION,
+                "Grep thread line 0",
+                "Grep thread line 1",
+                "Grep thread line 2",
+                "It walks the tree",
+                "and writes what it",
+                "finds.",
+            ]
+        );
+        assert_eq!(app.panel_lines_below(), 0);
+
+        // The window is cut out of those rows and not out of the lines: a panel
+        // three tall over seven rows shows the last three and has four above
+        // them, and a reader who goes back to the top has those four below.
+        app.set_panel_height(PANEL);
+        assert_eq!(app.panel_scroll_offset(), 4);
+        assert_eq!(app.panel_lines_below(), 0);
+        app.select_first();
+        assert_eq!(app.panel_lines_below(), 4);
+
+        // And wider again is the answer it always was — the lines held are the
+        // model's own, so a terminal dragged about re-flows what is on screen
+        // rather than asking anything again.
+        app.set_panel_height(9);
+        app.set_panel_width(80);
+        let drawn = panel_text(&app, at(base, 5));
+        assert_eq!(drawn.len(), 5);
+        assert_eq!(drawn.last().map(String::as_str), Some(ANSWER));
+    }
+
+    #[test]
+    fn a_second_question_goes_under_the_first_rather_than_in_place_of_it() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        // Nothing asked yet: there is no thread at all, and what a turn would
+        // have reported falls on the floor rather than making one.
+        assert!(!app.has_thread());
+        assert!(app.thread().is_none());
+        app.record_turn(&Activity::Thinking, base);
+        app.answer_turn("nobody asked", base);
+        assert!(!app.has_thread());
+
+        ask_and_answer(&mut app, base);
+        app.start_turn("and what did that cost?", at(base, 6));
+        app.record_turn(&Activity::Cost { usd: 0.02 }, at(base, 7));
+        app.end_turn(&Ending::Cancelled, at(base, 8));
+
+        // One session, one conversation: the second turn is under the first and
+        // the first is exactly as it was answered.
+        let thread = app.thread().expect("a question has been asked");
+        assert_eq!(thread.turns().len(), 2);
+        assert_eq!(thread.turns()[0].message(), QUESTION);
+        assert_eq!(thread.turns()[0].answer(), Some(ANSWER));
+        assert_eq!(thread.turns()[1].message(), "and what did that cost?");
+        assert_eq!(thread.turns()[1].ending(), Some(&Ending::Cancelled));
+        assert_eq!(thread.turns()[1].cost(), Some(0.02));
+
+        // A second ending is the first one still: the line on screen wins.
+        app.end_turn(&Ending::NothingSaid, at(base, 9));
+        let thread = app.thread().expect("a question has been asked");
+        assert_eq!(thread.turns()[1].ending(), Some(&Ending::Cancelled));
+
+        // And the run behind all of it never heard a word: a conversation is
+        // not a pact.
+        assert_eq!(app.account().map(Account::line_count), Some(10));
+    }
+
+    #[test]
+    fn a_reload_carries_the_thread_over_with_the_rest_of_the_panel() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        ask_and_answer(&mut app, base);
+        let thread = panel_text(&app, at(base, 9));
+
+        let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+
+        // The tree is read again *because* something happened, and a
+        // conversation is not a claim about the tree: the card, the turn on it
+        // and the card showing all come over.
+        assert!(reseated.has_thread());
+        assert_eq!(
+            reseated.thread().map(|thread| thread.turns().len()),
+            Some(1)
+        );
+        assert_eq!(panel_text(&reseated, at(base, 9)), thread);
+    }
+
+    #[test]
+    fn a_run_rolled_back_leaves_the_conversation_where_it_was() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        // The copy is taken before the run, so it predates every word of the
+        // conversation held over it.
+        let before = app.clone();
+        ask_and_answer(&mut app, base);
+        let thread = panel_text(&app, at(base, 9));
+
+        app.restore_from(before);
+
+        // The panel is the one thing a rollback keeps, and the thread is on it:
+        // a question somebody asked is not a claim about the tree, and rolling
+        // one back would take the answer off the screen of the reader who
+        // wanted it.
+        assert!(app.has_thread());
+        assert_eq!(app.thread().map(|thread| thread.turns().len()), Some(1));
+        assert_eq!(panel_text(&app, at(base, 9)), thread);
     }
 
     #[test]

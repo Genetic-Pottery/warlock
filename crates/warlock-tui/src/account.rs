@@ -55,7 +55,7 @@ use crate::claude::Activity;
 ///
 /// The bare fact, exactly as [`Activity::Thinking`] carries it: that thinking
 /// happened, never what was thought.
-const THINKING: &str = "thinking";
+pub(crate) const THINKING: &str = "thinking";
 
 /// The placeholder line of a section that has heard nothing yet.
 ///
@@ -64,7 +64,7 @@ const THINKING: &str = "thinking";
 /// minute of every pass. The word is about warlock rather than the model on
 /// purpose: `thinking` would claim to know what the silence is, and this file
 /// only words what it is given.
-const WAITING: &str = "waiting";
+pub(crate) const WAITING: &str = "waiting";
 
 /// The whole of what "the pass is producing its answer" is worth saying.
 ///
@@ -72,7 +72,7 @@ const WAITING: &str = "waiting";
 /// two: a pass thinks for a few seconds and then spends the rest of its time
 /// writing. The word is about the pass, not about the document — what it is
 /// writing is the document, and the document is the outcome line's business.
-const WRITING: &str = "writing";
+pub(crate) const WRITING: &str = "writing";
 
 /// The whole of what "a big file is being read in pieces" is worth saying.
 ///
@@ -97,6 +97,145 @@ struct Entry {
     at: Instant,
     /// What it says, whole and untruncated.
     text: String,
+}
+
+/// A run of clocked lines under one heading, and the whole rule their clocks
+/// follow.
+///
+/// Everything the module docs above say about the ticking clock lives in here:
+/// where a line's number is measured from, which line is the one that moves,
+/// what freezes it, and what an empty one shows in the meantime. It is the
+/// mechanism rather than the meaning — it holds no directory, no outcome and no
+/// money, and it words nothing except the [`WAITING`] placeholder, which is
+/// about the silence rather than about whatever is being waited for.
+///
+/// Crate-private and shared, because there are two things in warlock that are a
+/// list of things a model was seen doing with a clock on each: a [`Section`] of
+/// a pact's account, and a turn of the panel's thread. They differ in what
+/// surrounds the lines, not in how the lines tick, and a second copy of this
+/// rule would be a second clock to keep in step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Log {
+    /// When this stretch of work began, which is where its clocks count from.
+    started: Instant,
+    /// The lines, in arrival order.
+    entries: Vec<Entry>,
+    /// When this stopped being the live one, if it has. A frozen log's last
+    /// line stops here instead of ticking.
+    closed: Option<Instant>,
+}
+
+impl Log {
+    /// A log of work that began at `at` and has heard nothing yet.
+    pub(crate) const fn opened_at(at: Instant) -> Self {
+        Self {
+            started: at,
+            entries: Vec::new(),
+            closed: None,
+        }
+    }
+
+    /// When this stretch of work began.
+    pub(crate) const fn started(&self) -> Instant {
+        self.started
+    }
+
+    /// When it stopped moving, or `None` while it is still the live one.
+    pub(crate) const fn closed_at(&self) -> Option<Instant> {
+        self.closed
+    }
+
+    /// Whether it has stopped moving.
+    pub(crate) const fn is_closed(&self) -> bool {
+        self.closed.is_some()
+    }
+
+    /// How many rows it draws as: one per line, and one for the [`WAITING`]
+    /// placeholder where there are none.
+    ///
+    /// Counted here as well as drawn, because this number is what a scroll
+    /// offset is clamped against: a row that is drawn but not counted would be
+    /// one the panel can never scroll to the edge of.
+    pub(crate) fn row_count(&self) -> usize {
+        self.entries.len().max(1)
+    }
+
+    /// Stop this log moving as of `at`, if it has not stopped already.
+    ///
+    /// Idempotent on purpose: work can be frozen by its own ending, by the next
+    /// stretch starting, or by the run ending, and whichever happens first is
+    /// the honest instant to freeze at.
+    pub(crate) fn freeze(&mut self, at: Instant) {
+        self.closed.get_or_insert(at);
+    }
+
+    /// File `text` as a line of its own, arriving at `at`.
+    pub(crate) fn push(&mut self, text: impl Into<String>, at: Instant) {
+        self.entries.push(Entry {
+            at,
+            text: text.into(),
+        });
+    }
+
+    /// Let the stretch of `text` go on if it is already the newest line, or
+    /// open one for it at `at` if it is not.
+    ///
+    /// What makes a repeated report read as one continuing thing rather than as
+    /// a column of identical lines: the entry that is already there keeps the
+    /// instant it opened at, so its clock counts the whole stretch rather than
+    /// restarting on every report the stream happens to send.
+    pub(crate) fn extend_or_open(&mut self, text: &str, at: Instant) {
+        if self.entries.last().is_none_or(|entry| entry.text != text) {
+            self.push(text, at);
+        }
+    }
+
+    /// Every line as a drawable row, with clocks measured against `now`.
+    ///
+    /// A log with nothing in it yields the [`WAITING`] placeholder, clocked as
+    /// entry zero, which gives it the right instant by the ordinary rule: no
+    /// entry follows it, so it ticks with `now` while the log is live and
+    /// freezes where the log froze. The first real entry takes its place — same
+    /// rule, nothing special to remove.
+    pub(crate) fn rows(&self, now: Instant) -> impl Iterator<Item = Line> + '_ {
+        let waiting = self.entries.is_empty().then(|| Line::Clocked {
+            clock: self.clock(0, now),
+            text: WAITING.to_owned(),
+        });
+        waiting
+            .into_iter()
+            .chain(
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, entry)| Line::Clocked {
+                        clock: self.clock(index, now),
+                        text: entry.text.clone(),
+                    }),
+            )
+    }
+
+    /// The instant the line at `index` shows on its clock, against a caller's
+    /// `now`.
+    ///
+    /// The whole rule of the ticking clock, in one expression. A line with
+    /// another beneath it shows the instant that one arrived, so it reads as how
+    /// long the thing took. The last line of a live log shows `now`, so it
+    /// counts up between events. The last line of a frozen log shows the instant
+    /// it froze, so it stops.
+    fn shown_at(&self, index: usize, now: Instant) -> Instant {
+        self.entries
+            .get(index + 1)
+            .map_or_else(|| self.closed.unwrap_or(now), |next| next.at)
+    }
+
+    /// The clock text for the line at `index`, against a caller's `now`.
+    fn clock(&self, index: usize, now: Instant) -> String {
+        clock(
+            self.shown_at(index, now)
+                .saturating_duration_since(self.started),
+        )
+    }
 }
 
 /// How a directory's pass ended, in the words it ends its section with.
@@ -171,17 +310,13 @@ impl Outcome {
 pub struct Section {
     /// The directory being worked, named however the caller named it.
     directory: PathBuf,
-    /// When this section opened, which is where its clock counts from.
-    started: Instant,
-    /// The lines under it, in arrival order, with the outcome line — if the
-    /// section was closed with one — last.
-    entries: Vec<Entry>,
+    /// When this section opened, what has been filed under it in arrival order
+    /// — with the outcome line, if it was closed with one, last — and whether
+    /// its clock is still moving.
+    log: Log,
     /// What the pass reported spending, summed over however many times it said
     /// so. `None` means it never said, which is not the same as zero.
     cost: Option<f64>,
-    /// When this section stopped being the live one, if it has. A closed
-    /// section's last line is frozen here instead of ticking.
-    closed: Option<Instant>,
     /// Whether the outcome line is already under it.
     ///
     /// Not the same question as [`Section::is_closed`], and the difference is
@@ -217,64 +352,13 @@ impl Section {
     /// the same thing to a reader: nothing further will appear here.
     #[must_use]
     pub const fn is_closed(&self) -> bool {
-        self.closed.is_some()
+        self.log.is_closed()
     }
 
     /// How many drawable rows this section is: its heading plus its lines,
     /// where a section with no lines yet draws the one [`WAITING`] placeholder.
-    ///
-    /// Counted here as well as drawn, because this number is what a scroll
-    /// offset is clamped against: a row that is drawn but not counted would be
-    /// one the panel can never scroll to the edge of.
     fn line_count(&self) -> usize {
-        self.entries.len().max(1) + 1
-    }
-
-    /// The instant the line at `index` shows on its clock, against a caller's
-    /// `now`.
-    ///
-    /// The whole rule of the ticking clock, in one expression. A line with
-    /// another beneath it shows the instant that one arrived, so it reads as how
-    /// long the thing took. The last line of a live section shows `now`, so it
-    /// counts up between events. The last line of a closed section shows the
-    /// instant the section closed, so it stops.
-    fn shown_at(&self, index: usize, now: Instant) -> Instant {
-        self.entries
-            .get(index + 1)
-            .map_or_else(|| self.closed.unwrap_or(now), |next| next.at)
-    }
-
-    /// The clock text for the line at `index`, against a caller's `now`.
-    fn clock(&self, index: usize, now: Instant) -> String {
-        clock(
-            self.shown_at(index, now)
-                .saturating_duration_since(self.started),
-        )
-    }
-
-    /// Stop this section moving as of `at`, if it has not stopped already.
-    ///
-    /// Idempotent on purpose: a section can be frozen by its own outcome, by the
-    /// next section opening, or by the run ending, and whichever happens first
-    /// is the honest instant to freeze at.
-    fn freeze(&mut self, at: Instant) {
-        self.closed.get_or_insert(at);
-    }
-
-    /// Let the stretch of `text` go on if it is already the newest line, or
-    /// open one for it at `at` if it is not.
-    ///
-    /// What makes a repeated report read as one continuing thing rather than as
-    /// a column of identical lines: the entry that is already there keeps the
-    /// instant it opened at, so its clock counts the whole stretch rather than
-    /// restarting on every report the stream happens to send.
-    fn extend_or_open(&mut self, text: &str, at: Instant) {
-        if self.entries.last().is_none_or(|entry| entry.text != text) {
-            self.entries.push(Entry {
-                at,
-                text: text.to_owned(),
-            });
-        }
+        self.log.row_count() + 1
     }
 
     /// Put `outcome`'s line under this section, and stop it moving.
@@ -293,13 +377,10 @@ impl Section {
         if self.has_outcome {
             return;
         }
-        let at = self.closed.unwrap_or(at);
-        self.entries.push(Entry {
-            at,
-            text: outcome.line(self.cost),
-        });
+        let at = self.log.closed_at().unwrap_or(at);
+        self.log.push(outcome.line(self.cost), at);
         self.has_outcome = true;
-        self.freeze(at);
+        self.log.freeze(at);
     }
 }
 
@@ -310,11 +391,11 @@ impl Section {
 /// counting: a section heading takes a row like anything else, so the number of
 /// rows above and below a window is arithmetic rather than a walk.
 ///
-/// The panel's two cards — the account and the document — draw one card at a
-/// time and draw it the same way, so the rows of both are this one type and the
-/// window rule over them is one rule, whichever card the reader is looking at.
-/// [`Line::Text`] is the document's only shape, because a file's line is a
-/// file's line and nothing here knows what any of it means.
+/// The panel's cards — the account, the thread and the document — draw one card
+/// at a time and draw it the same way, so the rows of all three are this one
+/// type and the window rule over them is one rule, whichever card the reader is
+/// looking at. [`Line::Text`] is the document's only shape, because a file's
+/// line is a file's line and nothing here knows what any of it means.
 ///
 /// The text is whole. Cutting it to a width belongs to whoever knows the width.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,6 +428,24 @@ pub enum Line {
     /// on every row would spend the panel's width saying the same thing.
     Text {
         /// The line, exactly as the file has it, or the sentence about the cut.
+        text: String,
+    },
+    /// What the reader typed: the message one turn of the thread was asked in,
+    /// in their own words.
+    ///
+    /// Its own variant rather than a [`Line::Text`] with a marker in front of
+    /// it, because who said a line is a fact about the line and not a character
+    /// somebody decided to store: the renderer is the one place that knows how
+    /// the reader's half of a conversation should look, and a `>` baked in here
+    /// would be a second answer to that question sitting in the value.
+    ///
+    /// No clock — a question is not a thing that took time; the work under it is
+    /// what has a clock — and no name in front of it, because the panel has one
+    /// reader and one model and there is nobody else it could have been. Only a
+    /// thread ever yields one.
+    Said {
+        /// The message, exactly as it was typed, and wrapped by whoever knows
+        /// the width.
         text: String,
     },
 }
@@ -424,14 +523,12 @@ impl Account {
     /// so its newest line has no business still counting up.
     pub fn open_section(&mut self, directory: impl Into<PathBuf>, at: Instant) {
         if let Some(previous) = self.sections.last_mut() {
-            previous.freeze(at);
+            previous.log.freeze(at);
         }
         self.sections.push(Section {
             directory: directory.into(),
-            started: at,
-            entries: Vec::new(),
+            log: Log::opened_at(at),
             cost: None,
-            closed: None,
             has_outcome: false,
         });
     }
@@ -467,14 +564,11 @@ impl Account {
             // count of how long it has been at it. A stretch that ends and
             // begins again opens a new line, because something else will have
             // been filed in between.
-            Activity::Thinking => section.extend_or_open(THINKING, at),
-            Activity::Writing => section.extend_or_open(WRITING, at),
-            Activity::Tool { name, detail } => section.entries.push(Entry {
-                at,
-                text: detail
-                    .as_ref()
-                    .map_or_else(|| name.clone(), |detail| format!("{name} {detail}")),
-            }),
+            Activity::Thinking => section.log.extend_or_open(THINKING, at),
+            Activity::Writing => section.log.extend_or_open(WRITING, at),
+            Activity::Tool { name, detail } => {
+                section.log.push(tool_line(name, detail.as_ref()), at);
+            }
         }
     }
 
@@ -517,16 +611,15 @@ impl Account {
             return;
         }
 
-        // Pushed rather than run through `Section::extend_or_open`, which the
+        // Pushed rather than run through `Log::extend_or_open`, which the
         // repeated-report activities use: the two differ only for an event that
         // repeats *identically*, and every pass carries its own `part`, so the
         // ticket is one line per pass either way. Pushing says that outright
         // instead of leaving a reader to work out that the texts never collide.
         let file = file.as_ref().display();
-        section.entries.push(Entry {
-            at,
-            text: format!("{SUMMARISING} {file} ({part}/{parts})"),
-        });
+        section
+            .log
+            .push(format!("{SUMMARISING} {file} ({part}/{parts})"), at);
     }
 
     /// Close the newest section at `at` with the line `outcome` makes.
@@ -597,7 +690,7 @@ impl Account {
     /// more.
     pub fn finish(&mut self, at: Instant) {
         if let Some(section) = self.sections.last_mut() {
-            section.freeze(at);
+            section.log.freeze(at);
         }
 
         let directories = plural(self.sections.len(), "directory", "directories");
@@ -639,7 +732,7 @@ impl Account {
         self.sections
             .last()
             .filter(|section| !section.is_closed())
-            .map(|section| section.started)
+            .map(|section| section.log.started())
     }
 
     /// How many rows the whole account draws as.
@@ -676,35 +769,18 @@ impl Account {
 
     /// Every row, lazily, so a window costs only the rows it takes.
     ///
-    /// A section with no entries draws the [`WAITING`] placeholder under its
-    /// heading, so a pass that has not said anything yet still has a clock on
-    /// screen counting up from the moment its section opened. It is clocked as
-    /// entry zero, which gives it the right instant by the ordinary rule: no
-    /// entry follows it, so it ticks with `now` while the section is live and
-    /// freezes where the section froze. The first real entry takes its place —
-    /// same rule, nothing special to remove.
+    /// A heading and then whatever its [`Log`] draws as, which for a section
+    /// that has heard nothing yet is the [`WAITING`] placeholder: a pass that
+    /// has not said anything still has a clock on screen counting up from the
+    /// moment its section opened.
     fn rows(&self, now: Instant) -> impl Iterator<Item = Line> + '_ {
         self.sections
             .iter()
             .flat_map(move |section| {
-                let waiting = section.entries.is_empty().then(|| Line::Clocked {
-                    clock: section.clock(0, now),
-                    text: WAITING.to_owned(),
-                });
                 std::iter::once(Line::Directory {
                     path: section.directory.clone(),
                 })
-                .chain(waiting)
-                .chain(
-                    section
-                        .entries
-                        .iter()
-                        .enumerate()
-                        .map(move |(index, entry)| Line::Clocked {
-                            clock: section.clock(index, now),
-                            text: entry.text.clone(),
-                        }),
-                )
+                .chain(section.log.rows(now))
             })
             .chain(
                 self.summary
@@ -756,8 +832,23 @@ fn clock(elapsed: Duration) -> String {
 /// less than a cent — `$0.00` for a pass that reported almost nothing is a
 /// truer statement about the run's total than four decimal places of noise on
 /// every line.
-fn money(usd: f64) -> String {
+///
+/// The one place a number becomes money in this crate. What a *line* then says
+/// around it is the caller's, and the panel's two ledgers deliberately say very
+/// different things: see [`Outcome::line`] and [`Turn`](crate::Turn).
+pub(crate) fn money(usd: f64) -> String {
     format!("${usd:.2}")
+}
+
+/// A tool call as one line: its name, and the one detail [`Activity`] chose to
+/// carry, or its bare name where there is none.
+///
+/// Shared with the thread, because a `Grep` is a `Grep` whichever card it turns
+/// up on and a reader who has learnt to read one of them has learnt to read
+/// both. What is *not* shared is anything around it — a pact's line sits under
+/// a directory and a turn's under a question.
+pub(crate) fn tool_line(name: &str, detail: Option<&String>) -> String {
+    detail.map_or_else(|| name.to_owned(), |detail| format!("{name} {detail}"))
 }
 
 /// What an outcome line says about a pass's cost, including when there is none.
@@ -810,7 +901,7 @@ mod tests {
                 Line::Clocked { clock, text } => format!("{clock} {text}"),
                 // An account never yields a document's line; it is here so this
                 // helper words every row of the panel and not most of them.
-                Line::Summary { text } | Line::Text { text } => text,
+                Line::Summary { text } | Line::Text { text } | Line::Said { text } => text,
             })
             .collect()
     }
