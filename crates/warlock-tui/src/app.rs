@@ -43,7 +43,7 @@
 //! it without knowing what happened and the key handler never has to explain
 //! itself.
 //!
-//! Which of the screen's two panes the keys drive is view state of the same
+//! Which of the screen's three places the keys drive is view state of the same
 //! kind, and lives here for the same reason: it is a fact about what the reader
 //! is looking at, it changes what a keystroke does, and a rule about keystrokes
 //! that only an event loop with a terminal attached could demonstrate is a rule
@@ -482,18 +482,27 @@ struct Summarising {
     parts: usize,
 }
 
-/// Which of the screen's two panes the keys are driving.
+/// Which of the screen's three places the keys are driving.
 ///
-/// The screen is a tree column and a panel beside it, and a key that moves a
-/// selection has to be about one of them; this says which. Two variants and no
-/// third: the footer runs the width of the screen and is nobody's to drive, so
-/// there is nothing else focus could land on.
+/// The screen is a tree column, a panel beside it, and the composer at the foot
+/// of the panel's column; a key that moves a selection has to be about one of
+/// them, and a key that is a letter has to be either a command or a character
+/// somebody typed. This says which. Three variants and no fourth: the footer
+/// runs the width of the screen and is nobody's to drive, so there is nothing
+/// else focus could land on.
 ///
 /// It is deliberately not a general "which widget has the cursor" — nothing here
-/// is a widget and there is no cursor. It is one bit of view state, toggled by
-/// one key, read by the renderer to decide which border is lit and by [`App`] to
-/// decide which pane a movement key is about: see [`App::toggle_focus`] and
-/// [`App::focus`].
+/// is a widget, and the one cursor there is sits at the end of the composer's
+/// draft by construction. It is one piece of view state, cycled by one key, read
+/// by the renderer to decide which border is lit and by [`App`] to decide
+/// whether a keystroke is a command about a pane or a character for the draft:
+/// see [`App::toggle_focus`] and [`App::focus`].
+///
+/// [`Focus::Composer`] is the one variant that is not always available: the
+/// composer is not drawn at all while the panel's document card is up, and focus
+/// must never sit on a field nobody can see. That rule lives on the app rather
+/// than here, because it is a fact about which card is showing — see
+/// [`App::composer_showable`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Focus {
     /// The tree column. The movement keys move its selection, which is what
@@ -507,20 +516,33 @@ pub enum Focus {
     /// the document last read, see [`App::panel_scroll_offset`] — and the tree's
     /// selection stays exactly where the reader left it.
     Panel,
+    /// The composer under the panel. The keyboard is the draft's while focus is
+    /// here: a letter is the letter and not the command it spells, and a
+    /// movement key moves nothing at all, because neither the tree's selection
+    /// nor the panel's window is what the reader is pointed at. See
+    /// [`Composer`](crate::Composer).
+    Composer,
 }
 
 impl Focus {
-    /// The other pane: what [`App::toggle_focus`] moves to.
+    /// The next place round the cycle: what [`App::toggle_focus`] moves to.
     ///
-    /// Written as a method on the two-variant enum rather than as a `!` on a
-    /// boolean somewhere, so that "focus is one of these places" stays the thing
-    /// the type says and a third pane would be a compile error here rather than
-    /// a silent wrong answer.
+    /// Written as a method on the enum rather than as arithmetic on an index
+    /// somewhere, so that "focus is one of these places" stays the thing the
+    /// type says and a fourth place would be a compile error here rather than a
+    /// silent wrong answer.
+    ///
+    /// The order is the order they sit on screen: the tree, then the panel, then
+    /// the composer beneath it, then round to the tree again. Whether the
+    /// composer is a place the cycle can *stop* is not this method's business —
+    /// it is a fact about which card the panel is showing, and [`App`] answers
+    /// it.
     #[must_use]
-    pub const fn other(self) -> Self {
+    pub const fn next(self) -> Self {
         match self {
             Self::Tree => Self::Panel,
-            Self::Panel => Self::Tree,
+            Self::Panel => Self::Composer,
+            Self::Composer => Self::Tree,
         }
     }
 
@@ -529,11 +551,35 @@ impl Focus {
     ///
     /// The single place the rule is written down, so every movement method asks
     /// the same question rather than each of them matching on the enum in its
-    /// own way. `false` does not mean the key does nothing — it means the key is
-    /// the panel's, and scrolls the panel's window instead. See `App::movement`.
+    /// own way. `false` does not mean the key does something else here — at the
+    /// panel it scrolls the panel's window, at the composer it does nothing
+    /// whatever. See [`Focus::drives_the_panel`] and `App::movement`.
+    ///
+    /// Spelled out arm by arm rather than as a `matches!`, so that a variant
+    /// added later has to be answered for here instead of quietly falling
+    /// through to `false`.
     #[must_use]
     pub const fn drives_the_tree(self) -> bool {
-        matches!(self, Self::Tree)
+        match self {
+            Self::Tree => true,
+            Self::Panel | Self::Composer => false,
+        }
+    }
+
+    /// Whether a movement key scrolls the panel's window: the same question of
+    /// the other pane that a movement key can be about.
+    ///
+    /// The pair of them is not one boolean, because there are three places focus
+    /// can be and only two of them a movement key means anything at: the
+    /// composer answers `false` to both, which is exactly how "a movement key at
+    /// the composer moves nothing" is written down once. Arm by arm for
+    /// [`Focus::drives_the_tree`]'s reason.
+    #[must_use]
+    pub const fn drives_the_panel(self) -> bool {
+        match self {
+            Self::Panel => true,
+            Self::Tree | Self::Composer => false,
+        }
     }
 }
 
@@ -831,13 +877,20 @@ pub struct App {
 /// in when the flag goes on is what makes the flag reversible without the tree,
 /// exactly as `collapsed` is.
 ///
-/// `focus` is which of the screen's two panes the keys are driving, and it is
+/// `focus` is which of the screen's three places the keys are driving, and it is
 /// here rather than in the event loop for the reason everything else here is:
 /// it is view state that changes what a keystroke does, and the rule it decides
-/// — that a movement key moves the tree's selection while the tree has the focus
-/// and scrolls the panel while the panel has it — is a rule about [`App`]'s
-/// methods, testable with nothing attached to stdout. It starts on the tree,
-/// which is the pane warlock opens on. See [`Focus`].
+/// — that a movement key moves the tree's selection while the tree has the focus,
+/// scrolls the panel while the panel has it, and moves nothing at all while the
+/// composer has it — is a rule about [`App`]'s methods, testable with nothing
+/// attached to stdout. It starts on the tree, which is the pane warlock opens
+/// on. See [`Focus`].
+///
+/// The variant is the whole of what the composer keeps here. The draft itself is
+/// deliberately *not* a field on [`App`]: [`App::restore_from`] puts a pre-run
+/// copy of the app back after a run that recorded nothing and keeps only the
+/// panel, so a draft stored anywhere but the panel group would die every time
+/// somebody pacted a clean directory.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Viewpoint {
     collapsed: BTreeSet<PathBuf>,
@@ -967,8 +1020,8 @@ struct Panel {
 
 /// Which of the panel's two cards is on screen.
 ///
-/// Two variants and no third, exactly as [`Focus`] is two panes and no third:
-/// the panel holds an account and a document, so "which card is showing" is a
+/// Two variants and no third, for [`Focus`]'s reason: the panel holds an
+/// account and a document, so "which card is showing" is a
 /// bit, not an index into a list somebody could grow. There is no `Nothing`
 /// here — a slot with an empty card showing draws warlock's mark, which is a
 /// fact about the card rather than a third thing to be showing.
@@ -986,7 +1039,7 @@ enum Showing {
 impl Showing {
     /// The other card: what [`App::swap_card`] shows.
     ///
-    /// [`Focus::other`] for the slot, and written the same way and for the same
+    /// [`Focus::next`] for the slot, and written the same way and for the same
     /// reason — "the panel is showing one of these two" stays the thing the type
     /// says, so a third card would be a compile error here rather than a swap
     /// that quietly went nowhere.
@@ -1697,12 +1750,18 @@ impl App {
     /// what the last keystroke said, exactly as [`App::start_account`] does not.
     ///
     /// The one other way lines reach this card is [`App::refill_document`],
-    /// which is this method minus the last line of it: a file read again because
-    /// something changed it under the reader does not get to decide what they
-    /// are looking at.
+    /// which is this method minus the last two lines of it: a file read again
+    /// because something changed it under the reader does not get to decide what
+    /// they are looking at, and so cannot hide the composer either.
+    ///
+    /// The document card hides the composer, so a reader who was typing when
+    /// they pressed the view key has the focus moved onto the panel — see
+    /// `rescue_focus`. Their draft is untouched: it is not kept here, and the
+    /// field it is kept in is not emptied by anything on screen changing.
     pub fn show_document(&mut self, lines: impl IntoIterator<Item = impl Into<String>>, cut: bool) {
         self.refill_document(lines, cut);
         self.panel.showing = Showing::Document;
+        self.rescue_focus();
     }
 
     /// Put the lines of a file on the document card again, leaving which card is
@@ -1762,7 +1821,10 @@ impl App {
     /// there are two cards and one key, and a toggle cannot be asked for a
     /// third.
     ///
-    /// Nothing else moves. The focus stays on the pane it was on, the tree's
+    /// Nothing else moves, with one exception. The focus stays on the pane it
+    /// was on — unless it was on the composer and this is the swap that brings
+    /// the document up, which hides the composer, and then it lands on the panel
+    /// as it does for [`App::show_document`]; see `rescue_focus`. The tree's
     /// selection and window stay where the reader left them, each card keeps its
     /// own window — so scrolling a card, swapping away and swapping back lands
     /// on the line they left, while an account left following goes on following
@@ -1786,6 +1848,7 @@ impl App {
             return;
         }
         self.panel.showing = self.panel.showing.other();
+        self.rescue_focus();
     }
 
     /// Whether a pact has run this session, and so whether the panel has an
@@ -1871,6 +1934,11 @@ impl App {
         let panel = mem::take(&mut self.panel);
         *self = view;
         self.panel = panel;
+        // The focus comes from `view` and the card showing comes from the panel
+        // that stayed, so this is the one place the two can arrive out of step:
+        // a copy taken with the composer focused, put back over a panel that has
+        // a document up since. See `rescue_focus`.
+        self.rescue_focus();
     }
 
     /// How many lines of whatever the panel holds fit in it, as last set by
@@ -2243,46 +2311,110 @@ impl App {
         self.status.mouse_captured = captured;
     }
 
-    /// Which pane the keys are driving: the tree column, or the panel beside
-    /// it.
+    /// Which place the keys are driving: the tree column, the panel beside it,
+    /// or the composer under the panel.
     ///
     /// [`Focus::Tree`] for a freshly built app, which is the pane warlock opens
-    /// on. For the renderer, deciding which border to light, and for the
-    /// movement methods below, deciding whether they mean anything.
+    /// on. For the renderer, deciding which border to light and where to put the
+    /// cursor, for the event loop, deciding whether a letter is a command or a
+    /// character, and for the movement methods below, deciding whether they mean
+    /// anything.
     #[must_use]
     pub const fn focus(&self) -> Focus {
         self.viewpoint.focus
     }
 
-    /// Move the focus to the other pane.
+    /// Whether the composer is a thing on screen: whether it is drawn, and so
+    /// whether focus is allowed to land on it.
     ///
-    /// The whole of what the focus key does. It is a toggle rather than a pair
-    /// of "focus the tree" / "focus the panel" calls because there are two panes
-    /// and one key, and a toggle cannot be asked for a third.
+    /// One question with two readers. The renderer asks it to decide whether to
+    /// cut rows off the bottom of the panel's column at all, and the event loop
+    /// asks it to decide whether a keystroke can be the composer's. It is the
+    /// same answer for both, and it is here rather than in either of them
+    /// because it is a fact about which card the panel is showing: the composer
+    /// is hidden while the document card is up, so a file being read gives the
+    /// panel those rows back.
     ///
-    /// Nothing else moves: the selection stays on the row it was on, the window
-    /// stays where it was, and the last keystroke's message stays up. Focus
-    /// changes what the *next* key means and says nothing itself, so there is
-    /// nothing here for a message to report and nothing that would make a
-    /// message stale.
+    /// The rule is about the *card*, not about the draft. A composer holding
+    /// nothing is still showable — that is the one empty row somebody types the
+    /// first character into — and a draft somebody typed is not thrown away by
+    /// the document that hides it.
+    #[must_use]
+    pub const fn composer_showable(&self) -> bool {
+        match self.panel.showing {
+            Showing::Account => true,
+            Showing::Document => false,
+        }
+    }
+
+    /// Move the focus one place round the cycle: tree, panel, composer, tree.
+    ///
+    /// The whole of what the focus key does. It is a cycle rather than three
+    /// "focus the tree" / "focus the panel" / "focus the composer" calls because
+    /// there are three places and one key, and a cycle cannot be asked for a
+    /// fourth.
+    ///
+    /// The composer is skipped while it is not on screen — see
+    /// [`App::composer_showable`] — so a reader with a document up tabs between
+    /// the tree and the panel and never lands on a field that is not there. One
+    /// skip is enough and there is no loop here: the composer is the only place
+    /// that can be unavailable, and the place after it is always the tree.
+    ///
+    /// Nothing else moves: the selection stays on the row it was on, the windows
+    /// stay where they were, the draft stays exactly as it was typed, and the
+    /// last keystroke's message stays up. Focus changes what the *next* key
+    /// means and says nothing itself, so there is nothing here for a message to
+    /// report and nothing that would make a message stale.
     pub const fn toggle_focus(&mut self) {
-        self.viewpoint.focus = self.viewpoint.focus.other();
+        let next = self.viewpoint.focus.next();
+        self.viewpoint.focus = match next {
+            Focus::Composer if !self.composer_showable() => next.next(),
+            Focus::Tree | Focus::Panel | Focus::Composer => next,
+        };
     }
 
     /// Put the focus on `focus`, wherever it was.
     ///
     /// What a pointer can ask for and a key cannot. The focus key knows only
-    /// "the other one", which is the whole of what one key over two panes can
+    /// "the next one", which is the whole of what one key over three places can
     /// mean; a click names the pane it landed in, and naming the pane that
-    /// already has the focus has to leave it there rather than toggle away from
-    /// it — which is exactly what assigning the value it already holds does.
+    /// already has the focus has to leave it there rather than move off it —
+    /// which is exactly what assigning the value it already holds does.
+    ///
+    /// Asking for the composer while it is not on screen puts the focus on the
+    /// panel instead, which is the same rule [`App::toggle_focus`] keeps and the
+    /// same one [`App::show_document`] applies to focus that was already there:
+    /// nothing may point the keyboard at a field nobody can see.
     ///
     /// Nothing else moves, for the reason [`App::toggle_focus`] moves nothing
     /// else: focus changes what the *next* movement means and says nothing
-    /// itself, so the selection, both windows and the last keystroke's message
-    /// are none of its business.
+    /// itself, so the selection, both windows, the draft and the last
+    /// keystroke's message are none of its business.
     pub const fn set_focus(&mut self, focus: Focus) {
         self.viewpoint.focus = focus;
+        self.rescue_focus();
+    }
+
+    /// Move the focus off the composer if the composer is not on screen.
+    ///
+    /// The one rescue, called by everything that can put the document card up
+    /// under a focused composer — [`App::show_document`], [`App::swap_card`] and
+    /// [`App::restore_from`] — and by [`App::set_focus`], which can be handed the
+    /// composer outright. Written once here rather than at each of those, so
+    /// "focus never sits on a hidden field" is one sentence in one place.
+    ///
+    /// It lands on the panel, not on the tree: the document that hid the
+    /// composer is drawn in the panel, so the panel is where the reader is
+    /// looking and the movement keys they press next are about the thing they
+    /// just asked for. Nothing else moves, and nothing is said — a rescue is not
+    /// a keystroke's answer.
+    const fn rescue_focus(&mut self) {
+        match self.viewpoint.focus {
+            Focus::Composer if !self.composer_showable() => {
+                self.viewpoint.focus = Focus::Panel;
+            }
+            Focus::Tree | Focus::Panel | Focus::Composer => {}
+        }
     }
 
     /// Move up one line: the selection while the tree has the focus, the
@@ -2480,15 +2612,23 @@ impl App {
     /// the tree column has moved, the reader is looking somewhere else entirely,
     /// and sweeping away the line explaining what the last key did would be the
     /// panel answering for the tree.
+    ///
+    /// A movement at the composer does neither, because there is no third thing
+    /// to move: the draft has no window and its cursor is at its end by
+    /// construction, so `j` at the composer is the letter j and never reaches
+    /// here at all. If one does — a wheel, a chord, anything routed here while
+    /// the keyboard is the draft's — it is a no-op rather than a selection
+    /// moving under a reader who is typing.
     fn movement(
         &mut self,
         tree: impl FnOnce(&Self) -> usize,
         panel: impl FnOnce(&Self, usize) -> usize,
     ) {
-        if self.viewpoint.focus.drives_the_tree() {
+        let focus = self.viewpoint.focus;
+        if focus.drives_the_tree() {
             self.selected = tree(self);
             self.moved();
-        } else {
+        } else if focus.drives_the_panel() {
             let offset = panel(self, self.panel_scroll_offset());
             self.scroll_panel_to(offset);
         }
@@ -7304,7 +7444,21 @@ mod tests {
     /// focus.
     fn panel_focused() -> App {
         let mut app = scrolled_to(MANY / 2);
-        app.toggle_focus();
+        app.set_focus(Focus::Panel);
+        app
+    }
+
+    /// The same app with the keyboard on the composer instead: mid-tree for
+    /// [`panel_focused`]'s reason, and with the account card up, since the
+    /// composer is not a place focus can be while a document is.
+    fn composer_focused() -> App {
+        let mut app = scrolled_to(MANY / 2);
+        app.set_focus(Focus::Composer);
+        assert_eq!(
+            app.focus(),
+            Focus::Composer,
+            "the composer refused the keys"
+        );
         app
     }
 
@@ -7316,14 +7470,145 @@ mod tests {
     }
 
     #[test]
-    fn the_focus_key_moves_to_the_panel_and_back() {
+    fn the_focus_key_walks_the_tree_the_panel_and_the_composer_and_comes_back() {
         let mut app = App::from_rows(three_rows());
 
         app.toggle_focus();
         assert_eq!(app.focus(), Focus::Panel);
 
         app.toggle_focus();
-        assert_eq!(app.focus(), Focus::Tree);
+        assert_eq!(app.focus(), Focus::Composer);
+
+        app.toggle_focus();
+        assert_eq!(app.focus(), Focus::Tree, "the cycle did not come home");
+
+        // And round again, so the cycle is the cycle rather than three
+        // one-off answers.
+        for expected in [Focus::Panel, Focus::Composer, Focus::Tree] {
+            app.toggle_focus();
+            assert_eq!(app.focus(), expected);
+        }
+    }
+
+    #[test]
+    fn the_composer_is_showable_only_while_the_account_card_is_up() {
+        let mut app = App::from_rows(three_rows());
+        assert!(app.composer_showable(), "an app opens with room to type");
+
+        app.show_document(["a line of a file"], false);
+        assert!(!app.composer_showable(), "the document card hid nothing");
+
+        app.swap_card();
+        assert!(app.composer_showable(), "the account card gave it back");
+    }
+
+    #[test]
+    fn the_focus_key_skips_the_composer_while_the_document_card_is_up() {
+        let mut app = App::from_rows(three_rows());
+        app.show_document(["a line of a file"], false);
+
+        // Two places and no third: the field is not on screen, so tabbing
+        // through it would point the keyboard at nothing.
+        for expected in [Focus::Panel, Focus::Tree, Focus::Panel, Focus::Tree] {
+            app.toggle_focus();
+            assert_eq!(app.focus(), expected, "the cycle stopped at a hidden field");
+        }
+    }
+
+    #[test]
+    fn showing_the_document_takes_the_focus_off_the_composer() {
+        let mut app = composer_focused();
+
+        app.show_document(["a line of a file"], false);
+
+        // The panel, because the document that hid the composer is drawn there:
+        // the next movement key is about the thing the reader just asked for.
+        assert_eq!(
+            app.focus(),
+            Focus::Panel,
+            "the keys stayed on a hidden field"
+        );
+    }
+
+    #[test]
+    fn swapping_to_the_document_takes_the_focus_off_the_composer() {
+        let mut app = composer_focused();
+        // A document to swap to, read while the tree had the keys, then the
+        // keyboard put back on the composer over the account card.
+        app.show_document(["a line of a file"], false);
+        app.swap_card();
+        app.set_focus(Focus::Composer);
+        assert_eq!(app.focus(), Focus::Composer, "the account card allows it");
+
+        app.swap_card();
+
+        assert_eq!(app.focus(), Focus::Panel, "the swap left the keys nowhere");
+    }
+
+    #[test]
+    fn a_click_cannot_put_the_keys_on_a_composer_that_is_not_on_screen() {
+        let mut app = App::from_rows(three_rows());
+        app.show_document(["a line of a file"], false);
+
+        app.set_focus(Focus::Composer);
+
+        assert_eq!(app.focus(), Focus::Panel, "a hidden field took the keys");
+    }
+
+    #[test]
+    fn a_run_rolled_back_under_a_document_leaves_the_keys_somewhere_they_can_be() {
+        // The copy is taken with the composer focused; the run puts a document
+        // up behind it and then records nothing, so the pre-run focus meets a
+        // panel that has moved on.
+        let mut app = composer_focused();
+        let before = app.clone();
+        app.show_document(["a line of a file"], false);
+
+        app.restore_from(before);
+
+        assert!(!app.composer_showable(), "the panel came back with the app");
+        assert_eq!(
+            app.focus(),
+            Focus::Panel,
+            "the keys came back to a hidden field"
+        );
+    }
+
+    #[test]
+    fn no_movement_key_moves_anything_while_the_composer_has_the_focus() {
+        // The keyboard is the draft's, so a movement key is a character and
+        // never arrives here; if one does, it moves neither pane. An account of
+        // more lines than the panel is tall and a selection in the middle of the
+        // tree, so both windows have somewhere to go if anything lets them.
+        for (name, movement) in MOVEMENTS {
+            let mut app = app_pacting(9, Instant::now());
+            app.scroll_panel_up(3);
+            app.set_focus(Focus::Tree);
+            app.select_next();
+            app.set_focus(Focus::Composer);
+            assert_eq!(app.focus(), Focus::Composer, "the account card allows it");
+            let before = app.clone();
+
+            movement(&mut app);
+
+            assert_eq!(
+                app.selected(),
+                before.selected(),
+                "{name} moved the selection"
+            );
+            assert_eq!(
+                app.scroll_offset(),
+                before.scroll_offset(),
+                "{name} scrolled"
+            );
+            assert_eq!(
+                app.panel_scroll_offset(),
+                before.panel_scroll_offset(),
+                "{name} moved the panel's window"
+            );
+            assert_eq!(app.focus(), Focus::Composer, "{name} moved the focus");
+            assert_eq!(app, before, "{name} changed something at the composer");
+        }
     }
 
     #[test]
@@ -7363,7 +7648,10 @@ mod tests {
             movement(&mut expected);
 
             movement(&mut app);
+            // Round the rest of the cycle, past the composer, to the tree.
             app.toggle_focus();
+            app.toggle_focus();
+            assert_eq!(app.focus(), Focus::Tree, "the cycle went somewhere else");
             movement(&mut app);
 
             assert_eq!(app.selected(), expected.selected(), "{name} moved oddly");
@@ -7382,6 +7670,9 @@ mod tests {
         assert_eq!(app.selected(), before.selected());
         assert_eq!(app.scroll_offset(), before.scroll_offset());
         assert_eq!(app.message(), Some("something to keep"));
+        // All the way round rather than back the way it came, so the whole cycle
+        // is covered by the comparison.
+        app.toggle_focus();
         app.toggle_focus();
         assert_eq!(app, before, "the focus key changed something else");
     }
@@ -7430,7 +7721,7 @@ mod tests {
             change(&mut unfocused);
             // Put the focus back rather than exempting the field, so the
             // comparison covers every other field there is.
-            unfocused.toggle_focus();
+            unfocused.set_focus(focused.focus());
 
             assert_eq!(unfocused, focused, "{name} depends on the focus");
         }

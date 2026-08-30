@@ -39,14 +39,17 @@ pub(crate) enum Action {
     Quit,
     /// Stop the pact that is running, and stay.
     CancelPact,
-    /// Move the keys from one pane to the other: the tree column and the panel
-    /// beside it swap which of them is lit and which of them the movement keys
-    /// drive.
+    /// Move the keys one place round the cycle: the tree column, the panel
+    /// beside it, and the composer under the panel take it in turns to be lit
+    /// and to be what the movement keys drive.
     ///
-    /// One action rather than a focus-the-tree and a focus-the-panel, because
-    /// there is one key and two panes: with only two places focus can be, "go to
-    /// the other one" is the whole of what a reader can mean by pressing it, and
-    /// a pair of actions would be two names for the same keystroke read twice.
+    /// One action rather than a focus-the-tree, a focus-the-panel and a
+    /// focus-the-composer, because there is one key: "go to the next one" is the
+    /// whole of what a reader can mean by pressing it, and a set of actions
+    /// would be three names for the same keystroke read three times. Which
+    /// places the cycle can stop at is the app's, not this function's — the
+    /// composer is skipped while the document card hides it, see
+    /// [`App::toggle_focus`](crate::App::toggle_focus).
     ToggleFocus,
     /// Move the selection one row up.
     SelectPrevious,
@@ -221,17 +224,18 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
         // stops being a way out for as long as there is a run to stop.
         KeyCode::Esc if in_flight => Some(Action::CancelPact),
         KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
-        // Tab is the key every two-pane program moves focus with: it takes no
-        // argument and asks no question, so it means the same thing whether or
-        // not a pact is in flight, exactly like every key below it.
+        // Tab is the key every split-screen program moves focus with: it takes
+        // no argument and asks no question, so it means the same thing whether
+        // or not a pact is in flight, exactly like every key below it.
         KeyCode::Tab => Some(Action::ToggleFocus),
         // Shift-Tab is a different keystroke, and crossterm spells it
         // `BackTab` — the terminal sends its own code for it, so there is no
         // shift riding along on a `Tab` to match against and nothing here that
-        // could confuse the two. It is the panel's key rather than focus's: with
-        // two panes there is no "backwards" for it to mean, and with two cards
-        // in one slot there is exactly one other thing a reader can be asking
-        // for. Like every key but Esc it reads the same way with a run in flight
+        // could confuse the two. It is the panel's key rather than focus's:
+        // focus's cycle is short enough to get anywhere by pressing Tab again,
+        // and with two cards in one slot there is exactly one other thing a
+        // reader can be asking for. Like every key but Esc it reads the same
+        // way with a run in flight
         // as without one — the cards are already in hand, so there is nothing
         // for a run to race — and what a session with no document read yet comes
         // to is the app's answer, exactly as a directory row is for `v`.

@@ -132,8 +132,9 @@ pub use app::App;
 /// has never heard of them is an app no keystroke can be suspected of having
 /// changed them on.
 pub use app::Chrome;
-/// Which of the screen's two panes the keys are driving: toggled by the focus
-/// key, or set outright by a click naming a pane.
+/// Which of the screen's three places the keys are driving — the tree, the
+/// panel or the composer: cycled by the focus key, or set outright by a click
+/// naming a pane.
 pub use app::Focus;
 /// What a pact toggle changed, for whoever has to write it to the manifest.
 pub use app::PactToggle;
