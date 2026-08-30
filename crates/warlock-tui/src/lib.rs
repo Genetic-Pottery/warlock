@@ -75,6 +75,18 @@
 //! characters it may hold. It is not a field on [`App`] either, for the reason
 //! the confirmation is not.
 //!
+//! The composer is that arrangement again with several lines in it.
+//! [`Composer`] is what has been typed at the foot of the panel's column, and
+//! [`compose_for`] says what one key does to it — append a character, take one
+//! back, start a new line on Alt+Enter, offer the draft up on Enter, or hand the
+//! keyboard back on Esc. It is the field that lets every single-letter command
+//! warlock has go back to being a letter: while it holds the keyboard, `p` is
+//! the letter p. It knows its own height as well as its own text, because the
+//! panel above it loses exactly the rows it takes and that arithmetic has to
+//! happen before the frame is cut — one row when empty, one more per newline or
+//! wrap, and never more than [`COMPOSER_MAX_ROWS`], past which it scrolls within
+//! itself so the row the cursor is on stays on screen.
+//!
 //! The dependency edge runs TUI -> engine: this crate knows the engine's
 //! vocabulary, and the engine knows nothing about terminals.
 
@@ -82,6 +94,7 @@ mod account;
 mod app;
 mod claude;
 mod colour;
+mod composer;
 mod confirm;
 /// The hand-written tree the tests in this crate draw and walk, so none of
 /// them needs a repository on disk. Test-only, and private on purpose: the
@@ -155,6 +168,18 @@ pub use claude::ClaudeAgent;
 pub use claude::INVOCATION_TIMEOUT;
 /// The colour a node state is drawn in.
 pub use colour::colour_for;
+/// The most rows the composer is ever drawn in, however long the draft gets.
+pub use composer::COMPOSER_MAX_ROWS;
+/// What a keystroke comes to while the composer holds the keyboard: the draft
+/// stays with one character more or less, the keyboard goes back on Esc, or a
+/// draft with something in it is submitted on Enter.
+pub use composer::Composed;
+/// The composer's draft: the several lines typed at the foot of the panel's
+/// column, with the cursor always at the end, and how many rows they need at a
+/// given width.
+pub use composer::Composer;
+/// What one key does to the composer, given the draft it is holding.
+pub use composer::compose_for;
 /// One of the two answers the quit confirmation offers: Yes, drawn on the left,
 /// and No, drawn on the right and lit when the question opens.
 pub use confirm::Answer;
