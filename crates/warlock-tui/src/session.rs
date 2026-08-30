@@ -285,6 +285,26 @@ impl Watched {
     }
 }
 
+/// Start watching `scope`, and say on the footer if nothing is being watched.
+///
+/// The two halves of starting a watch, in one call because they are one thing
+/// the loop does before it begins: the watcher is asked for over the walk `tree`
+/// came from ([`Watched::start`]), and whether the operating system granted one
+/// is a line and not an error ([`Watched::off_note`]) — warlock with no live
+/// updates is warlock as it was, so a refusal is reported and never returned.
+///
+/// Said here rather than in the loop, so it is one line said once and not a line
+/// re-set ten times a second, and said through [`note`] so it gives way to
+/// anything the app already has to say.
+pub(crate) fn start_watching(app: &mut App, scope: &Scope, tree: &Tree) -> Watched {
+    let watched = Watched::start(scope, tree);
+    if let Some(line) = watched.off_note() {
+        note(app, line);
+    }
+
+    watched
+}
+
 /// What this machine holds for the repository at `repo_root`, for the header to
 /// state.
 ///

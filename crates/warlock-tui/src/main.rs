@@ -127,13 +127,26 @@
 //! running they open the quit confirmation ([`QuitConfirm`]), which is drawn
 //! over the frame and answered from the keyboard, and only a Yes returns. The
 //! decision is [`press_for`]'s and not this file's — a key, the question's
-//! state, the scope prompt's and whether a run is in flight go in, and what the
-//! loop is to do comes out — so the whole gate is testable with nothing attached
-//! to stdout, and the arms below are the four things that can come of a
-//! keystroke: leave, move the question, type into the scope prompt, or hand the
-//! key to the app. While either window is up the app hears nothing, the pointer
-//! included: mouse events are read and dropped, so a click cannot select a row
-//! behind a window that is about to close.
+//! state, the scope prompt's, the composer's and whether a run is in flight go
+//! in, and what the loop is to do comes out — so the whole gate is testable with
+//! nothing attached to stdout, and the arms below are the five things that can
+//! come of a keystroke: leave, move the question, type into the scope prompt,
+//! type into the composer, or hand the key to the app. While either window is up
+//! the app hears nothing, the pointer included: mouse events are read and
+//! dropped, so a click cannot select a row behind a window that is about to
+//! close.
+//!
+//! The composer is the third place a keystroke can land, and the newest. It is a
+//! [`Composer`] on this stack — beside the two questions and for their reason,
+//! since a draft on the app would be a draft the copy put back after a run had
+//! never heard of — and it is offered to [`press_for`] exactly when
+//! [`App::focus`] is on it. While it holds the keyboard every key but Ctrl-C and
+//! Tab goes to [`warlock_tui::compose_for`] and never to [`input::action_for`],
+//! which is the whole point of the field: `p` is the letter p rather than a pact
+//! over whatever row happens to be selected. Ctrl-C still leaves, Tab still moves
+//! the keyboard on, Esc hands it back with the draft intact, and Enter offers the
+//! draft up to nobody — this slice has no consumer for a submission, and the arm
+//! below is inert on purpose.
 //!
 //! The second window is the scope prompt, and it is the one keystroke that
 //! writes to disk without being a run. `s` opens it over the selected directory
@@ -192,12 +205,13 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use std::{env, io};
 
-use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseEvent};
 use ratatui::crossterm::execute;
 use ratatui::layout::Size;
 use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
 use warlock_tui::{
-    App, ClaudeAgent, Focus, QuitConfirm, ScopePrompt, draw, panel_height, panel_width, tree_height,
+    App, ClaudeAgent, Composed, Composer, Focus, QuitConfirm, ScopePrompt, composer_on_screen,
+    draw, panel_height, panel_width, tree_height,
 };
 
 mod config;
@@ -216,7 +230,7 @@ use error::Error;
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Running, Work, apply_progress, pact_press, refresh_press, start_run};
 use scoping::{scope_edit, scope_press};
-use session::{Scope, Watched, load_app, load_manifest, note};
+use session::{Scope, Watched, load_app, load_manifest, start_watching};
 use terminal::{TerminalGuard, install_panic_hook};
 use viewing::view_press;
 
@@ -459,14 +473,9 @@ fn run() -> Result<(), Error> {
     // Asked for once, over the tree the load just produced, and kept for as
     // long as warlock runs — dropping it stops the watch. Whether it was
     // granted is a fact for the footer and nothing more, which is why this is
-    // not a `?`: warlock with no live updates is warlock as it was.
-    let mut watched = Watched::start(&scope, &tree);
-    // Said here rather than in the loop, so it is one line said once and not a
-    // line re-set ten times a second. It gives way to anything the app already
-    // has to say, exactly as the reload's own line does — see [`note`].
-    if let Some(line) = watched.off_note() {
-        note(&mut app, line);
-    }
+    // not a `?` and why the line about it is put up in there rather than here:
+    // warlock with no live updates is warlock as it was. See [`start_watching`].
+    let mut watched = start_watching(&mut app, &scope, &tree);
     let mut guard = TerminalGuard::enter()?;
     // Whether the terminal is reporting its mouse, and the only record of it:
     // the guard has just asked it to, and `m` is the one thing that changes the
@@ -494,6 +503,15 @@ fn run() -> Result<(), Error> {
     // session's — the repo root and what warlock was pointed at — and two things
     // by that name in one loop is one of them being read as the other.
     let mut prompt = ScopePrompt::default();
+    // What has been typed into the composer, and the only copy of it: empty as
+    // every session starts. It lives here, beside the two questions above,
+    // rather than on the app — and that is load-bearing rather than tidy. A
+    // pact that ends with nothing recorded puts the copy of the app taken
+    // before it back over the live one and keeps only the panel (see
+    // `App::restore_from`), so a draft stored on the app would be a draft a run
+    // could swallow half a sentence into. Here, nothing a run does can reach it:
+    // the keystrokes are the only thing that ever writes to it.
+    let mut composer = Composer::default();
     // Which file the panel's document card is holding, and the only record of
     // it: `None` until the first `v` of the session that read something. It
     // lives here rather than on the app for the reason `mouse_captured` does —
@@ -517,7 +535,16 @@ fn run() -> Result<(), Error> {
         // of a flag that may have been toggled since — is put right before it is
         // drawn.
         app.set_mouse_captured(mouse_captured);
-        draw_frame(&mut app, &mut guard, &scope, size, confirm, &prompt)?;
+        // The draft goes in beside the two questions: it is a pane cut off the
+        // bottom of the panel's column, so the panel is drawn and scrolled a few
+        // rows shorter for as long as there is a field on screen. Whether there
+        // is one is `composer_on_screen`'s answer and not this loop's — the
+        // document card takes the whole column back — and it is asked in there,
+        // and again below for the pointer, so the frame and the hit test are one
+        // rule read twice rather than two opinions about the same rows.
+        draw_frame(
+            &mut app, &mut guard, &scope, size, confirm, &prompt, &composer,
+        )?;
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
         // sits here, so the wait has to end whether or not anybody presses
@@ -525,14 +552,25 @@ fn run() -> Result<(), Error> {
         // bottom of this loop reads, and a progress line that waits for a
         // keystroke to appear is worse than none at all.
         if event::poll(POLL_INTERVAL)? {
+            // Whether there is a field for a keystroke to land in, worked out
+            // before the event is read because it is a fact about the frame that
+            // was just drawn: the composer is offered to `press_for` on exactly
+            // the condition that lights its border, which is the keyboard being
+            // pointed at it. Offered rather than looked up, because `press_for`
+            // has never heard of an `App` — the same way the two questions above
+            // are handed in — and with the keyboard anywhere else this is `None`,
+            // there is no draft to type into, and every letter is the command it
+            // has always been.
+            let typing = (app.focus() == Focus::Composer).then_some(&composer);
             match event::read()? {
-                // Two situations are passed in rather than read out of the app,
-                // and each answers one key. Whether a run is in flight is what
-                // Esc reads two ways — it cancels a run when there is one and
-                // asks about quitting when there is not — and the question on
-                // screen is what every key reads differently while it is up.
-                // See [`press_for`], which owns both readings.
-                Event::Key(key) => match press_for(key, confirm, &prompt, pact.is_some()) {
+                // Three situations are passed in rather than read out of the
+                // app, and each answers a set of keys. Whether a run is in
+                // flight is what Esc reads two ways — it cancels a run when
+                // there is one and asks about quitting when there is not — the
+                // question on screen is what every key reads differently while
+                // it is up, and the composer is what turns the letters into
+                // text. See [`press_for`], which owns all three readings.
+                Event::Key(key) => match press_for(key, confirm, &prompt, typing, pact.is_some()) {
                     // Returning is the whole of quitting, and it is enough even
                     // with a pact in flight. `pact` drops on the way out, which
                     // cancels the run and kills the `claude` it was waiting on
@@ -823,33 +861,28 @@ fn run() -> Result<(), Error> {
                         prompt =
                             scope_edit(&mut app, &mut manifest, &scope.repo_root, &prompt, edited);
                     }
+                    // Somebody typing at the foot of the panel's column: a
+                    // character more or less in the draft, the keyboard handed
+                    // back, or a draft offered up. What each of those comes to
+                    // is [`apply_compose`], which is handed the local above
+                    // rather than reaching for anything on the app — what is in
+                    // the draft is not a fact about the tree.
+                    Pressed::Compose(outcome) => apply_compose(&mut app, &mut composer, outcome),
                     // A key nothing is bound to, or one whose press has already
                     // been answered where it was decided.
                     Pressed::Nothing => {}
                 },
                 // The pointer, answered in the same shape and for the same
-                // reasons. [`mouse_action`] is handed the event, the size this
-                // round measured at the top — the one the hit test has to
-                // agree with, because it is the size the frame above was drawn
-                // at — and the app, since which row a click lands on depends
-                // on where the tree's window is. Both windows are handed over
-                // too, and either one up makes every event mean nothing: the
-                // pointer is read and dropped, because neither has clickable
-                // answers and a click on the tree behind one would move a
-                // selection the reader cannot see.
-                //
-                // What comes of it is done in [`apply_mouse`], which is where
-                // the arms that used to stand here live: none of them reads the
-                // terminal and none of them draws — the round is the redraw,
-                // which is why a pointer swept across the screen costs nothing
-                // — and side by side with the keystrokes they crowd out the
-                // half of this match that can leave the loop.
+                // reasons, and in one line because both halves of it live in
+                // [`apply_mouse`]: the event, the size this round measured at
+                // the top — the one the hit test has to agree with, because it
+                // is the size the frame above was drawn at — both windows, and
+                // the draft under the panel, whose rows the hit test has to know
+                // are not the panel's. None of what it does reads the terminal
+                // and none of it draws: the round is the redraw, which is why a
+                // pointer swept across the screen costs nothing.
                 Event::Mouse(mouse) => {
-                    // Decided over the app as it stands and only then applied,
-                    // in two statements rather than one: the hit test reads the
-                    // app it is about, and the app cannot be lent out twice.
-                    let action = mouse_action(mouse, size, &app, confirm, &prompt);
-                    apply_mouse(&mut app, action);
+                    apply_mouse(&mut app, mouse, size, confirm, &prompt, &composer);
                 }
                 // Resizes, focus changes and pasted text: read and dropped. The
                 // frame is measured again at the top of every round, so a
@@ -898,6 +931,20 @@ fn run() -> Result<(), Error> {
 /// it cleared. The scope prompt goes in beside it for the same reason and is
 /// drawn the same way — by reference, since it carries the text somebody is
 /// typing.
+///
+/// The composer comes in the same way and is the reason the panel's height is
+/// worth a second look: it is a pane cut off the bottom of the panel's column,
+/// so every row it takes is a row the account no longer has, and the height the
+/// app is told to scroll by has to be the reduced one — a panel told the whole
+/// column would scroll by a window that is partly the field's. So the one
+/// measurement goes to [`panel_height`] and to [`draw`] both, and whether there
+/// is a field on this frame at all is [`composer_on_screen`]'s answer, asked
+/// here: the document card takes the column back, and the panel is measured and
+/// drawn as it was before there was a composer to pay for.
+///
+/// The width is not measured against it, because the field takes rows and never
+/// columns: a document is wrapped at the width the panel had and the composer is
+/// drawn at that very width. See [`panel_width`].
 fn draw_frame(
     app: &mut App,
     guard: &mut TerminalGuard,
@@ -905,13 +952,23 @@ fn draw_frame(
     size: Size,
     confirm: QuitConfirm,
     prompt: &ScopePrompt,
+    composer: &Composer,
 ) -> io::Result<()> {
+    let field = composer_on_screen(app, composer);
     app.set_viewport_height(tree_height(size));
-    app.set_panel_height(panel_height(size));
+    app.set_panel_height(panel_height(size, field));
     app.set_panel_width(panel_width(size));
-    guard
-        .terminal
-        .draw(|frame| draw(frame, app, &scope.chrome, Instant::now(), confirm, prompt))?;
+    guard.terminal.draw(|frame| {
+        draw(
+            frame,
+            app,
+            &scope.chrome,
+            Instant::now(),
+            confirm,
+            prompt,
+            field,
+        );
+    })?;
     Ok(())
 }
 
@@ -966,12 +1023,29 @@ fn keep_up(
 /// nothing draws: the round is the redraw, which is why a pointer swept across
 /// the screen costs nothing.
 ///
-/// `None` covers a click that means nothing and every event arriving while a
-/// window is up: the pointer is read and dropped then, because neither dialog
-/// has clickable answers and a click on the tree behind one would move a
+/// Nothing at all covers a click that means nothing and every event arriving
+/// while a window is up: the pointer is read and dropped then, because neither
+/// dialog has clickable answers and a click on the tree behind one would move a
 /// selection the reader cannot see.
-fn apply_mouse(app: &mut App, action: Option<MouseAction>) {
-    match action {
+///
+/// The decision is made here rather than in the loop's arm because it takes the
+/// app as it stands and the app cannot be lent out twice: the hit test reads it,
+/// and what comes of the hit test writes to it, so the two are two statements
+/// with the reading finished before the writing starts. The composer is in that
+/// reading — the rows it takes are rows the panel gave up, so a click on the
+/// field would otherwise be answered as a line of an account that is not drawn
+/// there — and whether the frame had one on it at all is
+/// [`composer_on_screen`]'s answer, asked here about the app that was drawn.
+fn apply_mouse(
+    app: &mut App,
+    mouse: MouseEvent,
+    size: Size,
+    confirm: QuitConfirm,
+    prompt: &ScopePrompt,
+    composer: &Composer,
+) {
+    let field = composer_on_screen(app, composer);
+    match mouse_action(mouse, size, app, confirm, prompt, field) {
         // The wheel over the tree column, whichever pane the keys are pointed
         // at: the selection moves and the window follows it, exactly as it does
         // for a movement key.
@@ -1004,6 +1078,61 @@ fn apply_mouse(app: &mut App, action: Option<MouseAction>) {
         // the whole of what it does.
         Some(MouseAction::Focus(focus)) => app.set_focus(focus),
         None => {}
+    }
+}
+
+/// Do to the draft and to the keyboard whatever the composer just made of a
+/// key.
+///
+/// The other half of [`warlock_tui::compose_for`], in [`apply_mouse`]'s shape
+/// and for its reason: three short arms that would otherwise be three more
+/// paragraphs in the middle of the loop. Nothing here reads the terminal, draws,
+/// starts a thread or writes a file — typing at the foot of the panel is the one
+/// thing in warlock that costs nothing but a redraw.
+///
+/// The draft is a local of the loop and is handed in rather than read off the
+/// app, which is the whole of why it survives a run: a pact that recorded
+/// nothing puts the copy of the app taken before it back over the live one and
+/// keeps only the panel (see [`App::restore_from`]), and this function is the
+/// only thing in the binary that ever writes to the draft.
+///
+/// The three arms:
+///
+/// **Typing** is the draft replaced by the one [`compose_for`] just made —
+/// a character more, a character less, or a new line. The app is not told,
+/// because what somebody is halfway through writing is not a fact about the
+/// tree, and the next frame draws whatever the local now holds.
+///
+/// **Leave** is Esc, the one key that means something different here to what it
+/// means anywhere else: it hands the keyboard back and leaves every character
+/// where it is. Nothing is thrown away — what somebody typed is worth more than
+/// the keystroke that stopped typing it — and the draft is not this arm's
+/// business at all, since a focus change cannot reach it. The panel rather than
+/// the tree, and the same landing [`App::set_focus`] rescues a hidden composer
+/// onto: the field is drawn under the panel, so the panel is what the reader is
+/// looking at and what the movement keys they press next should be about. Tab
+/// from there is one press back into the field.
+///
+/// **Submit** is a draft offered up, and deliberately offered to nobody. This
+/// slice builds the field and routes the keyboard through it; what a submitted
+/// draft is *for* is the next one's. So this arm starts nothing, spawns nothing,
+/// writes nothing and says nothing on the footer — an Enter that announced a
+/// submission nothing received would be warlock claiming to have done something.
+/// The draft is left exactly as it is rather than cleared, which is the honest
+/// half of that: clearing it would be the one place in here that can lose
+/// somebody's typing, and it would lose it to a consumer that does not exist
+/// yet. When there is one, this is where the draft is taken and the field reset
+/// in the same breath. An empty or whitespace-only draft never arrives here at
+/// all — [`compose_for`] answers that Enter with the draft unchanged — so a
+/// submission with nothing in it is a keystroke rather than a mistake and has
+/// nothing to report.
+///
+/// [`compose_for`]: warlock_tui::compose_for
+fn apply_compose(app: &mut App, composer: &mut Composer, outcome: Composed) {
+    match outcome {
+        Composed::Typing(next) => *composer = next,
+        Composed::Leave => app.set_focus(Focus::Panel),
+        Composed::Submit => {}
     }
 }
 

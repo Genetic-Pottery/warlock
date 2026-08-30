@@ -4986,7 +4986,7 @@ mod tests {
             pact_of, state_of, toggle,
         };
         use crate::POLL_INTERVAL;
-        use crate::session::{NOT_WATCHING, Watched, note};
+        use crate::session::{NOT_WATCHING, Watched, note, start_watching};
 
         /// A [`Watched`] with no watcher behind it, filtering against the
         /// tree that is on disk at `scope`.
@@ -5242,6 +5242,17 @@ mod tests {
                 Watched::start(&scope, &tree).off_note(),
                 None,
                 "a working watcher put a line on the footer"
+            );
+
+            // And the two halves in the one call the loop actually makes: the
+            // watcher started and the footer left alone, because there was
+            // nothing to say about it.
+            let (mut fresh, _) = load(&scratch);
+            let _watched = start_watching(&mut fresh, &scope, &tree);
+            assert_eq!(
+                fresh.message(),
+                None,
+                "starting a working watcher said something"
             );
         }
     }

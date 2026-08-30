@@ -46,8 +46,8 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 /// One of the two answers the confirmation offers.
 ///
-/// Two variants rather than a boolean, for the reason [`Focus`](crate::Focus) is
-/// two variants: "which answer is lit" is the thing the type says, the renderer
+/// Named variants rather than a boolean, for the reason [`Focus`](crate::Focus)
+/// is an enum: "which answer is lit" is the thing the type says, the renderer
 /// matches on it exhaustively, and a `bool` would need a comment at every use
 /// saying which way round it reads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
