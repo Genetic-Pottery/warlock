@@ -9,7 +9,9 @@
 //!
 //! This file is the loop itself; each of the loop's concerns lives in a
 //! sibling module. What a keystroke or a click means is [`input`]'s, running a
-//! pact on a worker thread and applying what it says is [`pacting`]'s, asking
+//! pact on a worker thread and applying what it says is [`pacting`]'s, running
+//! one chat turn the same way and putting the answer on the thread card is
+//! [`chatting`]'s, asking
 //! for a scope and writing it is [`scoping`]'s, reading a file into the panel is
 //! [`viewing`]'s, handing one to `$EDITOR` and taking the terminal back
 //! afterwards is [`editing`]'s, where
@@ -214,6 +216,7 @@ use warlock_tui::{
     draw, panel_height, panel_width, tree_height,
 };
 
+mod chatting;
 mod config;
 mod editing;
 mod error;

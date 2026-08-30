@@ -118,7 +118,21 @@ impl Ending {
     /// One line and never two, whatever it carries: a stderr with a stack trace
     /// in it is flattened to a single row here and cut to the panel's width by
     /// whoever knows the width, the same division of labour the account keeps.
-    fn line(&self) -> String {
+    ///
+    /// Public because a failed turn is said in two places — the row under the
+    /// question, and the footer, for a reader who is looking at another card —
+    /// and those two have to be one sentence rather than two spellings that
+    /// happen to agree. Whoever ends a turn puts this on the footer and hands
+    /// the [`Ending`] itself to [`Thread::end`], which files the very same
+    /// string as a line.
+    ///
+    /// ```
+    /// use warlock_tui::Ending;
+    ///
+    /// assert_eq!(Ending::Cancelled.line(), "the turn was cancelled");
+    /// ```
+    #[must_use]
+    pub fn line(&self) -> String {
         match self {
             Self::Cancelled => "the turn was cancelled".to_owned(),
             Self::NoModel { program } => {
