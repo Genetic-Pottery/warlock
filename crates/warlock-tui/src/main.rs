@@ -230,7 +230,7 @@ use error::Error;
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Running, Work, apply_progress, pact_press, refresh_press, start_run};
 use scoping::{scope_edit, scope_press};
-use session::{Scope, Watched, load_app, load_manifest, note};
+use session::{Scope, Watched, load_app, load_manifest, start_watching};
 use terminal::{TerminalGuard, install_panic_hook};
 use viewing::view_press;
 
@@ -473,14 +473,9 @@ fn run() -> Result<(), Error> {
     // Asked for once, over the tree the load just produced, and kept for as
     // long as warlock runs — dropping it stops the watch. Whether it was
     // granted is a fact for the footer and nothing more, which is why this is
-    // not a `?`: warlock with no live updates is warlock as it was.
-    let mut watched = Watched::start(&scope, &tree);
-    // Said here rather than in the loop, so it is one line said once and not a
-    // line re-set ten times a second. It gives way to anything the app already
-    // has to say, exactly as the reload's own line does — see [`note`].
-    if let Some(line) = watched.off_note() {
-        note(&mut app, line);
-    }
+    // not a `?` and why the line about it is put up in there rather than here:
+    // warlock with no live updates is warlock as it was. See [`start_watching`].
+    let mut watched = start_watching(&mut app, &scope, &tree);
     let mut guard = TerminalGuard::enter()?;
     // Whether the terminal is reporting its mouse, and the only record of it:
     // the guard has just asked it to, and `m` is the one thing that changes the
