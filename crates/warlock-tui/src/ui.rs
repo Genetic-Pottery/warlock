@@ -6259,6 +6259,135 @@ mod tests {
         assert!(!drawn[0].contains(BAR_EMPTY), "{:?}", drawn[0]);
     }
 
+    #[test]
+    fn the_scrollback_counts_the_window_the_run_header_left_and_nothing_else() {
+        let base = Instant::now();
+        let size = Size::new(WIDTH, HEIGHT);
+        // What the panel has inside its border at this one fixed terminal size,
+        // before there is a header to pay for.
+        let whole = usize::from(panel_height(size, None, None));
+        let mut counted = Vec::new();
+
+        for (name, in_flight) in [
+            ("with no run in flight", false),
+            ("under a run's header", true),
+        ] {
+            let mut app = pacting_app(base, WIDTH, HEIGHT);
+            if in_flight {
+                app.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
+            }
+            measure_panel(&mut app, WIDTH, HEIGHT);
+            let header = app.run_header();
+            let window = usize::from(panel_height(size, None, header.as_ref()));
+            let taken = usize::from(run_header_height(size, None, header.as_ref()));
+
+            assert_eq!(
+                taken,
+                usize::from(RUN_HEADER_HEIGHT) * usize::from(in_flight),
+                "{name}"
+            );
+            assert_eq!(window + taken, whole, "{name}");
+
+            // The same account either way: three windowfuls of it, under the
+            // section heading that makes a line more.
+            fill_account(&mut app, base, whole * 3);
+            let lines = whole * 3 + 1;
+
+            // Following its newest line, so there is nothing below the window
+            // and the edge says nothing: the row the header sits on is not
+            // something a reader can scroll back through.
+            assert_eq!(app.panel_lines_below(), 0, "{name}");
+            let edge = panel_bottom_edge(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
+            assert!(!edge.contains(SCROLLBACK_ARROW), "{name}: {edge:?}");
+
+            // Scrolled back to the first line: the number on the edge is the
+            // account less the windowful on screen, counted against the window
+            // the header left rather than against the whole of the border.
+            app.toggle_focus();
+            app.select_first();
+            let buffer = render_at(&app, WIDTH, HEIGHT, at(base, 99));
+            let below = app.panel_lines_below();
+
+            assert_eq!(app.panel_scroll_offset(), 0, "{name}");
+            assert_eq!(below, lines - window, "{name}");
+            let edge = panel_bottom_edge(&buffer);
+            assert!(
+                edge.contains(&format!("{SCROLLBACK_ARROW} {below} more ({LIVE_KEY})")),
+                "{name}: {edge:?}"
+            );
+
+            // The rows bear it out: the header's row and the window's rows are
+            // the whole inside of the border, and the window drew the lines the
+            // count was taken against.
+            let rows = panel_rows(&buffer);
+            assert_eq!(rows.len(), whole, "{name}");
+            assert_eq!(rows.len() - taken, window, "{name}");
+
+            // And the count is off by exactly nothing: a line at a time down
+            // reaches the end of the account after that many presses, and the
+            // indicator is gone when it gets there.
+            for step in 1..=below {
+                app.select_next();
+                assert_eq!(app.panel_lines_below(), below - step, "{name}, {step} down");
+            }
+            assert!(app.panel_follows(), "{name}");
+            let edge = panel_bottom_edge(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
+            assert!(!edge.contains(SCROLLBACK_ARROW), "{name}: {edge:?}");
+
+            counted.push(below);
+        }
+
+        // The whole of the difference between the two is the header's row: the
+        // same account parked at the same line has exactly one more line below
+        // a window that has paid for a header, and never two.
+        assert_eq!(counted[1], counted[0] + usize::from(RUN_HEADER_HEIGHT));
+    }
+
+    #[test]
+    fn the_account_has_the_headers_row_back_the_moment_the_run_is_over() {
+        let base = Instant::now();
+        let size = Size::new(WIDTH, HEIGHT);
+        let whole = panel_height(size, None, None);
+        let mut app = pacting_app(base, WIDTH, HEIGHT);
+        fill_account(&mut app, base, usize::from(whole) * 2);
+
+        // Before the first run there is no run to report: no header, and the
+        // window is the whole inside of the border.
+        assert!(app.run_header().is_none());
+        let before = panel_rows(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
+        assert_eq!(before.len(), usize::from(whole));
+        assert!(
+            before.iter().all(|row| !row.contains(PACTING_RUN)),
+            "{before:?}"
+        );
+
+        // During the run the top row inside the border is the header's, and the
+        // account keeps every row under it — it is still following its newest
+        // line, so the line the header displaced is the one that was at the top.
+        app.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
+        measure_panel(&mut app, WIDTH, HEIGHT);
+        let during = panel_rows(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
+
+        assert_eq!(during.len(), usize::from(whole));
+        assert!(
+            during[0].starts_with(&format!("{PACTING_RUN} {RUNNING_LABEL} (2/5)")),
+            "{:?}",
+            during[0]
+        );
+        assert_eq!(during[1..], before[1..]);
+
+        // And when the run is over the rows come back: no header, the window is
+        // the whole inside of the border again, and the frame is the frame from
+        // before the run started.
+        app.clear_pact_in_flight();
+        measure_panel(&mut app, WIDTH, HEIGHT);
+        let after = panel_rows(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
+
+        assert!(app.run_header().is_none());
+        assert_eq!(run_header_height(size, None, None), 0);
+        assert_eq!(after, before);
+    }
+
     /// The drafts the layout tests are run against: nothing typed, one row,
     /// several newlines, a run long enough to wrap, and one well past the cap.
     ///

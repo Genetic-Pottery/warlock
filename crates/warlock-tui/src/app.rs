@@ -8270,6 +8270,105 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_run_headers_row_costs_the_window_one_line_and_the_scrollback_counts_it() {
+        // What a panel has inside its border at one fixed terminal size, and
+        // what a frame with a run in flight leaves the account underneath the
+        // header's row. The row is [`crate::ui`]'s `RUN_HEADER_HEIGHT`, and
+        // that the layout really cuts one is asserted over there; here it is
+        // arithmetic, so nothing is measured and no frame is drawn.
+        const WHOLE: usize = 6;
+        const HEADER: usize = 1;
+
+        let base = Instant::now();
+        let mut below_at_top = Vec::new();
+        for (name, window, in_flight) in [
+            ("with no run in flight", WHOLE, false),
+            ("under a run's header", WHOLE - HEADER, true),
+        ] {
+            // The same account either way — twelve lines, the section heading
+            // included — so the only difference between the two passes is the
+            // row the header took off the window.
+            let mut app = app_pacting(11, base);
+            let lines = app
+                .account()
+                .map(Account::line_count)
+                .expect("a run has started");
+            assert_eq!(lines, 12);
+            if in_flight {
+                app.set_run_in_flight(Run::Pact, "crates/engine", 2, 5);
+            }
+            app.set_panel_height(u16::try_from(window).expect("a window this small"));
+
+            // Following the newest line: the window is the last screenful of
+            // the window it was given, and nothing is below it however many
+            // rows the header took.
+            assert!(app.panel_follows(), "{name}");
+            assert_eq!(
+                app.panel_scroll_offset(),
+                panel_offset_for(lines, window, 0, true),
+                "{name}"
+            );
+            assert_eq!(app.panel_scroll_offset(), lines - window, "{name}");
+            assert_eq!(app.panel_lines_below(), 0, "{name}");
+            assert_eq!(app.panel_lines(at(base, 99)).len(), window, "{name}");
+
+            // Parked at the first line: what is below is everything the shorter
+            // window does not cover, counted against that window rather than
+            // against the one the panel would have had with no header on it.
+            app.select_first();
+            assert!(!app.panel_follows(), "{name}");
+            assert_eq!(
+                app.panel_scroll_offset(),
+                panel_offset_for(lines, window, 0, false),
+                "{name}"
+            );
+            assert_eq!(app.panel_lines_below(), lines - window, "{name}");
+            below_at_top.push(app.panel_lines_below());
+
+            // Parked in the middle: what is above the window, what is drawn in
+            // it and what is below it come to the account, so the header's row
+            // is neither counted twice nor lost between the three.
+            app.select_next();
+            app.select_next();
+            let offset = app.panel_scroll_offset();
+            assert_eq!(offset, 2, "{name}");
+            assert_eq!(
+                offset,
+                panel_offset_for(lines, window, offset, false),
+                "{name}"
+            );
+            assert_eq!(
+                offset + app.panel_lines(at(base, 99)).len() + app.panel_lines_below(),
+                lines,
+                "{name}"
+            );
+
+            // And the count is off by exactly nothing: a line at a time down
+            // reaches the end of the account after that many presses, and the
+            // window is following again when it gets there.
+            let below = app.panel_lines_below();
+            for step in 1..=below {
+                app.select_next();
+                assert_eq!(app.panel_lines_below(), below - step, "{name}, {step} down");
+            }
+            assert!(app.panel_follows(), "{name}");
+
+            // An offset past the end is clamped to the last screenful of the
+            // window there is, header or no header.
+            assert_eq!(
+                panel_offset_for(lines, window, lines * 2, false),
+                lines - window,
+                "{name}"
+            );
+        }
+
+        // The whole of the difference is the header's row: the same account
+        // parked at the same line has exactly one more line below a window that
+        // has paid for a header, and never two.
+        assert_eq!(below_at_top[1], below_at_top[0] + HEADER);
+    }
+
     /// The lines of a small file, as whoever read it would hand them over.
     fn document_lines() -> Vec<String> {
         (0..5).map(|line| format!("line {line}")).collect()
