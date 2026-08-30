@@ -75,7 +75,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -386,6 +386,89 @@ fn default_args() -> Vec<OsString> {
     args.push(OsString::from("--system-prompt"));
     args.push(OsString::from(SYSTEM_PROMPT));
     args
+}
+
+/// How many session ids this process has handed out, so no two of them collide.
+///
+/// The one part of [`session_id`] that is not a guess: a clock can repeat, a
+/// hash can collide, but a counter that every call moves on cannot give the
+/// same number twice, which is the property that actually matters inside one
+/// run of warlock.
+static SESSIONS: AtomicU64 = AtomicU64::new(0);
+
+/// A fresh id in the shape `claude --session-id` insists on.
+///
+/// Thirty-six characters, `8-4-4-4-12` lowercase hex, with the version nibble
+/// `4` and the variant nibble one of `8`, `9`, `a` or `b` — a UUID as far as
+/// anything reading it can tell. The CLI validates the value, so the shape is a
+/// requirement rather than decoration.
+///
+/// # Why it is hashed together rather than drawn from a generator
+///
+/// There is no `uuid` and no `rand` in this crate's `Cargo.toml`, and the
+/// briefs say a session id is not worth adding one for. So the entropy is
+/// assembled from what std already offers, and the two properties wanted are
+/// kept apart on purpose:
+///
+/// * **Two ids from one process differ**, because [`SESSIONS`] moves on for
+///   every call. This holds even if the clock stands still, which on a coarse
+///   timer it will — two turns opened in the same millisecond are otherwise the
+///   same number twice.
+/// * **Two ids from different processes differ**, because
+///   [`RandomState`](std::collections::hash_map::RandomState) is seeded
+///   randomly per process and per instance, and the wall clock and the pid are
+///   folded in beside it. That seed is the closest thing std has to a random
+///   source, and it is what stops two warlocks started at once from claiming
+///   one session.
+///
+/// The 128 bits come out of two hashes of the same inputs distinguished by a
+/// trailing byte, since a hasher gives up 64 bits at a time. This is not a
+/// cryptographic identifier and does not need to be: it names a conversation
+/// with one local child process, and nothing is authorised by holding it.
+// Under `cfg(not(test))` only, because the tests below *are* a caller and an
+// expectation nothing fulfils is itself a warning. The chat agent that puts
+// this on a `--session-id` argument lands in the next slice; when it does, this
+// attribute stops being fulfilled and the compiler says so rather than letting
+// it linger.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the only caller so far is the unit test beside it"
+    )
+)]
+fn session_id() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::fmt::Write as _;
+    use std::hash::BuildHasher as _;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let seed = RandomState::new();
+    let count = SESSIONS.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    // A clock that reads before the epoch is a machine set wrong rather than
+    // anything to fail over; the other three inputs carry the call on their own.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+
+    let mut bytes = [0_u8; 16];
+    bytes[..8].copy_from_slice(&seed.hash_one((nanos, pid, count, 0_u8)).to_be_bytes());
+    bytes[8..].copy_from_slice(&seed.hash_one((nanos, pid, count, 1_u8)).to_be_bytes());
+    // Version 4 in the high nibble of byte 6, variant `10xx` in the top bits of
+    // byte 8: the two places a reader looks to decide this is a random UUID.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    let mut id = String::with_capacity(36);
+    for (index, byte) in bytes.iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            id.push('-');
+        }
+        // Infallible: writing into a `String` cannot fail.
+        let _ = write!(id, "{byte:02x}");
+    }
+    id
 }
 
 /// How often the waiter thread asks whether the child has exited.
@@ -1393,7 +1476,7 @@ mod tests {
     use super::stream;
     use super::{
         Activities, Activity, Cancel, ClaudeAgent, EFFORT, INVOCATION_TIMEOUT, MODEL, OsString,
-        SYSTEM_PROMPT, or_default, render,
+        SYSTEM_PROMPT, or_default, render, session_id,
     };
     use warlock_engine::{AgentChildDocument, AgentFile};
 
@@ -1595,6 +1678,61 @@ mod tests {
             or_default(Some(OsString::from("no-such-model")), MODEL),
             "no-such-model",
         );
+    }
+
+    /// What `claude --session-id` will accept, checked by hand because there is
+    /// no `uuid` crate here to check it for us: thirty-six characters, dashes
+    /// in the four places, lowercase hex everywhere else, version nibble `4`
+    /// and variant nibble one of `8`, `9`, `a`, `b`.
+    fn is_uuid_shaped(id: &str) -> bool {
+        let characters: Vec<char> = id.chars().collect();
+        if characters.len() != 36 {
+            return false;
+        }
+        let dashes = [8, 13, 18, 23];
+        for (index, character) in characters.iter().enumerate() {
+            let ok = if dashes.contains(&index) {
+                *character == '-'
+            } else {
+                character.is_ascii_hexdigit() && !character.is_ascii_uppercase()
+            };
+            if !ok {
+                return false;
+            }
+        }
+        // Segment lengths, said as themselves rather than inferred from where
+        // the dashes were found above.
+        let segments: Vec<usize> = id.split('-').map(str::len).collect();
+        segments == [8, 4, 4, 4, 12]
+            && characters[14] == '4'
+            && matches!(characters[19], '8' | '9' | 'a' | 'b')
+    }
+
+    #[test]
+    fn a_session_id_is_shaped_like_the_uuid_the_cli_demands() {
+        let id = session_id();
+
+        assert!(is_uuid_shaped(&id), "not UUID-shaped: {id}");
+        // The hand-rolled check is only worth trusting if it rejects things, so
+        // say what it rejects.
+        assert!(!is_uuid_shaped(""));
+        assert!(!is_uuid_shaped(&id[..35]));
+        assert!(!is_uuid_shaped(&id.to_uppercase()));
+        assert!(!is_uuid_shaped(&id.replace('-', "0")));
+        assert!(!is_uuid_shaped(&format!("{}5{}", &id[..14], &id[15..])));
+        assert!(!is_uuid_shaped(&format!("{}c{}", &id[..19], &id[20..])));
+    }
+
+    #[test]
+    fn no_two_session_ids_are_the_same() {
+        // A clock alone would not carry this: several of these are generated
+        // inside one tick of a coarse timer, and it is the counter that keeps
+        // them apart. Every id is checked for shape too, so a generator that
+        // stayed unique by degenerating into a counter would still fail.
+        let ids: std::collections::HashSet<String> = (0..500).map(|_| session_id()).collect();
+
+        assert_eq!(ids.len(), 500, "session ids repeated within one process");
+        assert!(ids.iter().all(|id| is_uuid_shaped(id)));
     }
 
     #[test]
