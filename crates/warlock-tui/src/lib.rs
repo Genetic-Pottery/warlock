@@ -165,6 +165,10 @@ pub use claude::Activity;
 /// A handle for stopping a model pass from another thread: it kills the child
 /// running now and refuses to start another.
 pub use claude::Cancel;
+/// The reading half of the model seam: a conversation with the `claude` CLI, one
+/// session for the life of the agent, where a turn is a message rather than a
+/// request and the model may read the repository but never write to it.
+pub use claude::ChatAgent;
 /// The engine's model-pass port, implemented by running the `claude` CLI as a
 /// child process.
 pub use claude::ClaudeAgent;

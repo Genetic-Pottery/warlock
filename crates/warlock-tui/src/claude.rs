@@ -217,6 +217,54 @@ ask for.";
 /// given it.
 const NO_TOOLS: &str = "";
 
+/// What a chat turn is allowed to reach for: the three tools that only look.
+///
+/// The other side of [`NO_TOOLS`], and the reason the two constants sit next to
+/// each other. A pass is handed its material and needs nothing; a turn is a
+/// question about a repository the person asking is looking at, and answering
+/// "where is the loader?" without opening a file would be guessing out loud. So
+/// a turn may open files, match names and search text — and that is the whole
+/// list.
+///
+/// What is not on it is the point. There is no `Write` and no `Edit`, because
+/// warlock's writers are the pact, the refresh, the manifest and the scope key,
+/// and a model that can edit a repository from a chat box is a different program
+/// with a different promise. There is no `Bash`, because a shell is every tool
+/// there has ever been wearing one name. And there is no `WebFetch`, because a
+/// question about this repository is answered out of this repository.
+///
+/// Granted by naming them rather than by taking the default set and subtracting:
+/// a default that grows gains a turn a tool nobody decided to give it, whereas a
+/// list that grows is a diff.
+const CHAT_TOOLS: &str = "Read,Grep,Glob";
+
+/// The system prompt a chat turn runs under, in place of the CLI's own.
+///
+/// [`SYSTEM_PROMPT`]'s counterpart, and a different job. A pass is told the
+/// least that will stop the CLI supplying a persona, because everything a pass
+/// needs is in the request the engine built for it. A turn has no request: what
+/// arrives on stdin is one sentence somebody typed at the foot of a panel, and
+/// none of the context that makes it a sensible sentence — which program is on
+/// their screen, what the colours in it mean, what a `WARLOCK.md` is — comes
+/// with it. Left unsaid, that is a coding agent being asked about "the tree" and
+/// answering about a data structure.
+///
+/// So this says what a pass's prompt never has to: what this program is, what
+/// the tree on screen means, and that the answer is prose for a panel rather
+/// than an edit to a repository. It is still the least that can be said, and it
+/// is still not a second copy of anything — the engine's prompt is about
+/// documents, and this is about a conversation.
+const CHAT_SYSTEM_PROMPT: &str = "You are answering questions inside warlock, a \
+terminal program that shows one repository as a tree of directories. A pacted \
+directory has a WARLOCK.md describing it: warlock draws that directory green \
+while the document is newer than everything beneath it, yellow once anything \
+under it has moved, and grey for a directory nobody has pacted. The person \
+asking is looking at that tree, and the repository it is a tree of is the one \
+you are running in — consult it with the tools you have when a question needs \
+it. You cannot change that repository, and nothing you say is put in a file. \
+Answer the message you are given in short, plain prose, and say when you do not \
+know.";
+
 /// The environment variable that replaces [`MODEL`] for a run.
 ///
 /// The escape hatch, and deliberately the only one of its kind: this file
@@ -388,6 +436,36 @@ fn default_args() -> Vec<OsString> {
     args
 }
 
+/// Everything `claude` is run with for a chat turn: [`ARGS`], then the model,
+/// the effort, the three tools that only look, warlock's own system prompt, and
+/// the session this agent's turns all belong to.
+///
+/// The same five leading arguments as a pass, for the same reason: the transport
+/// reads `stream-json`, and what the person watching sees a turn doing comes out
+/// of that stream. Everything after them differs, and every difference is one of
+/// the three things a turn is that a pass is not — allowed to look, told what
+/// program it is inside, and part of a conversation.
+///
+/// `--session-id` is the last of those and the reason `session` is a parameter
+/// rather than a call. The id is settled once, when the agent is made, and every
+/// turn that agent takes is run with this same vector: that is how the model
+/// remembers what was said two questions ago without warlock keeping a
+/// transcript of its own to send back to it.
+fn chat_args(session: &str) -> Vec<OsString> {
+    let mut args: Vec<OsString> = ARGS.iter().map(OsString::from).collect();
+    args.push(OsString::from("--model"));
+    args.push(overridden(MODEL_VAR, MODEL));
+    args.push(OsString::from("--effort"));
+    args.push(overridden(EFFORT_VAR, EFFORT));
+    args.push(OsString::from("--tools"));
+    args.push(OsString::from(CHAT_TOOLS));
+    args.push(OsString::from("--system-prompt"));
+    args.push(OsString::from(CHAT_SYSTEM_PROMPT));
+    args.push(OsString::from("--session-id"));
+    args.push(OsString::from(session));
+    args
+}
+
 /// How many session ids this process has handed out, so no two of them collide.
 ///
 /// The one part of [`session_id`] that is not a guess: a clock can repeat, a
@@ -425,18 +503,6 @@ static SESSIONS: AtomicU64 = AtomicU64::new(0);
 /// trailing byte, since a hasher gives up 64 bits at a time. This is not a
 /// cryptographic identifier and does not need to be: it names a conversation
 /// with one local child process, and nothing is authorised by holding it.
-// Under `cfg(not(test))` only, because the tests below *are* a caller and an
-// expectation nothing fulfils is itself a warning. The chat agent that puts
-// this on a `--session-id` argument lands in the next slice; when it does, this
-// attribute stops being fulfilled and the compiler says so rather than letting
-// it linger.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the only caller so far is the unit test beside it"
-    )
-)]
 fn session_id() -> String {
     use std::collections::hash_map::RandomState;
     use std::fmt::Write as _;
@@ -968,118 +1034,387 @@ impl Agent for ClaudeAgent {
             return Err(cancelled());
         }
 
-        let mut child = self.spawn(request)?;
+        let child = self.spawn(request)?;
 
-        // Configured as pipes just above, so all three are `Some`; taking them
-        // hands each stream to the thread that owns it for the rest of the
-        // call, and leaves the `Child` itself holding nothing but the process.
-        let stdin = child.stdin.take().expect("stdin was piped");
-        let stdout = child.stdout.take().expect("stdout was piped");
-        let stderr = child.stderr.take().expect("stderr was piped");
+        invoke(
+            child,
+            render(request),
+            self.timeout,
+            &self.cancel,
+            &self.activities,
+        )
+    }
+}
 
-        // The prompt goes out on its own thread, and the handle is dropped the
-        // moment it is written so the child sees EOF. Errors are deliberately
-        // dropped: a child that exits without reading its stdin — every
-        // stand-in below, and any real `claude` that rejects the run early —
-        // breaks the pipe, and that is not the failure worth reporting. Its
-        // exit status and stderr are.
-        let prompt = render(request);
-        let writer = thread::spawn(move || {
-            let mut stdin = stdin;
-            let _ = stdin.write_all(prompt.as_bytes());
-            let _ = stdin.flush();
-        });
+/// The other kind of run: `claude` as a child process, answering a message
+/// somebody typed.
+///
+/// [`ClaudeAgent`]'s sibling and not a second copy of it. Everything about
+/// getting a child to speak is shared — the three piped streams, the three
+/// threads, the same [`Cancel`], the same [`Activities`], the same
+/// [`INVOCATION_TIMEOUT`] — and [`invoke`] is where that lives. What differs is
+/// the three things a turn is that a pass is not:
+///
+/// * **A turn is a message.** Not an [`AgentRequest`]: there is no directory, no
+///   file list and no child document, so this deliberately does not implement
+///   the engine's [`Agent`] port. What goes to the child is the reader's
+///   sentence and nothing else — no tree dump, no transcript, no repository
+///   contents — and what comes back is the model's answer as text.
+/// * **A turn may look.** `Read`, `Grep` and `Glob`, named in [`CHAT_TOOLS`],
+///   because a question about a repository is answered out of the repository.
+///   Nothing that writes, runs or fetches, in any permission mode.
+/// * **A turn is part of a conversation.** The session id is settled when the
+///   agent is made and every turn carries it, so the model remembers what was
+///   said before without warlock keeping a transcript to send back to it.
+///
+/// # Where it runs
+///
+/// Wherever warlock does. A pass is spawned in the directory its request names,
+/// because a pass is *about* that directory; a turn is about the repository on
+/// screen, which is the one warlock was started in, so nothing is set and the
+/// child inherits the working directory this process already has. That also
+/// keeps [`spawn_error`](ChatAgent::spawn_error) honest: with no directory of
+/// its own to be wrong, a `NotFound` from the spawn can only be the program.
+///
+/// ```no_run
+/// use warlock_tui::ChatAgent;
+///
+/// // Runs a real `claude`, so this example is not executed by the test suite.
+/// let agent = ChatAgent::new();
+///
+/// println!("{}", agent.turn("what is in crates/warlock-engine?")?);
+/// // The same agent, so the same session: it remembers being asked.
+/// println!("{}", agent.turn("and which of those is the biggest?")?);
+/// # Ok::<(), warlock_engine::AgentError>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct ChatAgent {
+    /// The command to run: `claude`, or whatever a test points it at.
+    program: OsString,
+    /// The arguments every turn is run with, the session id among them. Built
+    /// once, when the agent is made, and not touched again — see
+    /// [`chat_args`].
+    args: Vec<OsString>,
+    /// How long a single turn gets before it is killed.
+    timeout: Duration,
+    /// Whoever is allowed to say stop. Its own handle by default, which nobody
+    /// else holds and so nothing ever cancels.
+    cancel: Cancel,
+    /// Where a turn says what it is doing. A handle nobody listens to by
+    /// default, so an agent no caller wired up reports into nothing.
+    activities: Activities,
+}
 
-        // Read concurrently with the wait, or a child that writes more than a
-        // pipeful blocks forever and so does this call. Stdout goes through
-        // [`read`], which reports as it reads; stderr is only ever looked at
-        // once the pass is over, so it is drained whole.
-        let out = read(stdout, self.activities.clone());
-        let err = drain(stderr);
+impl ChatAgent {
+    /// An agent whose turns run on [`MODEL`] at [`EFFORT`] with [`CHAT_TOOLS`],
+    /// under [`CHAT_SYSTEM_PROMPT`], in a session of their own, each given the
+    /// five-minute [`INVOCATION_TIMEOUT`].
+    ///
+    /// The model and the effort are read from [`MODEL_VAR`] and [`EFFORT_VAR`]
+    /// here, once, as they are for a pass — and so is the session id, which is
+    /// what makes every turn of this agent one conversation and two agents two.
+    ///
+    /// ```
+    /// use warlock_tui::{ChatAgent, INVOCATION_TIMEOUT};
+    ///
+    /// let agent = ChatAgent::new();
+    ///
+    /// assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+    /// // A conversation of its own, named on every turn.
+    /// assert!(agent.args().iter().any(|arg| arg == "--session-id"));
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            program: OsString::from(PROGRAM),
+            args: chat_args(&session_id()),
+            timeout: INVOCATION_TIMEOUT,
+            cancel: Cancel::new(),
+            activities: Activities::none(),
+        }
+    }
 
-        let child = Arc::new(Mutex::new(child));
-        // Registered before the wait and cleared after it, so a cancel arriving
-        // now reaches this child and one arriving later reaches nothing rather
-        // than a pass that has moved on.
-        if !self.cancel.register(&child) {
-            kill_and_reap(&child);
+    /// The same agent, running `program` instead of `claude`.
+    ///
+    /// For tests: a stand-in that fails in a chosen way is how the failure
+    /// paths are covered without installing anything.
+    #[must_use]
+    pub fn with_program(mut self, program: impl Into<OsString>) -> Self {
+        self.program = program.into();
+        self
+    }
+
+    /// The same agent, passing `args` instead of the default arguments.
+    ///
+    /// Replaced outright, session id and all: a caller who says what the
+    /// arguments are is saying what the whole vector is.
+    #[must_use]
+    pub fn with_args<A: Into<OsString>>(mut self, args: impl IntoIterator<Item = A>) -> Self {
+        self.args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The same agent, giving each turn `timeout` instead of
+    /// [`INVOCATION_TIMEOUT`].
+    ///
+    /// For tests, which cannot afford to wait five minutes to prove that
+    /// waiting stops.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// The same agent, answering to `cancel`.
+    ///
+    /// The caller keeps a clone: that is how a turn running on a worker thread
+    /// is stopped from the thread reading the keyboard. Without this, an agent
+    /// still has a handle — its own, which nobody else holds, so nothing can
+    /// ever cancel it.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: Cancel) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    /// The same agent, reporting what each turn does to `activities`.
+    ///
+    /// The mirror of [`with_cancel`](ChatAgent::with_cancel), and used the same
+    /// way: the caller keeps a clone, and what a turn does on the worker thread
+    /// reaches the thread drawing the screen. A turn is the first run in
+    /// warlock's history that can make a tool call, so this is where those
+    /// calls come out.
+    #[must_use]
+    pub fn with_activities(mut self, activities: Activities) -> Self {
+        self.activities = activities;
+        self
+    }
+
+    /// The command this agent runs.
+    #[must_use]
+    pub fn program(&self) -> &OsStr {
+        &self.program
+    }
+
+    /// The arguments every turn is run with, before any message — which never
+    /// becomes an argument, because it goes in on stdin.
+    #[must_use]
+    pub fn args(&self) -> &[OsString] {
+        &self.args
+    }
+
+    /// Where this agent reports what a turn is doing.
+    #[must_use]
+    pub fn activities(&self) -> &Activities {
+        &self.activities
+    }
+
+    /// How long one turn is given before it is killed.
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Put `message` to the model and wait for its answer.
+    ///
+    /// The message is the whole of what the child reads, and the answer is the
+    /// whole of what comes back: the work along the way — tools, thinking,
+    /// writing, cost — goes out over [`Activities`] as it happens and is no part
+    /// of this value. A turn that could not be run comes back as an
+    /// [`AgentError`], the same vocabulary a pass fails in, because a failed
+    /// turn is a line in the panel rather than the end of the program.
+    ///
+    /// # Errors
+    ///
+    /// [`AgentError::NotFound`] when there is no such program,
+    /// [`AgentError::Failed`] when the child exited non-zero,
+    /// [`AgentError::EmptyOutput`] when it said nothing,
+    /// [`AgentError::TimedOut`] when it ran past
+    /// [`timeout`](ChatAgent::timeout), and [`AgentError::Io`] for everything
+    /// else — including a turn somebody cancelled.
+    pub fn turn(&self, message: &str) -> Result<String, AgentError> {
+        // Asked before anything is started, for the reason a pass asks it: a
+        // turn begun after the cancel is a process the user already said they
+        // did not want.
+        if self.cancel.is_cancelled() {
             return Err(cancelled());
         }
-        let (waiter, exited) = watch(&child);
 
-        let outcome = match exited.recv_timeout(self.timeout) {
-            Ok(Ok(status)) if !status.success() && self.cancel.is_cancelled() => {
-                // The exit a cancel caused. Its output is not read, for the
-                // same reason the timeout arm below does not read it: the
-                // child is gone, but a grandchild the kill did not reach can
-                // still hold the pipes open, and a join here would sit out
-                // whatever that grandchild is doing — the very wait the cancel
-                // was pressed to end. There is nothing in that output worth
-                // waiting for anyway, because a pass killed mid-word has no
-                // document to judge, and the rewrite below is what this
-                // failure would come back as regardless.
-                let _ = waiter.join();
-                Err(cancelled())
-            }
-            Ok(Ok(status)) => {
-                // Exited on its own — including the pass that beat a cancel by
-                // a hair, which is why success is not read as a cancel above.
-                // The child is gone, so every pipe it held is closed and each
-                // join returns: the readers with what they read, the writer
-                // with nothing.
-                let _ = waiter.join();
-                let _ = writer.join();
-                // Not `?`: every way out of this wait has to reach the
-                // clearing below, and an early return would leave a finished
-                // child registered for a later cancel to find.
-                match (collect(out), collect(err)) {
-                    (Ok(document), Ok(stderr)) => judge(status, document, &stderr),
-                    (Err(error), _) | (_, Err(error)) => Err(error),
-                }
-            }
-            // The waiter could not tell whether it had exited; treat it like
-            // any other I/O failure, but not before cleaning up after it.
-            Ok(Err(error)) => {
-                kill_and_reap(&child);
-                let _ = waiter.join();
-                Err(AgentError::Io { source: error })
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                // Killed *and* reaped: an abandoned child is an orphan holding
-                // a subscription's worth of tokens, and one waited on by
-                // nobody is a zombie in the process table.
-                kill_and_reap(&child);
-                // The waiter sees the exit it caused within one poll, so this
-                // join is bounded. The reader and writer threads deliberately
-                // are not joined: their pipes could still be held open by a
-                // grandchild the kill did not reach, and this call has already
-                // decided what it returns. They end on their own when the last
-                // writer of each pipe closes it.
-                let _ = waiter.join();
-                Err(AgentError::TimedOut {
-                    after: self.timeout,
-                })
-            }
-            // Unreachable in practice: the waiter sends before it returns.
-            Err(RecvTimeoutError::Disconnected) => {
-                kill_and_reap(&child);
-                Err(AgentError::Io {
-                    source: io::Error::other("the process waiter stopped without an exit status"),
-                })
-            }
-        };
-        self.cancel.finished();
+        let child = self.spawn()?;
 
-        match outcome {
-            // A cancel kills the child, so the wait above ends the ordinary
-            // way and judges a signalled exit — which would go back as
-            // [`AgentError::Failed`], blaming the model for a run the user
-            // stopped. Only a failed outcome is rewritten: a pass that beat
-            // the cancel by a hair produced a real document, and throwing it
-            // away would be a lie in the other direction.
-            Err(_) if self.cancel.is_cancelled() => Err(cancelled()),
-            outcome => outcome,
+        invoke(
+            child,
+            message.to_owned(),
+            self.timeout,
+            &self.cancel,
+            &self.activities,
+        )
+        .map(AgentResponse::into_text)
+    }
+
+    /// Start the child with all three streams piped, in warlock's own working
+    /// directory.
+    fn spawn(&self) -> Result<Child, AgentError> {
+        Command::new(&self.program)
+            .args(&self.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| self.spawn_error(error))
+    }
+
+    /// Which [`AgentError`] a failed spawn is.
+    ///
+    /// Simpler than a pass's, and only because a turn names no directory: the
+    /// `NotFound` that is ambiguous over there — the program missing or the
+    /// working directory missing, one errno for both — can only be the program
+    /// here, since the directory is the one this process is already running in.
+    fn spawn_error(&self, error: io::Error) -> AgentError {
+        if error.kind() == io::ErrorKind::NotFound {
+            AgentError::NotFound {
+                program: self.program.to_string_lossy().into_owned(),
+            }
+        } else {
+            AgentError::Io { source: error }
         }
+    }
+}
+
+impl Default for ChatAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Everything an invocation is once its child exists: the text on its stdin, its
+/// output read as it arrives, the wait, the clock and the cancel.
+///
+/// The whole of the discipline this module's header is about, in one place
+/// because there is one of it. A pass and a chat turn differ in what they are
+/// spawned with and what they put on stdin, and in nothing after that: the same
+/// three threads, the same [`Cancel`], the same [`Activities`], the same
+/// [`INVOCATION_TIMEOUT`] policy and the same judgement of how it ended. Two
+/// copies of this would be two chances to get the deadlocks wrong, and one of
+/// them would be the copy nobody re-read.
+///
+/// Takes the child rather than making it, because making it is where the two
+/// callers differ — a pass runs in the directory its request names, and a turn
+/// runs wherever warlock does — and because the cancel is asked *before* a spawn
+/// as well as after it, which is the caller's line to say.
+fn invoke(
+    mut child: Child,
+    input: String,
+    timeout: Duration,
+    cancel: &Cancel,
+    activities: &Activities,
+) -> Result<AgentResponse, AgentError> {
+    // Configured as pipes by the caller, so all three are `Some`; taking them
+    // hands each stream to the thread that owns it for the rest of the call,
+    // and leaves the `Child` itself holding nothing but the process.
+    let stdin = child.stdin.take().expect("stdin was piped");
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let stderr = child.stderr.take().expect("stderr was piped");
+
+    // What the child reads goes out on its own thread, and the handle is
+    // dropped the moment it is written so the child sees EOF. Errors are
+    // deliberately dropped: a child that exits without reading its stdin —
+    // every stand-in below, and any real `claude` that rejects the run early —
+    // breaks the pipe, and that is not the failure worth reporting. Its exit
+    // status and stderr are.
+    let writer = thread::spawn(move || {
+        let mut stdin = stdin;
+        let _ = stdin.write_all(input.as_bytes());
+        let _ = stdin.flush();
+    });
+
+    // Read concurrently with the wait, or a child that writes more than a
+    // pipeful blocks forever and so does this call. Stdout goes through
+    // [`read`], which reports as it reads; stderr is only ever looked at
+    // once the pass is over, so it is drained whole.
+    let out = read(stdout, activities.clone());
+    let err = drain(stderr);
+
+    let child = Arc::new(Mutex::new(child));
+    // Registered before the wait and cleared after it, so a cancel arriving
+    // now reaches this child and one arriving later reaches nothing rather
+    // than a pass that has moved on.
+    if !cancel.register(&child) {
+        kill_and_reap(&child);
+        return Err(cancelled());
+    }
+    let (waiter, exited) = watch(&child);
+
+    let outcome = match exited.recv_timeout(timeout) {
+        Ok(Ok(status)) if !status.success() && cancel.is_cancelled() => {
+            // The exit a cancel caused. Its output is not read, for the
+            // same reason the timeout arm below does not read it: the
+            // child is gone, but a grandchild the kill did not reach can
+            // still hold the pipes open, and a join here would sit out
+            // whatever that grandchild is doing — the very wait the cancel
+            // was pressed to end. There is nothing in that output worth
+            // waiting for anyway, because a pass killed mid-word has no
+            // document to judge, and the rewrite below is what this
+            // failure would come back as regardless.
+            let _ = waiter.join();
+            Err(cancelled())
+        }
+        Ok(Ok(status)) => {
+            // Exited on its own — including the pass that beat a cancel by
+            // a hair, which is why success is not read as a cancel above.
+            // The child is gone, so every pipe it held is closed and each
+            // join returns: the readers with what they read, the writer
+            // with nothing.
+            let _ = waiter.join();
+            let _ = writer.join();
+            // Not `?`: every way out of this wait has to reach the
+            // clearing below, and an early return would leave a finished
+            // child registered for a later cancel to find.
+            match (collect(out), collect(err)) {
+                (Ok(document), Ok(stderr)) => judge(status, document, &stderr),
+                (Err(error), _) | (_, Err(error)) => Err(error),
+            }
+        }
+        // The waiter could not tell whether it had exited; treat it like
+        // any other I/O failure, but not before cleaning up after it.
+        Ok(Err(error)) => {
+            kill_and_reap(&child);
+            let _ = waiter.join();
+            Err(AgentError::Io { source: error })
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            // Killed *and* reaped: an abandoned child is an orphan holding
+            // a subscription's worth of tokens, and one waited on by
+            // nobody is a zombie in the process table.
+            kill_and_reap(&child);
+            // The waiter sees the exit it caused within one poll, so this
+            // join is bounded. The reader and writer threads deliberately
+            // are not joined: their pipes could still be held open by a
+            // grandchild the kill did not reach, and this call has already
+            // decided what it returns. They end on their own when the last
+            // writer of each pipe closes it.
+            let _ = waiter.join();
+            Err(AgentError::TimedOut { after: timeout })
+        }
+        // Unreachable in practice: the waiter sends before it returns.
+        Err(RecvTimeoutError::Disconnected) => {
+            kill_and_reap(&child);
+            Err(AgentError::Io {
+                source: io::Error::other("the process waiter stopped without an exit status"),
+            })
+        }
+    };
+    cancel.finished();
+
+    match outcome {
+        // A cancel kills the child, so the wait above ends the ordinary
+        // way and judges a signalled exit — which would go back as
+        // [`AgentError::Failed`], blaming the model for a run the user
+        // stopped. Only a failed outcome is rewritten: a pass that beat
+        // the cancel by a hair produced a real document, and throwing it
+        // away would be a lie in the other direction.
+        Err(_) if cancel.is_cancelled() => Err(cancelled()),
+        outcome => outcome,
     }
 }
 
@@ -1475,8 +1810,8 @@ mod tests {
 
     use super::stream;
     use super::{
-        Activities, Activity, Cancel, ClaudeAgent, EFFORT, INVOCATION_TIMEOUT, MODEL, OsString,
-        SYSTEM_PROMPT, or_default, render, session_id,
+        Activities, Activity, CHAT_SYSTEM_PROMPT, Cancel, ChatAgent, ClaudeAgent, EFFORT,
+        INVOCATION_TIMEOUT, MODEL, OsString, SYSTEM_PROMPT, or_default, render, session_id,
     };
     use warlock_engine::{AgentChildDocument, AgentFile};
 
@@ -1492,6 +1827,25 @@ mod tests {
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// The same, for the agent a conversation runs on.
+    fn turn_args(agent: &ChatAgent) -> Vec<String> {
+        agent
+            .args()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// What `flag` was given, if it was given anything.
+    ///
+    /// The vector is flags and their values in pairs, so a value is the word
+    /// after its flag: asking this way rather than by index means a test says
+    /// what it is about rather than where it happens to sit.
+    fn value_of<'a>(vector: &'a [String], flag: &str) -> Option<&'a str> {
+        let named = vector.iter().position(|word| word == flag)?;
+        vector.get(named + 1).map(String::as_str)
     }
 
     #[test]
@@ -1747,6 +2101,188 @@ mod tests {
             .expect("a pass says what it may reach for");
 
         assert_eq!(args.get(tools + 1).map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn a_turns_defaults_are_the_real_thing_too() {
+        let agent = ChatAgent::new();
+        let vector = turn_args(&agent);
+        let session = value_of(&vector, "--session-id").expect("a turn belongs to a conversation");
+
+        assert_eq!(agent.program(), "claude");
+        assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+        assert!(is_uuid_shaped(session), "not UUID-shaped: {session}");
+        // The same five leading arguments a pass has, because the transport
+        // reads the same stream; then the three answers a turn refuses to
+        // inherit, warlock's own system prompt, and the conversation this
+        // agent's turns all belong to.
+        assert_eq!(
+            vector,
+            [
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--model",
+                "claude-sonnet-5",
+                "--effort",
+                "low",
+                "--tools",
+                "Read,Grep,Glob",
+                "--system-prompt",
+                CHAT_SYSTEM_PROMPT,
+                "--session-id",
+                session,
+            ],
+        );
+
+        // A second agent is the same vector with a different conversation in
+        // it, and nothing else different.
+        let another = turn_args(&ChatAgent::default());
+        assert_eq!(another[..another.len() - 1], vector[..vector.len() - 1]);
+        assert_eq!(ChatAgent::default().timeout(), agent.timeout());
+    }
+
+    #[test]
+    fn a_turn_may_look_at_the_repository_and_do_nothing_whatever_else() {
+        let vector = turn_args(&ChatAgent::new());
+        let granted = value_of(&vector, "--tools").expect("a turn says what it may reach for");
+
+        // Exactly three, named rather than left to a default that could grow.
+        assert_eq!(
+            granted.split(',').collect::<Vec<&str>>(),
+            ["Read", "Grep", "Glob"],
+        );
+        // Asked of the whole vector rather than of the grant alone, because
+        // the grant is not the only way in: a permission flag is how a writer
+        // would arrive without ever being named as a tool, and a turn carries
+        // none of those either.
+        for smuggled in [
+            "Write",
+            "Edit",
+            "Bash",
+            "WebFetch",
+            "--permission-mode",
+            "--dangerously-skip-permissions",
+            "--allowed-tools",
+            "--allowedTools",
+            "acceptEdits",
+            "bypassPermissions",
+        ] {
+            assert!(
+                !vector.iter().any(|word| word.contains(smuggled)),
+                "{smuggled:?} is somewhere in the vector a turn is run with: {vector:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn every_turn_of_one_agent_is_one_conversation_and_two_agents_are_two() {
+        // The session is settled when the agent is made and lives in the
+        // vector every turn is spawned with, so what has to be true is that
+        // taking turns does not disturb it. Taken against a program that
+        // cannot exist, because the question is what the turn was run with
+        // rather than what came back.
+        let agent = ChatAgent::new().with_program(NOT_A_PROGRAM);
+        let before = turn_args(&agent);
+
+        for message in ["what is in crates?", "and which of those is biggest?"] {
+            let error = agent
+                .turn(message)
+                .expect_err("nothing by that name can be on PATH");
+            assert!(matches!(error, AgentError::NotFound { .. }), "{error:?}");
+        }
+
+        assert_eq!(
+            turn_args(&agent),
+            before,
+            "a turn changed the conversation it belongs to",
+        );
+
+        // And an agent made afterwards is a conversation of its own: nothing
+        // of the first is carried into it, so a second warlock — or a second
+        // thread of talk — never resumes somebody else's session.
+        let session = value_of(&before, "--session-id").expect("a turn names its session");
+        let others: std::collections::HashSet<String> = (0..64)
+            .map(|_| {
+                let vector = turn_args(&ChatAgent::new());
+                value_of(&vector, "--session-id")
+                    .expect("a turn names its session")
+                    .to_owned()
+            })
+            .collect();
+
+        assert_eq!(others.len(), 64, "two agents shared a conversation");
+        assert!(!others.contains(session));
+    }
+
+    #[test]
+    fn a_turn_runs_under_warlocks_own_prompt_rather_than_a_passs() {
+        let vector = turn_args(&ChatAgent::new());
+        let prompt = value_of(&vector, "--system-prompt").expect("a turn brings its own");
+
+        assert!(!prompt.trim().is_empty());
+        // Not the pass's. A pass is told the least that will stop the CLI
+        // supplying a persona, because its request carries everything else; a
+        // message arrives with none of that, so this one says what a message
+        // cannot.
+        assert_ne!(prompt, SYSTEM_PROMPT, "a turn is not a documentation pass");
+        for said in ["warlock", "tree", "WARLOCK.md", "green", "yellow"] {
+            assert!(
+                prompt.contains(said),
+                "{said:?} is missing from the prompt a turn runs under: {prompt}",
+            );
+        }
+        // And the pass's prompt is exactly where it was.
+        assert_eq!(
+            value_of(&args(&ClaudeAgent::new()), "--system-prompt"),
+            Some(SYSTEM_PROMPT),
+        );
+    }
+
+    #[test]
+    fn a_chat_agents_program_arguments_and_clock_are_a_callers_to_replace() {
+        // The same three fields a pass has, for the same reason: every failure
+        // path is exercised with a stand-in on a machine with no `claude`.
+        let agent = ChatAgent::new()
+            .with_program("/bin/sh")
+            .with_args(["-c", "echo hello"])
+            .with_timeout(Duration::from_millis(250));
+
+        assert_eq!(agent.program(), "/bin/sh");
+        assert_eq!(turn_args(&agent), ["-c", "echo hello"]);
+        assert_eq!(agent.timeout(), Duration::from_millis(250));
+        assert!(turn_args(&ChatAgent::new().with_args(Vec::<&str>::new())).is_empty());
+    }
+
+    #[test]
+    fn a_chat_agent_answers_to_the_handles_a_caller_attaches() {
+        let cancel = Cancel::new();
+        let (sender, received) = mpsc::channel();
+        let agent = ChatAgent::new()
+            .with_cancel(cancel.clone())
+            .with_activities(Activities::new(move |activity| {
+                let _ = sender.send(activity);
+            }));
+
+        agent.activities().report(Activity::Thinking);
+        assert_eq!(received.recv(), Ok(Activity::Thinking));
+
+        // The half of a cancel that needs no child: a turn asked for after one
+        // is refused before anything is spawned, which is why this test can
+        // hold an agent pointed at the real `claude` and still run nothing.
+        cancel.cancel();
+        let error = agent
+            .turn("anything")
+            .expect_err("a cancelled agent takes no turns");
+        assert!(
+            matches!(&error, AgentError::Io { source } if source.kind() == std::io::ErrorKind::Interrupted),
+            "{error:?}",
+        );
+
+        // And an agent nobody wired a port to reports into nothing.
+        ChatAgent::new().activities().report(Activity::Thinking);
     }
 
     #[test]
