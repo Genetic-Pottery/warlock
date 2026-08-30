@@ -5,7 +5,8 @@
 //! conversation — the third card, and the only place in warlock where a model's
 //! prose is ever shown. It is an ordered list of turns, one per message somebody
 //! typed at the foot of the panel, each holding that message, the work the model
-//! was seen doing while it answered, and the answer.
+//! was seen doing while it answered, and the answer — and, among them, the runs
+//! that happened while the conversation was going on.
 //!
 //! It is plain data like the account is: no terminal, no channel, no child
 //! process, and no clock of its own. [`Instant::now`] is never called in this
@@ -29,6 +30,34 @@
 //! what is kept out is kept out just as firmly: no tool results, no model
 //! reasoning, no fragment of the answer arriving early. The answer is the one
 //! piece of prose a turn has, it is a value of its own, and it lands whole.
+//!
+//! # A turn nobody typed
+//!
+//! A pact or a refresh started while the conversation is on screen is a third
+//! thing that happened, in the same sequence as the questions around it, so it
+//! is a turn too: [`Thread::open_run`] opens one at the instant the key was
+//! pressed, and it holds an [`Account`] — the very value the account card holds
+//! for the same run — fed through [`Thread::run_mut`] as the run's events
+//! arrive.
+//!
+//! It holds one rather than copying anything out of one, and that is the whole
+//! design. Every row a run has here is a row [`Account`] made: the directory
+//! headings, `thinking`, a tool and its one detail, `summarising … (2/3)`, `wrote
+//! … — 2341 bytes, $0.21`, `refused — …`, `cancelled — $0.03 spent`, `pact
+//! finished — …`. Nothing in this file re-words any of it, because a second
+//! spelling of a run's line is a second thing to keep in step with the card, and
+//! two cards disagreeing about what one run did is worse than either of them
+//! being wrong.
+//!
+//! What a run turn does *not* borrow is the conversation's vocabulary. It has no
+//! message above it, no answer under it, and no [`Ending`] — a cancelled run
+//! says `cancelled — $0.03 spent` where a cancelled question says `the turn was
+//! cancelled`, because one of them is a pass over a directory and the other is
+//! somebody's question, and a reader should never have to work out which they
+//! are looking at. The money keeps the same distance: a run's is its account's,
+//! per pass and totalled in `pact finished — …`, and a question's is the
+//! [`Turn::cost`] line below, which says out loud that it belongs to no total.
+//! Neither is ever added to the other, on screen or anywhere else.
 //!
 //! # Where this one differs
 //!
@@ -56,7 +85,7 @@ use std::time::{Duration, Instant};
 
 use warlock_engine::AgentError;
 
-use crate::account::{Line, Log, THINKING, WRITING, money, tool_line};
+use crate::account::{Account, Line, Log, THINKING, WRITING, money, tool_line};
 use crate::claude::Activity;
 
 /// One thing that stopped a turn short of an answer, in the words it ends with.
@@ -191,17 +220,44 @@ pub fn ending_for(error: &AgentError) -> Ending {
     }
 }
 
-/// One question, everything the model was seen doing about it, and the answer.
+/// One entry of the conversation: a question somebody typed, or a run nobody
+/// did.
 ///
-/// Opened by [`Thread::ask`] and closed by [`Thread::answer`] or
-/// [`Thread::end`]. Between the two it is the live turn — the one whose newest
-/// work line ticks and the only one anything can be filed under — and a closed
-/// turn never moves again, however long the session goes on.
+/// A typed turn is opened by [`Thread::ask`] and closed by [`Thread::answer`]
+/// or [`Thread::end`]; a run turn is opened by [`Thread::open_run`], fed
+/// through [`Thread::run_mut`] and closed by [`Thread::close_run`]. Between the
+/// two ends it is the live turn — the one whose newest work line ticks and the
+/// only one anything can be filed under — and a closed turn never moves again,
+/// however long the session goes on.
 ///
 /// Holds an `f64` cost, so it is [`PartialEq`] and not [`Eq`], as everything
 /// that comes to hold one of these is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Turn {
+    /// Which of the two kinds of turn this is, and everything that kind holds.
+    kind: Kind,
+}
+
+/// The two kinds of turn, and the whole difference between them.
+///
+/// Two and no third: either a reader typed something at the foot of the panel
+/// and a model answered it, or warlock ran a pact and wrote an account of it.
+/// They are one type because they are one sequence — the reader reads down the
+/// card and finds what happened in the order it happened — and they are two
+/// variants because nothing about them is shared except that order: a question
+/// has an answer and a cost line of its own, and a run has an [`Account`], which
+/// already knows how to word every line it will ever have.
+#[derive(Debug, Clone, PartialEq)]
+enum Kind {
+    /// A turn somebody typed.
+    Said(Said),
+    /// A turn nobody typed: a run, appearing in the conversation as itself.
+    Ran(Ran),
+}
+
+/// One question, everything the model was seen doing about it, and the answer.
+#[derive(Debug, Clone, PartialEq)]
+struct Said {
     /// The message the reader typed, exactly as they typed it, newlines and
     /// all. Never wrapped here: the width is a fact about a terminal.
     message: String,
@@ -218,11 +274,51 @@ pub struct Turn {
     cost: Option<f64>,
 }
 
+/// A run of warlock's own, as the conversation holds it: the account it is
+/// writing, and whether it is over.
+///
+/// The account is the whole of it. Every line a run has in the thread is a line
+/// the account made — [`Section`](crate::Section), the outcome wordings, the
+/// summary, the clocks — so the rows here and the rows on the account card are
+/// the same rows from the same code, and there is no second spelling of a run's
+/// lines for the two to drift apart in.
+#[derive(Debug, Clone, PartialEq)]
+struct Ran {
+    /// What the run has done, in the run's own words.
+    account: Account,
+    /// When the run stopped, if it has. The account cannot answer this for
+    /// itself — a run that has finished and a run that has opened no directory
+    /// yet both have nothing live in them — and the answer is what says whether
+    /// the composer is muted, so it is kept here rather than guessed at.
+    closed: Option<Instant>,
+}
+
 impl Turn {
-    /// The message this turn was asked in.
+    /// The message this turn was asked in, or `None` for a turn nobody typed.
+    ///
+    /// `None` is the run turns: a pact is started with a keystroke and says
+    /// nothing on its way in, so there is no message to draw above its lines and
+    /// an empty string would be a row of the reader's own words that they never
+    /// said.
     #[must_use]
-    pub fn message(&self) -> &str {
-        &self.message
+    pub fn message(&self) -> Option<&str> {
+        match &self.kind {
+            Kind::Said(said) => Some(&said.message),
+            Kind::Ran(_) => None,
+        }
+    }
+
+    /// The account of the run this turn is, or `None` for a turn somebody
+    /// typed.
+    ///
+    /// The run's own record, whole: what a reader sees on this turn is what
+    /// they see on the account card, because it is this.
+    #[must_use]
+    pub const fn account(&self) -> Option<&Account> {
+        match &self.kind {
+            Kind::Said(_) => None,
+            Kind::Ran(ran) => Some(&ran.account),
+        }
     }
 
     /// What came back, or `None` while the turn is still going — and for good
@@ -232,15 +328,30 @@ impl Turn {
     /// some width can draw it in happens on the way to the screen, so a terminal
     /// made narrower re-flows an answer the reader is looking at rather than
     /// asking the model again.
+    ///
+    /// Always `None` on a run turn: a pact answers nobody, it writes documents,
+    /// and what it wrote is its account's outcome line.
     #[must_use]
     pub fn answer(&self) -> Option<&str> {
-        self.answer.as_deref()
+        match &self.kind {
+            Kind::Said(said) => said.answer.as_deref(),
+            Kind::Ran(_) => None,
+        }
     }
 
     /// How this turn ended short of an answer, or `None` if it did not.
+    ///
+    /// Always `None` on a run turn, and deliberately: an [`Ending`] is worded
+    /// about a *turn* — `the turn was cancelled` — and a cancelled run says
+    /// `cancelled — $0.03 spent` under the directory it was stopped in, in the
+    /// account's words. Two wordings for one run is exactly what the account
+    /// being the run's only voice avoids.
     #[must_use]
     pub const fn ending(&self) -> Option<&Ending> {
-        self.ending.as_ref()
+        match &self.kind {
+            Kind::Said(said) => said.ending.as_ref(),
+            Kind::Ran(_) => None,
+        }
     }
 
     /// What this turn reported spending, or `None` if it never reported.
@@ -248,29 +359,124 @@ impl Turn {
     /// Its own number, said on its own line — `this turn cost $0.02 — chat,
     /// never added to a pact's total` — and deliberately not summed with any
     /// other turn's or with a pact's. A conversation is not a budget.
+    ///
+    /// Always `None` on a run turn, for the reason [`Turn::ending`] is: a run's
+    /// money is the account's arithmetic, said per pass in its outcome lines and
+    /// totalled in `pact finished — …`, and a number handed out here would be
+    /// the one somebody adds to a chat's.
     #[must_use]
     pub const fn cost(&self) -> Option<f64> {
-        self.cost
+        match &self.kind {
+            Kind::Said(said) => said.cost,
+            Kind::Ran(_) => None,
+        }
     }
 
-    /// When this turn was asked, which is where its clocks count from.
+    /// When this turn was asked, which is where its clocks count from — or,
+    /// for a run turn, when the run started.
     #[must_use]
     pub const fn started(&self) -> Instant {
-        self.log.started()
+        match &self.kind {
+            Kind::Said(said) => said.log.started(),
+            Kind::Ran(ran) => ran.account.started(),
+        }
     }
 
-    /// Whether this turn has stopped moving: answered, ended, or overtaken by a
-    /// newer question.
+    /// Whether this turn has stopped moving: answered, ended, run to a finish,
+    /// or overtaken by a newer turn.
     #[must_use]
     pub const fn is_closed(&self) -> bool {
-        self.log.is_closed()
+        match &self.kind {
+            Kind::Said(said) => said.log.is_closed(),
+            Kind::Ran(ran) => ran.closed.is_some(),
+        }
     }
 
     /// How many rows this turn draws as, before anything is wrapped to a width.
     ///
-    /// The message's own lines, the work lines — at least one, since a turn that
-    /// has heard nothing draws the `waiting` placeholder — the answer's own
-    /// lines, and the cost line where there is a cost.
+    /// A typed turn is the message's own lines, the work lines — at least one,
+    /// since a turn that has heard nothing draws the `waiting` placeholder — the
+    /// answer's own lines, and the cost line where there is a cost. A run turn
+    /// is however many rows its account has, counted by the account, because
+    /// they are the account's rows.
+    fn line_count(&self) -> usize {
+        match &self.kind {
+            Kind::Said(said) => said.line_count(),
+            Kind::Ran(ran) => ran.account.line_count(),
+        }
+    }
+
+    /// Every row of this turn, in the order a reader reads them, with clocks
+    /// measured against `now`.
+    ///
+    /// Boxed because the two kinds of turn draw out of two different iterators
+    /// and the whole point of the second one is that it is the account's: a run
+    /// turn yields [`Account`]'s own rows, unaltered and unre-worded, and one
+    /// allocation per turn per frame is the price of there being one place in
+    /// warlock that says what a run's line reads like.
+    fn rows(&self, now: Instant) -> Box<dyn Iterator<Item = Line> + '_> {
+        match &self.kind {
+            Kind::Said(said) => Box::new(said.rows(now)),
+            Kind::Ran(ran) => Box::new(ran.account.rows(now)),
+        }
+    }
+
+    /// Stop this turn moving as of `at`, if it has not stopped already.
+    ///
+    /// What a newer turn does to the one above it, and what closes a run. It
+    /// adds no line either way: a typed turn overtaken by a newer question is
+    /// simply frozen where it got to, and a run's last word is its account's
+    /// summary rather than anything the thread has to say about it.
+    ///
+    /// A run turn's account is frozen along with the turn, so the run's newest
+    /// line stops counting up rather than ticking on under a conversation that
+    /// has moved past it. `Account::freeze` is idempotent, so a run whose
+    /// account was already finished keeps the instant it finished at.
+    fn freeze(&mut self, at: Instant) {
+        match &mut self.kind {
+            Kind::Said(said) => said.log.freeze(at),
+            Kind::Ran(ran) => {
+                ran.account.freeze(at);
+                ran.closed.get_or_insert(at);
+            }
+        }
+    }
+
+    /// This turn as the typed turn it is, while it is still live.
+    ///
+    /// The one gate everything a conversation does goes through: a message's
+    /// activity, its answer and its ending are all filed here or dropped. A run
+    /// turn is never it — nothing the model says in a chat belongs under a run
+    /// nobody typed — and neither is a turn that is over, for the reason
+    /// [`Thread::record`] gives.
+    fn live_said(&mut self) -> Option<&mut Said> {
+        if self.is_closed() {
+            return None;
+        }
+        match &mut self.kind {
+            Kind::Said(said) => Some(said),
+            Kind::Ran(_) => None,
+        }
+    }
+
+    /// This turn as the run it is, while that run is still going.
+    ///
+    /// [`Turn::live_said`]'s counterpart, and the same rule the other way
+    /// round: a run's events reach its account through here and nothing else,
+    /// so they cannot land on a typed turn or on a run that has been closed.
+    fn live_run(&mut self) -> Option<&mut Account> {
+        if self.is_closed() {
+            return None;
+        }
+        match &mut self.kind {
+            Kind::Said(_) => None,
+            Kind::Ran(ran) => Some(&mut ran.account),
+        }
+    }
+}
+
+impl Said {
+    /// How many rows this turn draws as, before anything is wrapped to a width.
     fn line_count(&self) -> usize {
         broken(&self.message).count()
             + self.log.row_count()
@@ -306,20 +512,19 @@ impl Turn {
 
     /// Close this turn at `at` with the line `ending` makes.
     ///
-    /// Does nothing to a turn that is closed already. The first ending wins,
-    /// because it is the one already on screen — a cancel that lands a moment
-    /// before the answer does is still a cancel.
+    /// Reached only through [`Turn::live_said`], which is what makes the first
+    /// ending win: a turn that is closed already is not a live one, so a cancel
+    /// that lands a moment before the answer does is still the cancel that is on
+    /// screen.
     fn word(&mut self, ending: &Ending, at: Instant) {
-        if self.is_closed() {
-            return;
-        }
         self.log.push(ending.line(), at);
         self.ending = Some(ending.clone());
         self.log.freeze(at);
     }
 }
 
-/// The conversation, from the first question to the last answer.
+/// The conversation, from the first question to the last answer — and every run
+/// that happened while it was going on.
 ///
 /// One session, one thread: warlock's chat is one conversation for the life of
 /// the process, so turns are appended and nothing is ever dropped or trimmed —
@@ -327,11 +532,15 @@ impl Turn {
 /// remembers it too, which is [`ChatAgent`](crate::ChatAgent)'s half of the same
 /// arrangement.
 ///
-/// Driven by four calls, all of which take the instant they happened at:
-/// [`Thread::ask`] when a message is submitted, [`Thread::record`] for every
-/// activity the turn reports, and [`Thread::answer`] or [`Thread::end`] when it
-/// is over. Read back as rows with [`Thread::lines`] or [`Thread::window`],
-/// which take the `now` the newest clock is measured against.
+/// Driven by four calls for a question, all of which take the instant they
+/// happened at: [`Thread::ask`] when a message is submitted, [`Thread::record`]
+/// for every activity the turn reports, and [`Thread::answer`] or
+/// [`Thread::end`] when it is over. And three for a run, which is a turn nobody
+/// typed: [`Thread::open_run`] when it starts, [`Thread::run_mut`] to feed its
+/// [`Account`] as the run's own events arrive, and [`Thread::close_run`] when it
+/// is over however it went. Read back as rows with [`Thread::lines`] or
+/// [`Thread::window`], which take the `now` the newest clock is measured
+/// against.
 ///
 /// ```
 /// use std::time::{Duration, Instant};
@@ -353,9 +562,36 @@ impl Turn {
 ///     ],
 /// );
 /// ```
+///
+/// A run started under that question takes a turn of its own, and what it draws
+/// as is its account — the same rows, from the same code, as the account card
+/// shows for the same run:
+///
+/// ```
+/// use std::time::{Duration, Instant};
+///
+/// use warlock_tui::{Activity, Line, Thread};
+///
+/// let base = Instant::now();
+/// let mut thread = Thread::new();
+///
+/// thread.open_run(base);
+/// let run = thread.run_mut().expect("the run is the live turn");
+/// run.open_section("crates/engine", base);
+/// run.record(&Activity::Thinking, base + Duration::from_secs(1));
+///
+/// assert_eq!(
+///     thread.lines(base + Duration::from_secs(9)),
+///     vec![
+///         Line::Directory { path: "crates/engine".into() },
+///         Line::Clocked { clock: "0:09".to_owned(), text: "thinking".to_owned() },
+///     ],
+/// );
+/// ```
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Thread {
-    /// The turns, in the order they were asked.
+    /// The turns, in the order they were asked — a run among them at the
+    /// position it started at.
     turns: Vec<Turn>,
 }
 
@@ -379,16 +615,81 @@ impl Thread {
     /// the event loop keeps, and a turn still ticking under a newer one would
     /// be a second answer to that question.
     pub fn ask(&mut self, message: impl Into<String>, at: Instant) {
-        if let Some(previous) = self.turns.last_mut() {
-            previous.log.freeze(at);
-        }
+        self.freeze_last(at);
         self.turns.push(Turn {
-            message: message.into(),
-            log: Log::opened_at(at),
-            answer: None,
-            ending: None,
-            cost: None,
+            kind: Kind::Said(Said {
+                message: message.into(),
+                log: Log::opened_at(at),
+                answer: None,
+                ending: None,
+                cost: None,
+            }),
         });
+    }
+
+    /// Open a turn nobody typed at `at`: a run, appended in order like any
+    /// other turn.
+    ///
+    /// The counterpart of [`Thread::ask`], and the same call in every way but
+    /// the message there is none of. A pact or a refresh starting while the
+    /// conversation is on screen has to go *into* the conversation — a card
+    /// swapped away under the reader, or a second history beside this one, is
+    /// the single sequence of what happened coming apart — so a run takes a turn
+    /// of its own, at the position it started at, and whatever was live above it
+    /// freezes exactly as a new question would have frozen it.
+    ///
+    /// What the turn holds is an [`Account`], starting at `at`, which is the
+    /// same value the account card holds for the same run. Nothing about the run
+    /// is worded here and nothing ever will be: the lines are the account's,
+    /// from the account's own code, so a run reads the same in the conversation
+    /// as it does on its own card, down to the character.
+    ///
+    /// Feed it with [`Thread::run_mut`] and close it with [`Thread::close_run`].
+    pub fn open_run(&mut self, at: Instant) {
+        self.freeze_last(at);
+        self.turns.push(Turn {
+            kind: Kind::Ran(Ran {
+                account: Account::new(at),
+                closed: None,
+            }),
+        });
+    }
+
+    /// The account of the run still under way, to be fed as its events arrive.
+    ///
+    /// Handed out whole rather than wrapped in a method per kind of event,
+    /// because every one of those methods would be a second name for something
+    /// [`Account`] already does and a second place a run's line could come to be
+    /// worded: a directory opening, an activity, a summarising pass, an outcome
+    /// and the run's summary are all calls the caller already knows how to make.
+    /// What they make them on is the run's own account, and the rows the reader
+    /// sees are what those calls produced.
+    ///
+    /// `None` when the newest turn is not a run, or when the run it is has been
+    /// closed — the same silence [`Thread::record`] keeps, and for the same
+    /// reason: a line filed under a run that is over would contradict a line
+    /// already on screen.
+    pub fn run_mut(&mut self) -> Option<&mut Account> {
+        self.turns.last_mut().and_then(Turn::live_run)
+    }
+
+    /// Close the run turn at `at`.
+    ///
+    /// The run is over — it wrote its documents, it was refused, it failed, or
+    /// somebody stopped it — and this is the call that says so: the turn stops
+    /// being the live one, so the composer is the reader's again, and the run's
+    /// account stops counting up.
+    ///
+    /// It adds no line. How a run went is the account's to say, in the outcome
+    /// lines and the summary a caller has already put there through
+    /// [`Thread::run_mut`], and a sentence of the thread's own about a run would
+    /// be the second wording this whole arrangement exists to avoid.
+    ///
+    /// Does nothing when the newest turn is not a live run.
+    pub fn close_run(&mut self, at: Instant) {
+        if self.run_mut().is_some() {
+            self.freeze_last(at);
+        }
     }
 
     /// Record what the live turn was seen doing at `at`.
@@ -400,27 +701,28 @@ impl Thread {
     /// rather than a thing the turn did, so it is added up and said once, at the
     /// end, on a line of its own.
     ///
-    /// Does nothing when there is no live turn — before the first question, or
-    /// after the current one has been answered or ended. A line cannot be filed
-    /// under a turn that is already over without contradicting a line already on
-    /// screen, and dropping it is the honest way to fail.
+    /// Does nothing when there is no live *typed* turn — before the first
+    /// question, after the current one has been answered or ended, or while the
+    /// newest turn is a run. A line cannot be filed under a turn that is already
+    /// over without contradicting a line already on screen, and a chat's
+    /// activity filed under a run nobody typed would put the model's work in the
+    /// middle of a pact's account; dropping it is the honest way to fail. What a
+    /// run reports goes to the run's own account, through
+    /// [`Thread::run_mut`].
     pub fn record(&mut self, activity: &Activity, at: Instant) {
-        let Some(turn) = self.turns.last_mut() else {
+        let Some(said) = self.live_said() else {
             return;
         };
-        if turn.is_closed() {
-            return;
-        }
 
         match activity {
-            Activity::Cost { usd } => *turn.cost.get_or_insert(0.0) += usd,
+            Activity::Cost { usd } => *said.cost.get_or_insert(0.0) += usd,
             // One line per stretch, however many times the stream says the
             // stretch is still going: the line already there goes on ticking,
             // and its clock is the count of how long the model has been at it.
-            Activity::Thinking => turn.log.extend_or_open(THINKING, at),
-            Activity::Writing => turn.log.extend_or_open(WRITING, at),
+            Activity::Thinking => said.log.extend_or_open(THINKING, at),
+            Activity::Writing => said.log.extend_or_open(WRITING, at),
             Activity::Tool { name, detail } => {
-                turn.log.push(tool_line(name, detail.as_ref()), at);
+                said.log.push(tool_line(name, detail.as_ref()), at);
             }
         }
     }
@@ -435,22 +737,20 @@ impl Thread {
     /// a turn drawn as a question with nothing under it is indistinguishable
     /// from one still going, and a reader would sit and wait for it.
     ///
-    /// Does nothing when there is no live turn, for [`Thread::record`]'s reason.
+    /// Does nothing when there is no live typed turn, for [`Thread::record`]'s
+    /// reason — a run does not answer anybody.
     pub fn answer(&mut self, answer: impl Into<String>, at: Instant) {
-        let Some(turn) = self.turns.last_mut() else {
+        let Some(said) = self.live_said() else {
             return;
         };
-        if turn.is_closed() {
-            return;
-        }
 
         let answer = answer.into();
         if answer.trim().is_empty() {
-            turn.word(&Ending::NothingSaid, at);
+            said.word(&Ending::NothingSaid, at);
             return;
         }
-        turn.answer = Some(answer);
-        turn.log.freeze(at);
+        said.answer = Some(answer);
+        said.log.freeze(at);
     }
 
     /// End the live turn at `at` with the one line `ending` makes.
@@ -459,37 +759,57 @@ impl Thread {
     /// one line: whatever arrived before it stays exactly where it was, so a
     /// turn cancelled after two tool calls still shows those two tool calls.
     ///
-    /// Does nothing when there is no live turn, or when the newest one is over
-    /// already — the first ending wins, and a failure reported twice is still
-    /// one line.
+    /// Does nothing when there is no live typed turn, when the newest one is
+    /// over already — the first ending wins, and a failure reported twice is
+    /// still one line — or when the newest turn is a run, whose endings are its
+    /// account's [`Outcome`](crate::Outcome)s and not the thread's to word.
     pub fn end(&mut self, ending: &Ending, at: Instant) {
-        if let Some(turn) = self.turns.last_mut() {
-            turn.word(ending, at);
+        if let Some(said) = self.live_said() {
+            said.word(ending, at);
         }
     }
 
-    /// The turns, in the order they were asked.
+    /// The turns, in the order they were asked — the runs among them included,
+    /// at the position each run started at.
     #[must_use]
     pub fn turns(&self) -> &[Turn] {
         &self.turns
     }
 
-    /// Whether nothing has been asked yet.
+    /// Whether nothing has been asked and nothing has been run.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.turns.is_empty()
     }
 
-    /// The turn still being answered, or `None` when none is.
+    /// The turn still going, or `None` when none is.
     ///
     /// The live turn is the last one, and only while it is un-frozen: a turn
-    /// stops being live the moment it answers, ends, or is overtaken by a newer
-    /// question. What a caller does with it is decide whether the composer is
-    /// muted — one question at a time — without keeping a second flag that could
-    /// disagree with the thread.
+    /// stops being live the moment it answers, ends, is run to a finish, or is
+    /// overtaken by a newer one. What a caller does with it is decide whether the
+    /// composer is muted — one turn at a time, whether that turn is a question
+    /// somebody asked or a run they started — without keeping a second flag that
+    /// could disagree with the thread.
     #[must_use]
     pub fn in_flight(&self) -> Option<&Turn> {
         self.turns.last().filter(|turn| !turn.is_closed())
+    }
+
+    /// Stop the newest turn moving as of `at`, whatever kind of turn it is.
+    ///
+    /// What every turn opening does to the one above it, and what closes a run:
+    /// see [`Turn::freeze`], which is where the difference between freezing a
+    /// question and freezing a run lives.
+    fn freeze_last(&mut self, at: Instant) {
+        if let Some(previous) = self.turns.last_mut() {
+            previous.freeze(at);
+        }
+    }
+
+    /// The live typed turn, which is the only turn a conversation's own events
+    /// can be filed under.
+    fn live_said(&mut self) -> Option<&mut Said> {
+        self.turns.last_mut().and_then(Turn::live_said)
     }
 
     /// How many rows the whole thread draws as, before anything is wrapped.
@@ -566,6 +886,7 @@ fn one_line(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::time::{Duration, Instant};
 
     use warlock_engine::AgentError;
@@ -595,8 +916,8 @@ mod tests {
             .lines(now)
             .into_iter()
             .map(|line| match line {
-                // A thread never yields a directory heading; it is here so this
-                // helper words every row of the panel and not most of them.
+                // Only a run turn yields a directory heading, and it yields it
+                // as the account wrote it: the path, on its own row.
                 Line::Directory { path } => path.display().to_string(),
                 Line::Clocked { clock, text } => format!("{clock} {text}"),
                 Line::Summary { text } | Line::Text { text } | Line::Said { text } => text,
@@ -732,7 +1053,7 @@ mod tests {
             ],
         );
         assert_eq!(thread.turns().len(), 2);
-        assert_eq!(thread.turns()[0].message(), "first");
+        assert_eq!(thread.turns()[0].message(), Some("first"));
         assert_eq!(thread.in_flight().map(Turn::started), Some(at(base, 70)));
     }
 
@@ -1143,6 +1464,353 @@ mod tests {
         );
         assert_eq!(thread.window(0, 99, at(base, 4)).len(), 6);
         assert_eq!(thread.window(99, 4, at(base, 4)), Vec::new());
+    }
+
+    /// A whole run, fed to whichever account it is handed: two directories, a
+    /// pass over a big file, a document written, a refusal, and the summary.
+    ///
+    /// One script, so the account card's account and the thread's run turn are
+    /// driven by the same calls in the same order — which is the only honest way
+    /// to ask whether they come out saying the same thing.
+    fn drive_run(account: &mut Account, base: Instant) {
+        account.open_section("crates/engine", base);
+        account.record(&Activity::Thinking, at(base, 2));
+        account.record_summarising("crates/engine/Cargo.lock", 1, 2, at(base, 10));
+        account.record(&tool("Read", "src/lib.rs"), at(base, 40));
+        account.record(&Activity::Writing, at(base, 50));
+        account.record(&Activity::Cost { usd: 0.21 }, at(base, 55));
+        account.open_section("crates/tui", at(base, 60));
+        account.record(&Activity::Thinking, at(base, 61));
+        account.close_open_sections(at(base, 90), |section| {
+            if section.directory() == Path::new("crates/engine") {
+                Outcome::Wrote {
+                    document: "crates/engine/WARLOCK.md".into(),
+                    bytes: 2_341,
+                }
+            } else {
+                Outcome::Refused {
+                    reason: "the model returned an empty document".to_owned(),
+                }
+            }
+        });
+        account.finish(at(base, 90));
+    }
+
+    #[test]
+    fn a_run_turn_draws_exactly_what_the_account_card_draws() {
+        let base = Instant::now();
+
+        // The same run, twice: once as the card holds it, once as the thread
+        // does. The thread's is an account too — that is the whole design — so
+        // there is no second wording of a directory heading, a tool call, a
+        // summarising pass, an outcome or the summary to drift from this one.
+        let mut card = Account::new(base);
+        drive_run(&mut card, base);
+
+        let mut thread = Thread::new();
+        thread.open_run(base);
+        drive_run(thread.run_mut().expect("the run is the live turn"), base);
+        thread.close_run(at(base, 90));
+
+        let now = at(base, 120);
+        assert_eq!(thread.lines(now), card.lines(now));
+        assert_eq!(thread.line_count(), card.line_count());
+        assert_eq!(
+            said(&thread, now),
+            vec![
+                "crates/engine".to_owned(),
+                "0:10 thinking".to_owned(),
+                "0:40 summarising crates/engine/Cargo.lock (1/2)".to_owned(),
+                "0:50 Read src/lib.rs".to_owned(),
+                "1:00 writing".to_owned(),
+                "1:00 wrote crates/engine/WARLOCK.md — 2341 bytes, $0.21".to_owned(),
+                "crates/tui".to_owned(),
+                "0:30 thinking".to_owned(),
+                "0:30 refused — the model returned an empty document".to_owned(),
+                "pact finished — 2 directories, 1:30, $0.21 (incomplete: 1 pass reported no cost)"
+                    .to_owned(),
+            ],
+        );
+
+        // One line per action, and not one word of prose or of a tool's result
+        // among them: the run says what it did, exactly as it does on its card.
+        for line in work(&thread, now) {
+            assert!(
+                !line.contains("this turn"),
+                "a chat's wording reached a run's line: {line}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_run_takes_its_turn_where_it_started_among_the_questions() {
+        let base = Instant::now();
+        let mut thread = Thread::new();
+
+        thread.ask("what is in the engine?", base);
+        thread.record(&Activity::Thinking, at(base, 1));
+        thread.answer("A pact.", at(base, 5));
+
+        // A pact started while the conversation is on screen goes into the
+        // conversation, in order, rather than swapping a card away or opening a
+        // second history somewhere else.
+        thread.open_run(at(base, 10));
+        let run = thread.run_mut().expect("the run is the live turn");
+        run.open_section("crates/engine", at(base, 10));
+        run.record(&Activity::Writing, at(base, 12));
+        run.finish(at(base, 40));
+        thread.close_run(at(base, 40));
+
+        thread.ask("and how long did that take?", at(base, 50));
+        thread.answer("Half a minute.", at(base, 55));
+
+        assert_eq!(
+            said(&thread, at(base, 90)),
+            vec![
+                "what is in the engine?".to_owned(),
+                "0:05 thinking".to_owned(),
+                "A pact.".to_owned(),
+                // The run's own clock starts again at zero, as every turn's
+                // does, and counts from the key press rather than the session.
+                "crates/engine".to_owned(),
+                "0:30 writing".to_owned(),
+                "pact finished — 1 directory, 0:30, $0.00 (incomplete: 1 pass reported no cost)"
+                    .to_owned(),
+                "and how long did that take?".to_owned(),
+                "0:05 waiting".to_owned(),
+                "Half a minute.".to_owned(),
+            ],
+        );
+
+        // Three turns, in the order they happened, and the middle one is the
+        // one nobody typed.
+        assert_eq!(thread.turns().len(), 3);
+        assert_eq!(thread.turns()[0].message(), Some("what is in the engine?"));
+        assert_eq!(thread.turns()[1].message(), None);
+        assert_eq!(thread.turns()[1].started(), at(base, 10));
+        assert!(thread.turns()[1].account().is_some());
+        assert!(thread.turns()[0].account().is_none());
+        assert_eq!(
+            thread.turns()[2].message(),
+            Some("and how long did that take?"),
+        );
+
+        // Counted as well as drawn, so the panel can scroll to the end of it.
+        assert_eq!(thread.line_count(), 9);
+        assert_eq!(thread.lines(at(base, 90)).len(), thread.line_count());
+        assert_eq!(
+            thread.window(3, 3, at(base, 90)),
+            vec![
+                Line::Directory {
+                    path: "crates/engine".into(),
+                },
+                Line::Clocked {
+                    clock: "0:30".to_owned(),
+                    text: "writing".to_owned(),
+                },
+                Line::Summary {
+                    text: "pact finished — 1 directory, 0:30, $0.00 (incomplete: 1 pass reported \
+                           no cost)"
+                        .to_owned(),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn a_run_that_ends_badly_words_its_own_turn_and_leaves_the_ones_above_it_alone() {
+        let base = Instant::now();
+
+        for (outcome, wording) in [
+            (Outcome::Cancelled, "0:20 cancelled — $0.03 spent"),
+            (
+                Outcome::Refused {
+                    reason: "the model returned an empty document".to_owned(),
+                },
+                "0:20 refused — the model returned an empty document",
+            ),
+            // A pass that failed outright is a refusal with the failure as its
+            // reason — see `pacting`, which words every way a pass can not
+            // produce a document this way — so it lands here like the rest.
+            (
+                Outcome::Refused {
+                    reason: "claude exited with status 1".to_owned(),
+                },
+                "0:20 refused — claude exited with status 1",
+            ),
+        ] {
+            let mut thread = Thread::new();
+            thread.ask("what is in the engine?", base);
+            thread.answer("A pact.", at(base, 5));
+            let before = said(&thread, at(base, 900));
+
+            thread.open_run(at(base, 10));
+            let run = thread.run_mut().expect("the run is the live turn");
+            run.open_section("crates/engine", at(base, 10));
+            run.record(&Activity::Cost { usd: 0.03 }, at(base, 11));
+            run.close_section(&outcome, at(base, 30));
+            run.finish(at(base, 30));
+            thread.close_run(at(base, 30));
+
+            let after = said(&thread, at(base, 900));
+            assert_eq!(
+                after[..before.len()],
+                before[..],
+                "the turns above the run are exactly as they were",
+            );
+            assert_eq!(after[before.len() + 1], wording);
+
+            // The outcome is the account's, in the account's words: nothing
+            // here ends a run with `the turn was cancelled`.
+            assert!(!after.iter().any(|line| line.contains("the turn")));
+            assert_eq!(thread.turns()[1].ending(), None);
+            assert!(thread.in_flight().is_none(), "the session is free again");
+        }
+    }
+
+    #[test]
+    fn a_runs_money_and_a_turns_money_are_never_each_others_words() {
+        let base = Instant::now();
+        let mut thread = Thread::new();
+
+        // The same twenty-one cents, spent by a question and by a pact, in one
+        // conversation: the two lines have to be unmistakable for each other,
+        // because the panel now draws them one under the other.
+        thread.ask("how much?", base);
+        thread.record(&Activity::Cost { usd: 0.21 }, at(base, 1));
+        thread.answer("that much.", at(base, 2));
+
+        thread.open_run(at(base, 10));
+        let run = thread.run_mut().expect("the run is the live turn");
+        run.open_section("crates/engine", at(base, 10));
+        run.record(&Activity::Cost { usd: 0.21 }, at(base, 11));
+        run.close_section(
+            &Outcome::Wrote {
+                document: "crates/engine/WARLOCK.md".into(),
+                bytes: 2_341,
+            },
+            at(base, 30),
+        );
+        run.finish(at(base, 30));
+        thread.close_run(at(base, 30));
+
+        let money: Vec<String> = said(&thread, at(base, 60))
+            .into_iter()
+            .filter(|line| line.contains("$0.21"))
+            .collect();
+        assert_eq!(
+            money,
+            vec![
+                "this turn cost $0.21 — chat, never added to a pact's total".to_owned(),
+                "0:20 wrote crates/engine/WARLOCK.md — 2341 bytes, $0.21".to_owned(),
+                "pact finished — 1 directory, 0:20, $0.21".to_owned(),
+            ],
+        );
+
+        // And no arithmetic anywhere has added them: the chat's money is the
+        // turn's own and the run's total is the run's own, both $0.21 rather
+        // than one $0.42 between them.
+        assert_eq!(thread.turns()[0].cost(), Some(0.21));
+        assert_eq!(
+            thread.turns()[1].cost(),
+            None,
+            "a run's money is its account's, never a turn's number",
+        );
+        assert_eq!(
+            thread.turns()[1]
+                .account()
+                .and_then(|account| account.sections()[0].cost()),
+            Some(0.21),
+        );
+    }
+
+    #[test]
+    fn nothing_a_conversation_says_lands_on_a_turn_nobody_typed() {
+        let base = Instant::now();
+        let mut thread = Thread::new();
+
+        thread.open_run(base);
+        let run = thread.run_mut().expect("the run is the live turn");
+        run.open_section("crates/engine", base);
+        run.record(&Activity::Writing, at(base, 2));
+
+        let during = said(&thread, at(base, 20));
+
+        // A chat's activity, answer or ending has nowhere to go while the run
+        // is the newest turn: a model's prose in the middle of a pact's account
+        // is exactly what the account card refuses, and this card is that card.
+        thread.record(&Activity::Thinking, at(base, 21));
+        thread.record(&Activity::Cost { usd: 9.99 }, at(base, 22));
+        thread.answer("out of nowhere", at(base, 23));
+        thread.end(&Ending::Cancelled, at(base, 24));
+
+        assert_eq!(said(&thread, at(base, 20)), during);
+        assert_eq!(thread.turns().len(), 1);
+        assert_eq!(thread.turns()[0].answer(), None);
+        assert_eq!(thread.turns()[0].ending(), None);
+        assert!(
+            thread.in_flight().is_some(),
+            "and none of it ended the run either",
+        );
+    }
+
+    #[test]
+    fn a_run_is_the_live_turn_until_it_is_closed() {
+        let base = Instant::now();
+        let mut thread = Thread::new();
+
+        assert!(thread.run_mut().is_none(), "no run, nothing to feed");
+
+        thread.open_run(base);
+        assert!(thread.in_flight().is_some(), "the composer is muted");
+        assert_eq!(thread.in_flight().map(Turn::started), Some(base));
+
+        let run = thread.run_mut().expect("the run is the live turn");
+        run.open_section("crates/engine", base);
+        run.record(&Activity::Writing, at(base, 2));
+        assert_eq!(said(&thread, at(base, 30))[1], "0:30 writing");
+
+        // Closing a run stops its clocks with it, however the run went and
+        // whether or not its account was finished: a line still counting up
+        // under a conversation that has moved on is a run that looks alive.
+        thread.close_run(at(base, 40));
+        assert!(thread.in_flight().is_none(), "the composer is the reader's");
+        assert!(thread.run_mut().is_none(), "and nothing more is filed");
+        assert_eq!(said(&thread, at(base, 900))[1], "0:40 writing");
+
+        // A question after it opens a turn of its own, under the run.
+        thread.ask("what did that write?", at(base, 50));
+        thread.answer("A document.", at(base, 55));
+        assert_eq!(
+            said(&thread, at(base, 900)),
+            vec![
+                "crates/engine".to_owned(),
+                "0:40 writing".to_owned(),
+                "what did that write?".to_owned(),
+                "0:05 waiting".to_owned(),
+                "A document.".to_owned(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_run_left_open_stops_when_the_next_turn_starts() {
+        let base = Instant::now();
+        let mut thread = Thread::new();
+
+        thread.open_run(base);
+        let run = thread.run_mut().expect("the run is the live turn");
+        run.open_section("crates/engine", base);
+        run.record(&Activity::Writing, at(base, 2));
+
+        // Nobody closed the run, and a question was asked anyway: the run
+        // freezes where the question landed, exactly as a turn overtaken by a
+        // newer one does.
+        thread.ask("what is happening?", at(base, 20));
+
+        assert!(thread.turns()[0].is_closed());
+        assert_eq!(said(&thread, at(base, 900))[1], "0:20 writing");
+        assert_eq!(thread.in_flight().map(Turn::started), Some(at(base, 20)));
     }
 
     #[test]

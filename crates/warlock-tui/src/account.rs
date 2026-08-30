@@ -622,6 +622,25 @@ impl Account {
             .push(format!("{SUMMARISING} {file} ({part}/{parts})"), at);
     }
 
+    /// Stop whatever section is still live moving as of `at`, without ending
+    /// the run.
+    ///
+    /// The half of [`Account::finish`] that is about clocks rather than about
+    /// money: nothing is worded, no summary is written, and a run frozen this
+    /// way can still be looked at — it simply stops counting up. Idempotent for
+    /// [`Log::freeze`]'s reason, so freezing a run that has already stopped
+    /// leaves its last line where it stopped.
+    ///
+    /// Crate-private, because the two callers are the two ways a run's clocks
+    /// stop: `finish`, which is a run saying what it came to, and a run turn of
+    /// the thread being closed, which is the panel saying the run is over
+    /// without adding a word of its own.
+    pub(crate) fn freeze(&mut self, at: Instant) {
+        if let Some(section) = self.sections.last_mut() {
+            section.log.freeze(at);
+        }
+    }
+
     /// Close the newest section at `at` with the line `outcome` makes.
     ///
     /// The outcome line is a line like any other and takes a clock like any
@@ -689,9 +708,7 @@ impl Account {
     /// Freezes whatever section was still live, since nothing is running any
     /// more.
     pub fn finish(&mut self, at: Instant) {
-        if let Some(section) = self.sections.last_mut() {
-            section.log.freeze(at);
-        }
+        self.freeze(at);
 
         let directories = plural(self.sections.len(), "directory", "directories");
         let elapsed = clock(at.saturating_duration_since(self.started));
@@ -711,6 +728,16 @@ impl Account {
     #[must_use]
     pub fn sections(&self) -> &[Section] {
         &self.sections
+    }
+
+    /// When the run started, which is what its summary's duration counts from.
+    ///
+    /// Crate-private, and there for one reason: a run drawn into the thread is
+    /// a turn, and every turn of a thread has to be able to say when it began —
+    /// see [`Turn::started`](crate::Turn). A run began when the key was pressed,
+    /// which is the instant [`Account::new`] took.
+    pub(crate) const fn started(&self) -> Instant {
+        self.started
     }
 
     /// When the section that is still being worked started, or `None` when none
@@ -773,7 +800,13 @@ impl Account {
     /// that has heard nothing yet is the [`WAITING`] placeholder: a pass that
     /// has not said anything still has a clock on screen counting up from the
     /// moment its section opened.
-    fn rows(&self, now: Instant) -> impl Iterator<Item = Line> + '_ {
+    ///
+    /// Crate-private rather than private, because the thread draws a run's turn
+    /// out of exactly this iterator (see [`Turn`](crate::Turn)): the rows a run
+    /// has in the conversation are the rows it has on its own card, from this
+    /// one function, so there is no second wording of a run's lines anywhere in
+    /// warlock to keep in step with this one.
+    pub(crate) fn rows(&self, now: Instant) -> impl Iterator<Item = Line> + '_ {
         self.sections
             .iter()
             .flat_map(move |section| {

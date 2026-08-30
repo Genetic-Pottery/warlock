@@ -9550,9 +9550,9 @@ mod tests {
         // the first is exactly as it was answered.
         let thread = app.thread().expect("a question has been asked");
         assert_eq!(thread.turns().len(), 2);
-        assert_eq!(thread.turns()[0].message(), QUESTION);
+        assert_eq!(thread.turns()[0].message(), Some(QUESTION));
         assert_eq!(thread.turns()[0].answer(), Some(ANSWER));
-        assert_eq!(thread.turns()[1].message(), "and what did that cost?");
+        assert_eq!(thread.turns()[1].message(), Some("and what did that cost?"),);
         assert_eq!(thread.turns()[1].ending(), Some(&Ending::Cancelled));
         assert_eq!(thread.turns()[1].cost(), Some(0.02));
 
