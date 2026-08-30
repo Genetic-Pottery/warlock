@@ -595,6 +595,12 @@ pub(crate) enum MouseAction {
 /// are rows the panel gave up, so a hit test that had not been told about the
 /// draft would answer [`Hit::PanelLine`] for a point drawn on a field and scroll
 /// a window the pointer is not over. See [`hit_test`].
+///
+/// The run's header is the same again, and comes off the app rather than off a
+/// parameter: the frame drew whatever [`App::run_header`](warlock_tui::App::run_header)
+/// said, and the app is already here for the window the pointer is over. While a
+/// run is in flight the header holds the panel's top row, so the line offsets
+/// are counted from under it.
 pub(crate) fn mouse_action(
     mouse: MouseEvent,
     size: Size,
@@ -607,7 +613,8 @@ pub(crate) fn mouse_action(
         return None;
     }
 
-    let hit = hit_test(mouse.column, mouse.row, size, composer);
+    let header = app.run_header();
+    let hit = hit_test(mouse.column, mouse.row, size, composer, header.as_ref());
     match mouse.kind {
         // Down the tree and down the account are the same direction, so one
         // notch reads the same way over either pane.
@@ -634,9 +641,10 @@ pub(crate) fn mouse_action(
 /// Which way the notch went is the caller's, because that is the only thing
 /// that differs between the two directions; what this owns is the rule that the
 /// pointer picks the pane. Every part of a pane's inside answers for that pane,
-/// the tree's header included: a wheel is aimed at a column rather than at a
-/// row, and a notch that did nothing because the pointer happened to be on the
-/// one line naming the tree would read as a wheel that sticks.
+/// the tree's header and the run's included: a wheel is aimed at a column rather
+/// than at a row, and a notch that did nothing because the pointer happened to
+/// be on the one line naming the tree — or the one line naming the run — would
+/// read as a wheel that sticks.
 ///
 /// The footer, the composer and the borders answer nothing, and they are the
 /// whole of what does not: the footer is nobody's pane, a border is the line
@@ -649,7 +657,7 @@ pub(crate) fn mouse_action(
 fn wheel(hit: Hit, tree: MouseAction, panel: MouseAction) -> Option<MouseAction> {
     match hit {
         Hit::TreeHeader | Hit::TreeRow { .. } | Hit::TreeBelowRows => Some(tree),
-        Hit::PanelLine { .. } => Some(panel),
+        Hit::PanelHeader | Hit::PanelLine { .. } => Some(panel),
         Hit::Composer | Hit::Footer | Hit::Border | Hit::Offscreen => None,
     }
 }
@@ -685,7 +693,7 @@ fn click(hit: Hit, app: &App) -> Option<MouseAction> {
             }
         }
         Hit::TreeHeader | Hit::TreeBelowRows => Some(MouseAction::Focus(Focus::Tree)),
-        Hit::PanelLine { .. } => Some(MouseAction::Focus(Focus::Panel)),
+        Hit::PanelHeader | Hit::PanelLine { .. } => Some(MouseAction::Focus(Focus::Panel)),
         // A click inside a pane gives that pane the keys, and the composer is a
         // pane: it is only ever hit-tested when it is on screen, so a press on
         // it is somebody pointing at the field they mean to type in.
@@ -1721,7 +1729,7 @@ mod tests {
             }
             let mut app = App::from_rows(rows);
             app.set_viewport_height(tree_height(SIZE));
-            app.set_panel_height(panel_height(SIZE, None));
+            app.set_panel_height(panel_height(SIZE, None, None));
             app
         }
 
@@ -3094,7 +3102,7 @@ mod tests {
         fn app_on_screen() -> App {
             let mut app = App::from_rows(rows());
             app.set_viewport_height(tree_height(SIZE));
-            app.set_panel_height(panel_height(SIZE, None));
+            app.set_panel_height(panel_height(SIZE, None, None));
             app
         }
 
@@ -3165,7 +3173,7 @@ mod tests {
             // tests into assertions about somewhere else.
             assert_eq!(viewport(), 18, "eighteen rows of tree at 80x24");
             assert_eq!(
-                usize::from(panel_height(SIZE, None)),
+                usize::from(panel_height(SIZE, None, None)),
                 19,
                 "nineteen lines of panel: no header of its own"
             );

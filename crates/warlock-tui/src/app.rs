@@ -431,25 +431,102 @@ pub enum Run {
 /// counts directories, so it reads as `(3/12)` beside a `total` that does not
 /// move for the length of the run.
 ///
-/// Private, and the only thing given out of it is the yes-or-no of
-/// [`App::is_in_flight`]: what a caller can otherwise do with it is put it
-/// there, take it away, and ask for the line it makes. The path is answered
-/// against, never handed back, and the position and total are not given out at
-/// all — handing the parts back would be a second place the wording could be
-/// decided. A renderer needs to know which row of the tree is the one being
-/// worked, and asking about a path it already holds settles that without
-/// learning how the run is spelled.
+/// Private, and what comes out of it comes out finished: the yes-or-no of
+/// [`App::is_in_flight`], the worded line of [`App::pact_line`], and the
+/// already-spelled [`RunHeader`] of [`App::run_header`]. The path is answered
+/// against or spelled, never handed back, so there is no second place the
+/// directory's wording could be decided. A renderer needs to know which row of
+/// the tree is the one being worked, and asking about a path it already holds
+/// settles that without learning how the run is spelled.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct InFlight {
     /// The directory the pact is working now.
     path: PathBuf,
     /// Which directory of the run this is, counting from one.
     position: usize,
+    /// The furthest position this run has reached: `position` at its high-water
+    /// mark, which is what a bar is filled to.
+    ///
+    /// It is state on the record rather than something worked out when a frame
+    /// is drawn, because "furthest so far" is a fact about the run's history and
+    /// a draw sees only the run's present. It is seeded from the position the
+    /// run starts at and only ever rises, so a directory reported out of order —
+    /// a late event, a re-send, an engine that counts a retry backwards — cannot
+    /// take a fill that has already been drawn back down. It goes with the rest
+    /// of the record on [`App::clear_pact_in_flight`], so the next run starts its
+    /// fraction again rather than inheriting this one's.
+    ///
+    /// `position` is left exactly as the caller said it, because the footer
+    /// reports what is happening now: see [`App::pact_line`].
+    reached: usize,
     /// How many directories the whole run covers.
     total: usize,
     /// Whether the run is a pact or a refresh, which decides the verb
     /// [`App::pact_line`] words the line with and nothing else.
     run: Run,
+}
+
+/// The run in flight as a header states it: which run it is, the directory it is
+/// working spelled for the tree on screen, and how far through the run that
+/// directory is.
+///
+/// A snapshot, made when it is asked for and thrown away after — see
+/// [`App::run_header`]. Nothing keeps one, and nothing outside this module can
+/// make one: the fields are read-only, so the only way to a header is a run
+/// actually being in flight.
+///
+/// It exists because a header needs the *parts* where the footer needs a
+/// sentence. [`App::pact_line`] words one line and hands over the words;
+/// a header sets the directory in one place and a bar filled to
+/// `position/total` in another, and cannot take those out of a sentence again.
+/// So the parts come out here, already spelled — `directory` is
+/// [`App::label_for`]'s spelling, decided at the moment the header is asked for
+/// and against the tree that is on screen then, which is the same rule the
+/// footer's line is spelled by and the same single speller.
+///
+/// `position` is the run's high-water mark rather than the last position
+/// reported, so a fill drawn from it never goes backwards within one run: see
+/// `InFlight::reached`. `total` is the engine's own count of the directories the
+/// run plans to visit and does not move for the length of it, so
+/// `position/total` is the whole of what a bar is filled to — there is nothing
+/// here to estimate a remaining time from, and nothing that moves when a clock
+/// moves.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RunHeader {
+    run: Run,
+    directory: String,
+    position: usize,
+    total: usize,
+}
+
+impl RunHeader {
+    /// Whether the run being reported is a pact or a refresh.
+    #[must_use]
+    pub const fn run(&self) -> Run {
+        self.run
+    }
+
+    /// The directory being worked, spelled relative to the root of the tree on
+    /// screen the way every other label in the front end is: see
+    /// [`App::label_for`].
+    #[must_use]
+    pub fn directory(&self) -> &str {
+        &self.directory
+    }
+
+    /// Which directory of the run is being worked, counting from one — at the
+    /// furthest the run has got, so it never goes backwards.
+    #[must_use]
+    pub const fn position(&self) -> usize {
+        self.position
+    }
+
+    /// How many directories the whole run covers, which does not move for the
+    /// length of it.
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.total
+    }
 }
 
 /// A summarising pass running inside the directory a pact is working: the file
@@ -1485,6 +1562,14 @@ impl App {
     /// The kind rides on the same single in-flight record as the directory and
     /// the fraction, so a run cannot end up half pact and half refresh, and
     /// [`App::clear_pact_in_flight`] takes the kind away with everything else.
+    ///
+    /// This is also where the run's high-water mark is kept up: a call with a
+    /// `position` lower than one already seen in this run leaves the furthest
+    /// position where it was, so a header filled from it never draws a smaller
+    /// fraction than it has already drawn — see [`App::run_header`]. The footer
+    /// is not affected either way, because it reports the position it was just
+    /// handed. A run that has been cleared has no history to keep, so the next
+    /// one starts its fraction again.
     pub fn set_run_in_flight(
         &mut self,
         run: Run,
@@ -1492,9 +1577,15 @@ impl App {
         position: usize,
         total: usize,
     ) {
+        let reached = self
+            .status
+            .in_flight
+            .as_ref()
+            .map_or(position, |before| before.reached.max(position));
         self.status.in_flight = Some(InFlight {
             path: path.into(),
             position,
+            reached,
             total,
             run,
         });
@@ -1542,6 +1633,12 @@ impl App {
     /// Takes the summarising pass down with it — see
     /// [`App::set_pact_summarising`] — so no chunk wording survives the end of a
     /// run.
+    ///
+    /// The run's high-water position goes with it too, because it is a field of
+    /// the record being dropped rather than something kept beside it: this is
+    /// the boundary between one run and the next, so a second run reports 1 of
+    /// 12 rather than inheriting the first run's 12 of 12. See
+    /// [`App::run_header`].
     ///
     /// A no-op when no pact was in flight.
     pub fn clear_pact_in_flight(&mut self) {
@@ -1686,6 +1783,38 @@ impl App {
             } else {
                 line
             }
+        })
+    }
+
+    /// The run in flight in parts rather than in words — which run, which
+    /// directory, how far through — or `None` when no run is running.
+    ///
+    /// What [`App::pact_line`] is to the footer, this is to the panel's header:
+    /// the same one in-flight record, read for the same frame, given out as the
+    /// pieces a header sets in separate places instead of as a sentence. See
+    /// [`RunHeader`] for what each piece is worth.
+    ///
+    /// Nothing new is measured for it. Every part comes off the record
+    /// [`App::set_run_in_flight`] already keeps — which is why there is no new
+    /// event, no new observer call and nothing to change in the engine — and the
+    /// directory is spelled here, at the moment it is asked for, by the same
+    /// [`App::label_for`] the footer uses, so a header and a footer drawn in one
+    /// frame cannot spell one directory two ways.
+    ///
+    /// It reads no clock and takes none: two frames drawn at two instants with
+    /// no event in between come back with the same header, because the fraction
+    /// is the run's own counting and moves only when the run says it has moved.
+    ///
+    /// `None` before the first run and after [`App::clear_pact_in_flight`], so a
+    /// caller needs no separate [`App::is_pacting`] check — and so the rows a
+    /// header would take are the account's again the moment a run is over.
+    #[must_use]
+    pub fn run_header(&self) -> Option<RunHeader> {
+        self.status.in_flight.as_ref().map(|in_flight| RunHeader {
+            run: in_flight.run,
+            directory: self.label_for(&in_flight.path),
+            position: in_flight.reached,
+            total: in_flight.total,
         })
     }
 
@@ -5848,6 +5977,136 @@ mod tests {
     }
 
     #[test]
+    fn an_app_with_no_run_in_flight_has_no_run_header() {
+        let mut app = App::from_rows(rooted_rows());
+
+        // Before the first run there is nothing to head: a panel with no run
+        // draws no header and keeps those rows for the account.
+        assert!(app.run_header().is_none());
+
+        app.set_pact_in_flight(Path::new("/repo").join("crates"), 2, 4);
+        assert!(app.run_header().is_some());
+
+        // And the run being over takes the header down with the footer's line,
+        // however the run ended.
+        app.clear_pact_in_flight();
+        assert!(app.run_header().is_none());
+        assert_eq!(app.pact_line(), None);
+    }
+
+    #[test]
+    fn the_run_header_states_the_kind_the_directory_and_the_fraction() {
+        for run in [Run::Pact, Run::Refresh] {
+            let mut app = App::from_rows(rooted_rows());
+
+            app.set_run_in_flight(
+                run,
+                Path::new("/repo").join("crates").join("warlock-engine"),
+                3,
+                12,
+            );
+
+            let header = app.run_header().expect("a run in flight has a header");
+            // The kind is the caller's, said back unchanged: the header is the
+            // one place that has to know a refresh from a pact without reading
+            // the footer's wording for it.
+            assert_eq!(header.run(), run, "{run:?}");
+            assert_eq!(header.directory(), "crates/warlock-engine", "{run:?}");
+            assert_eq!(header.position(), 3, "{run:?}");
+            assert_eq!(header.total(), 12, "{run:?}");
+        }
+    }
+
+    #[test]
+    fn the_run_headers_directory_is_spelled_the_way_the_footer_spells_it() {
+        let mut app = App::from_rows(rooted_rows());
+
+        app.set_pact_in_flight(
+            Path::new("/repo").join("crates").join("warlock-engine"),
+            3,
+            12,
+        );
+
+        // One speller, so the header and the footer drawn in the same frame
+        // cannot name one directory two ways.
+        let header = app.run_header().expect("a run in flight has a header");
+        assert_eq!(header.directory(), "crates/warlock-engine");
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting crates/warlock-engine (3/12)")
+        );
+
+        // The root of the tree on screen is what it is spelled against, and a
+        // path that is not under that root is printed as it stands rather than
+        // as nothing at all.
+        app.set_pact_in_flight(Path::new("/elsewhere").join("notes"), 4, 12);
+        let header = app.run_header().expect("a run in flight has a header");
+        assert_eq!(
+            header.directory(),
+            Path::new("/elsewhere/notes").display().to_string()
+        );
+        assert!(
+            app.pact_line()
+                .expect("a run in flight has a line")
+                .contains(header.directory()),
+            "the footer spelled it some other way"
+        );
+    }
+
+    #[test]
+    fn the_run_headers_position_never_goes_backwards_within_one_run() {
+        let mut app = App::from_rows(rooted_rows());
+
+        app.set_pact_in_flight(Path::new("/repo").join("crates"), 3, 12);
+        assert_eq!(
+            app.run_header()
+                .expect("a run in flight has a header")
+                .position(),
+            3
+        );
+
+        // A position lower than one already seen leaves the fill where it is: a
+        // bar that goes backwards mid-run is a bar that is reporting the event
+        // order rather than the progress.
+        app.set_pact_in_flight(Path::new("/repo").join("crates"), 2, 12);
+        let header = app.run_header().expect("a run in flight has a header");
+        assert_eq!(header.position(), 3);
+        assert_eq!(header.total(), 12);
+        // The footer is untouched by the high-water mark and goes on reporting
+        // the directory and position it was just handed.
+        assert_eq!(app.pact_line().as_deref(), Some("pacting crates (2/12)"));
+
+        // And it goes on rising the moment the run gets past where it had been.
+        app.set_pact_in_flight(
+            Path::new("/repo").join("crates").join("warlock-engine"),
+            5,
+            12,
+        );
+        assert_eq!(
+            app.run_header()
+                .expect("a run in flight has a header")
+                .position(),
+            5
+        );
+    }
+
+    #[test]
+    fn a_fresh_run_starts_the_headers_fraction_again() {
+        let mut app = App::from_rows(rooted_rows());
+
+        app.set_pact_in_flight(Path::new("/repo").join("crates"), 12, 12);
+        app.clear_pact_in_flight();
+
+        // The high-water mark went with the record that held it, so run two is
+        // one of twelve rather than a bar that starts full.
+        app.set_run_in_flight(Run::Refresh, Path::new("/repo").join("crates"), 1, 12);
+        let header = app.run_header().expect("a run in flight has a header");
+        assert_eq!(header.run(), Run::Refresh);
+        assert_eq!(header.position(), 1);
+        assert_eq!(header.total(), 12);
+    }
+
+    #[test]
     fn the_app_says_which_row_is_the_one_being_worked() {
         let mut app = App::from_rows(rooted_rows());
         let engine = Path::new("/repo").join("crates").join("warlock-engine");
@@ -8009,6 +8268,105 @@ mod tests {
             assert_eq!(panel_offset_for(0, 3, 2, following), 0);
             assert_eq!(panel_offset_for(10, 0, 2, following), 0);
         }
+    }
+
+    #[test]
+    fn the_run_headers_row_costs_the_window_one_line_and_the_scrollback_counts_it() {
+        // What a panel has inside its border at one fixed terminal size, and
+        // what a frame with a run in flight leaves the account underneath the
+        // header's row. The row is [`crate::ui`]'s `RUN_HEADER_HEIGHT`, and
+        // that the layout really cuts one is asserted over there; here it is
+        // arithmetic, so nothing is measured and no frame is drawn.
+        const WHOLE: usize = 6;
+        const HEADER: usize = 1;
+
+        let base = Instant::now();
+        let mut below_at_top = Vec::new();
+        for (name, window, in_flight) in [
+            ("with no run in flight", WHOLE, false),
+            ("under a run's header", WHOLE - HEADER, true),
+        ] {
+            // The same account either way — twelve lines, the section heading
+            // included — so the only difference between the two passes is the
+            // row the header took off the window.
+            let mut app = app_pacting(11, base);
+            let lines = app
+                .account()
+                .map(Account::line_count)
+                .expect("a run has started");
+            assert_eq!(lines, 12);
+            if in_flight {
+                app.set_run_in_flight(Run::Pact, "crates/engine", 2, 5);
+            }
+            app.set_panel_height(u16::try_from(window).expect("a window this small"));
+
+            // Following the newest line: the window is the last screenful of
+            // the window it was given, and nothing is below it however many
+            // rows the header took.
+            assert!(app.panel_follows(), "{name}");
+            assert_eq!(
+                app.panel_scroll_offset(),
+                panel_offset_for(lines, window, 0, true),
+                "{name}"
+            );
+            assert_eq!(app.panel_scroll_offset(), lines - window, "{name}");
+            assert_eq!(app.panel_lines_below(), 0, "{name}");
+            assert_eq!(app.panel_lines(at(base, 99)).len(), window, "{name}");
+
+            // Parked at the first line: what is below is everything the shorter
+            // window does not cover, counted against that window rather than
+            // against the one the panel would have had with no header on it.
+            app.select_first();
+            assert!(!app.panel_follows(), "{name}");
+            assert_eq!(
+                app.panel_scroll_offset(),
+                panel_offset_for(lines, window, 0, false),
+                "{name}"
+            );
+            assert_eq!(app.panel_lines_below(), lines - window, "{name}");
+            below_at_top.push(app.panel_lines_below());
+
+            // Parked in the middle: what is above the window, what is drawn in
+            // it and what is below it come to the account, so the header's row
+            // is neither counted twice nor lost between the three.
+            app.select_next();
+            app.select_next();
+            let offset = app.panel_scroll_offset();
+            assert_eq!(offset, 2, "{name}");
+            assert_eq!(
+                offset,
+                panel_offset_for(lines, window, offset, false),
+                "{name}"
+            );
+            assert_eq!(
+                offset + app.panel_lines(at(base, 99)).len() + app.panel_lines_below(),
+                lines,
+                "{name}"
+            );
+
+            // And the count is off by exactly nothing: a line at a time down
+            // reaches the end of the account after that many presses, and the
+            // window is following again when it gets there.
+            let below = app.panel_lines_below();
+            for step in 1..=below {
+                app.select_next();
+                assert_eq!(app.panel_lines_below(), below - step, "{name}, {step} down");
+            }
+            assert!(app.panel_follows(), "{name}");
+
+            // An offset past the end is clamped to the last screenful of the
+            // window there is, header or no header.
+            assert_eq!(
+                panel_offset_for(lines, window, lines * 2, false),
+                lines - window,
+                "{name}"
+            );
+        }
+
+        // The whole of the difference is the header's row: the same account
+        // parked at the same line has exactly one more line below a window that
+        // has paid for a header, and never two.
+        assert_eq!(below_at_top[1], below_at_top[0] + HEADER);
     }
 
     /// The lines of a small file, as whoever read it would hand them over.

@@ -945,6 +945,14 @@ fn run() -> Result<(), Error> {
 /// The width is not measured against it, because the field takes rows and never
 /// columns: a document is wrapped at the width the panel had and the composer is
 /// drawn at that very width. See [`panel_width`].
+///
+/// The run's header is the same arithmetic at the other end of the panel: while
+/// a run is in flight the frame draws a fixed line inside the top of the panel's
+/// border, and the row it takes is a row the account no longer has. So the app
+/// is told the reduced height here, *before* the frame is drawn, or the window
+/// would scroll by the row the header owns. What the frame will report is asked
+/// of the app once, and [`panel_height`] is handed the same answer the frame
+/// draws from, so the measurement and the drawing cannot disagree.
 fn draw_frame(
     app: &mut App,
     guard: &mut TerminalGuard,
@@ -955,8 +963,9 @@ fn draw_frame(
     composer: &Composer,
 ) -> io::Result<()> {
     let field = composer_on_screen(app, composer);
+    let header = app.run_header();
     app.set_viewport_height(tree_height(size));
-    app.set_panel_height(panel_height(size, field));
+    app.set_panel_height(panel_height(size, field, header.as_ref()));
     app.set_panel_width(panel_width(size));
     guard.terminal.draw(|frame| {
         draw(

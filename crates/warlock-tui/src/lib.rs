@@ -143,6 +143,10 @@ pub use app::Row;
 /// Which kind of run is in flight — a pact or a refresh — which is the one word
 /// of the footer's progress line the two differ by.
 pub use app::Run;
+/// The run in flight in parts rather than in words — which run, the directory it
+/// is working spelled for the tree on screen, and its position out of the run's
+/// total — for whatever draws a header over the panel.
+pub use app::RunHeader;
 /// What this machine holds for the repository on screen — sigils, nothing, or a
 /// config that could not be read — as the tree pane's header states it.
 pub use app::Sigils;
@@ -207,7 +211,8 @@ pub use prompt::ScopePrompt;
 /// What one key does to the scope prompt, given the field it is open over.
 pub use prompt::edit_for;
 /// What is drawn where a pointer landed: the footer, a border, the tree's
-/// header, a row of the tree's window, a line of the panel's, the composer.
+/// header, a row of the tree's window, the run's header, a line of the panel's
+/// window, the composer.
 pub use ui::Hit;
 /// How many rows of the panel's column the composer takes in a terminal of a
 /// given size, its border included — the rows [`panel_height`] no longer has.
@@ -221,11 +226,16 @@ pub use ui::draw;
 /// frame is cut by.
 pub use ui::hit_test;
 /// How many lines of the pact's account a terminal of a given size has room for
-/// in the panel, once the composer under it has taken its rows.
+/// in the panel, once the composer under it and the run's header above it have
+/// taken their rows.
 pub use ui::panel_height;
 /// How many columns wide the panel's contents are in a terminal of a given
 /// size, which is the width a document in it is wrapped to.
 pub use ui::panel_width;
+/// How many rows of the panel a terminal of a given size gives the run's header
+/// — the rows [`panel_height`] no longer has — and none at all with no run in
+/// flight.
+pub use ui::run_header_height;
 /// How many rows of tree a terminal of a given size has room for.
 pub use ui::tree_height;
 /// How many further reloads the events arriving during a reload are worth: one,
