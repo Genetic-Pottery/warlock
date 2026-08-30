@@ -127,13 +127,26 @@
 //! running they open the quit confirmation ([`QuitConfirm`]), which is drawn
 //! over the frame and answered from the keyboard, and only a Yes returns. The
 //! decision is [`press_for`]'s and not this file's — a key, the question's
-//! state, the scope prompt's and whether a run is in flight go in, and what the
-//! loop is to do comes out — so the whole gate is testable with nothing attached
-//! to stdout, and the arms below are the four things that can come of a
-//! keystroke: leave, move the question, type into the scope prompt, or hand the
-//! key to the app. While either window is up the app hears nothing, the pointer
-//! included: mouse events are read and dropped, so a click cannot select a row
-//! behind a window that is about to close.
+//! state, the scope prompt's, the composer's and whether a run is in flight go
+//! in, and what the loop is to do comes out — so the whole gate is testable with
+//! nothing attached to stdout, and the arms below are the five things that can
+//! come of a keystroke: leave, move the question, type into the scope prompt,
+//! type into the composer, or hand the key to the app. While either window is up
+//! the app hears nothing, the pointer included: mouse events are read and
+//! dropped, so a click cannot select a row behind a window that is about to
+//! close.
+//!
+//! The composer is the third place a keystroke can land, and the newest. It is a
+//! [`Composer`] on this stack — beside the two questions and for their reason,
+//! since a draft on the app would be a draft the copy put back after a run had
+//! never heard of — and it is offered to [`press_for`] exactly when
+//! [`App::focus`] is on it. While it holds the keyboard every key but Ctrl-C and
+//! Tab goes to [`warlock_tui::compose_for`] and never to [`input::action_for`],
+//! which is the whole point of the field: `p` is the letter p rather than a pact
+//! over whatever row happens to be selected. Ctrl-C still leaves, Tab still moves
+//! the keyboard on, Esc hands it back with the draft intact, and Enter offers the
+//! draft up to nobody — this slice has no consumer for a submission, and the arm
+//! below is inert on purpose.
 //!
 //! The second window is the scope prompt, and it is the one keystroke that
 //! writes to disk without being a run. `s` opens it over the selected directory
@@ -197,7 +210,8 @@ use ratatui::crossterm::execute;
 use ratatui::layout::Size;
 use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
 use warlock_tui::{
-    App, ClaudeAgent, Focus, QuitConfirm, ScopePrompt, draw, panel_height, panel_width, tree_height,
+    App, ClaudeAgent, Composed, Composer, Focus, QuitConfirm, ScopePrompt, draw, panel_height,
+    panel_width, tree_height,
 };
 
 mod config;
@@ -494,6 +508,15 @@ fn run() -> Result<(), Error> {
     // session's — the repo root and what warlock was pointed at — and two things
     // by that name in one loop is one of them being read as the other.
     let mut prompt = ScopePrompt::default();
+    // What has been typed into the composer, and the only copy of it: empty as
+    // every session starts. It lives here, beside the two questions above,
+    // rather than on the app — and that is load-bearing rather than tidy. A
+    // pact that ends with nothing recorded puts the copy of the app taken
+    // before it back over the live one and keeps only the panel (see
+    // `App::restore_from`), so a draft stored on the app would be a draft a run
+    // could swallow half a sentence into. Here, nothing a run does can reach it:
+    // the keystrokes are the only thing that ever writes to it.
+    let mut composer = Composer::default();
     // Which file the panel's document card is holding, and the only record of
     // it: `None` until the first `v` of the session that read something. It
     // lives here rather than on the app for the reason `mouse_captured` does —
@@ -525,14 +548,25 @@ fn run() -> Result<(), Error> {
         // bottom of this loop reads, and a progress line that waits for a
         // keystroke to appear is worse than none at all.
         if event::poll(POLL_INTERVAL)? {
+            // Whether there is a field for a keystroke to land in, worked out
+            // before the event is read because it is a fact about the frame that
+            // was just drawn: the composer is offered to `press_for` on exactly
+            // the condition that lights its border, which is the keyboard being
+            // pointed at it. Offered rather than looked up, because `press_for`
+            // has never heard of an `App` — the same way the two questions above
+            // are handed in — and with the keyboard anywhere else this is `None`,
+            // there is no draft to type into, and every letter is the command it
+            // has always been.
+            let typing = (app.focus() == Focus::Composer).then_some(&composer);
             match event::read()? {
-                // Two situations are passed in rather than read out of the app,
-                // and each answers one key. Whether a run is in flight is what
-                // Esc reads two ways — it cancels a run when there is one and
-                // asks about quitting when there is not — and the question on
-                // screen is what every key reads differently while it is up.
-                // See [`press_for`], which owns both readings.
-                Event::Key(key) => match press_for(key, confirm, &prompt, pact.is_some()) {
+                // Three situations are passed in rather than read out of the
+                // app, and each answers a set of keys. Whether a run is in
+                // flight is what Esc reads two ways — it cancels a run when
+                // there is one and asks about quitting when there is not — the
+                // question on screen is what every key reads differently while
+                // it is up, and the composer is what turns the letters into
+                // text. See [`press_for`], which owns all three readings.
+                Event::Key(key) => match press_for(key, confirm, &prompt, typing, pact.is_some()) {
                     // Returning is the whole of quitting, and it is enough even
                     // with a pact in flight. `pact` drops on the way out, which
                     // cancels the run and kills the `claude` it was waiting on
@@ -823,6 +857,13 @@ fn run() -> Result<(), Error> {
                         prompt =
                             scope_edit(&mut app, &mut manifest, &scope.repo_root, &prompt, edited);
                     }
+                    // Somebody typing at the foot of the panel's column: a
+                    // character more or less in the draft, the keyboard handed
+                    // back, or a draft offered up. What each of those comes to
+                    // is [`apply_compose`], which is handed the local above
+                    // rather than reaching for anything on the app — what is in
+                    // the draft is not a fact about the tree.
+                    Pressed::Compose(outcome) => apply_compose(&mut app, &mut composer, outcome),
                     // A key nothing is bound to, or one whose press has already
                     // been answered where it was decided.
                     Pressed::Nothing => {}
@@ -1004,6 +1045,61 @@ fn apply_mouse(app: &mut App, action: Option<MouseAction>) {
         // the whole of what it does.
         Some(MouseAction::Focus(focus)) => app.set_focus(focus),
         None => {}
+    }
+}
+
+/// Do to the draft and to the keyboard whatever the composer just made of a
+/// key.
+///
+/// The other half of [`warlock_tui::compose_for`], in [`apply_mouse`]'s shape
+/// and for its reason: three short arms that would otherwise be three more
+/// paragraphs in the middle of the loop. Nothing here reads the terminal, draws,
+/// starts a thread or writes a file — typing at the foot of the panel is the one
+/// thing in warlock that costs nothing but a redraw.
+///
+/// The draft is a local of the loop and is handed in rather than read off the
+/// app, which is the whole of why it survives a run: a pact that recorded
+/// nothing puts the copy of the app taken before it back over the live one and
+/// keeps only the panel (see [`App::restore_from`]), and this function is the
+/// only thing in the binary that ever writes to the draft.
+///
+/// The three arms:
+///
+/// **Typing** is the draft replaced by the one [`compose_for`] just made —
+/// a character more, a character less, or a new line. The app is not told,
+/// because what somebody is halfway through writing is not a fact about the
+/// tree, and the next frame draws whatever the local now holds.
+///
+/// **Leave** is Esc, the one key that means something different here to what it
+/// means anywhere else: it hands the keyboard back and leaves every character
+/// where it is. Nothing is thrown away — what somebody typed is worth more than
+/// the keystroke that stopped typing it — and the draft is not this arm's
+/// business at all, since a focus change cannot reach it. The panel rather than
+/// the tree, and the same landing [`App::set_focus`] rescues a hidden composer
+/// onto: the field is drawn under the panel, so the panel is what the reader is
+/// looking at and what the movement keys they press next should be about. Tab
+/// from there is one press back into the field.
+///
+/// **Submit** is a draft offered up, and deliberately offered to nobody. This
+/// slice builds the field and routes the keyboard through it; what a submitted
+/// draft is *for* is the next one's. So this arm starts nothing, spawns nothing,
+/// writes nothing and says nothing on the footer — an Enter that announced a
+/// submission nothing received would be warlock claiming to have done something.
+/// The draft is left exactly as it is rather than cleared, which is the honest
+/// half of that: clearing it would be the one place in here that can lose
+/// somebody's typing, and it would lose it to a consumer that does not exist
+/// yet. When there is one, this is where the draft is taken and the field reset
+/// in the same breath. An empty or whitespace-only draft never arrives here at
+/// all — [`compose_for`] answers that Enter with the draft unchanged — so a
+/// submission with nothing in it is a keystroke rather than a mistake and has
+/// nothing to report.
+///
+/// [`compose_for`]: warlock_tui::compose_for
+fn apply_compose(app: &mut App, composer: &mut Composer, outcome: Composed) {
+    match outcome {
+        Composed::Typing(next) => *composer = next,
+        Composed::Leave => app.set_focus(Focus::Panel),
+        Composed::Submit => {}
     }
 }
 

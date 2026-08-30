@@ -11,21 +11,25 @@
 //! [`press_for`] is the keyboard's second half and the newer one: it is where
 //! the windows drawn over the frame are decided, so that the loop above has one
 //! arm that returns, one that moves the question, one that types into the scope
-//! prompt and one that hands the key on. Esc and `q` no longer leave by
-//! themselves — with nothing running they open the question instead — and while
-//! either window is up every key goes to its own pure function,
-//! [`answer_for`](warlock_tui::answer_for) or [`edit_for`](warlock_tui::edit_for),
-//! rather than to [`action_for`], which is what keeps a stray `j` from moving a
-//! selection nobody can see behind the window. Ctrl-C is answered before any of
-//! them, and a run in flight suppresses the quit gate; both are argued for on
-//! [`press_for`] itself.
+//! prompt, one that types into the composer and one that hands the key on. Esc
+//! and `q` no longer leave by themselves — with nothing running they open the
+//! question instead — and while either window is up, or while the composer holds
+//! the keyboard, every key goes to its own pure function,
+//! [`answer_for`](warlock_tui::answer_for),
+//! [`edit_for`](warlock_tui::edit_for) or
+//! [`compose_for`](warlock_tui::compose_for), rather than to [`action_for`],
+//! which is what keeps a stray `j` from moving a selection nobody can see behind
+//! the window and a typed `p` from pacting a directory. Ctrl-C is answered before
+//! any of them, and a run in flight suppresses the quit gate; both are argued for
+//! on [`press_for`] itself.
 
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Size;
 use warlock_tui::{
-    Answered, App, Edited, Focus, Hit, QuitConfirm, ScopePrompt, answer_for, edit_for, hit_test,
+    Answered, App, Composed, Composer, Edited, Focus, Hit, QuitConfirm, ScopePrompt, answer_for,
+    compose_for, edit_for, hit_test,
 };
 
 /// What a keystroke asks the app to do.
@@ -318,11 +322,13 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
 /// stands in front of it, rather than left as an [`Action`] the loop has to
 /// remember to treat differently.
 ///
-/// Five variants, and the useful part is that they are exclusive: a keystroke
+/// Six variants, and the useful part is that they are exclusive: a keystroke
 /// either ends the session, or moves the question, or goes into the scope
-/// prompt, or reaches the app, or comes to nothing. While either window is up
-/// the [`Pressed::Act`] road is unreachable, which is the plain statement of
-/// "nothing leaks through to the tree underneath".
+/// prompt, or goes into the composer, or reaches the app, or comes to nothing.
+/// While either window is up the [`Pressed::Act`] road is unreachable, which is
+/// the plain statement of "nothing leaks through to the tree underneath"; while
+/// the composer holds the keyboard it is reachable by exactly one key, and that
+/// key is Tab (see [`press_for`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Pressed {
     /// Leave warlock now, by the path a quit has always taken: the loop returns,
@@ -344,6 +350,19 @@ pub(crate) enum Pressed {
     /// [`Pressed::Confirm`], it says the app was not consulted: while the prompt
     /// is up every key that is not Ctrl-C comes back through here.
     Scope(Edited),
+    /// The composer had the key, and `.0` is what it made of it: the draft with
+    /// one character more or less in it, the keyboard handed back, or the draft
+    /// offered up.
+    ///
+    /// [`Pressed::Scope`]'s counterpart for the field that is not a window. The
+    /// composer's own outcome is carried through rather than translated, for the
+    /// reason the prompt's is: two of its three answers are the loop's to act on,
+    /// and none of them is a state this file can name better than
+    /// [`compose_for`](warlock_tui::compose_for) already does. Like the two arms
+    /// above it, it says the app was not consulted — while the composer holds the
+    /// keyboard every key but Ctrl-C and Tab comes back through here, which is
+    /// what makes `p` the letter p.
+    Compose(Composed),
     /// The app's key: do `.0`.
     ///
     /// Never [`Action::Quit`]. Every way out is [`Pressed::Leave`] above, which
@@ -368,11 +387,29 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
         && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// What `key` comes to with the confirmation at `confirm`, the scope prompt at
-/// `prompt` and a run `in_flight`.
+/// Whether `key` is the keystroke that moves the keyboard on.
 ///
-/// The gate itself, and it is a function of a key and three situations so that
-/// every rule below is one assertion with no terminal attached. Four roads out
+/// Split out for [`is_ctrl_c`]'s reason, one layer down: [`press_for`] has to
+/// answer it *before* it offers the key to the composer, because a field that
+/// swallowed Tab would be a field with no way out but Esc — and Esc is the key
+/// that hands the keyboard back without moving it anywhere, which is a different
+/// thing to want. The code alone, with no modifier compared, exactly as
+/// [`action_for`] matches it: Shift-Tab is a keystroke of its own that crossterm
+/// spells `BackTab`, so there is no shift riding along here to tell apart.
+///
+/// Every kind of event, presses included and releases with them, because what
+/// this decides is not what Tab *does* but which function is asked: a release
+/// handed on comes to nothing in [`action_for`], which is where every release
+/// already comes to nothing.
+fn is_tab(key: KeyEvent) -> bool {
+    key.code == KeyCode::Tab
+}
+
+/// What `key` comes to with the confirmation at `confirm`, the scope prompt at
+/// `prompt`, the composer at `composer` and a run `in_flight`.
+///
+/// The gate itself, and it is a function of a key and four situations so that
+/// every rule below is one assertion with no terminal attached. Five roads out
 /// of it, in the order they are decided.
 ///
 /// **Ctrl-C first, always.** It is a key event and not a signal — raw mode is
@@ -400,6 +437,29 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
 /// be up, since `q` and Esc are text and an abandonment while the prompt has the
 /// keyboard and so never reach the gate that opens the question.
 ///
+/// **Then the composer, if it has the keyboard.** `composer` is `Some` only when
+/// focus is on the field, which is the shape [`ScopePrompt::field`] already has:
+/// the situation is offered rather than looked up, so "the composer is consulted
+/// exactly when the reader is pointed at it" is the caller's one line and every
+/// rule here is one assertion. The road is the same as the two above it, to
+/// [`compose_for`](warlock_tui::compose_for) and only to it, and it is the whole
+/// reason this file's single-letter bindings can go on being single letters:
+/// while somebody is typing, `p`, `r`, `s`, `v`, `e`, `f`, `g`, `G`, `j` and `k`
+/// are characters going into a draft and [`action_for`] is not consulted at all.
+/// It is asked last of the three because a window is drawn *over* the composer:
+/// a key cannot be both typed into a field on the frame and answered by the
+/// dialog covering it.
+///
+/// One key is not the composer's, and it is Tab. It is the key every split-screen
+/// program moves the keyboard with, it is not text on any terminal, and a field
+/// that ate it would be a field whose only exit is Esc — so it goes past the
+/// composer to [`action_for`]'s cycle, which is where the composer was arrived
+/// at in the first place. Esc is the other way out and means something else: it
+/// hands the keyboard back and leaves the draft where it is, which is why a run
+/// in flight is *not* cancelled by an Esc typed at the composer — that Esc is
+/// answered by the field the reader is in, exactly as it is while the scope
+/// prompt is up, and the next one cancels the run.
+///
 /// **Then the keys, as they have always been read.** [`action_for`] answers,
 /// and the one answer this function re-reads is [`Action::Quit`]: with nothing
 /// running it opens the question instead of leaving, and with a run in flight it
@@ -419,6 +479,7 @@ pub(crate) fn press_for(
     key: KeyEvent,
     confirm: QuitConfirm,
     prompt: &ScopePrompt,
+    composer: Option<&Composer>,
     in_flight: bool,
 ) -> Pressed {
     if is_ctrl_c(key) {
@@ -435,6 +496,12 @@ pub(crate) fn press_for(
 
     if let Some(field) = prompt.field() {
         return Pressed::Scope(edit_for(key, field));
+    }
+
+    if let Some(draft) = composer
+        && !is_tab(key)
+    {
+        return Pressed::Compose(compose_for(key, draft));
     }
 
     match action_for(key, in_flight) {
@@ -1533,6 +1600,11 @@ mod tests {
     /// comparison of an app against a copy of itself rather than a list of
     /// fields. No terminal is entered and no frame is drawn: the whole gate is a
     /// function of a key, a mode and a flag.
+    ///
+    /// The composer is decided here too, and after both windows — see
+    /// [`press_for`] for why that order — so [`round_composing`] below is the
+    /// loop's arms once more with the draft in them, and [`composing`] is where
+    /// the rules that are about a field rather than about a way out are asserted.
     mod gate {
         use std::time::Instant;
 
@@ -1542,8 +1614,8 @@ mod tests {
         use ratatui::layout::Size;
         use warlock_engine::NodeState;
         use warlock_tui::{
-            Answer, App, Edited, Focus, QuitConfirm, Row, ScopeField, ScopePrompt, edit_for,
-            panel_height, tree_height,
+            Answer, App, Composed, Composer, Edited, Focus, QuitConfirm, Row, ScopeField,
+            ScopePrompt, edit_for, panel_height, tree_height,
         };
 
         use super::super::{Action, Pressed, action_for, press_for};
@@ -1679,13 +1751,22 @@ mod tests {
         /// the gate does not open during a run, and no key that reaches the app
         /// while it is up could start one.
         ///
-        /// The four arms the loop answers with a worker thread, a window or an
-        /// escape sequence — the pact key, the refresh key, the scope key and
-        /// the mouse key — panic rather than doing nothing quietly: a key that
-        /// reached one of those from behind either window is precisely the
-        /// accident these tests exist to catch.
+        /// What it does with each answer, and which four arms panic, is
+        /// [`round_composing`] below: this is that round with no window and an
+        /// empty draft nobody is pointed at.
         fn round(app: &mut App, confirm: &mut QuitConfirm, key: KeyEvent) -> Round {
             round_under(app, confirm, &mut ScopePrompt::Closed, key)
+        }
+
+        /// The composer the loop offers [`press_for`] with the keys where `app`
+        /// has them: `Some` only while the focus is on the field.
+        ///
+        /// The one line the event loop has, written once here so that every test
+        /// below asks the question the loop asks. A test that handed the field
+        /// over regardless would be asserting that a draft catches keystrokes
+        /// aimed at the tree.
+        fn offered<'a>(app: &App, composer: &'a Composer) -> Option<&'a Composer> {
+            (app.focus() == Focus::Composer).then_some(composer)
         }
 
         /// The same round with the scope prompt at `prompt` as well: the other
@@ -1704,7 +1785,33 @@ mod tests {
             prompt: &mut ScopePrompt,
             key: KeyEvent,
         ) -> Round {
-            match press_for(key, *confirm, prompt, false) {
+            round_composing(app, confirm, prompt, &mut Composer::default(), key)
+        }
+
+        /// The same round again with the draft at `composer`: the whole of the
+        /// loop's key handling, and the version the other two call.
+        ///
+        /// A parameter for [`round_under`]'s reason, and the composer is offered
+        /// to [`press_for`] through [`offered`] rather than by the test saying
+        /// so — which is the loop's own line, so a test cannot type into a field
+        /// the app is not pointed at. The three arms it adds are the loop's:
+        /// the draft replaced, the keyboard handed back to the panel, and a
+        /// submit that does nothing whatever.
+        ///
+        /// The four arms the loop answers with a worker thread, a window or an
+        /// escape sequence — the pact key, the refresh key, the scope key and
+        /// the mouse key — panic rather than doing nothing quietly: a key that
+        /// reached one of those from behind a window, or from a composer that
+        /// was supposed to be typing it, is precisely the accident these tests
+        /// exist to catch.
+        fn round_composing(
+            app: &mut App,
+            confirm: &mut QuitConfirm,
+            prompt: &mut ScopePrompt,
+            composer: &mut Composer,
+            key: KeyEvent,
+        ) -> Round {
+            match press_for(key, *confirm, prompt, offered(app, composer), false) {
                 Pressed::Leave | Pressed::Act(Action::Quit) => return Round::Left,
                 Pressed::Confirm(next) => *confirm = next,
                 Pressed::Scope(Edited::Open(field)) => *prompt = ScopePrompt::Open(field),
@@ -1717,6 +1824,28 @@ mod tests {
                 // closed prompt would be caught here.
                 Pressed::Scope(Edited::Submit) => {
                     assert!(prompt.is_open(), "a submit came from a prompt that is up");
+                }
+                // The loop's three composer arms, and the reason the draft is a
+                // local here exactly as it is there: nothing about it is ever
+                // handed to the app.
+                Pressed::Compose(Composed::Typing(next)) => *composer = next,
+                Pressed::Compose(Composed::Leave) => app.set_focus(Focus::Panel),
+                // Inert, as it is in the loop: this slice has no consumer for a
+                // submitted draft, so nothing is started, nothing is written and
+                // the footer is told nothing. What is asserted rather than done
+                // is where the key came from — a submit conjured out of a blank
+                // draft, or out of a composer nobody was pointed at, would be
+                // caught here.
+                Pressed::Compose(Composed::Submit) => {
+                    assert_eq!(
+                        app.focus(),
+                        Focus::Composer,
+                        "a submit came from a composer that has the keyboard"
+                    );
+                    assert!(
+                        composer.is_submittable(),
+                        "a submit came from a draft with something in it"
+                    );
                 }
                 Pressed::Act(Action::ToggleFocus) => app.toggle_focus(),
                 Pressed::Act(Action::SelectPrevious) => app.select_previous(),
@@ -1819,6 +1948,7 @@ mod tests {
                             press(code),
                             QuitConfirm::Open(lit),
                             &ScopePrompt::Closed,
+                            None,
                             false
                         ),
                         Pressed::Confirm(QuitConfirm::Open(lit)),
@@ -1847,12 +1977,12 @@ mod tests {
                 let mut confirm = QuitConfirm::Open(Answer::Yes);
 
                 assert_eq!(
-                    press_for(key, confirm, &ScopePrompt::Closed, false),
+                    press_for(key, confirm, &ScopePrompt::Closed, None, false),
                     Pressed::Leave
                 );
                 assert_eq!(
-                    press_for(key, confirm, &ScopePrompt::Closed, false),
-                    press_for(ctrl_c(), confirm, &ScopePrompt::Closed, false)
+                    press_for(key, confirm, &ScopePrompt::Closed, None, false),
+                    press_for(ctrl_c(), confirm, &ScopePrompt::Closed, None, false)
                 );
                 assert_eq!(round(&mut app, &mut confirm, key), Round::Left);
             }
@@ -1917,17 +2047,27 @@ mod tests {
             // of `answer_for`'s "every other key" arm: through there it would be
             // an ordinary `c` with a modifier riding along, and the one
             // keystroke every reader trusts would be the one the dialog ate.
+            //
+            // Pinned with the composer holding the keyboard as well as without
+            // it, because the field is the third thing that could have eaten the
+            // key: through `compose_for` it is a chord rather than text, i.e.
+            // one of the keys that change nothing, so a gate that consulted the
+            // draft first would swallow it in silence.
+            let draft = Composer::new("web");
             for confirm in [
                 QuitConfirm::Closed,
                 QuitConfirm::Open(Answer::No),
                 QuitConfirm::Open(Answer::Yes),
             ] {
-                for in_flight in [false, true] {
-                    assert_eq!(
-                        press_for(ctrl_c(), confirm, &ScopePrompt::Closed, in_flight),
-                        Pressed::Leave,
-                        "Ctrl-C should leave with {confirm:?} and a run in flight = {in_flight}"
-                    );
+                for composer in [None, Some(&draft)] {
+                    for in_flight in [false, true] {
+                        assert_eq!(
+                            press_for(ctrl_c(), confirm, &ScopePrompt::Closed, composer, in_flight),
+                            Pressed::Leave,
+                            "Ctrl-C should leave with {confirm:?}, {composer:?} and a run in \
+                             flight = {in_flight}"
+                        );
+                    }
                 }
             }
 
@@ -1946,6 +2086,7 @@ mod tests {
                     press(KeyCode::Esc),
                     QuitConfirm::Closed,
                     &ScopePrompt::Closed,
+                    None,
                     true
                 ),
                 Pressed::Act(Action::CancelPact),
@@ -1955,6 +2096,7 @@ mod tests {
                     press(KeyCode::Char('q')),
                     QuitConfirm::Closed,
                     &ScopePrompt::Closed,
+                    None,
                     true
                 ),
                 Pressed::Leave,
@@ -1967,6 +2109,7 @@ mod tests {
                     press(KeyCode::Esc),
                     QuitConfirm::Closed,
                     &ScopePrompt::Closed,
+                    None,
                     false
                 ),
                 Pressed::Confirm(QuitConfirm::open()),
@@ -1976,6 +2119,7 @@ mod tests {
                     press(KeyCode::Char('q')),
                     QuitConfirm::Closed,
                     &ScopePrompt::Closed,
+                    None,
                     false
                 ),
                 Pressed::Confirm(QuitConfirm::open()),
@@ -1994,6 +2138,7 @@ mod tests {
                             press(code),
                             QuitConfirm::Closed,
                             &ScopePrompt::Closed,
+                            None,
                             in_flight
                         ),
                         action_for(press(code), in_flight).map_or(Pressed::Nothing, Pressed::Act),
@@ -2019,12 +2164,12 @@ mod tests {
                     );
 
                     assert_eq!(
-                        press_for(key, QuitConfirm::Closed, &ScopePrompt::Closed, false),
+                        press_for(key, QuitConfirm::Closed, &ScopePrompt::Closed, None, false),
                         Pressed::Nothing,
                         "{kind:?} of {code:?} should open nothing"
                     );
                     assert_eq!(
-                        press_for(key, QuitConfirm::open(), &ScopePrompt::Closed, false),
+                        press_for(key, QuitConfirm::open(), &ScopePrompt::Closed, None, false),
                         Pressed::Confirm(QuitConfirm::open()),
                         "{kind:?} of {code:?} should answer nothing"
                     );
@@ -2054,7 +2199,7 @@ mod tests {
 
                 for code in INERT {
                     let key = press(code);
-                    let pressed = press_for(key, QuitConfirm::Closed, &prompt, false);
+                    let pressed = press_for(key, QuitConfirm::Closed, &prompt, None, false);
 
                     assert_eq!(
                         pressed,
@@ -2092,13 +2237,20 @@ mod tests {
                     press(KeyCode::Char('q')),
                     QuitConfirm::Closed,
                     &prompt,
+                    None,
                     false
                 ),
                 Pressed::Scope(Edited::Open(ScopeField::new(DIRECTORY, "webq"))),
                 "q is a letter while the field has the keyboard"
             );
             assert_eq!(
-                press_for(press(KeyCode::Esc), QuitConfirm::Closed, &prompt, false),
+                press_for(
+                    press(KeyCode::Esc),
+                    QuitConfirm::Closed,
+                    &prompt,
+                    None,
+                    false
+                ),
                 Pressed::Scope(Edited::Close),
                 "Esc abandons the prompt rather than opening the question"
             );
@@ -2133,7 +2285,7 @@ mod tests {
             ] {
                 for in_flight in [false, true] {
                     assert_eq!(
-                        press_for(ctrl_c(), QuitConfirm::Closed, &prompt, in_flight),
+                        press_for(ctrl_c(), QuitConfirm::Closed, &prompt, None, in_flight),
                         Pressed::Leave,
                         "Ctrl-C should leave with {prompt:?} up and a run in flight = {in_flight}"
                     );
@@ -2147,6 +2299,639 @@ mod tests {
                 round_under(&mut app, &mut confirm, &mut prompt, ctrl_c()),
                 Round::Left
             );
+        }
+
+        #[test]
+        fn the_order_is_ctrl_c_the_question_the_prompt_the_composer_then_the_keys() {
+            // The whole decision order in one test, each step asserted by taking
+            // the situation above it away and pressing the same key again. `j`
+            // is the key it is said with because it means something different to
+            // every one of them: a letter to both fields, a key the question
+            // ignores, and a movement to the app.
+            let key = press(KeyCode::Char('j'));
+            let draft = Composer::new("web");
+            let prompt = ScopePrompt::open(DIRECTORY, "web");
+            let question = QuitConfirm::open();
+
+            // Ctrl-C, over all three at once. It is a key event and not a
+            // signal, so if the gate does not answer it here nothing does.
+            assert_eq!(
+                press_for(ctrl_c(), question, &prompt, Some(&draft), false),
+                Pressed::Leave
+            );
+            // Then the question, which is drawn over everything else on the
+            // frame: a key cannot be both typed into a field and answered by the
+            // dialog covering it.
+            assert_eq!(
+                press_for(key, question, &prompt, Some(&draft), false),
+                Pressed::Confirm(question)
+            );
+            // Then the prompt, over the composer, for the same reason again.
+            assert_eq!(
+                press_for(key, QuitConfirm::Closed, &prompt, Some(&draft), false),
+                Pressed::Scope(edit_for(key, prompt.field().expect("the prompt is up")))
+            );
+            // Then the composer, over the keys: this is where `j` stops being a
+            // movement and becomes the letter j.
+            assert_eq!(
+                press_for(
+                    key,
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Closed,
+                    Some(&draft),
+                    false
+                ),
+                Pressed::Compose(Composed::Typing(Composer::new("webj")))
+            );
+            // And then the keys, as they have always been read.
+            assert_eq!(
+                press_for(key, QuitConfirm::Closed, &ScopePrompt::Closed, None, false),
+                Pressed::Act(Action::SelectNext)
+            );
+        }
+
+        /// The keyboard in the composer: what the tree's own bindings come to
+        /// while somebody is typing, and what they come to again once the field
+        /// has let go.
+        ///
+        /// The same two layers as the module above, and the same road: every
+        /// test here asks [`press_for`] what a key *means* and then puts it
+        /// through [`round_composing`], which is the loop's arms with the draft
+        /// in them. Nothing is drawn and no terminal is entered — where the
+        /// composer sits on the frame is `ui.rs`'s, what a key does to the draft
+        /// itself is `composer.rs`'s, and what is asserted here is only which of
+        /// the two functions a key reaches.
+        ///
+        /// The pairs are the point. Each key is asserted twice — once as a
+        /// letter with the focus on the field, once as the command it has always
+        /// been with the focus off it — because either half alone is a field that
+        /// works or a tree that works, and the ticket is both at once.
+        mod composing {
+            use std::time::Instant;
+
+            use super::{
+                Action, App, Composed, Composer, Focus, INERT, KeyCode, Pressed, QuitConfirm,
+                Round, ScopePrompt, app_in_use, app_on_screen, ctrl_c, offered, press, press_for,
+                round_composing,
+            };
+
+            /// What is in the draft before each test types anything.
+            ///
+            /// Something rather than nothing, so a key that appended nothing is
+            /// told apart from a key that replaced everything, and short enough
+            /// that the expected draft can be read at a glance.
+            const TYPED: &str = "web";
+
+            /// The app with the keyboard in the composer: [`app_in_use`] with
+            /// focus moved on one place, which is where Tab from the panel puts
+            /// it.
+            fn app_composing() -> App {
+                let mut app = app_in_use();
+                app.set_focus(Focus::Composer);
+                assert_eq!(
+                    app.focus(),
+                    Focus::Composer,
+                    "the composer can hold the keyboard with the account card up"
+                );
+                app
+            }
+
+            /// `code` pressed with the composer holding [`TYPED`]: it is the
+            /// letter, it goes into the draft, and no [`Action`] comes of it.
+            ///
+            /// Both layers, because they are different claims. The first is that
+            /// [`press_for`] answers with the composer's own outcome, which is
+            /// the plain statement that `action_for` was not consulted; the
+            /// second is that a round of the loop leaves the app it was holding
+            /// byte for byte — and [`round_composing`] panics on the four keys
+            /// that start a run or open a window, so a `p` that leaked through
+            /// would not be a quiet failure.
+            fn types(code: char) {
+                let key = press(KeyCode::Char(code));
+                let before = Composer::new(TYPED);
+                let typed = Composer::new(format!("{TYPED}{code}"));
+
+                assert_eq!(
+                    press_for(
+                        key,
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&before),
+                        false
+                    ),
+                    Pressed::Compose(Composed::Typing(typed.clone())),
+                    "{code} should be a letter while the composer has the keyboard"
+                );
+
+                let mut app = app_composing();
+                let untouched = app.clone();
+                let mut composer = before;
+                let mut confirm = QuitConfirm::Closed;
+                let mut prompt = ScopePrompt::Closed;
+
+                assert_eq!(
+                    round_composing(&mut app, &mut confirm, &mut prompt, &mut composer, key),
+                    Round::Stayed,
+                    "{code} should not end the session"
+                );
+                assert_eq!(composer, typed, "{code} should have gone into the draft");
+                assert_eq!(app, untouched, "{code} reached the app behind the composer");
+                assert_eq!(confirm, QuitConfirm::Closed, "and opened no question");
+                assert_eq!(prompt, ScopePrompt::Closed, "and no prompt");
+            }
+
+            /// `code` pressed with the keys anywhere but the composer: the
+            /// action it has always meant, and a draft nobody typed into.
+            ///
+            /// Asserted at both of the other two places focus can be, because
+            /// what makes the key a command is that the field does not have the
+            /// keyboard rather than which pane does. The situation goes in
+            /// through [`offered`], the loop's own line, so the test cannot
+            /// arrange something the loop would not.
+            fn acts(code: char, action: Action) {
+                let key = press(KeyCode::Char(code));
+                let composer = Composer::new(TYPED);
+
+                for focus in [Focus::Tree, Focus::Panel] {
+                    let mut app = app_in_use();
+                    app.set_focus(focus);
+
+                    assert_eq!(
+                        press_for(
+                            key,
+                            QuitConfirm::Closed,
+                            &ScopePrompt::Closed,
+                            offered(&app, &composer),
+                            false
+                        ),
+                        Pressed::Act(action),
+                        "{code} should mean {action:?} again with the keys at {focus:?}"
+                    );
+                }
+
+                assert_eq!(
+                    composer,
+                    Composer::new(TYPED),
+                    "{code} should have typed nothing anywhere"
+                );
+            }
+
+            #[test]
+            fn p_is_the_letter_p_while_the_composer_has_the_keyboard() {
+                // The key the whole arrangement is for: `p` writes a manifest,
+                // so a letter that pacted a directory would be the one typo that
+                // costs somebody minutes of model time.
+                types('p');
+            }
+
+            #[test]
+            fn p_pacts_again_once_the_composer_has_let_go() {
+                acts('p', Action::TogglePact);
+            }
+
+            #[test]
+            fn r_is_the_letter_r_while_the_composer_has_the_keyboard() {
+                types('r');
+            }
+
+            #[test]
+            fn r_refreshes_again_once_the_composer_has_let_go() {
+                acts('r', Action::Refresh);
+            }
+
+            #[test]
+            fn s_is_the_letter_s_while_the_composer_has_the_keyboard() {
+                // And a window that opened over the field somebody is typing in
+                // would take the keyboard off them mid-sentence.
+                types('s');
+            }
+
+            #[test]
+            fn s_scopes_again_once_the_composer_has_let_go() {
+                acts('s', Action::OpenScope);
+            }
+
+            #[test]
+            fn v_is_the_letter_v_while_the_composer_has_the_keyboard() {
+                types('v');
+            }
+
+            #[test]
+            fn v_reads_a_file_again_once_the_composer_has_let_go() {
+                acts('v', Action::ViewFile);
+            }
+
+            #[test]
+            fn e_is_the_letter_e_while_the_composer_has_the_keyboard() {
+                // The worst of them to leak: `e` hands the terminal to an editor,
+                // so a typed letter would take the screen away mid-draft.
+                types('e');
+            }
+
+            #[test]
+            fn e_edits_a_file_again_once_the_composer_has_let_go() {
+                acts('e', Action::EditFile);
+            }
+
+            #[test]
+            fn f_is_the_letter_f_while_the_composer_has_the_keyboard() {
+                types('f');
+            }
+
+            #[test]
+            fn f_shows_the_files_again_once_the_composer_has_let_go() {
+                acts('f', Action::ToggleFiles);
+            }
+
+            #[test]
+            fn g_is_the_letter_g_while_the_composer_has_the_keyboard() {
+                types('g');
+            }
+
+            #[test]
+            fn g_jumps_to_the_first_row_again_once_the_composer_has_let_go() {
+                acts('g', Action::SelectFirst);
+            }
+
+            #[test]
+            fn upper_g_is_the_letter_g_while_the_composer_has_the_keyboard() {
+                // Its own test rather than a second case of `g`'s: the pair is
+                // told apart by case alone, so a field that folded the letter
+                // would be a field somebody cannot write a sentence in.
+                types('G');
+            }
+
+            #[test]
+            fn upper_g_jumps_to_the_last_row_again_once_the_composer_has_let_go() {
+                acts('G', Action::SelectLast);
+            }
+
+            #[test]
+            fn j_is_the_letter_j_while_the_composer_has_the_keyboard() {
+                types('j');
+            }
+
+            #[test]
+            fn j_moves_the_selection_down_again_once_the_composer_has_let_go() {
+                acts('j', Action::SelectNext);
+            }
+
+            #[test]
+            fn k_is_the_letter_k_while_the_composer_has_the_keyboard() {
+                types('k');
+            }
+
+            #[test]
+            fn k_moves_the_selection_up_again_once_the_composer_has_let_go() {
+                acts('k', Action::SelectPrevious);
+            }
+
+            #[test]
+            fn every_other_binding_the_tree_has_is_the_composers_too() {
+                // The ten keys above one by one, and then the rest of the list in
+                // a loop: space, `o`, `m`, Shift-Tab, the arrows and the page
+                // keys are text or nothing while the field has the keyboard, and
+                // none of them is an `Action`. Tab is the exception and has its
+                // own test below.
+                let mut app = app_composing();
+                let untouched = app.clone();
+                let mut composer = Composer::new(TYPED);
+                let mut confirm = QuitConfirm::Closed;
+                let mut prompt = ScopePrompt::Closed;
+
+                for code in INERT.into_iter().filter(|code| *code != KeyCode::Tab) {
+                    let pressed = press_for(
+                        press(code),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&composer),
+                        false,
+                    );
+
+                    assert!(
+                        matches!(pressed, Pressed::Compose(_)),
+                        "{code:?} reached something other than the composer: {pressed:?}"
+                    );
+                    assert_eq!(
+                        round_composing(
+                            &mut app,
+                            &mut confirm,
+                            &mut prompt,
+                            &mut composer,
+                            press(code)
+                        ),
+                        Round::Stayed
+                    );
+                }
+
+                assert_eq!(app, untouched, "nothing reached the app underneath");
+                assert_eq!(confirm, QuitConfirm::Closed, "and no question was opened");
+                assert_eq!(prompt, ScopePrompt::Closed, "and no prompt");
+            }
+
+            #[test]
+            fn tab_still_moves_the_keyboard_on_rather_than_being_typed() {
+                // The one key the composer does not get. It is not text on any
+                // terminal, and a field that swallowed it would be a field whose
+                // only way out is Esc — which means something else.
+                let composer = Composer::new(TYPED);
+
+                assert_eq!(
+                    press_for(
+                        press(KeyCode::Tab),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&composer),
+                        false
+                    ),
+                    Pressed::Act(Action::ToggleFocus)
+                );
+
+                let mut app = app_composing();
+                let mut composer = composer;
+                let mut confirm = QuitConfirm::Closed;
+                let mut prompt = ScopePrompt::Closed;
+
+                assert_eq!(
+                    round_composing(
+                        &mut app,
+                        &mut confirm,
+                        &mut prompt,
+                        &mut composer,
+                        press(KeyCode::Tab)
+                    ),
+                    Round::Stayed
+                );
+                assert_eq!(app.focus(), Focus::Tree, "the cycle went on round");
+                assert_eq!(composer.draft(), TYPED, "and typed nothing on the way");
+            }
+
+            #[test]
+            fn esc_hands_the_keyboard_back_and_leaves_the_draft_where_it_is() {
+                let composer = Composer::new(TYPED);
+
+                assert_eq!(
+                    press_for(
+                        press(KeyCode::Esc),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&composer),
+                        false
+                    ),
+                    Pressed::Compose(Composed::Leave),
+                    "Esc belongs to the field rather than to the gate on the way out"
+                );
+
+                let mut app = app_composing();
+                let mut expected = app.clone();
+                expected.set_focus(Focus::Panel);
+                let mut composer = composer;
+                let mut confirm = QuitConfirm::Closed;
+                let mut prompt = ScopePrompt::Closed;
+
+                assert_eq!(
+                    round_composing(
+                        &mut app,
+                        &mut confirm,
+                        &mut prompt,
+                        &mut composer,
+                        press(KeyCode::Esc)
+                    ),
+                    Round::Stayed,
+                    "Esc at the composer does not end the session"
+                );
+                assert_eq!(app, expected, "it moved the focus to the panel and no more");
+                assert_eq!(composer.draft(), TYPED, "and threw nothing away");
+                assert_eq!(confirm, QuitConfirm::Closed, "and asked nothing");
+            }
+
+            #[test]
+            fn esc_at_the_composer_leaves_a_run_alone_and_the_next_one_cancels_it() {
+                // Deliberate, and the same rule the scope prompt keeps: the Esc
+                // pressed while a field has the keyboard is answered by that
+                // field, and the press after it — with the keyboard back on the
+                // panel — is the one that stops the run.
+                let composer = Composer::new(TYPED);
+
+                assert_eq!(
+                    press_for(
+                        press(KeyCode::Esc),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&composer),
+                        true
+                    ),
+                    Pressed::Compose(Composed::Leave)
+                );
+                assert_eq!(
+                    press_for(
+                        press(KeyCode::Esc),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        None,
+                        true
+                    ),
+                    Pressed::Act(Action::CancelPact)
+                );
+            }
+
+            #[test]
+            fn enter_offers_the_draft_up_and_the_loop_does_nothing_whatever_with_it() {
+                // The submission has no consumer in this slice: nothing is
+                // started, nothing is spawned and nothing is written. The round
+                // panics on every arm that would do any of those, so "inert" is
+                // asserted rather than described — and the app it was holding
+                // comes out of the round unchanged, message and all.
+                let composer = Composer::new("why nine passes");
+
+                assert_eq!(
+                    press_for(
+                        press(KeyCode::Enter),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&composer),
+                        false
+                    ),
+                    Pressed::Compose(Composed::Submit)
+                );
+
+                let mut app = app_composing();
+                let untouched = app.clone();
+                let mut composer = composer;
+                let mut confirm = QuitConfirm::Closed;
+                let mut prompt = ScopePrompt::Closed;
+
+                assert_eq!(
+                    round_composing(
+                        &mut app,
+                        &mut confirm,
+                        &mut prompt,
+                        &mut composer,
+                        press(KeyCode::Enter)
+                    ),
+                    Round::Stayed
+                );
+                assert_eq!(app, untouched, "a submit changed something");
+                assert_eq!(
+                    composer.draft(),
+                    "why nine passes",
+                    "and the draft is left for the consumer this slice does not have"
+                );
+                assert_eq!(prompt, ScopePrompt::Closed, "and opened no window");
+            }
+
+            #[test]
+            fn an_empty_or_blank_submit_puts_no_message_on_the_footer() {
+                // A submission with nothing in it is a keystroke, not a mistake:
+                // it leaves the draft as it was and says nothing at all. Asserted
+                // on an app with a clean footer, so a line put there would be the
+                // only line there is.
+                for draft in ["", " ", "  \t ", "\n", " \n \n "] {
+                    let mut app = app_on_screen();
+                    app.set_focus(Focus::Composer);
+                    let untouched = app.clone();
+                    let mut composer = Composer::new(draft);
+                    let mut confirm = QuitConfirm::Closed;
+                    let mut prompt = ScopePrompt::Closed;
+
+                    assert!(app.message().is_none(), "the footer starts with nothing");
+                    assert_eq!(
+                        round_composing(
+                            &mut app,
+                            &mut confirm,
+                            &mut prompt,
+                            &mut composer,
+                            press(KeyCode::Enter)
+                        ),
+                        Round::Stayed
+                    );
+
+                    assert_eq!(
+                        app.message(),
+                        None,
+                        "submitting {draft:?} said something on the footer"
+                    );
+                    assert_eq!(app, untouched, "and changed something");
+                    assert_eq!(composer, Composer::new(draft), "and moved the draft");
+                }
+            }
+
+            #[test]
+            fn ctrl_c_leaves_at_once_and_types_no_c_while_the_composer_has_it() {
+                // The order the gate decides in, where it matters most: through
+                // `compose_for` Ctrl-C is a chord rather than text, so a gate
+                // that consulted the field first would answer the one keystroke
+                // every reader trusts with nothing at all — and would not even
+                // leave a `c` behind to show for it.
+                for draft in ["", TYPED] {
+                    let composer = Composer::new(draft);
+
+                    for in_flight in [false, true] {
+                        assert_eq!(
+                            press_for(
+                                ctrl_c(),
+                                QuitConfirm::Closed,
+                                &ScopePrompt::Closed,
+                                Some(&composer),
+                                in_flight
+                            ),
+                            Pressed::Leave,
+                            "Ctrl-C should leave from {draft:?} with a run in flight = {in_flight}"
+                        );
+                    }
+                }
+
+                let mut app = app_composing();
+                let mut composer = Composer::new(TYPED);
+                let mut confirm = QuitConfirm::Closed;
+                let mut prompt = ScopePrompt::Closed;
+
+                assert_eq!(
+                    round_composing(&mut app, &mut confirm, &mut prompt, &mut composer, ctrl_c()),
+                    Round::Left
+                );
+                assert_eq!(composer.draft(), TYPED, "and typed no c on the way out");
+            }
+
+            #[test]
+            fn the_draft_survives_esc_the_focus_cycle_and_a_run_that_started_and_ended() {
+                // Where the draft is kept, said as a fact about a session rather
+                // than as a rule somebody follows: it is a local of the event
+                // loop, so nothing that happens to the `App` can reach it. The
+                // run is the case that decides it — a pact or a refresh that
+                // recorded nothing puts the copy taken before it back over the
+                // live app and keeps only the panel (`App::restore_from`), so a
+                // draft stored there would be a draft a run swallowed half a
+                // sentence into.
+                let mut app = app_composing();
+                let mut composer = Composer::default();
+                let mut confirm = QuitConfirm::Closed;
+                let mut prompt = ScopePrompt::Closed;
+
+                for character in "why nine".chars() {
+                    round_composing(
+                        &mut app,
+                        &mut confirm,
+                        &mut prompt,
+                        &mut composer,
+                        press(KeyCode::Char(character)),
+                    );
+                }
+                assert_eq!(composer.draft(), "why nine");
+
+                // Esc: the keyboard goes back to the panel and the draft stays.
+                round_composing(
+                    &mut app,
+                    &mut confirm,
+                    &mut prompt,
+                    &mut composer,
+                    press(KeyCode::Esc),
+                );
+                assert_eq!(app.focus(), Focus::Panel);
+                assert_eq!(composer.draft(), "why nine", "Esc threw the draft away");
+
+                // A run that started and ended with nothing recorded, which is
+                // the one move that replaces the whole app.
+                let before = app.clone();
+                app.start_account(Instant::now());
+                app.restore_from(before);
+                assert_eq!(
+                    composer.draft(),
+                    "why nine",
+                    "a run that ended took the draft with it"
+                );
+
+                // And the focus all the way round the cycle: panel, composer,
+                // tree, panel.
+                for _ in 0..3 {
+                    round_composing(
+                        &mut app,
+                        &mut confirm,
+                        &mut prompt,
+                        &mut composer,
+                        press(KeyCode::Tab),
+                    );
+                }
+                assert_eq!(app.focus(), Focus::Panel, "back where it started");
+                assert_eq!(
+                    composer.draft(),
+                    "why nine",
+                    "the focus cycle typed into the draft or emptied it"
+                );
+
+                // Typing carries on exactly where it left off.
+                app.set_focus(Focus::Composer);
+                for character in " passes".chars() {
+                    round_composing(
+                        &mut app,
+                        &mut confirm,
+                        &mut prompt,
+                        &mut composer,
+                        press(KeyCode::Char(character)),
+                    );
+                }
+                assert_eq!(composer.draft(), "why nine passes");
+            }
         }
     }
 
