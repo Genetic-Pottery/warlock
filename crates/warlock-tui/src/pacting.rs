@@ -728,13 +728,31 @@ pub(crate) fn apply_progress(
                     account.record(&activity, now);
                 }
             }
-            // The footer only, and on purpose: the panel's account reports what
-            // went wrong and what was written, and a file that is being
-            // summarised has done neither yet. The state it sets is cleared by
-            // the next directory's `Starting` and by the end of the run, both
-            // of which `App` does for itself, so no chunk wording is ever
-            // attributed to a directory the run has moved past.
+            // Both, and for two different readers. The panel gets a line per
+            // pass because the passes over one over-cap file can be most of a
+            // directory's wait, and a screen that has not moved in eight
+            // minutes is the thing this run is trying not to be; the footer
+            // goes on saying which pass is running *now*, replacing itself
+            // every time, which is a different question and the one it has
+            // always answered.
+            //
+            // The panel first, so the line lands under the directory the
+            // `Starting` before it opened — the same reason activities are
+            // filed where they are, and the same silence when there is no
+            // account or the newest section is already closed. The file is
+            // spelled relative to the tree on screen, as a section heading is,
+            // so a narrow panel spends its width on the part of the path the
+            // reader does not already know.
+            //
+            // The footer's state is cleared by the next directory's `Starting`
+            // and by the end of the run, both of which `App` does for itself,
+            // so no chunk wording is ever attributed to a directory the run has
+            // moved past. The panel's line needs no such sweeping up: it is a
+            // line, and a line stays where the run put it.
             Ok(PactEvent::Summarising { file, part, parts }) => {
+                if let Some(account) = app.account_mut() {
+                    account.record_summarising(section_label(&scope.root, &file), part, parts, now);
+                }
                 app.set_pact_summarising(file, part, parts);
             }
             // The one recolouring a run does before it is over. The engine
@@ -3177,6 +3195,86 @@ mod tests {
             panel_text(&app, at(base, 65)),
             ["engine", "0:04 Bash cargo test", "1:05 thinking"],
             "the line beneath the newest one is frozen and the newest is not"
+        );
+    }
+
+    #[test]
+    fn every_summarising_pass_over_a_big_file_draws_a_line_under_its_directory() {
+        // The eight minutes a directory holding an over-cap lockfile spends
+        // being read in pieces, as fourteen lines rather than as one `waiting`
+        // that has not moved since the run reached it. Every clock here is
+        // exact because nothing in the account reads a clock of its own: the
+        // whole run is one base instant and some arithmetic.
+        let base = Instant::now();
+        let (mut app, before, mut manifest, events, running) = a_run_in_flight(base);
+        let mut pact = Some(running);
+
+        events
+            .send(PactEvent::Starting {
+                directory: PathBuf::from("/repo/crates/engine"),
+                position: 1,
+                total: 1,
+            })
+            .expect("the loop is still listening");
+        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+
+        // A pass every half minute, each drained on the frame it arrived on,
+        // which is what the event loop does with them.
+        for part in 1..=14 {
+            events
+                .send(PactEvent::Summarising {
+                    file: PathBuf::from("/repo/crates/engine/src/deps.lock"),
+                    part,
+                    parts: 14,
+                })
+                .expect("the loop is still listening");
+            apply_progress(
+                &mut pact,
+                &mut app,
+                &mut manifest,
+                &nowhere(),
+                at(base, part as u64 * 30),
+            );
+        }
+
+        // Fourteen lines under the one heading, in arrival order, each
+        // spelling the file relative to the tree on screen — `engine/src`
+        // rather than `/repo/crates/engine/src`, as the heading above them is
+        // spelled. Every line but the last is frozen at the instant the next
+        // one arrived; the last counts up with the caller's `now`, which is
+        // half a minute past the fourteenth pass here.
+        assert_eq!(
+            panel_text(&app, at(base, 450)),
+            [
+                "engine",
+                "1:00 summarising engine/src/deps.lock (1/14)",
+                "1:30 summarising engine/src/deps.lock (2/14)",
+                "2:00 summarising engine/src/deps.lock (3/14)",
+                "2:30 summarising engine/src/deps.lock (4/14)",
+                "3:00 summarising engine/src/deps.lock (5/14)",
+                "3:30 summarising engine/src/deps.lock (6/14)",
+                "4:00 summarising engine/src/deps.lock (7/14)",
+                "4:30 summarising engine/src/deps.lock (8/14)",
+                "5:00 summarising engine/src/deps.lock (9/14)",
+                "5:30 summarising engine/src/deps.lock (10/14)",
+                "6:00 summarising engine/src/deps.lock (11/14)",
+                "6:30 summarising engine/src/deps.lock (12/14)",
+                "7:00 summarising engine/src/deps.lock (13/14)",
+                "7:30 summarising engine/src/deps.lock (14/14)",
+            ],
+            "one line per pass, under the directory whose wait they are"
+        );
+
+        // And the footer is untouched by any of it: it still names the pass
+        // running now and replaces itself every time, which is the other
+        // reader's question and not the panel's.
+        let mut in_flight = before.clone();
+        in_flight.set_pact_in_flight("/repo/crates/engine", 1, 1);
+        in_flight.set_pact_summarising("/repo/crates/engine/src/deps.lock", 14, 14);
+        assert_eq!(
+            app.pact_line(),
+            in_flight.pact_line(),
+            "the footer says exactly what it said before the panel joined in"
         );
     }
 
