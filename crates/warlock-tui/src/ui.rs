@@ -28,6 +28,17 @@
 //! already in the rows its width needs (see [`mod@crate::wrap`]), so this module
 //! draws the rows it is handed either way. See [`draw_panel`].
 //!
+//! Under the panel, in the panel's own column, is the composer: the draft
+//! somebody is typing, in a bordered box of its own. It is one row tall while
+//! there is nothing in it and grows a row per newline and per wrapped line up to
+//! a cap, past which it scrolls within itself and keeps the cursor's row on
+//! screen (see [`mod@crate::composer`]). Every row it takes is a row the panel
+//! above it does not have — [`areas`] cuts one column into the two of them, and
+//! [`panel_height`] and [`composer_height`] are that one cut read twice — and
+//! while the panel is showing a document it is not drawn at all and the panel
+//! has the column back. Its border is lit by [`pane_block`] like either pane's,
+//! which is what makes three places for the keyboard readable as three.
+//!
 //! The tree area is a window onto the flattened rows: it draws the slice
 //! starting at the app's scroll offset and running for as many rows as the area
 //! is tall, so a tree taller than the terminal scrolls under a header and a
@@ -71,6 +82,7 @@ use warlock_engine::{NodeState, SCOPE_RULES};
 use crate::account::{Account, Line as Entry};
 use crate::app::{App, Chrome, Focus, Row};
 use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
+use crate::composer::Composer;
 use crate::confirm::{Answer, QuitConfirm};
 use crate::prompt::{ScopeField, ScopePrompt};
 
@@ -743,6 +755,23 @@ const SCOPE_LINES: u16 = 5;
 /// [`SCOPE_LINES`].
 const SCOPE_HEIGHT: u16 = SCOPE_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
+/// The caret drawn after the composer's draft: [`SCOPE_CURSOR`], spelled as that
+/// rather than as another space.
+///
+/// The two fields are the only things in warlock somebody types into, and a
+/// reader who has seen one of them has learnt what the caret looks like. Written
+/// as the constant rather than copied so that a change to how warlock draws a
+/// cursor is one change and not two that have to be remembered together.
+const COMPOSER_CURSOR: &str = SCOPE_CURSOR;
+
+/// The fewest rows a composer can be drawn in: one row for the draft, and the
+/// border above and below it.
+///
+/// Below this the field is not drawn at all and the panel keeps the whole column
+/// — see [`split_column`]. A box with a border and no row inside it would be two
+/// rows spent saying there is somewhere to type and no room to type in it.
+const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
+
 /// Draw the whole frame: the panel on the left, the tree column on the right,
 /// the footer full width beneath both.
 ///
@@ -785,6 +814,17 @@ const SCOPE_HEIGHT: u16 = SCOPE_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICK
 /// one instead of the app, so the key that would open the other never reaches
 /// anything — and this is what that costs to be safe about it: one `if` in the
 /// order the modes stack.
+///
+/// `composer` is the draft somebody is typing under the panel, handed in beside
+/// the app for the reason the two questions are: the loop owns it and the app
+/// has never heard of it (see [`mod@crate::composer`]). Unlike them it is not
+/// drawn *over* anything — it is a pane of its own, cut off the bottom of the
+/// panel's column by [`areas`], so the panel above it loses exactly the rows it
+/// takes. `None` is a frame with no composer at all, which is what a test that
+/// is not about the field draws; and a `Some` handed in while the document card
+/// has the panel is put back to `None` here (see [`on_screen`]), so the rule
+/// about when the field is on screen is [`App::composer_showable`]'s and is
+/// asked rather than repeated.
 pub fn draw(
     frame: &mut Frame<'_>,
     app: &App,
@@ -792,15 +832,21 @@ pub fn draw(
     now: Instant,
     confirm: QuitConfirm,
     scope: &ScopePrompt,
+    composer: Option<&Composer>,
 ) {
     let screen = frame.area();
+    let composer = on_screen(app, composer);
     let Areas {
         panel,
+        composer: field,
         tree,
         footer,
-    } = areas(screen);
+    } = areas(screen, composer);
 
     draw_panel(frame, panel, app, now);
+    if let (Some(area), Some(composer)) = (field, composer) {
+        draw_composer(frame, area, composer, app.focus() == Focus::Composer);
+    }
     draw_tree_pane(frame, tree, app, chrome, now);
     draw_footer(frame, footer, app);
 
@@ -812,15 +858,22 @@ pub fn draw(
     }
 }
 
-/// The three areas one frame is cut into: the panel, the tree column beside it,
-/// and the footer under both.
+/// The areas one frame is cut into: the panel, the composer under it, the tree
+/// column beside them, and the footer under everything.
 ///
 /// Split out so that [`tree_height`] answers the same question [`draw`] does,
 /// from the same call: a caller that told the app one height while the frame
-/// used another would scroll by a window that is not on screen.
+/// used another would scroll by a window that is not on screen. The composer is
+/// why that matters twice over — the rows it takes are rows off the panel, so
+/// [`panel_height`] and [`composer_height`] have to be two answers from the one
+/// cut rather than two opinions about the same column.
 struct Areas {
     /// The left-hand pane, the majority of the width, drawn by [`draw_panel`].
     panel: Rect,
+    /// The composer's own pane, under the panel and in the same column: `None`
+    /// on a frame that has no composer on it, and on one with no room for even
+    /// the smallest field. See [`split_column`].
+    composer: Option<Rect>,
     /// The right-hand pane: border, header, tree rows.
     tree: Rect,
     /// Full width along the bottom, under both panes.
@@ -854,7 +907,14 @@ struct Areas {
 /// So: 160 columns gives the tree 48 and the panel 112; 80 gives the tree its
 /// floor of 30 and the panel 50; 40 gives the tree 20 and the panel 20; 41 gives
 /// the tree 20 and the panel 21.
-fn areas(area: Rect) -> Areas {
+///
+/// The panel's side of that is then cut again, top to bottom, and only then: the
+/// composer is a pane under the panel and in the panel's column, so it is paid
+/// for out of the panel's rows and out of nothing else — see [`split_column`].
+/// The tree column and the footer never hear about it, and neither does the
+/// width, which is why a document wrapped at [`panel_width`] is wrapped at the
+/// width the composer is drawn at too.
+fn areas(area: Rect, composer: Option<&Composer>) -> Areas {
     let [above, footer] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(FOOTER_HEIGHT)]).areas(area);
     let column = tree_width(above.width);
@@ -863,12 +923,82 @@ fn areas(area: Rect) -> Areas {
         Constraint::Length(column),
     ])
     .areas(above);
+    let (panel, composer) = split_column(panel, composer);
 
     Areas {
         panel,
+        composer,
         tree,
         footer,
     }
+}
+
+/// Cut the composer's pane off the bottom of `column`, the panel's, and give
+/// back what is left of the panel and what the composer got.
+///
+/// The composer asks for the rows its draft needs at the column's own inside
+/// width — one when the draft is empty, one more per newline and per wrap, and
+/// never more than [`COMPOSER_MAX_ROWS`], past which the field scrolls within
+/// itself (see [`Composer::height`]) — plus the row its border costs top and
+/// bottom. What it asks for is what it gets, and the panel above keeps the rest:
+/// panel and composer together are the column, so the rows one gains are rows
+/// the other lost and no row of the column goes unaccounted for.
+///
+/// Two things it does not get. It never takes the panel's own border with it:
+/// the most it is given is the column less those two rows, so the panel is
+/// squeezed to nothing before the composer is drawn in a column with no panel
+/// left around it. And below [`COMPOSER_MIN_HEIGHT`] — a field with no row to
+/// type on — it is not drawn at all and the panel keeps the whole column, which
+/// is the same answer a frame with no composer gets. A border round nothing
+/// would be furniture on the terminal that can least afford it.
+fn split_column(column: Rect, composer: Option<&Composer>) -> (Rect, Option<Rect>) {
+    let Some(composer) = composer else {
+        return (column, None);
+    };
+
+    let wanted = composer
+        .height(pane_inner(column).width)
+        .saturating_add(2 * BORDER_THICKNESS);
+    let rows = wanted.min(column.height.saturating_sub(2 * BORDER_THICKNESS));
+    if rows < COMPOSER_MIN_HEIGHT {
+        return (column, None);
+    }
+
+    let [panel, field] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(rows)]).areas(column);
+
+    (panel, Some(field))
+}
+
+/// The composer as a frame drawn over `app` has it: `Some` when the field is on
+/// screen, `None` while the document card is showing.
+///
+/// One question asked in one place, because four things have to give the same
+/// answer to it: what [`draw`] draws, what [`panel_height`] tells the app to
+/// scroll the account by, what [`composer_height`] says that cost, and what
+/// [`hit_test`] is pointing at. The rule itself is [`App::composer_showable`]'s
+/// — the panel holds one card at a time and a document takes the whole column —
+/// and it is asked here rather than stated again, so the frame agrees with the
+/// app that is already keeping the keyboard off a hidden field (see
+/// [`App::toggle_focus`]).
+///
+/// The app is borrowed only for the length of the call: what comes back borrows
+/// the draft and nothing else, so a caller can measure the frame's composer and
+/// still hand the app out mutably to draw it.
+#[must_use]
+pub fn composer_on_screen<'a>(app: &App, composer: &'a Composer) -> Option<&'a Composer> {
+    app.composer_showable().then_some(composer)
+}
+
+/// [`composer_on_screen`] for a caller that may not have a field at all: the
+/// same rule, over an `Option`.
+///
+/// [`draw`] takes the composer as an `Option` — a frame with no composer on it
+/// is what a test not about the field draws — and filtering it again there is
+/// belt and braces: whatever a caller hands in, a document card on the panel is
+/// a frame with no field on it.
+fn on_screen<'a>(app: &App, composer: Option<&'a Composer>) -> Option<&'a Composer> {
+    composer.and_then(|field| composer_on_screen(app, field))
 }
 
 /// How many columns of `width` the tree column gets. The rule is [`areas`]'s and
@@ -922,19 +1052,47 @@ fn tree_rows_area(tree: Rect) -> Rect {
 /// is the number of rows drawn rather than a count that happens to agree.
 #[must_use]
 pub fn tree_height(size: Size) -> u16 {
-    tree_rows_area(areas(Rect::from(size)).tree).height
+    tree_rows_area(areas(Rect::from(size), None).tree).height
 }
 
 /// How many lines of account a terminal of `size` has room for in the panel,
-/// once the footer and the panel's own border have taken theirs.
+/// once the footer, the panel's own border and the composer under it have taken
+/// theirs.
 ///
 /// [`tree_height`]'s counterpart, public for the same reason and measured the
 /// same way: off the very [`areas`] call the frame is cut by, so the height the
 /// app scrolls the panel's window by is the height the next frame draws it at.
-/// The panel has no header of its own, so it keeps everything inside its border.
+/// The panel has no header of its own, so it keeps everything inside its border
+/// that the composer has not taken.
+///
+/// `composer` is the field the next frame will draw, or `None` for a frame with
+/// no composer on it — which is what the panel gets back while the document card
+/// is showing. What it costs is [`composer_height`], and the two of them come to
+/// what the panel's column has inside it: a row is either the panel's or the
+/// composer's and never neither.
 #[must_use]
-pub fn panel_height(size: Size) -> u16 {
-    pane_inner(areas(Rect::from(size)).panel).height
+pub fn panel_height(size: Size, composer: Option<&Composer>) -> u16 {
+    pane_inner(areas(Rect::from(size), composer).panel).height
+}
+
+/// How many rows of `size`'s panel column the composer takes, its border
+/// included, and zero on a frame that has no composer on it.
+///
+/// [`panel_height`]'s other half and measured off the same [`areas`] call, which
+/// is the whole point of it being here: the two are one cut of one column read
+/// two ways, so `panel_height(size, composer) + composer_height(size, composer)`
+/// is the height that column had inside it before there was a composer to pay
+/// for — at every terminal size, including the short ones where the field is
+/// squeezed or dropped altogether.
+///
+/// The border is counted in because the border is a row the column gave up. What
+/// is left over inside it is the draft's, and how many rows the draft asked for
+/// is [`Composer::height`]'s answer at [`panel_width`]'s width.
+#[must_use]
+pub fn composer_height(size: Size, composer: Option<&Composer>) -> u16 {
+    areas(Rect::from(size), composer)
+        .composer
+        .map_or(0, |area| area.height)
 }
 
 /// How many columns wide the panel's contents are in a terminal of `size`, once
@@ -946,9 +1104,15 @@ pub fn panel_height(size: Size) -> u16 {
 /// it was told the width the next frame is about to draw them at. Measured off
 /// the same [`areas`] call, so the width wrapped at is the width drawn at and a
 /// row that fits one fits the other.
+///
+/// No composer is handed in and none is needed: the composer is cut off the
+/// bottom of the panel's column and takes rows rather than columns, so the panel
+/// is exactly as wide with a draft under it as without one — and the composer
+/// itself is drawn at this very width, which is why [`Composer::height`] can be
+/// asked for before the frame is cut.
 #[must_use]
 pub fn panel_width(size: Size) -> u16 {
-    pane_inner(areas(Rect::from(size)).panel).width
+    pane_inner(areas(Rect::from(size), None).panel).width
 }
 
 /// What is drawn at the point [`hit_test`] was asked about.
@@ -1000,6 +1164,19 @@ pub enum Hit {
         /// How many lines below the top of the panel's window the point is.
         offset: u16,
     },
+    /// Inside the composer, under the panel and in the panel's column.
+    ///
+    /// No offset and nothing to count: the field has one cursor, it is always
+    /// after the last character, and nothing on screen moves it — a row of a
+    /// draft is not a place a reader can point at. What this says is that the
+    /// point is in the field, which is the whole of what a pointer can mean
+    /// there.
+    ///
+    /// A variant of its own rather than a [`Hit::PanelLine`] with a big offset:
+    /// the composer's rows are rows the panel gave up, so a point on them is a
+    /// point on a line the panel does not have, and answering with one would
+    /// scroll a window the reader is not over.
+    Composer,
 }
 
 /// What is drawn at column `column`, row `row` of a terminal of `size`.
@@ -1010,17 +1187,24 @@ pub enum Hit {
 /// click lands on is what the reader saw at that point rather than what a second
 /// opinion about the layout thinks is there.
 ///
-/// A function of three numbers. No frame, no app state, no terminal — which is
-/// what lets the event loop's answer to a click be tested with nothing attached
-/// to stdout, and what keeps this file from needing to know what a row of the
-/// tree is.
+/// A function of three numbers and the draft under the panel. No frame, no app
+/// state, no terminal — which is what lets the event loop's answer to a click be
+/// tested with nothing attached to stdout, and what keeps this file from needing
+/// to know what a row of the tree is.
+///
+/// `composer` is here for one reason: the rows it takes are rows the panel no
+/// longer has, so a hit test that did not know about the draft would hand out
+/// panel lines for points drawn on a field. It is the same `composer` the frame
+/// was drawn with — `None` on a frame with no composer on it — and the caller
+/// hands over the one the round measured, so the answer is about the frame the
+/// reader is pointing at.
 ///
 /// Every case is asked of a [`Rect`] the layout produced, so a terminal too
 /// short for a tree row, too short for a header, or too short for anything but a
 /// footer answers what it has rather than underflowing its way to a row that is
 /// not there.
 #[must_use]
-pub fn hit_test(column: u16, row: u16, size: Size) -> Hit {
+pub fn hit_test(column: u16, row: u16, size: Size, composer: Option<&Composer>) -> Hit {
     let point = Position::new(column, row);
     let screen = Rect::from(size);
     if !screen.contains(point) {
@@ -1029,9 +1213,10 @@ pub fn hit_test(column: u16, row: u16, size: Size) -> Hit {
 
     let Areas {
         panel,
+        composer,
         tree,
         footer,
-    } = areas(screen);
+    } = areas(screen, composer);
     if footer.contains(point) {
         return Hit::Footer;
     }
@@ -1041,6 +1226,10 @@ pub fn hit_test(column: u16, row: u16, size: Size) -> Hit {
         return Hit::PanelLine {
             offset: row.saturating_sub(inside.y),
         };
+    }
+
+    if composer.is_some_and(|field| pane_inner(field).contains(point)) {
+        return Hit::Composer;
     }
 
     let inside = pane_inner(tree);
@@ -1208,6 +1397,56 @@ fn mark_area(inner: Rect) -> Option<Rect> {
         width,
         height,
     })
+}
+
+/// Draw the composer: the tail of the draft, one row per row it wraps to, inside
+/// a border lit exactly when the keyboard is pointed at it.
+///
+/// [`pane_block`] and no other border, so the field is lit and dimmed by the
+/// rule the two panes above it already follow — three places the keys can be and
+/// one lit border between them, which is what makes the focus readable at all
+/// (see [`Focus`]).
+///
+/// The rows are [`Composer::window`]'s: the *tail* of the draft, so the row the
+/// cursor is on is the last row drawn and a draft past
+/// [`COMPOSER_MAX_ROWS`](crate::COMPOSER_MAX_ROWS) scrolls within the field
+/// rather than growing it. They are cut to the rows the border actually left, in
+/// case a short terminal squeezed the box below what the draft asked for — from
+/// the bottom again, and for the same reason.
+///
+/// The caret is a reversed [`COMPOSER_CURSOR`] after the last character, drawn
+/// only while the field has the focus: it says where the next character lands,
+/// and while the keys are somewhere else nothing is landing. It is dropped
+/// rather than wrapped when the last row fills the width — a caret is not text,
+/// and a row of its own for a cursor would take a row off the draft and move
+/// everything above it while somebody is typing.
+///
+/// No colour and no prompt glyph. The panel above spends none, the draft is the
+/// reader's own words, and a `>` in front of them would be a column off every
+/// row of a field this narrow for the sake of saying what the lit border says.
+fn draw_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, focused: bool) {
+    let inner = pane_inner(area);
+    frame.render_widget(pane_block(focused), area);
+
+    let rows = composer.window(inner.width);
+    let from = rows.len().saturating_sub(usize::from(inner.height));
+    let rows = &rows[from..];
+    let room = rows
+        .last()
+        .is_some_and(|row| u16::try_from(display_width(row)).unwrap_or(u16::MAX) < inner.width);
+
+    let mut lines: Vec<Line<'static>> = rows.iter().map(|row| Line::raw(row.clone())).collect();
+    if focused
+        && room
+        && let Some(last) = lines.last_mut()
+    {
+        last.push_span(Span::styled(
+            COMPOSER_CURSOR,
+            Style::new().add_modifier(Modifier::REVERSED),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// What the bottom edge of a scrolled-back panel says: how many lines are below
@@ -1986,22 +2225,24 @@ mod tests {
     use warlock_engine::{NodeState, SCOPE_RULES};
 
     use super::{
-        Areas, BORDER_THICKNESS, CANCEL_KEY, COLLAPSE_KEY, CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT,
-        CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS, CONFIRM_NO, CONFIRM_QUESTION,
-        CONFIRM_YES, ELLIPSIS, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP,
-        HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN,
-        MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY, MOVE_KEYS, NO_MARKER, PACTING_KEYS,
-        PACTING_QUIT_KEY, PAGE_KEYS, PANEL_INDENT, QUIT_KEY, SCOPE_CURSOR, SCOPE_HEADING,
-        SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW,
-        SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas, centred, confirm_area, confirm_size,
-        display_width, draw, guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line,
-        pane_inner, panel_height, panel_width, scope_size, tree_height, tree_rows_area, tree_width,
-        truncated,
+        Areas, BORDER_THICKNESS, CANCEL_KEY, COLLAPSE_KEY, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP,
+        CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS, CONFIRM_NO,
+        CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST,
+        HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY, MARK,
+        MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY, MOVE_KEYS, NO_MARKER,
+        PACTING_KEYS, PACTING_QUIT_KEY, PAGE_KEYS, PANEL_INDENT, QUIT_KEY, SCOPE_CURSOR,
+        SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS,
+        SCROLLBACK_ARROW, SELECTION_MARKER, TREE_MIN_WIDTH, TREE_PERCENT, areas, centred,
+        composer_height, composer_on_screen, confirm_area, confirm_size, display_width, draw,
+        guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line, pane_inner,
+        panel_height, panel_width, scope_size, tree_height, tree_rows_area, tree_width, truncated,
     };
+    use crate::COMPOSER_MAX_ROWS;
     use crate::account::Outcome;
-    use crate::app::{App, Chrome, Row, Sigils};
+    use crate::app::{App, Chrome, Focus, Row, Sigils};
     use crate::claude::Activity;
     use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
+    use crate::composer::Composer;
     use crate::confirm::{Answer, QuitConfirm};
     use crate::fixture;
     use crate::prompt::{ScopeField, ScopePrompt};
@@ -2237,7 +2478,8 @@ mod tests {
     fn terminal_width_for(rows_width: u16) -> u16 {
         (2 * TREE_MIN_WIDTH..=400)
             .find(|width| {
-                tree_rows_area(areas(Rect::new(0, 0, *width, HEIGHT)).tree).width == rows_width
+                tree_rows_area(areas(Rect::new(0, 0, *width, HEIGHT), None).tree).width
+                    == rows_width
             })
             .unwrap_or_else(|| panic!("no terminal gives the tree's rows {rows_width} columns"))
     }
@@ -2288,7 +2530,7 @@ mod tests {
     fn pacting_app(base: Instant, width: u16, height: u16) -> App {
         let mut app = App::from_tree(&fixture::tree());
         app.set_viewport_height(tree_height(Size::new(width, height)));
-        app.set_panel_height(panel_height(Size::new(width, height)));
+        app.set_panel_height(panel_height(Size::new(width, height), None));
         app.set_panel_width(panel_width(Size::new(width, height)));
         app.start_account(base);
         app
@@ -2297,7 +2539,7 @@ mod tests {
     /// Where the panel's lines land in a buffer of this size: inside the
     /// panel's border, which is the whole of the pane — the panel has no header.
     fn panel_area(buffer: &Buffer) -> Rect {
-        pane_inner(areas(buffer.area).panel)
+        pane_inner(areas(buffer.area, None).panel)
     }
 
     /// The rows of `buffer` the panel is drawn into, as text, without the tree
@@ -2312,7 +2554,7 @@ mod tests {
     /// The panel's bottom border row, as text: the edge the scrollback
     /// indicator is written on, border glyphs and all.
     fn panel_bottom_edge(buffer: &Buffer) -> String {
-        let panel = areas(buffer.area).panel;
+        let panel = areas(buffer.area, None).panel;
 
         text_in(buffer, panel, panel.y + panel.height - 1)
     }
@@ -2322,12 +2564,12 @@ mod tests {
     /// cut by, so a test asserts about where the tree is rather than about where
     /// it used to be.
     fn rows_area(buffer: &Buffer) -> Rect {
-        tree_rows_area(areas(buffer.area).tree)
+        tree_rows_area(areas(buffer.area, None).tree)
     }
 
     /// The tree pane's header line: one row, inside the border, above the rows.
     fn header_area(buffer: &Buffer) -> Rect {
-        let inner = pane_inner(areas(buffer.area).tree);
+        let inner = pane_inner(areas(buffer.area, None).tree);
 
         Rect {
             height: HEADER_HEIGHT.min(inner.height),
@@ -2491,6 +2733,25 @@ mod tests {
         )
     }
 
+    /// [`render`], with a composer under the panel: the frame the binary draws
+    /// once there is a draft on screen.
+    ///
+    /// Every other helper here passes `None`, which is a frame with no field on
+    /// it — the shape of every test written before there was a composer, and
+    /// still the shape of a frame while the document card has the panel.
+    fn render_composer(app: &App, composer: &Composer, width: u16, height: u16) -> Buffer {
+        render_all(
+            app,
+            &Chrome::default(),
+            width,
+            height,
+            Instant::now(),
+            QuitConfirm::Closed,
+            &ScopePrompt::Closed,
+            Some(composer),
+        )
+    }
+
     /// The one place a frame is actually drawn: the app, the instant, and both
     /// windows that can be over it.
     fn render_windows(
@@ -2502,10 +2763,30 @@ mod tests {
         confirm: QuitConfirm,
         scope: &ScopePrompt,
     ) -> Buffer {
+        render_all(app, chrome, width, height, now, confirm, scope, None)
+    }
+
+    /// [`render_windows`] with the composer as well: everything one frame can
+    /// have on it, and the only place a test attaches a terminal.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one frame's worth of state, and the point of it is that no \
+                  test builds a frame any other way"
+    )]
+    fn render_all(
+        app: &App,
+        chrome: &Chrome,
+        width: u16,
+        height: u16,
+        now: Instant,
+        confirm: QuitConfirm,
+        scope: &ScopePrompt,
+        composer: Option<&Composer>,
+    ) -> Buffer {
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("test backend never fails");
         terminal
-            .draw(|frame| draw(frame, app, chrome, now, confirm, scope))
+            .draw(|frame| draw(frame, app, chrome, now, confirm, scope, composer))
             .expect("test backend never fails");
         terminal.backend().buffer().clone()
     }
@@ -2698,7 +2979,7 @@ mod tests {
     /// there was a mark: every cell inside it a space, the border whole on all
     /// four sides, and nothing on its bottom edge.
     fn assert_bare_panel(buffer: &Buffer) {
-        let panel = areas(buffer.area).panel;
+        let panel = areas(buffer.area, None).panel;
         let inner = pane_inner(panel);
         assert!(inner.width > 0 && inner.height > 0, "{inner:?}");
 
@@ -4275,7 +4556,7 @@ mod tests {
         let buffer = render(&app, KEYS_WIDTH, height);
 
         // Three lines and no more, where they have always been.
-        let footer = areas(buffer.area).footer;
+        let footer = areas(buffer.area, None).footer;
         assert_eq!(footer.height, FOOTER_HEIGHT);
         assert_eq!(footer.y, height - FOOTER_HEIGHT);
 
@@ -4471,7 +4752,7 @@ mod tests {
         let chrome = held_chrome(Sigils::held(["billing", "web"]));
         // Twenty columns of tree pane, eighteen inside it: room for the
         // identity several times over, and nowhere near room for both.
-        let narrow = pane_inner(areas(Rect::new(0, 0, NARROW_WIDTH, HEIGHT)).tree);
+        let narrow = pane_inner(areas(Rect::new(0, 0, NARROW_WIDTH, HEIGHT), None).tree);
         assert!(
             display_width(&format!("crates{HEADER_GAP}holding `billing`, `web`"))
                 > usize::from(narrow.width)
@@ -4509,7 +4790,7 @@ mod tests {
         // than on it: the pane's top row is the border's, not the header's.
         assert_eq!(header.y + HEADER_HEIGHT, rows.y);
         assert_eq!(header.x, rows.x);
-        let pane = areas(buffer.area).tree;
+        let pane = areas(buffer.area, None).tree;
         assert_eq!(header.y, pane.y + BORDER_THICKNESS);
         assert_eq!(header.x, pane.x + BORDER_THICKNESS);
     }
@@ -4518,7 +4799,7 @@ mod tests {
     fn the_panel_is_the_majority_of_the_width_and_the_tree_column_takes_its_share_of_the_rest() {
         // Wide enough that the proportion, not the floor, decides: 30% of 160 is
         // 48, comfortably past the floor of 30.
-        let panes = areas(Rect::new(0, 0, KEYS_WIDTH, 24));
+        let panes = areas(Rect::new(0, 0, KEYS_WIDTH, 24), None);
 
         assert_eq!(panes.tree.width, KEYS_WIDTH * TREE_PERCENT / 100);
         assert_eq!(panes.panel.width, KEYS_WIDTH - panes.tree.width);
@@ -4541,7 +4822,7 @@ mod tests {
         // floor, so the floor bites and the panel takes the rest — still the
         // majority.
         for width in [TREE_MIN_WIDTH * 2, 80, 99] {
-            let panes = areas(Rect::new(0, 0, width, 24));
+            let panes = areas(Rect::new(0, 0, width, 24), None);
 
             assert!(
                 width * TREE_PERCENT / 100 < TREE_MIN_WIDTH,
@@ -4560,7 +4841,7 @@ mod tests {
         // floor and leave the panel the majority, so the floor is what gives:
         // the two panes halve the width, and the odd column goes to the panel.
         for width in [0, 1, 20, 40, 41, TREE_MIN_WIDTH * 2 - 1] {
-            let panes = areas(Rect::new(0, 0, width, 24));
+            let panes = areas(Rect::new(0, 0, width, 24), None);
 
             assert_eq!(panes.tree.width, width / 2, "at {width} columns");
             assert_eq!(panes.panel.width, width - width / 2, "at {width} columns");
@@ -4587,8 +4868,8 @@ mod tests {
     #[test]
     fn a_point_is_answered_with_whatever_the_frame_draws_at_it() {
         let size = Size::new(WIDTH, HEIGHT);
-        let panes = areas(Rect::from(size));
-        let hit = |x, y| hit_test(x, y, size);
+        let panes = areas(Rect::from(size), None);
+        let hit = |x, y| hit_test(x, y, size, None);
 
         // The footer runs the full width, all three of its lines, and belongs
         // to neither pane.
@@ -4631,7 +4912,7 @@ mod tests {
         // And the whole inside of the panel is a line of its window, drawn on
         // or not: the panel has no selection for a point to land on.
         let inside = pane_inner(panes.panel);
-        assert_eq!(inside.height, panel_height(size));
+        assert_eq!(inside.height, panel_height(size, None));
         for offset in 0..inside.height {
             for x in [inside.x, inside.x + inside.width - 1] {
                 assert_eq!(hit(x, inside.y + offset), Hit::PanelLine { offset });
@@ -4651,7 +4932,7 @@ mod tests {
         assert!(rows.height > 1, "the window should hold more than one row");
         for offset in 0..rows.height {
             assert_eq!(
-                hit_test(rows.x, rows.y + offset, size),
+                hit_test(rows.x, rows.y + offset, size, None),
                 Hit::TreeRow { offset }
             );
             assert_eq!(
@@ -4662,7 +4943,7 @@ mod tests {
         }
         // The header is the line the frame drew the tree's name on, not a row.
         let header = header_area(&buffer);
-        assert_eq!(hit_test(header.x, header.y, size), Hit::TreeHeader);
+        assert_eq!(hit_test(header.x, header.y, size, None), Hit::TreeHeader);
         // Blank, because this frame was drawn through `render`, which passes
         // the default `Chrome`: the line is not the app's to fill any more.
         assert_eq!(header_text(&buffer), "");
@@ -4676,7 +4957,7 @@ mod tests {
 
             for y in 0..height {
                 for x in 0..WIDTH {
-                    let hit = hit_test(x, y, size);
+                    let hit = hit_test(x, y, size, None);
                     assert!(
                         !matches!(hit, Hit::TreeRow { .. }),
                         "({x}, {y}) of {height} rows answered {hit:?}"
@@ -4689,14 +4970,14 @@ mod tests {
         // and says so; a screen with no room even for that is all footer and
         // border.
         let header = Size::new(WIDTH, CHROME_HEIGHT);
-        let inside = pane_inner(areas(Rect::from(header)).tree);
+        let inside = pane_inner(areas(Rect::from(header), None).tree);
         assert_eq!(inside.height, HEADER_HEIGHT);
-        assert_eq!(hit_test(inside.x, inside.y, header), Hit::TreeHeader);
+        assert_eq!(hit_test(inside.x, inside.y, header, None), Hit::TreeHeader);
         for height in 0..CHROME_HEIGHT - HEADER_HEIGHT {
             let size = Size::new(WIDTH, height);
             for y in 0..height {
                 for x in 0..WIDTH {
-                    let hit = hit_test(x, y, size);
+                    let hit = hit_test(x, y, size, None);
                     assert!(
                         matches!(hit, Hit::Footer | Hit::Border),
                         "({x}, {y}) of {height} rows answered {hit:?}"
@@ -4714,7 +4995,7 @@ mod tests {
         // rule.
         for width in [40, 41, TREE_MIN_WIDTH * 2 - 1] {
             let size = Size::new(width, FIXTURE_HEIGHT);
-            let panes = areas(Rect::from(size));
+            let panes = areas(Rect::from(size), None);
             assert_eq!(
                 panes.tree.width,
                 width / 2,
@@ -4724,7 +5005,7 @@ mod tests {
             let inside = pane_inner(panes.panel);
             let rows = tree_rows_area(panes.tree);
             assert_eq!(
-                hit_test(inside.x, inside.y, size),
+                hit_test(inside.x, inside.y, size, None),
                 Hit::PanelLine { offset: 0 },
                 "at {width} columns"
             );
@@ -4732,7 +5013,8 @@ mod tests {
                 hit_test(
                     inside.x + inside.width - 1,
                     inside.y + inside.height - 1,
-                    size
+                    size,
+                    None
                 ),
                 Hit::PanelLine {
                     offset: inside.height - 1
@@ -4740,14 +5022,18 @@ mod tests {
                 "at {width} columns"
             );
             assert_eq!(
-                hit_test(rows.x, rows.y, size),
+                hit_test(rows.x, rows.y, size, None),
                 Hit::TreeRow { offset: 0 },
                 "at {width} columns"
             );
             // The two columns between the panes' insides are border on both
             // sides of the join, whichever pane owns which.
             for x in [inside.x + inside.width, rows.x - 1] {
-                assert_eq!(hit_test(x, rows.y, size), Hit::Border, "at {width} columns");
+                assert_eq!(
+                    hit_test(x, rows.y, size, None),
+                    Hit::Border,
+                    "at {width} columns"
+                );
             }
         }
     }
@@ -4765,16 +5051,16 @@ mod tests {
             let size = Size::new(width, height);
             for y in 0..height {
                 for x in 0..width {
-                    match hit_test(x, y, size) {
+                    match hit_test(x, y, size, None) {
                         Hit::TreeRow { offset } => assert!(
                             offset < tree_height(size),
                             "({x}, {y}) of {width}x{height} is row {offset} of a window {} tall",
                             tree_height(size)
                         ),
                         Hit::PanelLine { offset } => assert!(
-                            offset < panel_height(size),
+                            offset < panel_height(size, None),
                             "({x}, {y}) of {width}x{height} is line {offset} of a window {} tall",
-                            panel_height(size)
+                            panel_height(size, None)
                         ),
                         _ => {}
                     }
@@ -4783,9 +5069,9 @@ mod tests {
 
             // And a point off the end of the frame is nothing warlock drew,
             // rather than the nearest thing it did draw.
-            assert_eq!(hit_test(width, 0, size), Hit::Offscreen);
-            assert_eq!(hit_test(0, height, size), Hit::Offscreen);
-            assert_eq!(hit_test(u16::MAX, u16::MAX, size), Hit::Offscreen);
+            assert_eq!(hit_test(width, 0, size, None), Hit::Offscreen);
+            assert_eq!(hit_test(0, height, size, None), Hit::Offscreen);
+            assert_eq!(hit_test(u16::MAX, u16::MAX, size, None), Hit::Offscreen);
         }
     }
 
@@ -4807,7 +5093,7 @@ mod tests {
             // And its border really is there, on all four sides, carrying
             // nothing of its own: no title, and no scrollback indicator on a
             // panel with nothing to scroll.
-            let panel = areas(buffer.area).panel;
+            let panel = areas(buffer.area, None).panel;
             assert_ne!(buffer[(panel.x, panel.y)].symbol(), " ");
             assert_ne!(
                 buffer[(panel.x + panel.width - 1, panel.y + panel.height - 1)].symbol(),
@@ -4876,7 +5162,7 @@ mod tests {
 
         let buffer = render(&app, NARROW_WIDTH, FILES_HEIGHT);
 
-        assert_eq!(areas(buffer.area).panel.width, 20);
+        assert_eq!(areas(buffer.area, None).panel.width, 20);
         assert_bare_panel(&buffer);
     }
 
@@ -4891,7 +5177,7 @@ mod tests {
 
         let buffer = render(&app, STANDARD_WIDTH, MARK_HEIGHT);
 
-        assert_eq!(areas(buffer.area).panel.width, 50);
+        assert_eq!(areas(buffer.area, None).panel.width, 50);
         assert_bare_panel(&buffer);
     }
 
@@ -5079,7 +5365,7 @@ mod tests {
     fn viewing_app(width: u16, height: u16, cut: bool) -> App {
         let mut app = App::from_tree(&fixture::tree());
         app.set_viewport_height(tree_height(Size::new(width, height)));
-        app.set_panel_height(panel_height(Size::new(width, height)));
+        app.set_panel_height(panel_height(Size::new(width, height), None));
         app.set_panel_width(panel_width(Size::new(width, height)));
         app.show_document(
             [
@@ -5246,7 +5532,7 @@ mod tests {
     #[test]
     fn the_scrollback_indicator_reports_the_card_that_is_showing() {
         let base = Instant::now();
-        let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT)));
+        let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None));
 
         // An account longer than the panel, parked at its first line by the
         // ordinary movement keys, with a document shorter than the panel over
@@ -5340,7 +5626,7 @@ mod tests {
     fn a_scrolled_back_panel_says_what_is_below_it_and_the_key_back_to_live() {
         let base = Instant::now();
         let mut app = pacting_app(base, WIDTH, HEIGHT);
-        let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT)));
+        let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None));
         let account = app.account_mut().expect("a pact has started");
         account.open_section("crates/engine", base);
         for line in 0..height * 3 {
@@ -5421,7 +5707,7 @@ mod tests {
         // the way up, and the two the other tests draw at.
         let chrome = FOOTER_HEIGHT + 2 * BORDER_THICKNESS;
         for height in [chrome + 1, chrome + 2, HEIGHT, FIXTURE_HEIGHT, 24] {
-            let measured = panel_height(Size::new(WIDTH, height));
+            let measured = panel_height(Size::new(WIDTH, height), None);
             let base = Instant::now();
             let mut app = pacting_app(base, WIDTH, height);
             let account = app.account_mut().expect("a pact has started");
@@ -5445,11 +5731,283 @@ mod tests {
         // rather than underflowing.
         for height in 0..=chrome {
             assert_eq!(
-                panel_height(Size::new(WIDTH, height)),
+                panel_height(Size::new(WIDTH, height), None),
                 0,
                 "in {height} rows"
             );
         }
+    }
+
+    /// The drafts the layout tests are run against: nothing typed, one row,
+    /// several newlines, a run long enough to wrap, and one well past the cap.
+    ///
+    /// One list rather than a test per draft, because what is under test is
+    /// arithmetic that has to hold whatever is in the field — and a draft that
+    /// wants more rows than the cap is the case the arithmetic is easiest to get
+    /// wrong at.
+    fn drafts() -> Vec<Composer> {
+        let many = (0..usize::from(COMPOSER_MAX_ROWS) * 3)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        vec![
+            Composer::default(),
+            Composer::new("a line"),
+            Composer::new("one\ntwo\nthree"),
+            Composer::new("x".repeat(usize::from(WIDTH) * 2)),
+            Composer::new(many),
+        ]
+    }
+
+    /// The rows of `buffer` the composer is drawn into, as text.
+    fn composer_rows(buffer: &Buffer, composer: &Composer) -> Vec<String> {
+        let area = pane_inner(
+            areas(buffer.area, Some(composer))
+                .composer
+                .expect("a field on this frame"),
+        );
+
+        (0..area.height)
+            .map(|index| text_in(buffer, area, area.y + index))
+            .collect()
+    }
+
+    #[test]
+    fn the_panel_and_the_composer_come_to_the_column_the_panel_had_to_itself() {
+        let chrome = FOOTER_HEIGHT + 2 * BORDER_THICKNESS;
+        // Every height either side of the point there is room for a field at
+        // all, the ones the other tests draw at, and a tall one.
+        let heights = [
+            0,
+            1,
+            chrome,
+            chrome + 1,
+            chrome + 2,
+            chrome + 3,
+            HEIGHT,
+            FIXTURE_HEIGHT,
+            24,
+            60,
+        ];
+        for height in heights {
+            for width in [WIDTH, 80, 40, 20, 4, 0] {
+                let size = Size::new(width, height);
+                // What the panel had before there was a composer to pay for.
+                let before = panel_height(size, None);
+                assert_eq!(composer_height(size, None), 0, "{width}x{height}");
+
+                for composer in &drafts() {
+                    let field = Some(composer);
+                    assert_eq!(
+                        panel_height(size, field) + composer_height(size, field),
+                        before,
+                        "{width}x{height} does not add up with {:?} in the field",
+                        composer.draft()
+                    );
+                    // And the width is untouched: the field takes rows off the
+                    // panel and never a column, which is why a document wrapped
+                    // at `panel_width` is wrapped at the width it is drawn at.
+                    assert_eq!(
+                        pane_inner(areas(Rect::from(size), field).panel).width,
+                        panel_width(size),
+                        "{width}x{height} moved the panel's edge"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_composer_is_one_row_empty_and_grows_a_row_at_a_time_to_its_cap() {
+        let border = 2 * BORDER_THICKNESS;
+        let size = Size::new(WIDTH, 60);
+        assert_eq!(
+            composer_height(size, Some(&Composer::default())),
+            1 + border,
+            "an empty field is a row to type on and its border"
+        );
+
+        // A newline at a time, up to the cap and then not past it.
+        for lines in 1..usize::from(COMPOSER_MAX_ROWS) + 4 {
+            let composer = Composer::new(vec!["x"; lines].join("\n"));
+            let rows = u16::try_from(lines)
+                .expect("a short draft")
+                .min(COMPOSER_MAX_ROWS);
+            assert_eq!(
+                composer_height(size, Some(&composer)),
+                rows + border,
+                "{lines} lines"
+            );
+        }
+
+        // And a wrap costs exactly what a newline does: one line of text, one
+        // column wider than the field, is two rows.
+        let inner = panel_width(size);
+        let over = Composer::new("x".repeat(usize::from(inner) + 1));
+        assert_eq!(composer_height(size, Some(&over)), 2 + border);
+    }
+
+    #[test]
+    fn a_draft_past_the_cap_scrolls_inside_the_field_and_keeps_the_cursors_row() {
+        let app = App::from_tree(&fixture::tree());
+        let lines: Vec<String> = (0..usize::from(COMPOSER_MAX_ROWS) * 2)
+            .map(|line| format!("line {line}"))
+            .collect();
+        let composer = Composer::new(lines.join("\n"));
+
+        let buffer = render_composer(&app, &composer, WIDTH, 40);
+        let drawn = composer_rows(&buffer, &composer);
+
+        // The tail of the draft, so the row the cursor is on — the last one,
+        // always — is on screen, and the field never grew past its cap to get it
+        // there.
+        assert_eq!(drawn.len(), usize::from(COMPOSER_MAX_ROWS));
+        assert_eq!(drawn, lines[lines.len() - drawn.len()..]);
+        assert_eq!(
+            drawn.last().map(String::as_str),
+            lines.last().map(String::as_str),
+            "the newest line is the bottom row"
+        );
+    }
+
+    #[test]
+    fn the_composers_border_is_lit_only_while_the_keys_are_in_it() {
+        let mut app = App::from_tree(&fixture::tree());
+        let composer = Composer::new("what to ask for");
+        let style = |buffer: &Buffer, pane: Rect| {
+            let cell = &buffer[(pane.x, pane.y)];
+            (cell.fg, cell.modifier)
+        };
+
+        let mut seen = Vec::new();
+        for expected in [Focus::Tree, Focus::Panel, Focus::Composer] {
+            assert_eq!(app.focus(), expected, "the cycle moved somewhere else");
+            let buffer = render_composer(&app, &composer, WIDTH, FIXTURE_HEIGHT);
+            let panes = areas(buffer.area, Some(&composer));
+            let field = panes.composer.expect("a field on this frame");
+            seen.push((
+                expected,
+                style(&buffer, field),
+                style(&buffer, panes.panel),
+                style(&buffer, panes.tree),
+            ));
+            app.toggle_focus();
+        }
+
+        for (focus, field, panel, tree) in seen {
+            let lit = (FOCUS_COLOUR, Modifier::BOLD);
+            let borders = [
+                (Focus::Composer, field),
+                (Focus::Panel, panel),
+                (Focus::Tree, tree),
+            ];
+            for (whose, (fg, modifier)) in borders {
+                if whose == focus {
+                    assert_eq!((fg, modifier), lit, "{focus:?} should light {whose:?}");
+                } else {
+                    assert_ne!(fg, FOCUS_COLOUR, "{focus:?} lit {whose:?} as well");
+                    assert!(modifier.contains(Modifier::DIM));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_document_card_takes_the_composers_rows_back() {
+        let mut app = App::from_tree(&fixture::tree());
+        let composer = Composer::new("one\ntwo\nthree");
+        let size = Size::new(WIDTH, FIXTURE_HEIGHT);
+        assert_eq!(
+            composer_on_screen(&app, &composer),
+            Some(&composer),
+            "with an account showing the field is on screen"
+        );
+
+        app.show_document(["# The engine", "", "It walks the tree."], false);
+        let field = composer_on_screen(&app, &composer);
+
+        assert_eq!(field, None, "a document takes the whole column");
+        assert_eq!(
+            panel_height(size, field),
+            panel_height(size, None),
+            "the panel should have the rows the field was taking"
+        );
+        assert_eq!(composer_height(size, field), 0);
+
+        // And nothing of the field reaches the frame: a draft handed to `draw`
+        // while the card is up is drawn exactly as no draft at all.
+        let with = render_composer(&app, &composer, WIDTH, FIXTURE_HEIGHT);
+        let without = render(&app, WIDTH, FIXTURE_HEIGHT);
+        assert_eq!(with, without);
+    }
+
+    #[test]
+    fn a_point_on_the_composer_is_not_a_line_the_panel_no_longer_has() {
+        let composer = Composer::new("one\ntwo");
+        let size = Size::new(WIDTH, FIXTURE_HEIGHT);
+        let field = Some(&composer);
+        let cut = areas(Rect::from(size), field);
+        let area = cut.composer.expect("a field on this frame");
+
+        // Every point inside the field says so, and says nothing about a row of
+        // an account that is drawn above it.
+        let inside = pane_inner(area);
+        for y in inside.y..inside.y + inside.height {
+            for x in inside.x..inside.x + inside.width {
+                assert_eq!(hit_test(x, y, size, field), Hit::Composer, "at {x},{y}");
+            }
+        }
+        // Its border is a border, like either pane's.
+        assert_eq!(hit_test(area.x, area.y, size, field), Hit::Border);
+
+        // And the panel's lines are the lines the panel has: every offset the
+        // hit test hands out is inside the window the app was told about.
+        let panel = pane_inner(cut.panel);
+        let height = panel_height(size, field);
+        for y in panel.y..panel.y + panel.height {
+            let hit = hit_test(panel.x, y, size, field);
+            assert_eq!(
+                hit,
+                Hit::PanelLine {
+                    offset: y - panel.y
+                }
+            );
+            assert!(matches!(hit, Hit::PanelLine { offset } if offset < height));
+        }
+        // The rows the field took would have been the panel's, and the hit test
+        // knows it: the same points answer differently on a frame with no field.
+        assert_eq!(
+            hit_test(inside.x, inside.y, size, None),
+            Hit::PanelLine {
+                offset: inside.y - panel.y
+            }
+        );
+    }
+
+    #[test]
+    fn a_terminal_with_no_room_for_a_field_draws_none_and_the_panel_keeps_the_column() {
+        let chrome = FOOTER_HEIGHT + 2 * BORDER_THICKNESS;
+        let composer = Composer::new("something");
+        let field = Some(&composer);
+
+        // Up to the height the smallest field fits in, the column is the
+        // panel's: a border round nowhere to type is furniture the terminal that
+        // can least afford it would be paying for.
+        for height in 0..chrome + COMPOSER_MIN_HEIGHT {
+            let size = Size::new(WIDTH, height);
+            assert_eq!(composer_height(size, field), 0, "in {height} rows");
+            assert_eq!(
+                panel_height(size, field),
+                panel_height(size, None),
+                "in {height} rows"
+            );
+        }
+
+        // And the first height it does fit in, it fits in whole.
+        let size = Size::new(WIDTH, chrome + COMPOSER_MIN_HEIGHT);
+        assert_eq!(composer_height(size, field), COMPOSER_MIN_HEIGHT);
+        assert_eq!(panel_height(size, field), 0);
     }
 
     #[test]
@@ -5461,7 +6019,7 @@ mod tests {
         app.toggle_focus();
         let panel_focused = render(&app, WIDTH, FIXTURE_HEIGHT);
 
-        let areas = areas(tree_focused.area);
+        let areas = areas(tree_focused.area, None);
         let top_left = |buffer: &Buffer, pane: Rect| {
             let cell = &buffer[(pane.x, pane.y)];
             (cell.fg, cell.modifier)
@@ -5759,7 +6317,7 @@ mod tests {
         // over the top of the footer, and every row behind it has something on
         // it — without which the assertions below would pass on a blank screen.
         let area = confirm_rect(&open);
-        let Areas { panel, tree, .. } = areas(open.area);
+        let Areas { panel, tree, .. } = areas(open.area, None);
         assert!(
             area.x < panel.x + panel.width,
             "the window misses the panel"
@@ -5930,7 +6488,7 @@ mod tests {
         // Three lines, in their places, saying what they said: the gate on the
         // way out is a window over the frame and not a fourth footer line, and
         // the keys line still names the way out it always named.
-        let footer = areas(open.area).footer;
+        let footer = areas(open.area, None).footer;
         assert_eq!(footer.height, FOOTER_HEIGHT);
         assert_eq!(open.area.height, MARK_ROOM_HEIGHT);
         for y in footer.y..footer.y + footer.height {
@@ -6188,7 +6746,7 @@ mod tests {
         // At this size the window is over the panel, over the tree pane and over
         // the top of the footer.
         let over = scope_rect(&open, &field);
-        let Areas { panel, tree, .. } = areas(open.area);
+        let Areas { panel, tree, .. } = areas(open.area, None);
         assert!(
             over.x < panel.x + panel.width,
             "the window misses the panel"

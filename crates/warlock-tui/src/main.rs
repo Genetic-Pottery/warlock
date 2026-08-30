@@ -205,13 +205,13 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use std::{env, io};
 
-use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseEvent};
 use ratatui::crossterm::execute;
 use ratatui::layout::Size;
 use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
 use warlock_tui::{
-    App, ClaudeAgent, Composed, Composer, Focus, QuitConfirm, ScopePrompt, draw, panel_height,
-    panel_width, tree_height,
+    App, ClaudeAgent, Composed, Composer, Focus, QuitConfirm, ScopePrompt, composer_on_screen,
+    draw, panel_height, panel_width, tree_height,
 };
 
 mod config;
@@ -540,7 +540,16 @@ fn run() -> Result<(), Error> {
         // of a flag that may have been toggled since — is put right before it is
         // drawn.
         app.set_mouse_captured(mouse_captured);
-        draw_frame(&mut app, &mut guard, &scope, size, confirm, &prompt)?;
+        // The draft goes in beside the two questions: it is a pane cut off the
+        // bottom of the panel's column, so the panel is drawn and scrolled a few
+        // rows shorter for as long as there is a field on screen. Whether there
+        // is one is `composer_on_screen`'s answer and not this loop's — the
+        // document card takes the whole column back — and it is asked in there,
+        // and again below for the pointer, so the frame and the hit test are one
+        // rule read twice rather than two opinions about the same rows.
+        draw_frame(
+            &mut app, &mut guard, &scope, size, confirm, &prompt, &composer,
+        )?;
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
         // sits here, so the wait has to end whether or not anybody presses
@@ -869,28 +878,16 @@ fn run() -> Result<(), Error> {
                     Pressed::Nothing => {}
                 },
                 // The pointer, answered in the same shape and for the same
-                // reasons. [`mouse_action`] is handed the event, the size this
-                // round measured at the top — the one the hit test has to
-                // agree with, because it is the size the frame above was drawn
-                // at — and the app, since which row a click lands on depends
-                // on where the tree's window is. Both windows are handed over
-                // too, and either one up makes every event mean nothing: the
-                // pointer is read and dropped, because neither has clickable
-                // answers and a click on the tree behind one would move a
-                // selection the reader cannot see.
-                //
-                // What comes of it is done in [`apply_mouse`], which is where
-                // the arms that used to stand here live: none of them reads the
-                // terminal and none of them draws — the round is the redraw,
-                // which is why a pointer swept across the screen costs nothing
-                // — and side by side with the keystrokes they crowd out the
-                // half of this match that can leave the loop.
+                // reasons, and in one line because both halves of it live in
+                // [`apply_mouse`]: the event, the size this round measured at
+                // the top — the one the hit test has to agree with, because it
+                // is the size the frame above was drawn at — both windows, and
+                // the draft under the panel, whose rows the hit test has to know
+                // are not the panel's. None of what it does reads the terminal
+                // and none of it draws: the round is the redraw, which is why a
+                // pointer swept across the screen costs nothing.
                 Event::Mouse(mouse) => {
-                    // Decided over the app as it stands and only then applied,
-                    // in two statements rather than one: the hit test reads the
-                    // app it is about, and the app cannot be lent out twice.
-                    let action = mouse_action(mouse, size, &app, confirm, &prompt);
-                    apply_mouse(&mut app, action);
+                    apply_mouse(&mut app, mouse, size, confirm, &prompt, &composer);
                 }
                 // Resizes, focus changes and pasted text: read and dropped. The
                 // frame is measured again at the top of every round, so a
@@ -939,6 +936,20 @@ fn run() -> Result<(), Error> {
 /// it cleared. The scope prompt goes in beside it for the same reason and is
 /// drawn the same way — by reference, since it carries the text somebody is
 /// typing.
+///
+/// The composer comes in the same way and is the reason the panel's height is
+/// worth a second look: it is a pane cut off the bottom of the panel's column,
+/// so every row it takes is a row the account no longer has, and the height the
+/// app is told to scroll by has to be the reduced one — a panel told the whole
+/// column would scroll by a window that is partly the field's. So the one
+/// measurement goes to [`panel_height`] and to [`draw`] both, and whether there
+/// is a field on this frame at all is [`composer_on_screen`]'s answer, asked
+/// here: the document card takes the column back, and the panel is measured and
+/// drawn as it was before there was a composer to pay for.
+///
+/// The width is not measured against it, because the field takes rows and never
+/// columns: a document is wrapped at the width the panel had and the composer is
+/// drawn at that very width. See [`panel_width`].
 fn draw_frame(
     app: &mut App,
     guard: &mut TerminalGuard,
@@ -946,13 +957,23 @@ fn draw_frame(
     size: Size,
     confirm: QuitConfirm,
     prompt: &ScopePrompt,
+    composer: &Composer,
 ) -> io::Result<()> {
+    let field = composer_on_screen(app, composer);
     app.set_viewport_height(tree_height(size));
-    app.set_panel_height(panel_height(size));
+    app.set_panel_height(panel_height(size, field));
     app.set_panel_width(panel_width(size));
-    guard
-        .terminal
-        .draw(|frame| draw(frame, app, &scope.chrome, Instant::now(), confirm, prompt))?;
+    guard.terminal.draw(|frame| {
+        draw(
+            frame,
+            app,
+            &scope.chrome,
+            Instant::now(),
+            confirm,
+            prompt,
+            field,
+        );
+    })?;
     Ok(())
 }
 
@@ -1007,12 +1028,29 @@ fn keep_up(
 /// nothing draws: the round is the redraw, which is why a pointer swept across
 /// the screen costs nothing.
 ///
-/// `None` covers a click that means nothing and every event arriving while a
-/// window is up: the pointer is read and dropped then, because neither dialog
-/// has clickable answers and a click on the tree behind one would move a
+/// Nothing at all covers a click that means nothing and every event arriving
+/// while a window is up: the pointer is read and dropped then, because neither
+/// dialog has clickable answers and a click on the tree behind one would move a
 /// selection the reader cannot see.
-fn apply_mouse(app: &mut App, action: Option<MouseAction>) {
-    match action {
+///
+/// The decision is made here rather than in the loop's arm because it takes the
+/// app as it stands and the app cannot be lent out twice: the hit test reads it,
+/// and what comes of the hit test writes to it, so the two are two statements
+/// with the reading finished before the writing starts. The composer is in that
+/// reading — the rows it takes are rows the panel gave up, so a click on the
+/// field would otherwise be answered as a line of an account that is not drawn
+/// there — and whether the frame had one on it at all is
+/// [`composer_on_screen`]'s answer, asked here about the app that was drawn.
+fn apply_mouse(
+    app: &mut App,
+    mouse: MouseEvent,
+    size: Size,
+    confirm: QuitConfirm,
+    prompt: &ScopePrompt,
+    composer: &Composer,
+) {
+    let field = composer_on_screen(app, composer);
+    match mouse_action(mouse, size, app, confirm, prompt, field) {
         // The wheel over the tree column, whichever pane the keys are pointed
         // at: the selection moves and the window follows it, exactly as it does
         // for a movement key.

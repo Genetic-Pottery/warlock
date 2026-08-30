@@ -207,15 +207,21 @@ pub use prompt::ScopePrompt;
 /// What one key does to the scope prompt, given the field it is open over.
 pub use prompt::edit_for;
 /// What is drawn where a pointer landed: the footer, a border, the tree's
-/// header, a row of the tree's window, a line of the panel's.
+/// header, a row of the tree's window, a line of the panel's, the composer.
 pub use ui::Hit;
+/// How many rows of the panel's column the composer takes in a terminal of a
+/// given size, its border included — the rows [`panel_height`] no longer has.
+pub use ui::composer_height;
+/// The composer as a frame drawn over an app has it: nothing at all while the
+/// document card is showing.
+pub use ui::composer_on_screen;
 /// Draw one frame of the app.
 pub use ui::draw;
 /// Which part of the frame a screen point falls on, measured off the layout the
 /// frame is cut by.
 pub use ui::hit_test;
 /// How many lines of the pact's account a terminal of a given size has room for
-/// in the panel.
+/// in the panel, once the composer under it has taken its rows.
 pub use ui::panel_height;
 /// How many columns wide the panel's contents are in a terminal of a given
 /// size, which is the width a document in it is wrapped to.

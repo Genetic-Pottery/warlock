@@ -588,18 +588,26 @@ pub(crate) enum MouseAction {
 /// window that is about to close. The gate lives here rather than in the loop's
 /// arm for the same reason [`press_for`]'s does: it is a decision, and decisions
 /// are testable with nothing attached to stdout.
+///
+/// `composer` is the draft the frame was drawn with — `None` on a frame that had
+/// no composer on it, which is every frame while the document card has the panel
+/// — and it is here for the layout and nothing else: the rows the field takes
+/// are rows the panel gave up, so a hit test that had not been told about the
+/// draft would answer [`Hit::PanelLine`] for a point drawn on a field and scroll
+/// a window the pointer is not over. See [`hit_test`].
 pub(crate) fn mouse_action(
     mouse: MouseEvent,
     size: Size,
     app: &App,
     confirm: QuitConfirm,
     prompt: &ScopePrompt,
+    composer: Option<&Composer>,
 ) -> Option<MouseAction> {
     if confirm.is_open() || prompt.is_open() {
         return None;
     }
 
-    let hit = hit_test(mouse.column, mouse.row, size);
+    let hit = hit_test(mouse.column, mouse.row, size, composer);
     match mouse.kind {
         // Down the tree and down the account are the same direction, so one
         // notch reads the same way over either pane.
@@ -630,14 +638,19 @@ pub(crate) fn mouse_action(
 /// row, and a notch that did nothing because the pointer happened to be on the
 /// one line naming the tree would read as a wheel that sticks.
 ///
-/// The footer and the borders answer nothing, and they are the whole of what
-/// does not: the footer is nobody's pane, and a border is the line between two
-/// of them rather than a place a reader means to scroll.
+/// The footer, the composer and the borders answer nothing, and they are the
+/// whole of what does not: the footer is nobody's pane, a border is the line
+/// between two of them rather than a place a reader means to scroll, and the
+/// composer has nothing to scroll — it is a handful of rows showing the end of a
+/// draft, and it scrolls itself as somebody types. A notch over it is emphatically
+/// not a notch over the panel above it: scrolling the account because the pointer
+/// was resting on the field would move the half of the screen the reader is not
+/// pointing at, which is the one thing this function exists to prevent.
 fn wheel(hit: Hit, tree: MouseAction, panel: MouseAction) -> Option<MouseAction> {
     match hit {
         Hit::TreeHeader | Hit::TreeRow { .. } | Hit::TreeBelowRows => Some(tree),
         Hit::PanelLine { .. } => Some(panel),
-        Hit::Footer | Hit::Border | Hit::Offscreen => None,
+        Hit::Composer | Hit::Footer | Hit::Border | Hit::Offscreen => None,
     }
 }
 
@@ -673,6 +686,10 @@ fn click(hit: Hit, app: &App) -> Option<MouseAction> {
         }
         Hit::TreeHeader | Hit::TreeBelowRows => Some(MouseAction::Focus(Focus::Tree)),
         Hit::PanelLine { .. } => Some(MouseAction::Focus(Focus::Panel)),
+        // A click inside a pane gives that pane the keys, and the composer is a
+        // pane: it is only ever hit-tested when it is on screen, so a press on
+        // it is somebody pointing at the field they mean to type in.
+        Hit::Composer => Some(MouseAction::Focus(Focus::Composer)),
         Hit::Footer | Hit::Border | Hit::Offscreen => None,
     }
 }
@@ -1704,7 +1721,7 @@ mod tests {
             }
             let mut app = App::from_rows(rows);
             app.set_viewport_height(tree_height(SIZE));
-            app.set_panel_height(panel_height(SIZE));
+            app.set_panel_height(panel_height(SIZE, None));
             app
         }
 
@@ -3077,7 +3094,7 @@ mod tests {
         fn app_on_screen() -> App {
             let mut app = App::from_rows(rows());
             app.set_viewport_height(tree_height(SIZE));
-            app.set_panel_height(panel_height(SIZE));
+            app.set_panel_height(panel_height(SIZE, None));
             app
         }
 
@@ -3088,7 +3105,14 @@ mod tests {
         /// that the confirmation and the scope prompt are things a pointer event
         /// is read against.
         fn asks(mouse: MouseEvent, app: &App) -> Option<MouseAction> {
-            mouse_action(mouse, SIZE, app, QuitConfirm::Closed, &ScopePrompt::Closed)
+            mouse_action(
+                mouse,
+                SIZE,
+                app,
+                QuitConfirm::Closed,
+                &ScopePrompt::Closed,
+                None,
+            )
         }
 
         /// One round of the event loop with `mouse` arriving in it and the gate
@@ -3116,7 +3140,7 @@ mod tests {
             prompt: &ScopePrompt,
             mouse: MouseEvent,
         ) {
-            match mouse_action(mouse, SIZE, app, confirm, prompt) {
+            match mouse_action(mouse, SIZE, app, confirm, prompt, None) {
                 Some(MouseAction::SelectNextBy(rows)) => app.select_next_by(rows),
                 Some(MouseAction::SelectPreviousBy(rows)) => app.select_previous_by(rows),
                 Some(MouseAction::ScrollPanelDown(lines)) => app.scroll_panel_down(lines),
@@ -3141,7 +3165,7 @@ mod tests {
             // tests into assertions about somewhere else.
             assert_eq!(viewport(), 18, "eighteen rows of tree at 80x24");
             assert_eq!(
-                usize::from(panel_height(SIZE)),
+                usize::from(panel_height(SIZE, None)),
                 19,
                 "nineteen lines of panel: no header of its own"
             );
@@ -3532,7 +3556,14 @@ mod tests {
                 left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
             ] {
                 assert_eq!(
-                    mouse_action(mouse, SIZE, &app, QuitConfirm::open(), &ScopePrompt::Closed),
+                    mouse_action(
+                        mouse,
+                        SIZE,
+                        &app,
+                        QuitConfirm::open(),
+                        &ScopePrompt::Closed,
+                        None
+                    ),
                     None,
                     "{mouse:?} should mean nothing while the question is up"
                 );
@@ -3581,7 +3612,7 @@ mod tests {
                     left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
                 ] {
                     assert_eq!(
-                        mouse_action(mouse, SIZE, &app, QuitConfirm::Closed, &prompt),
+                        mouse_action(mouse, SIZE, &app, QuitConfirm::Closed, &prompt, None),
                         None,
                         "{mouse:?} should mean nothing while the prompt is up"
                     );
