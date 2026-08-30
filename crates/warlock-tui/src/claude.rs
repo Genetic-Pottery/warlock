@@ -2,9 +2,10 @@
 //!
 //! The engine defines what a model pass *is* — [`Agent`], its request, its
 //! response and its failure vocabulary — and spawns nothing. This module is
-//! the other half: it takes the request the engine built, hands the prompt to
-//! a child process on its stdin, reads what the child writes to stdout, and
-//! translates however that went into the engine's words. It is the only place
+//! the other half: it takes the request the engine built — or, for the second
+//! kind of run below, the message somebody typed — hands it to a child process
+//! on its stdin, reads what the child writes to stdout, and translates
+//! however that went into the engine's words. It is the only place
 //! in this crate that runs anything; everything else here is data and
 //! functions over data.
 //!
@@ -12,6 +13,37 @@
 //! the text it is given and never adds to it, because the moment this file
 //! starts composing prompts, domain logic has crossed to the wrong side of the
 //! seam.
+//!
+//! # Two kinds of run
+//!
+//! [`ClaudeAgent`] is one of them and [`ChatAgent`] is the other: a turn of a
+//! conversation, where what arrives is a message somebody typed at the foot of
+//! the panel rather than an [`AgentRequest`] the engine built. That is why it
+//! implements no port. A request names a directory and carries the files under it
+//! and its children's documents; behind a typed sentence there is no directory
+//! and no file list, so satisfying the trait would mean inventing the very things
+//! the seam exists to keep honest. A turn's stdin is the message and nothing else
+//! — no tree, no repository contents, no transcript this crate kept — and its
+//! answer comes back as text. It stays one conversation because the session id is
+//! settled once and every turn carries it, not because warlock sends back what
+//! was said before.
+//!
+//! A turn is also read-only, by construction rather than by intention: its vector
+//! grants `Read`, `Grep` and `Glob` — see [`CHAT_TOOLS`] — and nothing that
+//! writes, edits, runs a shell or reaches the network, in any permission mode.
+//! Warlock's writers are the pact, the refresh, the manifest and the scope key,
+//! and a chat box is not one of them.
+//!
+//! The rule about prompts holds for a turn, with one named exception. A pass's
+//! text is the engine's and is passed through untouched; a turn's message is the
+//! reader's and is passed through untouched too. What this file does decide is
+//! [`CHAT_SYSTEM_PROMPT`] — what this program is and what the tree on screen
+//! means — which is context about *warlock* rather than about a repository, and
+//! so is knowledge the engine has no business holding and a turn cannot be
+//! understood without.
+//!
+//! Everything after the spawn is one piece of code for both, [`invoke`], because
+//! the deadlocks below are the same deadlocks whichever kind of run is in flight.
 //!
 //! # Why this is fiddlier than "spawn, wait, read"
 //!
