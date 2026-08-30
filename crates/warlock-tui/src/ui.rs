@@ -1782,7 +1782,7 @@ fn panel_row(line: &Entry, width: u16) -> Line<'static> {
             Line::from(truncated(&format!("{PANEL_INDENT}{clock} {text}"), width))
         }
         Entry::Summary { text } => Line::from(truncated(text, width)).bold(),
-        Entry::Text { text } => Line::from(truncated(text, width)),
+        Entry::Text { text } | Entry::Said { text } => Line::from(truncated(text, width)),
     }
 }
 

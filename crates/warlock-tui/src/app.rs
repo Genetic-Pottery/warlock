@@ -8033,7 +8033,10 @@ mod tests {
                 Line::Directory { path } => path.display().to_string(),
                 // A document's line is its own text and nothing else, which is
                 // exactly what a test asserting on what is drawn wants back.
-                Line::Clocked { text, .. } | Line::Summary { text } | Line::Text { text } => text,
+                Line::Clocked { text, .. }
+                | Line::Summary { text }
+                | Line::Text { text }
+                | Line::Said { text } => text,
             })
             .collect()
     }
@@ -8576,9 +8579,10 @@ mod tests {
             .flatten()
             .map(|line| match line {
                 Line::Directory { path } => path.display().to_string(),
-                Line::Clocked { text, .. } | Line::Summary { text } | Line::Text { text } => {
-                    text.clone()
-                }
+                Line::Clocked { text, .. }
+                | Line::Summary { text }
+                | Line::Text { text }
+                | Line::Said { text } => text.clone(),
             })
             .collect()
     }

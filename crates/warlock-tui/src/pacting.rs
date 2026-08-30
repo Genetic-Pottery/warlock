@@ -1494,7 +1494,7 @@ mod tests {
                 Line::Clocked { clock, text } => format!("{clock} {text}"),
                 // A summary is the account's last line; a text line is a
                 // document's own, and the only thing on that card.
-                Line::Summary { text } | Line::Text { text } => text.clone(),
+                Line::Summary { text } | Line::Text { text } | Line::Said { text } => text.clone(),
             })
             .collect()
     }

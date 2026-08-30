@@ -33,6 +33,21 @@
 //! drawing the frame, so a whole minutes-long run can be driven through it in a
 //! test with nothing attached to stdout and no time passing at all.
 //!
+//! The conversation is data of that kind too. [`Thread`] is every message
+//! somebody typed at the foot of the panel, in order, each with the work the
+//! model was seen doing about it and the answer that came back — the same clock
+//! rule as an [`Account`], down to the same code, so a turn's work lines count
+//! from the question that started them and the newest one ticks with the `now`
+//! the frame hands in. Two things about it are not the account's, and both are
+//! wording rather than mechanism: a turn's money says out loud that it belongs
+//! to no pact's total, because the panel now draws both kinds of row and a
+//! sentence is the only thing that can keep them from being read as summable;
+//! and a turn that does not answer ends in exactly one line — cancelled, no
+//! `claude` to ask, a non-zero exit, a timeout, or a model with nothing to say —
+//! so a failure costs the reader a row rather than a screen. It is the one card
+//! that shows prose, and it is still a value: no channel, no child process, and
+//! no clock of its own.
+//!
 //! *When* the tree is read again is decided the same way. The disk keeps moving
 //! after a load — a file saved in another window, a branch checked out, a build
 //! writing thousands of files nobody wants to hear about — and [`WatchPolicy`]
@@ -120,6 +135,7 @@ mod confirm;
 #[cfg(test)]
 mod fixture;
 mod prompt;
+mod thread;
 mod ui;
 mod watch;
 mod wrap;
@@ -232,6 +248,20 @@ pub use prompt::ScopeField;
 pub use prompt::ScopePrompt;
 /// What one key does to the scope prompt, given the field it is open over.
 pub use prompt::edit_for;
+/// One thing that stopped a turn short of an answer — a cancel, no `claude` to
+/// ask, a non-zero exit, a timeout, or a model that said nothing — in the one
+/// line it ends with.
+pub use thread::Ending;
+/// The conversation the panel's third card holds: every message somebody typed,
+/// the work the model was seen doing about it, and what it answered.
+pub use thread::Thread;
+/// One question of a [`Thread`], everything the model was seen doing about it,
+/// the answer when it lands, and what that turn cost.
+pub use thread::Turn;
+/// Which [`Ending`] a failed turn is: the model seam's failure vocabulary as
+/// the panel's, in one place, so whoever runs a turn hands the error over rather
+/// than wording it.
+pub use thread::ending_for;
 /// What is drawn where a pointer landed: the footer, a border, the tree's
 /// header, a row of the tree's window, the run's header, a line of the panel's
 /// window, the composer.
