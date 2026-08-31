@@ -196,6 +196,10 @@ pub use app::Chrome;
 /// panel or the composer: cycled by the focus key, or set outright by a click
 /// naming a pane.
 pub use app::Focus;
+/// Which register the conversation is in — questions about the repository, or a
+/// conversation converging on a document — entered and left from the composer,
+/// and said on the panel's border title and nowhere else.
+pub use app::Mode;
 /// What a pact toggle changed, for whoever has to write it to the manifest.
 pub use app::PactToggle;
 /// One line of the flattened tree.

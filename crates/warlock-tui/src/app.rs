@@ -1133,12 +1133,22 @@ struct Status {
 /// it is asked for, so appending a line moves the window without anybody having
 /// to tell the window that a line was appended. See
 /// [`App::panel_scroll_offset`].
+///
+/// `mode` is which register the conversation is in — see [`Mode`] — and it is
+/// in this group rather than beside `focus` for the reason everything else here
+/// is: it has to survive a run that ended with nothing recorded. A reader who
+/// has spent ten turns converging on a brief and then pacts a clean directory
+/// would otherwise find the conversation back in chat mode because a *pact*
+/// rolled back, which is a run reaching into a conversation it has nothing to
+/// do with. It is a fact about the card and not about the slot: the mode is
+/// what the thread is, whichever of the three cards is being looked at.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Panel {
     account: Card<Account>,
     thread: Card<Thread>,
     document: Card<Vec<Line>>,
     showing: Showing,
+    mode: Mode,
     height: usize,
     width: usize,
 }
@@ -1187,6 +1197,41 @@ impl Showing {
             Self::Document => Self::Thread,
         }
     }
+}
+
+/// Which register the conversation is in: questions about the repository, or a
+/// conversation converging on a document.
+///
+/// Two variants and no third. A mode here is not a second system prompt and not
+/// a second session — it is a state warlock holds plus one ordinary turn sent
+/// into the conversation already in progress (see
+/// [`BRIEF_INSTRUCTION`](crate::BRIEF_INSTRUCTION) and
+/// [`CHAT_INSTRUCTION`](crate::CHAT_INSTRUCTION)) — so what the app keeps is
+/// only this word, and everything the word changes is said out loud somewhere
+/// else: which instruction a command sends, and how hard the turn is asked to
+/// think (see [`BRIEF_EFFORT`](crate::BRIEF_EFFORT)).
+///
+/// What it does *not* change is the card. Nothing on the thread is cleared,
+/// hidden or reordered by a mode change, the session is the same session, the
+/// system prompt is the same string, and the tool grant is byte-identical.
+///
+/// It is drawn in exactly one place: the panel's border title, where the thread
+/// already says which card it is (see `draw_panel` in [`mod@crate::ui`]). Not on
+/// the run header's row, which is the fixed row a pact takes over the panel and
+/// would collide with a brief started while a run is in flight, and not on a row
+/// of the card, which would be a row of the conversation spent saying what the
+/// border was already able to say for nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Mode {
+    /// Questions about the repository, answered one at a time: the register
+    /// warlock opens in and the one it goes back to on `/chat`.
+    #[default]
+    Chat,
+    /// The conversation is aimed at an artifact, and the model's job is to argue
+    /// toward a decision about it rather than to answer as asked. Entered by
+    /// `/brief` from the composer, and by nothing else — no key, no click and no
+    /// tree action puts a conversation in this mode.
+    Brief,
 }
 
 /// One card of the panel: what it holds, if anything, and where its window sits
@@ -1598,6 +1643,7 @@ impl App {
                     follows: false,
                 },
                 showing: Showing::Thread,
+                mode: Mode::Chat,
                 height: 0,
                 width: 0,
             },
@@ -2391,6 +2437,37 @@ impl App {
     #[must_use]
     pub const fn showing_thread(&self) -> bool {
         matches!(self.panel.showing, Showing::Thread)
+    }
+
+    /// Which register the conversation is in: [`Mode::Chat`] until somebody
+    /// types `/brief`.
+    ///
+    /// A fact about the conversation and not about what is on screen: an app
+    /// showing the account is still in brief mode, exactly as one showing the
+    /// account still has a thread. The renderer asks it to word the panel's
+    /// title, and whoever is about to send a turn asks it to decide how hard the
+    /// turn thinks; nothing else reads it.
+    #[must_use]
+    pub const fn mode(&self) -> Mode {
+        self.panel.mode
+    }
+
+    /// Put the conversation in `mode`, and say whether that changed anything.
+    ///
+    /// The answer is what a caller needs and cannot easily get back afterwards:
+    /// a mode *change* is worth one note in the thread, where `/brief` typed in
+    /// brief mode is a re-send that has nothing new to say about the register.
+    /// So the comparison happens here, once, rather than in each caller against
+    /// a copy of [`App::mode`] it had to remember to take first.
+    ///
+    /// It sets one word and touches nothing else. The card showing does not
+    /// move, no turn is started, ended or reordered, nothing is written into the
+    /// thread and the run header is not consulted — the note and the turn are
+    /// the caller's, and this is only the state they are about.
+    pub fn set_mode(&mut self, mode: Mode) -> bool {
+        let changed = self.panel.mode != mode;
+        self.panel.mode = mode;
+        changed
     }
 
     /// The account of the pact running now, or of the last one to run, or `None`
@@ -4486,7 +4563,7 @@ mod tests {
     use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
     use super::{
-        Account, App, Chrome, Focus, Line, PactToggle, Row, Run, Showing, Sigils,
+        Account, App, Chrome, Focus, Line, Mode, PactToggle, Row, Run, Showing, Sigils,
         cut_at_cap_message, no_document_message, panel_offset_for, reseat_on, scroll_offset_for,
     };
     use crate::account::Outcome;
@@ -6386,6 +6463,43 @@ mod tests {
         app.clear_pact_in_flight();
         assert!(app.run_header().is_none());
         assert_eq!(app.pact_line(), None);
+    }
+
+    /// The mode is one word and it is only a word: the card showing, the turns
+    /// on the thread and the run header are exactly what they were, and a run in
+    /// flight neither blocks the change nor is disturbed by it.
+    #[test]
+    fn setting_the_mode_changes_the_mode_and_nothing_else() {
+        let base = Instant::now();
+        let mut app = App::from_rows(rooted_rows());
+        app.start_turn("what does this do", base);
+        app.answer_turn("it walks the tree", at(base, 1));
+        app.set_run_in_flight(Run::Pact, Path::new("/repo").join("crates"), 1, 4);
+
+        let before = app.panel_lines(at(base, 2));
+        let header = app.run_header().expect("a run in flight has a header");
+
+        // Chat until somebody says otherwise, and the change is reported.
+        assert_eq!(app.mode(), Mode::Chat);
+        assert!(app.set_mode(Mode::Brief), "chat to brief is a change");
+        assert_eq!(app.mode(), Mode::Brief);
+
+        // Nothing else moved: same rows in the same order, same card, same
+        // header — the mode wrote no note and started no turn of its own.
+        assert_eq!(app.panel_lines(at(base, 2)), before);
+        assert!(app.showing_thread(), "the mode moved the card showing");
+        let after = app.run_header().expect("the mode took the header down");
+        assert_eq!(after.run(), header.run());
+        assert_eq!(after.directory(), header.directory());
+        assert_eq!(after.position(), header.position());
+        assert_eq!(after.total(), header.total());
+
+        // Setting the mode it is already in is no change, and says so: that is
+        // how a re-sent instruction knows to add no second note.
+        assert!(!app.set_mode(Mode::Brief), "brief to brief is no change");
+        assert_eq!(app.mode(), Mode::Brief);
+        assert!(app.set_mode(Mode::Chat), "brief to chat is a change");
+        assert_eq!(app.panel_lines(at(base, 2)), before);
     }
 
     #[test]

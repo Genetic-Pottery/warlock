@@ -79,7 +79,7 @@ use warlock_engine::{NodeState, SCOPE_RULES};
 // and the account's `Line` is what a row says. Both names are right where they
 // live, and this module is the one place both are in scope.
 use crate::account::{Account, Line as Entry};
-use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
+use crate::app::{App, Chrome, Focus, Mode, Row, Run, RunHeader};
 use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
 use crate::composer::Composer;
 use crate::confirm::{Answer, QuitConfirm};
@@ -293,7 +293,47 @@ pub(crate) const PANEL_INDENT: &str = "  ";
 /// Padded a column each side so it does not sit against the corner, like
 /// [`scrollback`]'s indicator on the opposite edge. No colour, for the reason
 /// written out at [`draw_panel`]: bold is what a heading gets here.
+///
+/// What the title says while the conversation is in brief mode is
+/// [`BRIEF_THREAD_TITLE`]; [`thread_title`] is the choice between the two.
 const THREAD_TITLE: &str = " thread ";
+
+/// The same title while the conversation is converging on a document: the card's
+/// name, then the register it is in.
+///
+/// The whole of what brief mode says on screen. It is the card's own name with a
+/// word added rather than a name of its own, because it is the same card and the
+/// same conversation — every turn that was on it is still on it — in a state; a
+/// title that read `brief` alone would be a fourth card that does not exist. The
+/// mode is worth saying at all because it changes what the next thing typed will
+/// do, and a reader who has scrolled back past the `/brief` turn has nothing
+/// else on screen to tell them.
+///
+/// What it does *not* say is anything about an artifact — no "nothing written
+/// yet", no path of a file that has been written. A title is what the card is,
+/// and the state of a document is news, which belongs in the thread with the
+/// turn that caused it and a clock beside it, not on a border that would go on
+/// asserting it every frame for the rest of the session.
+///
+/// The separator is the middot [`crate::account`] uses between the parts of a
+/// line, and it lands on the same border row: a brief-mode panel has exactly the
+/// rows a chat-mode one has. On a panel too narrow for it, the border truncates
+/// the title as it always did.
+const BRIEF_THREAD_TITLE: &str = " thread · brief ";
+
+/// What the panel's top edge says about the conversation, given the register it
+/// is in.
+///
+/// The one place the title is decided, so the two strings above are the two
+/// things a top edge can say and a third register would be a compile error here
+/// rather than a card that silently kept the old name. Called at the one
+/// `title_top` in [`draw_panel`] and nowhere else.
+const fn thread_title(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Chat => THREAD_TITLE,
+        Mode::Brief => BRIEF_THREAD_TITLE,
+    }
+}
 
 /// Drawn on the left of the reader's own words in the thread, so a question
 /// reads as a question rather than as the first line of an answer.
@@ -1539,11 +1579,19 @@ fn pane_block(focused: bool) -> Block<'static> {
 /// not how the panel says them.
 ///
 /// Mostly, and not entirely, because a reader has to be able to tell which card
-/// they are on. The thread is named on the top edge with [`THREAD_TITLE`] and
+/// they are on. The thread is named on the top edge with [`thread_title`] and
 /// the other two are not, which is one word on a row the border already owns —
 /// and its rows say it a second time, since a question carries [`SAID_MARKER`]
 /// and nothing on an account ever does (see [`panel_row`]). No colour does any
 /// of this work: see the note at the end of this comment.
+///
+/// That name is computed rather than fixed, and the one thing it varies by is
+/// the register the conversation is in ([`Mode`]): `thread` while questions are
+/// being answered, `thread · brief` while it is converging on a document. It is
+/// the only place on the screen the mode is said. Not the run header below it —
+/// that row belongs to a pact, which can be started in either mode and would
+/// collide with it — and not a row of the card, which the title deliberately
+/// costs nothing of.
 ///
 /// While no card has anything in it — before the first pact, the first question
 /// and the first read — what this draws inside the border is [`MARK`], centred
@@ -1610,7 +1658,7 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     let below = app.panel_lines_below();
     let mut block = pane_block(app.focus() == Focus::Panel);
     if app.showing_thread() {
-        block = block.title_top(Line::from(THREAD_TITLE).bold());
+        block = block.title_top(Line::from(thread_title(app.mode())).bold());
     }
     if below > 0 {
         block = block.title_bottom(Line::from(scrollback(below)).right_aligned().dim());
@@ -2637,24 +2685,24 @@ mod tests {
     use warlock_engine::{NodeState, SCOPE_RULES};
 
     use super::{
-        Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, CANCEL_KEY, COLLAPSE_KEY,
-        COMPOSE_KEYS, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT, CONFIRM_LINES,
-        CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS,
-        FOCUS_KEY, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit,
-        INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LEAVE_KEY, LIVE_KEY, MARK, MARK_MARGIN,
-        MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY, MOVE_KEYS, NO_MARKER, NOTE_MARKER,
-        PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PAGE_KEYS, PANEL_INDENT, QUIT_KEY,
-        REFRESHING_RUN, RUN_HEADER_HEIGHT, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT,
-        SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER,
-        THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, areas, centred, composer_height,
-        composer_on_screen, confirm_area, confirm_size, display_width, draw, footer_text_area,
-        guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line, pane_inner,
-        panel_height, panel_row, panel_width, run_header_height, scope_size, tree_height,
-        tree_rows_area, tree_width, truncated,
+        Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, BRIEF_THREAD_TITLE,
+        CANCEL_KEY, COLLAPSE_KEY, COMPOSE_KEYS, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP,
+        CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS, CONFIRM_NO,
+        CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FOCUS_KEY, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH,
+        GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS,
+        LEAVE_KEY, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY,
+        MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PAGE_KEYS,
+        PANEL_INDENT, QUIT_KEY, REFRESHING_RUN, RUN_HEADER_HEIGHT, SAID_MARKER, SCOPE_CURSOR,
+        SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS,
+        SCROLLBACK_ARROW, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, areas,
+        centred, composer_height, composer_on_screen, confirm_area, confirm_size, display_width,
+        draw, footer_text_area, guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line,
+        pane_inner, panel_height, panel_row, panel_width, run_header_height, scope_size,
+        tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::COMPOSER_MAX_ROWS;
     use crate::account::{Line as Entry, Outcome};
-    use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
+    use crate::app::{App, Chrome, Focus, Mode, Row, Run, Sigils};
     use crate::claude::Activity;
     use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
     use crate::composer::Composer;
@@ -6229,6 +6277,66 @@ mod tests {
             "{:?}",
             panel_top_edge(&buffer)
         );
+    }
+
+    /// The border title is the whole of what brief mode looks like: the same
+    /// card, the same rows, the same width, one word more on the edge — and the
+    /// other cards go on naming nothing at all.
+    #[test]
+    fn the_thread_title_says_which_register_the_conversation_is_in() {
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        app.start_turn(QUESTION, base);
+        app.answer_turn(ANSWER, at(base, 1));
+
+        // Chat is where a conversation starts, and the edge says only the card.
+        assert_eq!(app.mode(), Mode::Chat);
+        let chat = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 2));
+        let chat_edge = panel_top_edge(&chat);
+        assert!(chat_edge.contains(THREAD_TITLE.trim()), "{chat_edge:?}");
+        assert!(!chat_edge.contains("brief"), "{chat_edge:?}");
+
+        // The mode changed, so the same card at the same width says so.
+        assert!(app.set_mode(Mode::Brief), "chat to brief is a change");
+        let brief = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 2));
+        let brief_edge = panel_top_edge(&brief);
+        assert!(
+            brief_edge.contains(BRIEF_THREAD_TITLE.trim()),
+            "{brief_edge:?}"
+        );
+
+        // And says so on the border and nowhere else: not on a row of the card,
+        // which has exactly the rows it had, and nowhere on the frame — no
+        // artifact, no path, no "nothing written yet".
+        assert_eq!(panel_rows(&chat), panel_rows(&brief));
+        assert!(
+            !panel_rows(&brief).iter().any(|row| row.contains("brief")),
+            "the mode took a row of the thread: {:?}",
+            panel_rows(&brief)
+        );
+        assert_eq!(
+            rows_text(&brief)
+                .iter()
+                .filter(|row| row.contains("brief"))
+                .count(),
+            1,
+            "the mode is said somewhere other than the border: {:?}",
+            rows_text(&brief)
+        );
+
+        // A mode is a fact about the conversation, so the card the reader
+        // swapped to still names nothing on its edge.
+        assert!(app.showing_thread(), "the mode moved the card showing");
+        app.swap_card();
+        let account = panel_top_edge(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 2)));
+        assert!(!account.contains(THREAD_TITLE.trim()), "{account:?}");
+        assert!(!account.contains("brief"), "{account:?}");
+        assert_eq!(app.mode(), Mode::Brief, "the swap changed the register");
+
+        // Setting the mode it is already in changes nothing, and is said to
+        // change nothing: that is what a re-sent instruction is told by.
+        assert!(!app.set_mode(Mode::Brief), "brief to brief is no change");
+        assert!(app.set_mode(Mode::Chat), "brief to chat is a change");
     }
 
     #[test]
