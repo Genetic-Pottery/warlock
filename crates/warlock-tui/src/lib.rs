@@ -145,6 +145,18 @@
 //! and the reason there is no `/help`. Like everything else here it decides and
 //! does nothing: no mode, no file, no turn.
 //!
+//! What a brief-mode conversation is aiming at is one string and one function.
+//! [`brief_template`] is the shape a brief has to take — a built-in skeleton of
+//! the six moves twelve documents in `docs/` converged on, or the repository's
+//! own `.warlock/brief-template.md` when somebody has written one — and it is
+//! the only place in warlock that shape is written down. It reads the file on
+//! every call rather than at startup, so a template edited with `e` while
+//! warlock is running is a template the next brief is held to; it never invents
+//! an answer for a file it cannot read, which is [`TemplateError`] and the
+//! reason a template that exists is never quietly swapped for warlock's own;
+//! and it parses nothing, so an empty template is an empty template and what a
+//! template says is the reader's business.
+//!
 //! The dependency edge runs TUI -> engine: this crate knows the engine's
 //! vocabulary, and the engine knows nothing about terminals.
 
@@ -161,6 +173,7 @@ mod confirm;
 mod fixture;
 mod prompt;
 mod submission;
+mod template;
 mod thread;
 mod ui;
 mod watch;
@@ -234,10 +247,6 @@ pub use claude::Activity;
 /// document: a level above the one a question runs at, still overridden by
 /// `WARLOCK_EFFORT`.
 pub use claude::BRIEF_EFFORT;
-/// What warlock says into the conversation already in progress when somebody
-/// asks for brief mode: the artifact, the shape it takes, and that the job is to
-/// argue toward a decision rather than to agree.
-pub use claude::BRIEF_INSTRUCTION;
 /// The same instruction the other way: no artifact, no shape, and back to
 /// answering questions about the repository as they come.
 pub use claude::CHAT_INSTRUCTION;
@@ -258,6 +267,13 @@ pub use claude::INVOCATION_TIMEOUT;
 /// document as the entire reply, in the shape restated inline, and the decision
 /// rather than a summary of the conversation.
 pub use claude::WRITE_INSTRUCTION;
+/// What warlock says into the conversation already in progress when somebody
+/// asks for brief mode, given the shape the document has to take: the artifact,
+/// that template placed verbatim, and that the job is to argue toward a
+/// decision rather than to agree. A template with nothing in it composes an
+/// instruction that says nothing about shape rather than one carrying
+/// warlock's own.
+pub use claude::brief_instruction;
 /// The colour a node state is drawn in.
 pub use colour::colour_for;
 /// The most rows the composer is ever drawn in, however long the draft gets.
@@ -303,6 +319,20 @@ pub use prompt::edit_for;
 pub use submission::Submitted;
 /// What a draft submitted at the composer means, given nothing but the draft.
 pub use submission::submitted_for;
+/// The shape a brief takes when the repository has written none of its own:
+/// warlock's compiled-in skeleton, and what [`brief_template`] answers with for
+/// a repository that has no `.warlock/brief-template.md`. Exported for the
+/// caller that has to state a shape with no repository root in its hand.
+pub use template::DEFAULT_TEMPLATE;
+/// A brief template that is there and cannot be read, naming the file and what
+/// the filesystem said about it in one line. A missing file is not in here:
+/// that is the case the built-in shape answers.
+pub use template::Error as TemplateError;
+/// The shape a brief for a repository has to take: `.warlock/brief-template.md`
+/// when that file is there, verbatim and including an empty one, and warlock's
+/// own skeleton when it is not. Read from disk on every call, never cached, so
+/// a template edited under a running warlock is a template that took effect.
+pub use template::brief_template;
 /// One thing that stopped a turn short of an answer — a cancel, no `claude` to
 /// ask, a non-zero exit, a timeout, or a model that said nothing — in the one
 /// line it ends with.

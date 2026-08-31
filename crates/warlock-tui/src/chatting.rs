@@ -1079,8 +1079,11 @@ mod tests {
         //
         // The `claude` is one that does not exist, so the four turns these
         // commands really start spawn nothing at all: no terminal, no network
-        // and no model.
+        // and no model. The repository is an empty temporary directory, which
+        // is a repository that has written no brief template: `/brief` reads
+        // for one, finds none, and states warlock's own shape.
         let base = Instant::now();
+        let repo = tempfile::tempdir().expect("a temporary directory");
         let mut app = App::default();
         let mut chat = Chat::with_agent(ChatAgent::new().with_program("/warlock/no/such/program"));
         let opening = words(&chat.agent);
@@ -1094,6 +1097,7 @@ mod tests {
                 &mut composer,
                 warlock_tui::Composed::Submit,
                 &mut chat,
+                repo.path(),
                 base,
             );
         }
@@ -1568,14 +1572,12 @@ mod tests {
             let base = Instant::now();
             let mut app = App::default();
             let mut chat = Chat::with_agent(stand_in(&script));
+            // Composed here, as the loop composes it: what is sent is a string
+            // built around a shape, and this test only cares that whatever was
+            // built is what the child read.
+            let instruction = warlock_tui::brief_instruction(warlock_tui::DEFAULT_TEMPLATE);
 
-            chat.say(
-                &mut app,
-                "/brief",
-                warlock_tui::BRIEF_INSTRUCTION,
-                Asked::Answer,
-                base,
-            );
+            chat.say(&mut app, "/brief", &instruction, Asked::Answer, base);
             settle(&mut chat, &mut app, at(base, 1));
 
             // The command, its work lines and its answer: an ordinary turn in
@@ -1596,7 +1598,7 @@ mod tests {
             );
             assert_eq!(
                 fs::read_to_string(&sent).expect("the child read something"),
-                warlock_tui::BRIEF_INSTRUCTION,
+                instruction,
                 "the model was not given the instruction",
             );
             clean_up(&directory);

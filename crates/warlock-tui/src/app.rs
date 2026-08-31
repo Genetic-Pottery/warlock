@@ -1205,7 +1205,7 @@ impl Showing {
 /// Two variants and no third. A mode here is not a second system prompt and not
 /// a second session — it is a state warlock holds plus one ordinary turn sent
 /// into the conversation already in progress (see
-/// [`BRIEF_INSTRUCTION`](crate::BRIEF_INSTRUCTION) and
+/// [`brief_instruction`](crate::brief_instruction) and
 /// [`CHAT_INSTRUCTION`](crate::CHAT_INSTRUCTION)) — so what the app keeps is
 /// only this word, and everything the word changes is said out loud somewhere
 /// else: which instruction a command sends, and how hard the turn is asked to

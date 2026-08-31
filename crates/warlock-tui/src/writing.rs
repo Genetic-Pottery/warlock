@@ -1817,7 +1817,14 @@ mod writes {
 
             // The reader's Enter at the foot of the panel, through the very
             // function the loop's composer arm calls.
-            apply_compose(&mut app, &mut composer, Composed::Submit, &mut chat, base);
+            apply_compose(
+                &mut app,
+                &mut composer,
+                Composed::Submit,
+                &mut chat,
+                repo.path(),
+                base,
+            );
 
             assert!(chat.answering(), "the command started no turn");
             assert_eq!(composer.draft(), "", "the field kept the submitted word");

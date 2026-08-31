@@ -203,7 +203,7 @@
 //! through [`restore_terminal`], which turns reporting off whichever state the
 //! toggle was left in.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use std::{env, io};
@@ -215,9 +215,9 @@ use ratatui::crossterm::execute;
 use ratatui::layout::Size;
 use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
 use warlock_tui::{
-    App, BRIEF_INSTRUCTION, CHAT_INSTRUCTION, ClaudeAgent, Composed, Composer, Focus, Mode,
-    QuitConfirm, ScopePrompt, Submitted, WRITE_INSTRUCTION, composer_on_screen, draw, panel_height,
-    panel_width, submitted_for, tree_height,
+    App, CHAT_INSTRUCTION, ClaudeAgent, Composed, Composer, Focus, Mode, QuitConfirm, ScopePrompt,
+    Submitted, TemplateError, WRITE_INSTRUCTION, brief_instruction, brief_template,
+    composer_on_screen, draw, panel_height, panel_width, submitted_for, tree_height,
 };
 
 mod chatting;
@@ -758,6 +758,12 @@ struct Pressing<'a> {
 /// quit produce it. Leaving is deliberately not done from in here: the run's
 /// handle and the terminal guard are [`run`]'s to drop, in the order it has
 /// always dropped them.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per key and nothing else, and the length is the number of \
+              keys warlock has: splitting it would put half the list somewhere \
+              a reader looking for a key would not find it"
+)]
 fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result<bool, Error> {
     // The composer is offered on exactly the condition that lights its border,
     // which is the keyboard being pointed at it: with the keys anywhere else
@@ -1058,7 +1064,14 @@ fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result
         // that asked it, not as old as the first thing the model got round to
         // saying.
         Pressed::Compose(outcome) => {
-            apply_compose(pressing.app, pressing.composer, outcome, pressing.chat, now);
+            apply_compose(
+                pressing.app,
+                pressing.composer,
+                outcome,
+                pressing.chat,
+                &pressing.scope.repo_root,
+                now,
+            );
         }
         // A key nothing is bound to, or one whose press has already been
         // answered where it was decided.
@@ -1301,7 +1314,7 @@ fn apply_mouse(
 /// The word the reader typed, spelled here rather than taken from the draft: a
 /// draft is trimmed and matched by [`submitted_for`], so `"  /brief  "` and
 /// `"/brief"` are one command and have to read as one row. What is actually sent
-/// is [`BRIEF_INSTRUCTION`] and [`CHAT_INSTRUCTION`], which the card never shows
+/// is [`brief_asking`] and [`CHAT_INSTRUCTION`], which the card never shows
 /// (see [`Chat::say`](chatting::Chat::say)).
 const BRIEF_COMMAND: &str = "/brief";
 /// `/chat` as the card shows it. See [`BRIEF_COMMAND`].
@@ -1352,6 +1365,49 @@ const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes 
 /// wants and what puts it there. Decided from [`App::mode`] — the very state
 /// that title is drawn from — so the refusal and the header cannot disagree.
 const NOT_BRIEFING: &str = "/write is only in brief mode — /brief enters it";
+
+/// The one line `/brief` costs when the repository's own template is there and
+/// cannot be read.
+///
+/// [`ALREADY_CHATTING`]'s and [`NOT_BRIEFING`]'s third sibling, and the only one
+/// with something of somebody else's to quote: the file that was found and, in
+/// the loader's own words, why it could not be had (see [`TemplateError`], whose
+/// wording is `error.rs`'s for an unreadable sigil config). One line, unclocked,
+/// where a refusal goes.
+///
+/// The refusal itself is the point. A template file that exists is a shape
+/// somebody meant, so warlock will not quietly put its own in its place and open
+/// a twenty-turn conversation aimed at the wrong document — the same bargain
+/// `ignores.rs` makes about rules it cannot read and `sigils.rs` about a config
+/// it cannot read. Nothing else about the session moves: the mode is not entered,
+/// no turn is spent, and the card is what it was with one line added.
+///
+/// It says what the reader can do, because a reader who has just been refused
+/// cannot see from the screen that the fix is theirs: the file is in their
+/// repository and `e` opens it.
+fn unreadable_template(error: &TemplateError) -> String {
+    format!("{error} — /brief did nothing, so fix or remove the file and type it again")
+}
+
+/// The instruction a `/brief` sends, for the repository at `root`: its own
+/// template if it has written one, and warlock's if it has not.
+///
+/// The two halves of the command's one composition in one place — the load and
+/// the wording — so that what the turn carries is a function of a root and the
+/// bytes under it, testable without a terminal, a `claude` or a thread.
+///
+/// Read here, at the keystroke, and held nowhere: no copy on [`App`], on
+/// [`Chat`] or in the loop. That is the whole of what makes a template edited
+/// with `e` between two briefs a template the second one is held to (see
+/// [`brief_template`]).
+///
+/// # Errors
+///
+/// [`TemplateError`] when the file is there and cannot be read or decoded, which
+/// the caller turns into one line and no turn — never into the built-in default.
+fn brief_asking(root: &Path) -> Result<String, TemplateError> {
+    brief_template(root).map(|template| brief_instruction(&template))
+}
 
 /// Do to the draft and to the keyboard whatever the composer just made of a
 /// key.
@@ -1405,16 +1461,26 @@ const NOT_BRIEFING: &str = "/write is only in brief mode — /brief enters it";
 /// and a change is worth exactly one unclocked note ([`BRIEF_NOTE`]) at the point
 /// in the history the command was typed — where a `/brief` typed in brief mode is
 /// a re-send with nothing new to say about the register and adds none. Then the
-/// turn, whichever it was: [`BRIEF_INSTRUCTION`] goes into the conversation
-/// already in progress through the very path a typed message takes, shown on the
-/// card as [`BRIEF_COMMAND`] and never as the paragraph. So it costs a turn every
-/// time — which is the point of typing it again when the register has drifted —
-/// and the reply lands under it like any other answer.
+/// turn, whichever it was: [`brief_asking`] goes into the conversation already in
+/// progress through the very path a typed message takes, shown on the card as
+/// [`BRIEF_COMMAND`] and never as the paragraph. So it costs a turn every time —
+/// which is the point of typing it again when the register has drifted — and the
+/// reply lands under it like any other answer.
+///
+/// What that instruction states the shape is, is read out of the repository at
+/// this keystroke and at no other moment: `repo_root` is the root the loop
+/// already holds, and [`brief_asking`] loads `.warlock/brief-template.md` under
+/// it fresh every time, so a template edited between two briefs is a template the
+/// second one is held to. Nothing about it is kept on the app, on the
+/// conversation or in the loop.
 ///
 /// The mode is set *before* the turn is sent, and that ordering is load-bearing:
 /// the effort the turn is asked at is read off the app when the worker starts
 /// (see [`Chat::say`](chatting::Chat::say)), so the instruction that enters the
-/// mode is itself asked at the mode's level.
+/// mode is itself asked at the mode's level. The *load* comes before both, which
+/// is the other half of the ordering: a template that is there and cannot be read
+/// is one line ([`unreadable_template`]) and nothing else — no mode, no turn, no
+/// `claude`, and never warlock's own shape quietly used in its place.
 ///
 /// **`/chat`** is the same shape pointed the other way, with one difference: it
 /// is refused when there is nothing to leave. In brief mode it leaves the mode,
@@ -1480,6 +1546,7 @@ fn apply_compose(
     composer: &mut Composer,
     outcome: Composed,
     chat: &mut Chat,
+    repo_root: &Path,
     now: Instant,
 ) {
     match outcome {
@@ -1502,12 +1569,23 @@ fn apply_compose(
                 // asked at the level the mode it is entering is worth. The note
                 // is the change and not the command, so typing `/brief` twice
                 // costs two turns and one line.
-                Submitted::Brief => {
-                    if app.set_mode(Mode::Brief) {
-                        app.note(BRIEF_NOTE, now);
+                Submitted::Brief => match brief_asking(repo_root) {
+                    // The shape is read from the repository at the keystroke —
+                    // before the mode is touched, because a template that
+                    // cannot be read is a command that does not happen at all
+                    // and a mode set first would be a register entered by a
+                    // refusal.
+                    Ok(instruction) => {
+                        if app.set_mode(Mode::Brief) {
+                            app.note(BRIEF_NOTE, now);
+                        }
+                        chat.say(app, BRIEF_COMMAND, &instruction, Asked::Answer, now);
                     }
-                    chat.say(app, BRIEF_COMMAND, BRIEF_INSTRUCTION, Asked::Answer, now);
-                }
+                    // A template that is there and cannot be had: one line, no
+                    // mode, no turn, and warlock's own shape never quietly put
+                    // in its place. See [`unreadable_template`].
+                    Err(error) => app.note(unreadable_template(&error), now),
+                },
                 // The same, one way only: there is no register to leave in chat
                 // mode, so the command says so on the card and stops. A turn
                 // spent telling the model it is where it already was would be a
@@ -1767,16 +1845,24 @@ mod tests {
     /// command and refusal drafts never reach [`Chat::ask`] at all, and the one
     /// test that does submit a message hands the conversation an agent whose
     /// program does not exist, so the worker it starts finds nothing to run.
+    ///
+    /// The repository these submit into is a temporary directory of the test's
+    /// own — `/brief` reads `.warlock/brief-template.md` under it at the
+    /// keystroke — and one that has nothing in it is a repository that has
+    /// written no template, which is the ordinary case.
     mod submitting {
+        use std::fs;
+        use std::path::{Path, PathBuf};
         use std::time::{Duration, Instant};
 
         use warlock_tui::{
-            Activity, App, ChatAgent, Composed, Composer, Ending, Line, Mode, Submitted,
+            Activity, App, ChatAgent, Composed, Composer, DEFAULT_TEMPLATE, Ending, Line, Mode,
+            Submitted, brief_instruction,
         };
 
         use super::super::{
             ALREADY_CHATTING, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, NOT_BRIEFING,
-            WRITE_COMMAND, apply_compose,
+            WRITE_COMMAND, apply_compose, brief_asking,
         };
         use crate::chatting::Chat;
 
@@ -1785,9 +1871,35 @@ mod tests {
         /// same way.
         const NOT_A_PROGRAM: &str = "/warlock/no/such/program";
 
+        /// A repository that does not exist, and therefore has no template
+        /// under it.
+        ///
+        /// The root for every test here that is not *about* the template: an
+        /// absent file is an absent file whether the directory over it is there
+        /// or not, so these submit against warlock's own shape without a
+        /// temporary directory each. Nothing reads or writes it.
+        const NO_REPOSITORY: &str = "/warlock/no/such/repository";
+
         /// A conversation with nothing asked and nothing runnable to ask.
         fn conversation() -> Chat {
             Chat::with_agent(ChatAgent::new().with_program(NOT_A_PROGRAM))
+        }
+
+        /// A throwaway repository root, for the tests that put a template in
+        /// one.
+        fn a_root() -> tempfile::TempDir {
+            tempfile::tempdir().expect("a temporary directory")
+        }
+
+        /// Put `text` at `<root>/.warlock/brief-template.md`, and hand back
+        /// where it went.
+        fn write_template(root: &Path, text: &str) -> PathBuf {
+            let directory = root.join(".warlock");
+            fs::create_dir_all(&directory).expect("a `.warlock` directory");
+            let path = directory.join("brief-template.md");
+            fs::write(&path, text).expect("a template file");
+
+            path
         }
 
         /// Submit `draft` from a fresh field, and hand back what the app, the
@@ -1808,8 +1920,20 @@ mod tests {
         /// it are two and three commands long and every one of them has to be
         /// the same session and the same card.
         fn submit_into(app: &mut App, chat: &mut Chat, draft: &str, now: Instant) -> Composer {
+            submit_in(Path::new(NO_REPOSITORY), app, chat, draft, now)
+        }
+
+        /// [`submit_into`] over a stated repository root, for the tests that
+        /// care what is under it.
+        fn submit_in(
+            root: &Path,
+            app: &mut App,
+            chat: &mut Chat,
+            draft: &str,
+            now: Instant,
+        ) -> Composer {
             let mut composer = Composer::new(draft);
-            apply_compose(app, &mut composer, Composed::Submit, chat, now);
+            apply_compose(app, &mut composer, Composed::Submit, chat, root, now);
             composer
         }
 
@@ -1954,6 +2078,132 @@ mod tests {
                     "{draft:?} was left in the field"
                 );
             }
+        }
+
+        #[test]
+        fn a_brief_in_a_repository_with_no_template_states_the_built_in_shape() {
+            // The ordinary case, and the one nobody configures anything for: a
+            // repository that has written no `.warlock/brief-template.md` is a
+            // repository that has said nothing about the shape, so the command
+            // behaves exactly as it did before there was a file to write —
+            // mode, note, one turn — and what it sends is warlock's own
+            // skeleton.
+            let now = Instant::now();
+            let repo = a_root();
+            let mut app = App::default();
+            let mut chat = conversation();
+
+            let composer = submit_in(repo.path(), &mut app, &mut chat, "/brief", now);
+
+            assert_eq!(app.mode(), Mode::Brief, "the mode was not entered");
+            assert_eq!(
+                rows(&app, now),
+                [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
+            );
+            assert_eq!(turns(&app), 1, "the brief did not open one turn");
+            assert!(chat.answering(), "the brief asked the model nothing");
+            assert!(composer.draft().is_empty());
+            // And the instruction it sent, composed through the very function
+            // the arm above composes it with: the built-in shape, because there
+            // was nothing else to state.
+            assert_eq!(
+                brief_asking(repo.path()).expect("a repository with no template"),
+                brief_instruction(DEFAULT_TEMPLATE),
+            );
+        }
+
+        #[test]
+        fn a_brief_carries_the_shape_the_repository_wrote_rather_than_the_built_in_one() {
+            // A repository that has stated its own shape gets its own: the file
+            // is read at this keystroke, and the built-in skeleton is nowhere in
+            // what goes out. The card and the register are unchanged by any of
+            // that — a template is what the instruction says, not what the
+            // command does.
+            const SHAPE: &str = "## The only heading we want\n\nOne section, and no others.";
+
+            let now = Instant::now();
+            let repo = a_root();
+            write_template(repo.path(), SHAPE);
+            let mut app = App::default();
+            let mut chat = conversation();
+
+            submit_in(repo.path(), &mut app, &mut chat, "/brief", now);
+
+            assert_eq!(app.mode(), Mode::Brief, "the mode was not entered");
+            assert_eq!(turns(&app), 1, "the brief did not open one turn");
+            assert!(chat.answering());
+
+            let instruction = brief_asking(repo.path()).expect("a template that reads");
+            assert!(
+                instruction.contains(SHAPE),
+                "the template is not in the instruction: {instruction}"
+            );
+            assert!(
+                !instruction.contains("## Success criteria"),
+                "the built-in shape was sent as well: {instruction}"
+            );
+        }
+
+        #[test]
+        fn a_template_that_cannot_be_read_refuses_the_brief_and_changes_nothing_else() {
+            // Refused rather than degraded: a file somebody wrote is a shape
+            // somebody meant, and quietly aiming twenty turns at warlock's own
+            // instead would be the wrong document arrived at slowly. So the
+            // command is one line naming the file and what the filesystem said
+            // about it, and the session is otherwise exactly as it was — no
+            // mode, no turn, no `claude`, nothing on the footer.
+            //
+            // Bytes that are not UTF-8 are the portable way to have a file that
+            // exists and cannot be had; `template.rs` fails the same way for the
+            // same reason.
+            let now = Instant::now();
+            let repo = a_root();
+            let path = write_template(repo.path(), "");
+            fs::write(&path, [0x23, 0x20, 0xff, 0xfe, 0x0a]).expect("a template file");
+            let reason = warlock_tui::brief_template(repo.path())
+                .expect_err("a template that cannot be read")
+                .to_string();
+            let mut app = App::default();
+            let mut chat = conversation();
+
+            let composer = submit_in(repo.path(), &mut app, &mut chat, "/brief", now);
+
+            assert_eq!(app.mode(), Mode::Chat, "a refusal entered the mode");
+            assert_eq!(turns(&app), 0, "a refusal spent a turn");
+            assert!(!chat.answering(), "a refusal asked the model something");
+            assert!(composer.draft().is_empty());
+            assert_eq!(
+                app.message(),
+                None,
+                "a refusal said something on the footer"
+            );
+
+            let said = rows(&app, now);
+            assert_eq!(said.len(), 1, "a refusal is one line: {said:?}");
+            let Some(Line::Note { text }) = said.first() else {
+                panic!("a refusal is a note of warlock's own: {said:?}");
+            };
+            assert!(
+                text.contains(&reason),
+                "the loader's own words are not in it: {text}"
+            );
+            assert!(
+                text.contains(&path.display().to_string()),
+                "the file is not named: {text}"
+            );
+            assert!(!text.contains('\n'), "the refusal wrapped: {text}");
+            assert!(
+                !text.contains("## Success criteria"),
+                "the built-in shape leaked into the refusal: {text}"
+            );
+
+            // And the next `/brief`, once the file reads again, is an ordinary
+            // one: the refusal left nothing behind to recover from.
+            fs::write(&path, "## Ours\n\nsay the thing.").expect("a template file");
+            submit_in(repo.path(), &mut app, &mut chat, "/brief", now);
+
+            assert_eq!(app.mode(), Mode::Brief, "the mode was still not entered");
+            assert_eq!(turns(&app), 1, "the second brief opened no turn");
         }
 
         #[test]
