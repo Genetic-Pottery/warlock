@@ -39,7 +39,9 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Instant;
 
-use warlock_tui::{Activities, Activity, App, Cancel, ChatAgent, Ending, ending_for};
+use warlock_tui::{
+    Activities, Activity, App, BRIEF_EFFORT, Cancel, ChatAgent, Ending, Mode, ending_for,
+};
 
 use crate::pacting::CancelGuard;
 
@@ -136,8 +138,35 @@ impl Chat {
     /// simply replace the first — and the first's [`CancelGuard`] would drop and
     /// take its `claude` with it, which is the safe way for that accident to go.
     pub(crate) fn ask(&mut self, app: &mut App, message: &str, now: Instant) {
-        app.start_turn(message, now);
-        self.turn = Some(start_turn(message, &self.agent));
+        self.say(app, message, message, now);
+    }
+
+    /// Ask `sent`, at `now`, showing `shown` on the card instead of it.
+    ///
+    /// [`Chat::ask`]'s whole body with the one thing a synthesized turn needs
+    /// pulled apart: what the model is asked and what the reader is shown are
+    /// two strings rather than one. `/brief` sends a paragraph of instructions
+    /// warlock wrote and shows the word that was typed — the reader asked for
+    /// one thing in one word, and a screen of prose they did not write, in the
+    /// place their own questions go, would be warlock putting words in their
+    /// mouth — which is the rule `warlock_tui`'s thread module states and this
+    /// is the only way of keeping.
+    ///
+    /// Everything else is identical to a typed message, deliberately and by
+    /// construction rather than by resemblance: the same [`App::start_turn`], the
+    /// same [`start_turn`] worker, the same channel, the same say-when and the
+    /// same drain at the bottom of the loop. So the instruction's reply lands
+    /// under it like any other answer, its work lines are clocked from the
+    /// keystroke like any other turn's, and Ctrl-C stops it like any other.
+    ///
+    /// The mode is read off the app rather than held here, and it decides one
+    /// word of the argument vector: how hard the turn is asked to think (see
+    /// [`asking`]). It is read at the moment the turn starts, so a `/brief` that
+    /// has already set the mode sends its own instruction at the raised level,
+    /// and the `/chat` that leaves the mode sends its own at `low`.
+    pub(crate) fn say(&mut self, app: &mut App, shown: &str, sent: &str, now: Instant) {
+        app.start_turn(shown, now);
+        self.turn = Some(start_turn(sent, &asking(&self.agent, app.mode())));
     }
 
     /// Stop the turn in flight, if there is one.
@@ -260,6 +289,35 @@ fn wired(agent: &ChatAgent, cancel: &Cancel, events: &Sender<TurnEvent>) -> Chat
         .clone()
         .with_cancel(cancel.clone())
         .with_activities(activity_port(events))
+}
+
+/// The loop's own agent, asked at the level `mode` is worth.
+///
+/// The whole of what a mode changes about the model, and it is one word of one
+/// argument: a brief-mode turn is asked at [`BRIEF_EFFORT`] because proposing
+/// options, costing them and arguing for one is not what `low` is priced for,
+/// and a chat turn is asked at the level the agent was built with. Everything
+/// else is byte-identical between the two — the same system prompt, the same
+/// tools, the same session, down to whether this turn opens the conversation or
+/// resumes it — because the returned agent is a clone of the one long-lived
+/// [`ChatAgent`] and shares the very latch the session id is claimed in.
+///
+/// Which is the property a mode change has to have, and the reason this is a
+/// clone rather than a rebuild: the turns already said are the material the
+/// document is made of, and a second `ChatAgent` would be a second conversation
+/// that had never heard any of them. Nothing here constructs one, and nothing
+/// anywhere else does either once the process has started.
+///
+/// Chat mode is the agent untouched rather than the agent asked for `low` again,
+/// so the level a fresh agent takes — including a `WARLOCK_EFFORT` a reader set
+/// for the session — is carried rather than restated here. Brief mode goes
+/// through [`ChatAgent::at_effort`], which lets the same variable win over
+/// [`BRIEF_EFFORT`] too.
+fn asking(agent: &ChatAgent, mode: Mode) -> ChatAgent {
+    match mode {
+        Mode::Brief => agent.at_effort(BRIEF_EFFORT),
+        Mode::Chat => agent.clone(),
+    }
 }
 
 /// Put `message` to the model on a thread of its own, and hand back the channel
@@ -715,6 +773,68 @@ mod tests {
         );
     }
 
+    /// An agent's whole argument vector as strings, for a test that is about
+    /// what a mode does to it.
+    fn words(agent: &warlock_tui::ChatAgent) -> Vec<String> {
+        agent
+            .args()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// What `flag` was given, if it was given anything: `claude.rs`'s helper,
+    /// so a test says what it is about rather than where the word happens to
+    /// sit.
+    fn value_of<'a>(vector: &'a [String], flag: &str) -> Option<&'a str> {
+        let named = vector.iter().position(|word| word == flag)?;
+        vector.get(named + 1).map(String::as_str)
+    }
+
+    #[test]
+    fn a_mode_asks_the_one_conversation_at_a_different_level_and_nothing_else() {
+        // What `asking` is allowed to change, asserted on the vector a turn
+        // would really run with. Chat mode is the long-lived agent untouched;
+        // brief mode is the same agent with one word moved. Nothing here builds
+        // a second `ChatAgent`, and neither does the function under test — both
+        // vectors name the same session, which is the property the whole design
+        // rests on.
+        let agent = warlock_tui::ChatAgent::new();
+        let question = words(&super::asking(&agent, warlock_tui::Mode::Chat));
+        let brief = words(&super::asking(&agent, warlock_tui::Mode::Brief));
+
+        assert_eq!(
+            question,
+            words(&agent),
+            "chat mode is not the agent as built"
+        );
+        assert_eq!(brief.len(), question.len());
+        let moved: Vec<(&String, &String)> = brief
+            .iter()
+            .zip(&question)
+            .filter(|(brief, question)| brief != question)
+            .collect();
+        assert_eq!(
+            moved.len(),
+            1,
+            "a mode changed something other than how hard the turn thinks: {moved:?}",
+        );
+        assert_eq!(
+            value_of(&brief, "--effort"),
+            Some(warlock_tui::BRIEF_EFFORT)
+        );
+        assert_eq!(
+            value_of(&brief, "--session-id"),
+            value_of(&question, "--session-id"),
+            "a mode change started a second conversation",
+        );
+        assert_eq!(
+            value_of(&brief, "--system-prompt"),
+            value_of(&question, "--system-prompt"),
+        );
+        assert_eq!(value_of(&brief, "--tools"), value_of(&question, "--tools"));
+    }
+
     #[test]
     fn a_frame_with_no_turn_in_flight_does_nothing_at_all() {
         let base = Instant::now();
@@ -1119,6 +1239,47 @@ mod tests {
             assert_eq!(app.message(), Some(Ending::Cancelled.line().as_str()));
             // And the field is live again, on the strength of the drain alone.
             assert!(!chat.answering());
+        }
+
+        #[test]
+        fn a_synthesized_turn_shows_the_command_and_sends_the_instruction() {
+            // The display/send split, end to end and through the value the loop
+            // holds: what the reader sees is the word they typed and what the
+            // child reads on its stdin is the paragraph warlock wrote. The
+            // stand-in copies its stdin to a file before answering, so what was
+            // really sent is a thing this test can read rather than infer.
+            let directory = scratch("synthesized");
+            let sent = directory.join("sent");
+            let script = format!("cat > '{}'; {}", sent.display(), printing(&TURN));
+            let base = Instant::now();
+            let mut app = App::default();
+            let mut chat = Chat::with_agent(stand_in(&script));
+
+            chat.say(&mut app, "/brief", warlock_tui::BRIEF_INSTRUCTION, base);
+            settle(&mut chat, &mut app, at(base, 1));
+
+            // The command, its work lines and its answer: an ordinary turn in
+            // every respect but the one word it is shown as.
+            assert_eq!(
+                rows(&app, at(base, 1)),
+                vec![
+                    warlock_tui::Line::Said {
+                        text: "/brief".to_owned()
+                    },
+                    clocked(1, "Read src/lib.rs"),
+                    clocked(1, "thinking"),
+                    clocked(1, "writing"),
+                    warlock_tui::Line::Text {
+                        text: ANSWER.to_owned()
+                    },
+                ]
+            );
+            assert_eq!(
+                fs::read_to_string(&sent).expect("the child read something"),
+                warlock_tui::BRIEF_INSTRUCTION,
+                "the model was not given the instruction",
+            );
+            clean_up(&directory);
         }
 
         #[test]
