@@ -614,6 +614,7 @@ mod tests {
                 Line::Summary { text }
                 | Line::Text { text }
                 | Line::Said { text }
+                | Line::Note { text }
                 | Line::Wrapped { text, .. } => text,
             })
             .collect()

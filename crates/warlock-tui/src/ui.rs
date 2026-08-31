@@ -306,6 +306,19 @@ const THREAD_TITLE: &str = " thread ";
 /// state's.
 pub(crate) const SAID_MARKER: &str = "› ";
 
+/// Drawn on the left of warlock's own line in the thread, so a note reads as the
+/// program talking rather than as a question, an answer or a pass at work.
+///
+/// A dot rather than [`SAID_MARKER`]'s arrow, because an arrow points at what
+/// follows it and a note is not addressed to anybody: it is an aside beside the
+/// conversation. Two columns like the question's marker and like
+/// [`PANEL_INDENT`], so the three shapes of the card line up down the same
+/// column instead of stepping in and out by a character. Plain rather than bold
+/// — a note heads nothing, and bold is what the turn's own heading gets — which
+/// is the second half of telling it from a question drawn with the same width in
+/// front of it.
+pub(crate) const NOTE_MARKER: &str = "· ";
+
 /// What a truncated panel line ends with, in place of what was cut off.
 ///
 /// One column rather than three dots, because the columns it takes are columns
@@ -2620,6 +2633,7 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::{Position, Rect, Size};
     use ratatui::style::{Color, Modifier};
+    use ratatui::widgets::{Paragraph, Widget};
     use warlock_engine::{NodeState, SCOPE_RULES};
 
     use super::{
@@ -2628,17 +2642,18 @@ mod tests {
         CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS,
         FOCUS_KEY, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit,
         INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LEAVE_KEY, LIVE_KEY, MARK, MARK_MARGIN,
-        MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY, MOVE_KEYS, NO_MARKER, PACTING_KEYS,
-        PACTING_QUIT_KEY, PACTING_RUN, PAGE_KEYS, PANEL_INDENT, QUIT_KEY, REFRESHING_RUN,
-        RUN_HEADER_HEIGHT, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES,
-        SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER, THREAD_TITLE,
-        TREE_MIN_WIDTH, TREE_PERCENT, areas, centred, composer_height, composer_on_screen,
-        confirm_area, confirm_size, display_width, draw, footer_text_area, guide_prefixes,
-        hit_test, keys_line, mark_area, pacting_keys_line, pane_inner, panel_height, panel_width,
-        run_header_height, scope_size, tree_height, tree_rows_area, tree_width, truncated,
+        MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY, MOVE_KEYS, NO_MARKER, NOTE_MARKER,
+        PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PAGE_KEYS, PANEL_INDENT, QUIT_KEY,
+        REFRESHING_RUN, RUN_HEADER_HEIGHT, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT,
+        SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER,
+        THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, areas, centred, composer_height,
+        composer_on_screen, confirm_area, confirm_size, display_width, draw, footer_text_area,
+        guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line, pane_inner,
+        panel_height, panel_row, panel_width, run_header_height, scope_size, tree_height,
+        tree_rows_area, tree_width, truncated,
     };
     use crate::COMPOSER_MAX_ROWS;
-    use crate::account::Outcome;
+    use crate::account::{Line as Entry, Outcome};
     use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
     use crate::claude::Activity;
     use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
@@ -6323,6 +6338,57 @@ mod tests {
             buffer[(inner.x, inner.y)].modifier.contains(Modifier::BOLD),
             "the question should be bold"
         );
+    }
+
+    /// The width the single-row tests below draw into: room for a marker, a
+    /// clock and a few words, and no more than a failure message can be read
+    /// in.
+    const ROW_WIDTH: u16 = 24;
+
+    /// One line of a card drawn on its own, as what a reader would see: the
+    /// text that lands in the buffer, and whether any of it is bold.
+    ///
+    /// Drawn rather than read off the value, because what tells warlock's own
+    /// voice from the reader's and from a pass at work is what reaches the
+    /// screen.
+    fn row_drawn(line: &Entry) -> (String, bool) {
+        let area = Rect::new(0, 0, ROW_WIDTH, 1);
+        let mut buffer = Buffer::empty(area);
+        Paragraph::new(panel_row(line, ROW_WIDTH)).render(area, &mut buffer);
+        let bold = (0..ROW_WIDTH).any(|x| buffer[(x, 0)].modifier.contains(Modifier::BOLD));
+
+        (text_in(&buffer, area, 0), bold)
+    }
+
+    #[test]
+    fn a_note_is_drawn_as_neither_a_question_nor_a_work_line() {
+        const WORDS: &str = "no such command";
+
+        let note = row_drawn(&Entry::Note {
+            text: WORDS.to_owned(),
+        });
+        let said = row_drawn(&Entry::Said {
+            text: WORDS.to_owned(),
+        });
+        let clocked = row_drawn(&Entry::Clocked {
+            clock: "0:09".to_owned(),
+            text: WORDS.to_owned(),
+        });
+
+        // Warlock's own marker and then the words, with nothing else on the
+        // row: no clock, because a note is not work that took time, and nothing
+        // bold, because it heads nothing.
+        assert_eq!(note.0, format!("{NOTE_MARKER}{WORDS}"));
+        assert!(!note.0.contains(':'), "{:?} carries a clock", note.0);
+        assert!(!note.1, "a note is not a heading");
+
+        // And the same words typed by the reader or done by a pass are three
+        // different rows on the screen rather than one row drawn three times.
+        assert_ne!(note, said, "warlock's voice reads as the reader's");
+        assert_ne!(note, clocked, "warlock's voice reads as a pass at work");
+        assert_eq!(said.0, format!("{SAID_MARKER}{WORDS}"));
+        assert!(said.1, "a question is the heading of its turn");
+        assert_eq!(clocked.0, format!("{PANEL_INDENT}0:09 {WORDS}"));
     }
 
     #[test]

@@ -48,7 +48,7 @@
 //! holds is ever cut down to a width it happened to have once.
 
 use crate::account::Line;
-use crate::ui::{PANEL_INDENT, SAID_MARKER, display_width};
+use crate::ui::{NOTE_MARKER, PANEL_INDENT, SAID_MARKER, display_width};
 
 /// How the renderer draws one line: what it puts in front of it, the line's own
 /// text, and whether the row is bold.
@@ -98,6 +98,13 @@ pub(crate) fn shape(line: &Line) -> Shape {
             prefix: SAID_MARKER.to_owned(),
             text: text.clone(),
             heading: true,
+        },
+        // Warlock's own voice: its own marker, and plain, so it is neither the
+        // question above it nor a work line under one.
+        Line::Note { text } => Shape {
+            prefix: NOTE_MARKER.to_owned(),
+            text: text.clone(),
+            heading: false,
         },
         Line::Wrapped { text, heading } => Shape {
             prefix: String::new(),
@@ -156,6 +163,9 @@ fn continued(line: &Line, first: &str, shape: &Shape) -> Line {
             text: first.to_owned(),
         },
         Line::Said { .. } => Line::Said {
+            text: first.to_owned(),
+        },
+        Line::Note { .. } => Line::Note {
             text: first.to_owned(),
         },
         Line::Summary { .. } => Line::Summary {
@@ -302,6 +312,9 @@ mod tests {
             Line::Said {
                 text: "why?".to_owned(),
             },
+            Line::Note {
+                text: "no such command".to_owned(),
+            },
             Line::Text {
                 text: "It walks the tree.".to_owned(),
             },
@@ -378,6 +391,37 @@ mod tests {
     }
 
     #[test]
+    fn a_note_is_broken_under_its_own_marker_and_stays_plain() {
+        // Warlock's own line wraps like every other row of the card: the first
+        // row keeps the variant, so it keeps the marker the panel draws in
+        // front of it, and the rest sit in the column that marker left. Plain
+        // throughout, where a question of the same length is bold throughout.
+        let rows = rows(
+            &Line::Note {
+                text: "the commands are /brief, /write and /chat".to_owned(),
+            },
+            NARROW,
+        );
+
+        assert_eq!(
+            rows,
+            vec![
+                Line::Note {
+                    text: "the commands are".to_owned(),
+                },
+                Line::Wrapped {
+                    text: "  /brief, /write".to_owned(),
+                    heading: false,
+                },
+                Line::Wrapped {
+                    text: "  and /chat".to_owned(),
+                    heading: false,
+                },
+            ],
+        );
+    }
+
+    #[test]
     fn a_heading_too_long_for_the_panel_is_rows_rather_than_a_path_in_pieces() {
         // A piece of a path is not a path, so a broken heading gives up the
         // variant rather than holding a fragment that reads like a directory.
@@ -418,6 +462,9 @@ mod tests {
             },
             Line::Said {
                 text: "what is the name of this repository?".to_owned(),
+            },
+            Line::Note {
+                text: "the commands are /brief, /write and /chat".to_owned(),
             },
             Line::Text {
                 text: "It walks the tree and writes what it finds.".to_owned(),
