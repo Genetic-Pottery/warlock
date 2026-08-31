@@ -213,8 +213,8 @@ use ratatui::layout::Size;
 use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
 use warlock_tui::{
     App, BRIEF_INSTRUCTION, CHAT_INSTRUCTION, ClaudeAgent, Composed, Composer, Focus, Mode,
-    QuitConfirm, ScopePrompt, Submitted, composer_on_screen, draw, panel_height, panel_width,
-    submitted_for, tree_height,
+    QuitConfirm, ScopePrompt, Submitted, WRITE_INSTRUCTION, composer_on_screen, draw, panel_height,
+    panel_width, submitted_for, tree_height,
 };
 
 mod chatting;
@@ -1125,6 +1125,10 @@ fn apply_mouse(
 const BRIEF_COMMAND: &str = "/brief";
 /// `/chat` as the card shows it. See [`BRIEF_COMMAND`].
 const CHAT_COMMAND: &str = "/chat";
+/// `/write` as the card shows it. See [`BRIEF_COMMAND`]: what is actually sent
+/// is [`WRITE_INSTRUCTION`], and a screenful of warlock's prose in the place the
+/// reader's own words go would be warlock putting words in their mouth.
+const WRITE_COMMAND: &str = "/write";
 
 /// The one line the thread gains when the conversation enters brief mode.
 ///
@@ -1151,6 +1155,22 @@ const CHAT_NOTE: &str = "chat mode — the brief is over and nothing is being co
 /// it was never told the other way. One line, in warlock's own voice, where the
 /// refusal of a mistyped command goes.
 const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes that.";
+
+/// The one line `/write` costs when the conversation was never aimed at a
+/// document.
+///
+/// [`ALREADY_CHATTING`]'s sibling and the same bargain: there is nothing to ask
+/// for, so nothing is asked. A `/write` in chat mode would be warlock demanding
+/// a brief from a conversation about where the loader is, and the model,
+/// obliging, would invent one — a turn's wait and a screenful of fiction to
+/// discover that the command was typed in the wrong register.
+///
+/// It names the way in, because the way in is the one thing a reader who has
+/// just been refused cannot work out from the screen: the border title says
+/// which register the conversation is in, and this says which register `/write`
+/// wants and what puts it there. Decided from [`App::mode`] — the very state
+/// that title is drawn from — so the refusal and the header cannot disagree.
+const NOT_BRIEFING: &str = "/write is only in brief mode — /brief enters it";
 
 /// Do to the draft and to the keyboard whatever the composer just made of a
 /// key.
@@ -1227,10 +1247,20 @@ const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes 
 /// turns already on screen are the material the document is made of, and every
 /// one of them is still there, in order, with its answer and its work lines.
 ///
-/// **`/write`** still costs nothing at all here. The field is emptied and that is
-/// the whole of it: no turn, no question and no row of its own. What it does is
-/// not this slice's business — the arm that gives it behaviour lands with it, and
-/// until then it is a keystroke that was understood and nothing more.
+/// **`/write`** is the ask for the artifact, and it is one ordinary turn: in
+/// brief mode [`WRITE_INSTRUCTION`] goes into the conversation already in
+/// progress by the path a typed message takes, shown on the card as
+/// [`WRITE_COMMAND`] and never as the paragraph, and what comes back lands as an
+/// answer like any other. It changes no mode and needs no ordering against one —
+/// the register is already what it is, and the effort the turn is asked at is
+/// already the mode's.
+///
+/// Outside brief mode it is refused, on [`ALREADY_CHATTING`]'s rule: one
+/// unclocked line ([`NOT_BRIEFING`]) and no turn, because there is no document
+/// being converged on and asking for one anyway is a screenful of invention
+/// nobody wanted. The decision is read off [`App::mode`], which is the same
+/// state the panel's border title is drawn from, so the line and the title can
+/// never disagree about which register the conversation is in.
 ///
 /// A **refusal** is one line on the thread card and nothing else: no turn, no
 /// model, no `claude`. That line is the whole discovery mechanism for the three
@@ -1309,14 +1339,23 @@ fn apply_compose(
                         app.note(ALREADY_CHATTING, now);
                     }
                 }
-                // The two that stop here, without a question and without a turn.
-                // `/write` is recognised and handed nowhere — this slice gives it
-                // no behaviour, and a command that opened a turn to do nothing
-                // would be a question the reader never asked — and a refusal has
-                // exactly one line to say, asked of the value rather than
-                // restated here, so the list of what exists is written down in
-                // one place.
-                said @ (Submitted::Write | Submitted::Refused) => {
+                // The artifact, asked for as one ordinary turn — and only where
+                // there is one to ask for. The mode comes off the app rather
+                // than off anything this function remembers, because that is
+                // the state the border title is drawn from and two readings of
+                // the register would eventually be two answers.
+                Submitted::Write => {
+                    if app.mode() == Mode::Brief {
+                        chat.say(app, WRITE_COMMAND, WRITE_INSTRUCTION, now);
+                    } else {
+                        app.note(NOT_BRIEFING, now);
+                    }
+                }
+                // The one that stops here, without a question and without a
+                // turn: a refusal has exactly one line to say, asked of the
+                // value rather than restated here, so the list of what exists is
+                // written down in one place.
+                said @ Submitted::Refused => {
                     if let Some(line) = said.refusal() {
                         app.note(line, now);
                     }
@@ -1555,7 +1594,8 @@ mod tests {
         };
 
         use super::super::{
-            ALREADY_CHATTING, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, apply_compose,
+            ALREADY_CHATTING, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, NOT_BRIEFING,
+            WRITE_COMMAND, apply_compose,
         };
         use crate::chatting::Chat;
 
@@ -1628,30 +1668,84 @@ mod tests {
         }
 
         #[test]
-        fn write_clears_the_field_and_does_nothing_else() {
-            // Still the whole of what `/write` does: it is recognised and handed
-            // nowhere — no question, no turn, and no row of its own on the card.
-            // Asserted against a copy of the whole app, so a command that
-            // quietly moved anything — a card, a message, a mode, a selection —
-            // fails here.
+        fn write_outside_brief_mode_is_one_note_and_costs_no_turn() {
+            // Nothing is being converged on, so there is nothing to ask for: the
+            // command says which register it wants and how to get there, and
+            // spends neither a turn nor a `claude`. The line is decided from
+            // `App::mode`, which is the state the border title is drawn from, so
+            // it cannot say one register while the header says the other.
             let now = Instant::now();
-            let untouched = App::default();
 
             for draft in ["/write", "  /write  "] {
                 let (app, chat, composer) = submit(draft, now);
 
-                assert_eq!(app, untouched, "{draft:?} changed something on screen");
-                assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
-                assert!(
-                    rows(&app, now).is_empty(),
-                    "{draft:?} put a row on the card"
+                assert_eq!(app.mode(), Mode::Chat, "{draft:?} moved the register");
+                assert_eq!(
+                    rows(&app, now),
+                    vec![note(NOT_BRIEFING)],
+                    "{draft:?} did not leave exactly one note"
                 );
-                assert!(!chat.answering(), "{draft:?} was asked of the model");
+                assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
+                assert!(!chat.answering(), "{draft:?} started something");
                 assert!(
                     composer.draft().is_empty(),
                     "{draft:?} was left in the field"
                 );
             }
+
+            // And after a mode that was entered and left again: the refusal is
+            // about the register the conversation is in now, not about whether
+            // it was ever in the other one.
+            let mut app = App::default();
+            let mut chat = conversation();
+            submit_into(&mut app, &mut chat, "/brief", now);
+            submit_into(&mut app, &mut chat, "/chat", now);
+            let before = turns(&app);
+            submit_into(&mut app, &mut chat, "/write", now);
+
+            assert_eq!(turns(&app), before, "/write out of the mode cost a turn");
+            assert_eq!(rows(&app, now).last(), Some(&note(NOT_BRIEFING)));
+        }
+
+        #[test]
+        fn write_in_brief_mode_sends_one_turn_shown_as_the_command() {
+            // The ask for the artifact, and it is an ordinary turn in every
+            // respect but the one word it is shown as: the card carries `/write`
+            // and never the paragraph that went to the model, and no note is
+            // added because no register changed. `chatting.rs` asserts the
+            // instruction really is what reaches the child's stdin.
+            let now = Instant::now();
+            let mut app = App::default();
+            let mut chat = conversation();
+
+            submit_into(&mut app, &mut chat, "/brief", now);
+            let composer = submit_into(&mut app, &mut chat, "  /write  ", now);
+
+            assert_eq!(app.mode(), Mode::Brief, "/write moved the register");
+            assert_eq!(
+                rows(&app, now),
+                [
+                    vec![note(BRIEF_NOTE)],
+                    asked(BRIEF_COMMAND).to_vec(),
+                    asked(WRITE_COMMAND).to_vec(),
+                ]
+                .concat(),
+                "/write is not one turn shown as the command",
+            );
+            assert_eq!(turns(&app), 2, "/write did not open one turn");
+            assert!(chat.answering(), "/write asked the model nothing");
+            assert!(composer.draft().is_empty(), "/write was left in the field");
+
+            // And again, because asking twice is asking twice: a second document
+            // costs a second turn and still says nothing about the mode.
+            submit_into(&mut app, &mut chat, "/write", now);
+
+            assert_eq!(turns(&app), 3, "the second /write cost no turn");
+            assert_eq!(
+                rows(&app, now).len(),
+                1 + 2 + 2 + 2,
+                "the second /write said something about the register",
+            );
         }
 
         #[test]

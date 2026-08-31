@@ -250,6 +250,10 @@ pub use claude::ClaudeAgent;
 /// How long one model pass is given before it is killed: five minutes, per
 /// invocation rather than per pact.
 pub use claude::INVOCATION_TIMEOUT;
+/// What warlock asks for when somebody in brief mode types `/write`: the whole
+/// document as the entire reply, in the shape restated inline, and the decision
+/// rather than a summary of the conversation.
+pub use claude::WRITE_INSTRUCTION;
 /// The colour a node state is drawn in.
 pub use colour::colour_for;
 /// The most rows the composer is ever drawn in, however long the draft gets.
