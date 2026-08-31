@@ -2709,6 +2709,83 @@ mod tests {
     }
 
     #[test]
+    fn a_second_run_is_refused_in_the_same_words_with_the_thread_showing() {
+        // The refusal a conversation changes nothing about. A run started while
+        // the reader is looking at the thread writes its account into the thread
+        // as a turn nobody typed, so the run key pressed again — from the tree,
+        // which is the only place it can be pressed from while the field under
+        // the thread is muted — has to bounce off the same in-flight check, in
+        // the same words, without touching the card, the conversation, or the
+        // turn the run is filling.
+        let tree = Tree::new(Node::new(
+            "/repo/crates",
+            None::<PathBuf>,
+            NodeState::Unpacted,
+        ));
+        let mut app = App::from_tree(&tree);
+        app.set_panel_height(WHOLE_PANEL);
+        let base = Instant::now();
+
+        // A question and its answer, then a run started over the top of them.
+        app.start_turn("what does the engine do?", at(base, 1));
+        app.answer_turn("It walks the tree.", at(base, 2));
+        app.start_account(at(base, 3));
+        // Through the one call the loop writes a run with, so the card and the
+        // thread's turn hold the same section.
+        app.write_run(|account| account.open_section("engine", at(base, 3)));
+        app.set_pact_in_flight("/repo/crates/engine", 3, 12);
+        app.set_message("something the last key said");
+        assert!(app.showing_thread(), "the run swapped the card away");
+        let before = app.clone();
+        // Read at the instant the assertion below reads it at, so what is
+        // compared is the lines and not how long the clocks have been running.
+        let thread = shown(&app, at(base, 6));
+
+        assert_eq!(
+            pact_press(&mut app, true, at(base, 4)),
+            None,
+            "no second run"
+        );
+        assert_eq!(
+            refresh_press(&mut app, true, at(base, 5)),
+            None,
+            "and not by the other key either"
+        );
+
+        // The same wording as the refusal with no conversation behind it, on the
+        // same line, and the flag is the whole of what the presses moved.
+        let refused = {
+            let mut refused = before.clone();
+            refused.set_pact_refused();
+            refused
+        };
+        assert_eq!(app, refused, "the presses did more than say so");
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting engine (3/12) — already running"),
+            "the refusal is worded onto the line the reader is watching"
+        );
+        assert_eq!(
+            app.message(),
+            Some("something the last key said"),
+            "the refusal did not go through the message"
+        );
+
+        // And the reader is still looking at what they were looking at: the same
+        // card, the same lines, with the run's turn still in it.
+        assert!(app.showing_thread(), "the refusal swapped the card");
+        assert_eq!(shown(&app, at(base, 6)), thread, "the refusal moved a line");
+        assert!(
+            thread.iter().any(|line| line == "what does the engine do?"),
+            "the typed turn is not in the thread: {thread:?}"
+        );
+        assert!(
+            thread.iter().any(|line| line == "engine"),
+            "the run's turn is not in the thread: {thread:?}"
+        );
+    }
+
+    #[test]
     fn a_refresh_of_a_directory_with_nothing_stale_under_it_starts_no_run() {
         // The good outcome: the reader asked whether anything needed
         // describing again and the answer is no, which costs a sentence rather

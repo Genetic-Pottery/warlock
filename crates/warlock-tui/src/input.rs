@@ -493,12 +493,15 @@ fn is_tab(key: KeyEvent) -> bool {
 ///
 /// A muted composer is the same road with nothing at the end of it. While the
 /// last question is being answered the field takes no keys — one question at a
-/// time — and a key aimed at it comes to [`Pressed::Nothing`]: not typed, and
+/// time — and so does a field under a pact or a refresh, which is a tree and a
+/// panel being rewritten rather than a place to type. A key aimed at either
+/// comes to [`Pressed::Nothing`]: not typed, and
 /// not passed down to [`action_for`] either, since a letter that fell through a
 /// dead field would arrive at the tree's bindings as the pact key or the refresh
 /// key. Muting is read off the field ([`Composer::is_muted`]) rather than passed
-/// in beside `answered`, because it is the *field* that is muted and the loop is
-/// what says so: a turn asked from the tree leaves an unfocused field, which is
+/// in beside `answered` or worked out from `in_flight`, because it is the
+/// *field* that is muted and the loop is what says so, from the turn and the run
+/// together: a turn asked from the tree leaves an unfocused field, which is
 /// already `None` here. Tab is outside it for the reason it is outside the
 /// composer at all — it is the key that moves the keyboard, it is not text on
 /// any terminal, and a field that ate it while it was refusing to be typed in
@@ -550,8 +553,9 @@ pub(crate) fn press_for(
     if let Some(draft) = composer
         && !is_tab(key)
     {
-        // A muted field is one whose last question is still being answered, and
-        // the key that arrives at it does nothing at all: it is not typed, and
+        // A muted field is one whose last question is still being answered, or
+        // one a pact or a refresh is running under, and the key that arrives at
+        // it does nothing at all: it is not typed, and
         // it is emphatically not handed on to `action_for` underneath, because
         // a `p` swallowed by a dead field and re-read as the pact key would be
         // the worst possible answer to a keystroke aimed at a draft. Nothing is
@@ -1899,7 +1903,36 @@ mod tests {
             // in: no run in flight — the question cannot be up during one — and
             // no turn being answered, which is what the tests further down that
             // *are* about a turn hand in for themselves.
-            match press_for(key, *confirm, prompt, offered(app, composer), false, false) {
+            round_running(app, confirm, prompt, composer, key, false)
+        }
+
+        /// The same round again with a run `in_flight` or without one: the
+        /// version [`round_composing`] calls, and the one the tests about a run
+        /// call for themselves.
+        ///
+        /// A parameter for the reason the prompt and the draft are parameters —
+        /// a kinder loop written beside the tests would be the loop the tests
+        /// tested — and it is the one thing about the round a run changes:
+        /// `press_for` reads `q` and Ctrl-C as leaving outright rather than as a
+        /// question, and reads Esc as the cancel. Neither reaches a muted field,
+        /// which is what the tests that hand `true` in are about, and a cancel
+        /// that did get through would land on the panicking arm below.
+        fn round_running(
+            app: &mut App,
+            confirm: &mut QuitConfirm,
+            prompt: &mut ScopePrompt,
+            composer: &mut Composer,
+            key: KeyEvent,
+            in_flight: bool,
+        ) -> Round {
+            match press_for(
+                key,
+                *confirm,
+                prompt,
+                offered(app, composer),
+                in_flight,
+                false,
+            ) {
                 Pressed::Leave | Pressed::Act(Action::Quit) => return Round::Left,
                 // Never reached from a round with nothing being answered, and
                 // panicking rather than leaving quietly for the reason the four
@@ -2665,7 +2698,7 @@ mod tests {
             use super::{
                 Action, App, Composed, Composer, Focus, INERT, KeyCode, Pressed, QuitConfirm,
                 Round, ScopePrompt, app_in_use, app_on_screen, ctrl_c, offered, press, press_for,
-                round_composing,
+                round_composing, round_running,
             };
 
             /// What is in the draft before each test types anything.
@@ -3022,6 +3055,140 @@ mod tests {
                         true
                     ),
                     Pressed::CancelTurn,
+                );
+            }
+
+            #[test]
+            fn a_run_started_while_the_thread_shows_refuses_the_same_keys_the_same_way() {
+                // The other thing that mutes the field, and it arrives while the
+                // reader is looking at a conversation: a pact or a refresh
+                // started from the tree appends its account into the thread as a
+                // turn nobody typed, and for as long as it runs the field under
+                // that thread hears nothing. The keys are refused where they
+                // were already refused — at the field, before `action_for` is
+                // consulted — so a `p` cannot start a second run over a tree the
+                // first one is still writing to by falling through a dead draft.
+                let mut app = app_composing();
+                app.start_turn("what does the engine do?", Instant::now());
+                app.set_pact_in_flight("/repo/crates/engine", 3, 12);
+                assert!(app.showing_thread(), "the thread is the card on screen");
+                assert_eq!(app.focus(), Focus::Composer, "the field has the keyboard");
+                let untouched = app.clone();
+
+                // What the loop hands the field this round: muted off the run
+                // alone, with no turn being answered.
+                let mut muted = Composer::new(TYPED);
+                muted.set_muted(true);
+
+                let mut confirm = QuitConfirm::Closed;
+                let mut prompt = ScopePrompt::Closed;
+                let letters = ('a'..='z').chain('A'..='Z').chain('0'..='9');
+                let codes = letters
+                    .map(KeyCode::Char)
+                    .chain(INERT)
+                    .chain([KeyCode::Enter, KeyCode::Esc])
+                    .filter(|code| *code != KeyCode::Tab);
+
+                for code in codes {
+                    let mut composer = muted.clone();
+
+                    assert_eq!(
+                        press_for(
+                            press(code),
+                            QuitConfirm::Closed,
+                            &ScopePrompt::Closed,
+                            Some(&composer),
+                            true,
+                            false
+                        ),
+                        Pressed::Nothing,
+                        "{code:?} did something at a field a run had muted"
+                    );
+                    // And through the loop's own round with the run in flight,
+                    // which panics on the four keys that start a run or open a
+                    // window — including the cancel Esc means mid-run, which a
+                    // muted field is not the place to press.
+                    assert_eq!(
+                        round_running(
+                            &mut app,
+                            &mut confirm,
+                            &mut prompt,
+                            &mut composer,
+                            press(code),
+                            true
+                        ),
+                        Round::Stayed,
+                        "{code:?} ended the session from a field a run had muted"
+                    );
+                    assert_eq!(composer, muted, "{code:?} moved a muted draft");
+                }
+
+                assert_eq!(app, untouched, "a key reached the app behind the field");
+                assert!(app.showing_thread(), "a key changed the card under it");
+                assert_eq!(confirm, QuitConfirm::Closed, "and opened no question");
+                assert_eq!(prompt, ScopePrompt::Closed, "and no prompt");
+
+                // The two keys muting never swallows, with a run in flight
+                // rather than a turn: Tab is still the way back to the panel,
+                // and Ctrl-C mid-run still leaves outright — which is what it
+                // has always meant with a run and no question out.
+                assert_eq!(
+                    press_for(
+                        press(KeyCode::Tab),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&muted),
+                        true,
+                        false
+                    ),
+                    Pressed::Act(Action::ToggleFocus),
+                );
+                assert_eq!(
+                    press_for(
+                        ctrl_c(),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&muted),
+                        true,
+                        false
+                    ),
+                    Pressed::Leave,
+                );
+            }
+
+            #[test]
+            fn the_field_types_again_the_moment_the_run_ends() {
+                // The muting's other half over a run rather than a turn: what
+                // the loop hands the field is worked out from the run being in
+                // flight, so the round after it ends — however it ended — is the
+                // round the same draft types in again.
+                let mut composer = Composer::new(TYPED);
+                composer.set_muted(true);
+
+                assert_eq!(
+                    press_for(
+                        press(KeyCode::Char('p')),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&composer),
+                        true,
+                        false
+                    ),
+                    Pressed::Nothing,
+                );
+
+                composer.set_muted(false);
+
+                assert_eq!(
+                    press_for(
+                        press(KeyCode::Char('p')),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        Some(&composer),
+                        false,
+                        false
+                    ),
+                    Pressed::Compose(Composed::Typing(Composer::new(format!("{TYPED}p")))),
                 );
             }
 
