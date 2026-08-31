@@ -14,7 +14,8 @@
 //! [`chatting`]'s, asking
 //! for a scope and writing it is [`scoping`]'s, reading a file into the panel is
 //! [`viewing`]'s, handing one to `$EDITOR` and taking the terminal back
-//! afterwards is [`editing`]'s, where
+//! afterwards is [`editing`]'s, what a brief written out of the conversation
+//! would be called is [`writing`]'s, where
 //! the tree came from and when it is re-read is [`session`]'s, the terminal's
 //! setup and restoration is [`terminal`]'s, and the one-line errors `main`
 //! prints are [`error`]'s. The paragraphs below describe how the loop drives
@@ -227,6 +228,7 @@ mod scoping;
 mod session;
 mod terminal;
 mod viewing;
+mod writing;
 
 use chatting::Chat;
 use config::configure;
