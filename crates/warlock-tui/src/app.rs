@@ -1364,10 +1364,10 @@ impl Shown for Thread {
         // over the turns, so the count and the window cannot come to disagree
         // about what a width does. Any instant answers: `now` decides what a
         // clock *says* and never whether it is a row, and nothing else in a
-        // turn moves — so the first turn's own start, the one instant a thread
-        // that has rows can always name, is as good as the frame's.
-        self.turns().first().map_or(0, |first| {
-            self.lines(first.started())
+        // turn moves — so the first entry's own instant, the one a thread that
+        // has rows can always name, is as good as the frame's.
+        self.started().map_or(0, |started| {
+            self.lines(started)
                 .iter()
                 .map(|line| rows_of(line, width).len())
                 .sum()
@@ -2147,6 +2147,24 @@ impl App {
     /// the last keystroke said, exactly as [`App::start_account`] does not.
     pub fn start_turn(&mut self, message: impl Into<String>, at: Instant) {
         self.panel.thread.accrue().ask(message, at);
+        self.panel.showing = Showing::Thread;
+    }
+
+    /// Put one line of warlock's own on the thread at `at`, and show it.
+    ///
+    /// What warlock says for itself — a draft refused, and later a file written
+    /// or a document gone stale — as against a turn, which is something
+    /// somebody asked a model. It brings the conversation to the front exactly
+    /// as [`App::start_turn`] does, and for the same reason: the line is an
+    /// answer to what the reader just did, and an answer on a card they are not
+    /// looking at is not an answer. The card accumulates, so the note goes under
+    /// everything already said rather than replacing it.
+    ///
+    /// One unclocked row, and no turn is opened, closed or frozen by it — see
+    /// [`Thread::note`]. Not a keystroke's whole answer either: it says nothing
+    /// on the footer and takes down nothing that is there.
+    pub fn note(&mut self, text: impl Into<String>, at: Instant) {
+        self.panel.thread.accrue().note(text, at);
         self.panel.showing = Showing::Thread;
     }
 
@@ -9845,6 +9863,63 @@ mod tests {
         // And the run behind all of it never heard a word: a conversation is
         // not a pact.
         assert_eq!(app.account().map(Account::line_count), Some(10));
+    }
+
+    #[test]
+    fn a_note_brings_the_conversation_forward_and_costs_nobody_a_turn() {
+        const REFUSED: &str = "commands are /brief, /write and /chat, and take nothing after them";
+
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        // A file on screen, and not one question asked: the note has to make
+        // the card as well as land on it.
+        app.show_document(document_lines(), false);
+        assert_eq!(app.panel.showing, Showing::Document);
+        assert!(!app.has_thread());
+
+        app.note(REFUSED, base);
+
+        // The conversation comes to the front the way a question brings it: the
+        // line answers what the reader just typed, and an answer on a card they
+        // are not looking at is not an answer.
+        assert_eq!(app.panel.showing, Showing::Thread);
+        assert!(app.has_thread());
+        assert_eq!(panel_text(&app, at(base, 9)), [REFUSED]);
+
+        // And it is warlock's own line, not a turn: nobody was asked anything,
+        // so nothing is in flight and the composer is free.
+        let thread = app.thread().expect("the note made the card");
+        assert!(thread.turns().is_empty());
+        assert!(thread.in_flight().is_none());
+        assert_eq!(thread.line_count(), 1);
+
+        // The card accumulates, as it does for a question: what is said next
+        // goes under the note rather than in place of it.
+        ask_and_answer(&mut app, base);
+        app.note("wrote docs/brief.md", at(base, 6));
+
+        let lines = app
+            .thread()
+            .expect("a question has been asked")
+            .lines(at(base, 9));
+        assert_eq!(lines.len(), 1 + 5 + 1);
+        assert_eq!(
+            lines.first(),
+            Some(&Line::Note {
+                text: REFUSED.to_owned(),
+            })
+        );
+        assert_eq!(
+            lines.last(),
+            Some(&Line::Note {
+                text: "wrote docs/brief.md".to_owned(),
+            })
+        );
+        assert_eq!(app.thread().map(|thread| thread.turns().len()), Some(1));
+
+        // The other two cards are exactly as they were left, lines and all.
+        assert!(app.has_account());
+        assert!(app.has_document());
     }
 
     #[test]

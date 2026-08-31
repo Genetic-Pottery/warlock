@@ -3,11 +3,12 @@
 //! The panel's other two cards are a ledger and a file: an account is one pact
 //! writing documents, and a document is what it wrote. This one is the
 //! conversation — the third card, and the only place in warlock where a model's
-//! prose is ever shown. It is an ordered list of turns, one per message somebody
-//! typed at the foot of the panel, each holding that message, the work the model
-//! was seen doing while it answered, and the answer. Nothing else is a turn: a
-//! pact running behind the conversation is the account card's, whole, and this
-//! card has nothing to say about it.
+//! prose is ever shown. It is an ordered list of entries. Most of them are
+//! turns, one per message somebody typed at the foot of the panel, each holding
+//! that message, the work the model was seen doing while it answered, and the
+//! answer. The rest are notes: one line warlock says itself. Nothing else is a
+//! turn: a pact running behind the conversation is the account card's, whole,
+//! and this card has nothing to say about it.
 //!
 //! It is plain data like the account is: no terminal, no channel, no child
 //! process, and no clock of its own. [`Instant::now`] is never called in this
@@ -41,6 +42,38 @@
 //! the same run for the reader to reconcile with the first, in the middle of
 //! what they were reading. So this card is what was asked and what came back,
 //! and nothing that nobody typed.
+//!
+//! # A note is warlock's own line
+//!
+//! The other entry is one line warlock says for itself: a draft refused, a file
+//! written, a document gone stale under an answer that quoted it. It has to sit
+//! in the conversation because *when* it was said is the whole of what it means
+//! — a warning above the turn it is about and a warning three turns later are
+//! different warnings — which is why the entries are one sequence and not a
+//! turn list with a side table of remarks beside it.
+//!
+//! A note is unclocked: no `0:00`, no elapsed time, no ticking. A clock beside
+//! it would say warlock had been at something for that long, and it has not
+//! been at anything — the note is the whole event. It draws as
+//! [`Line::Note`](crate::Line), which is neither a work line nor a
+//! [`Line::Said`](crate::Line), so warlock's own voice is not read as something
+//! the model did or something the reader typed. It also does nothing to a turn:
+//! it opens none, closes none and freezes none, so a note landing while an
+//! answer is on its way leaves that turn ticking exactly as it was.
+//!
+//! # A synthesized instruction is a turn, shown as the command
+//!
+//! A command that ends up asking the model something — `/brief`, `/write` —
+//! sends an instruction warlock wrote, not a sentence the reader typed. That is
+//! a *turn*, with the work lines and the answer of any other turn, and its
+//! message is the command that caused it: the card shows `/brief`, never the
+//! paragraph of instructions actually sent. The reader typed one word and asked
+//! for one thing, and a screen of prose they did not write in the place their
+//! own question goes would be warlock putting words in their mouth. Nothing
+//! here builds such a turn yet — [`Thread::ask`] takes whatever message it is
+//! given, and it is the caller's business which string that is — but the entry
+//! model is the one that has to allow it, so the decision is recorded where the
+//! entries are.
 //!
 //! # Where this one differs
 //!
@@ -334,8 +367,78 @@ impl Turn {
     }
 }
 
-/// The conversation, from the first question to the last answer — and every run
-/// that happened while it was going on.
+/// One thing that happened in the conversation, in the order it happened: a
+/// turn, or a line warlock said itself.
+///
+/// The two are one sequence and not two lists, because a note's whole meaning is
+/// where it sits — see the module docs. Private, and it stays private: what a
+/// caller writes is [`Thread::ask`] or [`Thread::note`], and what it reads back
+/// is rows, or [`Thread::turns`] for the turns among them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Entry {
+    /// A question somebody typed and everything that came of it.
+    Turn(Turn),
+    /// One line warlock said, drawn unclocked as [`Line::Note`].
+    Note {
+        /// The line, already flattened to one row by [`Thread::note`].
+        text: String,
+        /// When it was said. Not drawn — a note has no clock — but it is what
+        /// [`Thread::started`] counts from when a note is the first entry.
+        at: Instant,
+    },
+}
+
+impl Entry {
+    /// When this entry happened, which for a turn is when it was asked.
+    const fn at(&self) -> Instant {
+        match self {
+            Self::Turn(turn) => turn.started(),
+            Self::Note { at, .. } => *at,
+        }
+    }
+
+    /// How many rows this entry draws as, before anything is wrapped.
+    ///
+    /// A note is one row and always one row: [`Thread::note`] flattens whatever
+    /// it is handed, so warlock's own voice cannot take two rows of the card by
+    /// accident.
+    fn line_count(&self) -> usize {
+        match self {
+            Self::Turn(turn) => turn.line_count(),
+            Self::Note { .. } => 1,
+        }
+    }
+
+    /// Every row of this entry, with clocks measured against `now`.
+    ///
+    /// Boxed because the two arms are different iterators and the difference is
+    /// of no interest to anybody: what comes out is rows, in order.
+    fn rows(&self, now: Instant) -> Box<dyn Iterator<Item = Line> + '_> {
+        match self {
+            Self::Turn(turn) => Box::new(turn.rows(now)),
+            Self::Note { text, .. } => Box::new(std::iter::once(Line::Note { text: text.clone() })),
+        }
+    }
+
+    /// This entry as a turn, or `None` for a note.
+    const fn turn(&self) -> Option<&Turn> {
+        match self {
+            Self::Turn(turn) => Some(turn),
+            Self::Note { .. } => None,
+        }
+    }
+
+    /// This entry as a turn to write to, or `None` for a note.
+    const fn turn_mut(&mut self) -> Option<&mut Turn> {
+        match self {
+            Self::Turn(turn) => Some(turn),
+            Self::Note { .. } => None,
+        }
+    }
+}
+
+/// The conversation, from the first question to the last answer — and, in the
+/// same sequence, every line warlock said for itself along the way.
 ///
 /// One session, one thread: warlock's chat is one conversation for the life of
 /// the process, so turns are appended and nothing is ever dropped or trimmed —
@@ -343,12 +446,13 @@ impl Turn {
 /// remembers it too, which is [`ChatAgent`](crate::ChatAgent)'s half of the same
 /// arrangement.
 ///
-/// Driven by four calls, all of which take the instant they happened at:
+/// Driven by five calls, all of which take the instant they happened at:
 /// [`Thread::ask`] when a message is submitted, [`Thread::record`] for every
-/// activity the turn reports, and [`Thread::answer`] or [`Thread::end`] when it
-/// is over. Read back as rows with [`Thread::lines`] or [`Thread::window`],
-/// which take the `now` the newest clock is measured against. There is no fifth
-/// call and nothing for a pact to say here: a run belongs to the account card.
+/// activity the turn reports, [`Thread::answer`] or [`Thread::end`] when it is
+/// over, and [`Thread::note`] for a line warlock says itself. Read back as rows
+/// with [`Thread::lines`] or [`Thread::window`], which take the `now` the newest
+/// clock is measured against. There is no sixth call and nothing for a pact to
+/// say here: a run belongs to the account card.
 ///
 /// ```
 /// use std::time::{Duration, Instant};
@@ -372,19 +476,23 @@ impl Turn {
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Thread {
-    /// The turns, in the order they were asked.
-    turns: Vec<Turn>,
+    /// Everything that has happened, in the order it happened: turns and the
+    /// notes between them, one sequence. There is no second list — a note's
+    /// place among the turns is what it means.
+    entries: Vec<Entry>,
 }
 
 impl Thread {
     /// A conversation nobody has said anything in yet.
     ///
-    /// Empty means empty: no turns, no lines, nothing to draw. A panel whose
+    /// Empty means empty: no entries, no lines, nothing to draw. A panel whose
     /// thread card has never been asked a question draws warlock's mark, which
     /// is the same fact said one level up.
     #[must_use]
     pub const fn new() -> Self {
-        Self { turns: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Ask `message` at `at`, and freeze the turn above it.
@@ -397,11 +505,35 @@ impl Thread {
     /// be a second answer to that question.
     pub fn ask(&mut self, message: impl Into<String>, at: Instant) {
         self.freeze_last(at);
-        self.turns.push(Turn {
+        self.entries.push(Entry::Turn(Turn {
             message: message.into(),
             log: Log::opened_at(at),
             answer: None,
             ending: None,
+        }));
+    }
+
+    /// Say `text` on the card at `at`, as one unclocked line of warlock's own.
+    ///
+    /// A refusal, a file written, a warning about something going stale: the
+    /// things warlock has to say for itself, which have nobody to ask and no
+    /// model to run. It lands where it happened — under the turn above it and
+    /// above whatever is asked next — because a note read out of order is a
+    /// note about the wrong thing.
+    ///
+    /// It touches no turn at all. Nothing is opened, nothing is closed and
+    /// nothing is frozen, so a note that arrives while an answer is on its way
+    /// leaves that turn live and still ticking, and [`Thread::in_flight`] says
+    /// what it said a moment before.
+    ///
+    /// One row, always: whatever is handed in is flattened to a single line
+    /// first, for the reason [`Ending::line`] gives — a row is a row, and
+    /// warlock saying one thing should cost the card one line of it.
+    pub fn note(&mut self, text: impl Into<String>, at: Instant) {
+        let text = text.into();
+        self.entries.push(Entry::Note {
+            text: one_line(&text),
+            at,
         });
     }
 
@@ -478,41 +610,74 @@ impl Thread {
         }
     }
 
-    /// The turns, in the order they were asked.
+    /// The turns, in the order they were asked, with the notes between them
+    /// left out.
+    ///
+    /// Borrowed turns rather than a slice, since the turns are no longer stored
+    /// end to end: what is stored is the sequence of everything that happened,
+    /// and this is the turns picked out of it. A note changes nothing here —
+    /// it is not a turn, and never becomes one.
     #[must_use]
-    pub fn turns(&self) -> &[Turn] {
-        &self.turns
+    pub fn turns(&self) -> Vec<&Turn> {
+        self.entries.iter().filter_map(Entry::turn).collect()
     }
 
-    /// Whether nothing has been asked.
+    /// Whether nothing has happened: no question asked, and no note said.
+    ///
+    /// A card with one note on it is not empty — there is a row to draw, and a
+    /// refusal before the first question is exactly that case.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.turns.is_empty()
+        self.entries.is_empty()
+    }
+
+    /// When the first thing in this conversation happened, or `None` while
+    /// there is nothing in it.
+    ///
+    /// The one instant a thread with rows in it can always name, whether it
+    /// opens with a question or with a note — which is what a caller counting
+    /// rows at some width needs, since `now` decides what a clock says and never
+    /// whether it is a row.
+    #[must_use]
+    pub fn started(&self) -> Option<Instant> {
+        self.entries.first().map(Entry::at)
     }
 
     /// The turn still going, or `None` when none is.
     ///
-    /// The live turn is the last one, and only while it is un-frozen: a turn
+    /// The live turn is the newest one, and only while it is un-frozen: a turn
     /// stops being live the moment it answers, ends, or is overtaken by a newer
-    /// one. What a caller does with it is decide whether the composer is muted —
-    /// one question at a time — without keeping a second flag that could
+    /// one. Notes are stepped over — one landing under a question does not end
+    /// it — so what a caller does with this is decide whether the composer is
+    /// muted, one question at a time, without keeping a second flag that could
     /// disagree with the thread.
     #[must_use]
     pub fn in_flight(&self) -> Option<&Turn> {
-        self.turns.last().filter(|turn| !turn.is_closed())
+        self.last_turn().filter(|turn| !turn.is_closed())
+    }
+
+    /// The newest turn, whatever has been said since it. See [`Thread::note`]:
+    /// a note is not a turn and never stands in front of one.
+    fn last_turn(&self) -> Option<&Turn> {
+        self.entries.iter().rev().find_map(Entry::turn)
+    }
+
+    /// The newest turn, to write to.
+    fn last_turn_mut(&mut self) -> Option<&mut Turn> {
+        self.entries.iter_mut().rev().find_map(Entry::turn_mut)
     }
 
     /// Stop the newest turn moving as of `at`: what every turn opening does to
     /// the one above it. See [`Turn::freeze`].
     fn freeze_last(&mut self, at: Instant) {
-        if let Some(previous) = self.turns.last_mut() {
+        if let Some(previous) = self.last_turn_mut() {
             previous.freeze(at);
         }
     }
 
     /// The live turn, which is the only turn anything can be filed under.
     fn live(&mut self) -> Option<&mut Turn> {
-        self.turns.last_mut().and_then(Turn::live)
+        self.last_turn_mut().and_then(Turn::live)
     }
 
     /// How many rows the whole thread draws as, before anything is wrapped.
@@ -522,14 +687,14 @@ impl Thread {
     /// that knows the width, and it is the one that wraps.
     #[must_use]
     pub fn line_count(&self) -> usize {
-        self.turns.iter().map(Turn::line_count).sum()
+        self.entries.iter().map(Entry::line_count).sum()
     }
 
     /// Every row of the thread, with clocks measured against `now`.
     ///
     /// `now` is the caller's: this reads no clock, so the same thread and the
     /// same instant give the same rows every time. Only the newest work line of
-    /// a live turn depends on it.
+    /// a live turn depends on it — a note has no clock at all.
     #[must_use]
     pub fn lines(&self, now: Instant) -> Vec<Line> {
         self.window(0, self.line_count(), now)
@@ -541,11 +706,14 @@ impl Thread {
     /// Asking for more rows than there are, or starting past the end, gives back
     /// what is there rather than failing: a viewport is a request, not an
     /// assertion about the conversation's length.
+    ///
+    /// The entries are walked in order, so a note sits exactly where it was
+    /// said: under the turn it followed, above the one asked after it.
     #[must_use]
     pub fn window(&self, offset: usize, height: usize, now: Instant) -> Vec<Line> {
-        self.turns
+        self.entries
             .iter()
-            .flat_map(move |turn| turn.rows(now))
+            .flat_map(move |entry| entry.rows(now))
             .skip(offset)
             .take(height)
             .collect()
@@ -1190,6 +1358,149 @@ mod tests {
             thread.in_flight().is_none(),
             "a run cannot mute a conversation it is no part of"
         );
+    }
+
+    #[test]
+    fn a_note_lands_between_the_turns_exactly_where_it_was_said() {
+        let base = Instant::now();
+        let mut thread = Thread::new();
+
+        // Note, turn, note: warlock says something before anybody has asked
+        // anything, and again after the answer.
+        thread.note("commands are /brief, /write and /chat", base);
+        thread.ask("what does the engine do?", at(base, 4));
+        thread.record(&Activity::Thinking, at(base, 5));
+        thread.answer("It walks the tree.", at(base, 8));
+        thread.note(
+            "crates/engine/WARLOCK.md is older than that answer",
+            at(base, 9),
+        );
+
+        // One sequence, read in the order it happened: a note read out of
+        // order is a note about the wrong thing.
+        assert_eq!(
+            thread.lines(at(base, 30)),
+            vec![
+                Line::Note {
+                    text: "commands are /brief, /write and /chat".to_owned(),
+                },
+                Line::Said {
+                    text: "what does the engine do?".to_owned(),
+                },
+                Line::Clocked {
+                    clock: "0:04".to_owned(),
+                    text: "thinking".to_owned(),
+                },
+                Line::Text {
+                    text: "It walks the tree.".to_owned(),
+                },
+                Line::Note {
+                    text: "crates/engine/WARLOCK.md is older than that answer".to_owned(),
+                },
+            ],
+        );
+        assert_eq!(thread.line_count(), 5);
+        assert_eq!(thread.lines(at(base, 30)).len(), thread.line_count());
+
+        // And the window cuts that same sequence, so a reader scrolled to the
+        // middle sees the note where it belongs and not at either end.
+        assert_eq!(
+            thread.window(3, 2, at(base, 30)),
+            vec![
+                Line::Text {
+                    text: "It walks the tree.".to_owned(),
+                },
+                Line::Note {
+                    text: "crates/engine/WARLOCK.md is older than that answer".to_owned(),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn a_note_is_one_unclocked_row_and_never_a_turn() {
+        let base = Instant::now();
+        let mut thread = Thread::new();
+
+        thread.note("that is not a command", at(base, 3));
+
+        // A card with a note on it has something to draw, so it is not empty —
+        // a refusal before the first question is exactly that case.
+        assert!(!thread.is_empty());
+        assert_eq!(thread.line_count(), 1);
+        assert_eq!(thread.started(), Some(at(base, 3)));
+        assert!(thread.turns().is_empty(), "a note is nobody's question");
+        assert!(thread.in_flight().is_none(), "and it asked nothing");
+
+        // Its own row: not a work line, so there is no clock beside it at any
+        // `now`, and not a `Said`, so warlock's voice is not the reader's.
+        let row = Line::Note {
+            text: "that is not a command".to_owned(),
+        };
+        assert_eq!(thread.lines(at(base, 3)), vec![row.clone()]);
+        assert_eq!(thread.lines(at(base, 900)), vec![row]);
+        assert_eq!(
+            said(&thread, at(base, 900)),
+            vec!["that is not a command".to_owned()]
+        );
+        assert!(work(&thread, at(base, 900)).is_empty());
+
+        // One row however it is worded: a note that arrived with newlines in it
+        // is flattened rather than spending two rows of the card.
+        let mut wordy = Thread::new();
+        wordy.note("that is not a command\n  try /brief", base);
+        assert_eq!(wordy.line_count(), 1);
+        assert_eq!(
+            wordy.lines(base),
+            vec![Line::Note {
+                text: "that is not a command try /brief".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_note_neither_opens_closes_nor_freezes_a_turn() {
+        let base = Instant::now();
+        let mut thread = Thread::new();
+
+        thread.ask("read the tree", base);
+        thread.record(&Activity::Thinking, at(base, 1));
+        thread.note("crates/engine/WARLOCK.md changed under you", at(base, 4));
+
+        // The turn is still the live one, and its clock is still moving: the
+        // note happened beside the turn, not to it.
+        assert_eq!(thread.in_flight().map(Turn::started), Some(base));
+        assert_eq!(thread.turns().len(), 1);
+        assert!(!thread.turns()[0].is_closed());
+        assert_eq!(
+            said(&thread, at(base, 20)),
+            vec![
+                "read the tree".to_owned(),
+                "0:20 thinking".to_owned(),
+                "crates/engine/WARLOCK.md changed under you".to_owned(),
+            ],
+            "the work line ticks on under a note that came after it",
+        );
+
+        // Everything still files under that turn, over the note's head.
+        thread.answer("It is a tree.", at(base, 30));
+        assert_eq!(thread.turns()[0].answer(), Some("It is a tree."));
+        assert!(thread.in_flight().is_none());
+        assert_eq!(
+            said(&thread, at(base, 60)),
+            vec![
+                "read the tree".to_owned(),
+                "0:30 thinking".to_owned(),
+                "It is a tree.".to_owned(),
+                "crates/engine/WARLOCK.md changed under you".to_owned(),
+            ],
+            "the note stays where it was said, under the turn it interrupted",
+        );
+
+        // And a question asked after it freezes the turn, not the note.
+        thread.ask("what else?", at(base, 70));
+        assert_eq!(thread.turns().len(), 2);
+        assert_eq!(thread.in_flight().map(Turn::started), Some(at(base, 70)));
     }
 
     #[test]

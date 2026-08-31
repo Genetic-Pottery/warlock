@@ -605,7 +605,7 @@ mod tests {
             assert_eq!(app.message(), Some(ending.line().as_str()), "{ending:?}");
             let turn = app
                 .thread()
-                .and_then(|thread| thread.turns().last().cloned())
+                .and_then(|thread| thread.turns().last().map(|turn| (**turn).clone()))
                 .expect("the turn is on the card");
             assert_eq!(turn.ending(), Some(&ending));
             assert_eq!(turn.answer(), None);
