@@ -1695,4 +1695,187 @@ mod writes {
             assert_eq!(everything_under(repo.path()), Vec::<String>::new());
         }
     }
+
+    /// The whole of `/write`, from the word typed at the composer to the bytes
+    /// on disk, in one test.
+    ///
+    /// Every other test in this file is about one joint of it. This one is about
+    /// the joints being joined: the composer's own `apply_compose` starts the
+    /// turn, the turn is really run — on a worker thread, through the very agent
+    /// the loop holds — the loop's own drain hands the answer back, the prompt
+    /// opens over it through `write_opened`, and Enter goes through `edit_for`
+    /// into `write_edit` exactly as the event loop's arm does. Nothing in the
+    /// middle is stood in for.
+    ///
+    /// What *is* stood in for is the model, and it is `/bin/sh` printing one
+    /// result line — `chatting.rs`'s arrangement, for its reason, which is why
+    /// this module is Unix-only. So the whole path runs with no terminal, no
+    /// network and no `claude`, over a repository of the test's own that goes
+    /// away with the test.
+    #[cfg(unix)]
+    mod whole {
+        use std::path::Path;
+        use std::thread;
+        use std::time::Duration;
+
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use warlock_tui::{ChatAgent, Composed, Composer, Line, Mode, ScopePrompt, edit_for};
+
+        use super::super::{WRITE_HEADING, write_edit, write_opened};
+        use super::{
+            App, Instant, Node, NodeState, PathBuf, Tree, a_repo, everything_under, fs, notes, now,
+            pacts,
+        };
+        use crate::apply_compose;
+        use crate::chatting::Chat;
+
+        /// How long the rounds below go on before giving up on a turn that is
+        /// never going to end. `chatting.rs`'s number and its reason: it is only
+        /// ever reached when something is already wrong, and every wait ends the
+        /// moment the turn does.
+        const AT_MOST: Duration = Duration::from_secs(5);
+
+        /// What the stand-in answers with: one document, with the title the slug
+        /// is plainly made of and the trailing newline a document has.
+        const DOCUMENT: &str =
+            "# Scopes and sigils\n\nA boundary somebody drew, and the reason it is there.\n";
+
+        /// Where that document proposes to go in a repository that has never had
+        /// a brief written into it.
+        const PROPOSED: &str = "docs/warlock-brief-01-scopes-and-sigils.md";
+
+        /// A `claude` that is a shell script: it answers with `document` on the
+        /// one line the seam takes an answer off, and exits.
+        ///
+        /// The result line is the only thing this stand-in says, so the turn has
+        /// no work lines and lands as one answer — which is all this test is
+        /// about. What a turn's *work* looks like on the card is `chatting.rs`'s
+        /// own suite.
+        fn answering_with(document: &str) -> ChatAgent {
+            let result = format!(
+                r#"{{"type":"result","subtype":"success","result":"{}"}}"#,
+                escaped(document)
+            );
+            ChatAgent::new()
+                .with_program("/bin/sh")
+                .with_args(["-c".to_owned(), format!("printf '%s\\n' '{result}'")])
+        }
+
+        /// `document` as a JSON string spells it, so the newlines in it survive
+        /// the one line the stand-in prints.
+        ///
+        /// `printf '%s\n'` does not interpret its argument, so what the shell is
+        /// handed is what `serde_json` reads — and what it reads back out is the
+        /// document byte for byte.
+        fn escaped(document: &str) -> String {
+            document
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+        }
+
+        /// The loop's bottom end, round after round, until the turn has ended.
+        ///
+        /// [`Chat::keep_up`] and the one line above it in the event loop's own
+        /// `keep_up`, and nothing else: a `/write` answer comes back from the
+        /// drain and becomes the window, and every other round comes back with
+        /// nothing and leaves the window closed. Nothing here joins a thread,
+        /// receives from a channel or waits on a child.
+        fn rounds_until_answered(
+            chat: &mut Chat,
+            app: &mut App,
+            repo_root: &Path,
+            now: Instant,
+        ) -> ScopePrompt {
+            let mut prompt = ScopePrompt::default();
+            let waited = Instant::now();
+            while chat.answering() && waited.elapsed() < AT_MOST {
+                if let Some(document) = chat.keep_up(app, now) {
+                    prompt = write_opened(repo_root, &document);
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(!chat.answering(), "the turn never ended");
+            prompt
+        }
+
+        #[test]
+        fn a_write_typed_at_the_composer_ends_as_a_document_on_disk() {
+            let repo = a_repo();
+            let base = now();
+            let mut app = App::from_tree(&Tree::new(Node::new(
+                repo.path(),
+                None::<PathBuf>,
+                NodeState::Unpacted,
+            )));
+            // The register the command is only allowed in, and the pact the
+            // written file is about to make stale.
+            app.set_mode(Mode::Brief);
+            let manifest = pacts(&["docs"]);
+            let mut chat = Chat::with_agent(answering_with(DOCUMENT));
+            let mut composer = Composer::new("/write");
+
+            // The reader's Enter at the foot of the panel, through the very
+            // function the loop's composer arm calls.
+            apply_compose(&mut app, &mut composer, Composed::Submit, &mut chat, base);
+
+            assert!(chat.answering(), "the command started no turn");
+            assert_eq!(composer.draft(), "", "the field kept the submitted word");
+
+            // Then the rounds, until the answer lands and the window opens over
+            // it — pre-filled, headed, and complaining about nothing.
+            let prompt = rounds_until_answered(&mut chat, &mut app, repo.path(), base);
+
+            let field = prompt
+                .field()
+                .expect("the path prompt opened over the answer")
+                .clone();
+            assert_eq!(field.text(), PROPOSED);
+            assert_eq!(field.directory(), WRITE_HEADING);
+            assert_eq!(field.rule(), None);
+            assert_eq!(
+                everything_under(repo.path()),
+                Vec::<String>::new(),
+                "a proposal wrote something"
+            );
+            // The card shows the word that was typed and the document that came
+            // back — never the paragraph warlock sent.
+            let rows = app.thread().expect("the conversation is there").lines(base);
+            assert_eq!(
+                rows.first(),
+                Some(&Line::Said {
+                    text: "/write".to_owned()
+                })
+            );
+            assert!(
+                rows.iter().any(|line| *line
+                    == Line::Text {
+                        text: "# Scopes and sigils".to_owned()
+                    }),
+                "the answer is not on the card: {rows:?}"
+            );
+
+            // And Enter in that window, through `edit_for` as `press_for` sends
+            // it and `write_edit` as the loop's arm applies it.
+            let edited = edit_for(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &field);
+            let prompt = write_edit(&mut app, &manifest, repo.path(), &prompt, edited, base);
+
+            assert_eq!(prompt, ScopePrompt::Closed, "Enter left the window up");
+            let written =
+                fs::read_to_string(repo.path().join(PROPOSED)).expect("the artifact reads back");
+            assert_eq!(written, DOCUMENT, "the bytes are not the document answered");
+            assert_eq!(
+                notes(&app),
+                [
+                    format!("wrote {PROPOSED} — {} bytes", written.len()),
+                    "docs is now stale".to_owned(),
+                ]
+            );
+            // The whole repository, after the whole path: the output directory
+            // and the one file in it. No transcript, no draft of the brief, and
+            // nothing warlock authored under `.warlock/` — the turn wrote
+            // nothing at all, and the write wrote the artifact.
+            assert_eq!(everything_under(repo.path()), ["docs", PROPOSED]);
+        }
+    }
 }
