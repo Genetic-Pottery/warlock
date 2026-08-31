@@ -477,6 +477,30 @@ pub enum Line {
         /// the width.
         text: String,
     },
+    /// What warlock itself has to say, in one line of its own voice.
+    ///
+    /// The third party on the thread's card. A [`Line::Said`] is the reader's
+    /// words and a [`Line::Text`] is the model's answer; this is neither — it is
+    /// the program saying something about the conversation rather than taking
+    /// part in it, which is what a refused command, a file written or a warning
+    /// about a stale document is. Only a [`Thread`](crate::Thread) ever yields
+    /// one: nothing an [`Account`] holds is warlock talking.
+    ///
+    /// Unclocked, like [`Line::Said`] and unlike [`Line::Clocked`]: a note is
+    /// not work that took time, it is one thing said at one moment, and a `0:00`
+    /// beside it would claim a pass had started. It draws distinctly from both
+    /// of its neighbours — its own marker rather than the question's, and not
+    /// bold — so warlock's own voice is not read as something the model did or
+    /// something the reader typed. Which marker that is belongs to the renderer,
+    /// for the reason written out at [`Line::Said`]: what is put in front of a
+    /// line is not a character stored in it.
+    ///
+    /// One line, whole. A note that had paragraphs in it would be prose, and
+    /// prose on this card is the model's.
+    Note {
+        /// What warlock says, wrapped by whoever knows the width.
+        text: String,
+    },
     /// One row of a line too long to draw in one — the whole of it that did not
     /// fit on the row above, already carrying whatever indent keeps it under the
     /// text it continues.
@@ -1142,13 +1166,15 @@ mod tests {
             .map(|line| match line {
                 Line::Directory { path } => path.display().to_string(),
                 Line::Clocked { clock, text } => format!("{clock} {text}"),
-                // An account never yields a document's line; it is here so this
-                // helper words every row of the panel and not most of them.
-                // Nor a wrapped row: an account holds what happened, and how
-                // many rows that takes is the panel's question.
+                // An account never yields a document's line, a question or a
+                // note; they are here so this helper words every row of the
+                // panel and not most of them. Nor a wrapped row: an account
+                // holds what happened, and how many rows that takes is the
+                // panel's question.
                 Line::Summary { text }
                 | Line::Text { text }
                 | Line::Said { text }
+                | Line::Note { text }
                 | Line::Wrapped { text, .. } => text,
             })
             .collect()

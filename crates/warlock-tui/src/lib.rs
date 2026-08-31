@@ -44,9 +44,11 @@
 //! sentence is the only thing that can keep them from being read as summable;
 //! and a turn that does not answer ends in exactly one line — cancelled, no
 //! `claude` to ask, a non-zero exit, a timeout, or a model with nothing to say —
-//! so a failure costs the reader a row rather than a screen. It is the one card
-//! that shows prose, and it is still a value: no channel, no child process, and
-//! no clock of its own.
+//! so a failure costs the reader a row rather than a screen. Between the turns
+//! sit warlock's own lines — a note is one unclocked row it says for itself, in
+//! the same sequence, because when it was said is the whole of what it means.
+//! It is the one card that shows prose, and it is still a value: no channel, no
+//! child process, and no clock of its own.
 //!
 //! A run that happens while a conversation is going on puts nothing in it. The
 //! panel has a card for a run — the [`Account`], one swap away — and a
@@ -131,6 +133,18 @@
 //! wrap, and never more than [`COMPOSER_MAX_ROWS`], past which it scrolls within
 //! itself so the row the cursor is on stays on screen.
 //!
+//! What a submitted draft *is* is the sentence after that one, and it is a
+//! function too. [`submitted_for`] takes the draft and comes back with one
+//! [`Submitted`]: one of the three commands warlock has, an ordinary message
+//! for the model, or a refusal. The rule is trim, first token, no leading slash
+//! means a message, a second slash means a path and so also a message, and only
+//! then a case-sensitive match against three words with nothing permitted after
+//! them. Case-sensitive because the two mistakes cost different amounts — a
+//! refusal costs one line on the card and a send costs a turn — and the refusal
+//! is one line naming all three, which is the whole of the discovery mechanism
+//! and the reason there is no `/help`. Like everything else here it decides and
+//! does nothing: no mode, no file, no turn.
+//!
 //! The dependency edge runs TUI -> engine: this crate knows the engine's
 //! vocabulary, and the engine knows nothing about terminals.
 
@@ -146,6 +160,7 @@ mod confirm;
 #[cfg(test)]
 mod fixture;
 mod prompt;
+mod submission;
 mod thread;
 mod ui;
 mod watch;
@@ -259,17 +274,23 @@ pub use prompt::ScopeField;
 pub use prompt::ScopePrompt;
 /// What one key does to the scope prompt, given the field it is open over.
 pub use prompt::edit_for;
+/// What a submitted draft turns out to be: one of warlock's three commands, an
+/// ordinary message for the model, or a refusal — which carries the one line
+/// naming the commands that exist.
+pub use submission::Submitted;
+/// What a draft submitted at the composer means, given nothing but the draft.
+pub use submission::submitted_for;
 /// One thing that stopped a turn short of an answer — a cancel, no `claude` to
 /// ask, a non-zero exit, a timeout, or a model that said nothing — in the one
 /// line it ends with.
 pub use thread::Ending;
-/// The conversation the panel's third card holds: every message somebody typed,
-/// the work the model was seen doing about it, what it answered — and, in the
-/// same sequence, every run that happened while it was going on.
+/// The conversation the panel's third card holds, as one ordered sequence:
+/// every message somebody typed, the work the model was seen doing about it,
+/// what it answered — and, where they were said, warlock's own unclocked notes.
 pub use thread::Thread;
-/// One entry of a [`Thread`]: a question, everything the model was seen doing
-/// about it, and the answer when it lands — or a run nobody typed, which is its
-/// [`Account`] and nothing else.
+/// One turn of a [`Thread`]: a question, everything the model was seen doing
+/// about it, and the answer when it lands — or the one line it ended in
+/// instead.
 pub use thread::Turn;
 /// Which [`Ending`] a failed turn is: the model seam's failure vocabulary as
 /// the panel's, in one place, so whoever runs a turn hands the error over rather

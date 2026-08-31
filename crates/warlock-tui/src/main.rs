@@ -212,8 +212,8 @@ use ratatui::crossterm::execute;
 use ratatui::layout::Size;
 use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
 use warlock_tui::{
-    App, ClaudeAgent, Composed, Composer, Focus, QuitConfirm, ScopePrompt, composer_on_screen,
-    draw, panel_height, panel_width, tree_height,
+    App, ClaudeAgent, Composed, Composer, Focus, QuitConfirm, ScopePrompt, Submitted,
+    composer_on_screen, draw, panel_height, panel_width, submitted_for, tree_height,
 };
 
 mod chatting;
@@ -1146,23 +1146,46 @@ fn apply_mouse(
 /// looking at and what the movement keys they press next should be about. Tab
 /// from there is one press back into the field.
 ///
-/// **Submit** is a draft offered up, and it is now the one thing in this
-/// function that costs anything. Three statements in one breath: the draft is
-/// taken, the field is left empty, and the message goes on the thread as a new
-/// turn — which is also what brings the thread card to the front, so the reader
-/// is looking at the conversation from the instant they asked rather than from
-/// whenever the model first says something (see [`App::start_turn`]). Then the
-/// worker: [`chatting::start_turn`] owns the channel, the say-when and this
+/// **Submit** is a draft offered up, and it is the one arm that can cost
+/// anything. Two statements happen whatever the draft turns out to be — it is
+/// taken, and the field is left empty — and then [`submitted_for`] says which of
+/// three things was submitted, because a submit is no longer the same as a
+/// question. Only a message is one.
+///
+/// A **message** is what it always was: it goes on the thread as a new turn —
+/// which is also what brings the thread card to the front, so the reader is
+/// looking at the conversation from the instant they asked rather than from
+/// whenever the model first says something (see [`App::start_turn`]) — and then
+/// the worker: [`chatting::start_turn`] owns the channel, the say-when and this
 /// turn's copy of the agent, and what comes back is the one value the loop keeps
 /// about a turn it is not performing. Nothing is waited for here — everything
 /// the turn produces arrives at the bottom of the loop, exactly as a run's does.
 ///
-/// Cleared rather than kept, which is the one place in here that can lose
-/// somebody's typing and is now honest: the words are on the thread card a row
-/// above the field, so nothing is lost, and a field still holding the question
-/// that is being answered would be a field the next Enter asked it from again.
-/// Nothing is said on the footer either — the question is on screen, and warlock
-/// announcing what the reader can read would be warlock talking about itself.
+/// A **command** costs nothing at all here. The field is emptied and that is the
+/// whole of it: no turn is opened, no question is asked, and the card gains no
+/// row of its own, because a command word is a thing warlock was told rather
+/// than a thing that was said to the model. What each command *does* is not this
+/// slice's business — the arms that give them behaviour land with them, and
+/// until then a recognised command is a keystroke that was understood and
+/// nothing more.
+///
+/// A **refusal** is one line on the thread card and nothing else: no turn, no
+/// model, no `claude`. That line is the whole discovery mechanism for the three
+/// commands warlock has (see [`Submitted::refusal`]), and it is put on the card
+/// rather than the footer because it answers something the reader typed, in the
+/// place their own words are, and because a footer line is gone by the next
+/// keystroke that says anything.
+///
+/// Cleared rather than kept in all three cases, which is the one place in here
+/// that can lose somebody's typing and is now honest: a submitted message is on
+/// the thread card a row above the field, so nothing is lost, and a field still
+/// holding the question that is being answered would be a field the next Enter
+/// asked it from again. A refused draft is the one thing that is genuinely
+/// thrown away, and the line it leaves says what to type instead — keeping it
+/// would leave the reader editing a word that has already been rejected in a
+/// field that looks exactly as it did before. Nothing is said on the footer
+/// either — a question and a refusal are both on screen, and warlock announcing
+/// what the reader can read would be warlock talking about itself.
 ///
 /// An empty or whitespace-only draft never arrives here at all — [`compose_for`]
 /// answers that Enter with the draft unchanged — so a submission with nothing in
@@ -1176,6 +1199,8 @@ fn apply_mouse(
 /// pact builds is what it always was, and a run is never told a word of this.
 ///
 /// [`compose_for`]: warlock_tui::compose_for
+/// [`submitted_for`]: warlock_tui::submitted_for
+/// [`Submitted::refusal`]: warlock_tui::Submitted::refusal
 fn apply_compose(
     app: &mut App,
     composer: &mut Composer,
@@ -1192,9 +1217,29 @@ fn apply_compose(
             // the turn alone, which is what makes "however the turn ends, the
             // field comes back" one line in the loop rather than a flag to unset
             // on five paths.
-            let message = composer.draft().to_owned();
+            let draft = composer.draft().to_owned();
             *composer = Composer::default();
-            chat.ask(app, &message, now);
+
+            match submitted_for(&draft) {
+                // The only arm that reaches the model, and it is the arm that
+                // was here before the other two existed.
+                Submitted::Message => chat.ask(app, &draft, now),
+                // Everything else stops here, without a question and without a
+                // turn. A recognised command is handed nowhere — this slice
+                // gives the three words no behaviour, and a command that opened
+                // a turn to do nothing would be a question the reader never
+                // asked — and a refusal has exactly one line to say, asked of
+                // the value rather than restated here, so the list of what
+                // exists is written down in one place.
+                said @ (Submitted::Brief
+                | Submitted::Write
+                | Submitted::Chat
+                | Submitted::Refused) => {
+                    if let Some(line) = said.refusal() {
+                        app.note(line, now);
+                    }
+                }
+            }
         }
     }
 }
@@ -1410,5 +1455,152 @@ mod tests {
         assert!(USAGE.contains("init"), "{USAGE}");
         assert!(USAGE.contains("config"), "{USAGE}");
         assert!(USAGE.starts_with("usage: warlock"), "{USAGE}");
+    }
+
+    /// What a submitted draft comes to, through the function the loop calls.
+    ///
+    /// [`submitted_for`]'s own tests say what each draft *is*; these say what
+    /// the loop then does with it, which is the thing that costs a turn when it
+    /// is wrong. Nothing here has a terminal, a network or a `claude`: the
+    /// command and refusal drafts never reach [`Chat::ask`] at all, and the one
+    /// test that does submit a message hands the conversation an agent whose
+    /// program does not exist, so the worker it starts finds nothing to run.
+    mod submitting {
+        use std::time::Instant;
+
+        use warlock_tui::{App, ChatAgent, Composed, Composer, Line, Submitted};
+
+        use super::super::apply_compose;
+        use crate::chatting::Chat;
+
+        /// A `claude` that is not there, so a turn that does start spawns
+        /// nothing. `pacting.rs` and `chatting.rs` build their failures the
+        /// same way.
+        const NOT_A_PROGRAM: &str = "/warlock/no/such/program";
+
+        /// A conversation with nothing asked and nothing runnable to ask.
+        fn conversation() -> Chat {
+            Chat::with_agent(ChatAgent::new().with_program(NOT_A_PROGRAM))
+        }
+
+        /// Submit `draft` from a fresh field, and hand back what the app, the
+        /// conversation and the field look like afterwards.
+        fn submit(draft: &str, now: Instant) -> (App, Chat, Composer) {
+            let mut app = App::default();
+            let mut chat = conversation();
+            let mut composer = Composer::new(draft);
+
+            apply_compose(&mut app, &mut composer, Composed::Submit, &mut chat, now);
+
+            (app, chat, composer)
+        }
+
+        /// Every row of the app's thread card, or none at all when nothing has
+        /// put a card there.
+        fn rows(app: &App, now: Instant) -> Vec<Line> {
+            app.thread()
+                .map(|thread| thread.lines(now))
+                .unwrap_or_default()
+        }
+
+        /// How many turns the thread holds, card or no card.
+        fn turns(app: &App) -> usize {
+            app.thread().map_or(0, |thread| thread.turns().len())
+        }
+
+        #[test]
+        fn a_command_word_clears_the_field_and_does_nothing_else() {
+            // The three words are recognised and handed nowhere: no question,
+            // no turn, and no row of their own on the card. Asserted against a
+            // copy of the whole app, so a command that quietly moved anything —
+            // a card, a message, a selection — fails here.
+            let now = Instant::now();
+            let untouched = App::default();
+
+            for draft in ["/brief", "/write", "/chat", "  /brief  "] {
+                let (app, chat, composer) = submit(draft, now);
+
+                assert_eq!(app, untouched, "{draft:?} changed something on screen");
+                assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
+                assert!(
+                    rows(&app, now).is_empty(),
+                    "{draft:?} put a row on the card"
+                );
+                assert!(!chat.answering(), "{draft:?} was asked of the model");
+                assert!(
+                    composer.draft().is_empty(),
+                    "{draft:?} was left in the field"
+                );
+            }
+        }
+
+        #[test]
+        fn a_refusal_is_exactly_one_note_and_never_a_turn() {
+            // The whole of what a missed command costs: one line on the card,
+            // in warlock's own voice, and not a question anybody paid for.
+            let now = Instant::now();
+            let refusal = Submitted::Refused
+                .refusal()
+                .expect("a refused draft has a line");
+
+            for draft in ["/breif", "/plan", "/BRIEF", "/", "/brief now", "/brief\nx"] {
+                let (app, chat, composer) = submit(draft, now);
+
+                assert_eq!(
+                    rows(&app, now),
+                    vec![Line::Note {
+                        text: refusal.to_owned()
+                    }],
+                    "{draft:?} did not leave exactly one note"
+                );
+                assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
+                assert!(!chat.answering(), "{draft:?} was asked of the model");
+                assert!(
+                    composer.draft().is_empty(),
+                    "{draft:?} was left in the field"
+                );
+            }
+        }
+
+        #[test]
+        fn a_message_submits_as_it_always_did() {
+            // The behaviour the classifier must not have changed: the words go
+            // on the card as the reader's own, one turn is opened, the question
+            // is out, and the field is empty behind it. A path is here too,
+            // because `/home/cole/notes` is a message and the reader who typed
+            // it is talking about a file.
+            let now = Instant::now();
+
+            for draft in [
+                "why nine passes?",
+                "/home/cole/notes",
+                "tell me about /brief",
+            ] {
+                let (app, chat, composer) = submit(draft, now);
+
+                assert_eq!(turns(&app), 1, "{draft:?} did not open one turn");
+                // The question as it was typed, and under it the clocked row a
+                // turn with nothing back yet draws — a live turn, which is
+                // exactly what a command and a refusal never leave.
+                assert_eq!(
+                    rows(&app, now),
+                    vec![
+                        Line::Said {
+                            text: draft.to_owned()
+                        },
+                        Line::Clocked {
+                            clock: "0:00".to_owned(),
+                            text: "waiting".to_owned()
+                        }
+                    ],
+                    "{draft:?} is not on the card as it was typed"
+                );
+                assert!(chat.answering(), "{draft:?} was never asked");
+                assert!(
+                    composer.draft().is_empty(),
+                    "{draft:?} was left in the field"
+                );
+            }
+        }
     }
 }

@@ -98,8 +98,10 @@ impl Chat {
     /// test can drive the very value the loop keeps — the agent and the turn
     /// together — against a stand-in program. A conversation whose failures
     /// could only be asserted through the pieces underneath it would be a
-    /// conversation nothing had ever run twice.
-    fn with_agent(agent: ChatAgent) -> Self {
+    /// conversation nothing had ever run twice — including the loop's own
+    /// submit path, which is why this is reachable from the binary's tests and
+    /// not only from this module's.
+    pub(crate) fn with_agent(agent: ChatAgent) -> Self {
         Self { agent, turn: None }
     }
 
@@ -605,7 +607,7 @@ mod tests {
             assert_eq!(app.message(), Some(ending.line().as_str()), "{ending:?}");
             let turn = app
                 .thread()
-                .and_then(|thread| thread.turns().last().cloned())
+                .and_then(|thread| thread.turns().last().map(|turn| (**turn).clone()))
                 .expect("the turn is on the card");
             assert_eq!(turn.ending(), Some(&ending));
             assert_eq!(turn.answer(), None);
