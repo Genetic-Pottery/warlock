@@ -1079,8 +1079,11 @@ mod tests {
         //
         // The `claude` is one that does not exist, so the four turns these
         // commands really start spawn nothing at all: no terminal, no network
-        // and no model.
+        // and no model. The repository is an empty temporary directory, which
+        // is a repository that has written no brief template: `/brief` reads
+        // for one, finds none, and states warlock's own shape.
         let base = Instant::now();
+        let repo = tempfile::tempdir().expect("a temporary directory");
         let mut app = App::default();
         let mut chat = Chat::with_agent(ChatAgent::new().with_program("/warlock/no/such/program"));
         let opening = words(&chat.agent);
@@ -1094,6 +1097,7 @@ mod tests {
                 &mut composer,
                 warlock_tui::Composed::Submit,
                 &mut chat,
+                repo.path(),
                 base,
             );
         }
