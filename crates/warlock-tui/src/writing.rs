@@ -20,13 +20,16 @@
 //! changes it or presses Enter. Nothing in that half can fail, which is why none
 //! of it returns a [`Result`].
 //!
-//! ## The directory is a constant here
+//! ## The directory is handed in
 //!
-//! [`BRIEFS_DIRECTORY`] is the built-in `docs/`, joined onto the repository
-//! root. The configurable output directory is `.warlock/briefs.toml`'s, a later
-//! slice's, and deliberately not this one's: nothing in this file reads a
-//! config, and the day the setting arrives it replaces one constant in one
-//! place.
+//! Where a brief goes is a parameter of both halves rather than a constant of
+//! this module: the event loop holds it as a local, settled once when brief mode
+//! is entered and held for the life of that mode, and hands it down with the
+//! reply. Nothing in here reads a config file, and nothing in here can fail for
+//! want of one — by the time `/write` asks for a path the directory is a string
+//! somebody else has already got hold of. It is joined onto the repository root
+//! exactly as the built-in `docs/` was, and the proposal is still spelled
+//! relative to that root.
 //!
 //! ## The unwrap comes before the title
 //!
@@ -148,13 +151,6 @@ use warlock_tui::{App, Edited, ScopeField, ScopePrompt, size};
 
 use crate::error::{Error, one_line};
 
-/// Where a brief is written, relative to the repository root.
-///
-/// The built-in default, and the whole of the answer in this slice: the
-/// directory named in `.warlock/briefs.toml` is a later one's, and until it
-/// lands this constant is the only place the answer is written down.
-pub(crate) const BRIEFS_DIRECTORY: &str = "docs";
-
 /// What the write prompt's window is headed with.
 ///
 /// Carried in [`ScopeField::directory`] — which this window never reads as a
@@ -199,7 +195,7 @@ const NOTHING_TO_WRITE: &str =
     "there is no answer on the conversation to write, so nothing was written";
 
 /// The path the write prompt opens holding, spelled relative to the repository
-/// root: `docs/warlock-brief-NN-slug.md`.
+/// root: `<directory>/warlock-brief-NN-slug.md`.
 ///
 /// The three rules in one line, in the order they depend on each other: the
 /// reply is unwrapped, the slug comes off the unwrapped document's first `# `
@@ -208,12 +204,15 @@ const NOTHING_TO_WRITE: &str =
 /// somebody reads and edits, and because it is the spelling the thread names
 /// the written file by afterwards.
 ///
-/// Reads `repo_root/docs` and nothing else, creates nothing, and is as happy
-/// with a directory that is not there as with an empty one.
-pub(crate) fn proposed_path(repo_root: &Path, reply: &str) -> String {
-    let number = spelled(next_number(&repo_root.join(BRIEFS_DIRECTORY)));
+/// `directory` is the caller's — see the module docs — and it is the one answer
+/// to two questions: where the file is proposed to go, and which directory's
+/// names the number is counted from. Reads `repo_root/directory` and nothing
+/// else, creates nothing, and is as happy with a directory that is not there as
+/// with an empty one.
+pub(crate) fn proposed_path(repo_root: &Path, directory: &str, reply: &str) -> String {
+    let number = spelled(next_number(&repo_root.join(directory)));
     let slug = slug_of(unfenced(reply));
-    format!("{BRIEFS_DIRECTORY}/{BRIEF_PREFIX}-{number}-{slug}.md")
+    format!("{directory}/{BRIEF_PREFIX}-{number}-{slug}.md")
 }
 
 /// The write prompt as it opens over `reply`: up, headed [`WRITE_HEADING`], and
@@ -226,12 +225,16 @@ pub(crate) fn proposed_path(repo_root: &Path, reply: &str) -> String {
 /// drain is what the proposal is made of, which is what keeps the path on screen
 /// about the very turn that just landed.
 ///
+/// `directory` comes the same way, off the loop, and is the value the mode was
+/// entered holding: nothing is read here to find it, which is what makes a
+/// window that opens over a finished document a window that cannot fail to open.
+///
 /// It refuses nothing and cannot fail. The path is a proposal in an editable
 /// field (see the module docs), so a reply with no title, a directory full of
-/// years, and a repository with no `docs/` at all each open a window with a line
-/// in it and no complaint anywhere.
-pub(crate) fn write_opened(repo_root: &Path, reply: &str) -> ScopePrompt {
-    ScopePrompt::open(WRITE_HEADING, proposed_path(repo_root, reply))
+/// years, and a repository with no output directory at all each open a window
+/// with a line in it and no complaint anywhere.
+pub(crate) fn write_opened(repo_root: &Path, directory: &str, reply: &str) -> ScopePrompt {
+    ScopePrompt::open(WRITE_HEADING, proposed_path(repo_root, directory, reply))
 }
 
 /// What one keystroke *inside* the write prompt comes to: the prompt the event
@@ -712,14 +715,25 @@ mod tests {
         tempfile::tempdir().expect("a temporary directory")
     }
 
-    /// `docs/` under `root` holding an empty file of each of `names`, which is
-    /// all the numbering ever looks at.
-    fn docs_holding(root: &Path, names: &[&str]) {
-        let docs = root.join("docs");
-        fs::create_dir_all(&docs).expect("makes the output directory");
+    /// The default output directory, which is the caller's answer everywhere
+    /// below but the one test about a repository that keeps its briefs
+    /// elsewhere.
+    const DOCS: &str = "docs";
+
+    /// `directory` under `root` holding an empty file of each of `names`, which
+    /// is all the numbering ever looks at.
+    fn holding(root: &Path, directory: &str, names: &[&str]) {
+        let output = root.join(directory);
+        fs::create_dir_all(&output).expect("makes the output directory");
         for name in names {
-            fs::write(docs.join(name), "").expect("writes a file into it");
+            fs::write(output.join(name), "").expect("writes a file into it");
         }
+    }
+
+    /// [`holding`] over the default directory, which is where all but one of
+    /// these tests put their names.
+    fn docs_holding(root: &Path, names: &[&str]) {
+        holding(root, DOCS, names);
     }
 
     /// The whole of a reply that is one document with one title line.
@@ -856,6 +870,7 @@ mod tests {
         assert_eq!(
             proposed_path(
                 repo.path(),
+                DOCS,
                 "```markdown\n# Scopes and sigils\n\nProse.\n```\n"
             ),
             "docs/warlock-brief-01-scopes-and-sigils.md"
@@ -869,7 +884,7 @@ mod tests {
         // The literal word, in the whole path, so the field opens on something
         // that reads as an invitation to type rather than as a bug.
         assert_eq!(
-            proposed_path(repo.path(), "Prose with no title anywhere in it.\n"),
+            proposed_path(repo.path(), DOCS, "Prose with no title anywhere in it.\n"),
             "docs/warlock-brief-01-untitled.md"
         );
     }
@@ -879,7 +894,7 @@ mod tests {
         let repo = a_repo();
 
         assert_eq!(
-            proposed_path(repo.path(), &titled("# ---")),
+            proposed_path(repo.path(), DOCS, &titled("# ---")),
             "docs/warlock-brief-01-untitled.md"
         );
     }
@@ -902,7 +917,7 @@ mod tests {
 
         assert_eq!(next_number(&repo.path().join("docs")), 13);
         assert_eq!(
-            proposed_path(repo.path(), &titled("# Scopes and sigils")),
+            proposed_path(repo.path(), DOCS, &titled("# Scopes and sigils")),
             "docs/warlock-brief-13-scopes-and-sigils.md"
         );
     }
@@ -914,7 +929,7 @@ mod tests {
         let repo = a_repo();
         assert_eq!(next_number(&repo.path().join("docs")), 1);
         assert_eq!(
-            proposed_path(repo.path(), &titled("# Foundations")),
+            proposed_path(repo.path(), DOCS, &titled("# Foundations")),
             "docs/warlock-brief-01-foundations.md"
         );
 
@@ -923,7 +938,7 @@ mod tests {
         docs_holding(repo.path(), &[]);
         assert_eq!(next_number(&repo.path().join("docs")), 1);
         assert_eq!(
-            proposed_path(repo.path(), &titled("# Foundations")),
+            proposed_path(repo.path(), DOCS, &titled("# Foundations")),
             "docs/warlock-brief-01-foundations.md"
         );
     }
@@ -956,8 +971,32 @@ mod tests {
         fs::write(repo.path().join("release-99.md"), "").expect("writes a file at the root");
 
         assert_eq!(
-            proposed_path(repo.path(), &titled("# At work")),
+            proposed_path(repo.path(), DOCS, &titled("# At work")),
             "docs/warlock-brief-05-at-work.md"
+        );
+    }
+
+    #[test]
+    fn the_directory_handed_in_is_both_the_path_and_what_the_number_is_counted_in() {
+        // A repository that keeps its briefs somewhere else: the whole of what
+        // the caller's directory changes, in one assertion. It is the first
+        // segment of the proposal, and it is the directory whose names the
+        // number comes off — so `plans/` holding an eighth brief proposes the
+        // ninth there, and the four documents sitting in `docs/` count for
+        // nothing because nothing is proposed into `docs/`.
+        let repo = a_repo();
+        docs_holding(repo.path(), &["red-brief-12-the-brief-workflow.md"]);
+        holding(repo.path(), "plans", &["warlock-brief-08-x.md"]);
+
+        assert_eq!(
+            proposed_path(repo.path(), "plans", &titled("# Scopes and sigils")),
+            "plans/warlock-brief-09-scopes-and-sigils.md"
+        );
+        // And a directory that is not there at all is the empty one's answer,
+        // wherever it is: nothing about the default is special.
+        assert_eq!(
+            proposed_path(repo.path(), "notes/briefs", &titled("# Foundations")),
+            "notes/briefs/warlock-brief-01-foundations.md"
         );
     }
 
@@ -969,7 +1008,7 @@ mod tests {
         docs_holding(repo.path(), &["warlock-brief-99-x.md"]);
 
         assert_eq!(
-            proposed_path(repo.path(), &titled("# Keeping up")),
+            proposed_path(repo.path(), DOCS, &titled("# Keeping up")),
             "docs/warlock-brief-100-keeping-up.md"
         );
     }
@@ -995,7 +1034,7 @@ mod tests {
         // repository is exactly as empty afterwards as it was before.
         let repo = a_repo();
 
-        let path = proposed_path(repo.path(), &titled("# Foundations"));
+        let path = proposed_path(repo.path(), DOCS, &titled("# Foundations"));
 
         assert_eq!(path, "docs/warlock-brief-01-foundations.md");
         assert!(!repo.path().join("docs").exists(), "the directory was made");
@@ -1491,6 +1530,7 @@ mod writes {
     /// the test's own.
     mod rounds {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use warlock_engine::DEFAULT_BRIEF_DIRECTORY;
         use warlock_tui::{Mode, ScopePrompt, edit_for};
 
         use super::super::{WRITE_HEADING, write_edit, write_opened};
@@ -1502,6 +1542,12 @@ mod writes {
         /// The reply the `/write` turn answered with in every round below: one
         /// document, with a title the slug is plainly made of.
         const REPLY: &str = "# Scopes and sigils\n\nA boundary somebody drew.\n";
+
+        /// Where the loop is holding briefs when it opens the window below: the
+        /// engine's default, which is what a session that has entered brief mode
+        /// and read nothing else is carrying. The value is handed down, never
+        /// looked up here — which is what these rounds are driving.
+        const DIRECTORY: &str = DEFAULT_BRIEF_DIRECTORY;
 
         /// Where that reply proposes to go in an empty repository: nothing is in
         /// `docs/` yet, so the number is the first one.
@@ -1540,7 +1586,7 @@ mod writes {
             let repo = a_repo();
 
             assert_eq!(
-                write_opened(repo.path(), REPLY),
+                write_opened(repo.path(), DIRECTORY, REPLY),
                 ScopePrompt::open(WRITE_HEADING, PROPOSED)
             );
             assert_eq!(
@@ -1559,7 +1605,7 @@ mod writes {
             let repo = a_repo();
             let mut app = app_answering(repo.path(), REPLY);
             let manifest = pacts(&["docs"]);
-            let mut prompt = write_opened(repo.path(), REPLY);
+            let mut prompt = write_opened(repo.path(), DIRECTORY, REPLY);
 
             for code in [
                 KeyCode::Backspace,
@@ -1600,7 +1646,7 @@ mod writes {
             let mut app = app_answering(repo.path(), REPLY);
             app.set_mode(Mode::Brief);
             let before = app.clone();
-            let prompt = write_opened(repo.path(), REPLY);
+            let prompt = write_opened(repo.path(), DIRECTORY, REPLY);
 
             let prompt = round(
                 &mut app,
@@ -1630,7 +1676,7 @@ mod writes {
             let repo = a_repo();
             let mut app = app_answering(repo.path(), REPLY);
             let manifest = pacts(&["docs"]);
-            let mut prompt = write_opened(repo.path(), REPLY);
+            let mut prompt = write_opened(repo.path(), DIRECTORY, REPLY);
             fs::create_dir_all(repo.path().join("docs")).expect("makes the output directory");
             fs::write(repo.path().join(PROPOSED), "somebody else's brief\n")
                 .expect("writes the file in the way");
@@ -1719,6 +1765,7 @@ mod writes {
         use std::time::Duration;
 
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use warlock_engine::DEFAULT_BRIEF_DIRECTORY;
         use warlock_tui::{ChatAgent, Composed, Composer, Line, Mode, ScopePrompt, edit_for};
 
         use super::super::{WRITE_HEADING, write_edit, write_opened};
@@ -1781,17 +1828,22 @@ mod writes {
         /// drain and becomes the window, and every other round comes back with
         /// nothing and leaves the window closed. Nothing here joins a thread,
         /// receives from a channel or waits on a child.
+        ///
+        /// `directory` comes in the way the loop's own bottom end has it: a
+        /// value settled turns ago, carried down to the one line that proposes a
+        /// path, so no round of this loop reads a file or can fail.
         fn rounds_until_answered(
             chat: &mut Chat,
             app: &mut App,
             repo_root: &Path,
+            directory: &str,
             now: Instant,
         ) -> ScopePrompt {
             let mut prompt = ScopePrompt::default();
             let waited = Instant::now();
             while chat.answering() && waited.elapsed() < AT_MOST {
                 if let Some(document) = chat.keep_up(app, now) {
-                    prompt = write_opened(repo_root, &document);
+                    prompt = write_opened(repo_root, directory, &document);
                 }
                 thread::sleep(Duration::from_millis(10));
             }
@@ -1814,6 +1866,10 @@ mod writes {
             let manifest = pacts(&["docs"]);
             let mut chat = Chat::with_agent(answering_with(DOCUMENT));
             let mut composer = Composer::new("/write");
+            // The loop's own local, as a session that entered brief mode is
+            // holding it: the default, settled at `/brief` and carried from here
+            // to the window without being looked at again.
+            let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
 
             // The reader's Enter at the foot of the panel, through the very
             // function the loop's composer arm calls.
@@ -1823,6 +1879,7 @@ mod writes {
                 Composed::Submit,
                 &mut chat,
                 repo.path(),
+                &mut brief_directory,
                 base,
             );
 
@@ -1831,7 +1888,8 @@ mod writes {
 
             // Then the rounds, until the answer lands and the window opens over
             // it — pre-filled, headed, and complaining about nothing.
-            let prompt = rounds_until_answered(&mut chat, &mut app, repo.path(), base);
+            let prompt =
+                rounds_until_answered(&mut chat, &mut app, repo.path(), &brief_directory, base);
 
             let field = prompt
                 .field()

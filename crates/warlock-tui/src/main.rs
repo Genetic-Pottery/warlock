@@ -213,7 +213,10 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::Size;
-use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
+use warlock_engine::{
+    BriefsError, DEFAULT_BRIEF_DIRECTORY, Manifest, Written, load_briefs, repository_root,
+    write_claude_md,
+};
 use warlock_tui::{
     App, CHAT_INSTRUCTION, ClaudeAgent, Composed, Composer, Focus, Mode, QuitConfirm, ScopePrompt,
     Submitted, TemplateError, WRITE_INSTRUCTION, brief_instruction, brief_template,
@@ -235,7 +238,7 @@ mod writing;
 use chatting::{Asked, Chat};
 use config::configure;
 use editing::edit_press;
-use error::Error;
+use error::{Error, one_line};
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Running, Work, apply_progress, pact_press, refresh_press, start_run};
 use scoping::{scope_edit, scope_press};
@@ -545,6 +548,20 @@ fn run() -> Result<(), Error> {
     // could swallow half a sentence into. Here, nothing a run does can reach it:
     // the keystrokes are the only thing that ever writes to it.
     let mut composer = Composer::default();
+    // Where a brief written from this conversation would go, relative to the
+    // repository root, and the only copy of it: the engine's built-in default
+    // as every session starts. It lives here with the two windows and the draft
+    // for their reason — it is state about this keystroke and the next one
+    // rather than about what warlock is showing, and an `App` that has never
+    // heard of it is an `App` that a restored copy cannot put an old answer
+    // back on.
+    //
+    // Read once, at `/brief`, and held for the life of the mode: `/write` is
+    // handed this string rather than looking anything up, so a document that has
+    // taken twenty turns to converge can never arrive at a window that will not
+    // open. What settles it is `apply_compose`'s `/brief` arm, which is also
+    // where anything that fails to be read has to fail.
+    let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
     // Which file the panel's document card is holding, and the only record of
     // it: `None` until the first `v` of the session that read something. It
     // lives here rather than on the app for the reason `mouse_captured` does —
@@ -641,6 +658,7 @@ fn run() -> Result<(), Error> {
                         prompt: &mut prompt,
                         path_prompt: &mut path_prompt,
                         composer: &mut composer,
+                        brief_directory: &mut brief_directory,
                         document: &mut document,
                         mouse_captured: &mut mouse_captured,
                     };
@@ -689,6 +707,7 @@ fn run() -> Result<(), Error> {
             &scope,
             &mut watched,
             &mut path_prompt,
+            &brief_directory,
         );
     }
 }
@@ -730,6 +749,9 @@ struct Pressing<'a> {
     path_prompt: &'a mut ScopePrompt,
     /// The draft under the panel, and the only copy of it.
     composer: &'a mut Composer,
+    /// Where a brief written from this conversation would go: settled at
+    /// `/brief` and read at `/write`, which is why one keystroke can move it.
+    brief_directory: &'a mut String,
     /// Which file the panel's document card is holding.
     document: &'a mut Option<PathBuf>,
     /// Whether the terminal is reporting its mouse.
@@ -1058,6 +1080,11 @@ fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result
         // handed the local above rather than reaching for anything on the app
         // — what is in the draft is not a fact about the tree.
         //
+        // The output directory goes in for the same reason and in the same
+        // shape: it is a local of the loop, `/brief` is the one thing that
+        // settles it, and this is where `/brief` is answered — so it goes in
+        // borrowed rather than being fetched from somewhere in there.
+        //
         // The last of the three is now a worker thread, so the agent and the
         // turn go in with it, and the instant the key was pressed goes in as
         // well for the pact key's reason: a turn is as old as the question
@@ -1070,6 +1097,7 @@ fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result
                 outcome,
                 pressing.chat,
                 &pressing.scope.repo_root,
+                pressing.brief_directory,
                 now,
             );
         }
@@ -1209,6 +1237,11 @@ fn draw_frame(
 /// land on screen — within one [`POLL_INTERVAL`] of when they were sent. It is
 /// read at the top rather than per call for the reason the frame reads its own:
 /// two readings a round would be two answers to one question.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the whole of what the bottom of one round has to keep up with, and \
+              the point of it is that the loop keeps up in one call"
+)]
 fn keep_up(
     pact: &mut Option<Running>,
     chat: &mut Chat,
@@ -1217,6 +1250,7 @@ fn keep_up(
     scope: &Scope,
     watched: &mut Watched,
     path_prompt: &mut ScopePrompt,
+    brief_directory: &str,
 ) {
     let now = Instant::now();
     let running = pact.is_some();
@@ -1236,8 +1270,14 @@ fn keep_up(
     // `claude` that is missing, a non-zero exit, a timeout and a cancel all
     // leave this line doing nothing: no window opens, no path is proposed, and
     // the ending is the one line the drain already put on the thread.
+    //
+    // The directory the path is proposed in comes in as a value the loop is
+    // already holding — settled at `/brief`, turns ago — so this line reads no
+    // file and has no failure to report. That is the whole of why it is a
+    // parameter: a window that opens over a finished document must be a window
+    // that opens.
     if let Some(document) = chat.keep_up(app, now) {
-        *path_prompt = write_opened(&scope.repo_root, &document);
+        *path_prompt = write_opened(&scope.repo_root, brief_directory, &document);
     }
 }
 
@@ -1409,6 +1449,60 @@ fn brief_asking(root: &Path) -> Result<String, TemplateError> {
     brief_template(root).map(|template| brief_instruction(&template))
 }
 
+/// The one line `/brief` costs when the repository's own `.warlock/briefs.toml`
+/// is there and cannot be had.
+///
+/// [`unreadable_template`]'s twin, in its wording and its shape, because the two
+/// are the same refusal about the two files `/brief` reads: the loader's own
+/// sentence — which names the file and quotes the parser (see [`BriefsError`]) —
+/// and what it cost, on one unclocked line where a refusal goes.
+///
+/// Flattened with [`one_line`] where that one is not, and only because the
+/// material differs: a `briefs.toml` that will not parse carries the TOML
+/// parser's multi-line diagnostic inside it, exactly as an unreadable
+/// `pacts.toml` does, and the thread card is one line per note. `error.rs` does
+/// the same to a manifest for the same reason.
+///
+/// The refusal, again, is the point. A `directory` that was written down is a
+/// place somebody meant, so warlock will not quietly aim twenty turns at
+/// `docs/` instead — a misspelled key is a line to go and fix rather than a
+/// silent write somewhere nobody asked for. Nothing else about the session
+/// moves: no mode, no turn, and the card is what it was with one line added.
+fn unreadable_briefs(error: &BriefsError) -> String {
+    format!(
+        "{} — /brief did nothing, so fix or remove the file and type it again",
+        one_line(&error.to_string())
+    )
+}
+
+/// Everything `/brief` has to read out of the repository at `root` before it can
+/// happen: the instruction to send, and the directory a `/write` in the mode it
+/// opens would propose.
+///
+/// The whole of the command's *load* in one place, and in one order, so that the
+/// arm below is a single question with a single refusal. Both files are optional
+/// and both are re-read at every `/brief`, which is what makes either of them
+/// edited with `e` between two briefs a file the second one is held to.
+///
+/// The template comes first, and that is the answer to a repository where both
+/// files are broken: the first failure stops the command, so what the reader is
+/// shown is one line about the template, and the `briefs.toml` line is what the
+/// next `/brief` says once that one is fixed. One refusal at a time is the rule
+/// the two must not disagree about — two notes for one keystroke would be
+/// warlock reporting its own reading order — and neither costs a turn.
+///
+/// # Errors
+///
+/// The finished line for whichever file could not be had, already worded for the
+/// card ([`unreadable_template`], [`unreadable_briefs`]) — the caller has a note
+/// to add and nothing to decide.
+fn brief_reading(root: &Path) -> Result<(String, String), String> {
+    let instruction = brief_asking(root).map_err(|error| unreadable_template(&error))?;
+    let directory = load_briefs(root).map_err(|error| unreadable_briefs(&error))?;
+
+    Ok((instruction, directory))
+}
+
 /// Do to the draft and to the keyboard whatever the composer just made of a
 /// key.
 ///
@@ -1456,6 +1550,15 @@ fn brief_asking(root: &Path) -> Result<String, TemplateError> {
 /// about a turn it is not performing. Nothing is waited for here — everything
 /// the turn produces arrives at the bottom of the loop, exactly as a run's does.
 ///
+/// It is also the one place `brief_directory` is written. Where a brief goes is
+/// a fact about the mode rather than about the write, so it is settled at
+/// `/brief`, on this thread, out of what the repository says at that keystroke,
+/// and then held: by the time `/write` proposes a path it is a string the loop
+/// has been carrying for the whole conversation (see [`keep_up`]). What says so
+/// is `.warlock/briefs.toml` — [`load_briefs`], read here and nowhere else,
+/// answering [`DEFAULT_BRIEF_DIRECTORY`] where the repository has written no
+/// file or no `directory`.
+///
 /// **`/brief`** is two things in the order the reader experiences them: the mode,
 /// and one ordinary turn. [`App::set_mode`] answers whether that was a *change*,
 /// and a change is worth exactly one unclocked note ([`BRIEF_NOTE`]) at the point
@@ -1467,20 +1570,26 @@ fn brief_asking(root: &Path) -> Result<String, TemplateError> {
 /// which is the point of typing it again when the register has drifted — and the
 /// reply lands under it like any other answer.
 ///
-/// What that instruction states the shape is, is read out of the repository at
-/// this keystroke and at no other moment: `repo_root` is the root the loop
-/// already holds, and [`brief_asking`] loads `.warlock/brief-template.md` under
-/// it fresh every time, so a template edited between two briefs is a template the
-/// second one is held to. Nothing about it is kept on the app, on the
-/// conversation or in the loop.
+/// What that instruction states the shape is, and where the document it converges
+/// on would land, are both read out of the repository at this keystroke and at no
+/// other moment: `repo_root` is the root the loop already holds, and
+/// [`brief_reading`] loads `.warlock/brief-template.md` and `.warlock/briefs.toml`
+/// under it fresh every time. So a template edited between two briefs is a
+/// template the second one is held to, and a `directory` edited between them is
+/// where the next `/write` proposes — with `e` and no restart. Neither file is
+/// read at startup, and nothing about the template is kept on the app, on the
+/// conversation or in the loop; the directory is kept in exactly one place, the
+/// loop local this function writes.
 ///
 /// The mode is set *before* the turn is sent, and that ordering is load-bearing:
 /// the effort the turn is asked at is read off the app when the worker starts
 /// (see [`Chat::say`](chatting::Chat::say)), so the instruction that enters the
 /// mode is itself asked at the mode's level. The *load* comes before both, which
-/// is the other half of the ordering: a template that is there and cannot be read
-/// is one line ([`unreadable_template`]) and nothing else — no mode, no turn, no
-/// `claude`, and never warlock's own shape quietly used in its place.
+/// is the other half of the ordering: a file that is there and cannot be read is
+/// one line ([`unreadable_template`], [`unreadable_briefs`]) and nothing else —
+/// no mode, no turn, no `claude`, and never warlock's own shape or its own
+/// default quietly used in its place. Where both files are broken it is still one
+/// line, the template's, because [`brief_reading`] stops at the first.
 ///
 /// **`/chat`** is the same shape pointed the other way, with one difference: it
 /// is refused when there is nothing to leave. In brief mode it leaves the mode,
@@ -1547,6 +1656,7 @@ fn apply_compose(
     outcome: Composed,
     chat: &mut Chat,
     repo_root: &Path,
+    brief_directory: &mut String,
     now: Instant,
 ) {
     match outcome {
@@ -1569,22 +1679,33 @@ fn apply_compose(
                 // asked at the level the mode it is entering is worth. The note
                 // is the change and not the command, so typing `/brief` twice
                 // costs two turns and one line.
-                Submitted::Brief => match brief_asking(repo_root) {
-                    // The shape is read from the repository at the keystroke —
-                    // before the mode is touched, because a template that
-                    // cannot be read is a command that does not happen at all
-                    // and a mode set first would be a register entered by a
-                    // refusal.
-                    Ok(instruction) => {
+                Submitted::Brief => match brief_reading(repo_root) {
+                    // Both files are read from the repository at the keystroke
+                    // — before the mode is touched, because a file that cannot
+                    // be read is a command that does not happen at all and a
+                    // mode set first would be a register entered by a refusal.
+                    Ok((instruction, directory)) => {
+                        // Where a `/write` in this mode will propose to put the
+                        // document, settled here and held until the next
+                        // `/brief` — which is what keeps `/write` from reading
+                        // anything and therefore from failing. It is what
+                        // `.warlock/briefs.toml` says, or the engine's default
+                        // where it says nothing, and it is written on every
+                        // `/brief` rather than left wherever the last one put
+                        // it: that is the whole of what makes the file edited
+                        // between two briefs take effect without a restart.
+                        *brief_directory = directory;
                         if app.set_mode(Mode::Brief) {
                             app.note(BRIEF_NOTE, now);
                         }
                         chat.say(app, BRIEF_COMMAND, &instruction, Asked::Answer, now);
                     }
-                    // A template that is there and cannot be had: one line, no
-                    // mode, no turn, and warlock's own shape never quietly put
-                    // in its place. See [`unreadable_template`].
-                    Err(error) => app.note(unreadable_template(&error), now),
+                    // A file that is there and cannot be had: one line, no
+                    // mode, no turn, and neither warlock's own shape nor its
+                    // own default quietly put in its place. See
+                    // [`brief_reading`], [`unreadable_template`] and
+                    // [`unreadable_briefs`].
+                    Err(line) => app.note(line, now),
                 },
                 // The same, one way only: there is no register to leave in chat
                 // mode, so the command says so on the card and stops. A turn
@@ -1847,14 +1968,16 @@ mod tests {
     /// program does not exist, so the worker it starts finds nothing to run.
     ///
     /// The repository these submit into is a temporary directory of the test's
-    /// own — `/brief` reads `.warlock/brief-template.md` under it at the
-    /// keystroke — and one that has nothing in it is a repository that has
-    /// written no template, which is the ordinary case.
+    /// own — `/brief` reads `.warlock/brief-template.md` and
+    /// `.warlock/briefs.toml` under it at the keystroke — and one that has
+    /// nothing in it is a repository that has written neither, which is the
+    /// ordinary case.
     mod submitting {
         use std::fs;
         use std::path::{Path, PathBuf};
         use std::time::{Duration, Instant};
 
+        use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs_path, load_briefs};
         use warlock_tui::{
             Activity, App, ChatAgent, Composed, Composer, DEFAULT_TEMPLATE, Ending, Line, Mode,
             Submitted, brief_instruction,
@@ -1862,9 +1985,10 @@ mod tests {
 
         use super::super::{
             ALREADY_CHATTING, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, NOT_BRIEFING,
-            WRITE_COMMAND, apply_compose, brief_asking,
+            WRITE_COMMAND, apply_compose, brief_asking, one_line,
         };
         use crate::chatting::Chat;
+        use crate::writing::write_opened;
 
         /// A `claude` that is not there, so a turn that does start spawns
         /// nothing. `pacting.rs` and `chatting.rs` build their failures the
@@ -1902,6 +2026,18 @@ mod tests {
             path
         }
 
+        /// Put `text` at `<root>/.warlock/briefs.toml` the way a person with an
+        /// editor would — the only way that file is ever written — and hand back
+        /// where it went.
+        fn write_briefs(root: &Path, text: &str) -> PathBuf {
+            let path = briefs_path(root);
+            fs::create_dir_all(path.parent().expect("the file has a directory"))
+                .expect("a `.warlock` directory");
+            fs::write(&path, text).expect("a briefs config");
+
+            path
+        }
+
         /// Submit `draft` from a fresh field, and hand back what the app, the
         /// conversation and the field look like afterwards.
         fn submit(draft: &str, now: Instant) -> (App, Chat, Composer) {
@@ -1932,8 +2068,40 @@ mod tests {
             draft: &str,
             now: Instant,
         ) -> Composer {
+            // The loop's own local, made fresh for the submit and dropped with
+            // it: these tests are about what a draft comes to, and where a brief
+            // would go is settled by `/brief` alone — the tests below that name
+            // an output directory are the ones that keep it.
+            let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
+
+            submit_briefing(root, app, chat, &mut brief_directory, draft, now)
+        }
+
+        /// [`submit_in`] over a `brief_directory` the caller keeps, for the
+        /// tests about where a brief would go.
+        ///
+        /// In the loop that local outlives every keystroke — one `/brief`
+        /// settles it and every `/write` after is handed it — so the tests about
+        /// re-reading a file hold one string across two submits, exactly as the
+        /// loop does.
+        fn submit_briefing(
+            root: &Path,
+            app: &mut App,
+            chat: &mut Chat,
+            brief_directory: &mut String,
+            draft: &str,
+            now: Instant,
+        ) -> Composer {
             let mut composer = Composer::new(draft);
-            apply_compose(app, &mut composer, Composed::Submit, chat, root, now);
+            apply_compose(
+                app,
+                &mut composer,
+                Composed::Submit,
+                chat,
+                root,
+                brief_directory,
+                now,
+            );
             composer
         }
 
@@ -1970,6 +2138,24 @@ mod tests {
         /// How many turns the thread holds, card or no card.
         fn turns(app: &App) -> usize {
             app.thread().map_or(0, |thread| thread.turns().len())
+        }
+
+        /// The path a `/write` would pre-fill for a mode pointed at
+        /// `directory`, through the very function the loop opens that window
+        /// with.
+        ///
+        /// What the setting actually comes to, rather than the string it was
+        /// read as: `writing.rs` owns the numbering and the slug, and this asks
+        /// it where the document would land. Spelled relative to the repository
+        /// root, as that window spells it.
+        fn proposal(root: &Path, directory: &str) -> String {
+            let prompt = write_opened(root, directory, "# A brief\n\nsomething was said.");
+
+            prompt
+                .field()
+                .expect("the write window opened")
+                .text()
+                .to_owned()
         }
 
         #[test]
@@ -2204,6 +2390,278 @@ mod tests {
 
             assert_eq!(app.mode(), Mode::Brief, "the mode was still not entered");
             assert_eq!(turns(&app), 1, "the second brief opened no turn");
+        }
+
+        #[test]
+        fn a_repository_that_says_nothing_briefs_into_the_default_directory() {
+            // Where a `/write` in this mode would put the document is a value
+            // this command settles and the loop then holds: `/write` reads
+            // nothing, so a brief that has taken twenty turns cannot arrive at a
+            // window that will not open. A repository with no
+            // `.warlock/briefs.toml` has stated no preference, which is the
+            // engine's default and nothing said on the card — and it is written
+            // here rather than left wherever a previous mode pointed.
+            let now = Instant::now();
+            let repo = a_root();
+            let mut app = App::default();
+            let mut chat = conversation();
+            let mut brief_directory = String::from("somewhere a previous mode was pointed");
+
+            submit_briefing(
+                repo.path(),
+                &mut app,
+                &mut chat,
+                &mut brief_directory,
+                "/brief",
+                now,
+            );
+
+            assert_eq!(app.mode(), Mode::Brief, "the mode was not entered");
+            assert_eq!(turns(&app), 1, "the brief did not open one turn");
+            assert_eq!(rows(&app, now).len(), 1 + 2, "something was said about it");
+            assert_eq!(brief_directory, DEFAULT_BRIEF_DIRECTORY);
+            // And that is a proposal under `docs/`, through the very function
+            // the loop opens the write window with.
+            let proposed = proposal(repo.path(), &brief_directory);
+            assert!(
+                proposed.starts_with("docs/"),
+                "the default is not where a write would go: {proposed}",
+            );
+        }
+
+        #[test]
+        fn the_repositorys_own_directory_is_what_brief_settles_on() {
+            // One key in one hand-written file, read at this keystroke: a
+            // repository that keeps its briefs in `plans/` gets `plans/`, and
+            // nothing about the command changes — the mode is entered, the note
+            // is the note, and the turn is the turn.
+            let now = Instant::now();
+            let repo = a_root();
+            write_briefs(repo.path(), "directory = \"plans\"\n");
+            let mut app = App::default();
+            let mut chat = conversation();
+            let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
+
+            submit_briefing(
+                repo.path(),
+                &mut app,
+                &mut chat,
+                &mut brief_directory,
+                "/brief",
+                now,
+            );
+
+            assert_eq!(app.mode(), Mode::Brief, "the mode was not entered");
+            assert_eq!(
+                rows(&app, now),
+                [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
+                "a setting that reads said something on the card",
+            );
+            assert_eq!(brief_directory, "plans");
+            let proposed = proposal(repo.path(), &brief_directory);
+            assert!(
+                proposed.starts_with("plans/"),
+                "the setting is not where a write would go: {proposed}",
+            );
+        }
+
+        #[test]
+        fn a_briefs_config_that_cannot_be_read_refuses_the_brief_and_changes_nothing_else() {
+            // The template's refusal, over the other file and for the same
+            // reason: a `directory` somebody wrote down is a place somebody
+            // meant, so warlock will not quietly aim twenty turns at `docs/`
+            // instead. One line naming the file and quoting the parser, and the
+            // session otherwise exactly as it was — no mode, no turn, no
+            // `claude`, nothing on the footer, and the directory the loop was
+            // carrying untouched.
+            let now = Instant::now();
+            let repo = a_root();
+            let path = write_briefs(repo.path(), "directory = [\n");
+            // The loader's own sentence, flattened the way the note flattens it:
+            // a `briefs.toml` that will not parse carries the TOML parser's
+            // multi-line diagnostic, and the card is one line a note.
+            let reason = one_line(
+                &load_briefs(repo.path())
+                    .expect_err("a config that is not TOML")
+                    .to_string(),
+            );
+            let mut app = App::default();
+            let mut chat = conversation();
+            let mut brief_directory = String::from("somewhere a previous mode was pointed");
+
+            let composer = submit_briefing(
+                repo.path(),
+                &mut app,
+                &mut chat,
+                &mut brief_directory,
+                "/brief",
+                now,
+            );
+
+            assert_eq!(app.mode(), Mode::Chat, "a refusal entered the mode");
+            assert_eq!(turns(&app), 0, "a refusal spent a turn");
+            assert!(!chat.answering(), "a refusal asked the model something");
+            assert!(composer.draft().is_empty());
+            assert_eq!(
+                app.message(),
+                None,
+                "a refusal said something on the footer"
+            );
+            assert_eq!(
+                brief_directory, "somewhere a previous mode was pointed",
+                "a refusal moved where a brief would go",
+            );
+
+            let said = rows(&app, now);
+            assert_eq!(said.len(), 1, "a refusal is one line: {said:?}");
+            let Some(Line::Note { text }) = said.first() else {
+                panic!("a refusal is a note of warlock's own: {said:?}");
+            };
+            assert!(
+                text.contains(&path.display().to_string()),
+                "the file is not named: {text}"
+            );
+            assert!(
+                text.contains(&reason),
+                "the parser's own words are not in it: {text}"
+            );
+            assert!(!text.contains('\n'), "the refusal wrapped: {text}");
+
+            // And the next `/brief`, once the file reads again, is an ordinary
+            // one: the refusal left nothing behind to recover from, and the
+            // setting that now parses is the setting the mode is entered with.
+            fs::write(&path, "directory = \"plans\"\n").expect("a briefs config");
+            submit_briefing(
+                repo.path(),
+                &mut app,
+                &mut chat,
+                &mut brief_directory,
+                "/brief",
+                now,
+            );
+
+            assert_eq!(app.mode(), Mode::Brief, "the mode was still not entered");
+            assert_eq!(turns(&app), 1, "the second brief opened no turn");
+            assert_eq!(brief_directory, "plans");
+        }
+
+        #[test]
+        fn two_broken_files_are_still_one_line_and_no_turn() {
+            // The decision when both files under `.warlock/` are broken: the
+            // load stops at the first, so the reader gets one refusal rather
+            // than two, and the second file's line is what the next `/brief`
+            // says once this one is fixed. Two notes for one keystroke would be
+            // warlock reporting its own reading order.
+            let now = Instant::now();
+            let repo = a_root();
+            let template = write_template(repo.path(), "");
+            fs::write(&template, [0x23, 0x20, 0xff, 0xfe, 0x0a]).expect("a template file");
+            write_briefs(repo.path(), "directroy = \"plans\"\n");
+            let mut app = App::default();
+            let mut chat = conversation();
+            let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
+
+            submit_briefing(
+                repo.path(),
+                &mut app,
+                &mut chat,
+                &mut brief_directory,
+                "/brief",
+                now,
+            );
+
+            assert_eq!(app.mode(), Mode::Chat, "a refusal entered the mode");
+            assert_eq!(turns(&app), 0, "a refusal spent a turn");
+            let said = rows(&app, now);
+            assert_eq!(said.len(), 1, "two files, two lines: {said:?}");
+            let Some(Line::Note { text }) = said.first() else {
+                panic!("a refusal is a note of warlock's own: {said:?}");
+            };
+            assert!(
+                text.contains(&template.display().to_string()),
+                "the first file read is not the one named: {text}"
+            );
+
+            // The template fixed, the misspelled key is what the next one says
+            // — and it is still one line and still no turn.
+            fs::write(&template, "## Ours\n\nsay the thing.").expect("a template file");
+            submit_briefing(
+                repo.path(),
+                &mut app,
+                &mut chat,
+                &mut brief_directory,
+                "/brief",
+                now,
+            );
+
+            assert_eq!(
+                app.mode(),
+                Mode::Chat,
+                "the second refusal entered the mode"
+            );
+            assert_eq!(turns(&app), 0, "the second refusal spent a turn");
+            let said = rows(&app, now);
+            assert_eq!(
+                said.len(),
+                2,
+                "the second refusal is one more line: {said:?}"
+            );
+            let Some(Line::Note { text }) = said.last() else {
+                panic!("a refusal is a note of warlock's own: {said:?}");
+            };
+            assert!(
+                text.contains(&briefs_path(repo.path()).display().to_string()),
+                "the second file is not named: {text}"
+            );
+            assert!(
+                text.contains("directroy"),
+                "the offending key is not named: {text}"
+            );
+            assert_eq!(
+                brief_directory, DEFAULT_BRIEF_DIRECTORY,
+                "a refusal moved where a brief would go",
+            );
+        }
+
+        #[test]
+        fn a_second_brief_re_reads_the_file_and_takes_the_new_directory() {
+            // The file is read at every `/brief` and never held, so editing it
+            // with `e` and typing the command again is the whole of changing
+            // where a brief lands — no restart, and nothing on the app or the
+            // conversation remembering the old answer.
+            let now = Instant::now();
+            let repo = a_root();
+            write_briefs(repo.path(), "directory = \"plans\"\n");
+            let mut app = App::default();
+            let mut chat = conversation();
+            let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
+
+            submit_briefing(
+                repo.path(),
+                &mut app,
+                &mut chat,
+                &mut brief_directory,
+                "/brief",
+                now,
+            );
+            assert_eq!(brief_directory, "plans");
+
+            write_briefs(repo.path(), "directory = \"notes/adr\"\n");
+            submit_briefing(
+                repo.path(),
+                &mut app,
+                &mut chat,
+                &mut brief_directory,
+                "/brief",
+                now,
+            );
+
+            assert_eq!(
+                brief_directory, "notes/adr",
+                "the second /brief re-read nothing"
+            );
+            assert_eq!(app.mode(), Mode::Brief);
+            assert_eq!(turns(&app), 2, "the second /brief cost no turn");
         }
 
         #[test]

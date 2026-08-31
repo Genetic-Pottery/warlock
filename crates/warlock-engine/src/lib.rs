@@ -16,6 +16,7 @@
 //! seam, and these tests need no `claude`, no network and no terminal.
 
 mod agent;
+mod briefs;
 mod claude_md;
 mod clock;
 mod decide;
@@ -46,6 +47,22 @@ pub use agent::File as AgentFile;
 pub use agent::Request as AgentRequest;
 /// What one model pass produced: the text the model wrote, unparsed.
 pub use agent::Response as AgentResponse;
+/// The directory briefs go in when a repository has not said otherwise,
+/// relative to its root: spelled once here, so nothing has to hard-code it.
+pub use briefs::DEFAULT_BRIEF_DIRECTORY;
+/// Everything that can stop the brief directory being read, each one naming the
+/// file. A missing file is deliberately not in here: an optional setting that
+/// was never set is the default, not a fault.
+pub use briefs::Error as BriefsError;
+/// Where a repository's brief settings live under its root:
+/// `.warlock/briefs.toml`, beside the manifest. A join; nothing here searches.
+pub use briefs::briefs_path;
+/// The directory a repository asks its briefs to be written in, relative to its
+/// root. Absent file or absent key is [`DEFAULT_BRIEF_DIRECTORY`]; anything
+/// else — not TOML, an unknown key, an absolute path, a `..` component — is a
+/// named error rather than a quiet fall back to it. Reads one file and writes
+/// nothing.
+pub use briefs::load_briefs;
 /// Everything that can stop a `CLAUDE.md` being written, each one naming the
 /// file. A missing file is not in here: that is the case where one is created.
 pub use claude_md::Error as ClaudeMdError;
