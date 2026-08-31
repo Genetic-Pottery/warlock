@@ -42,7 +42,7 @@
 //! so is knowledge the engine has no business holding and a turn cannot be
 //! understood without.
 //!
-//! The other three are [`BRIEF_INSTRUCTION`], [`CHAT_INSTRUCTION`] and
+//! The other three are [`brief_instruction`], [`CHAT_INSTRUCTION`] and
 //! [`WRITE_INSTRUCTION`], which are the same kind of knowledge said the same
 //! way: what warlock's two registers are, and what warlock asks for when it
 //! wants the artifact, are facts about warlock. They are not a second system
@@ -227,7 +227,7 @@ const EFFORT: &str = "low";
 /// [`EFFORT`]'s exception, and the only place in this file where thinking is
 /// bought rather than saved. `low` is the right price for what a pass and a
 /// question both are — describe material somebody already handed you — and the
-/// wrong price for the work [`BRIEF_INSTRUCTION`] asks for, which is proposing
+/// wrong price for the work [`brief_instruction`] asks for, which is proposing
 /// two or three ways a change could be made, costing each one, and saying which
 /// is wrong. That is reasoning the task genuinely needs, and a turn that comes
 /// back agreeable and shallow is the failure this constant exists to avoid.
@@ -319,7 +319,7 @@ const CHAT_TOOLS: &str = "Read,Grep,Glob";
 ///
 /// There is one of these for the life of the process, and a conversation has two
 /// things it can be: questions about the repository, or a conversation
-/// converging on a document (see [`BRIEF_INSTRUCTION`]). The mode is a message
+/// converging on a document (see [`brief_instruction`]). The mode is a message
 /// sent into the session already in progress, not a second prompt and not a
 /// second session — nothing here depends on whether the CLI re-applies a system
 /// prompt to a session it is continuing, because it is never asked to.
@@ -347,7 +347,34 @@ is the one thing you say that becomes bytes on disk; everything else is read in 
 a panel and then gone. Answer the message you are given in short, plain prose, \
 and say when you do not know.";
 
-/// What warlock says into the conversation when somebody types `/brief`.
+/// What the `/brief` instruction opens with: the artifact, before any shape.
+///
+/// Said first because it is the thing a conversation cannot infer from a
+/// skeleton: a document is coming, warlock writes it to a file, and nothing is
+/// written until it is asked for. A model handed a shape without an artifact
+/// starts filling the shape in.
+const BRIEF_ARTIFACT: &str = "This conversation is now aimed at one artifact: a \
+brief — a single markdown document about one change to this repository, which \
+warlock will write to a file when I ask for it. Nothing is written until I ask.";
+
+/// What the `/brief` instruction closes with: that arguing is the job, and the
+/// first question.
+///
+/// After the shape rather than before it, because it is the instruction that
+/// holds while the shape is still empty — write none of it yet, argue toward a
+/// decision instead — and because the last thing said is the thing a model does
+/// next.
+const BRIEF_ARGUMENT: &str = "Until I ask for the document, write no part of \
+it. Your job until then is to argue toward a decision: propose the two or three \
+ways the change could be made, say what each one costs — in work, in what it \
+forecloses, in what somebody has to maintain afterwards — recommend one and say \
+why, and push back when what I am describing is bigger, vaguer or more \
+expensive than I am saying it is. Agreement is not the product; a decision I \
+can defend is. Keep your replies short and ask one question at a time. Start \
+now by asking what the change is and what it is for.";
+
+/// What warlock says into the conversation when somebody types `/brief`, with
+/// `template` placed into it as the shape the document has to take.
 ///
 /// The mode, as the only thing a mode can be here: an ordinary turn, sent into
 /// the session already in progress. Not a second [`CHAT_SYSTEM_PROMPT`] and not
@@ -361,47 +388,66 @@ and say when you do not know.";
 ///
 /// * **What is being converged on.** A brief, one markdown document about one
 ///   change to this repository, which warlock writes to a file when it is asked
-///   for. A conversation that does not know it is aimed at an artifact is a
-///   conversation, and warlock already has one of those.
-/// * **The shape, stated inline.** Spelled out here rather than loaded from
-///   `.warlock/brief-template.md`, which is a later slice's file and does not
-///   exist yet: a shape asked for vaguely comes back as an essay, and the
-///   sections are what make the document checkable by somebody who did not sit
-///   through the conversation.
+///   for ([`BRIEF_ARTIFACT`]). A conversation that does not know it is aimed at
+///   an artifact is a conversation, and warlock already has one of those.
+/// * **The shape.** `template` verbatim, between two rules, because a shape
+///   asked for vaguely comes back as an essay and the sections are what make
+///   the document checkable by somebody who did not sit through the
+///   conversation. It arrives here as text rather than being spelled out here,
+///   so the shape is written down once — in
+///   [`brief_template`](crate::brief_template) — and read out in every place
+///   that has to state it.
 /// * **That arguing is the job.** Propose the ways it could be done, cost each
-///   one, recommend one, and push back — because the failure this mode has is
-///   not a wrong document, it is an agreeable one. A model that says yes to
-///   every idea produces a brief that records what was already believed, which
-///   is a transcript with headings.
+///   one, recommend one, and push back ([`BRIEF_ARGUMENT`]) — because the
+///   failure this mode has is not a wrong document, it is an agreeable one. A
+///   model that says yes to every idea produces a brief that records what was
+///   already believed, which is a transcript with headings.
 ///
 /// It ends by asking the first question, so the reply to `/brief` is the model
 /// opening the conversation rather than a paragraph agreeing to be helpful.
 /// Sent as a turn, it steers less hard than a system prompt would and the
 /// register can drift over many turns; the remedy is typing `/brief` again,
 /// which re-sends this, and not a second session.
-pub const BRIEF_INSTRUCTION: &str = "This conversation is now aimed at one \
-artifact: a brief — a single markdown document about one change to this \
-repository, which warlock will write to a file when I ask for it. Nothing is \
-written until I ask.\n\nThe document takes this shape and no other: a `# ` \
-title line naming the change; then prose stating the problem — what is wrong \
-now, in this repository, naming the files and the behaviour; then `## \
-Outcome`, what somebody sees once the change is made; then `## Success \
-criteria`, each one a fact that can be checked as done or not done; then `## \
-Constraints`, what must not change and what the work may not reach for; then \
-`## Out of scope`, named and refused rather than left unsaid. No other \
-sections, and no plan of which files to edit.\n\nUntil I ask for the document, \
-write no part of it. Your job until then is to argue toward a decision: \
-propose the two or three ways the change could be made, say what each one \
-costs — in work, in what it forecloses, in what somebody has to maintain \
-afterwards — recommend one and say why, and push back when what I am \
-describing is bigger, vaguer or more expensive than I am saying it is. \
-Agreement is not the product; a decision I can defend is. Keep your replies \
-short and ask one question at a time. Start now by asking what the change is \
-and what it is for.";
+///
+/// # A template that says nothing
+///
+/// A template with nothing in it drops the middle paragraph and its rules
+/// outright, so what goes in is the artifact and the argument and no mention of
+/// a shape at all. That is a repository saying the model is to be given no
+/// skeleton, and the one thing this must not do about it is supply one:
+/// warlock's own shape put back here would be exactly the document the emptied
+/// file was refusing. Nothing else is checked, parsed or trimmed — a template
+/// full of nonsense is the user's business, and it is placed as it was written.
+///
+/// ```
+/// use warlock_tui::brief_instruction;
+///
+/// let asking = brief_instruction("## Outcome\n\nWhat somebody sees.");
+///
+/// assert!(asking.contains("## Outcome"));
+/// assert!(asking.ends_with("what the change is and what it is for."));
+/// ```
+#[must_use]
+pub fn brief_instruction(template: &str) -> String {
+    // Rules rather than a code fence: a template is markdown and may hold
+    // fences of its own, and a delimiter a document can close early is a
+    // delimiter that puts half the shape outside the shape.
+    let shape = if template.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nThe document takes the shape between the two rules below and \
+             no other. It is a skeleton to fill in and not text to \
+             copy.\n\n---\n\n{template}\n\n---"
+        )
+    };
+
+    format!("{BRIEF_ARTIFACT}{shape}\n\n{BRIEF_ARGUMENT}")
+}
 
 /// What warlock says into the conversation when somebody types `/chat`.
 ///
-/// [`BRIEF_INSTRUCTION`]'s counterpart and its exact mirror: the same mechanism
+/// [`brief_instruction`]'s counterpart and its exact mirror: the same mechanism
 /// — one ordinary turn into the same session — pointed the other way. A mode
 /// entered by saying so has to be left by saying so, because nothing else in the
 /// process ever told the model the register changed.
@@ -422,7 +468,7 @@ and saying when you do not know. Wait for the next question.";
 /// What warlock says into the conversation when somebody types `/write`.
 ///
 /// The third of the three, and the only one that asks for the artifact rather
-/// than for a register. [`BRIEF_INSTRUCTION`] said a document would be asked for
+/// than for a register. [`brief_instruction`] said a document would be asked for
 /// and that nothing is written until it is; this is that asking, sent the same
 /// way — one ordinary turn into the session already in progress — so the reply
 /// lands on the card as an answer like any other and warlock, not the model,
@@ -436,9 +482,10 @@ and saying when you do not know. Wait for the next question.";
 ///   courteous sentence in the artifact, and warlock parses nothing and strips
 ///   nothing to find the document inside the reply.
 /// * **The shape, restated inline.** The same sections
-///   [`BRIEF_INSTRUCTION`] named, said again here rather than referred back to.
-///   It reads no template file and no `.warlock/` file — those are a later
-///   slice's and do not exist — and by this point the shape is twenty turns
+///   [`brief_instruction`] placed, said again here rather than referred back
+///   to. It states them itself rather than reading the template
+///   [`brief_instruction`] was handed — a later slice's job — and by this point
+///   the shape is twenty turns
 ///   behind in a long conversation, which is exactly where a model's memory of
 ///   an instruction goes vague. Two copies of a shape that must not drift apart
 ///   is the cost, and it is cheaper than a document that quietly grew a
@@ -2257,10 +2304,11 @@ mod tests {
 
     use super::stream;
     use super::{
-        Activities, Activity, BRIEF_EFFORT, BRIEF_INSTRUCTION, CHAT_INSTRUCTION,
-        CHAT_SYSTEM_PROMPT, Cancel, ChatAgent, ClaudeAgent, EFFORT, INVOCATION_TIMEOUT, MODEL,
-        OsString, SYSTEM_PROMPT, WRITE_INSTRUCTION, or_default, render, session_id,
+        Activities, Activity, BRIEF_EFFORT, CHAT_INSTRUCTION, CHAT_SYSTEM_PROMPT, Cancel,
+        ChatAgent, ClaudeAgent, EFFORT, INVOCATION_TIMEOUT, MODEL, OsString, SYSTEM_PROMPT,
+        WRITE_INSTRUCTION, brief_instruction, or_default, render, session_id,
     };
+    use crate::template::DEFAULT_TEMPLATE;
     use warlock_engine::{AgentChildDocument, AgentFile};
 
     /// A name no directory on `PATH` can hold, so the lookup is guaranteed to
@@ -2887,11 +2935,13 @@ mod tests {
     #[test]
     fn the_two_instructions_are_the_mode_said_each_way() {
         // The brief instruction has three jobs, and a test per job: name the
-        // artifact, state the shape inline — there is no template file to load
-        // and there is not meant to be one yet — and say that arguing is the
-        // work.
-        assert!(BRIEF_INSTRUCTION.contains("brief"));
-        assert!(BRIEF_INSTRUCTION.contains("markdown document"));
+        // artifact, place the shape it was handed, and say that arguing is the
+        // work. Composed here with the built-in shape, which is what a
+        // repository that has written no template of its own is given.
+        let briefing = brief_instruction(DEFAULT_TEMPLATE);
+
+        assert!(briefing.contains("brief"));
+        assert!(briefing.contains("markdown document"));
         for section in [
             "## Outcome",
             "## Success criteria",
@@ -2899,7 +2949,7 @@ mod tests {
             "## Out of scope",
         ] {
             assert!(
-                BRIEF_INSTRUCTION.contains(section),
+                briefing.contains(section),
                 "{section:?} is missing from the shape the brief must take",
             );
         }
@@ -2911,15 +2961,17 @@ mod tests {
             "Agreement is not the product",
         ] {
             assert!(
-                BRIEF_INSTRUCTION.contains(said),
+                briefing.contains(said),
                 "{said:?} is missing: the instruction asks for agreement rather than argument",
             );
         }
         // It ends by asking, so the reply to the command is the model's opening
         // question rather than a paragraph agreeing to help.
-        assert!(BRIEF_INSTRUCTION.contains("Start now by asking"));
-        // It does not load a template that does not exist yet.
-        assert!(!BRIEF_INSTRUCTION.contains(".warlock"));
+        assert!(briefing.contains("Start now by asking"));
+        // The shape is a shape the model is given, never a file it is sent to
+        // read: warlock loads the template and the model never hears where
+        // from.
+        assert!(!briefing.contains(".warlock"));
 
         // And the matching instruction back, which undoes each of the three.
         for said in [
@@ -2933,10 +2985,10 @@ mod tests {
                 "{said:?} is missing from the instruction that leaves brief mode",
             );
         }
-        assert_ne!(BRIEF_INSTRUCTION, CHAT_INSTRUCTION);
+        assert_ne!(briefing, CHAT_INSTRUCTION);
         // Neither is a system prompt, and neither is ever passed as one: they go
         // in on stdin as an ordinary turn.
-        for instruction in [BRIEF_INSTRUCTION, CHAT_INSTRUCTION] {
+        for instruction in [briefing.as_str(), CHAT_INSTRUCTION] {
             assert_ne!(instruction, CHAT_SYSTEM_PROMPT);
             assert!(
                 !turn_args(&ChatAgent::new())
@@ -2944,6 +2996,64 @@ mod tests {
                     .any(|word| word == instruction),
                 "an instruction reached the argument vector",
             );
+        }
+    }
+
+    #[test]
+    fn the_shape_the_brief_instruction_states_is_the_template_it_was_handed() {
+        // A stand-in nothing else in the crate says, so what comes back can
+        // only have come from the argument: this composes a string and reads
+        // no file, no repository and no default.
+        const SHAPE: &str = "# say it in haiku\n\n## Syllables\n\nFive, seven, five.";
+
+        let asking = brief_instruction(SHAPE);
+
+        assert!(
+            asking.contains(SHAPE),
+            "the template was not placed verbatim: {asking}",
+        );
+        assert!(
+            !asking.contains("## Success criteria"),
+            "warlock's own shape arrived beside the repository's: {asking}",
+        );
+
+        // In the order the three parts stop being guesses: the artifact, then
+        // the shape it takes, then the work until it is asked for.
+        let artifact = asking.find("one artifact").expect("the artifact named");
+        let shape = asking.find(SHAPE).expect("the shape stated");
+        let argument = asking
+            .find("argue toward a decision")
+            .expect("the argument asked for");
+
+        assert!(
+            artifact < shape && shape < argument,
+            "out of order: {asking}"
+        );
+        assert!(asking.ends_with("what the change is and what it is for."));
+    }
+
+    #[test]
+    fn a_template_that_says_nothing_leaves_the_instruction_saying_nothing_about_shape() {
+        // The emptied file is a repository asking for no skeleton, and the one
+        // thing this must not do is hand back warlock's own. Whitespace is the
+        // same statement typed less carefully.
+        for template in ["", "   \n\n\t", "\n"] {
+            let asking = brief_instruction(template);
+
+            assert!(
+                !asking.contains("## Outcome"),
+                "a shape was invented for an empty template: {asking}",
+            );
+            assert!(
+                !asking.contains("shape"),
+                "an empty template still left a shape paragraph: {asking}",
+            );
+            assert!(!asking.contains("---"), "empty rules with nothing between");
+            // What is left is still the two things that do not come from a
+            // template: the artifact, and that arguing is the job.
+            assert!(asking.starts_with("This conversation is now aimed at"));
+            assert!(asking.contains("argue toward a decision"));
+            assert!(asking.ends_with("what the change is and what it is for."));
         }
     }
 
@@ -2988,7 +3098,7 @@ mod tests {
 
         // And it is an instruction like the other two: its own words, never a
         // system prompt, and never a word of the argument vector.
-        assert_ne!(WRITE_INSTRUCTION, BRIEF_INSTRUCTION);
+        assert_ne!(WRITE_INSTRUCTION, brief_instruction(DEFAULT_TEMPLATE));
         assert_ne!(WRITE_INSTRUCTION, CHAT_INSTRUCTION);
         assert_ne!(WRITE_INSTRUCTION, CHAT_SYSTEM_PROMPT);
         assert!(

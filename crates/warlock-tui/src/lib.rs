@@ -247,10 +247,6 @@ pub use claude::Activity;
 /// document: a level above the one a question runs at, still overridden by
 /// `WARLOCK_EFFORT`.
 pub use claude::BRIEF_EFFORT;
-/// What warlock says into the conversation already in progress when somebody
-/// asks for brief mode: the artifact, the shape it takes, and that the job is to
-/// argue toward a decision rather than to agree.
-pub use claude::BRIEF_INSTRUCTION;
 /// The same instruction the other way: no artifact, no shape, and back to
 /// answering questions about the repository as they come.
 pub use claude::CHAT_INSTRUCTION;
@@ -271,6 +267,13 @@ pub use claude::INVOCATION_TIMEOUT;
 /// document as the entire reply, in the shape restated inline, and the decision
 /// rather than a summary of the conversation.
 pub use claude::WRITE_INSTRUCTION;
+/// What warlock says into the conversation already in progress when somebody
+/// asks for brief mode, given the shape the document has to take: the artifact,
+/// that template placed verbatim, and that the job is to argue toward a
+/// decision rather than to agree. A template with nothing in it composes an
+/// instruction that says nothing about shape rather than one carrying
+/// warlock's own.
+pub use claude::brief_instruction;
 /// The colour a node state is drawn in.
 pub use colour::colour_for;
 /// The most rows the composer is ever drawn in, however long the draft gets.
@@ -316,6 +319,11 @@ pub use prompt::edit_for;
 pub use submission::Submitted;
 /// What a draft submitted at the composer means, given nothing but the draft.
 pub use submission::submitted_for;
+/// The shape a brief takes when the repository has written none of its own:
+/// warlock's compiled-in skeleton, and what [`brief_template`] answers with for
+/// a repository that has no `.warlock/brief-template.md`. Exported for the
+/// caller that has to state a shape with no repository root in its hand.
+pub use template::DEFAULT_TEMPLATE;
 /// A brief template that is there and cannot be read, naming the file and what
 /// the filesystem said about it in one line. A missing file is not in here:
 /// that is the case the built-in shape answers.

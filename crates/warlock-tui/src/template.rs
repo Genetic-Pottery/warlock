@@ -67,7 +67,11 @@ const TEMPLATE_FILE: &str = "brief-template.md";
 /// the example's words, and the sections stop being questions the conversation
 /// has to answer. So each heading here is followed by what belongs under it and
 /// nothing that could be mistaken for content.
-const DEFAULT_TEMPLATE: &str = "# A title line naming the change\n\n\
+///
+/// Public because a caller that has no repository root in its hand still has to
+/// be able to state a shape — [`brief_template`] is how a repository's own is
+/// reached, and this is the answer that function gives when there is none.
+pub const DEFAULT_TEMPLATE: &str = "# A title line naming the change\n\n\
 Open with the problem, in prose and before any heading: what is wrong now, in \
 this repository, naming the files and the behaviour. Say what it costs to \
 leave it alone. Do not describe the document itself.\n\n\

@@ -215,9 +215,9 @@ use ratatui::crossterm::execute;
 use ratatui::layout::Size;
 use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
 use warlock_tui::{
-    App, BRIEF_INSTRUCTION, CHAT_INSTRUCTION, ClaudeAgent, Composed, Composer, Focus, Mode,
-    QuitConfirm, ScopePrompt, Submitted, WRITE_INSTRUCTION, composer_on_screen, draw, panel_height,
-    panel_width, submitted_for, tree_height,
+    App, CHAT_INSTRUCTION, ClaudeAgent, Composed, Composer, DEFAULT_TEMPLATE, Focus, Mode,
+    QuitConfirm, ScopePrompt, Submitted, WRITE_INSTRUCTION, brief_instruction, composer_on_screen,
+    draw, panel_height, panel_width, submitted_for, tree_height,
 };
 
 mod chatting;
@@ -1301,7 +1301,7 @@ fn apply_mouse(
 /// The word the reader typed, spelled here rather than taken from the draft: a
 /// draft is trimmed and matched by [`submitted_for`], so `"  /brief  "` and
 /// `"/brief"` are one command and have to read as one row. What is actually sent
-/// is [`BRIEF_INSTRUCTION`] and [`CHAT_INSTRUCTION`], which the card never shows
+/// is [`brief_instruction`] and [`CHAT_INSTRUCTION`], which the card never shows
 /// (see [`Chat::say`](chatting::Chat::say)).
 const BRIEF_COMMAND: &str = "/brief";
 /// `/chat` as the card shows it. See [`BRIEF_COMMAND`].
@@ -1405,7 +1405,7 @@ const NOT_BRIEFING: &str = "/write is only in brief mode — /brief enters it";
 /// and a change is worth exactly one unclocked note ([`BRIEF_NOTE`]) at the point
 /// in the history the command was typed — where a `/brief` typed in brief mode is
 /// a re-send with nothing new to say about the register and adds none. Then the
-/// turn, whichever it was: [`BRIEF_INSTRUCTION`] goes into the conversation
+/// turn, whichever it was: [`brief_instruction`] goes into the conversation
 /// already in progress through the very path a typed message takes, shown on the
 /// card as [`BRIEF_COMMAND`] and never as the paragraph. So it costs a turn every
 /// time — which is the point of typing it again when the register has drifted —
@@ -1506,7 +1506,16 @@ fn apply_compose(
                     if app.set_mode(Mode::Brief) {
                         app.note(BRIEF_NOTE, now);
                     }
-                    chat.say(app, BRIEF_COMMAND, BRIEF_INSTRUCTION, Asked::Answer, now);
+                    // The shape the instruction states is composed here from
+                    // the built-in template, which is what a repository that
+                    // has written none of its own gets. Reading
+                    // `.warlock/brief-template.md` at the keystroke — and
+                    // refusing the command when it is there and cannot be read
+                    // — needs the repository root this function has never been
+                    // handed, and is the next slice's.
+                    let instruction = brief_instruction(DEFAULT_TEMPLATE);
+
+                    chat.say(app, BRIEF_COMMAND, &instruction, Asked::Answer, now);
                 }
                 // The same, one way only: there is no register to leave in chat
                 // mode, so the command says so on the card and stops. A turn
