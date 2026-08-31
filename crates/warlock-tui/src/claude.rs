@@ -34,13 +34,22 @@
 //! Warlock's writers are the pact, the refresh, the manifest and the scope key,
 //! and a chat box is not one of them.
 //!
-//! The rule about prompts holds for a turn, with one named exception. A pass's
+//! The rule about prompts holds for a turn, with named exceptions. A pass's
 //! text is the engine's and is passed through untouched; a turn's message is the
 //! reader's and is passed through untouched too. What this file does decide is
 //! [`CHAT_SYSTEM_PROMPT`] — what this program is and what the tree on screen
 //! means — which is context about *warlock* rather than about a repository, and
 //! so is knowledge the engine has no business holding and a turn cannot be
 //! understood without.
+//!
+//! The other two are [`BRIEF_INSTRUCTION`] and [`CHAT_INSTRUCTION`], which are
+//! the same kind of knowledge said the same way: what warlock's two registers
+//! are is a fact about warlock. They are not a second system prompt and are
+//! never passed as one — each is sent as an ordinary turn into the session
+//! already in progress, so a mode change costs one message and never the
+//! conversation, and the effort those turns are asked at
+//! ([`at_effort`](ChatAgent::at_effort), [`BRIEF_EFFORT`]) is the only word of
+//! the argument vector a mode moves.
 //!
 //! Everything after the spawn is one piece of code for both, [`invoke`], because
 //! the deadlocks below are the same deadlocks whichever kind of run is in flight.
@@ -212,6 +221,24 @@ const MODEL: &str = "claude-sonnet-5";
 /// that adds up.
 const EFFORT: &str = "low";
 
+/// How hard a turn thinks once the conversation is aimed at a document.
+///
+/// [`EFFORT`]'s exception, and the only place in this file where thinking is
+/// bought rather than saved. `low` is the right price for what a pass and a
+/// question both are — describe material somebody already handed you — and the
+/// wrong price for the work [`BRIEF_INSTRUCTION`] asks for, which is proposing
+/// two or three ways a change could be made, costing each one, and saying which
+/// is wrong. That is reasoning the task genuinely needs, and a turn that comes
+/// back agreeable and shallow is the failure this constant exists to avoid.
+///
+/// One step up rather than to the CLI's own `high`, for the reason `low` was
+/// picked in the first place: the cost of a level is paid on *every* turn of a
+/// conversation that runs to twenty of them, and the cheap direction to be wrong
+/// in is the one a reader can see and fix. `medium` is visibly more argument
+/// than `low` and still not a bill nobody chose; a reader who wants more says so
+/// with [`EFFORT_VAR`], which overrides this exactly as it overrides `low`.
+pub const BRIEF_EFFORT: &str = "medium";
+
 /// The system prompt a pass runs under, in place of the CLI's own.
 ///
 /// The largest single saving here, and the least obvious. `claude` is a coding
@@ -286,6 +313,23 @@ const CHAT_TOOLS: &str = "Read,Grep,Glob";
 /// than an edit to a repository. It is still the least that can be said, and it
 /// is still not a second copy of anything — the engine's prompt is about
 /// documents, and this is about a conversation.
+///
+/// # Why it covers two registers
+///
+/// There is one of these for the life of the process, and a conversation has two
+/// things it can be: questions about the repository, or a conversation
+/// converging on a document (see [`BRIEF_INSTRUCTION`]). The mode is a message
+/// sent into the session already in progress, not a second prompt and not a
+/// second session — nothing here depends on whether the CLI re-applies a system
+/// prompt to a session it is continuing, because it is never asked to.
+///
+/// Which is why this string can no longer end "nothing you say is put in a
+/// file": that was true when a turn was only ever an answer on a panel, and
+/// false the moment a document can be asked for. What replaces it is narrower
+/// and true in both registers — the model has no tool that writes and never
+/// chooses a path, and the one exception is warlock copying an asked-for
+/// document verbatim into a file warlock names. A model told that nothing it
+/// says can reach a file is a model that hedges when it is asked for the file.
 const CHAT_SYSTEM_PROMPT: &str = "You are answering questions inside warlock, a \
 terminal program that shows one repository as a tree of directories. A pacted \
 directory has a WARLOCK.md describing it: warlock draws that directory green \
@@ -293,9 +337,86 @@ while the document is newer than everything beneath it, yellow once anything \
 under it has moved, and grey for a directory nobody has pacted. The person \
 asking is looking at that tree, and the repository it is a tree of is the one \
 you are running in — consult it with the tools you have when a question needs \
-it. You cannot change that repository, and nothing you say is put in a file. \
-Answer the message you are given in short, plain prose, and say when you do not \
-know.";
+it. You cannot change that repository: you have no tool that writes, and you \
+never choose where anything goes. There is one exception and it is warlock's \
+doing rather than yours — when the conversation has been converging on a \
+document and you are asked for that document in the shape agreed, your whole \
+reply is copied verbatim into a file whose path warlock decides. That document \
+is the one thing you say that becomes bytes on disk; everything else is read in \
+a panel and then gone. Answer the message you are given in short, plain prose, \
+and say when you do not know.";
+
+/// What warlock says into the conversation when somebody types `/brief`.
+///
+/// The mode, as the only thing a mode can be here: an ordinary turn, sent into
+/// the session already in progress. Not a second [`CHAT_SYSTEM_PROMPT`] and not
+/// a second [`Session`] — the alternative was a fresh prompt on a resumed id,
+/// which rests on CLI behaviour nobody documents, and whose failure mode is a
+/// new session, thrown at exactly the moment twenty turns of conversation have
+/// become the material the document is made of.
+///
+/// Three things it has to say, and it says them in this order because that is
+/// the order they stop being guesses:
+///
+/// * **What is being converged on.** A brief, one markdown document about one
+///   change to this repository, which warlock writes to a file when it is asked
+///   for. A conversation that does not know it is aimed at an artifact is a
+///   conversation, and warlock already has one of those.
+/// * **The shape, stated inline.** Spelled out here rather than loaded from
+///   `.warlock/brief-template.md`, which is a later slice's file and does not
+///   exist yet: a shape asked for vaguely comes back as an essay, and the
+///   sections are what make the document checkable by somebody who did not sit
+///   through the conversation.
+/// * **That arguing is the job.** Propose the ways it could be done, cost each
+///   one, recommend one, and push back — because the failure this mode has is
+///   not a wrong document, it is an agreeable one. A model that says yes to
+///   every idea produces a brief that records what was already believed, which
+///   is a transcript with headings.
+///
+/// It ends by asking the first question, so the reply to `/brief` is the model
+/// opening the conversation rather than a paragraph agreeing to be helpful.
+/// Sent as a turn, it steers less hard than a system prompt would and the
+/// register can drift over many turns; the remedy is typing `/brief` again,
+/// which re-sends this, and not a second session.
+pub const BRIEF_INSTRUCTION: &str = "This conversation is now aimed at one \
+artifact: a brief — a single markdown document about one change to this \
+repository, which warlock will write to a file when I ask for it. Nothing is \
+written until I ask.\n\nThe document takes this shape and no other: a `# ` \
+title line naming the change; then prose stating the problem — what is wrong \
+now, in this repository, naming the files and the behaviour; then `## \
+Outcome`, what somebody sees once the change is made; then `## Success \
+criteria`, each one a fact that can be checked as done or not done; then `## \
+Constraints`, what must not change and what the work may not reach for; then \
+`## Out of scope`, named and refused rather than left unsaid. No other \
+sections, and no plan of which files to edit.\n\nUntil I ask for the document, \
+write no part of it. Your job until then is to argue toward a decision: \
+propose the two or three ways the change could be made, say what each one \
+costs — in work, in what it forecloses, in what somebody has to maintain \
+afterwards — recommend one and say why, and push back when what I am \
+describing is bigger, vaguer or more expensive than I am saying it is. \
+Agreement is not the product; a decision I can defend is. Keep your replies \
+short and ask one question at a time. Start now by asking what the change is \
+and what it is for.";
+
+/// What warlock says into the conversation when somebody types `/chat`.
+///
+/// [`BRIEF_INSTRUCTION`]'s counterpart and its exact mirror: the same mechanism
+/// — one ordinary turn into the same session — pointed the other way. A mode
+/// entered by saying so has to be left by saying so, because nothing else in the
+/// process ever told the model the register changed.
+///
+/// It says three things, each of them the undoing of one the brief instruction
+/// said: there is no artifact, the shape is dropped, and questions are answered
+/// as they come. It also says not to summarise what was decided, which is the
+/// reflex a model has when told a piece of work is over and is the one reply
+/// that would make leaving the mode cost a screenful.
+pub const CHAT_INSTRUCTION: &str = "That is the end of the brief. We are not \
+converging on a document any more, there is no artifact, and nothing you say \
+from here is written to a file. Drop the shape you were given. Do not \
+summarise what we decided and do not ask what to do next.\n\nGo back to \
+answering questions about this repository as they come: one answer per \
+question, short and plain, consulting the repository with the tools you have, \
+and saying when you do not know. Wait for the next question.";
 
 /// The environment variable that replaces [`MODEL`] for a run.
 ///
@@ -315,6 +436,11 @@ const MODEL_VAR: &str = "WARLOCK_MODEL";
 /// unread: a level this file does not recognise is the CLI's to reject, and
 /// guessing at the list here would mean a new level needing a release of
 /// warlock before anyone could try it.
+///
+/// It replaces [`BRIEF_EFFORT`] as well, and there is no second variable for it.
+/// A reader who names a level has said what they are willing to spend on this
+/// machine, and warlock quietly asking for something else on some of the turns
+/// would make that statement untrue in the one place it was supposed to hold.
 const EFFORT_VAR: &str = "WARLOCK_EFFORT";
 
 /// What an override comes to: `value` if it says anything, `fallback` if not.
@@ -481,6 +607,10 @@ fn default_args() -> Vec<OsString> {
 /// The conversation is the one part not written here, because it is the one part
 /// that is not the same on every turn: see [`Session`], which says how a turn
 /// names it and why the first turn says it differently from the rest.
+///
+/// The effort is the second part that can move per turn, and the only one — see
+/// [`at_effort`](ChatAgent::at_effort), which takes this vector and changes that
+/// one value and nothing else.
 fn chat_args() -> Vec<OsString> {
     let mut args: Vec<OsString> = ARGS.iter().map(OsString::from).collect();
     args.push(OsString::from("--model"));
@@ -1264,6 +1394,51 @@ impl ChatAgent {
         self
     }
 
+    /// The same agent and the same conversation, asking this turn for `effort`
+    /// instead of the level it was built with.
+    ///
+    /// The one thing a mode is allowed to vary. A brief-mode turn thinks harder
+    /// than a question does — see [`BRIEF_EFFORT`] — and *nothing else about it
+    /// differs*: the same [`CHAT_SYSTEM_PROMPT`], the same [`CHAT_TOOLS`], the
+    /// same [`Session`], down to whether this turn opens the conversation or
+    /// resumes it, since the returned agent shares the very
+    /// [`Arc`](std::sync::Arc) the claim is latched in. Nothing here constructs
+    /// a session or a second conversation, which is the property a mode change
+    /// has to have: the twenty turns already said are the material the document
+    /// is made of, and a new session throws them away.
+    ///
+    /// A clone rather than a `&mut self` because a turn runs on a worker thread
+    /// off a clone of the agent already, and because asking for a level should
+    /// not change what the *next* turn is asked at: the caller says the mode
+    /// turn by turn, or says nothing and gets the level the agent was made with.
+    ///
+    /// [`EFFORT_VAR`] still wins, exactly as it does for the level a fresh agent
+    /// takes: a reader who named a level gets it in both registers.
+    ///
+    /// An agent whose whole vector was handed in by
+    /// [`with_args`](ChatAgent::with_args) is returned unchanged, on the same
+    /// doctrine as the session — a caller who says what the vector is has said
+    /// all of it, and there is no `--effort` in it to speak for.
+    #[must_use]
+    pub fn at_effort(&self, effort: &str) -> Self {
+        self.asking_for(overridden(EFFORT_VAR, effort))
+    }
+
+    /// [`at_effort`](ChatAgent::at_effort) with the override already resolved.
+    ///
+    /// Split out for the reason [`or_default`] is: the environment is read in
+    /// one line that a test cannot drive, and everything decided *after* that
+    /// read is a pure function of the level, which a test can hand any value at
+    /// all without setting a process-wide variable.
+    fn asking_for(&self, level: OsString) -> Self {
+        let mut agent = self.clone();
+        let flag = agent.args.iter().position(|arg| arg == "--effort");
+        if let Some(value) = flag.and_then(|flag| agent.args.get_mut(flag + 1)) {
+            *value = level;
+        }
+        agent
+    }
+
     /// The same agent, giving each turn `timeout` instead of
     /// [`INVOCATION_TIMEOUT`].
     ///
@@ -2034,8 +2209,9 @@ mod tests {
 
     use super::stream;
     use super::{
-        Activities, Activity, CHAT_SYSTEM_PROMPT, Cancel, ChatAgent, ClaudeAgent, EFFORT,
-        INVOCATION_TIMEOUT, MODEL, OsString, SYSTEM_PROMPT, or_default, render, session_id,
+        Activities, Activity, BRIEF_EFFORT, BRIEF_INSTRUCTION, CHAT_INSTRUCTION,
+        CHAT_SYSTEM_PROMPT, Cancel, ChatAgent, ClaudeAgent, EFFORT, INVOCATION_TIMEOUT, MODEL,
+        OsString, SYSTEM_PROMPT, or_default, render, session_id,
     };
     use warlock_engine::{AgentChildDocument, AgentFile};
 
@@ -2370,34 +2546,40 @@ mod tests {
 
     #[test]
     fn a_turn_may_look_at_the_repository_and_do_nothing_whatever_else() {
-        let vector = turn_args(&ChatAgent::new());
-        let granted = value_of(&vector, "--tools").expect("a turn says what it may reach for");
+        let agent = ChatAgent::new();
 
-        // Exactly three, named rather than left to a default that could grow.
-        assert_eq!(
-            granted.split(',').collect::<Vec<&str>>(),
-            ["Read", "Grep", "Glob"],
-        );
-        // Asked of the whole vector rather than of the grant alone, because
-        // the grant is not the only way in: a permission flag is how a writer
-        // would arrive without ever being named as a tool, and a turn carries
-        // none of those either.
-        for smuggled in [
-            "Write",
-            "Edit",
-            "Bash",
-            "WebFetch",
-            "--permission-mode",
-            "--dangerously-skip-permissions",
-            "--allowed-tools",
-            "--allowedTools",
-            "acceptEdits",
-            "bypassPermissions",
-        ] {
-            assert!(
-                !vector.iter().any(|word| word.contains(smuggled)),
-                "{smuggled:?} is somewhere in the vector a turn is run with: {vector:?}",
+        // Both registers, one assertion: a mode is a message and an effort
+        // level, and a conversation aimed at a document is granted not one tool
+        // more than a question about a file is. Warlock holds the pen in both.
+        for vector in [turn_args(&agent), turn_args(&agent.at_effort(BRIEF_EFFORT))] {
+            let granted = value_of(&vector, "--tools").expect("a turn says what it may reach for");
+
+            // Exactly three, named rather than left to a default that could grow.
+            assert_eq!(
+                granted.split(',').collect::<Vec<&str>>(),
+                ["Read", "Grep", "Glob"],
             );
+            // Asked of the whole vector rather than of the grant alone, because
+            // the grant is not the only way in: a permission flag is how a writer
+            // would arrive without ever being named as a tool, and a turn carries
+            // none of those either.
+            for smuggled in [
+                "Write",
+                "Edit",
+                "Bash",
+                "WebFetch",
+                "--permission-mode",
+                "--dangerously-skip-permissions",
+                "--allowed-tools",
+                "--allowedTools",
+                "acceptEdits",
+                "bypassPermissions",
+            ] {
+                assert!(
+                    !vector.iter().any(|word| word.contains(smuggled)),
+                    "{smuggled:?} is somewhere in the vector a turn is run with: {vector:?}",
+                );
+            }
         }
     }
 
@@ -2519,6 +2701,202 @@ mod tests {
             value_of(&args(&ClaudeAgent::new()), "--system-prompt"),
             Some(SYSTEM_PROMPT),
         );
+    }
+
+    #[test]
+    fn the_one_prompt_is_true_in_both_registers() {
+        // The sentence that had to go. It was true while a turn was only ever an
+        // answer on a panel and false the moment a document can be asked for,
+        // and a model told nothing it says can reach a file is a model that
+        // hedges when it is asked for the file.
+        assert!(
+            !CHAT_SYSTEM_PROMPT.contains("nothing you say is put in a file"),
+            "the prompt still promises a turn can never reach a file",
+        );
+        // What replaces it: one document, copied as it stands, into a path the
+        // model does not choose, and nothing else it says written anywhere.
+        for said in [
+            "verbatim",
+            "file",
+            "path warlock decides",
+            "never choose where anything goes",
+            "the one thing you say that becomes bytes on disk",
+        ] {
+            assert!(
+                CHAT_SYSTEM_PROMPT.contains(said),
+                "{said:?} is missing from the prompt both registers run under: {CHAT_SYSTEM_PROMPT}",
+            );
+        }
+        // Still one prompt, and still not a pass's: the mode is a message and a
+        // level, not a second configuration of the agent.
+        let agent = ChatAgent::new();
+        for vector in [turn_args(&agent), turn_args(&agent.at_effort(BRIEF_EFFORT))] {
+            assert_eq!(
+                value_of(&vector, "--system-prompt"),
+                Some(CHAT_SYSTEM_PROMPT)
+            );
+        }
+    }
+
+    #[test]
+    fn a_brief_turn_thinks_harder_and_is_otherwise_the_same_turn() {
+        let agent = ChatAgent::new();
+        let question = turn_args(&agent);
+        let brief = turn_args(&agent.at_effort(BRIEF_EFFORT));
+
+        // Above `low`, which is the whole of what the raised level has to be:
+        // one of the levels the CLI takes, and not the one a question runs at.
+        assert_eq!(value_of(&question, "--effort"), Some(EFFORT));
+        assert_eq!(value_of(&brief, "--effort"), Some(BRIEF_EFFORT));
+        assert_ne!(BRIEF_EFFORT, EFFORT);
+        assert!(
+            ["medium", "high", "xhigh", "max"].contains(&BRIEF_EFFORT),
+            "{BRIEF_EFFORT:?} is not a level above low",
+        );
+
+        // And that is the only word of the vector that moved. Said as a count
+        // rather than by index so that an argument added to either register
+        // fails here rather than sliding past.
+        assert_eq!(brief.len(), question.len());
+        let moved: Vec<(&String, &String)> = brief
+            .iter()
+            .zip(&question)
+            .filter(|(brief, question)| brief != question)
+            .collect();
+        assert_eq!(
+            moved.len(),
+            1,
+            "a mode changed something other than how hard the turn thinks: {moved:?}",
+        );
+        assert_eq!(value_of(&brief, "--tools"), Some("Read,Grep,Glob"));
+        assert_eq!(
+            value_of(&brief, "--system-prompt"),
+            value_of(&question, "--system-prompt"),
+        );
+        assert_eq!(value_of(&brief, "--model"), value_of(&question, "--model"));
+    }
+
+    #[test]
+    fn a_mode_is_the_same_conversation_said_at_a_different_level() {
+        // The property the whole design rests on: entering brief mode cannot
+        // cost the twenty turns already said, which means the id and the flag
+        // that names it are shared rather than copied.
+        let agent = ChatAgent::new();
+        let brief = agent.at_effort(BRIEF_EFFORT);
+
+        let opening = turn_args(&agent);
+        let session = value_of(&opening, "--session-id").expect("a turn opens a conversation");
+        assert_eq!(value_of(&turn_args(&brief), "--session-id"), Some(session));
+
+        // And once a child has taken the id — claimed here rather than by
+        // spawning one, since this test runs on machines with no `claude` and
+        // starts no process of any kind — both registers resume it, which is
+        // only true because they share the latch and not merely its value.
+        agent.session.as_ref().expect("a conversation").claim();
+        let resuming = turn_args(&agent);
+        let resuming_brief = turn_args(&brief);
+
+        assert_eq!(value_of(&resuming, "--resume"), Some(session));
+        assert_eq!(value_of(&resuming_brief, "--resume"), Some(session));
+        for vector in [&resuming, &resuming_brief] {
+            assert!(
+                !vector.iter().any(|word| word == "--session-id"),
+                "a mode reopened a session that is already in use: {vector:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn the_effort_variable_wins_in_both_registers() {
+        // Driven as the pure function it is rather than by setting a real
+        // variable: `set_var` is unsafe in this edition, process-wide, and racy
+        // against every other test on the runner.
+        let asked = OsString::from("xhigh");
+        for level in [EFFORT, BRIEF_EFFORT] {
+            assert_eq!(or_default(Some(asked.clone()), level), asked);
+            assert_eq!(or_default(None, level), OsString::from(level));
+            // An exported-but-blank variable is a shell saying nothing.
+            assert_eq!(
+                or_default(Some(OsString::new()), level),
+                OsString::from(level)
+            );
+        }
+
+        // And what the resolved level comes to on the vector, through the same
+        // seam `at_effort` uses once it has read the environment.
+        let agent = ChatAgent::new();
+        let overridden = agent.asking_for(or_default(Some(asked.clone()), BRIEF_EFFORT));
+
+        assert_eq!(value_of(&turn_args(&overridden), "--effort"), Some("xhigh"));
+        // A vector a caller handed in whole is left exactly as it was handed in.
+        let given = ChatAgent::new().with_args(["-c", "echo hello"]);
+        assert_eq!(
+            turn_args(&given.at_effort(BRIEF_EFFORT)),
+            ["-c", "echo hello"]
+        );
+    }
+
+    #[test]
+    fn the_two_instructions_are_the_mode_said_each_way() {
+        // The brief instruction has three jobs, and a test per job: name the
+        // artifact, state the shape inline — there is no template file to load
+        // and there is not meant to be one yet — and say that arguing is the
+        // work.
+        assert!(BRIEF_INSTRUCTION.contains("brief"));
+        assert!(BRIEF_INSTRUCTION.contains("markdown document"));
+        for section in [
+            "## Outcome",
+            "## Success criteria",
+            "## Constraints",
+            "## Out of scope",
+        ] {
+            assert!(
+                BRIEF_INSTRUCTION.contains(section),
+                "{section:?} is missing from the shape the brief must take",
+            );
+        }
+        for said in [
+            "the two or three ways",
+            "costs",
+            "recommend one",
+            "push back",
+            "Agreement is not the product",
+        ] {
+            assert!(
+                BRIEF_INSTRUCTION.contains(said),
+                "{said:?} is missing: the instruction asks for agreement rather than argument",
+            );
+        }
+        // It ends by asking, so the reply to the command is the model's opening
+        // question rather than a paragraph agreeing to help.
+        assert!(BRIEF_INSTRUCTION.contains("Start now by asking"));
+        // It does not load a template that does not exist yet.
+        assert!(!BRIEF_INSTRUCTION.contains(".warlock"));
+
+        // And the matching instruction back, which undoes each of the three.
+        for said in [
+            "not converging on a document any more",
+            "no artifact",
+            "Drop the shape",
+            "answering questions about this repository",
+        ] {
+            assert!(
+                CHAT_INSTRUCTION.contains(said),
+                "{said:?} is missing from the instruction that leaves brief mode",
+            );
+        }
+        assert_ne!(BRIEF_INSTRUCTION, CHAT_INSTRUCTION);
+        // Neither is a system prompt, and neither is ever passed as one: they go
+        // in on stdin as an ordinary turn.
+        for instruction in [BRIEF_INSTRUCTION, CHAT_INSTRUCTION] {
+            assert_ne!(instruction, CHAT_SYSTEM_PROMPT);
+            assert!(
+                !turn_args(&ChatAgent::new())
+                    .iter()
+                    .any(|word| word == instruction),
+                "an instruction reached the argument vector",
+            );
+        }
     }
 
     #[test]
