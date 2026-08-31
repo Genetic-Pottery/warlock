@@ -138,7 +138,7 @@ impl Chat {
     /// simply replace the first — and the first's [`CancelGuard`] would drop and
     /// take its `claude` with it, which is the safe way for that accident to go.
     pub(crate) fn ask(&mut self, app: &mut App, message: &str, now: Instant) {
-        self.say(app, message, message, now);
+        self.say(app, message, message, Asked::Answer, now);
     }
 
     /// Ask `sent`, at `now`, showing `shown` on the card instead of it.
@@ -164,9 +164,20 @@ impl Chat {
     /// [`asking`]). It is read at the moment the turn starts, so a `/brief` that
     /// has already set the mode sends its own instruction at the raised level,
     /// and the `/chat` that leaves the mode sends its own at `low`.
-    pub(crate) fn say(&mut self, app: &mut App, shown: &str, sent: &str, now: Instant) {
+    ///
+    /// `asked` is what this turn was started to get, and it is remembered on the
+    /// turn itself rather than anywhere the loop keeps: see [`Asked`], which is
+    /// the whole of the difference `/write` makes to the machinery here.
+    pub(crate) fn say(
+        &mut self,
+        app: &mut App,
+        shown: &str,
+        sent: &str,
+        asked: Asked,
+        now: Instant,
+    ) {
         app.start_turn(shown, now);
-        self.turn = Some(start_turn(sent, &asking(&self.agent, app.mode())));
+        self.turn = Some(start_turn(sent, &asking(&self.agent, app.mode()), asked));
     }
 
     /// Stop the turn in flight, if there is one.
@@ -194,8 +205,12 @@ impl Chat {
     /// next round finds [`Chat::answering`] false and gives the field back —
     /// which is how "the composer is live again the moment the turn ends,
     /// however it ends" is one rule rather than five.
-    pub(crate) fn keep_up(&mut self, app: &mut App, now: Instant) {
-        apply_turn(&mut self.turn, app, now);
+    ///
+    /// What comes back is [`apply_turn`]'s answer and means what it means there:
+    /// the document a `/write` turn just answered with, on the one round that
+    /// turn ended in, and `None` on every other round warlock ever goes through.
+    pub(crate) fn keep_up(&mut self, app: &mut App, now: Instant) -> Option<String> {
+        apply_turn(&mut self.turn, app, now)
     }
 }
 
@@ -222,6 +237,36 @@ pub(crate) struct Chatting {
     /// Say-when for the worker: the handle its agent answers to, and the kill
     /// switch for the `claude` it is waiting on.
     pub(crate) cancel: CancelGuard,
+    /// What this turn was started to get, fixed at the keystroke that started
+    /// it and never read by the worker: it is the drain's, and it decides
+    /// whether the answer is handed back as well as put on the card.
+    pub(crate) asked: Asked,
+}
+
+/// What a turn was started to get.
+///
+/// The one thing a `/write` turn is not like every other turn in, and it is
+/// written down *here*, on the turn, rather than as a flag beside the turn in
+/// the event loop. A loop-side flag would be a second record of which question
+/// is out, and the two would disagree the first time a turn ended in a way
+/// nobody remembered to clear it on — a cancelled `/write`, a `claude` that is
+/// not installed, a worker that panicked. There is one turn at a time and this
+/// rides on it, so it goes down exactly when the turn does.
+///
+/// It changes nothing about how the turn is run. The same worker, the same
+/// channel, the same agent, the same say-when, the same clock and the same
+/// endings: what it decides is one thing at the drain, which is whether the
+/// answer is handed back to the loop as well as put on the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Asked {
+    /// An answer to read, which is what every turn a reader types is for. The
+    /// answer lands on the card and the loop is told nothing.
+    Answer,
+    /// The document `/write` asked for. The answer lands on the card exactly as
+    /// an ordinary one does — it is the reply, and the reader can read it — and
+    /// it is handed back besides, so the loop can open the path prompt over it
+    /// (see [`apply_turn`]).
+    Document,
 }
 
 /// What a turn's worker thread has to say for itself.
@@ -362,11 +407,15 @@ pub(crate) fn spawn_turn(message: &str, agent: &ChatAgent, cancel: Cancel) -> Re
 /// by [`App::start_turn`](warlock_tui::App::start_turn), at the keystroke, so
 /// that the question is on screen from the moment it is asked rather than from
 /// whenever the model first says something.
-pub(crate) fn start_turn(message: &str, agent: &ChatAgent) -> Chatting {
+///
+/// `asked` is carried rather than acted on: it is what the drain reads when this
+/// turn ends, and nothing between here and there consults it.
+pub(crate) fn start_turn(message: &str, agent: &ChatAgent, asked: Asked) -> Chatting {
     let cancel = CancelGuard::new();
     Chatting {
         events: spawn_turn(message, agent, cancel.handle()),
         cancel,
+        asked,
     }
 }
 
@@ -433,12 +482,29 @@ fn run_turn(message: &str, agent: &ChatAgent, cancel: &Cancel, events: &Sender<T
 /// `now` is the caller's clock, and this function reads none of its own: every
 /// event drained here is filed under it, so a whole turn is drivable from a base
 /// instant in a test exactly as the thread below it is.
-pub(crate) fn apply_turn(chat: &mut Option<Chatting>, app: &mut App, now: Instant) {
+///
+/// One thing comes back, and only on the one round a `/write` turn answers in:
+/// the document, so the loop can open the path prompt over it. It is handed back
+/// rather than left for the loop to read off the card because *this* is where a
+/// turn is known to have been the write request — the turn carries what it was
+/// started for ([`Asked`]) — and a loop that went looking for the newest answer
+/// afterwards would be a second opinion about which turn just ended. It costs
+/// one clone of one answer, on the one round in a session that asks for a
+/// document; the card gets the original, so there is still exactly one copy of
+/// the reply anybody draws or writes.
+///
+/// Every other round hands back nothing, and that includes every way a `/write`
+/// turn can fail: an ending is an ending, so no prompt opens, no file is
+/// proposed and the conversation is as usable as it was.
+pub(crate) fn apply_turn(
+    chat: &mut Option<Chatting>,
+    app: &mut App,
+    now: Instant,
+) -> Option<String> {
     // No turn, nothing drained — which is what almost every frame of warlock's
     // life does here.
-    let Some(chatting) = chat.as_ref() else {
-        return;
-    };
+    let chatting = chat.as_ref()?;
+    let asked = chatting.asked;
 
     let finished = loop {
         match chatting.events.try_recv() {
@@ -450,7 +516,7 @@ pub(crate) fn apply_turn(chat: &mut Option<Chatting>, app: &mut App, now: Instan
             Ok(TurnEvent::Doing(activity)) => app.record_turn(&activity, now),
             Ok(TurnEvent::Finished(finished)) => break Some(finished),
             // Still going, and nothing new to say.
-            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => break None,
         }
     };
@@ -461,15 +527,30 @@ pub(crate) fn apply_turn(chat: &mut Option<Chatting>, app: &mut App, now: Instan
     // nobody will ever hear from again.
     chat.take();
     match finished {
-        Some(Ok(answer)) => app.answer_turn(answer, now),
-        Some(Err(ending)) => end(app, &ending, now),
-        None => end(
-            app,
-            &Ending::Broke {
-                reason: TURN_LOST.to_owned(),
-            },
-            now,
-        ),
+        Some(Ok(answer)) => {
+            // Cloned only for the turn that asked for a document, and cloned
+            // rather than moved because the answer belongs on the card first:
+            // the reply is a turn of the conversation whatever is done with it,
+            // and a `/write` whose answer went to the loop instead of the thread
+            // would be a document nobody could read.
+            let document = (asked == Asked::Document).then(|| answer.clone());
+            app.answer_turn(answer, now);
+            document
+        }
+        Some(Err(ending)) => {
+            end(app, &ending, now);
+            None
+        }
+        None => {
+            end(
+                app,
+                &Ending::Broke {
+                    reason: TURN_LOST.to_owned(),
+                },
+                now,
+            );
+            None
+        }
     }
 }
 
@@ -504,7 +585,7 @@ mod tests {
 
     use warlock_tui::{Activity, App, ChatAgent, Ending, INVOCATION_TIMEOUT, Line, Mode};
 
-    use super::{Chat, Chatting, TurnEvent, apply_turn};
+    use super::{Asked, Chat, Chatting, TurnEvent, apply_turn};
     use crate::pacting::CancelGuard;
 
     /// The question every test asks, so a row that quotes it is recognisable.
@@ -529,12 +610,40 @@ mod tests {
         (app, events, Some(chatting(received)))
     }
 
-    /// The value the loop keeps for a turn reporting on `received`.
+    /// The value the loop keeps for a turn reporting on `received`: an ordinary
+    /// question, which is what every turn but `/write`'s is.
     fn chatting(received: Receiver<TurnEvent>) -> Chatting {
+        turn_for(received, Asked::Answer)
+    }
+
+    /// The same value for the turn `/write` starts: the one turn whose answer
+    /// the drain hands back.
+    fn writing(received: Receiver<TurnEvent>) -> Chatting {
+        turn_for(received, Asked::Document)
+    }
+
+    /// The value the loop keeps for a turn reporting on `received` that was
+    /// started to get `asked`.
+    fn turn_for(received: Receiver<TurnEvent>, asked: Asked) -> Chatting {
         Chatting {
             events: received,
             cancel: CancelGuard::new(),
+            asked,
         }
+    }
+
+    /// The loop's drain over `chat`, for a turn that is not the write request.
+    ///
+    /// [`apply_turn`] with the one thing it hands back asserted away: an
+    /// ordinary turn's answer goes on the card and nowhere else, so every test
+    /// here that is not about `/write` gets that promise for free rather than
+    /// restating it.
+    fn drain(chat: &mut Option<Chatting>, app: &mut App, now: Instant) {
+        assert_eq!(
+            apply_turn(chat, app, now),
+            None,
+            "an ordinary turn handed something back to the loop"
+        );
     }
 
     /// Every row of the app's thread card, clocked against `now`.
@@ -571,7 +680,7 @@ mod tests {
         events
             .send(TurnEvent::Doing(Activity::Thinking))
             .expect("the loop is still listening");
-        apply_turn(&mut chat, &mut app, at(base, 3));
+        drain(&mut chat, &mut app, at(base, 3));
 
         // Drained and returned: the worker has said nothing since, and this
         // call did not sit and wait for it to.
@@ -602,7 +711,7 @@ mod tests {
                 "The tree and the manifest.".to_owned()
             )))
             .expect("the loop is still listening");
-        apply_turn(&mut chat, &mut app, at(base, 4));
+        drain(&mut chat, &mut app, at(base, 4));
 
         assert!(chat.is_none(), "an answered turn is still in flight");
         assert_eq!(
@@ -620,6 +729,128 @@ mod tests {
         // An answer is on screen where it was asked for, so the footer says
         // nothing about it.
         assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn a_write_turn_hands_its_answer_back_and_leaves_it_on_the_card_as_well() {
+        // The one difference `/write` makes to the drain, and both halves of it:
+        // the loop is handed the document — which is what it opens the path
+        // prompt over — and the card keeps the reply, which is what the reader
+        // reads and what the write itself takes its bytes from.
+        const DOCUMENT: &str = "# Scopes\n\nA boundary somebody drew.";
+
+        let base = Instant::now();
+        let (events, received) = mpsc::channel();
+        let mut app = App::default();
+        app.start_turn("/write", base);
+        let mut chat = Some(writing(received));
+
+        events
+            .send(TurnEvent::Finished(Ok(DOCUMENT.to_owned())))
+            .expect("the loop is still listening");
+        let document = apply_turn(&mut chat, &mut app, at(base, 4));
+
+        assert_eq!(document.as_deref(), Some(DOCUMENT));
+        assert!(chat.is_none(), "an answered turn is still in flight");
+        assert_eq!(
+            rows(&app, at(base, 4)),
+            vec![
+                Line::Said {
+                    text: "/write".to_owned()
+                },
+                clocked(4, "waiting"),
+                // The card holds the answer as the lines it is made of, which
+                // is how every answer lands on it: what matters here is that
+                // the document is still there as well as in the loop's hand.
+                Line::Text {
+                    text: "# Scopes".to_owned()
+                },
+                Line::Text {
+                    text: String::new()
+                },
+                Line::Text {
+                    text: "A boundary somebody drew.".to_owned()
+                },
+            ],
+            "the reply left the card it was answered on"
+        );
+        assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn a_write_turn_that_fails_hands_nothing_back_however_it_failed() {
+        // Every ending, over the turn that asked for a document: a failure is a
+        // failure, so there is nothing for the loop to open a prompt over and
+        // nothing anywhere for it to write.
+        let endings = [
+            Ending::Cancelled,
+            Ending::NoModel {
+                program: "claude".to_owned(),
+            },
+            Ending::Failed {
+                code: Some(3),
+                stderr: "boom".to_owned(),
+            },
+            Ending::TimedOut {
+                after: INVOCATION_TIMEOUT,
+            },
+            Ending::NothingSaid,
+        ];
+
+        for ending in endings {
+            let base = Instant::now();
+            let (events, received) = mpsc::channel();
+            let mut app = App::default();
+            app.start_turn("/write", base);
+            let mut chat = Some(writing(received));
+
+            events
+                .send(TurnEvent::Finished(Err(ending.clone())))
+                .expect("the loop is still listening");
+
+            assert_eq!(
+                apply_turn(&mut chat, &mut app, at(base, 2)),
+                None,
+                "{ending:?} handed the loop a document to write"
+            );
+            assert!(chat.is_none(), "{ending:?} left the turn in flight");
+            assert_eq!(app.message(), Some(ending.line().as_str()), "{ending:?}");
+        }
+    }
+
+    #[test]
+    fn a_write_turn_whose_worker_died_hands_nothing_back_either() {
+        // The sixth ending, which arrives as a closed channel rather than as a
+        // message: the same nothing, by the road that has no `Ending` on it.
+        let base = Instant::now();
+        let (events, received) = mpsc::channel();
+        let mut app = App::default();
+        app.start_turn("/write", base);
+        let mut chat = Some(writing(received));
+
+        drop(events);
+
+        assert_eq!(apply_turn(&mut chat, &mut app, at(base, 2)), None);
+        assert!(chat.is_none(), "a dead worker is still in flight");
+        assert!(app.message().is_some(), "the footer says the turn is over");
+    }
+
+    #[test]
+    fn a_write_turn_still_in_flight_hands_nothing_back() {
+        // The round in the middle: work has arrived, the answer has not, and
+        // the prompt has nothing to open over yet.
+        let base = Instant::now();
+        let (events, received) = mpsc::channel();
+        let mut app = App::default();
+        app.start_turn("/write", base);
+        let mut chat = Some(writing(received));
+
+        events
+            .send(TurnEvent::Doing(Activity::Thinking))
+            .expect("the loop is still listening");
+
+        assert_eq!(apply_turn(&mut chat, &mut app, at(base, 1)), None);
+        assert!(chat.is_some(), "an unfinished turn was taken down");
     }
 
     #[test]
@@ -649,7 +880,7 @@ mod tests {
             events
                 .send(TurnEvent::Finished(Err(ending.clone())))
                 .expect("the loop is still listening");
-            apply_turn(&mut chat, &mut app, at(base, 2));
+            drain(&mut chat, &mut app, at(base, 2));
 
             assert!(chat.is_none(), "{ending:?} left the turn in flight");
             // One row for the question and one for the ending, whichever
@@ -692,7 +923,7 @@ mod tests {
                 }))
                 .expect("the loop is still listening");
         }
-        apply_turn(&mut chat, &mut app, at(base, 2));
+        drain(&mut chat, &mut app, at(base, 2));
         assert!(chat.is_some(), "the turn is still in flight");
 
         // And then the cancel, which arrives as the worker's one ending like
@@ -700,7 +931,7 @@ mod tests {
         events
             .send(TurnEvent::Finished(Err(Ending::Cancelled)))
             .expect("the loop is still listening");
-        apply_turn(&mut chat, &mut app, at(base, 4));
+        drain(&mut chat, &mut app, at(base, 4));
 
         assert!(chat.is_none(), "a cancelled turn is still in flight");
         assert_eq!(
@@ -725,7 +956,7 @@ mod tests {
         // A panicked worker, as this thread sees it: its end of the channel is
         // gone and no ending ever arrived.
         drop(events);
-        apply_turn(&mut chat, &mut app, at(base, 5));
+        drain(&mut chat, &mut app, at(base, 5));
 
         assert!(chat.is_none(), "a dead worker is still in flight");
         let line = app.message().expect("the footer says the turn is over");
@@ -740,7 +971,7 @@ mod tests {
         events
             .send(TurnEvent::Finished(Err(Ending::NothingSaid)))
             .expect("the loop is still listening");
-        apply_turn(&mut chat, &mut app, at(base, 1));
+        drain(&mut chat, &mut app, at(base, 1));
 
         // The session is as usable as it was: a new turn, a new channel, and
         // the failed one still on the card above it.
@@ -750,7 +981,7 @@ mod tests {
         again
             .send(TurnEvent::Finished(Ok("The engine.".to_owned())))
             .expect("the loop is still listening");
-        apply_turn(&mut chat, &mut app, at(base, 12));
+        drain(&mut chat, &mut app, at(base, 12));
 
         assert!(chat.is_none());
         assert_eq!(
@@ -907,7 +1138,7 @@ mod tests {
         let mut app = App::default();
         let before = app.clone();
 
-        apply_turn(&mut None, &mut app, at(base, 1));
+        drain(&mut None, &mut app, at(base, 1));
 
         assert_eq!(app, before, "a frame with nothing running moved something");
     }
@@ -930,10 +1161,10 @@ mod tests {
         use std::time::{Duration, Instant};
         use std::{env, fs, process, thread};
 
-        use warlock_tui::{Activity, App, Cancel, ChatAgent, Ending};
+        use warlock_tui::{Activity, App, Cancel, ChatAgent, Ending, Mode};
 
-        use super::super::{Chat, TurnEvent, apply_turn, run_turn, spawn_turn, start_turn, wired};
-        use super::{ASKED, at, chatting, clocked, rows, said};
+        use super::super::{Asked, Chat, TurnEvent, run_turn, spawn_turn, start_turn, wired};
+        use super::{ASKED, at, chatting, clocked, drain, rows, said};
 
         /// How long a test waits for a child to say it is running, or for a
         /// turn to come back, before giving up. Generous, because it is only
@@ -1075,13 +1306,30 @@ mod tests {
         /// in the event loop calls: nothing here waits on the worker, joins a
         /// thread or receives from a channel — the round polls and comes back,
         /// and the turn ending is the drain taking it down.
-        fn settle(chat: &mut Chat, app: &mut App, now: Instant) {
+        ///
+        /// What comes back is what the drain handed the loop, which is `None`
+        /// for every turn but the one `/write` starts. [`settle`] is this with
+        /// that asserted away, and is what the tests about an ordinary turn
+        /// call.
+        fn settled(chat: &mut Chat, app: &mut App, now: Instant) -> Option<String> {
+            let mut document = None;
             let waited = Instant::now();
             while chat.answering() && waited.elapsed() < AT_MOST {
-                chat.keep_up(app, now);
+                document = chat.keep_up(app, now).or(document);
                 thread::sleep(Duration::from_millis(10));
             }
             assert!(!chat.answering(), "the turn never ended");
+            document
+        }
+
+        /// [`settled`] for a turn that is not the write request: the rounds go
+        /// by and the loop is handed nothing at all.
+        fn settle(chat: &mut Chat, app: &mut App, now: Instant) {
+            assert_eq!(
+                settled(chat, app, now),
+                None,
+                "an ordinary turn handed something back to the loop"
+            );
         }
 
         /// Wait until `path` exists, or give up after [`AT_MOST`].
@@ -1223,7 +1471,7 @@ mod tests {
                 "while :; do echo tick >> '{}'; sleep 0.05; done",
                 ticks.display()
             );
-            let chatting = start_turn(ASKED, &stand_in(&script));
+            let chatting = start_turn(ASKED, &stand_in(&script), Asked::Answer);
 
             wait_for(&ticks);
             drop(chatting);
@@ -1258,7 +1506,7 @@ mod tests {
             // poll rather than a receive.
             let waited = Instant::now();
             while chat.is_some() && waited.elapsed() < AT_MOST {
-                apply_turn(&mut chat, &mut app, at(base, 2));
+                drain(&mut chat, &mut app, at(base, 2));
                 thread::sleep(Duration::from_millis(10));
             }
 
@@ -1321,7 +1569,13 @@ mod tests {
             let mut app = App::default();
             let mut chat = Chat::with_agent(stand_in(&script));
 
-            chat.say(&mut app, "/brief", warlock_tui::BRIEF_INSTRUCTION, base);
+            chat.say(
+                &mut app,
+                "/brief",
+                warlock_tui::BRIEF_INSTRUCTION,
+                Asked::Answer,
+                base,
+            );
             settle(&mut chat, &mut app, at(base, 1));
 
             // The command, its work lines and its answer: an ordinary turn in
@@ -1410,6 +1664,114 @@ mod tests {
                         text: ANSWER.to_owned()
                     },
                 ]
+            );
+            clean_up(&directory);
+        }
+
+        #[test]
+        fn a_write_turn_that_answers_hands_the_document_to_the_loop() {
+            // The whole of what `/write` adds to a turn, through the value the
+            // loop holds and a `/bin/sh` standing in for the model: the answer
+            // comes back to the caller — which is what the path prompt opens
+            // over — and the same answer is on the card, where the reader reads
+            // it and where the write takes its bytes from.
+            let directory = scratch("write-answers");
+            let base = Instant::now();
+            let mut app = App::default();
+            app.set_mode(Mode::Brief);
+            let mut chat = Chat::with_agent(stand_in(&printing(&TURN)));
+
+            chat.say(
+                &mut app,
+                "/write",
+                warlock_tui::WRITE_INSTRUCTION,
+                Asked::Document,
+                base,
+            );
+            let document = settled(&mut chat, &mut app, at(base, 1));
+
+            assert_eq!(document.as_deref(), Some(ANSWER));
+            assert_eq!(
+                rows(&app, at(base, 1)),
+                vec![
+                    warlock_tui::Line::Said {
+                        text: "/write".to_owned()
+                    },
+                    clocked(1, "Read src/lib.rs"),
+                    clocked(1, "thinking"),
+                    clocked(1, "writing"),
+                    warlock_tui::Line::Text {
+                        text: ANSWER.to_owned()
+                    },
+                ],
+                "the document left the card it was answered on"
+            );
+            assert_eq!(app.mode(), Mode::Brief, "the register moved for a write");
+            clean_up(&directory);
+        }
+
+        #[test]
+        fn a_write_turn_that_fails_hands_nothing_back_and_leaves_the_mode_alone() {
+            // The failure half of the same thing, and the promise it has to
+            // keep: nothing comes back, so the loop has nothing to open a
+            // prompt over and nothing to write; the ending is one line in the
+            // existing wording; the conversation is still in brief mode and
+            // still answers the next question.
+            const AGAIN: &str = "what did that leave out?";
+
+            let directory = scratch("write-fails");
+            let asked_once = directory.join("asked-once");
+            // Fails the first time it is asked and answers the second, exactly
+            // as the ordinary failed turn above does.
+            let script = format!(
+                "if [ -f '{marker}' ]; then {answer}; else : > '{marker}'; echo boom >&2; exit 3; fi",
+                marker = asked_once.display(),
+                answer = printing(&TURN),
+            );
+            let base = Instant::now();
+            let mut app = App::default();
+            app.set_mode(Mode::Brief);
+            let mut chat = Chat::with_agent(stand_in(&script));
+
+            chat.say(
+                &mut app,
+                "/write",
+                warlock_tui::WRITE_INSTRUCTION,
+                Asked::Document,
+                base,
+            );
+            assert_eq!(
+                settled(&mut chat, &mut app, at(base, 1)),
+                None,
+                "a failed write handed the loop a document"
+            );
+
+            let line = app
+                .message()
+                .expect("a failed turn says so on the footer")
+                .to_owned();
+            assert!(line.contains("exit status 3"), "{line}");
+            assert_eq!(
+                rows(&app, at(base, 30)),
+                vec![
+                    warlock_tui::Line::Said {
+                        text: "/write".to_owned()
+                    },
+                    clocked(1, &line),
+                ]
+            );
+            assert_eq!(app.mode(), Mode::Brief, "a failed write left the register");
+
+            // And the conversation goes on: the next question is asked into the
+            // very `Chat` the write failed in.
+            chat.ask(&mut app, AGAIN, at(base, 10));
+            settle(&mut chat, &mut app, at(base, 12));
+
+            assert_eq!(
+                rows(&app, at(base, 12)).last(),
+                Some(&warlock_tui::Line::Text {
+                    text: ANSWER.to_owned()
+                })
             );
             clean_up(&directory);
         }

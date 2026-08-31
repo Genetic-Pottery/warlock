@@ -144,7 +144,7 @@ use std::time::Instant;
 use std::{fs, io};
 
 use warlock_engine::{Manifest, PactEntry, from_manifest_path, to_manifest_path};
-use warlock_tui::{App, ScopeField, ScopePrompt, size};
+use warlock_tui::{App, Edited, ScopeField, ScopePrompt, size};
 
 use crate::error::{Error, one_line};
 
@@ -153,10 +153,17 @@ use crate::error::{Error, one_line};
 /// The built-in default, and the whole of the answer in this slice: the
 /// directory named in `.warlock/briefs.toml` is a later one's, and until it
 /// lands this constant is the only place the answer is written down.
-// Nothing outside the tests below reaches for it yet, for the reason
-// `proposed_path` gives.
-#[allow(dead_code)]
 pub(crate) const BRIEFS_DIRECTORY: &str = "docs";
+
+/// What the write prompt's window is headed with.
+///
+/// Carried in [`ScopeField::directory`] — which this window never reads as a
+/// directory, only prints — because that is the one string the field already
+/// has for saying what it is asking about. The scope prompt puts a module path
+/// there and the window heads itself "Scope for <module>"; this one puts the
+/// whole heading there, because what a path prompt is about is not a directory
+/// but the question itself.
+pub(crate) const WRITE_HEADING: &str = "Write the brief to";
 
 /// What every brief's filename begins with, before its number and its slug.
 const BRIEF_PREFIX: &str = "warlock-brief";
@@ -203,16 +210,66 @@ const NOTHING_TO_WRITE: &str =
 ///
 /// Reads `repo_root/docs` and nothing else, creates nothing, and is as happy
 /// with a directory that is not there as with an empty one.
-// The event loop does not call this yet: the prompt it fills opens in the next
-// slice, and the alternative to one narrow allow here is wiring a window before
-// the code that draws it exists. The attribute comes off with that wiring, and
-// it is on the two crate-visible names rather than on the module, so everything
-// below still has to be reachable from here or be told it is not.
-#[allow(dead_code)]
 pub(crate) fn proposed_path(repo_root: &Path, reply: &str) -> String {
     let number = spelled(next_number(&repo_root.join(BRIEFS_DIRECTORY)));
     let slug = slug_of(unfenced(reply));
     format!("{BRIEFS_DIRECTORY}/{BRIEF_PREFIX}-{number}-{slug}.md")
+}
+
+/// The write prompt as it opens over `reply`: up, headed [`WRITE_HEADING`], and
+/// holding [`proposed_path`]'s guess at where the document goes.
+///
+/// The counterpart of [`scope_press`](crate::scoping::scope_press) for a window
+/// no keystroke opens. Nothing presses a key to get here — the prompt opens
+/// because a `/write` turn answered, and the answer is what it opens over — so
+/// this takes the reply rather than the app: the document handed back by the
+/// drain is what the proposal is made of, which is what keeps the path on screen
+/// about the very turn that just landed.
+///
+/// It refuses nothing and cannot fail. The path is a proposal in an editable
+/// field (see the module docs), so a reply with no title, a directory full of
+/// years, and a repository with no `docs/` at all each open a window with a line
+/// in it and no complaint anywhere.
+pub(crate) fn write_opened(repo_root: &Path, reply: &str) -> ScopePrompt {
+    ScopePrompt::open(WRITE_HEADING, proposed_path(repo_root, reply))
+}
+
+/// What one keystroke *inside* the write prompt comes to: the prompt the event
+/// loop holds from here on.
+///
+/// [`scope_edit`](crate::scoping::scope_edit)'s twin, over the other window and
+/// with the other submit at the end of it — the same three answers from the same
+/// [`edit_for`](warlock_tui::edit_for), because it is the same field type and
+/// the same editor.
+///
+/// Typing moves the field and nothing else. Esc takes the window down and
+/// writes nothing: the app was never told the question was asked, so the reply
+/// is still on the card, the register is still whatever it was, and there is
+/// nothing to put back. Enter is [`write_submit`] and only [`write_submit`],
+/// which either writes the file and closes, or reopens this window over the rule
+/// the path broke.
+///
+/// A closed prompt cannot submit: [`press_for`](crate::input::press_for) only
+/// consults `edit_for` while one is up, so the `None` road below is unreachable
+/// rather than silent. It answers with a closed prompt for the reason
+/// `scope_edit` does — a submit that found no field to write is not a window
+/// anybody can still be typing into.
+pub(crate) fn write_edit(
+    app: &mut App,
+    manifest: &Manifest,
+    repo_root: &Path,
+    prompt: &ScopePrompt,
+    edited: Edited,
+    now: Instant,
+) -> ScopePrompt {
+    match edited {
+        Edited::Open(field) => ScopePrompt::Open(field),
+        Edited::Close => ScopePrompt::Closed,
+        Edited::Submit => match prompt.field() {
+            Some(field) => write_submit(app, manifest, repo_root, field, now),
+            None => ScopePrompt::Closed,
+        },
+    }
 }
 
 /// What Enter in the write prompt comes to: the document on disk and two lines
@@ -240,10 +297,6 @@ pub(crate) fn proposed_path(repo_root: &Path, reply: &str) -> String {
 ///
 /// `now` is the caller's instant, as every line on the conversation is timed by
 /// the loop's clock rather than by one this function reads for itself.
-// Wired to a keystroke in the slice that gives the write prompt its own arm of
-// `press_for`; the allow comes off with that wiring, for the reason
-// `proposed_path` gives above.
-#[allow(dead_code)]
 pub(crate) fn write_submit(
     app: &mut App,
     manifest: &Manifest,
@@ -1425,5 +1478,221 @@ mod writes {
         assert_eq!(prompt, ScopePrompt::Closed);
         assert!(app.message().is_some_and(|line| !line.is_empty()));
         assert_eq!(everything_under(repo.path()), Vec::<String>::new());
+    }
+
+    /// The event loop's own round over this window, one key at a time.
+    ///
+    /// `scoping.rs`'s counterpart for the other prompt, and driven exactly as it
+    /// drives that one: the window is opened the way the loop opens it, every
+    /// key goes through [`edit_for`] as `press_for` would send it, and what
+    /// comes back goes through [`write_edit`], which is the loop's arm. Nothing
+    /// here is a terminal, a `claude` or a worker thread — what is asserted is
+    /// the path from a turn's answer to the bytes on disk, over a repository of
+    /// the test's own.
+    mod rounds {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use warlock_tui::{Mode, ScopePrompt, edit_for};
+
+        use super::super::{WRITE_HEADING, write_edit, write_opened};
+        use super::{
+            App, Instant, Manifest, TempDir, a_repo, app_answering, everything_under, fs, notes,
+            now, pacts,
+        };
+
+        /// The reply the `/write` turn answered with in every round below: one
+        /// document, with a title the slug is plainly made of.
+        const REPLY: &str = "# Scopes and sigils\n\nA boundary somebody drew.\n";
+
+        /// Where that reply proposes to go in an empty repository: nothing is in
+        /// `docs/` yet, so the number is the first one.
+        const PROPOSED: &str = "docs/warlock-brief-01-scopes-and-sigils.md";
+
+        /// A plain press of `code`, as crossterm reports one.
+        fn press(code: KeyCode) -> KeyEvent {
+            KeyEvent::new(code, KeyModifiers::NONE)
+        }
+
+        /// One round of the loop with `code` pressed into `prompt`: the key
+        /// answered by [`edit_for`], and the answer applied by [`write_edit`].
+        ///
+        /// The loop's two lines and nothing else, so a test below cannot swallow
+        /// a key through a kinder version of the loop written beside it.
+        fn round(
+            app: &mut App,
+            manifest: &Manifest,
+            repo: &TempDir,
+            prompt: &ScopePrompt,
+            code: KeyCode,
+            now: Instant,
+        ) -> ScopePrompt {
+            let edited = {
+                let field = prompt.field().expect("the window is still up");
+                edit_for(press(code), field)
+            };
+            write_edit(app, manifest, repo.path(), prompt, edited, now)
+        }
+
+        #[test]
+        fn the_window_opens_over_the_answer_holding_the_path_it_proposes() {
+            // What the drain hands the loop, turned into the window the reader
+            // sees: the heading it is drawn under, and the proposal in the
+            // field, ready for an Enter that changes nothing about it.
+            let repo = a_repo();
+
+            assert_eq!(
+                write_opened(repo.path(), REPLY),
+                ScopePrompt::open(WRITE_HEADING, PROPOSED)
+            );
+            assert_eq!(
+                everything_under(repo.path()),
+                Vec::<String>::new(),
+                "opening a window wrote something"
+            );
+        }
+
+        #[test]
+        fn the_whole_path_from_the_answer_to_the_file_is_one_key_at_a_time() {
+            // The loop's arms in the order a reader presses them: the window
+            // opens on the proposal, three Backspaces and four characters make
+            // it something else, and Enter writes the document at the path on
+            // screen rather than at the one warlock guessed.
+            let repo = a_repo();
+            let mut app = app_answering(repo.path(), REPLY);
+            let manifest = pacts(&["docs"]);
+            let mut prompt = write_opened(repo.path(), REPLY);
+
+            for code in [
+                KeyCode::Backspace,
+                KeyCode::Backspace,
+                KeyCode::Backspace,
+                KeyCode::Char('.'),
+                KeyCode::Char('t'),
+                KeyCode::Char('x'),
+                KeyCode::Char('t'),
+                KeyCode::Enter,
+            ] {
+                prompt = round(&mut app, &manifest, &repo, &prompt, code, now());
+            }
+
+            let written = "docs/warlock-brief-01-scopes-and-sigils.txt";
+            assert_eq!(prompt, ScopePrompt::Closed, "Enter left the window up");
+            assert_eq!(
+                fs::read_to_string(repo.path().join(written)).expect("the artifact reads back"),
+                REPLY,
+                "the bytes on disk are not the reply on the card"
+            );
+            assert_eq!(
+                notes(&app),
+                vec![
+                    format!("wrote {written} — 47 bytes"),
+                    "docs is now stale".to_owned(),
+                ]
+            );
+        }
+
+        #[test]
+        fn esc_writes_nothing_and_leaves_the_reply_and_the_register_alone() {
+            // The abandonment, and the whole of what it is allowed to touch:
+            // the window. The reply is still on the card, the mode is still
+            // brief, the footer still says what the last key said, and the
+            // repository is as empty as it was.
+            let repo = a_repo();
+            let mut app = app_answering(repo.path(), REPLY);
+            app.set_mode(Mode::Brief);
+            let before = app.clone();
+            let prompt = write_opened(repo.path(), REPLY);
+
+            let prompt = round(
+                &mut app,
+                &pacts(&["docs"]),
+                &repo,
+                &prompt,
+                KeyCode::Esc,
+                now(),
+            );
+
+            assert_eq!(prompt, ScopePrompt::Closed);
+            assert_eq!(app, before, "Esc moved something on the app");
+            assert_eq!(app.mode(), Mode::Brief);
+            assert_eq!(everything_under(repo.path()), Vec::<String>::new());
+        }
+
+        #[test]
+        fn a_refused_path_reopens_the_field_and_the_next_enter_writes() {
+            // A path that is taken, typed out of the way and written: the
+            // refusal keeps the window up over the very text that earned it, so
+            // the fix is a keystroke rather than a second `/write`.
+            //
+            // The file in the way appears after the window opened, which is the
+            // situation the check is for: the proposal is a guess made once, at
+            // the answer, and what is on disk when Enter is pressed is a
+            // different question with a different answer.
+            let repo = a_repo();
+            let mut app = app_answering(repo.path(), REPLY);
+            let manifest = pacts(&["docs"]);
+            let mut prompt = write_opened(repo.path(), REPLY);
+            fs::create_dir_all(repo.path().join("docs")).expect("makes the output directory");
+            fs::write(repo.path().join(PROPOSED), "somebody else's brief\n")
+                .expect("writes the file in the way");
+
+            prompt = round(&mut app, &manifest, &repo, &prompt, KeyCode::Enter, now());
+
+            let field = prompt
+                .field()
+                .expect("a refusal left the window up")
+                .clone();
+            assert_eq!(field.text(), PROPOSED, "the typed path was taken away");
+            assert!(field.rule().is_some(), "the window says nothing about why");
+            assert_eq!(
+                fs::read_to_string(repo.path().join(PROPOSED)).expect("the file is still there"),
+                "somebody else's brief\n",
+                "the refused Enter wrote over the file in the way"
+            );
+
+            for code in [
+                KeyCode::Backspace,
+                KeyCode::Backspace,
+                KeyCode::Backspace,
+                KeyCode::Char('-'),
+                KeyCode::Char('2'),
+                KeyCode::Char('.'),
+                KeyCode::Char('m'),
+                KeyCode::Char('d'),
+                KeyCode::Enter,
+            ] {
+                prompt = round(&mut app, &manifest, &repo, &prompt, code, now());
+            }
+
+            assert_eq!(prompt, ScopePrompt::Closed);
+            assert_eq!(
+                fs::read_to_string(
+                    repo.path()
+                        .join("docs/warlock-brief-01-scopes-and-sigils-2.md")
+                )
+                .expect("the second path reads back"),
+                REPLY
+            );
+        }
+
+        #[test]
+        fn a_submit_from_a_window_that_is_not_up_writes_nothing() {
+            // The road `press_for` cannot take — it consults `edit_for` only
+            // while a window is up — answered rather than left to be
+            // discovered.
+            let repo = a_repo();
+            let mut app = app_answering(repo.path(), REPLY);
+
+            let prompt = write_edit(
+                &mut app,
+                &pacts(&["docs"]),
+                repo.path(),
+                &ScopePrompt::Closed,
+                warlock_tui::Edited::Submit,
+                now(),
+            );
+
+            assert_eq!(prompt, ScopePrompt::Closed);
+            assert_eq!(everything_under(repo.path()), Vec::<String>::new());
+        }
     }
 }
