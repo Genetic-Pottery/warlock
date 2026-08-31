@@ -222,10 +222,11 @@ impl Drop for CancelGuard {
 
 /// What a worker thread has to say for itself.
 ///
-/// Five things, and the order of two of them is fixed: one
+/// Six things, and the order of two of them is fixed: one
 /// [`PactEvent::Starting`] per directory as the run reaches it, any number of
-/// [`PactEvent::Doing`] from the pass that directory is running and of
 /// [`PactEvent::Summarising`] from the passes over the big files inside it, at
+/// most one [`PactEvent::Requesting`] as that directory's own request is handed
+/// over, any number of [`PactEvent::Doing`] from the pass that then runs, at
 /// most one [`PactEvent::Documented`] per directory as its pass delivers, and
 /// then exactly one [`PactEvent::Finished`]. Nothing else is sent, and nothing
 /// is sent after the outcome — the worker drops its end of the channel and
@@ -279,6 +280,27 @@ pub(crate) enum PactEvent {
         part: usize,
         /// How many passes the file costs in all.
         parts: usize,
+    },
+    /// The directory's own request has been handed to the pass: `files` files
+    /// in it, `bytes` bytes counted the way the budget counts them.
+    ///
+    /// What the silence that follows is made of. Every other event on this
+    /// channel is something happening; this one is the last thing said before
+    /// nothing is said, and the two numbers are the whole of what a reader can
+    /// use to explain why this directory is slow.
+    ///
+    /// Carries no directory, for [`Doing`](PactEvent::Doing)'s reason and
+    /// [`Summarising`](PactEvent::Summarising)'s: the
+    /// [`Starting`](PactEvent::Starting) before it already named the one whose
+    /// request this is. It is deliberately not folded into that `Starting`
+    /// either, because neither number is true when `Starting` is sent — see
+    /// [`PactObserver::requesting`], whose numbers these are, unaltered.
+    Requesting {
+        /// How many files the request carries.
+        files: usize,
+        /// What it weighs: the files plus each child directory's document,
+        /// which is the total the caps are checked against.
+        bytes: u64,
     },
     /// `directory` and everything under it is documented: its pass delivered,
     /// and no pass below it failed. The engine's own word, sent the moment it
@@ -382,6 +404,17 @@ impl PactObserver for Reporting<'_> {
             part,
             parts,
         });
+    }
+
+    /// Pass the two numbers on, exactly as `summarising` is passed on and with
+    /// the same shrug at a send that fails.
+    ///
+    /// No cancellation check of its own, for `summarising`'s reason: the
+    /// request is handed to the pass in the next breath, the engine asks
+    /// nothing here, and the one place a pact stops is still the question
+    /// asked between directories above.
+    fn requesting(&mut self, files: usize, bytes: u64) {
+        let _ = self.events.send(PactEvent::Requesting { files, bytes });
     }
 
     /// Pass the announcement on, exactly as `summarising` is passed on and
@@ -773,6 +806,22 @@ pub(crate) fn apply_progress(
                 let spelled = section_label(&scope.root, &file);
                 app.write_run(|account| account.record_summarising(&spelled, part, parts, now));
                 app.set_pact_summarising(file, part, parts);
+            }
+            // The panel only, and one line: the request this directory's pass
+            // was handed, filed under whichever section the `Starting` before
+            // it opened, exactly as an activity and a summarising pass are.
+            // The footer is left alone — it is already saying which directory
+            // of how many is being worked, which is the question it answers,
+            // and a byte total is not that.
+            //
+            // Filed at the handover rather than drawn on the placeholder
+            // above, because the clock is the point: this line counts the
+            // silence of *this* directory's own pass, from the moment its
+            // request went over, while the placeholder counts from the section
+            // opening and would label a multi-pass directory's whole wait with
+            // it. See `Account::record_waiting`.
+            Ok(PactEvent::Requesting { files, bytes }) => {
+                app.write_run(|account| account.record_waiting(files, bytes, now));
             }
             // The one recolouring a run does before it is over. The engine
             // only says this of a directory whose whole subtree delivered —
@@ -2023,6 +2072,7 @@ mod tests {
                 } => Some((*position, *total)),
                 PactEvent::Doing(_)
                 | PactEvent::Summarising { .. }
+                | PactEvent::Requesting { .. }
                 | PactEvent::Documented { .. }
                 | PactEvent::Finished(_) => None,
             })
@@ -2043,6 +2093,7 @@ mod tests {
                 ),
                 PactEvent::Doing(_)
                 | PactEvent::Summarising { .. }
+                | PactEvent::Requesting { .. }
                 | PactEvent::Documented { .. }
                 | PactEvent::Finished(_) => None,
             })
@@ -2103,7 +2154,8 @@ mod tests {
 
         // One announcement per directory, in the order the passes run —
         // children before parents — counted from one against a total that
-        // does not move, each answered by the word that its pass delivered,
+        // does not move, each followed by what its request weighed as the
+        // pass is handed it and answered by the word that its pass delivered,
         // and then exactly one outcome and nothing after it.
         let [
             PactEvent::Starting {
@@ -2111,6 +2163,7 @@ mod tests {
                 position: 1,
                 total: 2,
             },
+            PactEvent::Requesting { .. },
             PactEvent::Documented {
                 directory: first_done,
             },
@@ -2119,6 +2172,7 @@ mod tests {
                 position: 2,
                 total: 2,
             },
+            PactEvent::Requesting { .. },
             PactEvent::Documented {
                 directory: second_done,
             },
@@ -2175,15 +2229,17 @@ mod tests {
         let events: Vec<PactEvent> = received.into_iter().collect();
 
         // Both streams in one sequence, in the order the run produced them:
-        // a directory is announced, then what its pass did, then the next
-        // directory. The three kinds of activity arrive whole and unaltered
-        // — this channel carries them, it does not interpret them.
+        // a directory is announced, then what its request weighed, then what
+        // its pass did, then the next directory. The three kinds of activity
+        // arrive whole and unaltered — this channel carries them, it does not
+        // interpret them.
         let [
             PactEvent::Starting {
                 directory: first,
                 position: 1,
                 total: 2,
             },
+            PactEvent::Requesting { .. },
             PactEvent::Doing(Activity::Tool {
                 name: first_tool,
                 detail: Some(first_detail),
@@ -2196,6 +2252,7 @@ mod tests {
                 position: 2,
                 total: 2,
             },
+            PactEvent::Requesting { .. },
             PactEvent::Doing(Activity::Tool {
                 detail: Some(second_detail),
                 ..
@@ -3179,13 +3236,21 @@ mod tests {
         // cancelled pact leaves, because it is the same code closing it.
         let lines = panel_text(&app, at(base, 10_000));
         assert_eq!(
-            &lines[lines.len() - 5..],
+            &lines[lines.len() - 6..],
             [
                 "crates/alpha".to_owned(),
-                "0:20 Read crates/alpha".to_owned(),
-                "0:50 thinking".to_owned(),
-                "0:50 cancelled — $0.25 spent".to_owned(),
-                "pact finished — 4 directories, 3:20, $1.00".to_owned(),
+                // What the stopped pass had been handed: this directory's own
+                // document, which a refresh finds sitting there as a file, and
+                // its child's on top of it.
+                format!(
+                    "0:20 waiting · 1 file, {} bytes",
+                    document_bytes(&scratch, "crates/alpha")
+                        + document_bytes(&scratch, "crates/alpha/src")
+                ),
+                "0:30 Read crates/alpha".to_owned(),
+                "1:00 thinking".to_owned(),
+                "1:00 cancelled — $0.25 spent".to_owned(),
+                "pact finished — 4 directories, 4:00, $1.00".to_owned(),
             ],
             "the cancel is recorded in the section it happened in"
         );
@@ -3417,6 +3482,66 @@ mod tests {
         let mut in_flight = before.clone();
         in_flight.set_pact_in_flight("/repo/crates/engine", 1, 1);
         in_flight.set_pact_summarising("/repo/crates/engine/src/deps.lock", 14, 14);
+        assert_eq!(
+            app.pact_line(),
+            in_flight.pact_line(),
+            "the footer says exactly what it said before the panel joined in"
+        );
+    }
+
+    #[test]
+    fn the_request_a_directory_was_handed_draws_a_line_under_it() {
+        // What the silence is made of, on the channel and then on screen: the
+        // directory is announced, the panel draws the bare placeholder while
+        // its files are being read off disk, and the moment the request goes
+        // over to the pass a real line lands under that same heading saying
+        // what went in it.
+        let base = Instant::now();
+        let (mut app, before, mut manifest, events, running) = a_run_in_flight(base);
+        let mut pact = Some(running);
+
+        events
+            .send(PactEvent::Starting {
+                directory: PathBuf::from("/repo/crates/engine"),
+                position: 1,
+                total: 1,
+            })
+            .expect("the loop is still listening");
+        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+        assert_eq!(
+            panel_text(&app, at(base, 5)),
+            ["engine", "0:05 waiting"],
+            "the placeholder covers the stretch before the request exists"
+        );
+
+        // Twenty seconds of reading files, and then the handover.
+        events
+            .send(PactEvent::Requesting {
+                files: 11,
+                bytes: 34 * 1024,
+            })
+            .expect("the loop is still listening");
+        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 20));
+
+        // One line, under the heading the `Starting` before it opened, in
+        // place of the placeholder that was there a moment ago — and it is the
+        // newest line, so it goes on counting while the pass says nothing.
+        assert_eq!(
+            panel_text(&app, at(base, 20)),
+            ["engine", "0:20 waiting · 11 files, 34 KB"],
+            "the request the pass was handed is not under its directory"
+        );
+        assert_eq!(
+            panel_text(&app, at(base, 80)),
+            ["engine", "1:20 waiting · 11 files, 34 KB"],
+            "the line stopped counting the silence it is about"
+        );
+
+        // And the footer is untouched by it, as it is by a summarising pass:
+        // it still says which directory of how many is being worked, which is
+        // the question it answers.
+        let mut in_flight = before.clone();
+        in_flight.set_pact_in_flight("/repo/crates/engine", 1, 1);
         assert_eq!(
             app.pact_line(),
             in_flight.pact_line(),
@@ -4135,31 +4260,41 @@ mod tests {
             panel_text(&app, at(base, 10_000)),
             [
                 "crates/engine/src".to_owned(),
-                "0:20 Read crates/engine/src".to_owned(),
-                "0:50 thinking".to_owned(),
+                // The request that pass was handed: the one file in
+                // `crates/engine/src`, seventeen bytes of it.
+                "0:20 waiting · 1 file, 17 bytes".to_owned(),
+                "0:30 Read crates/engine/src".to_owned(),
+                "1:00 thinking".to_owned(),
                 format!(
-                    "0:50 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.25",
+                    "1:00 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.25",
                     document_bytes(&scratch, "crates/engine/src")
                 ),
                 "crates/engine".to_owned(),
-                "0:20 Read crates/engine".to_owned(),
-                "0:50 thinking".to_owned(),
+                // The parent holds no file of its own, and what it carries is
+                // its child's document — which is why the count and the weight
+                // do not describe the same set.
                 format!(
-                    "0:50 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                    "0:20 waiting · 0 files, {} bytes",
+                    document_bytes(&scratch, "crates/engine/src")
+                ),
+                "0:30 Read crates/engine".to_owned(),
+                "1:00 thinking".to_owned(),
+                format!(
+                    "1:00 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
                     document_bytes(&scratch, "crates/engine")
                 ),
-                // Eleven frames of ten seconds: the run started with the
-                // first and ended with the eleventh. The total is the two
+                // Thirteen frames of ten seconds: the run started with the
+                // first and ended with the thirteenth. The total is the two
                 // passes added up, and there is no `incomplete` on it because
                 // both of them said what they cost.
-                "pact finished — 2 directories, 1:40, $0.50".to_owned(),
+                "pact finished — 2 directories, 2:00, $0.50".to_owned(),
             ],
             "each section is closed with its own document and its own cost"
         );
 
         // And the account of a run that is over is still all there and still
         // all reachable: three lines of panel, and the reader can walk the
-        // nine the run wrote a screenful at a time.
+        // eleven the run wrote a screenful at a time.
         app.toggle_focus();
         app.set_panel_height(3);
         app.select_first();
@@ -4171,6 +4306,12 @@ mod tests {
             }
             app.select_page_down();
         }
+        // Eleven lines do not divide into pages of three, so the last page
+        // overlaps the one before it: a panel scrolled to the bottom shows the
+        // last three lines whatever it showed a moment ago. A line walked past
+        // twice is not a line missed, which is what this is about, so the
+        // repeats come out before the comparison.
+        walked.dedup();
         assert_eq!(
             walked,
             app.account()
@@ -4205,14 +4346,14 @@ mod tests {
         );
 
         let lines = panel_text(&app, at(base, 10_000));
-        let [first, _, _, refused, second, _, _, wrote, summary] = lines.as_slice() else {
+        let [first, _, _, _, refused, second, _, _, _, wrote, summary] = lines.as_slice() else {
             panic!("a two-directory run reads as two sections and a summary: {lines:?}");
         };
         assert_eq!(first, "crates/engine/src");
         assert_eq!(second, "crates/engine");
 
         let reason = refused
-            .strip_prefix("0:40 refused — ")
+            .strip_prefix("0:50 refused — ")
             .unwrap_or_else(|| panic!("the section says why it was refused: {refused}"));
         assert!(
             reason.contains("crates/engine/src"),
@@ -4232,7 +4373,7 @@ mod tests {
         assert_eq!(
             wrote,
             &format!(
-                "0:40 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                "0:50 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
                 document_bytes(&scratch, "crates/engine")
             )
         );
@@ -4243,7 +4384,7 @@ mod tests {
                 .exists(),
             "the refused directory really has no document"
         );
-        assert_eq!(summary, "pact finished — 2 directories, 1:20, $0.50");
+        assert_eq!(summary, "pact finished — 2 directories, 1:40, $0.50");
     }
 
     #[test]
@@ -4276,19 +4417,25 @@ mod tests {
         let lines = panel_text(&app, at(base, 10_000));
         assert_eq!(
             lines.len(),
-            17,
-            "four sections of four lines and a summary: {lines:?}"
+            21,
+            "four sections of five lines and a summary: {lines:?}"
         );
         assert_eq!(
-            &lines[12..],
+            &lines[15..],
             [
                 "crates/alpha".to_owned(),
-                "0:20 Read crates/alpha".to_owned(),
-                "0:50 thinking".to_owned(),
-                "0:50 cancelled — $0.25 spent".to_owned(),
+                // What the pass that was stopped had been handed: no file of
+                // its own and its child's document.
+                format!(
+                    "0:20 waiting · 0 files, {} bytes",
+                    document_bytes(&scratch, "crates/alpha/src")
+                ),
+                "0:30 Read crates/alpha".to_owned(),
+                "1:00 thinking".to_owned(),
+                "1:00 cancelled — $0.25 spent".to_owned(),
                 // Four directories and not the five the subtree holds: the
                 // descent stopped, and the account counts what it reached.
-                "pact finished — 4 directories, 3:20, $1.00".to_owned(),
+                "pact finished — 4 directories, 4:00, $1.00".to_owned(),
             ],
             "the cancel is recorded in the section it happened in"
         );
@@ -4297,11 +4444,11 @@ mod tests {
             .into_iter()
             .enumerate()
         {
-            assert_eq!(&lines[index * 4], directory);
+            assert_eq!(&lines[index * 5], directory);
             assert_eq!(
-                lines[index * 4 + 3],
+                lines[index * 5 + 4],
                 format!(
-                    "0:50 wrote {directory}/WARLOCK.md — {} bytes, $0.25",
+                    "1:00 wrote {directory}/WARLOCK.md — {} bytes, $0.25",
                     document_bytes(&scratch, directory)
                 ),
                 "a section above the cancel keeps the ending it earned"
@@ -4749,20 +4896,25 @@ mod tests {
             turn,
             [
                 "crates/engine/src".to_owned(),
-                "0:20 Read crates/engine/src".to_owned(),
-                "0:50 thinking".to_owned(),
+                "0:20 waiting · 1 file, 17 bytes".to_owned(),
+                "0:30 Read crates/engine/src".to_owned(),
+                "1:00 thinking".to_owned(),
                 format!(
-                    "0:50 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.25",
+                    "1:00 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.25",
                     document_bytes(&scratch, "crates/engine/src")
                 ),
                 "crates/engine".to_owned(),
-                "0:20 Read crates/engine".to_owned(),
-                "0:50 thinking".to_owned(),
                 format!(
-                    "0:50 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                    "0:20 waiting · 0 files, {} bytes",
+                    document_bytes(&scratch, "crates/engine/src")
+                ),
+                "0:30 Read crates/engine".to_owned(),
+                "1:00 thinking".to_owned(),
+                format!(
+                    "1:00 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
                     document_bytes(&scratch, "crates/engine")
                 ),
-                "pact finished — 2 directories, 1:40, $0.50".to_owned(),
+                "pact finished — 2 directories, 2:00, $0.50".to_owned(),
             ],
             "the conversation is not holding the whole run"
         );
@@ -5147,7 +5299,7 @@ mod tests {
         assert_eq!(
             lines.last().map(String::as_str),
             Some(
-                "pact finished — 7 directories, 2:20, $0.00 (incomplete: 7 passes reported no cost)"
+                "pact finished — 7 directories, 3:30, $0.00 (incomplete: 7 passes reported no cost)"
             ),
             "the summary counts the run: {lines:?}"
         );
@@ -5208,20 +5360,27 @@ mod tests {
             panel_text(&app, at(base, 10_000)),
             [
                 "crates/engine/src".to_owned(),
-                "0:20 Read crates/engine/src".to_owned(),
-                "0:40 thinking".to_owned(),
+                // The one file of `one_crate`, seventeen bytes of it, on the
+                // line that says what the silence after it was made of.
+                "0:20 waiting · 1 file, 17 bytes".to_owned(),
+                "0:30 Read crates/engine/src".to_owned(),
+                "0:50 thinking".to_owned(),
                 format!(
-                    "0:40 wrote crates/engine/src/WARLOCK.md — {} bytes, no cost reported",
+                    "0:50 wrote crates/engine/src/WARLOCK.md — {} bytes, no cost reported",
                     document_bytes(&scratch, "crates/engine/src")
                 ),
                 "crates/engine".to_owned(),
-                "0:20 Read crates/engine".to_owned(),
-                "0:50 thinking".to_owned(),
                 format!(
-                    "0:50 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                    "0:20 waiting · 0 files, {} bytes",
+                    document_bytes(&scratch, "crates/engine/src")
+                ),
+                "0:30 Read crates/engine".to_owned(),
+                "1:00 thinking".to_owned(),
+                format!(
+                    "1:00 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
                     document_bytes(&scratch, "crates/engine")
                 ),
-                "pact finished — 2 directories, 1:30, \
+                "pact finished — 2 directories, 1:50, \
                      $0.25 (incomplete: 1 pass reported no cost)"
                     .to_owned(),
             ],
