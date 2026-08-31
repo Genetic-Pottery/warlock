@@ -1183,6 +1183,16 @@ mod tests {
         /// what it is waiting for happens.
         const AT_MOST: Duration = Duration::from_secs(5);
 
+        /// How often a test looks again while waiting for a worker thread to
+        /// finish letting go of its channel.
+        ///
+        /// Short enough that the ordinary case — the thread returning a moment
+        /// after its last send — costs one tick and not a visible pause, and it
+        /// is a polling interval rather than a deadline: [`AT_MOST`] is what
+        /// gives up. Nothing is timed against this, so it may be made longer or
+        /// shorter without any test's meaning changing.
+        const TEARDOWN_TICK: Duration = Duration::from_millis(10);
+
         /// A program that is not there, so a spawn fails the one way that has
         /// its own ending.
         const NOT_A_PROGRAM: &str = "/warlock/no/such/program";
@@ -1462,14 +1472,33 @@ mod tests {
                 "{first:?}"
             );
             assert!(elapsed < AT_MOST, "the cancel took {elapsed:?}");
+
             // And nothing after it: the worker sent its one ending and stopped.
-            assert!(
-                matches!(
-                    received.recv_timeout(Duration::from_millis(200)),
-                    Err(RecvTimeoutError::Disconnected)
-                ),
-                "the worker went on talking after it ended"
-            );
+            // Two facts, and they fail for different reasons, so they are waited
+            // on rather than sampled once. `run_turn` sends the ending as its
+            // last statement and the channel goes quiet only when the closure
+            // returns and drops the two senders — the worker's and the one
+            // `wired` gave the agent — so the gap between the ending arriving
+            // here and the disconnect arriving is a thread being scheduled. On a
+            // loaded machine that is not bounded by any number worth writing
+            // down, and a fixed window here read a slow teardown as a talkative
+            // worker: `Timeout` says precisely that nothing was said.
+            //
+            // So an event is the failure, immediately and in its own words, and
+            // silence is waited out to [`AT_MOST`] — the budget every other wait
+            // in this module keeps.
+            let quiet = Instant::now();
+            loop {
+                match received.recv_timeout(TEARDOWN_TICK) {
+                    Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => assert!(
+                        quiet.elapsed() < AT_MOST,
+                        "the worker held the channel open for {:?} after it ended",
+                        quiet.elapsed()
+                    ),
+                    Ok(event) => panic!("the worker went on talking after it ended: {event:?}"),
+                }
+            }
         }
 
         #[test]
