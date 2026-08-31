@@ -212,8 +212,9 @@ use ratatui::crossterm::execute;
 use ratatui::layout::Size;
 use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
 use warlock_tui::{
-    App, ClaudeAgent, Composed, Composer, Focus, QuitConfirm, ScopePrompt, Submitted,
-    composer_on_screen, draw, panel_height, panel_width, submitted_for, tree_height,
+    App, BRIEF_INSTRUCTION, CHAT_INSTRUCTION, ClaudeAgent, Composed, Composer, Focus, Mode,
+    QuitConfirm, ScopePrompt, Submitted, composer_on_screen, draw, panel_height, panel_width,
+    submitted_for, tree_height,
 };
 
 mod chatting;
@@ -1114,6 +1115,43 @@ fn apply_mouse(
     }
 }
 
+/// What `/brief` is shown as on the thread card, and `/chat`.
+///
+/// The word the reader typed, spelled here rather than taken from the draft: a
+/// draft is trimmed and matched by [`submitted_for`], so `"  /brief  "` and
+/// `"/brief"` are one command and have to read as one row. What is actually sent
+/// is [`BRIEF_INSTRUCTION`] and [`CHAT_INSTRUCTION`], which the card never shows
+/// (see [`Chat::say`](chatting::Chat::say)).
+const BRIEF_COMMAND: &str = "/brief";
+/// `/chat` as the card shows it. See [`BRIEF_COMMAND`].
+const CHAT_COMMAND: &str = "/chat";
+
+/// The one line the thread gains when the conversation enters brief mode.
+///
+/// A note and not a turn: warlock saying what it did with the word it was given,
+/// unclocked, at the point in the history the command was typed. It is said on a
+/// *change* only — `/brief` in brief mode re-sends the instruction and has
+/// nothing new to say about the register — and it says what the mode is and how
+/// to leave it, because the way out is the one thing a reader in a mode cannot
+/// work out from the screen. The border title says which mode it is from then
+/// on; this line says when it started.
+const BRIEF_NOTE: &str =
+    "brief mode — this conversation is now converging on a document. /chat leaves it.";
+
+/// The one line the thread gains when the conversation leaves brief mode.
+///
+/// [`BRIEF_NOTE`]'s counterpart, on the same rule and for the same reason: one
+/// unclocked line where the command was typed, and only on a change.
+const CHAT_NOTE: &str = "chat mode — the brief is over and nothing is being converged on.";
+
+/// The one line `/chat` costs when the conversation is in chat mode already.
+///
+/// The command has nothing to do — there is no mode to leave — so it does
+/// nothing, and says so rather than spending a turn telling the model something
+/// it was never told the other way. One line, in warlock's own voice, where the
+/// refusal of a mistyped command goes.
+const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes that.";
+
 /// Do to the draft and to the keyboard whatever the composer just made of a
 /// key.
 ///
@@ -1161,13 +1199,38 @@ fn apply_mouse(
 /// about a turn it is not performing. Nothing is waited for here — everything
 /// the turn produces arrives at the bottom of the loop, exactly as a run's does.
 ///
-/// A **command** costs nothing at all here. The field is emptied and that is the
-/// whole of it: no turn is opened, no question is asked, and the card gains no
-/// row of its own, because a command word is a thing warlock was told rather
-/// than a thing that was said to the model. What each command *does* is not this
-/// slice's business — the arms that give them behaviour land with them, and
-/// until then a recognised command is a keystroke that was understood and
-/// nothing more.
+/// **`/brief`** is two things in the order the reader experiences them: the mode,
+/// and one ordinary turn. [`App::set_mode`] answers whether that was a *change*,
+/// and a change is worth exactly one unclocked note ([`BRIEF_NOTE`]) at the point
+/// in the history the command was typed — where a `/brief` typed in brief mode is
+/// a re-send with nothing new to say about the register and adds none. Then the
+/// turn, whichever it was: [`BRIEF_INSTRUCTION`] goes into the conversation
+/// already in progress through the very path a typed message takes, shown on the
+/// card as [`BRIEF_COMMAND`] and never as the paragraph. So it costs a turn every
+/// time — which is the point of typing it again when the register has drifted —
+/// and the reply lands under it like any other answer.
+///
+/// The mode is set *before* the turn is sent, and that ordering is load-bearing:
+/// the effort the turn is asked at is read off the app when the worker starts
+/// (see [`Chat::say`](chatting::Chat::say)), so the instruction that enters the
+/// mode is itself asked at the mode's level.
+///
+/// **`/chat`** is the same shape pointed the other way, with one difference: it
+/// is refused when there is nothing to leave. In brief mode it leaves the mode,
+/// notes it once and sends [`CHAT_INSTRUCTION`] as one ordinary turn shown as
+/// [`CHAT_COMMAND`]; in chat mode it is [`ALREADY_CHATTING`] on the card and no
+/// turn at all, because the model was never told the register changed and telling
+/// it that it has not is a question nobody asked.
+///
+/// Nothing on the card is cleared, hidden or reordered by either of them. A mode
+/// is a word warlock holds and a message into a session that is not replaced: the
+/// turns already on screen are the material the document is made of, and every
+/// one of them is still there, in order, with its answer and its work lines.
+///
+/// **`/write`** still costs nothing at all here. The field is emptied and that is
+/// the whole of it: no turn, no question and no row of its own. What it does is
+/// not this slice's business — the arm that gives it behaviour lands with it, and
+/// until then it is a keystroke that was understood and nothing more.
 ///
 /// A **refusal** is one line on the thread card and nothing else: no turn, no
 /// model, no `claude`. That line is the whole discovery mechanism for the three
@@ -1221,20 +1284,39 @@ fn apply_compose(
             *composer = Composer::default();
 
             match submitted_for(&draft) {
-                // The only arm that reaches the model, and it is the arm that
-                // was here before the other two existed.
+                // The arm that was here before the other three existed: the
+                // words go to the model as they were typed.
                 Submitted::Message => chat.ask(app, &draft, now),
-                // Everything else stops here, without a question and without a
-                // turn. A recognised command is handed nowhere — this slice
-                // gives the three words no behaviour, and a command that opened
-                // a turn to do nothing would be a question the reader never
-                // asked — and a refusal has exactly one line to say, asked of
-                // the value rather than restated here, so the list of what
-                // exists is written down in one place.
-                said @ (Submitted::Brief
-                | Submitted::Write
-                | Submitted::Chat
-                | Submitted::Refused) => {
+                // The mode, then the turn — in that order, because the turn is
+                // asked at the level the mode it is entering is worth. The note
+                // is the change and not the command, so typing `/brief` twice
+                // costs two turns and one line.
+                Submitted::Brief => {
+                    if app.set_mode(Mode::Brief) {
+                        app.note(BRIEF_NOTE, now);
+                    }
+                    chat.say(app, BRIEF_COMMAND, BRIEF_INSTRUCTION, now);
+                }
+                // The same, one way only: there is no register to leave in chat
+                // mode, so the command says so on the card and stops. A turn
+                // spent telling the model it is where it already was would be a
+                // question nobody asked and money nobody meant to spend.
+                Submitted::Chat => {
+                    if app.set_mode(Mode::Chat) {
+                        app.note(CHAT_NOTE, now);
+                        chat.say(app, CHAT_COMMAND, CHAT_INSTRUCTION, now);
+                    } else {
+                        app.note(ALREADY_CHATTING, now);
+                    }
+                }
+                // The two that stop here, without a question and without a turn.
+                // `/write` is recognised and handed nowhere — this slice gives it
+                // no behaviour, and a command that opened a turn to do nothing
+                // would be a question the reader never asked — and a refusal has
+                // exactly one line to say, asked of the value rather than
+                // restated here, so the list of what exists is written down in
+                // one place.
+                said @ (Submitted::Write | Submitted::Refused) => {
                     if let Some(line) = said.refusal() {
                         app.note(line, now);
                     }
@@ -1466,11 +1548,15 @@ mod tests {
     /// test that does submit a message hands the conversation an agent whose
     /// program does not exist, so the worker it starts finds nothing to run.
     mod submitting {
-        use std::time::Instant;
+        use std::time::{Duration, Instant};
 
-        use warlock_tui::{App, ChatAgent, Composed, Composer, Line, Submitted};
+        use warlock_tui::{
+            Activity, App, ChatAgent, Composed, Composer, Ending, Line, Mode, Submitted,
+        };
 
-        use super::super::apply_compose;
+        use super::super::{
+            ALREADY_CHATTING, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, apply_compose,
+        };
         use crate::chatting::Chat;
 
         /// A `claude` that is not there, so a turn that does start spawns
@@ -1488,11 +1574,44 @@ mod tests {
         fn submit(draft: &str, now: Instant) -> (App, Chat, Composer) {
             let mut app = App::default();
             let mut chat = conversation();
-            let mut composer = Composer::new(draft);
-
-            apply_compose(&mut app, &mut composer, Composed::Submit, &mut chat, now);
+            let composer = submit_into(&mut app, &mut chat, draft, now);
 
             (app, chat, composer)
+        }
+
+        /// Submit `draft` into a conversation that is already going, and hand
+        /// back the field it left behind.
+        ///
+        /// What [`submit`] does for one draft, over an app and a chat the caller
+        /// keeps: a mode is a state of *this* conversation, so the tests about
+        /// it are two and three commands long and every one of them has to be
+        /// the same session and the same card.
+        fn submit_into(app: &mut App, chat: &mut Chat, draft: &str, now: Instant) -> Composer {
+            let mut composer = Composer::new(draft);
+            apply_compose(app, &mut composer, Composed::Submit, chat, now);
+            composer
+        }
+
+        /// The card as one unclocked note of warlock's own.
+        fn note(text: &str) -> Line {
+            Line::Note {
+                text: text.to_owned(),
+            }
+        }
+
+        /// A turn on the card as it is drawn the instant it is asked: the
+        /// message it is shown as, and the clocked row a turn with nothing back
+        /// yet draws under it.
+        fn asked(shown: &str) -> [Line; 2] {
+            [
+                Line::Said {
+                    text: shown.to_owned(),
+                },
+                Line::Clocked {
+                    clock: "0:00".to_owned(),
+                    text: "waiting".to_owned(),
+                },
+            ]
         }
 
         /// Every row of the app's thread card, or none at all when nothing has
@@ -1509,15 +1628,16 @@ mod tests {
         }
 
         #[test]
-        fn a_command_word_clears_the_field_and_does_nothing_else() {
-            // The three words are recognised and handed nowhere: no question,
-            // no turn, and no row of their own on the card. Asserted against a
-            // copy of the whole app, so a command that quietly moved anything —
-            // a card, a message, a selection — fails here.
+        fn write_clears_the_field_and_does_nothing_else() {
+            // Still the whole of what `/write` does: it is recognised and handed
+            // nowhere — no question, no turn, and no row of its own on the card.
+            // Asserted against a copy of the whole app, so a command that
+            // quietly moved anything — a card, a message, a mode, a selection —
+            // fails here.
             let now = Instant::now();
             let untouched = App::default();
 
-            for draft in ["/brief", "/write", "/chat", "  /brief  "] {
+            for draft in ["/write", "  /write  "] {
                 let (app, chat, composer) = submit(draft, now);
 
                 assert_eq!(app, untouched, "{draft:?} changed something on screen");
@@ -1532,6 +1652,238 @@ mod tests {
                     "{draft:?} was left in the field"
                 );
             }
+        }
+
+        #[test]
+        fn brief_notes_the_mode_once_and_sends_one_turn_shown_as_the_command() {
+            // What `/brief` costs: one unclocked note where it was typed, and
+            // one ordinary turn under it. The card shows the word that was
+            // typed and never the paragraph that went to the model — a screen of
+            // prose the reader did not write, in the place their own questions
+            // go, would be warlock putting words in their mouth.
+            let now = Instant::now();
+
+            for draft in ["/brief", "  /brief  "] {
+                let (app, chat, composer) = submit(draft, now);
+
+                assert_eq!(app.mode(), Mode::Brief, "{draft:?} did not enter the mode");
+                assert_eq!(
+                    rows(&app, now),
+                    [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
+                    "{draft:?} is not one note and one turn"
+                );
+                assert_eq!(turns(&app), 1, "{draft:?} did not open one turn");
+                assert!(chat.answering(), "{draft:?} asked the model nothing");
+                assert!(
+                    composer.draft().is_empty(),
+                    "{draft:?} was left in the field"
+                );
+            }
+        }
+
+        #[test]
+        fn brief_in_brief_mode_re_sends_the_instruction_and_notes_nothing() {
+            // Typing it again is the remedy for a register that has drifted, so
+            // it costs a turn every time — and says nothing new about the mode,
+            // because the mode did not change.
+            let now = Instant::now();
+            let mut app = App::default();
+            let mut chat = conversation();
+
+            submit_into(&mut app, &mut chat, "/brief", now);
+            submit_into(&mut app, &mut chat, "/brief", now);
+
+            assert_eq!(app.mode(), Mode::Brief);
+            assert_eq!(
+                rows(&app, now),
+                [
+                    vec![note(BRIEF_NOTE)],
+                    asked(BRIEF_COMMAND).to_vec(),
+                    asked(BRIEF_COMMAND).to_vec(),
+                ]
+                .concat(),
+            );
+            assert_eq!(turns(&app), 2, "the second /brief cost no turn");
+        }
+
+        #[test]
+        fn chat_leaves_the_mode_with_one_note_and_one_turn() {
+            // The way out, and the same shape as the way in: the register is
+            // left, warlock says so once, and the model is told the other
+            // instruction as one ordinary turn shown as `/chat`.
+            let now = Instant::now();
+            let mut app = App::default();
+            let mut chat = conversation();
+
+            submit_into(&mut app, &mut chat, "/brief", now);
+            submit_into(&mut app, &mut chat, "/chat", now);
+
+            assert_eq!(app.mode(), Mode::Chat, "/chat did not leave the mode");
+            assert_eq!(
+                rows(&app, now),
+                [
+                    vec![note(BRIEF_NOTE)],
+                    asked(BRIEF_COMMAND).to_vec(),
+                    vec![note(CHAT_NOTE)],
+                    asked(CHAT_COMMAND).to_vec(),
+                ]
+                .concat(),
+            );
+            assert_eq!(turns(&app), 2);
+            assert!(chat.answering(), "the instruction was never sent");
+        }
+
+        #[test]
+        fn chat_in_chat_mode_is_one_line_and_costs_no_turn() {
+            // There is nothing to leave, so there is nothing to tell the model:
+            // a turn spent saying the conversation is where it already was is a
+            // question nobody asked and money nobody meant to spend.
+            let now = Instant::now();
+            let (app, chat, composer) = submit("/chat", now);
+
+            assert_eq!(app.mode(), Mode::Chat);
+            assert_eq!(rows(&app, now), vec![note(ALREADY_CHATTING)]);
+            assert_eq!(turns(&app), 0, "/chat in chat mode opened a turn");
+            assert!(!chat.answering(), "/chat in chat mode asked the model");
+            assert!(composer.draft().is_empty());
+
+            // And the same after a mode that really was left: the refusal is
+            // about the state, not about how the conversation got into it.
+            let mut app = App::default();
+            let mut chat = conversation();
+            submit_into(&mut app, &mut chat, "/brief", now);
+            submit_into(&mut app, &mut chat, "/chat", now);
+            let before = turns(&app);
+            submit_into(&mut app, &mut chat, "/chat", now);
+
+            assert_eq!(turns(&app), before, "the second /chat cost a turn");
+            assert_eq!(
+                rows(&app, now).last(),
+                Some(&note(ALREADY_CHATTING)),
+                "the second /chat said something else",
+            );
+        }
+
+        #[test]
+        fn a_mode_clears_hides_and_reorders_nothing_that_was_already_said() {
+            // The property the whole design rests on: the turns already on the
+            // card are the material a document is made of. Entering the mode and
+            // leaving it again puts rows *under* them and moves none of them.
+            let now = Instant::now();
+            let mut app = App::default();
+            let mut chat = conversation();
+
+            submit_into(&mut app, &mut chat, "why nine passes?", now);
+            let before = rows(&app, now);
+            submit_into(&mut app, &mut chat, "/brief", now);
+            submit_into(&mut app, &mut chat, "/chat", now);
+
+            let after = rows(&app, now);
+            assert_eq!(after[..before.len()], before[..], "the card was rewritten");
+            assert_eq!(
+                after,
+                [
+                    before,
+                    vec![note(BRIEF_NOTE)],
+                    asked(BRIEF_COMMAND).to_vec(),
+                    vec![note(CHAT_NOTE)],
+                    asked(CHAT_COMMAND).to_vec(),
+                ]
+                .concat(),
+            );
+            assert_eq!(turns(&app), 3);
+        }
+
+        #[test]
+        fn a_mode_leaves_every_answer_and_every_work_line_exactly_where_it_was() {
+            // The same property with the card full rather than empty, which is
+            // the state a `/brief` is actually typed in: the conversation worth
+            // converging on is one that has been going for a while, and by then
+            // the turns on the card carry the answers and the work lines that
+            // are the material a document is made of. Losing those to a mode
+            // change would be losing the brief before it started — and it is
+            // the failure a second session would show up as, because a session
+            // that starts again starts with nothing on the card.
+            //
+            // The rows come first, because that is what the reader has, and
+            // then the turns themselves, because a row that merely *drew* the
+            // same is not the same answer.
+            let now = Instant::now();
+            let later = now + Duration::from_secs(30);
+            let mut app = App::default();
+            let mut chat = conversation();
+
+            // One turn that was worked at and answered, and one that ended
+            // without an answer: both are things a mode change could drop.
+            submit_into(&mut app, &mut chat, "why nine passes?", now);
+            app.record_turn(
+                &Activity::Tool {
+                    name: "Read".to_owned(),
+                    detail: Some("crates/warlock-engine/src/lib.rs".to_owned()),
+                },
+                now,
+            );
+            app.record_turn(&Activity::Thinking, now);
+            app.answer_turn("One pass per directory, bottom up.", now);
+            submit_into(&mut app, &mut chat, "and the manifest?", now);
+            app.end_turn(&Ending::NothingSaid, now);
+
+            let before = rows(&app, later);
+            let asked_already: Vec<_> = app
+                .thread()
+                .expect("two questions were asked")
+                .turns()
+                .into_iter()
+                .cloned()
+                .collect();
+            // The history is really a history: an answer, work lines and an
+            // ending are all on the card before the mode is touched, so the
+            // equalities below are about something rather than about nothing.
+            assert!(
+                before.iter().any(|line| matches!(line, Line::Text { .. })),
+                "there is no answer on the card to survive anything: {before:?}"
+            );
+            assert!(
+                before
+                    .iter()
+                    .filter(|line| matches!(line, Line::Clocked { .. }))
+                    .count()
+                    >= 3,
+                "there is no work on the card to survive anything: {before:?}"
+            );
+
+            submit_into(&mut app, &mut chat, "/brief", later);
+            submit_into(&mut app, &mut chat, "/chat", later);
+
+            // Every row that was there is still there, at the index it was at:
+            // nothing cleared, nothing hidden, nothing reordered, and the two
+            // answers and every work line word for word.
+            let after = rows(&app, later);
+            assert_eq!(
+                after[..before.len()],
+                before[..],
+                "entering and leaving the register rewrote the conversation"
+            );
+            // And the turns under those rows: the message, the answer and the
+            // ending of each, unchanged and in the order they were asked in.
+            let asked_now: Vec<_> = app
+                .thread()
+                .expect("the conversation is still there")
+                .turns()
+                .into_iter()
+                .cloned()
+                .collect();
+            assert_eq!(
+                asked_now[..asked_already.len()],
+                asked_already[..],
+                "a mode change took a turn of the conversation"
+            );
+            assert_eq!(
+                asked_now.len(),
+                asked_already.len() + 2,
+                "the two commands did not cost the two turns they are supposed to"
+            );
+            assert_eq!(app.mode(), Mode::Chat, "the register was never left");
         }
 
         #[test]

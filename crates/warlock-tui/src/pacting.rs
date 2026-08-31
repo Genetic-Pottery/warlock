@@ -1329,8 +1329,8 @@ mod tests {
         repository_root, subtree_hash,
     };
     use warlock_tui::{
-        Account, Activities, Activity, App, Chrome, ClaudeAgent, Line, PactToggle, Run, Section,
-        Sigils,
+        Account, Activities, Activity, App, Chrome, ClaudeAgent, Line, Mode, PactToggle, Run,
+        Section, Sigils,
     };
 
     use warlock_tui::Cancel;
@@ -1339,6 +1339,8 @@ mod tests {
         CancelGuard, PACT_CANCELLED, PACT_LOST, PactEvent, Running, Toggled, Work, activity_port,
         apply_progress, apply_toggle, run_pact, spawn_pact,
     };
+    use crate::chatting::Chat;
+    use crate::field_muted;
     use crate::session::{NOT_REFRESHED, Scope};
 
     /// [`super::pact_press`] with no boundary in the way.
@@ -5270,6 +5272,116 @@ mod tests {
             card.iter().any(|line| line.contains("refused")),
             "the run's card does not say why it failed: {card:?}"
         );
+    }
+
+    #[test]
+    fn a_run_in_flight_leaves_the_register_the_field_and_the_conversation_alone() {
+        // A brief is exactly the conversation somebody is most likely to press a
+        // run key during: they are converging on a document about a repository,
+        // so they pact or refresh part of it to see what warlock makes of it
+        // first. The run is a worker of its own with a card of its own and it
+        // shares nothing with the register — so a whole run, driven a frame at a
+        // time through the loop that hears the worker, writes not one row into
+        // the thread, mutes nothing, and finds the conversation in brief mode at
+        // every frame and after the last one.
+        //
+        // Both keys, because they are two presses of one machine and the mode
+        // has to survive either. Nothing here has a `claude`: the run is a
+        // recording of a canned agent played back over a channel, and the
+        // conversation is asked nothing at all.
+        for refreshing_it in [false, true] {
+            let scratch = one_crate_to_load(if refreshing_it {
+                "refresh-during-a-brief"
+            } else {
+                "pact-during-a-brief"
+            });
+            // A refresh is only a question about a subtree pacted once, so it
+            // starts from the manifest that pact earned and a file changed
+            // under it; a pact starts from nothing, as a first pact does.
+            let started = if refreshing_it {
+                let earned = pacted(&scratch, "crates/engine");
+                scratch.write("crates/engine/src/lib.rs", "//! Core engine, rewritten.\n");
+                earned
+            } else {
+                Manifest::new()
+            };
+            let work = if refreshing_it {
+                refreshing(&scratch, "crates/engine")
+            } else {
+                toggle(&scratch, "crates/engine", true)
+            };
+
+            let (mut app, scope) = load(&scratch);
+            let mut manifest = started.clone();
+            let base = Instant::now();
+            a_conversation(&mut app, base);
+            assert!(
+                app.set_mode(Mode::Brief),
+                "the conversation was in the register before the test put it there"
+            );
+            let asked = shown(&app, base);
+            // The field the run must not reach, held where the loop holds it:
+            // the muting is derived from this and from nothing else, and the
+            // run is never handed it.
+            let chat = Chat::new();
+            // Everything the press does before the worker starts: one account,
+            // and nothing at all to the conversation.
+            app.start_account(base);
+
+            let said = recorded_from(&scratch, &started, &work, &Cancel::new(), |events| {
+                Canned::new(&scratch, []).reporting(activity_port(events))
+            });
+            assert!(
+                said.len() > 1,
+                "the run had nothing to say, so nothing was driven: {refreshing_it}"
+            );
+            let (events, received) = mpsc::channel();
+            let mut pact = Some(Running {
+                events: received,
+                cancel: CancelGuard::new(),
+                work,
+                before: app.clone(),
+            });
+            for (frame, event) in said.into_iter().enumerate() {
+                let frame = u64::try_from(frame).expect("a run of fewer than 2^64 events");
+                let now = at(base, frame * FRAME);
+                events.send(event).expect("the loop is still listening");
+                apply_progress(&mut pact, &mut app, &mut manifest, &scope, now);
+
+                assert_eq!(
+                    app.mode(),
+                    Mode::Brief,
+                    "the run left the register at frame {frame}"
+                );
+                assert_eq!(
+                    shown(&app, now),
+                    asked,
+                    "the run wrote into the conversation at frame {frame}"
+                );
+                assert!(
+                    !field_muted(chat.answering()),
+                    "the run took the field at frame {frame}"
+                );
+            }
+
+            assert!(pact.is_none(), "the run reported its outcome and is over");
+            assert_eq!(
+                app.mode(),
+                Mode::Brief,
+                "the register did not survive the run: {refreshing_it}"
+            );
+            assert!(
+                !field_muted(chat.answering()),
+                "the run left the field muted"
+            );
+            // And the whole of the run is on the card one swap away, with the
+            // conversation — question, work and answer — exactly as it was.
+            let card = conversation_untouched(&mut app, at(base, 10_000));
+            assert!(
+                card.iter().any(|line| line.contains("pact finished")),
+                "the run's card does not say it ran: {card:?}"
+            );
+        }
     }
 
     /// A run under way during a conversation, over a tree that is not on disk:

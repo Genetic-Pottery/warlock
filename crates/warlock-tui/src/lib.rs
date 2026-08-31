@@ -196,6 +196,10 @@ pub use app::Chrome;
 /// panel or the composer: cycled by the focus key, or set outright by a click
 /// naming a pane.
 pub use app::Focus;
+/// Which register the conversation is in — questions about the repository, or a
+/// conversation converging on a document — entered and left from the composer,
+/// and said on the panel's border title and nowhere else.
+pub use app::Mode;
 /// What a pact toggle changed, for whoever has to write it to the manifest.
 pub use app::PactToggle;
 /// One line of the flattened tree.
@@ -222,6 +226,17 @@ pub use claude::Activities;
 /// One thing a model pass was seen doing: a tool call, a stretch of thinking, or
 /// what the pass cost.
 pub use claude::Activity;
+/// How hard a turn is asked to think once the conversation is aimed at a
+/// document: a level above the one a question runs at, still overridden by
+/// `WARLOCK_EFFORT`.
+pub use claude::BRIEF_EFFORT;
+/// What warlock says into the conversation already in progress when somebody
+/// asks for brief mode: the artifact, the shape it takes, and that the job is to
+/// argue toward a decision rather than to agree.
+pub use claude::BRIEF_INSTRUCTION;
+/// The same instruction the other way: no artifact, no shape, and back to
+/// answering questions about the repository as they come.
+pub use claude::CHAT_INSTRUCTION;
 /// A handle for stopping a model pass from another thread: it kills the child
 /// running now and refuses to start another.
 pub use claude::Cancel;
