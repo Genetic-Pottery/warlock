@@ -535,7 +535,7 @@ mod tests {
         let (mut app, events, mut chat) = asking(base);
 
         events
-            .send(TurnEvent::Doing(Activity::Writing))
+            .send(TurnEvent::Doing(Activity::Writing { bytes: 0 }))
             .expect("the loop is still listening");
         events
             .send(TurnEvent::Finished(Ok(
@@ -787,7 +787,7 @@ mod tests {
                     detail: Some("src/lib.rs".to_owned()),
                 },
                 Activity::Thinking,
-                Activity::Writing,
+                Activity::Writing { bytes: 0 },
                 Activity::Cost { usd: 0.0123 },
             ]
         }

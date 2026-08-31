@@ -6162,7 +6162,7 @@ mod tests {
         // it either: a second directory, its own lines, no prose.
         let account = app.account_mut().expect("a pact has started");
         account.open_section("crates/tui", at(base, 10));
-        account.record(&Activity::Writing, at(base, 11));
+        account.record(&Activity::Writing { bytes: 0 }, at(base, 11));
         for row in rows_text(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 20))) {
             assert!(!row.contains("walks the tree"), "{row:?}");
         }

@@ -72,6 +72,9 @@ pub(crate) const WAITING: &str = "waiting";
 /// two: a pass thinks for a few seconds and then spends the rest of its time
 /// writing. The word is about the pass, not about the document — what it is
 /// writing is the document, and the document is the outcome line's business.
+///
+/// The word alone is the start of the line rather than the whole of it: a pact
+/// section adds how much of the answer has arrived, per [`writing_line`].
 pub(crate) const WRITING: &str = "writing";
 
 /// The whole of what "a big file is being read in pieces" is worth saying.
@@ -187,6 +190,32 @@ impl Log {
     pub(crate) fn extend_or_open(&mut self, text: &str, at: Instant) {
         if self.entries.last().is_none_or(|entry| entry.text != text) {
             self.push(text, at);
+        }
+    }
+
+    /// Reword the newest line to `text` if it is already a line of the `word`
+    /// stretch, or open one for it at `at` if it is not.
+    ///
+    /// [`Log::extend_or_open`] for a stretch whose wording *changes* while it
+    /// goes on: a running count of what has arrived so far. Comparing whole
+    /// texts, as that one does, would read every new count as a new stretch and
+    /// leave a column of lines one byte apart, each with a clock starting from
+    /// nothing; comparing the word in front of the count reads them as the one
+    /// thing they are. The entry that is already there keeps the instant it
+    /// opened at — so its clock still counts the whole stretch, and the line
+    /// above it, frozen by this line's arrival, does not re-freeze later.
+    ///
+    /// A line belongs to the stretch when it is the bare `word` or the `word`
+    /// followed by this file's ` · ` separator, which is exactly the shape
+    /// [`writing_line`] gives its two cases and no shape any other line in the
+    /// panel has. So a stretch that ends and begins again — anything else
+    /// having been filed in between — opens a fresh line and counts its own
+    /// bytes from its own instant, by the same rule that gives thinking one
+    /// line per stretch.
+    pub(crate) fn rewrite_or_open(&mut self, word: &str, text: &str, at: Instant) {
+        match self.entries.last_mut() {
+            Some(entry) if continues(&entry.text, word) => text.clone_into(&mut entry.text),
+            _ => self.push(text, at),
         }
     }
 
@@ -565,7 +594,15 @@ impl Account {
             // begins again opens a new line, because something else will have
             // been filed in between.
             Activity::Thinking => section.log.extend_or_open(THINKING, at),
-            Activity::Writing => section.log.extend_or_open(WRITING, at),
+            // Writing is the same one-line-per-stretch rule, except that its
+            // line is reworded as the answer arrives rather than left alone:
+            // the count is the whole point of it, and the entry it rewrites is
+            // the one already on screen, instant and all.
+            Activity::Writing { bytes } => {
+                section
+                    .log
+                    .rewrite_or_open(WRITING, &writing_line(*bytes), at);
+            }
             Activity::Tool { name, detail } => {
                 section.log.push(tool_line(name, detail.as_ref()), at);
             }
@@ -941,6 +978,40 @@ pub(crate) fn tool_line(name: &str, detail: Option<&String>) -> String {
     detail.map_or_else(|| name.to_owned(), |detail| format!("{name} {detail}"))
 }
 
+/// The [`WRITING`] line as it stands, given how much of the answer has arrived.
+///
+/// `writing · 1.8 KB`, and `writing · 934 bytes` under a kilobyte, per
+/// [`size`]. A count and nothing else: no denominator, because nothing knows
+/// how long the answer will be until it ends; no percentage and no bar, which
+/// are that denominator wearing a hat; no spinner, because the clock the line
+/// already carries is the honest thing that moves. What it says is what has
+/// happened, and a reader watching it climb knows the pass is alive without
+/// being told a guess about when it will stop.
+///
+/// Zero bytes reads as the bare word. That is the case the block's opening
+/// reports, before a single delta has landed, and the bare word is what the
+/// panel has always shown at the first token; `writing · 0 bytes` would be a
+/// count of nothing, worded as though something had been measured.
+fn writing_line(bytes: u64) -> String {
+    if bytes == 0 {
+        WRITING.to_owned()
+    } else {
+        format!("{WRITING} · {}", size(bytes))
+    }
+}
+
+/// Whether `text` is a line of the `word` stretch: the bare word, or the word
+/// in front of a ` · ` detail.
+///
+/// The half of [`Log::rewrite_or_open`] that decides what "the same stretch"
+/// means. Split out so the shape it looks for sits next to [`writing_line`],
+/// which is what produces it — the two have to agree, and agreeing at a
+/// distance is how they would stop.
+fn continues(text: &str, word: &str) -> bool {
+    text.strip_prefix(word)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(" · "))
+}
+
 /// What an outcome line says about a pass's cost, including when there is none.
 ///
 /// A pass that never reported is said in words rather than as a number, because
@@ -1161,8 +1232,8 @@ mod tests {
         account.open_section("crates/engine", base);
         account.record(&Activity::Thinking, at(base, 2));
         account.record(&Activity::Thinking, at(base, 3));
-        account.record(&Activity::Writing, at(base, 4));
-        account.record(&Activity::Writing, at(base, 9));
+        account.record(&Activity::Writing { bytes: 0 }, at(base, 4));
+        account.record(&Activity::Writing { bytes: 0 }, at(base, 9));
 
         assert_eq!(
             said(&account, at(base, 25)),
@@ -1173,6 +1244,90 @@ mod tests {
                 // And writing is the live line, counting from when it started.
                 "0:25 writing".to_owned(),
             ],
+        );
+    }
+
+    #[test]
+    fn the_writing_line_is_reworded_as_the_answer_arrives() {
+        // The long half of a toolless pass, with the count on it: one line,
+        // reworded where it stands, so the panel moves while the answer is
+        // being produced instead of holding one motionless word for minutes.
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        account.open_section("crates/engine", base);
+        account.record(&Activity::Thinking, at(base, 2));
+        // The text block opening, before a single delta: the bare word, which
+        // is what the panel showed at the first token before there was a count
+        // to show.
+        account.record(&Activity::Writing { bytes: 0 }, at(base, 8));
+        assert_eq!(
+            said(&account, at(base, 8)),
+            vec![
+                "crates/engine".to_owned(),
+                "0:08 thinking".to_owned(),
+                "0:08 writing".to_owned(),
+            ],
+        );
+
+        for (bytes, second) in [(212, 20), (1_843, 60), (48_000, 200)] {
+            account.record(&Activity::Writing { bytes }, at(base, second));
+        }
+
+        assert_eq!(
+            said(&account, at(base, 260)),
+            vec![
+                "crates/engine".to_owned(),
+                // Thinking still froze when writing began, and nothing since
+                // has moved it: the rewrites are not arrivals.
+                "0:08 thinking".to_owned(),
+                // One line, the newest count, and a clock counting from the
+                // first report rather than from the last one.
+                "4:20 writing · 47 KB".to_owned(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_writing_line_under_a_kilobyte_counts_in_bytes() {
+        // The short answer, worded exactly rather than rounded to `0.9 KB`.
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        account.open_section("crates/engine", base);
+        account.record(&Activity::Writing { bytes: 0 }, at(base, 3));
+        account.record(&Activity::Writing { bytes: 934 }, at(base, 5));
+
+        assert_eq!(said(&account, at(base, 6))[1], "0:06 writing · 934 bytes");
+    }
+
+    #[test]
+    fn writing_after_something_else_opens_a_line_with_its_own_count() {
+        // A stretch that ends and begins again — a tool call between two text
+        // blocks, and a summarising pass between two directories' worth of
+        // work — counts its own block's bytes from its own instant, rather
+        // than continuing the earlier line's total.
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        account.open_section("crates/engine", base);
+        account.record(&Activity::Writing { bytes: 2_048 }, at(base, 10));
+        account.record(&tool("Read", "src/lib.rs"), at(base, 30));
+        account.record(&Activity::Writing { bytes: 512 }, at(base, 40));
+        account.record_summarising("src/big.rs", 1, 3, at(base, 50));
+        account.record(&Activity::Writing { bytes: 100 }, at(base, 60));
+
+        assert_eq!(
+            said(&account, at(base, 90)),
+            vec![
+                "crates/engine".to_owned(),
+                "0:30 writing · 2.0 KB".to_owned(),
+                "0:40 Read src/lib.rs".to_owned(),
+                "0:50 writing · 512 bytes".to_owned(),
+                "1:00 summarising src/big.rs (1/3)".to_owned(),
+                "1:30 writing · 100 bytes".to_owned(),
+            ],
+            "each stretch its own line, its own count and its own clock",
         );
     }
 
@@ -1313,7 +1468,7 @@ mod tests {
         account.record_summarising("crates/engine/Cargo.lock", 2, 3, at(base, 70));
         account.record(&tool("Read", "src/lib.rs"), at(base, 130));
         account.record_summarising("crates/engine/Cargo.lock", 3, 3, at(base, 131));
-        account.record(&Activity::Writing, at(base, 190));
+        account.record(&Activity::Writing { bytes: 0 }, at(base, 190));
 
         assert_eq!(
             said(&account, at(base, 200)),
@@ -1379,7 +1534,7 @@ mod tests {
             said(&account, at(base, 41))[2],
             "0:41 summarising Cargo.lock (1/2)"
         );
-        account.record(&Activity::Writing, at(base, 50));
+        account.record(&Activity::Writing { bytes: 0 }, at(base, 50));
         for now in [at(base, 50), at(base, 900)] {
             assert_eq!(said(&account, now)[2], "0:50 summarising Cargo.lock (1/2)");
         }
