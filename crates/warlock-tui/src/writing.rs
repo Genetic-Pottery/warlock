@@ -1,12 +1,14 @@
-//! Where a brief would go: the reply unwrapped, its title slugged, and the next
-//! number in the directory.
+//! Where a brief goes, and the writing of it: the reply unwrapped, its title
+//! slugged, the next number in the directory, and then the bytes on disk.
 //!
-//! This is the arithmetic behind the path the `/write` prompt opens holding —
-//! `docs/warlock-brief-13-scopes-and-sigils.md` — and nothing else. It proposes
-//! a path; it does not write one, does not create a directory, does not open a
-//! field and does not touch the reply that will land in the file. The one thing
-//! it does to the disk is read the names in one directory, because "one above
-//! the highest number already there" cannot be answered without them.
+//! Two halves, and the seam between them is the field. [`proposed_path`] is the
+//! arithmetic behind the path the `/write` prompt opens holding —
+//! `docs/warlock-brief-13-scopes-and-sigils.md` — and it writes nothing;
+//! [`write_submit`] is what Enter in that field comes to, and it is the one
+//! thing in warlock that puts a document somebody asked for on disk. Everything
+//! between the two is the reader's: the field is editable, so the path that is
+//! written is the path on screen when Enter was pressed and never the proposal
+//! unless they left it alone.
 //!
 //! ## The proposal is only a proposal
 //!
@@ -15,8 +17,8 @@
 //! them refuses anything: a reply with no title still gets a path, a title made
 //! entirely of punctuation still gets a path, and a directory holding a file
 //! with `2026` in its name still gets a path. The reader reads the line and
-//! changes it or presses Enter. Nothing here can fail, which is why nothing here
-//! returns a [`Result`].
+//! changes it or presses Enter. Nothing in that half can fail, which is why none
+//! of it returns a [`Result`].
 //!
 //! ## The directory is a constant here
 //!
@@ -79,9 +81,72 @@
 //! not a hundred pretending to be `99` — because the padding exists to make
 //! `01` sort before `10`, and a wider number keeps that true for as long as the
 //! widths agree.
+//!
+//! # The write
+//!
+//! ## Everything is spelled from the repository root
+//!
+//! Decided once, here: whatever is typed into the field resolves against the
+//! repository root — the directory `.warlock/` and the manifest live under —
+//! and not against the tree's root, which may be a subdirectory somebody
+//! started warlock in, and not against the process's working directory, which
+//! nothing on screen names. That is one rule for three things at once: where
+//! the bytes land, how the written path is spelled on the line that announces
+//! it, and which entries of `.warlock/pacts.toml` count as above it. A path
+//! that climbs out of the repository is refused rather than followed, because
+//! the artifact belongs to the repository the ledger is about.
+//!
+//! ## Two transformations, and warlock is not a markdown editor
+//!
+//! The reply is written as it stands but for exactly two things: [`unfenced`]
+//! takes off a fence wrapped around the whole document, and a single trailing
+//! newline is ensured so the file ends the way a text file does. Nothing else is
+//! parsed, reformatted, re-indented, spell-checked or inspected — not the
+//! headings, not the links, not the width of a line — because the document is
+//! the model's and the reader's, and every further rule would be warlock editing
+//! prose it promised to copy.
+//!
+//! The bytes come off the card. The reply is on the conversation as an ordinary
+//! answer, and [`write_submit`] writes the newest turn's answer, so what lands
+//! in the file is what the reader was looking at when they pressed Enter —
+//! there is no second copy of the document anywhere for the two to disagree
+//! about, and nothing is kept on disk between the answer and the write.
+//!
+//! ## A path that exists is refused, never overwritten
+//!
+//! There is one destructive thing a write can do, and this is it. So a target
+//! that exists at all — file, directory or anything else — writes nothing and
+//! comes back through [`ScopeField::refused`] with the rule under the field and
+//! the typed path still in it, one keystroke from being changed. No `.bak`, no
+//! suffix warlock invents, no prompt asking a second time.
+//!
+//! ## Two lines, both facts
+//!
+//! A write that lands says the path and the size, in the panel's own spelling
+//! through [`size`], and then — when one exists — names the nearest directory
+//! above the new file that has a pact in the manifest, because that directory's
+//! document now describes a subtree with a file in it that the document has
+//! never seen. Both are facts rather than narration: the first is what is now on
+//! disk, the second is what the ledger now says. A file written where nothing
+//! above it is pacted says only the first line, since there is no ledger entry
+//! to have gone stale.
+//!
+//! ## A failed write is a line, not an error
+//!
+//! [`scope_submit`](crate::scoping::scope_submit)'s rule exactly: a disk that
+//! will not take the file puts its reason on
+//! [`App::message`](warlock_tui::App::message) and the prompt comes down.
+//! Nothing here returns out of the event loop, because a write that did not
+//! happen is news for the footer and not a reason to tear the screen down.
 
-use std::fs;
 use std::path::Path;
+use std::time::Instant;
+use std::{fs, io};
+
+use warlock_engine::{Manifest, PactEntry, from_manifest_path, to_manifest_path};
+use warlock_tui::{App, ScopeField, ScopePrompt, size};
+
+use crate::error::{Error, one_line};
 
 /// Where a brief is written, relative to the repository root.
 ///
@@ -102,6 +167,29 @@ const UNTITLED: &str = "untitled";
 /// About how many characters of the title survive into the slug, before the
 /// last whole word that fits.
 const SLUG_MAX: usize = 60;
+
+/// How the manifest spells the repository root.
+///
+/// The engine's own `ROOT_MODULE`, which is not exported, written down again
+/// here because the ancestor walk below has to be able to arrive at it. One
+/// character, fixed by the file format, and if it ever moved the manifest would
+/// stop parsing long before this line was noticed.
+const ROOT_MODULE: &str = ".";
+
+/// What the field says when Enter is pressed on nothing.
+///
+/// Not a write and not a close: an empty field is a reader who has cleared the
+/// line and is about to type, so the prompt stays up over the rule rather than
+/// answering a question they have not finished asking.
+const NO_PATH: &str = "type a path for the document, or press Esc to write nothing";
+
+/// What the footer says when there is no reply to write.
+///
+/// Unreachable in the loop — the prompt opens over an answer that has landed —
+/// and answered anyway, because a window whose Enter did nothing at all is the
+/// one outcome a reader cannot tell from success.
+const NOTHING_TO_WRITE: &str =
+    "there is no answer on the conversation to write, so nothing was written";
 
 /// The path the write prompt opens holding, spelled relative to the repository
 /// root: `docs/warlock-brief-NN-slug.md`.
@@ -125,6 +213,235 @@ pub(crate) fn proposed_path(repo_root: &Path, reply: &str) -> String {
     let number = spelled(next_number(&repo_root.join(BRIEFS_DIRECTORY)));
     let slug = slug_of(unfenced(reply));
     format!("{BRIEFS_DIRECTORY}/{BRIEF_PREFIX}-{number}-{slug}.md")
+}
+
+/// What Enter in the write prompt comes to: the document on disk and two lines
+/// on the conversation, or the prompt still up over the reason it is not.
+///
+/// [`scope_submit`](crate::scoping::scope_submit)'s shape, and deliberately the
+/// same one — this runs on the event loop's own thread between two frames,
+/// spawns nothing, and hands back the prompt the loop holds next:
+/// [`ScopePrompt::Closed`] for a submit that was answered one way or another,
+/// and an open prompt over the same text for one that was refused.
+///
+/// The path is what is in the field, trimmed of the whitespace an editable line
+/// collects, and it resolves against `repo_root` — see the module docs, where
+/// that is decided once. `field.directory()` is not consulted at all: in this
+/// window it carries the heading the prompt is drawn under, and the answer is
+/// the line the reader typed.
+///
+/// The order is judge, then write, and every refusal happens before a byte
+/// moves. A path that climbs out of the repository, and a path that is already
+/// taken, both reopen the field with the rule under it and the typed text
+/// exactly where it was. Only then is the reply taken off the card, the parent
+/// directory made if it is missing, and the bytes written — after which the
+/// thread gains the line naming what was written and, if a pact sits above it,
+/// the line naming what that made stale.
+///
+/// `now` is the caller's instant, as every line on the conversation is timed by
+/// the loop's clock rather than by one this function reads for itself.
+// Wired to a keystroke in the slice that gives the write prompt its own arm of
+// `press_for`; the allow comes off with that wiring, for the reason
+// `proposed_path` gives above.
+#[allow(dead_code)]
+pub(crate) fn write_submit(
+    app: &mut App,
+    manifest: &Manifest,
+    repo_root: &Path,
+    field: &ScopeField,
+    now: Instant,
+) -> ScopePrompt {
+    let typed = field.text().trim();
+    if typed.is_empty() {
+        return refused(field, NO_PATH);
+    }
+    // The one spelling of the path, produced before anything is done with it:
+    // the bytes go to it, the line names it, and the ancestor walk climbs it,
+    // so all three are the same string and cannot come to disagree.
+    let stored = match to_manifest_path(repo_root, typed) {
+        Ok(stored) => stored,
+        // The engine's own wording about a path that is not inside the root,
+        // flattened as every other manifest failure in this binary is — on the
+        // rule line rather than the footer, because it is the field's text that
+        // is wrong and the field is still up.
+        Err(source) => return refused(field, Error::Manifest { source }.to_string()),
+    };
+    let path = from_manifest_path(repo_root, &stored);
+    if path.exists() {
+        return refused(field, taken_rule(&stored));
+    }
+
+    let Some(document) = document_on(app) else {
+        app.set_message(NOTHING_TO_WRITE);
+        return ScopePrompt::Closed;
+    };
+    if let Err(error) = put(&path, document.as_bytes()) {
+        app.set_message(failure_line(&stored, &error));
+        return ScopePrompt::Closed;
+    }
+
+    // The size is the bytes just handed to the disk rather than a `stat` of what
+    // came back: it is the same number, and asking the filesystem again would be
+    // a second way for this line to fail after the write succeeded.
+    let bytes = u64::try_from(document.len()).unwrap_or(u64::MAX);
+    app.note(wrote_line(&stored, bytes), now);
+    if let Some(module) = pacted_above(manifest, &stored) {
+        app.note(stale_line(module), now);
+    }
+    ScopePrompt::Closed
+}
+
+/// The prompt still up over `rule`, with the text and the cursor exactly where
+/// they were.
+///
+/// The one road back to the field, so every refusal in [`write_submit`] leaves
+/// the window in the same state: the reader's own line, one keystroke from being
+/// fixed, and the reason for the last Enter under it.
+fn refused(field: &ScopeField, rule: impl Into<String>) -> ScopePrompt {
+    ScopePrompt::Open(field.clone().refused(rule))
+}
+
+/// The bytes to write for `reply`: the fence off, and a trailing newline on.
+///
+/// The whole of what warlock does to a document, in one function so that the
+/// promise in the module docs is a thing that can be read rather than a
+/// discipline spread over a write. [`unfenced`] is the same call
+/// [`proposed_path`] made, so the document the slug came from is the document
+/// that lands.
+///
+/// The newline is *ensured*, not normalised: a reply already ending in one is
+/// copied byte for byte, and a reply ending in three keeps all three. Trimming
+/// them back would be a third transformation, and the one this makes exists only
+/// so the file ends the way a text file ends.
+fn document(reply: &str) -> String {
+    let body = unfenced(reply);
+    if body.ends_with('\n') {
+        return body.to_owned();
+    }
+    format!("{body}\n")
+}
+
+/// The document to write, taken off the conversation's newest turn, or `None`
+/// when there is no answer there to write.
+///
+/// The reply is on the card as an ordinary answer and this is warlock reading
+/// it back off there — the newest turn, which is the `/write` turn whose answer
+/// the prompt opened over, since nothing can be asked while the field holds the
+/// keyboard. One copy of the document, on the card the reader is looking at.
+fn document_on(app: &App) -> Option<String> {
+    let thread = app.thread()?;
+    let reply = thread.turns().last().copied()?.answer()?;
+    Some(document(reply))
+}
+
+/// `bytes` at `path`, with the directory above it made first if it is not there.
+///
+/// The whole of the disk work, and the only two calls in warlock that create a
+/// directory and a file for a document somebody asked for. `create_dir_all` is
+/// happy with a directory that already exists, so there is nothing to check
+/// first, and the write refuses nothing — [`write_submit`] has already settled
+/// that this path is free.
+fn put(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, bytes)
+}
+
+/// The nearest directory at or above the one `stored` lands in that has an entry
+/// in the manifest, or `None` when nothing above it is pacted.
+///
+/// The walk starts at the file's own directory rather than at the file, because
+/// a pact is on a directory and the file itself has just been created. Segments
+/// are cut at `/` exactly as `warlock_engine::scope`'s own ancestor walk cuts
+/// them, so the ancestors of `docs/adr/x.md` are `docs/adr`, `docs` and `.`, and
+/// a `docs-old` entry is never among them however much of a prefix it looks
+/// like.
+///
+/// Nearest wins and the walk stops there: the directory that has to be described
+/// again is the one whose document is closest to the new file, and naming every
+/// pact above it would be a list of work nobody asked for.
+///
+/// The name comes back off the entry rather than out of the walk, which is what
+/// makes the line say the module exactly as `.warlock/pacts.toml` spells it —
+/// including `.` for a repository pacted at its root.
+fn pacted_above<'manifest>(manifest: &'manifest Manifest, stored: &str) -> Option<&'manifest str> {
+    at_or_above(directory_of(stored))
+        .find_map(|module| manifest.entry(module).map(PactEntry::module))
+}
+
+/// The stored path of the directory `stored` sits in: `docs` for
+/// `docs/x.md`, and the root for a file written beside it.
+fn directory_of(stored: &str) -> &str {
+    match stored.rsplit_once('/') {
+        Some((parent, _)) => parent,
+        None => ROOT_MODULE,
+    }
+}
+
+/// The stored path `stored` and every stored path above it, nearest first,
+/// ending at [`ROOT_MODULE`].
+///
+/// `warlock_engine::scope`'s own walk, which is private to that module: the
+/// engine decides what a scope covers, and this decides which pact a written
+/// file staled. Copying eight lines is the cost of not opening a door in the
+/// engine for the TUI to reach through — and it is the shape rather than the
+/// judgement that is shared, so nothing about scopes, sigils or manifests is
+/// duplicated by it.
+fn at_or_above(stored: &str) -> impl Iterator<Item = &str> {
+    let mut next = Some(stored);
+    std::iter::from_fn(move || {
+        let current = next?;
+        next = match current.rsplit_once('/') {
+            // A path with a parent segment: `docs` above `docs/adr`.
+            Some((parent, _)) => Some(parent),
+            // A single segment sits directly under the root, and the root sits
+            // under nothing.
+            None if current == ROOT_MODULE => None,
+            None => Some(ROOT_MODULE),
+        };
+        Some(current)
+    })
+}
+
+/// The line the conversation gains when a document lands: what was written and
+/// how big it is.
+///
+/// The path as the field spelled it, relative to the repository root, because
+/// that is the path the reader typed and the one they will go looking for. The
+/// size through [`size`], which is the account's own spelling, shared rather
+/// than restated — see its doc comment.
+fn wrote_line(stored: &str, bytes: u64) -> String {
+    format!("wrote {stored} — {}", size(bytes))
+}
+
+/// The second line: the pact the new file has just made stale.
+///
+/// Present tense and no advice. The ledger says a directory's document no longer
+/// describes it, and which key puts that right is the footer's business and the
+/// reader's — a sentence telling them to press `r` here would be warlock
+/// narrating rather than stating.
+fn stale_line(module: &str) -> String {
+    format!("{module} is now stale")
+}
+
+/// The rule under the field when the path is already taken.
+///
+/// It names the path rather than saying "that file exists", because the field
+/// may hold a path several directories deep and the reader is looking at what
+/// they typed rather than at what is on disk. Overwriting is the one destructive
+/// thing this key could do, so it is refused rather than confirmed.
+fn taken_rule(stored: &str) -> String {
+    format!("{stored} already exists — nothing was written; change the path or press Esc")
+}
+
+/// The footer line when the disk would not take the file.
+///
+/// One line, naming the path warlock tried and the reason it came back with, in
+/// the operating system's own words flattened the way every other non-fatal
+/// failure in this binary is.
+fn failure_line(stored: &str, error: &io::Error) -> String {
+    format!("could not write {stored}: {}", one_line(&error.to_string()))
 }
 
 /// The document inside a reply that is entirely one fenced code block, or the
@@ -636,5 +953,477 @@ mod tests {
             0,
             "something was written into the repository"
         );
+    }
+}
+
+/// What Enter in the write prompt actually does: the bytes that end up on disk,
+/// the two lines that end up on the conversation, what a refusal leaves behind,
+/// and what — deliberately — is never written at all.
+///
+/// The whole path is driven over a repository of the test's own under the
+/// temporary directory, with the field built by hand as the loop would be
+/// holding it. No terminal, no network, no `claude` and no worker thread: a
+/// write is a function of an app, a manifest, a root and a field, which is what
+/// makes every rule below one assertion.
+#[cfg(test)]
+mod writes {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::Instant;
+
+    use tempfile::TempDir;
+    use warlock_engine::{Manifest, Node, NodeState, PactEntry, Tree, to_manifest_path};
+    use warlock_tui::{App, Line, ScopeField, ScopePrompt};
+
+    use super::{NO_PATH, write_submit};
+
+    /// The path the field holds in most of the tests below: the proposal, left
+    /// exactly as it opened.
+    const BRIEF: &str = "docs/warlock-brief-13-scopes-and-sigils.md";
+
+    /// The line the last keystroke left on the footer, which a write that lands
+    /// is not allowed to spend.
+    const LAST_KEY: &str = "something the last key said";
+
+    /// A repository of this test's own, removed when the test that made it
+    /// ends.
+    fn a_repo() -> TempDir {
+        tempfile::tempdir().expect("a temporary directory")
+    }
+
+    /// The instant every line below is timed by: one clock, handed in, so the
+    /// whole of this suite runs in whatever time it takes and nothing depends on
+    /// how long that was.
+    fn now() -> Instant {
+        Instant::now()
+    }
+
+    /// The app the loop is holding when the prompt is up: a tree over `root`,
+    /// a `/write` turn, and `reply` landed on it as an ordinary answer.
+    ///
+    /// The reply goes on the card and nowhere else, because the card is where
+    /// the write reads it back from — which is the whole of the arrangement the
+    /// module docs describe.
+    fn app_answering(root: &Path, reply: &str) -> App {
+        let mut app = App::from_tree(&Tree::new(Node::new(
+            root,
+            None::<PathBuf>,
+            NodeState::Unpacted,
+        )));
+        app.start_turn("/write", now());
+        app.answer_turn(reply, now());
+        app.set_message(LAST_KEY);
+        app
+    }
+
+    /// The field as the window would be by the time Enter is pressed: the
+    /// heading it is drawn under, and the path typed into it.
+    fn field(path: &str) -> ScopeField {
+        ScopeField::new("Write to", path)
+    }
+
+    /// A granted entry for `module`, as a pacted directory has one.
+    fn entry(module: &str) -> PactEntry {
+        let document = if module == "." {
+            "WARLOCK.md".to_owned()
+        } else {
+            format!("{module}/WARLOCK.md")
+        };
+        PactEntry::new(".", module, document)
+            .expect("a relative module path is inside the root")
+            .with_grant("d0f5a1", "2026-08-19T07:32:00Z")
+    }
+
+    /// The manifest the loop holds, pacting each of `modules`.
+    fn pacts(modules: &[&str]) -> Manifest {
+        Manifest::with_entries(modules.iter().map(|module| entry(module)))
+    }
+
+    /// Warlock's own lines on the conversation, in order — which is what a
+    /// write says for itself, as against the turn it was asked in.
+    fn notes(app: &App) -> Vec<String> {
+        app.thread()
+            .expect("the conversation is there")
+            .lines(now())
+            .into_iter()
+            .filter_map(|line| match line {
+                Line::Note { text } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Everything under `root`, spelled the way the manifest spells a path and
+    /// sorted, so "nothing but the artifact was written" is one assertion about
+    /// the whole repository.
+    fn everything_under(root: &Path) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut directories = vec![root.to_path_buf()];
+        while let Some(directory) = directories.pop() {
+            for entry in fs::read_dir(&directory)
+                .expect("a directory of this test's own reads back")
+                .flatten()
+            {
+                let path = entry.path();
+                if path.is_dir() {
+                    directories.push(path.clone());
+                }
+                found.push(to_manifest_path(root, &path).expect("inside the repository"));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// A document of exactly `bytes` bytes, title and trailing newline included,
+    /// so a test can assert the size the line spells it with.
+    fn document_of(bytes: usize) -> String {
+        let opening = "# Scopes and sigils\n\n";
+        let closing = "\n";
+        let prose = bytes - opening.len() - closing.len();
+        format!("{opening}{}{closing}", "x".repeat(prose))
+    }
+
+    #[test]
+    fn enter_writes_the_document_and_says_what_landed_and_what_it_staled() {
+        let repo = a_repo();
+        // 1832 bytes on the nose, so the line's size is a fact rather than a
+        // range: the panel's own spelling, one decimal under ten kilobytes.
+        let reply = document_of(1832);
+        let mut app = app_answering(repo.path(), &reply);
+
+        let prompt = write_submit(
+            &mut app,
+            &pacts(&["docs"]),
+            repo.path(),
+            &field(BRIEF),
+            now(),
+        );
+
+        assert_eq!(prompt, ScopePrompt::Closed, "the window is answered");
+        assert_eq!(
+            fs::read_to_string(repo.path().join(BRIEF)).expect("the artifact reads back"),
+            reply,
+            "the bytes on disk are not the reply on the card"
+        );
+        assert_eq!(
+            notes(&app),
+            [
+                format!("wrote {BRIEF} — 1.8 KB"),
+                "docs is now stale".to_owned(),
+            ]
+        );
+        // The two lines are the whole of what a write says. The footer is the
+        // last keystroke's, and nothing about the run state moved.
+        assert_eq!(app.message(), Some(LAST_KEY));
+        assert!(!app.is_pacting());
+        assert_eq!(app.pact_line(), None);
+    }
+
+    #[test]
+    fn the_size_is_the_panels_own_spelling_at_every_scale() {
+        for (bytes, said) in [
+            (934, "934 bytes"),
+            (1832, "1.8 KB"),
+            (14_540, "14 KB"),
+            (412_672, "403 KB"),
+        ] {
+            let repo = a_repo();
+            let mut app = app_answering(repo.path(), &document_of(bytes));
+
+            write_submit(
+                &mut app,
+                &Manifest::new(),
+                repo.path(),
+                &field(BRIEF),
+                now(),
+            );
+
+            assert_eq!(notes(&app), [format!("wrote {BRIEF} — {said}")]);
+        }
+    }
+
+    #[test]
+    fn the_document_is_written_verbatim_but_for_the_fence_and_the_last_newline() {
+        for (reply, written) in [
+            // Byte for byte, trailing newline and all.
+            ("# Freshness\n\nProse.\n", "# Freshness\n\nProse.\n"),
+            // The one newline ensured, and nothing else added.
+            ("# Freshness\n\nProse.", "# Freshness\n\nProse.\n"),
+            // Already ending in three: not normalised, because trimming would
+            // be a third transformation nobody asked for.
+            ("# Freshness\n\n\n\n", "# Freshness\n\n\n\n"),
+            // A reply that is entirely one fence comes out of it.
+            (
+                "```markdown\n# Freshness\n\nProse.\n```\n",
+                "# Freshness\n\nProse.\n",
+            ),
+            // A document that merely contains one is left exactly as it is,
+            // indentation, blank lines, trailing spaces and all.
+            (
+                "# Freshness\n\n```rust\nlet x = 1;\n```\n\n  indented   \n",
+                "# Freshness\n\n```rust\nlet x = 1;\n```\n\n  indented   \n",
+            ),
+        ] {
+            let repo = a_repo();
+            let mut app = app_answering(repo.path(), reply);
+
+            write_submit(
+                &mut app,
+                &Manifest::new(),
+                repo.path(),
+                &field(BRIEF),
+                now(),
+            );
+
+            assert_eq!(
+                fs::read_to_string(repo.path().join(BRIEF)).expect("the artifact reads back"),
+                written,
+                "{reply:?} was interfered with"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_but_the_artifact_is_written() {
+        let repo = a_repo();
+        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+
+        write_submit(
+            &mut app,
+            &pacts(&["docs", "."]),
+            repo.path(),
+            &field(BRIEF),
+            now(),
+        );
+
+        // The output directory and the file in it, and that is the whole of the
+        // repository: no transcript, no draft, and nothing warlock authored
+        // under `.warlock/` — the manifest was read and never written.
+        assert_eq!(everything_under(repo.path()), ["docs", BRIEF]);
+    }
+
+    #[test]
+    fn the_parent_directory_is_made_when_it_is_not_there() {
+        let repo = a_repo();
+        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+        let deep = "docs/briefs/2026/warlock-brief-01-freshness.md";
+
+        let prompt = write_submit(&mut app, &Manifest::new(), repo.path(), &field(deep), now());
+
+        assert_eq!(prompt, ScopePrompt::Closed);
+        assert!(repo.path().join(deep).is_file(), "{deep} is not a file");
+    }
+
+    #[test]
+    fn a_path_that_already_exists_writes_nothing_and_reopens_the_field() {
+        let repo = a_repo();
+        fs::create_dir_all(repo.path().join("docs")).expect("makes the output directory");
+        fs::write(repo.path().join(BRIEF), "what was already there\n").expect("writes it first");
+        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+        let before = app.clone();
+        let typed = field(BRIEF);
+
+        let prompt = write_submit(&mut app, &pacts(&["docs"]), repo.path(), &typed, now());
+
+        // The rule under the field and the typed path still in it, one keystroke
+        // from being changed — and the file that was there is byte for byte the
+        // file that is there.
+        let still_up = prompt.field().expect("the window came down");
+        assert_eq!(still_up.text(), BRIEF);
+        assert!(
+            still_up
+                .rule()
+                .is_some_and(|rule| rule.contains(BRIEF) && rule.contains("already exists")),
+            "the refusal said {:?}",
+            still_up.rule()
+        );
+        assert_eq!(
+            fs::read_to_string(repo.path().join(BRIEF)).expect("the file reads back"),
+            "what was already there\n",
+            "the write went over a file that was already there"
+        );
+        assert_eq!(app, before, "a refusal moved the view");
+        assert!(notes(&app).is_empty(), "a refusal said something happened");
+    }
+
+    #[test]
+    fn a_directory_in_the_way_is_a_path_that_already_exists() {
+        // Not a file, and still nothing warlock may write over. `exists` is
+        // asked about the path rather than about its kind.
+        let repo = a_repo();
+        fs::create_dir_all(repo.path().join(BRIEF)).expect("makes a directory of that name");
+        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+
+        let prompt = write_submit(
+            &mut app,
+            &Manifest::new(),
+            repo.path(),
+            &field(BRIEF),
+            now(),
+        );
+
+        assert!(prompt.is_open(), "a directory was written over");
+        assert!(notes(&app).is_empty());
+    }
+
+    #[test]
+    fn the_stale_line_names_the_nearest_pacted_ancestor_and_only_it() {
+        for (modules, said) in [
+            // The directory the file landed in, when it is the one with a pact.
+            (&["docs", "."][..], Some("docs is now stale")),
+            // The root, when nothing nearer is pacted: an outer pact still
+            // describes a subtree the new file is in.
+            (&["."][..], Some(". is now stale")),
+            // A pact beside it is not a pact above it, however much of a prefix
+            // it looks like.
+            (&["docs-old", "crates"][..], None),
+            // And a repository with no pacts at all has no ledger to stale.
+            (&[][..], None),
+        ] {
+            let repo = a_repo();
+            let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+
+            write_submit(&mut app, &pacts(modules), repo.path(), &field(BRIEF), now());
+
+            let lines = notes(&app);
+            assert!(
+                lines[0].starts_with(&format!("wrote {BRIEF} — ")),
+                "{modules:?} said {lines:?}"
+            );
+            assert_eq!(
+                lines.get(1).map(String::as_str),
+                said,
+                "{modules:?} said {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_written_beside_the_root_is_staled_by_the_root_pact() {
+        // No `/` in the path at all, which is the one case the ancestor walk
+        // has to reach the root from directly.
+        let repo = a_repo();
+        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+
+        write_submit(
+            &mut app,
+            &pacts(&["."]),
+            repo.path(),
+            &field("brief.md"),
+            now(),
+        );
+
+        assert_eq!(
+            notes(&app).get(1).map(String::as_str),
+            Some(". is now stale")
+        );
+    }
+
+    #[test]
+    fn an_empty_field_writes_nothing_and_stays_up() {
+        let repo = a_repo();
+        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+
+        for typed in ["", "   "] {
+            let prompt = write_submit(
+                &mut app,
+                &Manifest::new(),
+                repo.path(),
+                &field(typed),
+                now(),
+            );
+
+            assert_eq!(
+                prompt.field().and_then(ScopeField::rule),
+                Some(NO_PATH),
+                "{typed:?} was answered as a path"
+            );
+            assert_eq!(everything_under(repo.path()), Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn a_path_that_climbs_out_of_the_repository_is_refused() {
+        let repo = a_repo();
+        let outside = repo.path().join("outside");
+        let root = repo.path().join("repo");
+        fs::create_dir_all(&outside).expect("makes a directory beside the repository");
+        fs::create_dir_all(&root).expect("makes the repository");
+        let mut app = app_answering(&root, "# Freshness\n\nProse.\n");
+
+        let prompt = write_submit(
+            &mut app,
+            &Manifest::new(),
+            &root,
+            &field("../outside/brief.md"),
+            now(),
+        );
+
+        // The artifact belongs to the repository the ledger is about, so the
+        // field stays up over the engine's own sentence and nothing lands
+        // anywhere.
+        assert!(
+            prompt
+                .field()
+                .and_then(ScopeField::rule)
+                .is_some_and(|rule| !rule.is_empty()),
+            "a path outside the repository was allowed through"
+        );
+        assert_eq!(everything_under(&outside), Vec::<String>::new());
+        assert_eq!(everything_under(&root), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_write_that_will_not_happen_puts_its_reason_on_the_message_line() {
+        // A file where the output directory has to be: the parent cannot be
+        // made, which is the cheapest real version of a disk that will not take
+        // the write.
+        let repo = a_repo();
+        fs::write(repo.path().join("docs"), "not a directory\n")
+            .expect("writes a file in the way of the output directory");
+        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+
+        let prompt = write_submit(&mut app, &pacts(&["."]), repo.path(), &field(BRIEF), now());
+
+        // A line on the footer and the window down off it — never an error out
+        // of the event loop, and never a line on the conversation claiming a
+        // file that is not there.
+        assert_eq!(prompt, ScopePrompt::Closed);
+        assert!(
+            app.message()
+                .is_some_and(|line| line.contains(BRIEF) && line != LAST_KEY),
+            "a write that failed said {:?}",
+            app.message()
+        );
+        assert!(notes(&app).is_empty(), "it said something happened anyway");
+        assert_eq!(
+            fs::read_to_string(repo.path().join("docs")).expect("the file in the way reads back"),
+            "not a directory\n"
+        );
+    }
+
+    #[test]
+    fn a_conversation_with_no_answer_on_it_writes_nothing_and_says_so() {
+        // The road the loop cannot take — the prompt opens over an answer that
+        // has landed — answered rather than left to be discovered.
+        let repo = a_repo();
+        let mut app = App::from_tree(&Tree::new(Node::new(
+            repo.path(),
+            None::<PathBuf>,
+            NodeState::Unpacted,
+        )));
+
+        let prompt = write_submit(
+            &mut app,
+            &Manifest::new(),
+            repo.path(),
+            &field(BRIEF),
+            now(),
+        );
+
+        assert_eq!(prompt, ScopePrompt::Closed);
+        assert!(app.message().is_some_and(|line| !line.is_empty()));
+        assert_eq!(everything_under(repo.path()), Vec::<String>::new());
     }
 }

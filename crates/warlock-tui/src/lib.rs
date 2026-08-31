@@ -177,6 +177,10 @@ pub use account::Line;
 pub use account::Outcome;
 /// One directory's pass inside an [`Account`].
 pub use account::Section;
+/// A number of bytes as the panel spells it: `934 bytes`, `1.8 KB`, `14.2 KB`.
+/// The account's own spelling, exported so the line a written file is announced
+/// on says a size the same way the rest of the panel does.
+pub use account::size;
 /// The front end's state: the flattened tree, which of it is collapsed, the
 /// selected row and the slice of rows on screen — moved by the keys, which
 /// drive whichever pane has the focus, or by a pointer, which names the row and
