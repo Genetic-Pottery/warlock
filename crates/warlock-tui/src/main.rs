@@ -1548,9 +1548,11 @@ mod tests {
     /// test that does submit a message hands the conversation an agent whose
     /// program does not exist, so the worker it starts finds nothing to run.
     mod submitting {
-        use std::time::Instant;
+        use std::time::{Duration, Instant};
 
-        use warlock_tui::{App, ChatAgent, Composed, Composer, Line, Mode, Submitted};
+        use warlock_tui::{
+            Activity, App, ChatAgent, Composed, Composer, Ending, Line, Mode, Submitted,
+        };
 
         use super::super::{
             ALREADY_CHATTING, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, apply_compose,
@@ -1790,6 +1792,98 @@ mod tests {
                 .concat(),
             );
             assert_eq!(turns(&app), 3);
+        }
+
+        #[test]
+        fn a_mode_leaves_every_answer_and_every_work_line_exactly_where_it_was() {
+            // The same property with the card full rather than empty, which is
+            // the state a `/brief` is actually typed in: the conversation worth
+            // converging on is one that has been going for a while, and by then
+            // the turns on the card carry the answers and the work lines that
+            // are the material a document is made of. Losing those to a mode
+            // change would be losing the brief before it started — and it is
+            // the failure a second session would show up as, because a session
+            // that starts again starts with nothing on the card.
+            //
+            // The rows come first, because that is what the reader has, and
+            // then the turns themselves, because a row that merely *drew* the
+            // same is not the same answer.
+            let now = Instant::now();
+            let later = now + Duration::from_secs(30);
+            let mut app = App::default();
+            let mut chat = conversation();
+
+            // One turn that was worked at and answered, and one that ended
+            // without an answer: both are things a mode change could drop.
+            submit_into(&mut app, &mut chat, "why nine passes?", now);
+            app.record_turn(
+                &Activity::Tool {
+                    name: "Read".to_owned(),
+                    detail: Some("crates/warlock-engine/src/lib.rs".to_owned()),
+                },
+                now,
+            );
+            app.record_turn(&Activity::Thinking, now);
+            app.answer_turn("One pass per directory, bottom up.", now);
+            submit_into(&mut app, &mut chat, "and the manifest?", now);
+            app.end_turn(&Ending::NothingSaid, now);
+
+            let before = rows(&app, later);
+            let asked_already: Vec<_> = app
+                .thread()
+                .expect("two questions were asked")
+                .turns()
+                .into_iter()
+                .cloned()
+                .collect();
+            // The history is really a history: an answer, work lines and an
+            // ending are all on the card before the mode is touched, so the
+            // equalities below are about something rather than about nothing.
+            assert!(
+                before.iter().any(|line| matches!(line, Line::Text { .. })),
+                "there is no answer on the card to survive anything: {before:?}"
+            );
+            assert!(
+                before
+                    .iter()
+                    .filter(|line| matches!(line, Line::Clocked { .. }))
+                    .count()
+                    >= 3,
+                "there is no work on the card to survive anything: {before:?}"
+            );
+
+            submit_into(&mut app, &mut chat, "/brief", later);
+            submit_into(&mut app, &mut chat, "/chat", later);
+
+            // Every row that was there is still there, at the index it was at:
+            // nothing cleared, nothing hidden, nothing reordered, and the two
+            // answers and every work line word for word.
+            let after = rows(&app, later);
+            assert_eq!(
+                after[..before.len()],
+                before[..],
+                "entering and leaving the register rewrote the conversation"
+            );
+            // And the turns under those rows: the message, the answer and the
+            // ending of each, unchanged and in the order they were asked in.
+            let asked_now: Vec<_> = app
+                .thread()
+                .expect("the conversation is still there")
+                .turns()
+                .into_iter()
+                .cloned()
+                .collect();
+            assert_eq!(
+                asked_now[..asked_already.len()],
+                asked_already[..],
+                "a mode change took a turn of the conversation"
+            );
+            assert_eq!(
+                asked_now.len(),
+                asked_already.len() + 2,
+                "the two commands did not cost the two turns they are supposed to"
+            );
+            assert_eq!(app.mode(), Mode::Chat, "the register was never left");
         }
 
         #[test]

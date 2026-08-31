@@ -502,9 +502,9 @@ mod tests {
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::time::{Duration, Instant};
 
-    use warlock_tui::{Activity, App, Ending, INVOCATION_TIMEOUT, Line};
+    use warlock_tui::{Activity, App, ChatAgent, Ending, INVOCATION_TIMEOUT, Line, Mode};
 
-    use super::{Chatting, TurnEvent, apply_turn};
+    use super::{Chat, Chatting, TurnEvent, apply_turn};
     use crate::pacting::CancelGuard;
 
     /// The question every test asks, so a row that quotes it is recognisable.
@@ -833,6 +833,72 @@ mod tests {
             value_of(&question, "--system-prompt"),
         );
         assert_eq!(value_of(&brief, "--tools"), value_of(&question, "--tools"));
+    }
+
+    #[test]
+    fn a_mode_change_is_a_state_of_the_conversation_and_never_a_second_one() {
+        // The same property as the test above, said where a mode change really
+        // happens: the composer's own `apply_compose`, over the value the loop
+        // keeps, with the commands submitted as they are typed. What is asserted
+        // is the agent the conversation still holds four turns later — the one
+        // long-lived `ChatAgent` — because *that* is what a second session would
+        // show up in. A `/brief` that rebuilt the conversation would name a new
+        // session id here, and the turns already said would be turns nothing had
+        // ever heard.
+        //
+        // The `claude` is one that does not exist, so the four turns these
+        // commands really start spawn nothing at all: no terminal, no network
+        // and no model.
+        let base = Instant::now();
+        let mut app = App::default();
+        let mut chat = Chat::with_agent(ChatAgent::new().with_program("/warlock/no/such/program"));
+        let opening = words(&chat.agent);
+        let session = value_of(&opening, "--session-id").expect("a turn opens a conversation");
+        let prompt = value_of(&opening, "--system-prompt").expect("a turn carries the prompt");
+
+        for draft in ["why nine passes?", "/brief", "/brief", "/chat"] {
+            let mut composer = warlock_tui::Composer::new(draft);
+            crate::apply_compose(
+                &mut app,
+                &mut composer,
+                warlock_tui::Composed::Submit,
+                &mut chat,
+                base,
+            );
+        }
+
+        // The register was really entered and really left — otherwise the
+        // vectors below would be equal for the dullest of reasons.
+        assert_eq!(app.mode(), Mode::Chat);
+        assert_eq!(
+            app.thread().map_or(0, |thread| thread.turns().len()),
+            4,
+            "the commands did not cost the four turns they are supposed to",
+        );
+        assert_eq!(
+            words(&chat.agent),
+            opening,
+            "a mode change rebuilt the conversation it is a state of",
+        );
+
+        // And said one fact at a time, so a failure names which of them went.
+        let brief = words(&super::asking(&chat.agent, Mode::Brief));
+        let question = words(&super::asking(&chat.agent, Mode::Chat));
+        for (mode, vector) in [("brief", &brief), ("chat", &question)] {
+            assert_eq!(
+                value_of(vector, "--session-id"),
+                Some(session),
+                "a {mode}-mode turn is asked in another session",
+            );
+            assert_eq!(
+                value_of(vector, "--system-prompt"),
+                Some(prompt),
+                "a {mode}-mode turn is asked under another prompt",
+            );
+        }
+        // That the one prompt is `CHAT_SYSTEM_PROMPT` and says what it has to
+        // say in both registers is `claude.rs`'s own test, on the constant
+        // itself; what is asserted here is that a mode change never swaps it.
     }
 
     #[test]
