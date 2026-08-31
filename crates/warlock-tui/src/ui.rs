@@ -447,6 +447,26 @@ const COMPOSE_KEYS: &str = "Enter/Alt+Enter: send/newline";
 /// has the keyboard and leaves warlock when nothing does.
 const LEAVE_KEY: &str = "Esc: leave, draft kept";
 
+/// The leading slash inside the composer, which makes a draft a command instead
+/// of a message.
+///
+/// One name for all three commands rather than one name each. The line is
+/// already wider than an eighty-column terminal and every column of it costs
+/// another key its place, so what the footer buys here is the shape of the
+/// thing — a draft that starts with a slash is read as a command — and not the
+/// vocabulary. The vocabulary is a keystroke away and already written:
+/// [`submitted_for`](crate::submitted_for) refuses a slash that is not one of
+/// the commands with a line that names `/brief`, `/write` and `/chat`, so a
+/// reader who types `/` and guesses wrong is told all three by the thing they
+/// typed at. Three names here would spend three times the columns to say that
+/// worse, and would want widening again for every command that came after.
+///
+/// It is listed with the composer's names in [`KEYS`] and given up with them in
+/// [`KEY_DROP_ORDER`], because it is a fact about the one field rather than
+/// about the screen: a slash typed anywhere else is a slash, and a reader with
+/// no cursor in the composer has nothing to do with this name.
+const COMMAND_KEY: &str = "/: command";
+
 /// The keys line of the footer, up to the one key whose name depends on what it
 /// would do next: every key that does something, in the order [`keys_line`]
 /// assembles them.
@@ -465,14 +485,15 @@ const LEAVE_KEY: &str = "Esc: leave, draft kept";
 /// `r` because it is the one of the three that needs a pact to already be
 /// there: nothing on a row `p` has never been pressed on is scopeable.
 ///
-/// The composer's three come last, together and in the order somebody meets
+/// The composer's four come last, together and in the order somebody meets
 /// them: [`FOCUS_KEY`] reaches the field, [`COMPOSE_KEYS`] is what to press in
-/// it, [`LEAVE_KEY`] is how to stop. They sit at the end because they are the
-/// keys of one pane rather than of the whole screen, and because that is where a
-/// reader who has just looked down from a cursor finds them — next to the other
-/// facts about what the terminal is doing rather than buried among the tree's
-/// movement. Where they sit is not where they are given up: see
-/// [`KEY_DROP_ORDER`], which loses all three before it loses anything else.
+/// it, [`LEAVE_KEY`] is how to stop, and [`COMMAND_KEY`] is the one thing the
+/// field does that a cursor does not explain. They sit at the end because they
+/// are the keys of one pane rather than of the whole screen, and because that is
+/// where a reader who has just looked down from a cursor finds them — next to
+/// the other facts about what the terminal is doing rather than buried among the
+/// tree's movement. Where they sit is not where they are given up: see
+/// [`KEY_DROP_ORDER`], which loses all four before it loses anything else.
 ///
 /// Every name here is as short as it can be and still be read: the line is
 /// already wider than an eighty-column terminal, and a key nobody can see
@@ -512,6 +533,7 @@ const KEYS: &[&str] = &[
     FOCUS_KEY,
     COMPOSE_KEYS,
     LEAVE_KEY,
+    COMMAND_KEY,
 ];
 
 /// What separates one key's name from the next on the keys line.
@@ -565,16 +587,18 @@ const EDIT_KEY: &str = "e: edit";
 /// likely. So the line is laid out for the width it has, by [`laid_out_keys`],
 /// and gives up the names a reader is least likely to need told first.
 ///
-/// The composer's three go before everything, because a reader looking at a
+/// The composer's four go before everything, because a reader looking at a
 /// composer has a cursor in front of them saying it takes typing — the field is
 /// the one thing on screen that explains itself, so its names are the cheapest
-/// on the line. [`COMPOSE_KEYS`] goes first of the three: it is the widest name
+/// on the line. [`COMPOSE_KEYS`] goes first of the four: it is the widest name
 /// here by some way, and Enter is the press everybody makes in a field without
 /// being told. [`LEAVE_KEY`] next, because Esc is the other press everybody
 /// makes, and because the way out is still spelled on the line inside
-/// [`QUIT_KEY`]. [`FOCUS_KEY`] is the last of the three kept: Tab is the only
+/// [`QUIT_KEY`]. [`COMMAND_KEY`] outlasts those two, because the slash is the
+/// one thing about the field a cursor does not hint at and nobody presses by
+/// accident. [`FOCUS_KEY`] is the last of the four kept even so: Tab is the only
 /// one of them a reader needs *before* the cursor is theirs, and a composer
-/// nobody can reach is a composer nobody types in.
+/// nobody can reach is a composer nobody types a command into either.
 ///
 /// Movement goes next, all of it: `PgUp/PgDn`, then `g/G: ends`, then
 /// `k/j: row`. The arrows are what a reader presses before reading anything at
@@ -601,6 +625,7 @@ const EDIT_KEY: &str = "e: edit";
 const KEY_DROP_ORDER: &[&str] = &[
     COMPOSE_KEYS,
     LEAVE_KEY,
+    COMMAND_KEY,
     FOCUS_KEY,
     PAGE_KEYS,
     ENDS_KEY,
@@ -2760,19 +2785,20 @@ mod tests {
 
     use super::{
         Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, BRIEF_THREAD_TITLE,
-        CANCEL_KEY, COLLAPSE_KEY, COMPOSE_KEYS, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP,
-        CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS, CONFIRM_NO,
-        CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FOCUS_KEY, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH,
-        GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS,
-        LEAVE_KEY, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY,
-        MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PAGE_KEYS,
-        PANEL_INDENT, PATH_HEADING, PATH_RULES, QUIT_KEY, REFRESHING_RUN, RUN_HEADER_HEIGHT,
-        SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN,
-        SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH,
-        TREE_PERCENT, areas, centred, composer_height, composer_on_screen, confirm_area,
-        confirm_size, display_width, draw, footer_text_area, guide_prefixes, hit_test, keys_line,
-        mark_area, pacting_keys_line, pane_inner, panel_height, panel_row, panel_width,
-        run_header_height, scope_size, tree_height, tree_rows_area, tree_width, truncated,
+        CANCEL_KEY, COLLAPSE_KEY, COMMAND_KEY, COMPOSE_KEYS, COMPOSER_MIN_HEIGHT,
+        CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS,
+        CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FOCUS_KEY, FOOTER_HEIGHT, GUIDE,
+        GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP,
+        KEYS, LEAVE_KEY, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY,
+        MOUSE_ON_KEY, MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_QUIT_KEY,
+        PACTING_RUN, PAGE_KEYS, PANEL_INDENT, PATH_HEADING, PATH_RULES, QUIT_KEY, REFRESHING_RUN,
+        RUN_HEADER_HEIGHT, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES,
+        SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER, THREAD_TITLE,
+        TREE_MIN_WIDTH, TREE_PERCENT, areas, centred, composer_height, composer_on_screen,
+        confirm_area, confirm_size, display_width, draw, footer_text_area, guide_prefixes,
+        hit_test, keys_line, mark_area, pacting_keys_line, pane_inner, panel_height, panel_row,
+        panel_width, run_header_height, scope_size, tree_height, tree_rows_area, tree_width,
+        truncated,
     };
     use crate::COMPOSER_MAX_ROWS;
     use crate::account::{Line as Entry, Outcome};
@@ -5009,7 +5035,7 @@ mod tests {
     }
 
     /// What eighty columns costs, now that the composer has names on the line:
-    /// its three and no other name before them, with the way out still whole.
+    /// its four and no other name before them, with the way out still whole.
     ///
     /// The assertions are about the row the footer drew rather than about what
     /// [`keys_line`] returned, because "nothing moves off the footer" is a claim
@@ -5022,7 +5048,7 @@ mod tests {
         let columns = footer_width(EIGHTY_COLUMNS);
         // In the order `KEY_DROP_ORDER` loses them, which is not the order
         // `KEYS` lists them in.
-        let composer = [COMPOSE_KEYS, LEAVE_KEY, FOCUS_KEY];
+        let composer = [COMPOSE_KEYS, LEAVE_KEY, COMMAND_KEY, FOCUS_KEY];
 
         for captured in [true, false] {
             app.set_mouse_captured(captured);
@@ -5154,8 +5180,8 @@ mod tests {
                 .filter(|name| pieces.contains(name))
                 .collect();
             assert_eq!(
-                expected.iter().take(4).copied().collect::<Vec<&str>>(),
-                vec![COMPOSE_KEYS, LEAVE_KEY, FOCUS_KEY, PAGE_KEYS],
+                expected.iter().take(5).copied().collect::<Vec<&str>>(),
+                vec![COMPOSE_KEYS, LEAVE_KEY, COMMAND_KEY, FOCUS_KEY, PAGE_KEYS],
                 "the composer's names go first, then the page keys: {expected:?}"
             );
 
