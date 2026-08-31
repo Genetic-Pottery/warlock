@@ -904,7 +904,37 @@ const CONFIRM_HEIGHT: u16 = CONFIRM_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER
 /// meant to. The trailing space is part of the constant so that the width the
 /// window is sized to (see [`scope_size`]) is the width actually drawn, the way
 /// [`CONFIRM_YES`]'s padding is.
+///
+/// Handed to [`draw_scope`] rather than read inside it: the same window draws
+/// the path prompt too, under [`PATH_HEADING`], and a window that named itself
+/// would be a second window to keep in step with this one.
 const SCOPE_HEADING: &str = "Scope for ";
+
+/// What the path prompt's window says it is about, in front of what
+/// [`ScopeField::directory`] carries — which is nothing, because that field
+/// carries the whole heading.
+///
+/// Empty on purpose, and a constant rather than a bare `""` at the one call
+/// site, so that the two windows are drawn from two pairs of words in the same
+/// place rather than from one pair and a literal. The path prompt is opened by a
+/// `/write` turn landing, not by a keystroke, so the heading has to come from
+/// whoever knew what was being asked for; that is the binary, and the one string
+/// a [`ScopeField`] already has for saying what it is asking about is its
+/// directory (see [`mod@crate::prompt`]). Nothing here reads it as a path — this
+/// window prints it, as it prints the module the scope prompt puts there.
+const PATH_HEADING: &str = "";
+
+/// The dim last line of the path prompt's window: what the two keys do.
+///
+/// [`SCOPE_RULES`]'s place in the window, and deliberately not the same kind of
+/// sentence. The scope prompt's line is the engine's, word for word, because
+/// what a scope may say is the engine's to judge; what a path may say is judged
+/// where the file is written, and this line does not attempt it. It says what
+/// Enter and Esc come to, which is worth saying here for the reason nothing else
+/// in warlock needs it said: this is the one window a reader arrives at without
+/// having pressed a key for it, so the way out of it is not something they can
+/// have just done.
+const PATH_RULES: &str = "Enter writes the document, Esc writes nothing";
 
 /// The clear columns the scope window's text is given inside its border, each
 /// side: [`CONFIRM_MARGIN`], spelled as that rather than as a three.
@@ -945,6 +975,10 @@ const SCOPE_CURSOR: &str = " ";
 /// to being clipped. The blank under the heading is [`CONFIRM_LINES`]'s blank,
 /// for the same reason: what the window is about and what is being typed are two
 /// things to read.
+///
+/// Five for the path prompt as well, which is drawn by the same [`draw_scope`]
+/// with the other pair of words in it: one window somebody types a line into,
+/// asked twice, rather than two windows that could drift a row apart.
 const SCOPE_LINES: u16 = 5;
 
 /// How tall the whole scope window is: its lines, the rows kept clear around
@@ -1005,12 +1039,24 @@ const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
 /// `confirm`, because it is carrying a string somebody is typing and a renderer
 /// has no business owning a copy of it.
 ///
-/// The two are drawn in that order, and the scope prompt last, so that a frame
-/// somehow carrying both shows the one whose keys are live rather than half of
-/// each. The event loop never opens both — while either is up it consults that
-/// one instead of the app, so the key that would open the other never reaches
-/// anything — and this is what that costs to be safe about it: one `if` in the
-/// order the modes stack.
+/// `path` is the third window and the only one no keystroke opens: the path a
+/// brief is about to be written to, up from the moment a `/write` turn answers
+/// until Enter writes the file or Esc writes nothing. It is a [`ScopePrompt`]
+/// like the one above it because it is the same field and the same editor with a
+/// different question in it, and it is drawn by the same [`draw_scope`] with
+/// [`PATH_HEADING`] and [`PATH_RULES`] in place of the scope's two sentences —
+/// so the window a reader has already learnt to read is the window they get. The
+/// heading itself rides in the field (see [`PATH_HEADING`]): this crate never
+/// composed it and never reads it as a path.
+///
+/// The windows are drawn in that order, and the scope prompt last, so that a
+/// frame somehow carrying more than one shows the one whose keys are live rather
+/// than half of each — the order they are stacked in here is the order
+/// [`press_for`](crate::input::press_for) consults them in, back to front. The
+/// event loop never opens two — while any is up it consults that one instead of
+/// the app, so the key that would open another never reaches anything — and this
+/// is what that costs to be safe about it: two `if`s in the order the modes
+/// stack.
 ///
 /// `composer` is the draft somebody is typing under the panel, handed in beside
 /// the app for the reason the two questions are: the loop owns it and the app
@@ -1022,6 +1068,12 @@ const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
 /// has the panel is put back to `None` here (see [`on_screen`]), so the rule
 /// about when the field is on screen is [`App::composer_showable`]'s and is
 /// asked rather than repeated.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one frame's worth of state, and the point of it is that the binary \
+              draws a frame in one call: the three windows that can be over the \
+              app are three parameters here rather than three entry points"
+)]
 pub fn draw(
     frame: &mut Frame<'_>,
     app: &App,
@@ -1029,6 +1081,7 @@ pub fn draw(
     now: Instant,
     confirm: QuitConfirm,
     scope: &ScopePrompt,
+    path: &ScopePrompt,
     composer: Option<&Composer>,
 ) {
     let screen = frame.area();
@@ -1061,8 +1114,11 @@ pub fn draw(
     if let Some(highlighted) = confirm.highlighted() {
         draw_confirm(frame, screen, highlighted);
     }
+    if let Some(field) = path.field() {
+        draw_scope(frame, screen, field, PATH_HEADING, PATH_RULES);
+    }
     if let Some(field) = scope.field() {
-        draw_scope(frame, screen, field);
+        draw_scope(frame, screen, field, SCOPE_HEADING, SCOPE_RULES);
     }
 }
 
@@ -2585,8 +2641,17 @@ fn confirm_size() -> Size {
     Size::new(width, CONFIRM_HEIGHT)
 }
 
-/// Draw the scope prompt: what is being scoped, what has been typed into it, and
-/// the rules a scope keeps, in a bordered window over the middle of `screen`.
+/// Draw a prompt somebody types one line into: what it is about, what has been
+/// typed into it, and the sentence under it, in a bordered window over the
+/// middle of `screen`.
+///
+/// Two windows, one function. `heading` goes in front of what the field carries
+/// and `rules` on the last line, so the caller says which prompt this is —
+/// [`SCOPE_HEADING`] and [`SCOPE_RULES`] for the scope, [`PATH_HEADING`] and
+/// [`PATH_RULES`] for the path a brief is about to be written to. Nothing else
+/// differs: same [`Clear`], same border, same margins, same five lines, same
+/// clamping on a terminal with no room, because a reader who has answered one of
+/// them has learnt the other.
 ///
 /// [`draw_confirm`]'s shape, down to the [`Clear`] before the border and the
 /// clamping rather than skipping on a terminal with no room — a mode with
@@ -2599,23 +2664,26 @@ fn confirm_size() -> Size {
 /// on every other keystroke, taking the cursor and the text already typed with
 /// it. Everything above and below it is aligned to the same edge, so the window
 /// reads as one block rather than as a centred heading over a left-hung field.
-fn draw_scope(frame: &mut Frame<'_>, screen: Rect, field: &ScopeField) {
-    let area = centred(screen, scope_size(field));
+fn draw_scope(frame: &mut Frame<'_>, screen: Rect, field: &ScopeField, heading: &str, rules: &str) {
+    let area = centred(screen, scope_size(field, heading, rules));
     let block = Block::bordered().padding(Padding::symmetric(SCOPE_MARGIN, SCOPE_MARGIN_ROWS));
     let inner = block.inner(area);
 
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(scope_lines(field)), inner);
+    frame.render_widget(Paragraph::new(scope_lines(field, heading, rules)), inner);
 }
 
-/// The [`SCOPE_LINES`] lines of the scope window, in the order they are drawn.
+/// The [`SCOPE_LINES`] lines of one prompt's window, in the order they are
+/// drawn.
 ///
-/// The directory is bold against the plain [`SCOPE_HEADING`]: the heading is the
-/// same words every time the window opens and the path is the one part of it
+/// What the field carries is bold against the plain `heading`: the heading is
+/// the same words every time the window opens and the path is the one part of it
 /// worth reading, and bold is what the tree already spends on the row the keys
 /// are driving, so no new colour is invented for a window that is up for a few
-/// seconds.
+/// seconds. The path prompt hands in an empty heading and its whole first line
+/// is that bold field (see [`PATH_HEADING`]), which is the same rule and not an
+/// exception to it: the words worth reading are the words drawn bold.
 ///
 /// The cursor is a reversed [`SCOPE_CURSOR`] after the text and nowhere else,
 /// which is not a decision made here: [`mod@crate::prompt`] appends and deletes
@@ -2626,10 +2694,10 @@ fn draw_scope(frame: &mut Frame<'_>, screen: Rect, field: &ScopeField) {
 /// before anything is typed, and then to stop competing with the text. The
 /// broken rule above it is not dimmed — it is the one thing that changed since
 /// the last frame, and it is the reason the prompt is still up.
-fn scope_lines(field: &ScopeField) -> Vec<Line<'_>> {
+fn scope_lines<'a>(field: &'a ScopeField, heading: &'a str, rules: &'a str) -> Vec<Line<'a>> {
     vec![
         Line::from(vec![
-            Span::raw(SCOPE_HEADING),
+            Span::raw(heading),
             Span::raw(field.directory()).bold(),
         ]),
         Line::default(),
@@ -2638,31 +2706,37 @@ fn scope_lines(field: &ScopeField) -> Vec<Line<'_>> {
             Span::styled(SCOPE_CURSOR, Style::new().add_modifier(Modifier::REVERSED)),
         ]),
         Line::from(field.rule().unwrap_or_default()),
-        Line::from(SCOPE_RULES).dim(),
+        Line::from(rules).dim(),
     ]
 }
 
-/// How big the scope window wants to be: its widest line, the margins and the
+/// How big one prompt's window wants to be: its widest line, the margins and the
 /// border.
 ///
 /// Measured off the lines the way [`confirm_size`] is, and off the field as well
-/// as the constants, because a path and a broken rule are as much of the window
-/// as the heading is. In practice [`SCOPE_RULES`] is the floor and the window
-/// does not breathe as somebody types: the rules sentence is wider than a
-/// directory that fits on a tree row and wider than any scope the engine would
-/// accept, so the width only moves for a path or a refusal longer than it.
+/// as off the two sentences handed in, because a path and a broken rule are as
+/// much of the window as the heading is. In practice the rules line is the floor
+/// and the window does not breathe as somebody types: [`SCOPE_RULES`] is wider
+/// than a directory that fits on a tree row and wider than any scope the engine
+/// would accept, so the width only moves for something longer than it. The path
+/// prompt is the one window that does breathe — a proposed path is about as long
+/// as [`PATH_RULES`] — and it breathes at the pace a path is edited, which is a
+/// character at a time and no faster than the scope window already moves when a
+/// refusal lands.
 ///
 /// [`SCOPE_RULES`] is the engine's sentence rather than one written here, and
 /// that is a rule rather than a convenience: a window that spelled out how long
 /// a scope may be or which characters it may hold would be this crate judging a
-/// scope, and there is one judge — see [`mod@crate::prompt`].
-fn scope_size(field: &ScopeField) -> Size {
-    let heading = display_width(SCOPE_HEADING) + display_width(field.directory());
+/// scope, and there is one judge — see [`mod@crate::prompt`]. Taking the
+/// sentence as a parameter is what keeps that true of a function that now sizes
+/// two windows: the caller says which words, and this measures them.
+fn scope_size(field: &ScopeField, heading: &str, rules: &str) -> Size {
+    let heading = display_width(heading) + display_width(field.directory());
     let typed = display_width(field.text()) + display_width(SCOPE_CURSOR);
     let widest = heading
         .max(typed)
         .max(field.rule().map_or(0, display_width))
-        .max(display_width(SCOPE_RULES));
+        .max(display_width(rules));
     let width = u16::try_from(widest)
         .unwrap_or(u16::MAX)
         .saturating_add(2 * SCOPE_MARGIN)
@@ -2692,13 +2766,13 @@ mod tests {
         GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS,
         LEAVE_KEY, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY, MOUSE_ON_KEY,
         MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PAGE_KEYS,
-        PANEL_INDENT, QUIT_KEY, REFRESHING_RUN, RUN_HEADER_HEIGHT, SAID_MARKER, SCOPE_CURSOR,
-        SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS,
-        SCROLLBACK_ARROW, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, areas,
-        centred, composer_height, composer_on_screen, confirm_area, confirm_size, display_width,
-        draw, footer_text_area, guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line,
-        pane_inner, panel_height, panel_row, panel_width, run_header_height, scope_size,
-        tree_height, tree_rows_area, tree_width, truncated,
+        PANEL_INDENT, PATH_HEADING, PATH_RULES, QUIT_KEY, REFRESHING_RUN, RUN_HEADER_HEIGHT,
+        SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN,
+        SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH,
+        TREE_PERCENT, areas, centred, composer_height, composer_on_screen, confirm_area,
+        confirm_size, display_width, draw, footer_text_area, guide_prefixes, hit_test, keys_line,
+        mark_area, pacting_keys_line, pane_inner, panel_height, panel_row, panel_width,
+        run_header_height, scope_size, tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::COMPOSER_MAX_ROWS;
     use crate::account::{Line as Entry, Outcome};
@@ -3186,6 +3260,23 @@ mod tests {
         )
     }
 
+    /// [`render_at`], with the path prompt in whatever state the test is about
+    /// and every other window closed: the frame a `/write` turn's answer leaves
+    /// on screen.
+    fn render_path(app: &App, width: u16, height: u16, now: Instant, path: &ScopePrompt) -> Buffer {
+        render_all(
+            app,
+            &Chrome::default(),
+            width,
+            height,
+            now,
+            QuitConfirm::Closed,
+            &ScopePrompt::Closed,
+            path,
+            None,
+        )
+    }
+
     /// [`render`], with a header line the test chose.
     ///
     /// The header is no longer app state, so the tests about it hand one in
@@ -3220,12 +3311,16 @@ mod tests {
             Instant::now(),
             QuitConfirm::Closed,
             &ScopePrompt::Closed,
+            &ScopePrompt::Closed,
             Some(composer),
         )
     }
 
-    /// The one place a frame is actually drawn: the app, the instant, and both
+    /// The one place a frame is actually drawn: the app, the instant, and the
     /// windows that can be over it.
+    ///
+    /// The path prompt is closed here, which is every test but the ones about
+    /// the path prompt itself — they go through [`render_path`].
     fn render_windows(
         app: &App,
         chrome: &Chrome,
@@ -3235,7 +3330,17 @@ mod tests {
         confirm: QuitConfirm,
         scope: &ScopePrompt,
     ) -> Buffer {
-        render_all(app, chrome, width, height, now, confirm, scope, None)
+        render_all(
+            app,
+            chrome,
+            width,
+            height,
+            now,
+            confirm,
+            scope,
+            &ScopePrompt::Closed,
+            None,
+        )
     }
 
     /// [`render_windows`] with the composer as well: everything one frame can
@@ -3253,12 +3358,13 @@ mod tests {
         now: Instant,
         confirm: QuitConfirm,
         scope: &ScopePrompt,
+        path: &ScopePrompt,
         composer: Option<&Composer>,
     ) -> Buffer {
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("test backend never fails");
         terminal
-            .draw(|frame| draw(frame, app, chrome, now, confirm, scope, composer))
+            .draw(|frame| draw(frame, app, chrome, now, confirm, scope, path, composer))
             .expect("test backend never fails");
         terminal.backend().buffer().clone()
     }
@@ -7564,6 +7670,7 @@ mod tests {
                 now,
                 QuitConfirm::Closed,
                 &ScopePrompt::Closed,
+                &ScopePrompt::Closed,
                 Some(composer),
             );
             let field = areas(buffer.area, Some(composer))
@@ -7666,6 +7773,7 @@ mod tests {
                 now,
                 QuitConfirm::Closed,
                 &ScopePrompt::Closed,
+                &ScopePrompt::Closed,
                 Some(&muted),
             ),
             render_all(
@@ -7675,6 +7783,7 @@ mod tests {
                 FIXTURE_HEIGHT,
                 now,
                 QuitConfirm::Closed,
+                &ScopePrompt::Closed,
                 &ScopePrompt::Closed,
                 None,
             ),
@@ -8290,16 +8399,20 @@ mod tests {
     /// something rather than only being empty.
     const CARRIED: &str = "data-plane";
 
-    /// Where the scope prompt's window lands on a buffer, measured off the very
+    /// Where one prompt's window lands on a buffer, measured off the very
     /// functions [`draw`] places it with.
-    fn scope_rect(buffer: &Buffer, field: &ScopeField) -> Rect {
-        centred(buffer.area, scope_size(field))
+    ///
+    /// The two sentences are what say which prompt: the same window is drawn
+    /// twice over, so a helper that assumed the scope's words would measure the
+    /// path prompt's window in the wrong columns.
+    fn window_rect(buffer: &Buffer, field: &ScopeField, heading: &str, rules: &str) -> Rect {
+        centred(buffer.area, scope_size(field, heading, rules))
     }
 
-    /// The rows of the scope prompt's window, as text, clipped to its own
-    /// columns — [`confirm_rows`] for the other window.
-    fn scope_rows(buffer: &Buffer, field: &ScopeField) -> Vec<String> {
-        let area = scope_rect(buffer, field);
+    /// The rows of one prompt's window, as text, clipped to its own columns —
+    /// [`confirm_rows`] for the other kind of window.
+    fn window_rows(buffer: &Buffer, field: &ScopeField, heading: &str, rules: &str) -> Vec<String> {
+        let area = window_rect(buffer, field, heading, rules);
         (0..area.height)
             .map(|index| text_in(buffer, area, area.y + index))
             .collect()
@@ -8308,14 +8421,41 @@ mod tests {
     /// The cell the cursor should be in: one column past `text` on the field's
     /// row, worked out from the window's own corner, its border and its margin
     /// rather than by looking for something that looks like a cursor.
-    fn cursor_cell(buffer: &Buffer, field: &ScopeField) -> Position {
-        let area = scope_rect(buffer, field);
-        let typed = u16::try_from(display_width(field.text())).expect("a short scope");
+    fn window_cursor(buffer: &Buffer, field: &ScopeField, heading: &str, rules: &str) -> Position {
+        let area = window_rect(buffer, field, heading, rules);
+        let typed = u16::try_from(display_width(field.text())).expect("a short line");
 
         Position::new(
             area.x + BORDER_THICKNESS + SCOPE_MARGIN + typed,
             area.y + BORDER_THICKNESS + SCOPE_MARGIN_ROWS + FIELD_LINE,
         )
+    }
+
+    /// [`window_rect`] for the scope prompt: the window drawn with the engine's
+    /// sentence under it.
+    fn scope_rect(buffer: &Buffer, field: &ScopeField) -> Rect {
+        window_rect(buffer, field, SCOPE_HEADING, SCOPE_RULES)
+    }
+
+    /// [`window_rows`] for the scope prompt.
+    fn scope_rows(buffer: &Buffer, field: &ScopeField) -> Vec<String> {
+        window_rows(buffer, field, SCOPE_HEADING, SCOPE_RULES)
+    }
+
+    /// [`window_cursor`] for the scope prompt.
+    fn cursor_cell(buffer: &Buffer, field: &ScopeField) -> Position {
+        window_cursor(buffer, field, SCOPE_HEADING, SCOPE_RULES)
+    }
+
+    /// [`window_rows`] for the path prompt: the window whose heading rides in
+    /// the field and whose last line is [`PATH_RULES`].
+    fn path_rows(buffer: &Buffer, field: &ScopeField) -> Vec<String> {
+        window_rows(buffer, field, PATH_HEADING, PATH_RULES)
+    }
+
+    /// [`window_cursor`] for the path prompt.
+    fn path_cursor(buffer: &Buffer, field: &ScopeField) -> Position {
+        window_cursor(buffer, field, PATH_HEADING, PATH_RULES)
     }
 
     /// Which of the window's [`SCOPE_LINES`] the field is: the heading, a blank,
@@ -8343,7 +8483,7 @@ mod tests {
             ScopeField::new("a", ""),
             refused.clone(),
         ] {
-            let Size { width, height } = scope_size(&field);
+            let Size { width, height } = scope_size(&field, SCOPE_HEADING, SCOPE_RULES);
             let widest = (display_width(SCOPE_HEADING) + display_width(field.directory()))
                 .max(display_width(field.text()) + display_width(SCOPE_CURSOR))
                 .max(field.rule().map_or(0, display_width))
@@ -8364,7 +8504,7 @@ mod tests {
             );
         }
         assert_eq!(
-            scope_size(&ScopeField::new(SCOPED, "")).height,
+            scope_size(&ScopeField::new(SCOPED, ""), SCOPE_HEADING, SCOPE_RULES).height,
             SCOPE_HEIGHT
         );
     }
@@ -8616,5 +8756,104 @@ mod tests {
                 "the prompt changed nothing on screen at {size}"
             );
         }
+    }
+
+    /// The heading the path prompt's window opens under, in the field rather
+    /// than in front of it — see [`PATH_HEADING`], which is empty for exactly
+    /// this reason.
+    ///
+    /// Spelled here rather than imported from whoever composes it: this crate
+    /// draws the string it is handed and never asks what it means, so a test
+    /// reading the binary's constant would be asserting that two modules agree
+    /// on some words rather than that this window draws them.
+    const HEADED: &str = "Write the brief to";
+
+    /// The path a `/write` turn's answer proposes, as the binary works one out:
+    /// the directory, the number and the slug a reader checks before pressing
+    /// Enter, and long enough to be worth reading off the screen.
+    const PROPOSED: &str = "docs/warlock-brief-13-scopes-and-sigils.md";
+
+    #[test]
+    fn the_path_window_heads_itself_holds_the_proposal_and_takes_a_refusal_under_it() {
+        let base = Instant::now();
+        let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+        // Worded by whoever refused — the write, in the loop — and printed here
+        // without being read, the way a broken scope rule is: this window judges
+        // no path either.
+        let broken = "docs/warlock-brief-13-scopes-and-sigils.md is already there";
+        let field = ScopeField::new(HEADED, PROPOSED);
+        let refused = field.clone().refused(broken);
+
+        let opened = render_path(
+            &app,
+            WIDTH,
+            FIXTURE_HEIGHT,
+            base,
+            &ScopePrompt::open(HEADED, PROPOSED),
+        );
+
+        // The same window the scope prompt is drawn in, with the other question
+        // in it: bordered all the way round, over the middle of the frame.
+        let rows = path_rows(&opened, &field);
+        assert!(
+            rows[0].starts_with('┌') && rows[0].ends_with('┐'),
+            "{rows:?}"
+        );
+        let last = rows.last().expect("the window has rows");
+        assert!(last.starts_with('└') && last.ends_with('┘'), "{rows:?}");
+        // What it is asking for, on the row the scope prompt heads itself in.
+        // Nothing goes in front of it: the whole heading rides in the field.
+        let heading = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS);
+        let line = heading + usize::from(FIELD_LINE);
+        assert_eq!(inside_the_border(&rows[heading]), HEADED, "{rows:?}");
+        // The path is already typed, so an Enter with nothing else pressed
+        // writes the document where warlock proposed.
+        assert_eq!(inside_the_border(&rows[line]), PROPOSED, "{rows:?}");
+        // And the cursor is where the next character would land: one column
+        // past the last of the path, not over it.
+        let cursor = path_cursor(&opened, &field);
+        assert!(
+            opened[cursor].modifier.contains(Modifier::REVERSED),
+            "no cursor at {cursor:?}: {rows:?}"
+        );
+        let before = Position::new(cursor.x - 1, cursor.y);
+        assert_eq!(opened[before].symbol(), &PROPOSED[PROPOSED.len() - 1..]);
+        assert!(
+            !opened[before].modifier.contains(Modifier::REVERSED),
+            "the cursor is over the path rather than after it"
+        );
+        // The last line is this window's own sentence and not the engine's: a
+        // path is not a scope, and nothing here says what a scope may be.
+        assert!(rows[line + 2].contains(PATH_RULES), "{rows:?}");
+        for (index, row) in rows.iter().enumerate() {
+            assert!(!row.contains(SCOPE_RULES), "row {index}: {row:?}");
+            assert!(!row.contains(SCOPE_HEADING.trim()), "row {index}: {row:?}");
+        }
+
+        let reopened = render_path(
+            &app,
+            WIDTH,
+            FIXTURE_HEIGHT,
+            base,
+            &ScopePrompt::Open(refused.clone()),
+        );
+
+        // A path in the way reopens the window with the reason under the field
+        // and the path still in it, a character away from being fixed — and the
+        // rules line is still under that, because a refusal adds a line rather
+        // than replacing the one that was there.
+        let rows = path_rows(&reopened, &refused);
+        assert_eq!(inside_the_border(&rows[heading]), HEADED, "{rows:?}");
+        assert_eq!(inside_the_border(&rows[line]), PROPOSED, "{rows:?}");
+        assert!(rows[line + 1].contains(broken), "{rows:?}");
+        assert!(rows[line + 2].contains(PATH_RULES), "{rows:?}");
+        // Nothing moved: the field is on the row of the window it was on before
+        // the write was refused, and that row was blank until it was.
+        assert_eq!(
+            path_rows(&opened, &field)[line + 1]
+                .trim_matches('│')
+                .trim(),
+            ""
+        );
     }
 }

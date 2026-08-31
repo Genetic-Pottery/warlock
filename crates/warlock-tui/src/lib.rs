@@ -177,6 +177,10 @@ pub use account::Line;
 pub use account::Outcome;
 /// One directory's pass inside an [`Account`].
 pub use account::Section;
+/// A number of bytes as the panel spells it: `934 bytes`, `1.8 KB`, `14.2 KB`.
+/// The account's own spelling, exported so the line a written file is announced
+/// on says a size the same way the rest of the panel does.
+pub use account::size;
 /// The front end's state: the flattened tree, which of it is collapsed, the
 /// selected row and the slice of rows on screen — moved by the keys, which
 /// drive whichever pane has the focus, or by a pointer, which names the row and
@@ -250,6 +254,10 @@ pub use claude::ClaudeAgent;
 /// How long one model pass is given before it is killed: five minutes, per
 /// invocation rather than per pact.
 pub use claude::INVOCATION_TIMEOUT;
+/// What warlock asks for when somebody in brief mode types `/write`: the whole
+/// document as the entire reply, in the shape restated inline, and the decision
+/// rather than a summary of the conversation.
+pub use claude::WRITE_INSTRUCTION;
 /// The colour a node state is drawn in.
 pub use colour::colour_for;
 /// The most rows the composer is ever drawn in, however long the draft gets.

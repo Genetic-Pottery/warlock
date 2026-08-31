@@ -42,12 +42,13 @@
 //! so is knowledge the engine has no business holding and a turn cannot be
 //! understood without.
 //!
-//! The other two are [`BRIEF_INSTRUCTION`] and [`CHAT_INSTRUCTION`], which are
-//! the same kind of knowledge said the same way: what warlock's two registers
-//! are is a fact about warlock. They are not a second system prompt and are
-//! never passed as one — each is sent as an ordinary turn into the session
-//! already in progress, so a mode change costs one message and never the
-//! conversation, and the effort those turns are asked at
+//! The other three are [`BRIEF_INSTRUCTION`], [`CHAT_INSTRUCTION`] and
+//! [`WRITE_INSTRUCTION`], which are the same kind of knowledge said the same
+//! way: what warlock's two registers are, and what warlock asks for when it
+//! wants the artifact, are facts about warlock. They are not a second system
+//! prompt and are never passed as one — each is sent as an ordinary turn into
+//! the session already in progress, so a mode change costs one message and
+//! never the conversation, and the effort those turns are asked at
 //! ([`at_effort`](ChatAgent::at_effort), [`BRIEF_EFFORT`]) is the only word of
 //! the argument vector a mode moves.
 //!
@@ -417,6 +418,53 @@ summarise what we decided and do not ask what to do next.\n\nGo back to \
 answering questions about this repository as they come: one answer per \
 question, short and plain, consulting the repository with the tools you have, \
 and saying when you do not know. Wait for the next question.";
+
+/// What warlock says into the conversation when somebody types `/write`.
+///
+/// The third of the three, and the only one that asks for the artifact rather
+/// than for a register. [`BRIEF_INSTRUCTION`] said a document would be asked for
+/// and that nothing is written until it is; this is that asking, sent the same
+/// way — one ordinary turn into the session already in progress — so the reply
+/// lands on the card as an answer like any other and warlock, not the model,
+/// decides what happens to it next.
+///
+/// Three things it has to say:
+///
+/// * **The whole reply is the document.** Not "here is the brief" followed by
+///   the brief, not the brief followed by an offer to revise it. What comes back
+///   is copied verbatim into a file, so a courteous sentence at either end is a
+///   courteous sentence in the artifact, and warlock parses nothing and strips
+///   nothing to find the document inside the reply.
+/// * **The shape, restated inline.** The same sections
+///   [`BRIEF_INSTRUCTION`] named, said again here rather than referred back to.
+///   It reads no template file and no `.warlock/` file — those are a later
+///   slice's and do not exist — and by this point the shape is twenty turns
+///   behind in a long conversation, which is exactly where a model's memory of
+///   an instruction goes vague. Two copies of a shape that must not drift apart
+///   is the cost, and it is cheaper than a document that quietly grew a
+///   `## Implementation plan`.
+/// * **Write the decision, not the transcript.** The failure this turn has is a
+///   summary of the conversation with headings on it. What was decided is the
+///   product; what was left open is said as one line rather than filled in with
+///   something plausible.
+///
+/// It does not name a file, a directory or a path, because the model never
+/// chooses where anything goes — warlock proposes the path and warlock writes
+/// the bytes, which is what [`CHAT_SYSTEM_PROMPT`] already told it.
+pub const WRITE_INSTRUCTION: &str = "Write the brief now. Your entire reply is \
+the document and nothing else: no preamble, no sign-off, no commentary on it, \
+no question at the end, and no offer to revise it. Do not wrap it in a code \
+fence. Everything you say in this reply is copied verbatim into the file, so a \
+sentence that is not part of the document ends up in the document.\n\nIt takes \
+the shape we agreed and no other: a `# ` title line naming the change; then \
+prose stating the problem — what is wrong now, in this repository, naming the \
+files and the behaviour; then `## Outcome`, what somebody sees once the change \
+is made; then `## Success criteria`, each one a fact that can be checked as \
+done or not done; then `## Constraints`, what must not change and what the work \
+may not reach for; then `## Out of scope`, named and refused rather than left \
+unsaid. No other sections, and no plan of which files to edit.\n\nWrite what we \
+decided rather than a summary of how we got there. Where something was left \
+open, say so in a line instead of inventing an answer.";
 
 /// The environment variable that replaces [`MODEL`] for a run.
 ///
@@ -2211,7 +2259,7 @@ mod tests {
     use super::{
         Activities, Activity, BRIEF_EFFORT, BRIEF_INSTRUCTION, CHAT_INSTRUCTION,
         CHAT_SYSTEM_PROMPT, Cancel, ChatAgent, ClaudeAgent, EFFORT, INVOCATION_TIMEOUT, MODEL,
-        OsString, SYSTEM_PROMPT, or_default, render, session_id,
+        OsString, SYSTEM_PROMPT, WRITE_INSTRUCTION, or_default, render, session_id,
     };
     use warlock_engine::{AgentChildDocument, AgentFile};
 
@@ -2897,6 +2945,58 @@ mod tests {
                 "an instruction reached the argument vector",
             );
         }
+    }
+
+    #[test]
+    fn the_write_instruction_asks_for_the_whole_document_in_the_shape() {
+        // Three jobs, and the same test per job as the other two get. First:
+        // the entire reply is the document, because warlock copies it verbatim
+        // and a courteous sentence at either end becomes a line of the file.
+        for said in [
+            "entire reply",
+            "no preamble",
+            "code fence",
+            "copied verbatim",
+        ] {
+            assert!(
+                WRITE_INSTRUCTION.contains(said),
+                "{said:?} is missing: the reply is allowed to be more than the document",
+            );
+        }
+        // Second: the shape, restated inline, twenty turns after it was first
+        // given — and read out of this constant rather than out of a file.
+        for section in [
+            "# ",
+            "## Outcome",
+            "## Success criteria",
+            "## Constraints",
+            "## Out of scope",
+        ] {
+            assert!(
+                WRITE_INSTRUCTION.contains(section),
+                "{section:?} is missing from the shape the document must take",
+            );
+        }
+        assert!(WRITE_INSTRUCTION.contains("No other sections"));
+        assert!(!WRITE_INSTRUCTION.contains(".warlock"));
+        assert!(
+            !WRITE_INSTRUCTION.contains("docs/"),
+            "the instruction named a path, which is warlock's to choose",
+        );
+        // Third: what was decided rather than how it was arrived at.
+        assert!(WRITE_INSTRUCTION.contains("rather than a summary"));
+
+        // And it is an instruction like the other two: its own words, never a
+        // system prompt, and never a word of the argument vector.
+        assert_ne!(WRITE_INSTRUCTION, BRIEF_INSTRUCTION);
+        assert_ne!(WRITE_INSTRUCTION, CHAT_INSTRUCTION);
+        assert_ne!(WRITE_INSTRUCTION, CHAT_SYSTEM_PROMPT);
+        assert!(
+            !turn_args(&ChatAgent::new())
+                .iter()
+                .any(|word| word == WRITE_INSTRUCTION),
+            "the write instruction reached the argument vector",
+        );
     }
 
     #[test]

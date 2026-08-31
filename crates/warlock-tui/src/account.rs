@@ -1092,7 +1092,13 @@ fn spend(cost: Option<f64>) -> String {
 ///
 /// Integer arithmetic throughout: these are exact counts, and the halfway cases
 /// are the ones the tests pin.
-fn size(bytes: u64) -> String {
+///
+/// Public because it is the panel's spelling of a size and there is now more
+/// than one line that needs it — the account's request lines, and the line the
+/// thread says when `/write` puts a file on disk. Shared rather than copied: two
+/// formatters would be two spellings the day either of them changed.
+#[must_use]
+pub fn size(bytes: u64) -> String {
     /// One kilobyte, as this file counts them.
     const KB: u64 = 1024;
     /// One megabyte, likewise.

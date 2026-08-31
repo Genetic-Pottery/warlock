@@ -11,9 +11,10 @@
 //! [`press_for`] is the keyboard's second half and the newer one: it is where
 //! the windows drawn over the frame are decided, so that the loop above has one
 //! arm that returns, one that moves the question, one that types into the scope
-//! prompt, one that types into the composer and one that hands the key on. Esc
+//! prompt, one that types into the write prompt, one that types into the
+//! composer and one that hands the key on. Esc
 //! and `q` no longer leave by themselves — with nothing running they open the
-//! question instead — and while either window is up, or while the composer holds
+//! question instead — and while any window is up, or while the composer holds
 //! the keyboard, every key goes to its own pure function,
 //! [`answer_for`](warlock_tui::answer_for),
 //! [`edit_for`](warlock_tui::edit_for) or
@@ -322,10 +323,11 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
 /// stands in front of it, rather than left as an [`Action`] the loop has to
 /// remember to treat differently.
 ///
-/// Six variants, and the useful part is that they are exclusive: a keystroke
-/// either ends the session, or moves the question, or goes into the scope
-/// prompt, or goes into the composer, or reaches the app, or comes to nothing.
-/// While either window is up the [`Pressed::Act`] road is unreachable, which is
+/// Eight variants, and the useful part is that they are exclusive: a keystroke
+/// either ends the session, or stops the turn, or moves the question, or goes
+/// into the scope prompt, or goes into the write prompt, or goes into the
+/// composer, or reaches the app, or comes to nothing.
+/// While any window is up the [`Pressed::Act`] road is unreachable, which is
 /// the plain statement of "nothing leaks through to the tree underneath"; while
 /// the composer holds the keyboard it is reachable by exactly one key, and that
 /// key is Tab (see [`press_for`]).
@@ -364,6 +366,16 @@ pub(crate) enum Pressed {
     /// [`Pressed::Confirm`], it says the app was not consulted: while the prompt
     /// is up every key that is not Ctrl-C comes back through here.
     Scope(Edited),
+    /// The write prompt had the key, and `.0` is what it made of it: the same
+    /// three answers, from the same [`edit_for`](warlock_tui::edit_for), over
+    /// the field holding the path a brief is about to be written to.
+    ///
+    /// A variant of its own rather than a second use of [`Pressed::Scope`],
+    /// because the two windows answer to different halves of the loop: a submit
+    /// here writes a document, and a submit there writes the manifest. One
+    /// [`Edited`] arriving at the loop with no way to say which window it came
+    /// from would be exactly the disagreement this type exists to prevent.
+    Write(Edited),
     /// The composer had the key, and `.0` is what it made of it: the draft with
     /// one character more or less in it, the keyboard handed back, or the draft
     /// offered up.
@@ -420,11 +432,11 @@ fn is_tab(key: KeyEvent) -> bool {
 }
 
 /// What `key` comes to with the confirmation at `confirm`, the scope prompt at
-/// `prompt`, the composer at `composer`, a run `in_flight` and a turn being
-/// `answered`.
+/// `prompt`, the write prompt at `write`, the composer at `composer`, a run
+/// `in_flight` and a turn being `answered`.
 ///
-/// The gate itself, and it is a function of a key and five situations so that
-/// every rule below is one assertion with no terminal attached. Six roads out
+/// The gate itself, and it is a function of a key and six situations so that
+/// every rule below is one assertion with no terminal attached. Seven roads out
 /// of it, in the order they are decided.
 ///
 /// **Ctrl-C first, always.** It is a key event and not a signal — raw mode is
@@ -467,6 +479,25 @@ fn is_tab(key: KeyEvent) -> bool {
 /// answered twice is a key answered wrongly once; in practice they cannot both
 /// be up, since `q` and Esc are text and an abandonment while the prompt has the
 /// keyboard and so never reach the gate that opens the question.
+///
+/// **Then the write prompt, if that is up.** The third window and the third
+/// time down the same road: while a path is being typed, every key that is not
+/// Ctrl-C goes to [`edit_for`] and [`action_for`] is not consulted at all. It is
+/// the same field type and the same editor as the scope prompt — what differs is
+/// only what the loop does with a submit — so it is asked here, one step after
+/// the scope prompt, and the answer is [`Pressed::Write`] so the loop cannot
+/// mistake one submit for the other.
+///
+/// The order between the two prompts is the precedence, and it is stated once
+/// here: the scope prompt is asked first, so with both up the keys belong to the
+/// scope prompt and the write prompt waits underneath with its path intact.
+/// Both *can* be up, unlike the confirmation and the scope prompt — `s` opens
+/// one from the tree while a `/write` turn is still out, and the answer to that
+/// turn opens the other with no keystroke at all — so a precedence is owed
+/// rather than assumed. The scope prompt wins because it is the window somebody
+/// is typing in *now*: the write prompt opened underneath it while their hands
+/// were elsewhere, and a window that stole the keyboard from a half-typed scope
+/// would type the rest of that scope into a path.
 ///
 /// **Then the composer, if it has the keyboard.** `composer` is `Some` only when
 /// focus is on the field, which is the shape [`ScopePrompt::field`] already has:
@@ -527,6 +558,7 @@ pub(crate) fn press_for(
     key: KeyEvent,
     confirm: QuitConfirm,
     prompt: &ScopePrompt,
+    write: &ScopePrompt,
     composer: Option<&Composer>,
     in_flight: bool,
     answered: bool,
@@ -549,6 +581,12 @@ pub(crate) fn press_for(
 
     if let Some(field) = prompt.field() {
         return Pressed::Scope(edit_for(key, field));
+    }
+
+    // The second window, asked after the first: the precedence between them, in
+    // the one place a key can be answered by either.
+    if let Some(field) = write.field() {
+        return Pressed::Write(edit_for(key, field));
     }
 
     if let Some(draft) = composer
@@ -622,8 +660,8 @@ pub(crate) enum MouseAction {
 }
 
 /// What `mouse` over a terminal of `size` asks `app` to do with the
-/// confirmation at `confirm` and the scope prompt at `prompt`, or `None` for an
-/// event that means nothing here.
+/// confirmation at `confirm`, the scope prompt at `prompt` and the write prompt
+/// at `write`, or `None` for an event that means nothing here.
 ///
 /// [`action_for`]'s counterpart, and the same shape: everything in, one
 /// intention out, no terminal read and nothing drawn. The size is the one the
@@ -642,13 +680,15 @@ pub(crate) enum MouseAction {
 /// and dropping them here is what keeps a pointer swept across the screen from
 /// changing anything at all.
 ///
-/// While either window is up the pointer means nothing anywhere: every event is
-/// read and dropped, wheel and click alike. Neither has anything clickable in it
-/// — the confirmation has no clickable Yes and no clickable No, and the scope
-/// prompt has a field that is typed into and no buttons — both are answered from
-/// the keyboard, like the keystrokes that opened them, and a click that landed
-/// on the tree behind either would select a row the reader cannot see, under a
-/// window that is about to close. The gate lives here rather than in the loop's
+/// While any window is up the pointer means nothing anywhere: every event is
+/// read and dropped, wheel and click alike. None of the three has anything
+/// clickable in it — the confirmation has no clickable Yes and no clickable No,
+/// and the scope prompt and the write prompt are fields that are typed into,
+/// with no buttons — all of them are answered from the keyboard, and a click
+/// that landed on the tree behind one would select a row the reader cannot see,
+/// under a window that is about to close. The write prompt is the third and it
+/// is gated exactly as the second is, in the same line, so a pointer swept over
+/// a half-typed path changes nothing. The gate lives here rather than in the loop's
 /// arm for the same reason [`press_for`]'s does: it is a decision, and decisions
 /// are testable with nothing attached to stdout.
 ///
@@ -670,9 +710,10 @@ pub(crate) fn mouse_action(
     app: &App,
     confirm: QuitConfirm,
     prompt: &ScopePrompt,
+    write: &ScopePrompt,
     composer: Option<&Composer>,
 ) -> Option<MouseAction> {
-    if confirm.is_open() || prompt.is_open() {
+    if confirm.is_open() || prompt.is_open() || write.is_open() {
         return None;
     }
 
@@ -1706,7 +1747,35 @@ mod tests {
             ScopePrompt, edit_for, panel_height, tree_height,
         };
 
-        use super::super::{Action, Pressed, action_for, press_for};
+        use super::super::{Action, Pressed, action_for, press_for as gate_for};
+
+        /// [`gate_for`] with the write prompt closed.
+        ///
+        /// Every test in this module but the write prompt's own is about a
+        /// session with no document waiting to be written, which is every
+        /// session until a `/write` turn answers — so the sixth situation is
+        /// fixed in one place rather than repeated at every call below, exactly
+        /// as [`round`] fixes the scope prompt for the tests that are not about
+        /// it. The tests that *are* about that window call [`gate_for`] and hand
+        /// it in.
+        fn press_for(
+            key: KeyEvent,
+            confirm: QuitConfirm,
+            prompt: &ScopePrompt,
+            composer: Option<&Composer>,
+            in_flight: bool,
+            answered: bool,
+        ) -> Pressed {
+            gate_for(
+                key,
+                confirm,
+                prompt,
+                &ScopePrompt::Closed,
+                composer,
+                in_flight,
+                answered,
+            )
+        }
 
         /// The terminal these tests measure their app against: the same eighty
         /// by twenty-four every other test here uses.
@@ -1950,6 +2019,16 @@ mod tests {
                 // closed prompt would be caught here.
                 Pressed::Scope(Edited::Submit) => {
                     assert!(prompt.is_open(), "a submit came from a prompt that is up");
+                }
+                // Unreachable through [`press_for`] above, which hands the gate
+                // a closed write prompt: the rounds here are about a session
+                // with no document waiting to be written. A key that arrived
+                // from that window anyway would be the gate answering a question
+                // nobody asked, so it is loud rather than quiet — the write
+                // prompt's own tests call the gate directly and assert on what
+                // comes back.
+                Pressed::Write(edited) => {
+                    panic!("{edited:?} came from a write prompt that is not up")
                 }
                 // The loop's three composer arms, and the reason the draft is a
                 // local here exactly as it is there: nothing about it is ever
@@ -2674,6 +2753,208 @@ mod tests {
                 ),
                 Pressed::Act(Action::SelectNext)
             );
+        }
+
+        /// The third window: what a key comes to while the path a brief is
+        /// about to be written to is on screen.
+        ///
+        /// The scope prompt's tests one window along, and deliberately the same
+        /// assertions, because it is the same field and the same editor: every
+        /// binding is swallowed, Ctrl-C is still answered first, and
+        /// [`action_for`] is not consulted at all. What is new is the one thing
+        /// two windows need and one did not — an order between them — which is
+        /// asserted here rather than left to whichever of the two the loop
+        /// happens to ask about first.
+        ///
+        /// Nothing here draws the window: where it sits on the frame and what it
+        /// says are `ui.rs`'s, and what a key does to the field itself is
+        /// `prompt.rs`'s.
+        mod writing {
+            use super::{
+                Action, Composer, Edited, INERT, KeyCode, KeyEvent, Pressed, QuitConfirm,
+                ScopeField, ScopePrompt, action_for, ctrl_c, edit_for, gate_for, press,
+            };
+
+            /// The path the field below opens holding: what a `/write` turn's
+            /// answer proposes, and long enough that a key typed into it is
+            /// plainly a character on the end rather than the whole line.
+            const PROPOSED: &str = "docs/warlock-brief-13-scopes-and-sigils.md";
+
+            /// What the write prompt's field carries where the scope prompt
+            /// carries a module: the heading the window is drawn under, which
+            /// this file never reads and only passes through.
+            const HEADING: &str = "Write the brief to";
+
+            /// The write prompt as the loop holds it once a `/write` turn has
+            /// answered.
+            fn open() -> ScopePrompt {
+                ScopePrompt::open(HEADING, PROPOSED)
+            }
+
+            /// The field inside it, for the expected answers below.
+            fn field() -> ScopeField {
+                open().field().expect("the prompt is up").clone()
+            }
+
+            /// What the gate makes of `key` with the write prompt at `write`,
+            /// nothing else up, no run and no turn.
+            ///
+            /// The real [`press_for`](super::super::super::press_for) rather
+            /// than the module's wrapper, because the whole of what these tests
+            /// are about is the situation the wrapper fixes.
+            fn asked(key: KeyEvent, write: &ScopePrompt) -> Pressed {
+                gate_for(
+                    key,
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Closed,
+                    write,
+                    None,
+                    false,
+                    false,
+                )
+            }
+
+            #[test]
+            fn every_binding_goes_into_the_field_and_none_of_them_reaches_the_app() {
+                // The promise, over the whole list: while a path is being typed
+                // there is no `p` that pacts, no `j` that moves a selection
+                // nobody can see and no Tab that hands the keyboard somewhere
+                // else — every one of them is `edit_for`'s answer and nothing
+                // else's.
+                let write = open();
+                let field = field();
+
+                for code in INERT {
+                    let key = press(code);
+
+                    assert_eq!(
+                        asked(key, &write),
+                        Pressed::Write(edit_for(key, &field)),
+                        "{code:?} should have gone into the field"
+                    );
+                }
+            }
+
+            #[test]
+            fn enter_submits_and_esc_closes_and_nothing_else_does_either() {
+                let write = open();
+
+                assert_eq!(
+                    asked(press(KeyCode::Enter), &write),
+                    Pressed::Write(Edited::Submit)
+                );
+                assert_eq!(
+                    asked(press(KeyCode::Esc), &write),
+                    Pressed::Write(Edited::Close)
+                );
+                for code in INERT.into_iter().chain([KeyCode::Backspace]) {
+                    let pressed = asked(press(code), &write);
+
+                    assert_ne!(pressed, Pressed::Write(Edited::Submit), "{code:?}");
+                    assert_ne!(pressed, Pressed::Write(Edited::Close), "{code:?}");
+                }
+            }
+
+            #[test]
+            fn ctrl_c_is_still_answered_before_the_field() {
+                // The keystroke of last resort, with this window up as with
+                // every other: it leaves with nothing out, and stops the turn
+                // when one is being answered. Typed into the field it would be
+                // a `c` on the end of a path.
+                let write = open();
+
+                assert_eq!(asked(ctrl_c(), &write), Pressed::Leave);
+                assert_eq!(
+                    gate_for(
+                        ctrl_c(),
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        &write,
+                        None,
+                        false,
+                        true,
+                    ),
+                    Pressed::CancelTurn
+                );
+            }
+
+            #[test]
+            fn the_composer_is_not_consulted_while_the_field_is_up() {
+                // The window is drawn over the field at the foot of the panel,
+                // so a key cannot be both typed into the path and typed into a
+                // draft. Tab included: it is the key that moves the keyboard
+                // *past* the composer, and there is nowhere for it to move it
+                // while a window is up.
+                let write = open();
+                let draft = Composer::new("web");
+
+                for code in [KeyCode::Char('j'), KeyCode::Tab, KeyCode::Enter] {
+                    let key = press(code);
+
+                    assert_eq!(
+                        gate_for(
+                            key,
+                            QuitConfirm::Closed,
+                            &ScopePrompt::Closed,
+                            &write,
+                            Some(&draft),
+                            false,
+                            false,
+                        ),
+                        Pressed::Write(edit_for(key, &field())),
+                        "{code:?} reached the draft from behind the window"
+                    );
+                }
+            }
+
+            #[test]
+            fn the_scope_prompt_has_the_keys_while_both_windows_are_up() {
+                // The precedence, and the one situation that needs one: `s`
+                // opens the scope prompt from the tree while a `/write` turn is
+                // still out, and the answer to that turn opens this window with
+                // no keystroke at all. The scope prompt is the one somebody is
+                // typing in, so it keeps the keyboard; the write prompt waits
+                // underneath with its path exactly as it was, which is what the
+                // loop's separate arms then act on.
+                let write = open();
+                let scope = ScopePrompt::open("crates/warlock-engine", "data-plane");
+                let scope_field = scope.field().expect("the prompt is up").clone();
+
+                for code in INERT.into_iter().chain([KeyCode::Enter, KeyCode::Esc]) {
+                    let key = press(code);
+
+                    assert_eq!(
+                        gate_for(key, QuitConfirm::Closed, &scope, &write, None, false, false,),
+                        Pressed::Scope(edit_for(key, &scope_field)),
+                        "{code:?} was answered by the wrong window"
+                    );
+                }
+                // And the window underneath is untouched by any of it: it is
+                // read, never written, on that road.
+                assert_eq!(write, open());
+            }
+
+            #[test]
+            fn the_keys_mean_what_they_always_did_once_the_window_is_down() {
+                // The other half of the promise, and the one that says
+                // `action_for` was not touched: with nothing up, every one of
+                // the keys the field swallowed is the command it has always
+                // been, straight out of the function that has always decided it.
+                for code in INERT {
+                    let key = press(code);
+                    let expected = match action_for(key, false) {
+                        Some(Action::Quit) => Pressed::Confirm(QuitConfirm::open()),
+                        Some(action) => Pressed::Act(action),
+                        None => Pressed::Nothing,
+                    };
+
+                    assert_eq!(
+                        asked(key, &ScopePrompt::Closed),
+                        expected,
+                        "{code:?} stopped meaning what it meant"
+                    );
+                }
+            }
         }
 
         /// The keyboard in the composer: what the tree's own bindings come to
@@ -3636,18 +3917,19 @@ mod tests {
             app
         }
 
-        /// What `mouse` over [`SIZE`] asks `app` for with both windows down,
-        /// which is the situation every test here but the last two is about.
+        /// What `mouse` over [`SIZE`] asks `app` for with every window down,
+        /// which is the situation every test here but the last three is about.
         ///
         /// Named so the question the pointer tests ask stays one line long now
-        /// that the confirmation and the scope prompt are things a pointer event
-        /// is read against.
+        /// that the confirmation, the scope prompt and the write prompt are
+        /// things a pointer event is read against.
         fn asks(mouse: MouseEvent, app: &App) -> Option<MouseAction> {
             mouse_action(
                 mouse,
                 SIZE,
                 app,
                 QuitConfirm::Closed,
+                &ScopePrompt::Closed,
                 &ScopePrompt::Closed,
                 None,
             )
@@ -3662,13 +3944,20 @@ mod tests {
         /// a change to the loop that this stopped matching would be a change one
         /// of the tests below is asserting the old shape of.
         fn round(app: &mut App, confirm: QuitConfirm, mouse: MouseEvent) {
-            round_under(app, confirm, &ScopePrompt::Closed, mouse);
+            round_under(
+                app,
+                confirm,
+                &ScopePrompt::Closed,
+                &ScopePrompt::Closed,
+                mouse,
+            );
         }
 
-        /// The same round with the scope prompt at `prompt` as well: the other
-        /// window the pointer goes inert under.
+        /// The same round with the scope prompt at `prompt` and the write prompt
+        /// at `write` as well: the other two windows the pointer goes inert
+        /// under.
         ///
-        /// A parameter rather than a second copy of the arms below, so the two
+        /// Parameters rather than a second copy of the arms below, so all three
         /// windows are asserted against the one road out of [`mouse_action`] —
         /// a test that dropped events through a second, kinder version of the
         /// loop would be testing the version it wrote.
@@ -3676,9 +3965,10 @@ mod tests {
             app: &mut App,
             confirm: QuitConfirm,
             prompt: &ScopePrompt,
+            write: &ScopePrompt,
             mouse: MouseEvent,
         ) {
-            match mouse_action(mouse, SIZE, app, confirm, prompt, None) {
+            match mouse_action(mouse, SIZE, app, confirm, prompt, write, None) {
                 Some(MouseAction::SelectNextBy(rows)) => app.select_next_by(rows),
                 Some(MouseAction::SelectPreviousBy(rows)) => app.select_previous_by(rows),
                 Some(MouseAction::ScrollPanelDown(lines)) => app.scroll_panel_down(lines),
@@ -4100,6 +4390,7 @@ mod tests {
                         &app,
                         QuitConfirm::open(),
                         &ScopePrompt::Closed,
+                        &ScopePrompt::Closed,
                         None
                     ),
                     None,
@@ -4150,12 +4441,71 @@ mod tests {
                     left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
                 ] {
                     assert_eq!(
-                        mouse_action(mouse, SIZE, &app, QuitConfirm::Closed, &prompt, None),
+                        mouse_action(
+                            mouse,
+                            SIZE,
+                            &app,
+                            QuitConfirm::Closed,
+                            &prompt,
+                            &ScopePrompt::Closed,
+                            None
+                        ),
                         None,
                         "{mouse:?} should mean nothing while the prompt is up"
                     );
-                    round_under(&mut app, QuitConfirm::Closed, &prompt, mouse);
+                    round_under(
+                        &mut app,
+                        QuitConfirm::Closed,
+                        &prompt,
+                        &ScopePrompt::Closed,
+                        mouse,
+                    );
                 }
+            }
+
+            assert_eq!(app, before, "the pointer moved nothing behind the prompt");
+        }
+
+        #[test]
+        fn the_pointer_is_read_and_dropped_while_the_write_prompt_is_up() {
+            // The third window and the same rule: a path being typed has no
+            // buttons either, and a click on the tree behind it would select a
+            // row the reader cannot see under a window that is about to close.
+            let mut app = app_on_screen();
+            app.select_row(3);
+            let before = app.clone();
+            let write = ScopePrompt::open("Write the brief to", "docs/warlock-brief-13-x.md");
+
+            for mouse in [
+                wheel_down(IN_TREE, FIRST_TREE_ROW),
+                wheel_up(IN_TREE, FIRST_TREE_ROW),
+                wheel_down(IN_PANEL, FIRST_PANEL_LINE),
+                wheel_up(IN_PANEL, FIRST_PANEL_LINE),
+                left_click(IN_TREE, FIRST_TREE_ROW),
+                left_click(IN_TREE, FIRST_TREE_ROW + 9),
+                left_click(IN_TREE, TREE_HEADER),
+                left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
+            ] {
+                assert_eq!(
+                    mouse_action(
+                        mouse,
+                        SIZE,
+                        &app,
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        &write,
+                        None
+                    ),
+                    None,
+                    "{mouse:?} should mean nothing while the path prompt is up"
+                );
+                round_under(
+                    &mut app,
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Closed,
+                    &write,
+                    mouse,
+                );
             }
 
             assert_eq!(app, before, "the pointer moved nothing behind the prompt");
