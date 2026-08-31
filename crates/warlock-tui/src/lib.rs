@@ -131,6 +131,18 @@
 //! wrap, and never more than [`COMPOSER_MAX_ROWS`], past which it scrolls within
 //! itself so the row the cursor is on stays on screen.
 //!
+//! What a submitted draft *is* is the sentence after that one, and it is a
+//! function too. [`submitted_for`] takes the draft and comes back with one
+//! [`Submitted`]: one of the three commands warlock has, an ordinary message
+//! for the model, or a refusal. The rule is trim, first token, no leading slash
+//! means a message, a second slash means a path and so also a message, and only
+//! then a case-sensitive match against three words with nothing permitted after
+//! them. Case-sensitive because the two mistakes cost different amounts — a
+//! refusal costs one line on the card and a send costs a turn — and the refusal
+//! is one line naming all three, which is the whole of the discovery mechanism
+//! and the reason there is no `/help`. Like everything else here it decides and
+//! does nothing: no mode, no file, no turn.
+//!
 //! The dependency edge runs TUI -> engine: this crate knows the engine's
 //! vocabulary, and the engine knows nothing about terminals.
 
@@ -146,6 +158,7 @@ mod confirm;
 #[cfg(test)]
 mod fixture;
 mod prompt;
+mod submission;
 mod thread;
 mod ui;
 mod watch;
@@ -259,6 +272,12 @@ pub use prompt::ScopeField;
 pub use prompt::ScopePrompt;
 /// What one key does to the scope prompt, given the field it is open over.
 pub use prompt::edit_for;
+/// What a submitted draft turns out to be: one of warlock's three commands, an
+/// ordinary message for the model, or a refusal — which carries the one line
+/// naming the commands that exist.
+pub use submission::Submitted;
+/// What a draft submitted at the composer means, given nothing but the draft.
+pub use submission::submitted_for;
 /// One thing that stopped a turn short of an answer — a cancel, no `claude` to
 /// ask, a non-zero exit, a timeout, or a model that said nothing — in the one
 /// line it ends with.
