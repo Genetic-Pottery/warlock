@@ -493,9 +493,10 @@ fn is_tab(key: KeyEvent) -> bool {
 ///
 /// A muted composer is the same road with nothing at the end of it. While the
 /// last question is being answered the field takes no keys — one question at a
-/// time — and so does a field under a pact or a refresh, which is a tree and a
-/// panel being rewritten rather than a place to type. A key aimed at either
-/// comes to [`Pressed::Nothing`]: not typed, and
+/// time — and that is the whole of the rule: a pact running somewhere else is
+/// not a reason, since the run has a card of its own and the two never wait on
+/// each other. A key aimed at a muted field comes to [`Pressed::Nothing`]: not
+/// typed, and
 /// not passed down to [`action_for`] either, since a letter that fell through a
 /// dead field would arrive at the tree's bindings as the pact key or the refresh
 /// key. Muting is read off the field ([`Composer::is_muted`]) rather than passed
@@ -553,9 +554,8 @@ pub(crate) fn press_for(
     if let Some(draft) = composer
         && !is_tab(key)
     {
-        // A muted field is one whose last question is still being answered, or
-        // one a pact or a refresh is running under, and the key that arrives at
-        // it does nothing at all: it is not typed, and
+        // A muted field is one whose last question is still being answered, and
+        // the key that arrives at it does nothing at all: it is not typed, and
         // it is emphatically not handed on to `action_for` underneath, because
         // a `p` swallowed by a dead field and re-read as the pact key would be
         // the worst possible answer to a keystroke aimed at a draft. Nothing is
@@ -2698,7 +2698,7 @@ mod tests {
             use super::{
                 Action, App, Composed, Composer, Focus, INERT, KeyCode, Pressed, QuitConfirm,
                 Round, ScopePrompt, app_in_use, app_on_screen, ctrl_c, offered, press, press_for,
-                round_composing, round_running,
+                round_composing,
             };
 
             /// What is in the draft before each test types anything.
@@ -2708,16 +2708,27 @@ mod tests {
             /// that the expected draft can be read at a glance.
             const TYPED: &str = "web";
 
-            /// The app with the keyboard in the composer: [`app_in_use`] with
-            /// focus moved on one place, which is where Tab from the panel puts
-            /// it.
+            /// The app with the keyboard in the composer: [`app_in_use`] showing
+            /// the conversation, with focus moved on one place — which is where
+            /// Tab from the panel puts it.
+            ///
+            /// The card matters. The field is drawn under the conversation and
+            /// under nothing else (see [`App::composer_showable`]), so an app
+            /// showing the run cannot have the keyboard in a field it is not
+            /// drawing. The turn is answered at length for [`app_in_use`]'s
+            /// reason: a panel with more in it than its window holds is one
+            /// where a key that scrolled it would show.
             fn app_composing() -> App {
                 let mut app = app_in_use();
+                let asked = Instant::now();
+                app.start_turn("what does the engine do?", asked);
+                app.answer_turn("It walks the tree.\n".repeat(40), asked);
+                app.scroll_panel_up(5);
                 app.set_focus(Focus::Composer);
                 assert_eq!(
                     app.focus(),
                     Focus::Composer,
-                    "the composer can hold the keyboard with the account card up"
+                    "the composer can hold the keyboard with the thread card up"
                 );
                 app
             }
@@ -3059,101 +3070,39 @@ mod tests {
             }
 
             #[test]
-            fn a_run_started_while_the_thread_shows_refuses_the_same_keys_the_same_way() {
-                // The other thing that mutes the field, and it arrives while the
-                // reader is looking at a conversation: a pact or a refresh
-                // started from the tree appends its account into the thread as a
-                // turn nobody typed, and for as long as it runs the field under
-                // that thread hears nothing. The keys are refused where they
-                // were already refused — at the field, before `action_for` is
-                // consulted — so a `p` cannot start a second run over a tree the
-                // first one is still writing to by falling through a dead draft.
+            fn a_run_started_while_the_thread_shows_leaves_the_field_typing() {
+                // What used to be the second thing that muted the field, and is
+                // not any more. A pact or a refresh started from the tree fills
+                // the card behind the conversation, and the two never wait on
+                // each other: a reader watching a long run is exactly who most
+                // wants to ask something about the repository it is walking. So
+                // `in_flight` changes nothing about what a key at a live field
+                // does — including `p`, which is a letter here and the pact key
+                // only at the tree.
                 let mut app = app_composing();
                 app.start_turn("what does the engine do?", Instant::now());
                 app.set_pact_in_flight("/repo/crates/engine", 3, 12);
                 assert!(app.showing_thread(), "the thread is the card on screen");
                 assert_eq!(app.focus(), Focus::Composer, "the field has the keyboard");
-                let untouched = app.clone();
 
-                // What the loop hands the field this round: muted off the run
-                // alone, with no turn being answered.
-                let mut muted = Composer::new(TYPED);
-                muted.set_muted(true);
-
-                let mut confirm = QuitConfirm::Closed;
-                let mut prompt = ScopePrompt::Closed;
-                let letters = ('a'..='z').chain('A'..='Z').chain('0'..='9');
-                let codes = letters
-                    .map(KeyCode::Char)
-                    .chain(INERT)
-                    .chain([KeyCode::Enter, KeyCode::Esc])
-                    .filter(|code| *code != KeyCode::Tab);
-
-                for code in codes {
-                    let mut composer = muted.clone();
+                let live = Composer::new(TYPED);
+                for code in ['p', 'r', 'e', 'v', 'q'] {
+                    let key = press(KeyCode::Char(code));
+                    let typed = Composer::new(format!("{TYPED}{code}"));
 
                     assert_eq!(
                         press_for(
-                            press(code),
+                            key,
                             QuitConfirm::Closed,
                             &ScopePrompt::Closed,
-                            Some(&composer),
+                            Some(&live),
                             true,
                             false
                         ),
-                        Pressed::Nothing,
-                        "{code:?} did something at a field a run had muted"
+                        Pressed::Compose(Composed::Typing(typed)),
+                        "{code} did not reach a field with a run in flight"
                     );
-                    // And through the loop's own round with the run in flight,
-                    // which panics on the four keys that start a run or open a
-                    // window — including the cancel Esc means mid-run, which a
-                    // muted field is not the place to press.
-                    assert_eq!(
-                        round_running(
-                            &mut app,
-                            &mut confirm,
-                            &mut prompt,
-                            &mut composer,
-                            press(code),
-                            true
-                        ),
-                        Round::Stayed,
-                        "{code:?} ended the session from a field a run had muted"
-                    );
-                    assert_eq!(composer, muted, "{code:?} moved a muted draft");
                 }
-
-                assert_eq!(app, untouched, "a key reached the app behind the field");
-                assert!(app.showing_thread(), "a key changed the card under it");
-                assert_eq!(confirm, QuitConfirm::Closed, "and opened no question");
-                assert_eq!(prompt, ScopePrompt::Closed, "and no prompt");
-
-                // The two keys muting never swallows, with a run in flight
-                // rather than a turn: Tab is still the way back to the panel,
-                // and Ctrl-C mid-run still leaves outright — which is what it
-                // has always meant with a run and no question out.
-                assert_eq!(
-                    press_for(
-                        press(KeyCode::Tab),
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        Some(&muted),
-                        true,
-                        false
-                    ),
-                    Pressed::Act(Action::ToggleFocus),
-                );
-                assert_eq!(
-                    press_for(
-                        ctrl_c(),
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        Some(&muted),
-                        true,
-                        false
-                    ),
-                    Pressed::Leave,
-                );
             }
 
             #[test]

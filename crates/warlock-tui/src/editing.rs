@@ -801,7 +801,10 @@ mod tests {
                 .map(|line| match line {
                     Line::Directory { path } => path.display().to_string(),
                     Line::Clocked { clock, text } => format!("{clock} {text}"),
-                    Line::Summary { text } | Line::Text { text } | Line::Said { text } => text,
+                    Line::Summary { text }
+                    | Line::Text { text }
+                    | Line::Said { text }
+                    | Line::Wrapped { text, .. } => text,
                 })
                 .collect()
         }
@@ -889,6 +892,8 @@ mod tests {
             let edited = repo.path().join("crates/engine/WARLOCK.md");
             with_an_account(&mut app, now);
             app.show_document(lines_of(DOCUMENT), false);
+            // Round to the run, past the conversation the field is drawn under.
+            app.swap_card();
             app.swap_card();
             let account = shown(&app, now);
             assert!(!is_document(&app, now), "the fixture is not on the run");
@@ -901,7 +906,8 @@ mod tests {
             assert!(!is_document(&app, now), "the re-read flipped the panel");
             assert_eq!(shown(&app, now), account);
             // And the new lines are on the card behind it, waiting for the
-            // swap the reader will ask for themselves.
+            // swap the reader will ask for themselves — the file is the very
+            // next card round from the run.
             app.swap_card();
             assert_eq!(shown(&app, now), lines_of(REWRITTEN));
         }

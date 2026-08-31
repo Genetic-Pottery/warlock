@@ -551,15 +551,11 @@ fn run() -> Result<(), Error> {
         app.set_mouse_captured(mouse_captured);
         // And the field is told whether it is listening, here and every round,
         // for the reason the flag above is set every round: a turn ends in five
-        // different ways, a run in four, and none of them should have to
-        // remember to give the keyboard back. One thing at a time is the whole
-        // rule — while either is in flight the field neither types nor acts
-        // (`press_for`) and is drawn dim with no caret (`draw_composer`) — and
-        // the moment the drain at the bottom of the round takes the turn or the
-        // run down, the next round hands the field back. See [`field_muted`],
-        // which is the whole of the rule and is derived from the two values the
-        // loop already keeps rather than from a flag somebody has to clear.
-        composer.set_muted(field_muted(chat.answering(), pact.is_some()));
+        // different ways and none of them should have to remember to give the
+        // keyboard back. See [`field_muted`], which is the whole of the rule and
+        // is derived from the value the loop already keeps rather than from a
+        // flag somebody has to clear.
+        composer.set_muted(field_muted(chat.answering()));
         // The draft goes in beside the two questions: it is a pane cut off the
         // bottom of the panel's column, so the panel is drawn and scrolled a few
         // rows shorter for as long as there is a field on screen. Whether there
@@ -1199,29 +1195,36 @@ fn apply_compose(
 
 /// Whether the field is listening this round, or is dim and taking nothing.
 ///
-/// The whole of the muting rule, in one expression over the two things the loop
-/// already keeps: the turn being answered somewhere else, and the run writing
-/// documents somewhere else. Either of them is a reason the field says nothing —
-/// a question asked while its predecessor is out is a second conversation, and a
-/// question, a pact key or a stray letter typed into a run is a keystroke aimed
-/// at a screen that is being rewritten under it — and neither of them is a flag.
+/// The whole of the muting rule, and it is one thing: the turn being answered
+/// somewhere else. One question at a time is what a conversation is — a second
+/// asked while the first is out is a second conversation — so the field says
+/// nothing until the answer lands.
 ///
-/// That is the point of it being a function of the two rather than a `bool`
-/// somebody sets and clears. A run ends in four ways and a turn in five, and not
-/// one of those endings has to remember to give the keyboard back: the value is
-/// derived again at the top of every round, so the round after the drain takes
-/// the run or the turn down is the round the field types in. A second flag could
-/// disagree with the run; this cannot.
+/// A pact is deliberately *not* a reason. The two workers share nothing: a run
+/// writes documents on its own thread and reports into its own card, a turn asks
+/// its own `claude` and reports into another, and the loop drains both every
+/// round. Muting the field for a run was a guess about a limit that does not
+/// exist, and it cost the reader the thing they most want while a long pact
+/// runs, which is to ask something about the repository it is walking. What a
+/// run does take is the field's *card*: an account showing has no composer under
+/// it at all (see [`App::composer_showable`]), so a question asked during a run
+/// is asked from the conversation, one swap away.
 ///
-/// It is deliberately not asked of the app. Neither the run nor the turn is
-/// something [`App`] performs — the loop holds both — and muting is a fact about
-/// the field rather than about what is on screen, which is why the *other*
-/// reason the field is not typed into, the document card, is a separate question
-/// with a separate answer: that one hides the field outright and gives the panel
-/// its rows back (see [`composer_on_screen`]), where this one leaves it exactly
-/// where it is, draft and all.
-const fn field_muted(answering: bool, running: bool) -> bool {
-    answering || running
+/// That is the point of it being derived rather than a `bool` somebody sets and
+/// clears. A turn ends in five ways and not one of those endings has to remember
+/// to give the keyboard back: the value is worked out again at the top of every
+/// round, so the round after the drain takes the turn down is the round the
+/// field types in. A second flag could disagree with the turn; this cannot.
+///
+/// It is deliberately not asked of the app. The turn is not something [`App`]
+/// performs — the loop holds it — and muting is a fact about the field rather
+/// than about what is on screen, which is why the *other* reason the field is
+/// not typed into, the card showing, is a separate question with a separate
+/// answer: that one hides the field outright and gives the panel its rows back
+/// (see [`composer_on_screen`]), where this one leaves it exactly where it is,
+/// draft and all.
+const fn field_muted(answering: bool) -> bool {
+    answering
 }
 
 /// Start the run one of the two long keystrokes is asking for, if it is asking
@@ -1303,34 +1306,26 @@ mod tests {
     use super::{Intention, USAGE, field_muted, intention_for};
 
     #[test]
-    fn the_field_is_muted_by_a_turn_being_answered_and_by_a_run_in_flight() {
-        // Both halves of the rule, and the one situation the field types in:
-        // nothing of warlock's is out.
-        assert!(!field_muted(false, false), "an idle session cannot type");
-        assert!(field_muted(true, false), "a turn out leaves the field live");
-        assert!(field_muted(false, true), "a run leaves the field live");
-        assert!(field_muted(true, true), "both at once");
+    fn the_field_is_muted_by_a_turn_being_answered_and_by_nothing_else() {
+        // The whole of the rule: one question at a time, and the field types
+        // whenever there is not one out. A pact is not a reason — the two
+        // workers share nothing, and a reader watching a long run is exactly
+        // who most wants to ask something about the repository it is walking.
+        assert!(!field_muted(false), "an idle session cannot type");
+        assert!(field_muted(true), "a turn out leaves the field live");
     }
 
     #[test]
-    fn the_muting_follows_the_run_rather_than_a_flag_somebody_clears() {
-        // The half that matters to somebody waiting. A run ends in four ways —
-        // it finishes, it fails, it is cancelled, its worker is lost — and the
-        // field comes back on all four without any of them saying so, because
-        // what mutes it is the run being in flight and nothing else. The same
-        // sentence about a turn, which ends in five.
-        for answering in [false, true] {
-            assert!(
-                field_muted(answering, true),
-                "a run in flight left the field live, answering = {answering}"
-            );
-        }
-        // The round after the drain took the run down, with the same answer
-        // about the turn as before it: whatever ended, the keyboard is back.
-        assert!(
-            !field_muted(false, false),
-            "the run ended and the field is still deaf"
-        );
+    fn the_muting_follows_the_turn_rather_than_a_flag_somebody_clears() {
+        // The half that matters to somebody waiting. A turn ends in five ways —
+        // it answers, it is cancelled, there is no `claude`, it exits non-zero,
+        // it times out — and the field comes back on all five without any of
+        // them saying so, because what mutes it is the turn being out and
+        // nothing else.
+        assert!(field_muted(true));
+        // The round after the drain took the turn down: whatever ended it, the
+        // keyboard is back.
+        assert!(!field_muted(false), "the turn ended and the field is deaf");
     }
 
     #[test]

@@ -477,6 +477,30 @@ pub enum Line {
         /// the width.
         text: String,
     },
+    /// One row of a line too long to draw in one — the whole of it that did not
+    /// fit on the row above, already carrying whatever indent keeps it under the
+    /// text it continues.
+    ///
+    /// Nothing here ever makes one: an [`Account`] and a [`Thread`](crate::Thread)
+    /// hold what happened, and how many rows that takes is a question about a
+    /// terminal. They are made on the way to the screen, by whoever knows the
+    /// width (see [`mod@crate::wrap`]), which is why a panel dragged narrower
+    /// re-flows the line a reader is looking at rather than cutting its tail
+    /// off.
+    ///
+    /// A line that fits is itself and never one of these, and a line that does
+    /// not keeps its own variant on its first row wherever that variant can hold
+    /// a piece of it — a question keeps its marker, a clocked line keeps its
+    /// clock — so what a row *is* still reads off the value.
+    Wrapped {
+        /// The row, composed: the prefix on the first row of a broken line, or
+        /// blanks the width of it on the rows after, and then the text.
+        text: String,
+        /// Whether the line this continues is drawn bold — a heading, a summary
+        /// or a question — so that one line broken over two rows is not bold on
+        /// one of them and plain on the other.
+        heading: bool,
+    },
 }
 
 /// Everything one pact did, from the key press to the summary line.
@@ -725,10 +749,9 @@ impl Account {
     /// [`Log::freeze`]'s reason, so freezing a run that has already stopped
     /// leaves its last line where it stopped.
     ///
-    /// Crate-private, because the two callers are the two ways a run's clocks
-    /// stop: `finish`, which is a run saying what it came to, and a run turn of
-    /// the thread being closed, which is the panel saying the run is over
-    /// without adding a word of its own.
+    /// Crate-private, because the caller is `finish` — a run saying what it came
+    /// to — and because stopping a run's clocks from anywhere else would be
+    /// somebody other than the run deciding it is over.
     pub(crate) fn freeze(&mut self, at: Instant) {
         if let Some(section) = self.sections.last_mut() {
             section.log.freeze(at);
@@ -895,11 +918,10 @@ impl Account {
     /// has not said anything still has a clock on screen counting up from the
     /// moment its section opened.
     ///
-    /// Crate-private rather than private, because the thread draws a run's turn
-    /// out of exactly this iterator (see [`Turn`](crate::Turn)): the rows a run
-    /// has in the conversation are the rows it has on its own card, from this
-    /// one function, so there is no second wording of a run's lines anywhere in
-    /// warlock to keep in step with this one.
+    /// Crate-private rather than private, because the panel reads a run's rows
+    /// out of exactly this iterator: one function words what a run did, so
+    /// there is no second spelling of a directory heading or an outcome line
+    /// anywhere in warlock to keep in step with this one.
     pub(crate) fn rows(&self, now: Instant) -> impl Iterator<Item = Line> + '_ {
         self.sections
             .iter()
@@ -1122,7 +1144,12 @@ mod tests {
                 Line::Clocked { clock, text } => format!("{clock} {text}"),
                 // An account never yields a document's line; it is here so this
                 // helper words every row of the panel and not most of them.
-                Line::Summary { text } | Line::Text { text } | Line::Said { text } => text,
+                // Nor a wrapped row: an account holds what happened, and how
+                // many rows that takes is the panel's question.
+                Line::Summary { text }
+                | Line::Text { text }
+                | Line::Said { text }
+                | Line::Wrapped { text, .. } => text,
             })
             .collect()
     }

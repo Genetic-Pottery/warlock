@@ -25,8 +25,8 @@
 //! the seam exists to keep honest. A turn's stdin is the message and nothing else
 //! — no tree, no repository contents, no transcript this crate kept — and its
 //! answer comes back as text. It stays one conversation because the session id is
-//! settled once and every turn carries it, not because warlock sends back what
-//! was said before.
+//! settled once and every turn names it — the first turn opening it, the rest
+//! resuming it — not because warlock sends back what was said before.
 //!
 //! A turn is also read-only, by construction rather than by intention: its vector
 //! grants `Read`, `Grep` and `Glob` — see [`CHAT_TOOLS`] — and nothing that
@@ -468,9 +468,9 @@ fn default_args() -> Vec<OsString> {
     args
 }
 
-/// Everything `claude` is run with for a chat turn: [`ARGS`], then the model,
-/// the effort, the three tools that only look, warlock's own system prompt, and
-/// the session this agent's turns all belong to.
+/// Everything `claude` is run with for a chat turn *except* the session:
+/// [`ARGS`], then the model, the effort, the three tools that only look, and
+/// warlock's own system prompt.
 ///
 /// The same five leading arguments as a pass, for the same reason: the transport
 /// reads `stream-json`, and what the person watching sees a turn doing comes out
@@ -478,12 +478,10 @@ fn default_args() -> Vec<OsString> {
 /// the three things a turn is that a pass is not — allowed to look, told what
 /// program it is inside, and part of a conversation.
 ///
-/// `--session-id` is the last of those and the reason `session` is a parameter
-/// rather than a call. The id is settled once, when the agent is made, and every
-/// turn that agent takes is run with this same vector: that is how the model
-/// remembers what was said two questions ago without warlock keeping a
-/// transcript of its own to send back to it.
-fn chat_args(session: &str) -> Vec<OsString> {
+/// The conversation is the one part not written here, because it is the one part
+/// that is not the same on every turn: see [`Session`], which says how a turn
+/// names it and why the first turn says it differently from the rest.
+fn chat_args() -> Vec<OsString> {
     let mut args: Vec<OsString> = ARGS.iter().map(OsString::from).collect();
     args.push(OsString::from("--model"));
     args.push(overridden(MODEL_VAR, MODEL));
@@ -493,9 +491,65 @@ fn chat_args(session: &str) -> Vec<OsString> {
     args.push(OsString::from(CHAT_TOOLS));
     args.push(OsString::from("--system-prompt"));
     args.push(OsString::from(CHAT_SYSTEM_PROMPT));
-    args.push(OsString::from("--session-id"));
-    args.push(OsString::from(session));
     args
+}
+
+/// The conversation a [`ChatAgent`]'s turns all belong to, and whether a child
+/// has claimed it yet.
+///
+/// One id for the life of the agent, said two different ways. `claude` opens a
+/// conversation with `--session-id` and refuses to open the same one twice —
+/// `Session ID … is already in use` — so only the first turn may say it that
+/// way; every turn after it says `--resume`, which continues that same
+/// conversation and keeps its id. Both facts were checked against the CLI: a
+/// resumed turn reports the id it was given back, so this is one session however
+/// many turns it takes.
+///
+/// The id is claimed the moment a child is spawned with it, not when a turn
+/// succeeds, because that is when the CLI takes it: a turn that was cancelled,
+/// timed out or exited non-zero has still opened the session, and the CLI
+/// resumes it happily while refusing to open it again. A spawn that never
+/// happened — no `claude` on the machine — claims nothing, so the first turn on
+/// a machine that grows one is still the turn that opens the conversation.
+///
+/// [`Arc`] because an agent is cloned per turn (see
+/// [`with_activities`](ChatAgent::with_activities)): the copy the worker thread
+/// runs is the copy that spawns, and a claim it made on its own would be
+/// forgotten with the thread.
+#[derive(Debug, Clone)]
+struct Session {
+    /// The conversation's id, settled when the agent is made and never changed.
+    id: String,
+    /// Whether a child has been spawned with `id` already, and so whether this
+    /// turn resumes the conversation rather than opening it.
+    claimed: Arc<AtomicBool>,
+}
+
+impl Session {
+    /// A conversation nobody has opened yet, under a fresh [`session_id`].
+    fn new() -> Self {
+        Self {
+            id: session_id(),
+            claimed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// How the next turn names this conversation: `--session-id` to open it,
+    /// `--resume` once it is open.
+    fn args(&self) -> [OsString; 2] {
+        let flag = if self.claimed.load(Ordering::Acquire) {
+            "--resume"
+        } else {
+            "--session-id"
+        };
+        [OsString::from(flag), OsString::from(&self.id)]
+    }
+
+    /// Say that a child has taken this id, so every turn after this one
+    /// resumes.
+    fn claim(&self) {
+        self.claimed.store(true, Ordering::Release);
+    }
 }
 
 /// How many session ids this process has handed out, so no two of them collide.
@@ -1112,8 +1166,10 @@ impl Agent for ClaudeAgent {
 ///   because a question about a repository is answered out of the repository.
 ///   Nothing that writes, runs or fetches, in any permission mode.
 /// * **A turn is part of a conversation.** The session id is settled when the
-///   agent is made and every turn carries it, so the model remembers what was
-///   said before without warlock keeping a transcript to send back to it.
+///   agent is made and every turn names it — `--session-id` to open it, then
+///   `--resume` for every turn after (see [`Session`]) — so the model remembers
+///   what was said before without warlock keeping a transcript to send back to
+///   it.
 ///
 /// # Where it runs
 ///
@@ -1139,10 +1195,13 @@ impl Agent for ClaudeAgent {
 pub struct ChatAgent {
     /// The command to run: `claude`, or whatever a test points it at.
     program: OsString,
-    /// The arguments every turn is run with, the session id among them. Built
-    /// once, when the agent is made, and not touched again — see
-    /// [`chat_args`].
+    /// The arguments every turn is run with except the session: built once,
+    /// when the agent is made, and not touched again — see [`chat_args`].
     args: Vec<OsString>,
+    /// The conversation every turn of this agent belongs to, or `None` for an
+    /// agent whose whole vector was handed in (see
+    /// [`with_args`](ChatAgent::with_args)).
+    session: Option<Session>,
     /// How long a single turn gets before it is killed.
     timeout: Duration,
     /// Whoever is allowed to say stop. Its own handle by default, which nobody
@@ -1168,14 +1227,15 @@ impl ChatAgent {
     /// let agent = ChatAgent::new();
     ///
     /// assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
-    /// // A conversation of its own, named on every turn.
+    /// // A conversation of its own, opened by the first turn to run.
     /// assert!(agent.args().iter().any(|arg| arg == "--session-id"));
     /// ```
     #[must_use]
     pub fn new() -> Self {
         Self {
             program: OsString::from(PROGRAM),
-            args: chat_args(&session_id()),
+            args: chat_args(),
+            session: Some(Session::new()),
             timeout: INVOCATION_TIMEOUT,
             cancel: Cancel::new(),
             activities: Activities::none(),
@@ -1194,11 +1254,13 @@ impl ChatAgent {
 
     /// The same agent, passing `args` instead of the default arguments.
     ///
-    /// Replaced outright, session id and all: a caller who says what the
-    /// arguments are is saying what the whole vector is.
+    /// Replaced outright, session and all: a caller who says what the arguments
+    /// are is saying what the whole vector is, so nothing about a conversation
+    /// is appended to it afterwards.
     #[must_use]
     pub fn with_args<A: Into<OsString>>(mut self, args: impl IntoIterator<Item = A>) -> Self {
         self.args = args.into_iter().map(Into::into).collect();
+        self.session = None;
         self
     }
 
@@ -1244,11 +1306,20 @@ impl ChatAgent {
         &self.program
     }
 
-    /// The arguments every turn is run with, before any message — which never
-    /// becomes an argument, because it goes in on stdin.
+    /// The arguments the next turn is run with, before any message — which
+    /// never becomes an argument, because it goes in on stdin.
+    ///
+    /// Built per call rather than held, because the last pair of it moves: a
+    /// conversation is opened with `--session-id` and continued with
+    /// `--resume`, and which of those the next turn says depends on whether a
+    /// child has taken the id already. See [`Session`].
     #[must_use]
-    pub fn args(&self) -> &[OsString] {
-        &self.args
+    pub fn args(&self) -> Vec<OsString> {
+        let mut args = self.args.clone();
+        if let Some(session) = &self.session {
+            args.extend(session.args());
+        }
+        args
     }
 
     /// Where this agent reports what a turn is doing.
@@ -1302,14 +1373,23 @@ impl ChatAgent {
 
     /// Start the child with all three streams piped, in warlock's own working
     /// directory.
+    ///
+    /// The session is claimed here and only here, once the spawn has actually
+    /// happened: from this call on, the conversation exists and every later
+    /// turn resumes it rather than trying to open it a second time.
     fn spawn(&self) -> Result<Child, AgentError> {
-        Command::new(&self.program)
-            .args(&self.args)
+        let child = Command::new(&self.program)
+            .args(self.args())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| self.spawn_error(error))
+            .map_err(|error| self.spawn_error(error))?;
+
+        if let Some(session) = &self.session {
+            session.claim();
+        }
+        Ok(child)
     }
 
     /// Which [`AgentError`] a failed spawn is.
@@ -2322,12 +2402,68 @@ mod tests {
     }
 
     #[test]
+    fn the_first_turn_opens_the_conversation_and_every_turn_after_it_resumes() {
+        // `claude` opens a conversation with `--session-id` and refuses to open
+        // the same one twice — `Session ID … is already in use` — so the second
+        // question somebody types must arrive as `--resume` or it fails before
+        // the model ever hears it. Run against a program that exists and will
+        // not understand a word of what it is handed: the spawn is what claims
+        // the id, and what came back is not what this is about.
+        let agent = ChatAgent::new().with_program("/bin/sh");
+        let opening = turn_args(&agent);
+        let session = value_of(&opening, "--session-id")
+            .expect("the first turn opens the conversation")
+            .to_owned();
+
+        let _ = agent.turn("what is in crates?");
+        let resuming = turn_args(&agent);
+
+        assert_eq!(
+            value_of(&resuming, "--resume"),
+            Some(session.as_str()),
+            "the second turn opened a conversation the first one already had",
+        );
+        assert!(
+            !resuming.iter().any(|word| word == "--session-id"),
+            "a turn cannot open a session that is already in use: {resuming:?}",
+        );
+        // One flag apart and not one word else: the same model, the same tools
+        // and the same conversation, said the way a turn after the first says
+        // it.
+        assert_eq!(
+            resuming[..resuming.len() - 2],
+            opening[..opening.len() - 2],
+            "resuming a conversation changed something other than how it is named",
+        );
+
+        // And it stays that way however many turns are taken.
+        let _ = agent.turn("and which of those is biggest?");
+        assert_eq!(turn_args(&agent), resuming);
+    }
+
+    #[test]
+    fn a_conversation_no_child_ever_took_is_still_waiting_to_be_opened() {
+        // The id is claimed by a spawn, not by a turn: on a machine with no
+        // `claude` nothing ever took it, so the turn that runs once one is
+        // installed is still the turn that opens the conversation.
+        let agent = ChatAgent::new().with_program(NOT_A_PROGRAM);
+        let before = turn_args(&agent);
+
+        let error = agent
+            .turn("what is in crates?")
+            .expect_err("nothing to run");
+        assert!(matches!(error, AgentError::NotFound { .. }), "{error:?}");
+        assert_eq!(turn_args(&agent), before);
+        assert!(value_of(&before, "--session-id").is_some());
+    }
+
+    #[test]
     fn every_turn_of_one_agent_is_one_conversation_and_two_agents_are_two() {
-        // The session is settled when the agent is made and lives in the
-        // vector every turn is spawned with, so what has to be true is that
-        // taking turns does not disturb it. Taken against a program that
-        // cannot exist, because the question is what the turn was run with
-        // rather than what came back.
+        // The session is settled when the agent is made and every turn names
+        // it, so what has to be true is that taking turns does not change which
+        // conversation it is. Taken against a program that cannot exist,
+        // because the question is what the turn was run with rather than what
+        // came back.
         let agent = ChatAgent::new().with_program(NOT_A_PROGRAM);
         let before = turn_args(&agent);
 

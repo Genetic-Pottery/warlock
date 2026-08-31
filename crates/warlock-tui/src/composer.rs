@@ -57,10 +57,8 @@
 //! reader trusts to get them out would put a `c` in the draft.
 //!
 //! Muting, too. A field is muted for as long as the answer to the last question
-//! is on its way — one question at a time — and for as long as a pact or a
-//! refresh is writing documents under it, which is a screen being rewritten
-//! rather than a place to type. Both halves of that are somewhere else: the loop
-//! owns the turn and the run, so it owns the flag
+//! is on its way, and for no other reason — one question at a time. That is
+//! somewhere else: the loop owns the turn, so it owns the flag
 //! ([`Composer::set_muted`]), and the keyboard's gate is what declines to ask
 //! this function anything while the flag is up. So [`compose_for`] behaves
 //! identically either way and simply carries the flag through, which is what
@@ -111,11 +109,11 @@ const CHORD: KeyModifiers = KeyModifiers::CONTROL
 /// every width a terminal has in one test without a terminal.
 ///
 /// The flag is [`Composer::is_muted`], and it is a fact about the session rather
-/// than about the draft: one thing at a time, so while an answer or a run is on
-/// its way the field takes no keys and is drawn to say so. Which is also why it
-/// is carried here rather than worked out where it is read — the loop knows
-/// whether a turn or a run is in flight, and it tells the field once a round,
-/// exactly as it tells the app what the terminal is doing with the pointer.
+/// than about the draft: one question at a time, so while an answer is on its
+/// way the field takes no keys and is drawn to say so. Which is also why it is
+/// carried here rather than worked out where it is read — the loop knows whether
+/// a turn is in flight, and it tells the field once a round, exactly as it tells
+/// the app what the terminal is doing with the pointer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Composer {
     /// What has been typed. Newlines are in it as `\n`; the cursor sits after

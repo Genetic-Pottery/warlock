@@ -22,8 +22,6 @@
 //! flight and leaves the manifest as it was. Either way no half-state exists
 //! for an abandoned worker to leave — see [`spawn_pact`] for the bargain.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Instant;
@@ -689,16 +687,12 @@ pub(crate) fn refresh_press(app: &mut App, in_flight: bool, at: Instant) -> Opti
 /// inside them, because an account that is never closed is a finished run whose
 /// newest line goes on counting up for as long as warlock is open.
 ///
-/// Everything that lands on the account here lands on the conversation's copy of
-/// the same run as well, when there is one: a pact or a refresh started while the
-/// thread was on screen took a turn nobody typed ([`App::start_account`]), and
-/// each event drained above is applied to the card and to that turn in one call
-/// ([`App::write_run`]), so the turn fills as the run's events arrive rather than
-/// being copied over at the end. The endings and the summary go the same way, and
-/// the turn is closed with them. None of that changes which card is showing, and
-/// none of it is a second history: a reader watching the thread watches the run
-/// arrive in it, and a reader on the account card or a document has the run where
-/// they left it.
+/// Everything that lands here lands on the account card and nowhere else. A pact
+/// or a refresh started while the thread or a document was on screen fills its
+/// own card behind them ([`App::start_account`], [`App::write_run`]) and changes
+/// neither which card is showing nor a line of what is on it: the run is where
+/// the reader left it when they swap to it, and what they were reading is what
+/// they go on reading.
 ///
 /// The tree is then re-read from disk and the view put
 /// back on top of it ([`reload_tree`]). One reload, at the bottom, for all four
@@ -747,13 +741,11 @@ pub(crate) fn apply_progress(
                 // activities drained after it — which may be in this same batch
                 // — land under the directory they belong to.
                 //
-                // The panel's copy goes through `App::write_run`, here and for
-                // every other event below: a run reaches its own card and, when
-                // there is a conversation on screen, the turn nobody typed in
-                // it, and the one call is what keeps the two from wording the
-                // same event differently. The label is computed once, outside
-                // the closure, for the same reason — one spelling of a
-                // directory, handed to whoever is holding this run.
+                // The panel goes through `App::write_run`, here and for every
+                // other event below: one way in, so a line of a run cannot be
+                // put on the panel by two different routes. The label is
+                // computed once, outside the closure — one spelling of a
+                // directory, handed to the account holding this run.
                 let heading = section_label(&scope.root, &directory);
                 app.write_run(|account| account.open_section(&heading, now));
                 // The fraction is the observer's own, whichever run is
@@ -767,8 +759,7 @@ pub(crate) fn apply_progress(
             // Filed under whichever directory is open, which is the one the
             // `Starting` before it named: an activity carries no directory
             // because it needs none, and the account's live section is the
-            // answer — in the card and in the conversation's run turn alike,
-            // since both were opened by the same `Starting`. An account is
+            // answer. An account is
             // always there during a run — the press that started it made one —
             // so a run with neither is one nobody started this way, which is a
             // test driving the events directly; dropping the line is the honest
@@ -967,23 +958,15 @@ const DOCUMENT_FILE: &str = "WARLOCK.md";
 /// which is what a killed `claude` otherwise comes back as. The sections above
 /// it are worded exactly as they would have been, because they finished.
 ///
-/// The endings go to the run wherever it is being kept — its own card, and the
-/// turn nobody typed when the run happened during a conversation — through the
-/// one call every other event goes through ([`App::write_run`]), so the
-/// conversation's copy of a run ends in the same words its card does. The turn is
-/// then closed ([`App::close_run`]), which adds no line and says only that the
-/// run is over: its clocks stop and the composer is the reader's again. Both
-/// happen on all four endings — the run that wrote its documents, the one whose
-/// engine call failed, the one whose worker was lost, and the one the reader
-/// stopped — because all four leave a run that is over, and a turn left open
-/// would go on ticking under whatever is asked next.
+/// The endings go to the run through the one call every other event goes through
+/// ([`App::write_run`]), on all four endings — the run that wrote its documents,
+/// the one whose engine call failed, the one whose worker was lost, and the one
+/// the reader stopped — because all four leave a run that is over, and an
+/// account left open would go on ticking under whatever happens next.
 ///
-/// Each section's ending is worded once and given to both copies, from the memo
-/// below rather than from a second look at disk. `section_outcome` `stat`s the
-/// document it reports the size of, and a file that changed between two stats
-/// would put a different byte count in the thread than on the card — the one
-/// thing the single call exists to prevent. The keys are the section headings,
-/// which is what a section is looked up by everywhere here.
+/// Each section's ending is worded once, here, and `section_outcome` `stat`s the
+/// document it reports the size of: one look at disk per section, so the byte
+/// count on the card is the file as it was when the run ended.
 ///
 /// Writes nothing where there is no run to write to, which is a run nobody
 /// started through the pact key: a test driving the events straight down the
@@ -995,21 +978,15 @@ fn close_account(
     cancelled: bool,
     now: Instant,
 ) {
-    let worded: RefCell<HashMap<PathBuf, Outcome>> = RefCell::new(HashMap::new());
     app.write_run(|account| {
         if cancelled {
             account.close_section(&Outcome::Cancelled, now);
         }
         account.close_open_sections(now, |section| {
-            worded
-                .borrow_mut()
-                .entry(section.directory().to_path_buf())
-                .or_insert_with(|| section_outcome(section, refusals, &scope.root))
-                .clone()
+            section_outcome(section, refusals, &scope.root)
         });
         account.finish(now);
     });
-    app.close_run(now);
 }
 
 /// How the section for one directory ends: the document it wrote, or the reason
@@ -1308,7 +1285,6 @@ mod tests {
     };
     use warlock_tui::{
         Account, Activities, Activity, App, Chrome, ClaudeAgent, Line, PactToggle, Run, Section,
-        Turn,
     };
 
     use warlock_tui::Cancel;
@@ -1612,7 +1588,10 @@ mod tests {
                 Line::Clocked { clock, text } => format!("{clock} {text}"),
                 // A summary is the account's last line; a text line is a
                 // document's own, and the only thing on that card.
-                Line::Summary { text } | Line::Text { text } | Line::Said { text } => text.clone(),
+                Line::Summary { text }
+                | Line::Text { text }
+                | Line::Said { text }
+                | Line::Wrapped { text, .. } => text.clone(),
             })
             .collect()
     }
@@ -2793,12 +2772,11 @@ mod tests {
     #[test]
     fn a_second_run_is_refused_in_the_same_words_with_the_thread_showing() {
         // The refusal a conversation changes nothing about. A run started while
-        // the reader is looking at the thread writes its account into the thread
-        // as a turn nobody typed, so the run key pressed again — from the tree,
-        // which is the only place it can be pressed from while the field under
-        // the thread is muted — has to bounce off the same in-flight check, in
-        // the same words, without touching the card, the conversation, or the
-        // turn the run is filling.
+        // the reader is looking at the thread fills the account card behind it,
+        // so the run key pressed again — from the tree, since the field under
+        // the thread has the keyboard otherwise — has to bounce off the same
+        // in-flight check, in the same words, without touching either card or
+        // the conversation the reader is reading.
         let tree = Tree::new(Node::new(
             "/repo/crates",
             None::<PathBuf>,
@@ -2812,8 +2790,7 @@ mod tests {
         app.start_turn("what does the engine do?", at(base, 1));
         app.answer_turn("It walks the tree.", at(base, 2));
         app.start_account(at(base, 3));
-        // Through the one call the loop writes a run with, so the card and the
-        // thread's turn hold the same section.
+        // Through the one call the loop writes a run with.
         app.write_run(|account| account.open_section("engine", at(base, 3)));
         app.set_pact_in_flight("/repo/crates/engine", 3, 12);
         app.set_message("something the last key said");
@@ -2854,7 +2831,7 @@ mod tests {
         );
 
         // And the reader is still looking at what they were looking at: the same
-        // card, the same lines, with the run's turn still in it.
+        // card, the same lines, and none of the run's among them.
         assert!(app.showing_thread(), "the refusal swapped the card");
         assert_eq!(shown(&app, at(base, 6)), thread, "the refusal moved a line");
         assert!(
@@ -2862,8 +2839,8 @@ mod tests {
             "the typed turn is not in the thread: {thread:?}"
         );
         assert!(
-            thread.iter().any(|line| line == "engine"),
-            "the run's turn is not in the thread: {thread:?}"
+            !thread.iter().any(|line| line == "engine"),
+            "the run's section is in the thread: {thread:?}"
         );
     }
 
@@ -4492,9 +4469,9 @@ mod tests {
     /// back. Every one of them fills the account and none of them may take the
     /// slot.
     ///
-    /// Swaps twice, which is how the card behind is reached at all, and leaves
-    /// `app` showing the document again — so an assertion after this one is
-    /// about the same screen as the assertions inside it.
+    /// Swaps round the cycle, which is how the card behind is reached at all,
+    /// and leaves `app` showing the document again — so an assertion after this
+    /// one is about the same screen as the assertions inside it.
     fn document_survived(app: &mut App, now: Instant) -> Vec<String> {
         assert_eq!(
             shown(app, now),
@@ -4504,6 +4481,10 @@ mod tests {
         assert!(app.has_document(), "the run threw the document away");
         assert!(app.has_account(), "the run left no account behind it");
 
+        // Past the conversation, which is always a stop of its own: it is where
+        // the field is, and a reader is never more than a press from it.
+        app.swap_card();
+        assert!(app.showing_thread(), "the cycle skipped the conversation");
         app.swap_card();
         let account = shown(app, now);
         assert_eq!(
@@ -4719,8 +4700,8 @@ mod tests {
     /// What the conversation the runs below happen during asked, and what came
     /// back.
     ///
-    /// Prose, because that is what a chat turn holds and what a run's turn must
-    /// not start holding: a pact says what it did and never what it thinks.
+    /// Prose, because that is what a chat turn holds and what an account never
+    /// does: a pact says what it did and never what it thinks.
     const QUESTION: &str = "what does the engine do?";
     const ANSWER: &str = "It walks the tree and writes what it finds.";
 
@@ -4748,21 +4729,21 @@ mod tests {
         );
     }
 
-    /// Assert that the run that has just ended is in the conversation, in the
-    /// same words it is on its own card, under the turn somebody typed. What the
-    /// run's turn says, for the caller to go on and assert on.
+    /// Assert that the run that has just ended left the conversation exactly as
+    /// it was, and give back what the run's own card says for the caller to go
+    /// on and assert on.
     ///
-    /// The whole of "a run started on the thread appends in place", written once
-    /// because four endings are held to it: a run that finished, one the reader
-    /// stopped, one whose outcome recorded nothing, and one whose worker was
-    /// lost. Every one of them fills the turn and the card alike, and none of
-    /// them may take the card the reader was on, empty the thread, or open a
-    /// second history.
+    /// The whole of "a run happens beside a conversation and never inside it",
+    /// written once because four endings are held to it: a run that finished,
+    /// one the reader stopped, one whose outcome recorded nothing, and one whose
+    /// worker was lost. Every one of them fills the account card and only that,
+    /// and none of them may take the card the reader was on, add a row to the
+    /// conversation, or mute the field under it.
     ///
     /// Swaps twice, which is how the account card is reached at all, and leaves
     /// `app` showing the conversation again — so an assertion after this one is
     /// about the same screen as the assertions inside it.
-    fn conversation_survived(app: &mut App, now: Instant) -> Vec<String> {
+    fn conversation_untouched(app: &mut App, now: Instant) -> Vec<String> {
         assert!(
             app.showing_thread(),
             "the run took the panel from the reader"
@@ -4770,10 +4751,10 @@ mod tests {
         let thread = app.thread().expect("a question was asked before the run");
         assert_eq!(
             thread.turns().len(),
-            2,
-            "the run is not one turn of the one conversation"
+            1,
+            "the run took a turn of the conversation"
         );
-        assert_eq!(thread.turns()[0].message(), Some(QUESTION));
+        assert_eq!(thread.turns()[0].message(), QUESTION);
         assert_eq!(
             thread.turns()[0].answer(),
             Some(ANSWER),
@@ -4781,31 +4762,21 @@ mod tests {
         );
         assert!(
             thread.in_flight().is_none(),
-            "the run's turn is still counting up"
-        );
-        let turn = as_text(
-            &thread.turns()[1]
-                .account()
-                .expect("the run took a turn nobody typed")
-                .lines(now),
-        );
-        assert_eq!(
-            thread.turns()[1].message(),
-            None,
-            "somebody typed the run's turn"
+            "a run nobody typed muted the field"
         );
 
-        // On screen, in place: the conversation is the question, the answer, and
-        // the run under them, and the reader scrolled nowhere to get it.
+        // On screen: the question, the work under it and the answer, with not
+        // one word of the run's vocabulary among them.
         let shown_now = shown(app, now);
-        assert_eq!(
-            shown_now[shown_now.len() - turn.len()..],
-            turn[..],
-            "the run is not at the foot of the conversation: {shown_now:?}"
-        );
+        for said in ["wrote", "refused", "cancelled", "pact finished"] {
+            assert!(
+                !shown_now.iter().any(|line| line.contains(said)),
+                "{said:?} is in the conversation: {shown_now:?}"
+            );
+        }
 
-        // And one swap away is the run's own card, which the same run filled
-        // through the same call and which therefore says the same thing.
+        // And one swap away is the run's own card, which is where the whole of
+        // the run is.
         assert!(app.has_account(), "the run left no account behind it");
         app.swap_card();
         let card = shown(app, now);
@@ -4814,10 +4785,6 @@ mod tests {
             panel_text(app, now),
             "the account card is not what the run wrote"
         );
-        assert_eq!(
-            turn, card,
-            "the conversation and the card word the same run differently"
-        );
 
         app.swap_card();
         assert!(
@@ -4825,16 +4792,16 @@ mod tests {
             "the conversation did not come back whole"
         );
         assert_eq!(shown(app, now), shown_now);
-        turn
+        card
     }
 
     #[test]
-    fn a_run_started_while_the_thread_shows_fills_its_turn_as_the_events_arrive() {
+    fn a_run_started_while_the_thread_shows_fills_its_own_card_and_only_that() {
         // A whole pact, driven a frame at a time through the loop that hears the
         // worker, with a conversation already on screen. After every frame the
-        // turn nobody typed and the run's own card say exactly the same thing —
-        // which is the point of feeding them in one call: the turn fills as the
-        // run reports rather than being copied over when it ends.
+        // run's own card has more on it and the conversation has exactly what it
+        // had — the run reports into the card built for it, while the reader
+        // goes on reading what they asked for.
         let scratch = one_crate_to_load("run-in-a-conversation");
         let (mut app, scope) = load(&scratch);
         let mut manifest = Manifest::new();
@@ -4842,7 +4809,7 @@ mod tests {
         a_conversation(&mut app, base);
         let asked = shown(&app, base);
         // Everything the press does before the worker starts: one account, and
-        // the turn it takes of the conversation.
+        // nothing at all to the conversation.
         app.start_account(base);
 
         let said = recorded(&scratch, "crates/engine", &Cancel::new(), |events| {
@@ -4867,13 +4834,11 @@ mod tests {
                 .account()
                 .expect("the press started the run's own card")
                 .lines(now);
-            let turn = app
-                .thread()
-                .and_then(|thread| thread.turns().last())
-                .and_then(Turn::account)
-                .expect("the run took a turn of the conversation")
-                .lines(now);
-            assert_eq!(turn, card, "the turn is behind the card at frame {frame}");
+            assert_eq!(
+                shown(&app, now),
+                asked,
+                "the run wrote into the conversation at frame {frame}"
+            );
             lengths.push(card.len());
         }
         assert!(pact.is_none(), "the run reported its outcome and is over");
@@ -4884,16 +4849,16 @@ mod tests {
             "nothing arrived over the whole run: {lengths:?}"
         );
 
-        // The question is still above it, the run is under it, and both readings
-        // of the run are the same reading.
-        let turn = conversation_survived(&mut app, at(base, 10_000));
+        // The conversation is the conversation, and the whole of the run is on
+        // the card one swap away.
+        let card = conversation_untouched(&mut app, at(base, 10_000));
         assert_eq!(
-            shown(&app, at(base, 10_000))[..asked.len()],
-            asked[..],
+            shown(&app, at(base, 10_000)),
+            asked,
             "the run rewrote the turn somebody typed"
         );
         assert_eq!(
-            turn,
+            card,
             [
                 "crates/engine/src".to_owned(),
                 "0:20 waiting · 1 file, 17 bytes".to_owned(),
@@ -4921,10 +4886,10 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_run_leaves_the_conversation_and_says_so_in_its_own_turn() {
-        // Esc during a run somebody started mid-conversation. The turn nobody
-        // typed says where the run got to and what stopped it; the turn above it
-        // is untouched, and the reader is where they were.
+    fn a_cancelled_run_says_so_on_its_own_card_and_leaves_the_conversation() {
+        // Esc during a run somebody started mid-conversation. The account says
+        // where the run got to and what stopped it; the conversation is
+        // untouched, and the reader is where they were.
         let scratch = one_crate_to_load("cancelled-in-a-conversation");
         let (mut app, scope) = load(&scratch);
         let mut manifest = Manifest::new();
@@ -4942,18 +4907,18 @@ mod tests {
         replay(&mut app, &mut manifest, &scope, guard, said, base);
 
         assert_eq!(app.message(), Some(PACT_CANCELLED), "the run was stopped");
-        let turn = conversation_survived(&mut app, at(base, 10_000));
+        let card = conversation_untouched(&mut app, at(base, 10_000));
         assert!(
-            turn.iter().any(|line| line.contains("cancelled")),
-            "the run's turn does not say the reader stopped it: {turn:?}"
+            card.iter().any(|line| line.contains("cancelled")),
+            "the run's card does not say the reader stopped it: {card:?}"
         );
     }
 
     #[test]
-    fn a_run_a_pass_failed_in_says_so_in_its_turn_and_leaves_the_rest_alone() {
+    fn a_run_a_pass_failed_in_says_so_on_its_card_and_leaves_the_rest_alone() {
         // The engine turns down the only answer it got. The failure goes where
         // a run's failures have always gone — the footer and the account — and
-        // the account is now in two places, which have to agree.
+        // the conversation beside it hears none of it.
         let scratch = one_crate_to_load("refused-in-a-conversation");
         let (mut app, scope) = load(&scratch);
         let mut manifest = Manifest::new();
@@ -4978,10 +4943,10 @@ mod tests {
             message.contains("crates/engine/src"),
             "the failing directory is named: {message}"
         );
-        let turn = conversation_survived(&mut app, at(base, 10_000));
+        let card = conversation_untouched(&mut app, at(base, 10_000));
         assert!(
-            turn.iter().any(|line| line.contains("refused")),
-            "the run's turn does not say why it failed: {turn:?}"
+            card.iter().any(|line| line.contains("refused")),
+            "the run's card does not say why it failed: {card:?}"
         );
     }
 
@@ -4989,9 +4954,9 @@ mod tests {
     /// the app, the copy taken when the key was pressed, the manifest, the
     /// worker's end of the channel and the run itself.
     ///
-    /// [`a_run_in_flight`] with a question asked first, which is the whole
-    /// difference the run turn depends on: the conversation exists before the
-    /// account starts, so the press that starts the run takes a turn of it.
+    /// [`a_run_in_flight`] with a question asked first: the conversation exists
+    /// before the account starts, which is the case where a run could reach it
+    /// and must not.
     fn a_run_in_flight_during_a_conversation(
         base: Instant,
     ) -> (App, App, Manifest, mpsc::Sender<PactEvent>, Running) {
@@ -5015,7 +4980,7 @@ mod tests {
     }
 
     #[test]
-    fn a_run_whose_end_puts_the_view_back_keeps_its_turn_in_the_conversation() {
+    fn a_run_whose_end_puts_the_view_back_keeps_the_conversation_beside_it() {
         // The two endings that go through `App::restore_from`: an outcome that
         // recorded nothing, and a worker that died without one. Both roll the
         // rows back to what the manifest on disk still says, and neither may
@@ -5053,9 +5018,9 @@ mod tests {
             assert_eq!(app.message(), Some(failure.unwrap_or(PACT_LOST)));
             assert_eq!(app.rows(), before.rows(), "the rows match the manifest");
 
-            let turn = conversation_survived(&mut app, at(base, 5));
+            let card = conversation_untouched(&mut app, at(base, 5));
             assert_eq!(
-                turn,
+                card,
                 [
                     "engine",
                     "0:05 thinking",
@@ -5063,7 +5028,7 @@ mod tests {
                     "pact finished — 1 directory, 0:05, $0.00 \
                          (incomplete: 1 pass reported no cost)",
                 ],
-                "the restore took the run's turn with the rows: {failure:?}"
+                "the restore took the run's account with the rows: {failure:?}"
             );
 
             // And the frame after the ending is the frame after any other run:

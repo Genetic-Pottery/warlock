@@ -21,12 +21,11 @@
 //! with it — a screen saying something before anything has happened would be
 //! saying it about nothing, where a mark only says whose screen this is. A panel
 //! with no room for the whole mark draws the bare border, which on a narrow
-//! terminal is every panel there is. Every row of an account is exactly one row:
-//! a path longer than the panel is cut with an ellipsis rather than wrapped, so
-//! the number of rows on screen is the number of things that happened. The
-//! panel's other card is not cut but wrapped, and not here — a document arrives
-//! already in the rows its width needs (see [`mod@crate::wrap`]), so this module
-//! draws the rows it is handed either way. See [`draw_panel`].
+//! terminal is every panel there is. Nothing on any card runs off the
+//! right-hand edge: a line too long for the panel is broken into the rows it
+//! needs, under its own clock or marker, and none of that happens here — every
+//! card arrives already in the rows its width needs (see [`mod@crate::wrap`]),
+//! so this module draws the rows it is handed. See [`draw_panel`].
 //!
 //! Under the panel, in the panel's own column, is the composer: the draft
 //! somebody is typing, in a bordered box of its own. It is one row tall while
@@ -85,6 +84,7 @@ use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
 use crate::composer::Composer;
 use crate::confirm::{Answer, QuitConfirm};
 use crate::prompt::{ScopeField, ScopePrompt};
+use crate::wrap::shape;
 
 /// One level of nesting, per unit of the depth the engine's walk yields.
 const INDENT: &str = "  ";
@@ -208,13 +208,21 @@ const MARK_MARGIN_ROWS: u16 = 1;
 /// The one line naming the tree's root.
 const HEADER_HEIGHT: u16 = 1;
 
-/// The one line naming the run in flight, inside the panel's border and above
-/// its window.
+/// What the run in flight takes off the top of the panel, inside the border and
+/// above the window: the one line naming it, and one blank row under that.
 ///
-/// One row, like the tree's header, and for the same reason: every row it takes
-/// is a row of the account the reader no longer has, and the run says what it is
-/// doing in one line or it is not worth a second — see [`run_header_line`].
-const RUN_HEADER_HEIGHT: u16 = 1;
+/// The line itself is one row, like the tree's header, and for the same reason:
+/// every row it takes is a row of the card the reader no longer has, and the run
+/// says what it is doing in one line or it is not worth a second — see
+/// [`run_header_line`].
+///
+/// The blank row is what makes it read as a header rather than as the first row
+/// of whatever is under it. The header is bold and so are an account's headings,
+/// a summary and a question, so with nothing between them a run's line and the
+/// card's first line are two bold rows against each other and the eye has to
+/// work out which is furniture. A row is a cheap price for that, and it is only
+/// paid while a run is actually going.
+const RUN_HEADER_HEIGHT: u16 = 2;
 
 /// What the run header calls a pact.
 ///
@@ -270,7 +278,7 @@ const HEADER_GAP: &str = " — ";
 /// The tree's [`INDENT`] happens to be the same two columns and deliberately is
 /// not reused: that one is a unit of a walk's depth, this one is a fixed inset
 /// under a heading, and a change to either has nothing to say about the other.
-const PANEL_INDENT: &str = "  ";
+pub(crate) const PANEL_INDENT: &str = "  ";
 
 /// What the panel's top edge says while the conversation is the card on screen.
 ///
@@ -296,7 +304,7 @@ const THREAD_TITLE: &str = " thread ";
 /// [`SELECTION_MARKER`], which is the tree's `>` and says where the keyboard is
 /// — nothing is selected in the panel — and not a colour, which is a node
 /// state's.
-const SAID_MARKER: &str = "› ";
+pub(crate) const SAID_MARKER: &str = "› ";
 
 /// What a truncated panel line ends with, in place of what was cut off.
 ///
@@ -983,14 +991,14 @@ pub fn draw(
     if let (Some(area), Some(composer)) = (field, composer) {
         // Two things have to be true for the field to be drawn as the place the
         // next character lands: the keys have to be pointed at it, and it has to
-        // be taking them. A muted field is one a turn is being answered over, or
-        // one a pact or a refresh is writing under (see [`Composer::is_muted`]),
-        // and either is drawn exactly as a field nobody is pointed at — dim, and
-        // with no caret — because that is what is true of it. Muting only ever
-        // changes how the field is drawn: it is still on screen, still the
-        // panel's missing rows, still holding every character of the draft. The
-        // one thing that takes the field off the frame is the document card,
-        // which is [`on_screen`]'s question and not this one.
+        // be taking them. A muted field is one a turn is being answered over
+        // (see [`Composer::is_muted`]), and it is drawn exactly as a field
+        // nobody is pointed at — dim, and with no caret — because that is what
+        // is true of it. Muting only ever changes how the field is drawn: it is
+        // still on screen, still the panel's missing rows, still holding every
+        // character of the draft. What takes the field off the frame is the card
+        // showing — it is drawn under the conversation and under neither of the
+        // other two — which is [`on_screen`]'s question and not this one.
         let live = app.focus() == Focus::Composer && !composer.is_muted();
         draw_composer(frame, area, composer, live);
     }
@@ -1204,10 +1212,10 @@ fn tree_rows_area(tree: Rect) -> Rect {
 /// row holds it anyway and a second question would be a second answer.
 ///
 /// A header is only cut when a row is left over for the account under it. A
-/// panel one row tall would otherwise be a header over nothing — a run reporting
-/// its progress into a window with no room to report anything in — so such a
-/// panel degrades to the bare account, exactly as it was before there was a
-/// header to pay for.
+/// panel no taller than the header would otherwise be a header over nothing — a
+/// run reporting its progress into a window with no room to report anything in —
+/// so such a panel degrades to the bare account, exactly as it was before there
+/// was a header to pay for.
 fn panel_split(panel: Rect, header: Option<&RunHeader>) -> (Option<Rect>, Rect) {
     let inner = pane_inner(panel);
     if header.is_none() || inner.height <= RUN_HEADER_HEIGHT {
@@ -1537,13 +1545,13 @@ fn pane_block(focused: bool) -> Block<'static> {
 /// for it. A panel too small for the mark and its margins draws the bare border,
 /// exactly as it always did.
 ///
-/// With the account showing, every row is one line of it: a section heading
-/// naming a directory, or one thing that pass was seen doing with the elapsed
-/// clock of its own section in front of it, or the line the run finished with.
-/// With the thread showing, every row is one line of the conversation: a
-/// question somebody typed, one thing the model was seen doing while it answered,
-/// a row of the answer itself, or what the turn cost. With the document showing,
-/// every row is one line of the file, from its first. Which lines those are is
+/// With the account showing, every row is a line of it or the rest of one: a
+/// section heading naming a directory, or one thing that pass was seen doing
+/// with the elapsed clock of its own section in front of it, or the line the run
+/// finished with. With the thread showing, every row is a line of the
+/// conversation: a question somebody typed, one thing the model was seen doing
+/// while it answered, or a row of the answer itself. With the document showing,
+/// every row is a line of the file, from its first. Which rows those are is
 /// [`App::panel_lines`]'s answer, window and all — the app owns the scrolling,
 /// exactly as it owns the tree's — and this only words them and cuts them to the
 /// width.
@@ -1551,12 +1559,11 @@ fn pane_block(focused: bool) -> Block<'static> {
 /// A [`Paragraph`] with no [`Wrap`](ratatui::widgets::Wrap): every line handed
 /// over is one row, whatever is on it. Wrapping here would be the widget
 /// deciding how many rows the panel holds, which is the app's answer — it is
-/// what the window is cut out of and what the scrollback counts — so a document
-/// and a model's answer arrive already broken into the rows their width needs
-/// and an account arrives meaning to be cut. A row of an account that wrapped
-/// would put one activity on two rows, which makes the count of rows on screen
-/// stop being the count of things that happened and moves every row beneath it
-/// for a reason that has nothing to do with the run.
+/// what the window is cut out of and what the scrollback counts — so every card
+/// arrives already broken into the rows its width needs (see
+/// [`mod@crate::wrap`]). The count of rows on screen is therefore not the count
+/// of things that happened; the clock in front of each of them is what says
+/// where one ends and the next begins.
 ///
 /// While the showing card's window is scrolled back, the bottom edge of the
 /// border says how much of *that* card is below it and which key returns to
@@ -1626,6 +1633,9 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
 /// and nothing is handed one — what the line says is what the run has said, so
 /// two frames drawn at two instants with no event in between draw the same row.
 fn draw_run_header(frame: &mut Frame<'_>, area: Rect, header: &RunHeader) {
+    // Into the whole of the area it was given, which is the line's row and the
+    // blank one under it (see [`RUN_HEADER_HEIGHT`]): one line drawn into two
+    // rows leaves the second one as the border cleared it, which is the gap.
     frame.render_widget(
         Paragraph::new(Line::from(run_header_line(header, usize::from(area.width))).bold()),
         area,
@@ -1819,53 +1829,40 @@ fn scrollback(below: usize) -> String {
 
 /// One line of the panel's contents as one row of it, cut to `width`.
 ///
-/// A heading is the directory's path, bold and flush left; a clocked line is its
-/// elapsed time and what happened, indented under the heading it belongs to; the
-/// summary is the run's last word, flush left and bold like a heading because it
-/// is about the whole run rather than about any one directory.
+/// What goes in front of a line and whether it is bold is [`shape`]'s answer,
+/// not this function's, and that is the whole of why it is a call: the app wraps
+/// a line at the width the prefix leaves it (see [`mod@crate::wrap`]), and a
+/// second opinion here about what that prefix is would be a line broken at one
+/// width and drawn at another. A heading is the directory's path, bold and flush
+/// left; a clocked line is its elapsed time and what happened, indented under
+/// the heading it belongs to; the summary is the run's last word, flush left and
+/// bold like a heading because it is about the whole run rather than about any
+/// one directory; a question carries [`SAID_MARKER`] and is bold like the
+/// headings it stands among, since it is the heading of its turn.
 ///
 /// A line of a document is the file's own text, flush left, unindented and
-/// unstyled — nothing is added to it and nothing is taken off it. It arrives cut
-/// to no width and wrapped to this one already, one row per row the app counted
-/// (see [`mod@crate::wrap`]), so on the frames the binary draws — which tell the
-/// app the width first, every time — [`truncated`] takes nothing off it. The
+/// unstyled — nothing is added to it and nothing is taken off it. So is a
+/// model's answer, because prose is prose, and it reaches here only on the
+/// thread's card: nothing an [`Account`] holds is an [`Entry::Text`], so no
+/// arrangement of runs and swaps can put a sentence of a model's on the account.
+///
+/// Everything arrives already broken into the rows this width needs, one row per
+/// row the app counted, so on the frames the binary draws — which tell the app
+/// the width first, every time — [`truncated`] takes nothing off anything. The
 /// call stays because [`draw`] takes an [`App`] rather than a promise about one:
 /// a caller that never measured the panel, or measured a different one, gets a
-/// row inside the border rather than a row over it. See
-/// [`App::show_document`].
-///
-/// A model's answer is that same arm and gets that same treatment — plain text,
-/// flush left, unstyled, already wrapped to the panel's width — because it is
-/// prose and prose is prose. It is the one thing on this screen a model wrote in
-/// its own words, and it reaches here only on the thread's card: nothing an
-/// [`Account`] holds is a [`Entry::Text`], so no arrangement of runs and swaps
-/// can put a sentence of a model's on the account.
-///
-/// What the reader typed is its own arm and leads with [`SAID_MARKER`], bold
-/// like the headings it stands among: it is the heading of its turn, and a
-/// question that drew exactly like the answer under it would leave a reader
-/// working out from the words which of them had said what. It is cut and never
-/// wrapped, like an account's line — the reader has their own question already,
-/// and what the width is spent on is the answer.
+/// row inside the border rather than a row over it. See [`App::show_document`].
 ///
 /// The row is built whole and cut once, rather than assembled from a styled
 /// clock and a styled text: the width is a fact about the row, and two spans
 /// each guessing at their share of it is how a line ends up one column too wide.
 fn panel_row(line: &Entry, width: u16) -> Line<'static> {
-    let width = usize::from(width);
-    match line {
-        Entry::Directory { path } => {
-            Line::from(truncated(&path.display().to_string(), width)).bold()
-        }
-        Entry::Clocked { clock, text } => {
-            Line::from(truncated(&format!("{PANEL_INDENT}{clock} {text}"), width))
-        }
-        Entry::Summary { text } => Line::from(truncated(text, width)).bold(),
-        Entry::Said { text } => {
-            Line::from(truncated(&format!("{SAID_MARKER}{text}"), width)).bold()
-        }
-        Entry::Text { text } => Line::from(truncated(text, width)),
-    }
+    let shape = shape(line);
+    let row = Line::from(truncated(
+        &format!("{}{}", shape.prefix, shape.text),
+        usize::from(width),
+    ));
+    if shape.heading { row.bold() } else { row }
 }
 
 /// `text`, cut to `width` columns with an [`ELLIPSIS`] where it was cut.
@@ -2328,6 +2325,7 @@ fn pulse_colour(app: &App, now: Instant) -> Option<Color> {
 /// left fits. Cut at the edge instead, the name each would lose first is the way
 /// out of warlock and the way out of the run.
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let area = footer_text_area(area);
     let counts = app.counts();
     let mut tally = Vec::new();
     for state in NodeState::ALL {
@@ -2354,6 +2352,31 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     )
     .dim();
     frame.render_widget(Paragraph::new(vec![Line::from(tally), keys, message]), area);
+}
+
+/// Where the footer's own text goes inside the band it was given: in from each
+/// edge by the width of a pane's border.
+///
+/// The footer is nobody's pane and draws no border, so left alone its lines
+/// would start in column zero — the column the panel's border owns, one to the
+/// left of every row of text above it. Three lines flush against the edge under
+/// a screen of lines that are not reads as a slip rather than as a band of its
+/// own, and the fix is a column, not a border: a box around the footer would
+/// cost two rows and make the tally look like a fourth card.
+///
+/// Taken off both edges rather than only the left, so the keys line — which is
+/// laid out for the width it is handed — gives its names up at the width it is
+/// actually drawn in, and a long message is cut where the panes end rather than
+/// a column past them.
+///
+/// A band too narrow to inset comes back with nothing in it, which on a
+/// terminal one or two columns wide is every line there is anyway.
+fn footer_text_area(footer: Rect) -> Rect {
+    Rect {
+        x: footer.x + BORDER_THICKNESS,
+        width: footer.width.saturating_sub(2 * BORDER_THICKNESS),
+        ..footer
+    }
 }
 
 /// What a state is called in the footer.
@@ -2610,9 +2633,9 @@ mod tests {
         RUN_HEADER_HEIGHT, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES,
         SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER, THREAD_TITLE,
         TREE_MIN_WIDTH, TREE_PERCENT, areas, centred, composer_height, composer_on_screen,
-        confirm_area, confirm_size, display_width, draw, guide_prefixes, hit_test, keys_line,
-        mark_area, pacting_keys_line, pane_inner, panel_height, panel_width, run_header_height,
-        scope_size, tree_height, tree_rows_area, tree_width, truncated,
+        confirm_area, confirm_size, display_width, draw, footer_text_area, guide_prefixes,
+        hit_test, keys_line, mark_area, pacting_keys_line, pane_inner, panel_height, panel_width,
+        run_header_height, scope_size, tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::COMPOSER_MAX_ROWS;
     use crate::account::Outcome;
@@ -3192,6 +3215,31 @@ mod tests {
         text.trim_end().to_string()
     }
 
+    /// Line `line` of the footer, read from the columns the footer's text is
+    /// drawn in.
+    ///
+    /// The footer draws no border and its text is inset a column from each edge
+    /// so that it begins where the panes' own rows do (see
+    /// [`footer_text_area`]). A test reading the whole row would read that
+    /// column too and compare every line against a leading blank.
+    fn footer_line(buffer: &Buffer, line: u16) -> String {
+        let band = Rect {
+            x: buffer.area.x,
+            y: buffer.area.height - FOOTER_HEIGHT,
+            width: buffer.area.width,
+            height: FOOTER_HEIGHT,
+        };
+
+        text_in(buffer, footer_text_area(band), band.y + line)
+    }
+
+    /// How many columns the footer's text has on a terminal `width` wide: the
+    /// width the keys line is laid out for, which is what [`footer_text_area`]
+    /// leaves after insetting a column at each edge.
+    fn footer_width(width: u16) -> usize {
+        usize::from(footer_text_area(Rect::new(0, 0, width, FOOTER_HEIGHT)).width)
+    }
+
     /// Every row of a buffer, full width, as text.
     fn rows_text(buffer: &Buffer) -> Vec<String> {
         (0..buffer.area.height)
@@ -3363,7 +3411,13 @@ mod tests {
 
     /// Assert that the panel of `buffer` is the bare border it drew before
     /// there was a mark: every cell inside it a space, the border whole on all
-    /// four sides, and nothing on its bottom edge.
+    /// four sides but for the card's own title, and nothing on its bottom edge.
+    ///
+    /// The title is the one thing the top edge is allowed to carry. The panel
+    /// opens on the conversation, which is the card that says its name on the
+    /// border (see [`THREAD_TITLE`]), and the blanks padding that name off the
+    /// corner are cells of the edge that are not border — so the top edge is
+    /// only held to being unbroken on the cards that name nothing.
     fn assert_bare_panel(buffer: &Buffer) {
         let panel = areas(buffer.area, None).panel;
         let inner = pane_inner(panel);
@@ -3382,8 +3436,15 @@ mod tests {
         // The border is still there, on all four sides, carrying nothing of its
         // own: no title, and no scrollback indicator on a panel with nothing to
         // scroll.
+        let top = panel_top_edge(buffer);
+        let titled = top.contains(THREAD_TITLE.trim());
         for x in panel.x..panel.x + panel.width {
-            assert_ne!(buffer[(x, panel.y)].symbol(), " ", "the top edge at {x}");
+            // The title, and the blanks padding it, are what the top edge is
+            // allowed to carry; a panel too narrow for the name carries none of
+            // it and the edge is unbroken.
+            if !titled {
+                assert_ne!(buffer[(x, panel.y)].symbol(), " ", "the top edge at {x}");
+            }
             assert_ne!(
                 buffer[(x, panel.y + panel.height - 1)].symbol(),
                 " ",
@@ -4311,7 +4372,7 @@ mod tests {
         // not how it survives a narrow terminal.
         let buffer = render(&app, KEYS_WIDTH, height);
 
-        let tally = row_text(&buffer, height - FOOTER_HEIGHT);
+        let tally = footer_line(&buffer, 0);
         for state in NodeState::ALL {
             assert!(
                 tally.contains(&format!(
@@ -4322,7 +4383,7 @@ mod tests {
                 "footer {tally:?} is missing the count for {state:?}"
             );
         }
-        let keys = row_text(&buffer, height - FOOTER_HEIGHT + 1);
+        let keys = footer_line(&buffer, 1);
         // Every key, in full: equality rather than a bag of substrings, so a
         // line that has grown past the width it is drawn at fails here instead
         // of quietly losing whatever sat on the right-hand end of it.
@@ -4362,7 +4423,7 @@ mod tests {
         // And the lines either side of it are the footer's own, untouched by
         // the new key: the tally still counts the whole tree, and the message
         // line is blank because nothing has been said.
-        assert_eq!(row_text(&buffer, height - 1), "");
+        assert_eq!(footer_line(&buffer, FOOTER_HEIGHT - 1), "");
     }
 
     #[test]
@@ -4406,17 +4467,17 @@ mod tests {
         let buffer = render(&app, 120, height);
         let said = app.message().expect("a refusal says why").to_owned();
         assert!(said.contains("is a file"), "{said:?}");
-        assert_eq!(row_text(&buffer, height - 1), said);
+        assert_eq!(footer_line(&buffer, FOOTER_HEIGHT - 1), said);
         // And it took nothing else's line: the tally and the keys are still on
         // the two lines above it.
-        assert!(row_text(&buffer, height - FOOTER_HEIGHT).contains("unpacted"));
-        assert!(row_text(&buffer, height - FOOTER_HEIGHT + 1).contains("p: pact"));
+        assert!(footer_line(&buffer, 0).contains("unpacted"));
+        assert!(footer_line(&buffer, 1).contains("p: pact"));
 
         // The next keystroke moves on, and the line goes blank again.
         app.select_next();
         let buffer = render(&app, 120, height);
         assert_eq!(app.message(), None);
-        assert_eq!(row_text(&buffer, height - 1), "");
+        assert_eq!(footer_line(&buffer, FOOTER_HEIGHT - 1), "");
     }
 
     #[test]
@@ -4433,15 +4494,12 @@ mod tests {
         // takes a relative path to be relative to the root already; the app
         // tests cover the cutting-down an absolutely-rooted tree gets.
         assert_eq!(
-            row_text(&buffer, height - 1),
+            footer_line(&buffer, FOOTER_HEIGHT - 1),
             "pacting warlock/crates/engine (3/12)"
         );
         // The tally has not moved, and no fourth line grew under the footer:
         // the progress line took the message line rather than adding one.
-        assert_eq!(
-            row_text(&buffer, height - FOOTER_HEIGHT),
-            row_text(&before, height - FOOTER_HEIGHT)
-        );
+        assert_eq!(footer_line(&buffer, 0), footer_line(&before, 0));
         assert_eq!(buffer.area.height, height);
         // And the tree above the footer is untouched: nothing marks the
         // directory being worked.
@@ -4451,7 +4509,7 @@ mod tests {
         app.set_pact_in_flight("warlock/assets", 4, 12);
         let buffer = render(&app, KEYS_WIDTH, height);
         assert_eq!(
-            row_text(&buffer, height - 1),
+            footer_line(&buffer, FOOTER_HEIGHT - 1),
             "pacting warlock/assets (4/12)"
         );
 
@@ -4477,19 +4535,16 @@ mod tests {
         // directory, and the footer says so: same last row, same directory and
         // fraction leading it, with the file and its part of the total added.
         assert_eq!(
-            row_text(&buffer, height - 1),
+            footer_line(&buffer, FOOTER_HEIGHT - 1),
             "pacting warlock/crates/engine (3/12) — summarising warlock/crates/engine/Cargo.toml (2/9)"
         );
         // The keys line is untouched — a pass running is not a key to press —
         // and so is the tally above it.
         assert_eq!(
-            row_text(&buffer, height - FOOTER_HEIGHT + 1),
+            footer_line(&buffer, 1),
             pacting_keys_line(usize::from(KEYS_WIDTH))
         );
-        assert_eq!(
-            row_text(&buffer, height - FOOTER_HEIGHT),
-            row_text(&quiet, height - FOOTER_HEIGHT)
-        );
+        assert_eq!(footer_line(&buffer, 0), footer_line(&quiet, 0));
         // And the footer is still exactly `FOOTER_HEIGHT` lines: the longer line
         // took the message line it was already on rather than wrapping onto a
         // fourth, so nothing above the footer moved and the tree is the tree it
@@ -4523,20 +4578,17 @@ mod tests {
         // progress line is where it has always been: the last row of the
         // screen, which is the last row of the footer.
         assert_eq!(
-            row_text(&buffer, height - 1),
+            footer_line(&buffer, FOOTER_HEIGHT - 1),
             "pacting warlock/crates/engine (3/12) — already running"
         );
         // The keys line is still the pacting one: a press that started nothing
         // does not change what the keys do, and Esc still says cancel.
         assert_eq!(
-            row_text(&buffer, height - FOOTER_HEIGHT + 1),
+            footer_line(&buffer, 1),
             pacting_keys_line(usize::from(KEYS_WIDTH))
         );
         // The tally is untouched, on the first line of the footer.
-        assert_eq!(
-            row_text(&buffer, height - FOOTER_HEIGHT),
-            row_text(&quiet, height - FOOTER_HEIGHT)
-        );
+        assert_eq!(footer_line(&buffer, 0), footer_line(&quiet, 0));
         // And the footer is still exactly `FOOTER_HEIGHT` lines: no fourth line
         // grew under it, and nothing above it moved up to make room — every row
         // over the footer is the row it was before the press, tree included.
@@ -4563,13 +4615,14 @@ mod tests {
             format!("{progress}{suffix}"),
             "the app words the line; this test only measures it"
         );
-        let fits =
-            u16::try_from(display_width(progress)).expect("a footer line's worth of columns");
+        let fits = u16::try_from(display_width(progress) + 2 * usize::from(BORDER_THICKNESS))
+            .expect("a footer line's worth of columns");
 
-        // Drawn exactly as wide as the fraction and not a column more: the
-        // fraction survives whole and the suffix is the part that is gone.
+        // Drawn with exactly the fraction's columns of footer and not one more,
+        // the inset at each edge aside: the fraction survives whole and the
+        // suffix is the part that is gone.
         let buffer = render(&app, fits, height);
-        assert_eq!(row_text(&buffer, height - 1), progress);
+        assert_eq!(footer_line(&buffer, FOOTER_HEIGHT - 1), progress);
         // Gone rather than moved: an unwrapped line is cut at the right edge,
         // so no part of the suffix turns up on a line of its own, and the
         // footer is still three lines with the keys on the middle one.
@@ -4584,23 +4637,28 @@ mod tests {
         // the whole pacting line, so what is on it is what survived — the two
         // names that answer "how do I stop this?".
         assert_eq!(
-            row_text(&buffer, height - FOOTER_HEIGHT + 1),
-            pacting_keys_line(usize::from(fits))
+            footer_line(&buffer, 1),
+            pacting_keys_line(footer_width(fits))
         );
-        assert!(row_text(&buffer, height - FOOTER_HEIGHT + 1).contains(CANCEL_KEY));
+        assert!(footer_line(&buffer, 1).contains(CANCEL_KEY));
         assert_eq!(buffer.area.height, height);
 
         // The cut is at the right edge and column by column: two columns wider
         // and the first of the suffix is back, with the fraction still whole in
         // front of it rather than shortened to make room for it.
         let wider = render(&app, fits + 2, height);
-        assert_eq!(row_text(&wider, height - 1), format!("{progress} —"));
+        assert_eq!(
+            footer_line(&wider, FOOTER_HEIGHT - 1),
+            format!("{progress} —")
+        );
 
         // And a terminal wide enough for the whole of it draws the whole of it.
-        let whole = u16::try_from(display_width(&format!("{progress}{suffix}")))
-            .expect("a footer line's worth of columns");
+        let whole = u16::try_from(
+            display_width(&format!("{progress}{suffix}")) + 2 * usize::from(BORDER_THICKNESS),
+        )
+        .expect("a footer line's worth of columns");
         assert_eq!(
-            row_text(&render(&app, whole, height), height - 1),
+            footer_line(&render(&app, whole, height), FOOTER_HEIGHT - 1),
             format!("{progress}{suffix}")
         );
     }
@@ -4609,7 +4667,6 @@ mod tests {
     fn the_keys_line_advertises_esc_as_cancel_while_a_pact_runs_and_says_quit_otherwise() {
         let mut app = App::from_tree(&fixture::tree());
         let height = 10;
-        let y = height - FOOTER_HEIGHT + 1;
 
         let idle = render(&app, KEYS_WIDTH, height);
         app.set_pact_in_flight("warlock/crates/engine", 3, 12);
@@ -4619,33 +4676,33 @@ mod tests {
         // whole while one is: equality, so a line that outgrew the terminal it
         // is drawn on fails here rather than losing its right-hand end quietly.
         assert_eq!(
-            row_text(&idle, y),
-            keys_line(app.mouse_captured(), usize::from(KEYS_WIDTH))
+            footer_line(&idle, 1),
+            keys_line(app.mouse_captured(), footer_width(KEYS_WIDTH))
         );
         assert_eq!(
-            row_text(&pacting, y),
-            pacting_keys_line(usize::from(KEYS_WIDTH))
+            footer_line(&pacting, 1),
+            pacting_keys_line(footer_width(KEYS_WIDTH))
         );
         // Esc means two things, and the line says which one it means now.
-        let said = row_text(&pacting, y);
+        let said = footer_line(&pacting, 1);
         assert!(said.contains("Esc: cancel"), "{said:?}");
         assert!(!said.contains("Esc/Ctrl-C: quit"), "{said:?}");
-        assert!(keys_line(true, usize::from(KEYS_WIDTH)).contains("Esc/Ctrl-C: quit"));
+        assert!(keys_line(true, footer_width(KEYS_WIDTH)).contains("Esc/Ctrl-C: quit"));
 
         // The line is short enough to survive the narrow terminal the other
         // footer tests draw on whole, because it is the line that answers "how
         // do I stop this?": every name on it, in order, laid out or not.
         let narrow = render(&app, 120, height);
         assert_eq!(
-            row_text(&narrow, y),
+            footer_line(&narrow, 1),
             "up/down k/j: move    space: collapse    Esc: cancel    q/Ctrl-C: quit"
         );
 
         // And the run ending puts today's line back, exactly.
         app.clear_pact_in_flight();
         assert_eq!(
-            row_text(&render(&app, KEYS_WIDTH, height), y),
-            keys_line(app.mouse_captured(), usize::from(KEYS_WIDTH))
+            footer_line(&render(&app, KEYS_WIDTH, height), 1),
+            keys_line(app.mouse_captured(), footer_width(KEYS_WIDTH))
         );
     }
 
@@ -4722,8 +4779,7 @@ mod tests {
     fn the_footer_keeps_the_whole_way_out_on_an_eighty_column_terminal() {
         let mut app = App::from_tree(&fixture::tree());
         let height = 10;
-        let y = height - FOOTER_HEIGHT + 1;
-        let columns = usize::from(EIGHTY_COLUMNS);
+        let columns = footer_width(EIGHTY_COLUMNS);
 
         // Eighty columns is narrower than the whole keys line, so this is a line
         // that has given names up — and the name it keeps is the one a stuck
@@ -4731,7 +4787,7 @@ mod tests {
         for captured in [true, false] {
             app.set_mouse_captured(captured);
 
-            let keys = row_text(&render(&app, EIGHTY_COLUMNS, height), y);
+            let keys = footer_line(&render(&app, EIGHTY_COLUMNS, height), 1);
 
             // Whole, not the first few characters of it: `contains` of the
             // entire name, with nothing after it on the line.
@@ -4762,7 +4818,7 @@ mod tests {
         for captured in [true, false] {
             app.set_mouse_captured(captured);
 
-            let keys = row_text(&render(&app, EIGHTY_COLUMNS, height), y);
+            let keys = footer_line(&render(&app, EIGHTY_COLUMNS, height), 1);
 
             assert!(
                 keys.contains(PACTING_QUIT_KEY),
@@ -4794,8 +4850,7 @@ mod tests {
     fn the_composers_names_are_the_first_the_eighty_column_footer_gives_up() {
         let mut app = App::from_tree(&fixture::tree());
         let height = 10;
-        let y = height - FOOTER_HEIGHT + 1;
-        let columns = usize::from(EIGHTY_COLUMNS);
+        let columns = footer_width(EIGHTY_COLUMNS);
         // In the order `KEY_DROP_ORDER` loses them, which is not the order
         // `KEYS` lists them in.
         let composer = [COMPOSE_KEYS, LEAVE_KEY, FOCUS_KEY];
@@ -4804,7 +4859,7 @@ mod tests {
             app.set_mouse_captured(captured);
             let pieces = idle_keys(captured);
 
-            let keys = row_text(&render(&app, EIGHTY_COLUMNS, height), y);
+            let keys = footer_line(&render(&app, EIGHTY_COLUMNS, height), 1);
 
             // The names this width could not afford, in the order the line is
             // documented to give them up in.
@@ -4866,7 +4921,6 @@ mod tests {
     fn the_drawn_keys_line_never_outgrows_the_terminal_it_is_drawn_on() {
         let mut app = App::from_tree(&fixture::tree());
         let height = 10;
-        let y = height - FOOTER_HEIGHT + 1;
 
         // Every width from one column up to wider than the whole line, in both
         // mouse states and with a pact running and without: measured in columns
@@ -4884,14 +4938,14 @@ mod tests {
             for captured in [true, false] {
                 app.set_mouse_captured(captured);
                 for width in 1..=KEYS_WIDTH {
-                    let columns = usize::from(width);
+                    let columns = footer_width(width);
                     let laid_out = if pacting {
                         pacting_keys_line(columns)
                     } else {
                         keys_line(captured, columns)
                     };
 
-                    let keys = row_text(&render(&app, width, height), y);
+                    let keys = footer_line(&render(&app, width, height), 1);
 
                     assert!(
                         display_width(&laid_out) <= columns,
@@ -5000,15 +5054,52 @@ mod tests {
             }
         }
 
-        // And that is what is drawn, not just what is assembled: a terminal
-        // thirteen columns wide says as much of the way out as it has room for.
+        // And that is what is drawn, not just what is assembled: a terminal with
+        // thirteen columns of footer says as much of the way out as it has room
+        // for. Two columns wider than the text, because the footer's lines are
+        // inset a column at each edge (see [`footer_text_area`]).
         let cut = "q/Esc/Ctrl-C:";
-        let width = u16::try_from(display_width(cut)).expect("a footer line's worth of columns");
+        let width = u16::try_from(display_width(cut) + 2 * usize::from(BORDER_THICKNESS))
+            .expect("a footer line's worth of columns");
         let height = 10;
 
         let buffer = render(&App::from_tree(&fixture::tree()), width, height);
 
-        assert_eq!(row_text(&buffer, height - FOOTER_HEIGHT + 1), cut);
+        assert_eq!(footer_line(&buffer, 1), cut);
+    }
+
+    #[test]
+    fn the_footers_lines_start_in_the_column_the_panels_rows_do() {
+        // The one thing the inset is for. The footer draws no border, so left
+        // alone its three lines would begin in the column the panel's border
+        // owns — one to the left of every row of text above them, which reads as
+        // a slip rather than as a band of its own.
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, HEIGHT);
+        let account = app.account_mut().expect("a pact has started");
+        account.open_section("crates/warlock-engine", base);
+        let buffer = render_at(&app, WIDTH, HEIGHT, at(base, 1));
+
+        let panel = panel_area(&buffer);
+        let footer = HEIGHT - FOOTER_HEIGHT;
+
+        // The account's heading is flush against the inside of the border, and
+        // the tally and the keys under it begin in that very column — the
+        // footer's own rows have no border in front of them, so the first thing
+        // drawn on them is the first column of text on the screen.
+        assert_ne!(
+            buffer[(panel.x, panel.y)].symbol(),
+            " ",
+            "the account's heading is not flush left"
+        );
+        assert_eq!(first_column(&buffer, footer), Some(panel.x));
+        assert_eq!(first_column(&buffer, footer + 1), Some(panel.x));
+    }
+
+    /// The first column of row `y` with something drawn in it, or `None` for a
+    /// row that is all blanks.
+    fn first_column(buffer: &Buffer, y: u16) -> Option<u16> {
+        (buffer.area.x..buffer.area.x + buffer.area.width).find(|&x| buffer[(x, y)].symbol() != " ")
     }
 
     #[test]
@@ -5030,26 +5121,30 @@ mod tests {
             .iter()
             .map(|state| format!("{} {}", tree.counts().get(*state), super::noun(*state)))
             .collect();
-        assert_eq!(row_text(&buffer, footer.y), tally.join("  "));
+        assert_eq!(footer_line(&buffer, 0), tally.join("  "));
         assert_eq!(
-            row_text(&buffer, footer.y + 1),
+            footer_line(&buffer, 1),
             idle_keys(app.mouse_captured()).join(KEY_GAP)
         );
-        assert_eq!(row_text(&buffer, footer.y + 2), "nothing to refresh");
+        assert_eq!(footer_line(&buffer, 2), "nothing to refresh");
 
         // The keys and the message are dim, every column of them, and the tally
         // is not: its colours are the node states', which dimness would mute.
-        for y in [footer.y + 1, footer.y + 2] {
-            let text = row_text(&buffer, y);
+        // Read from where the footer's text starts, which is a column in from
+        // the edge the band begins at.
+        let text_area = footer_text_area(footer);
+        for line in [1, 2] {
+            let y = footer.y + line;
+            let text = text_in(&buffer, text_area, y);
             let columns = u16::try_from(display_width(&text)).expect("a line's worth of columns");
-            for x in footer.x..footer.x + columns {
+            for x in text_area.x..text_area.x + columns {
                 assert!(
                     buffer[(x, y)].modifier.contains(Modifier::DIM),
                     "({x}, {y}) is not dim"
                 );
             }
         }
-        let first = &buffer[(footer.x, footer.y)];
+        let first = &buffer[(text_area.x, footer.y)];
         assert!(!first.modifier.contains(Modifier::DIM));
         assert_eq!(first.fg, colour_for(NodeState::Unpacted));
     }
@@ -5058,14 +5153,13 @@ mod tests {
     fn the_keys_line_names_the_mouse_key_by_what_the_next_press_does() {
         let mut app = App::from_tree(&fixture::tree());
         let height = 10;
-        let y = height - FOOTER_HEIGHT + 1;
 
         // Reporting its mouse, which is how warlock starts: the key on offer is
         // the one that stops it.
         app.set_mouse_captured(true);
         let capturing = render(&app, KEYS_WIDTH, height);
-        let keys = row_text(&capturing, y);
-        assert_eq!(keys, keys_line(true, usize::from(KEYS_WIDTH)));
+        let keys = footer_line(&capturing, 1);
+        assert_eq!(keys, keys_line(true, footer_width(KEYS_WIDTH)));
         assert!(keys.contains(MOUSE_OFF_KEY), "{keys:?}");
         assert!(!keys.contains(MOUSE_ON_KEY), "{keys:?}");
 
@@ -5074,8 +5168,8 @@ mod tests {
         // screen that says the wheel is the terminal's for the moment.
         app.set_mouse_captured(false);
         let released = render(&app, KEYS_WIDTH, height);
-        let keys = row_text(&released, y);
-        assert_eq!(keys, keys_line(false, usize::from(KEYS_WIDTH)));
+        let keys = footer_line(&released, 1);
+        assert_eq!(keys, keys_line(false, footer_width(KEYS_WIDTH)));
         assert!(keys.contains(MOUSE_ON_KEY), "{keys:?}");
         assert!(!keys.contains(MOUSE_OFF_KEY), "{keys:?}");
 
@@ -5083,9 +5177,9 @@ mod tests {
         // terminal, not about the tree, and it is not announced on the message
         // line either — that line is blank in both frames, and every row above
         // the keys line is the row it was.
-        assert_eq!(row_text(&capturing, height - 1), "");
-        assert_eq!(row_text(&released, height - 1), "");
-        for row in 0..y {
+        assert_eq!(footer_line(&capturing, FOOTER_HEIGHT - 1), "");
+        assert_eq!(footer_line(&released, FOOTER_HEIGHT - 1), "");
+        for row in 0..=(height - FOOTER_HEIGHT) {
             assert_eq!(
                 row_text(&capturing, row),
                 row_text(&released, row),
@@ -5097,10 +5191,10 @@ mod tests {
         // short line that answers "how do I stop this?" is not the place for a
         // key about the pointer, and `PACTING_KEYS` says so by not naming it.
         app.set_pact_in_flight("warlock/crates/engine", 3, 12);
-        let pacting = pacting_keys_line(usize::from(KEYS_WIDTH));
-        assert_eq!(row_text(&render(&app, KEYS_WIDTH, height), y), pacting);
+        let pacting = pacting_keys_line(footer_width(KEYS_WIDTH));
+        assert_eq!(footer_line(&render(&app, KEYS_WIDTH, height), 1), pacting);
         app.set_mouse_captured(true);
-        assert_eq!(row_text(&render(&app, KEYS_WIDTH, height), y), pacting);
+        assert_eq!(footer_line(&render(&app, KEYS_WIDTH, height), 1), pacting);
         assert!(!pacting.contains("mouse"));
     }
 
@@ -5117,7 +5211,7 @@ mod tests {
         for (index, row) in tree_rows(&buffer).iter().enumerate() {
             assert_eq!(row, "", "tree row {index} should be blank");
         }
-        assert!(row_text(&buffer, height - FOOTER_HEIGHT).contains("0 unpacted"));
+        assert!(footer_line(&buffer, 0).contains("0 unpacted"));
     }
 
     #[test]
@@ -5669,8 +5763,11 @@ mod tests {
         );
 
         // A pact under way with nothing recorded yet is still a pact: the panel
-        // is empty, and empty is not the same as free.
+        // is empty, and empty is not the same as free. The run took the panel
+        // because the card it took it from had nothing on it (see
+        // [`App::start_account`]), so what is drawn is the account's border.
         assert!(app.panel_lines(at(base, 1)).is_empty());
+        assert!(!app.showing_thread(), "the run took the empty card");
         assert_bare_panel(&render_at(
             &app,
             MARK_ROOM_WIDTH,
@@ -5784,7 +5881,7 @@ mod tests {
     }
 
     #[test]
-    fn a_line_too_long_for_the_panel_is_cut_with_an_ellipsis_and_never_wrapped() {
+    fn a_line_too_long_for_the_panel_is_broken_under_itself_rather_than_cut() {
         // Narrow enough that both lines run off the end: the panel gets half of
         // forty columns, less its border.
         let narrow = 40;
@@ -5806,17 +5903,22 @@ mod tests {
         let inner = panel_area(&buffer);
         assert_eq!(inner.width, 18, "the terminal is the narrow one");
         let drawn = panel_rows(&buffer);
-        // Cut, with the ellipsis in place of what was cut, and the row that
-        // fits left alone. Three lines, three rows: what did not fit is gone
-        // rather than pushed onto a row of its own.
+        // Three lines, six rows, and the whole of every one of them on screen:
+        // the heading broken where it had to be, the tool call broken under its
+        // own clock so the path stays in the column it started in, and the line
+        // that fits left exactly as it was.
         assert_eq!(
-            drawn[..3],
+            drawn[..6],
             [
-                format!("crates/warlock-en{ELLIPSIS}"),
-                format!("{PANEL_INDENT}0:02 Read crate{ELLIPSIS}"),
-                format!("{PANEL_INDENT}0:02 thinking"),
+                "crates/warlock-eng".to_owned(),
+                "ine".to_owned(),
+                format!("{PANEL_INDENT}0:02 Read"),
+                "       crates/warl".to_owned(),
+                "       ock-engine/".to_owned(),
+                "       src/pact.rs".to_owned(),
             ],
         );
+        assert_eq!(drawn[6], format!("{PANEL_INDENT}0:02 thinking"));
         for row in &drawn {
             assert!(
                 display_width(row) <= usize::from(inner.width),
@@ -5976,9 +6078,11 @@ mod tests {
         );
         assert_no_mark(&up);
 
-        // A swap, and the same panel draws the other card: the account's heading
+        // Two swaps — the empty conversation is a stop of its own, since it is
+        // where the field is — and the same panel draws the account: its heading
         // and its clocked line, the clock still counting up to the instant the
         // frame was drawn at, and nothing left of the document on screen.
+        app.swap_card();
         app.swap_card();
         let swapped = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
         let account = panel_rows(&swapped);
@@ -6183,14 +6287,15 @@ mod tests {
         let inner = panel_area(&buffer);
         assert_eq!(inner.width, 18, "the terminal is the narrow one");
         let drawn = panel_rows(&buffer);
-        // The question cut to the width behind its marker, the placeholder for
-        // a turn that heard nothing, and then the answer broken at spaces onto
-        // rows of its own — wrapped like a document and not cut like an account,
-        // so the end of the sentence is on screen.
+        // The question broken under its own marker, the placeholder for a turn
+        // that heard nothing, and then the answer broken at spaces onto rows of
+        // its own: the whole of what was asked and the whole of what came back,
+        // with nothing off the right-hand edge.
         assert_eq!(
-            drawn[..5],
+            drawn[..6],
             [
-                format!("{SAID_MARKER}what does the e{ELLIPSIS}"),
+                format!("{SAID_MARKER}what does the"),
+                "  engine do?".to_owned(),
                 format!("{PANEL_INDENT}0:01 waiting"),
                 "It walks the tree".to_owned(),
                 "and writes what it".to_owned(),
@@ -6207,7 +6312,7 @@ mod tests {
         // The answer's rows are plain: no colour, no modifier, nothing added to
         // the left of them — where the question above them is bold, which is
         // what a heading gets here and what no prose does.
-        for index in 2..5 {
+        for index in 3..6 {
             for x in inner.x..inner.x + inner.width {
                 let cell = &buffer[(x, inner.y + index)];
                 assert_eq!(cell.fg, Color::Reset, "at ({x}, {index})");
@@ -6229,12 +6334,14 @@ mod tests {
         app.set_panel_height(panel_height(size, None, None));
         app.set_panel_width(panel_width(size));
 
-        // Nothing has happened at all: no pact, no question, no read, and the
-        // panel is warlock's mark on a border with nothing written on it.
+        // Nothing has happened at all: no pact, no question, no read. The panel
+        // is warlock's mark on the conversation's own border — the card a
+        // session opens on, named on its edge from the first frame, with the
+        // field under it waiting for the first thing anybody types.
         let empty = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, base);
         assert_mark_drawn(&empty);
         assert!(
-            !panel_top_edge(&empty).contains(THREAD_TITLE.trim()),
+            panel_top_edge(&empty).contains(THREAD_TITLE.trim()),
             "{:?}",
             panel_top_edge(&empty)
         );
@@ -6253,22 +6360,30 @@ mod tests {
         );
         assert!(panel_top_edge(&asked).contains(THREAD_TITLE.trim()));
 
-        // Swapping back to the account, which no pact has filled, brings the
-        // mark back and takes the title away: the mark is about the card on
-        // screen, exactly as it always was.
+        // And there is no press that brings the mark back over a conversation:
+        // the account no pact has filled is not somewhere the swap key stops
+        // while there is something to read, so the panel stays where it is and
+        // the footer says why.
         app.swap_card();
         let swapped = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 1));
-        assert!(!app.showing_thread());
-        assert_mark_drawn(&swapped);
-        assert!(!panel_top_edge(&swapped).contains(THREAD_TITLE.trim()));
+        assert!(app.showing_thread());
+        assert_no_mark(&swapped);
+        assert!(panel_top_edge(&swapped).contains(THREAD_TITLE.trim()));
+        assert!(app.message().is_some(), "the refusal says what would help");
 
         // And a pact starting under the thread does not move the panel or the
         // mark: the account it fills is the card behind.
-        app.swap_card();
         app.start_account(at(base, 2));
         let running = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 3));
         assert!(app.showing_thread());
         assert_no_mark(&running);
+
+        // Now that a pact has filled it the account is worth a press again, and
+        // what it draws is the run rather than the mark.
+        app.swap_card();
+        let account = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 3));
+        assert!(!app.showing_thread());
+        assert_no_mark(&account);
     }
 
     #[test]
@@ -6315,20 +6430,23 @@ mod tests {
             "{:?}",
             rows[0]
         );
-        // The header takes one of the rows the panel already had, exactly as it
-        // does behind the account: the inside of the border is the height it
-        // always was, and the thread is drawn one row shorter under it.
+        // The header takes the rows it takes off the panel, exactly as it does
+        // behind the account: the inside of the border is the height it always
+        // was, and the thread is drawn that much shorter under it.
+        let taken = usize::from(RUN_HEADER_HEIGHT);
         assert_eq!(rows.len(), height);
         assert_eq!(
-            rows.len() - usize::from(RUN_HEADER_HEIGHT),
+            rows.len() - taken,
             usize::from(panel_height(
                 Size::new(WIDTH, HEIGHT),
                 None,
                 app.run_header().as_ref()
             )),
         );
-        // The rows under it are the thread's own, and the edge still says so.
-        assert!(rows[1].contains("Read line"), "{:?}", rows[1]);
+        // The rows under it are the thread's own, past the gap, and the edge
+        // still says so.
+        assert_eq!(rows[1].trim(), "", "{:?}", rows[1]);
+        assert!(rows[taken].contains("Read line"), "{:?}", rows[taken]);
         assert!(panel_top_edge(&running).contains(THREAD_TITLE.trim()));
     }
 
@@ -6360,8 +6478,10 @@ mod tests {
         assert!(!edge.contains(SCROLLBACK_ARROW), "{edge:?}");
         assert!(!edge.contains("more"), "{edge:?}");
 
-        // Swap, and the indicator comes back counting the account's lines: the
-        // number on the edge is the showing card's and follows it across.
+        // Swap round to the account, and the indicator comes back counting its
+        // lines: the number on the edge is the showing card's and follows it
+        // across.
+        app.swap_card();
         app.swap_card();
         let showing_account = render_at(&app, WIDTH, HEIGHT, at(base, 99));
         assert_eq!(app.panel_lines_below(), parked);
@@ -6647,16 +6767,22 @@ mod tests {
             assert!(with[0].contains(BAR_FILLED), "{:?}", with[0]);
             assert!(with[0].contains(BAR_EMPTY), "{:?}", with[0]);
 
-            // And the account under it is what it was, one line shorter: it is
-            // still following its newest line, so the row the header took is the
-            // one that was at the top and every other line is where it was.
+            // Then the blank row that keeps the run's line off the card's own
+            // first one.
+            assert_eq!(with[1].trim(), "", "{:?}", with[1]);
+
+            // And the account under those is what it was, that much shorter: it
+            // is still following its newest line, so the rows the header took
+            // are the ones that were at the top and every other line is where it
+            // was.
+            let taken = usize::from(RUN_HEADER_HEIGHT);
             assert_eq!(with.len(), without.len());
             assert_eq!(
-                with.len() - usize::from(RUN_HEADER_HEIGHT),
+                with.len() - taken,
                 usize::from(panel_height(size, None, Some(&header))),
                 "the window drew a different number of lines than it was measured at"
             );
-            assert_eq!(with[1..], without[1..]);
+            assert_eq!(with[taken..], without[taken..]);
         }
     }
 
@@ -6792,9 +6918,10 @@ mod tests {
         app.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
         let header = app.run_header().expect("a run in flight has a header");
 
-        // A panel with one row inside its border, or none: a header there would
-        // be a run reporting its progress into a window with no room to report
-        // anything in, so there is none and the account keeps what it had.
+        // A panel with no more rows inside its border than the header itself
+        // takes: a header there would be a run reporting its progress into a
+        // window with no room to report anything in, so there is none and the
+        // account keeps what it had.
         for height in 0..=chrome + RUN_HEADER_HEIGHT {
             let size = Size::new(WIDTH, height);
 
@@ -6810,16 +6937,18 @@ mod tests {
             );
         }
 
-        // And the one row such a panel has is a line of the account rather than
-        // a header drawn over nothing.
+        // And the rows such a panel does have are the account's rather than a
+        // header drawn over nothing.
         let height = chrome + RUN_HEADER_HEIGHT;
         let mut app = running_app(base, WIDTH, height, Run::Pact, 2, 5);
         fill_account(&mut app, base, 4);
         let drawn = panel_rows(&render_at(&app, WIDTH, height, at(base, 99)));
 
-        assert_eq!(drawn.len(), 1);
-        assert!(!drawn[0].contains(PACTING_RUN), "{:?}", drawn[0]);
-        assert!(!drawn[0].contains(BAR_EMPTY), "{:?}", drawn[0]);
+        assert_eq!(drawn.len(), usize::from(RUN_HEADER_HEIGHT));
+        for row in &drawn {
+            assert!(!row.contains(PACTING_RUN), "{row:?}");
+            assert!(!row.contains(BAR_EMPTY), "{row:?}");
+        }
     }
 
     #[test]
@@ -6924,9 +7053,10 @@ mod tests {
             "{before:?}"
         );
 
-        // During the run the top row inside the border is the header's, and the
-        // account keeps every row under it — it is still following its newest
-        // line, so the line the header displaced is the one that was at the top.
+        // During the run the top rows inside the border are the header's — its
+        // line and the gap under it — and the account keeps every row below
+        // them: it is still following its newest line, so the lines the header
+        // displaced are the ones that were at the top.
         app.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
         measure_panel(&mut app, WIDTH, HEIGHT);
         let during = panel_rows(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
@@ -6937,7 +7067,11 @@ mod tests {
             "{:?}",
             during[0]
         );
-        assert_eq!(during[1..], before[1..]);
+        assert_eq!(during[1].trim(), "", "{:?}", during[1]);
+        assert_eq!(
+            during[usize::from(RUN_HEADER_HEIGHT)..],
+            before[usize::from(RUN_HEADER_HEIGHT)..]
+        );
 
         // And when the run is over the rows come back: no header, the window is
         // the whole inside of the border again, and the frame is the frame from
@@ -7203,9 +7337,9 @@ mod tests {
         assert_eq!(muted_rows.last().map(String::as_str), Some(live.draft()));
     }
 
-    /// An app showing a conversation with a run writing into it: a question,
-    /// its answer, and then a pact started from the tree over the top of them,
-    /// which appends its account to the thread as a turn nobody typed.
+    /// An app showing a conversation with a run going on behind it: a question,
+    /// its answer, and then a pact started from the tree, which fills the
+    /// account card without touching the one on screen.
     ///
     /// The two tests below are about the field under that thread, so what they
     /// need of the app is that the thread is what is showing and that a run is
@@ -7224,19 +7358,18 @@ mod tests {
     }
 
     #[test]
-    fn a_field_muted_by_a_run_is_dim_and_caretless_and_still_on_screen() {
-        // The other thing that mutes the field, drawn. A pact or a refresh
-        // started while the reader is looking at the conversation writes its
-        // account into the thread as a turn nobody typed, and the field under
-        // that thread is dim and caretless for as long as the run lasts — the
-        // same drawing as a turn being answered, because it is the same fact
-        // about the field.
+    fn a_field_under_a_conversation_is_drawn_the_same_whatever_a_run_is_doing() {
+        // A pact or a refresh started while the reader is looking at the
+        // conversation fills the card behind it and takes nothing from the field
+        // in front: it is lit, it draws its caret, and it types. Muting is one
+        // question at a time and nothing else (see `field_muted`), so the only
+        // difference this frame can show is the one the flag makes — and the
+        // flag is the loop's, from the turn alone.
         //
-        // And it is only a drawing: muting leaves the field exactly where it is,
-        // same pane, same rows off the panel, same characters in it. Somebody
-        // who was half way through a question when a run started still has their
-        // question. The other reason a field is not typed into — the document
-        // card — is the test after this one, and it is a different rule.
+        // Muted or not it is the same pane in the same place holding the same
+        // draft. The other reason a field is not typed into — the card showing
+        // being one the field is not drawn under — is the test after this one,
+        // and it is a different rule.
         let base = Instant::now();
         let now = at(base, 9);
         let app = app_running_under_a_thread(base);
@@ -7283,10 +7416,10 @@ mod tests {
             (FOCUS_COLOUR, Modifier::BOLD),
             "a live field the keys are in is lit"
         );
-        assert_ne!(dim_fg, FOCUS_COLOUR, "a field a run muted is lit");
+        assert_ne!(dim_fg, FOCUS_COLOUR, "a muted field is lit");
         assert!(
             dim_modifier.contains(Modifier::DIM),
-            "a field a run muted should be dim: {dim_modifier:?}"
+            "a muted field should be dim: {dim_modifier:?}"
         );
         assert!(
             live_caret.contains(Modifier::REVERSED),
@@ -7294,7 +7427,7 @@ mod tests {
         );
         assert!(
             !muted_caret.contains(Modifier::REVERSED),
-            "a field a run muted drew a caret: {muted_caret:?}"
+            "a muted field drew a caret: {muted_caret:?}"
         );
 
         // Nothing else about the frame moved: the field is the same pane in the
@@ -7305,9 +7438,9 @@ mod tests {
         assert_eq!(muted_rows.last().map(String::as_str), Some(live.draft()));
         assert_eq!(live_panel, muted_panel, "muting moved the panel's lines");
         assert_eq!(
-            composer_on_screen(&app, &muted),
-            Some(&muted),
-            "a run takes the field's keys, not its rows"
+            composer_on_screen(&app, &live),
+            Some(&live),
+            "a run behind the conversation took the field off the frame"
         );
         assert_eq!(
             panel_height(Size::new(WIDTH, FIXTURE_HEIGHT), Some(&muted), None),
@@ -7333,9 +7466,9 @@ mod tests {
         let mut muted = live.clone();
         muted.set_muted(true);
         assert_eq!(
-            composer_on_screen(&app, &muted),
-            Some(&muted),
-            "a run takes the field's keys, not its rows"
+            composer_on_screen(&app, &live),
+            Some(&live),
+            "a run behind the conversation took the field off the frame"
         );
 
         app.show_document(["# The engine", "", "It walks the tree."], false);
@@ -7374,11 +7507,8 @@ mod tests {
             "a muted draft reached a frame the document card has"
         );
 
-        // Shift-Tab round the cycle to the conversation — the account is
-        // between them, because a run has filled it — and the field is there
-        // again, dim, with every character still in it.
-        app.swap_card();
-        assert!(!app.showing_thread(), "the cycle skipped the account");
+        // Shift-Tab back to the conversation, which is the very next card, and
+        // the field is there again — dim, with every character still in it.
         app.swap_card();
         assert!(app.showing_thread(), "the swap landed somewhere else");
         assert_eq!(composer_on_screen(&app, &muted), Some(&muted));
@@ -7970,7 +8100,7 @@ mod tests {
         for y in footer.y..footer.y + footer.height {
             assert_eq!(row_text(&open, y), row_text(&closed, y), "footer row {y}");
         }
-        let keys = row_text(&open, footer.y + 1);
+        let keys = footer_line(&open, 1);
         for name in KEYS {
             assert!(keys.contains(name), "{keys:?} is missing {name}");
         }

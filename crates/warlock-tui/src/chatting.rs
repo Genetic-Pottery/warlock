@@ -1085,10 +1085,6 @@ mod tests {
                     warlock_tui::Line::Text {
                         text: ANSWER.to_owned()
                     },
-                    warlock_tui::Line::Summary {
-                        text: "this turn cost $0.01 — chat, never added to a pact's total"
-                            .to_owned()
-                    },
                 ]
             );
             // A turn that worked says nothing on the footer.
@@ -1168,8 +1164,8 @@ mod tests {
             settle(&mut chat, &mut app, at(base, 12));
 
             // The failed turn is still on the card above the answered one, and
-            // the answered one is whole: the work as it arrived, the answer, and
-            // what this turn cost.
+            // the answered one is whole: the work as it arrived, and the
+            // answer.
             assert_eq!(
                 rows(&app, at(base, 12)),
                 vec![
@@ -1183,10 +1179,6 @@ mod tests {
                     clocked(2, "writing"),
                     warlock_tui::Line::Text {
                         text: ANSWER.to_owned()
-                    },
-                    warlock_tui::Line::Summary {
-                        text: "this turn cost $0.01 — chat, never added to a pact's total"
-                            .to_owned()
                     },
                 ]
             );

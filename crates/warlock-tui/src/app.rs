@@ -98,7 +98,7 @@ use warlock_engine::{IntoDocument, NodeState, StateCounts, Tree, to_manifest_pat
 use crate::account::{Account, Line};
 use crate::claude::Activity;
 use crate::thread::{Ending, Thread};
-use crate::wrap::wrapped;
+use crate::wrap::rows as wrap_rows;
 
 /// One line of the flattened tree: what to draw, how far to indent it, and
 /// which colour it takes.
@@ -578,10 +578,10 @@ struct Summarising {
 /// see [`App::toggle_focus`] and [`App::focus`].
 ///
 /// [`Focus::Composer`] is the one variant that is not always available: the
-/// composer is not drawn at all while the panel's document card is up, and focus
-/// must never sit on a field nobody can see. That rule lives on the app rather
-/// than here, because it is a fact about which card is showing — see
-/// [`App::composer_showable`].
+/// composer is drawn under the conversation and under neither of the other two
+/// cards, and focus must never sit on a field nobody can see. That rule lives on
+/// the app rather than here, because it is a fact about which card is showing —
+/// see [`App::composer_showable`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Focus {
     /// The tree column. The movement keys move its selection, which is what
@@ -1061,12 +1061,11 @@ struct Status {
 /// goes on filling the card behind it, and the answer to a question they asked
 /// a minute ago is still there when they swap back to it.
 ///
-/// A run started while a conversation exists is written to *two* of the cards:
-/// its own, and the thread, where it takes a turn nobody typed at the position
-/// it started at (see [`App::start_account`] and [`App::write_run`]). Both
-/// copies are the same [`Account`] fed the same calls, so a run reads the same
-/// in the conversation as it does on its own card; what it is not is a second
-/// card, a second history or a card swapped away under the reader.
+/// A run is written to exactly one of the cards — its own — however many of the
+/// three are filled and whichever one the reader is looking at (see
+/// [`App::start_account`] and [`App::write_run`]). A conversation carrying the
+/// same run would be one run written twice on one screen, and a card swapped
+/// away under the reader would be worse: what is showing is theirs.
 ///
 /// A card being filled is not the same as it having lines. An app that has never
 /// run a pact has nothing to draw in the panel at all, not even a heading, while
@@ -1121,16 +1120,22 @@ struct Panel {
 /// which is a fact about the card rather than a fourth thing to be showing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 enum Showing {
-    /// The account of the pact running now, or of the last one to run, or the
-    /// empty card an app that has run no pact opens on.
-    #[default]
+    /// The account of the pact running now, or of the last one to run. Reached
+    /// only once a pact has run: an empty one is a card about nothing, and the
+    /// swap key steps over it.
     Account,
-    /// The conversation: every question typed below and what came back. Only
-    /// [`App::start_turn`] brings it to the front, and the swap key takes it
-    /// either way.
+    /// The conversation: every question typed below and what came back, and the
+    /// card the panel opens on.
+    ///
+    /// The one card that is always somewhere to be. It is where the field is
+    /// drawn, so it is where a session starts and where the swap key can always
+    /// go back to — empty, it draws warlock's mark over a field with nothing
+    /// typed in it yet, which is the whole of what an app that has just started
+    /// has to say.
+    #[default]
     Thread,
-    /// The document last read. Only [`App::show_document`] puts the panel here,
-    /// and only the swap key takes it back.
+    /// The document last read. Reached only once [`App::show_document`] has put
+    /// one there, and only by the swap key after that.
     Document,
 }
 
@@ -1141,13 +1146,13 @@ impl Showing {
     /// reason — an arm per card, so "the panel is showing one of these" stays
     /// the thing the type says and a fourth card is a compile error here rather
     /// than a swap that quietly went nowhere. The order is the order the reader
-    /// reads them in: the run, then the conversation about it, then the file it
-    /// wrote.
+    /// comes to them in: the conversation they start on, the run they asked for,
+    /// then the file it wrote.
     const fn next(self) -> Self {
         match self {
-            Self::Account => Self::Thread,
-            Self::Thread => Self::Document,
-            Self::Document => Self::Account,
+            Self::Thread => Self::Account,
+            Self::Account => Self::Document,
+            Self::Document => Self::Thread,
         }
     }
 }
@@ -1283,32 +1288,44 @@ trait Shown {
     fn window(&self, offset: usize, height: usize, width: usize, now: Instant) -> Vec<Line>;
 }
 
-/// An account is not wrapped, so the width does not reach it: one thing that
-/// happened is one row, and a line too long for the panel is cut there with an
-/// ellipsis (see [`crate::ui`]). Its rows move with the clock instead, which is
-/// the half of the pair a document has no use for.
+/// An account is wrapped like everything else the panel draws: a pass that
+/// reports a long tool detail, or fails with a whole sentence of somebody else's
+/// stderr, has that line broken across the rows it needs rather than cut off at
+/// the edge (see [`mod@crate::wrap`]). What separates one thing that happened
+/// from the next is then the clock in front of it, since the count of rows is no
+/// longer the count of events.
+///
+/// The count is taken from the account's own start, which is the one instant an
+/// account that has rows can always name. `now` decides what a clock *says*
+/// rather than whether it is a row — with the one exception that a clock going
+/// from `9:59` to `10:00` takes a column off the line beside it, which can move
+/// a line that was exactly one column inside the width onto a second row. The
+/// cost of that is one row of scrollback being a frame behind, which the next
+/// frame settles.
 impl Shown for Account {
-    fn line_count(&self, _width: usize) -> usize {
-        Self::line_count(self)
+    fn line_count(&self, width: usize) -> usize {
+        self.lines(self.started())
+            .iter()
+            .map(|line| rows_of(line, width).len())
+            .sum()
     }
 
-    fn window(&self, offset: usize, height: usize, _width: usize, now: Instant) -> Vec<Line> {
-        Self::window(self, offset, height, now)
+    fn window(&self, offset: usize, height: usize, width: usize, now: Instant) -> Vec<Line> {
+        self.lines(now)
+            .iter()
+            .flat_map(|line| rows_of(line, width))
+            .skip(offset)
+            .take(height)
+            .collect()
     }
 }
 
-/// A thread is both at once, and which half a row belongs to is decided by what
-/// kind of line it is. The work lines are the account's own lines, worded by the
-/// account's own function, so they count one row each and are cut to the width
-/// by the renderer exactly as a run's are. The answer is prose — the only prose
-/// warlock draws — so it is wrapped to the panel's width through the same
-/// `rows_of` a document goes through, and a terminal dragged narrower re-flows
-/// an answer the reader is looking at rather than asking the model again.
-///
-/// The question is not wrapped: it is what the reader typed, in the rows they
-/// typed it in, and a line of it too long for the panel is cut like an account's.
-/// What they came back to read is the answer, and it is the answer the width is
-/// spent on.
+/// A thread is every kind of line the panel has in one card — a question, the
+/// account's own work lines, prose — and every one of them goes through the same
+/// `rows_of` at the panel's width, so a terminal dragged narrower re-flows the
+/// turn a reader is looking at rather than asking the model again. What differs
+/// between them is only where a continuation row sits: under the marker for a
+/// question, under the clock for a work line, flush left for the answer.
 impl Shown for Thread {
     fn line_count(&self, width: usize) -> usize {
         // Counted from the rows themselves rather than from a second formula
@@ -1360,21 +1377,15 @@ impl Shown for Vec<Line> {
     }
 }
 
-/// The rows one line of a document or a thread draws as at `width`.
+/// The rows one line of a card draws as at `width`.
 ///
-/// One row per line for everything but text, and text is the prose: every line
-/// of a document ([`App::refill_document`] words them all as [`Line::Text`]) and
-/// a turn's answer. The other arm is a heading, a clock, a summary or a question
-/// somebody typed, each of which is one thing that happened or one thing that
-/// was said and so one row, cut to the width by the renderer.
+/// One row wherever the line fits, and the rows it needs where it does not: the
+/// wrap module's answer, not this one's, so that what the app counts and what
+/// the renderer draws are the same rows from the same code. See
+/// [`rows`](crate::wrap::rows), which is also where the shape of a continuation
+/// row is decided.
 fn rows_of(line: &Line, width: usize) -> Vec<Line> {
-    match line {
-        Line::Text { text } => wrapped(text, width)
-            .into_iter()
-            .map(|text| Line::Text { text })
-            .collect(),
-        other => vec![other.clone()],
-    }
+    wrap_rows(line, width)
 }
 
 impl Panel {
@@ -1489,10 +1500,11 @@ impl App {
     /// All three of the panel's cards are empty: no pact has run this session,
     /// nobody has asked anything and no file has been read, so the panel has
     /// nothing whatever to draw, which is a different state from a run that has
-    /// started and done nothing yet. See [`App::start_account`]. The account is
-    /// the card showing, as it is on every app until a document or a question
-    /// arrives, and all three windows start the way the tree's does — no height,
-    /// no offset — since nothing has been drawn.
+    /// started and done nothing yet. See [`App::start_account`]. The
+    /// conversation is the card showing — it is the one card that is always
+    /// somewhere to be, and the one the field is drawn under — and all three
+    /// windows start the way the tree's does, no height and no offset, since
+    /// nothing has been drawn.
     ///
     /// The tree has the focus, so the movement keys move its selection from the
     /// first keystroke on. See [`App::focus`].
@@ -1553,7 +1565,7 @@ impl App {
                     offset: 0,
                     follows: false,
                 },
-                showing: Showing::Account,
+                showing: Showing::Thread,
                 height: 0,
                 width: 0,
             },
@@ -1942,88 +1954,49 @@ impl App {
     /// the document, following its own newest line, and is there the moment they
     /// swap back.
     ///
-    /// The conversation, if there is one, gets the same run as a turn nobody
-    /// typed — [`Thread::open_run`] — opened here so that a run and its turn
-    /// begin at the same instant and there is no window in which events could
-    /// arrive with only one of the two open. It is the same run in two places
-    /// rather than two records of it: both are [`Account`]s, both are fed by
-    /// [`App::write_run`], and the turn's rows are the account's own rows.
+    /// The conversation is not touched, and that is the rule rather than an
+    /// omission. A run has a card of its own — this one — and a conversation
+    /// that also carried it would be the same run written twice on one screen,
+    /// arriving in the middle of whatever the reader was reading. The thread is
+    /// what somebody typed and what came back; a pact is the account's, whole,
+    /// one swap away.
     ///
-    /// A session that has never chatted keeps no conversation, and a run does
-    /// not conjure one: a thread card filled by a keystroke nobody typed into it
-    /// would put warlock's mark in the swap cycle and hand the reader an empty
-    /// history to swap through. So the turn is opened only where a thread is
-    /// already held, and the run is on its own card everywhere else. See
-    /// [`App::has_thread`], which this does not change.
+    /// Which card is showing moves in one case and one only: when the card on
+    /// screen has nothing on it. A reader watching a conversation keeps it, and
+    /// a reader reading a file keeps that — taking either away is taking away
+    /// something they chose to look at — but a reader who pressed the pact key
+    /// on a session that has said nothing is looking at warlock's mark, and the
+    /// run they just asked for is worth more than that. Nothing is lost either
+    /// way: an empty card has nothing to come back to, and the swap key reaches
+    /// it in one press once it does.
     ///
-    /// Which card is showing does not move, here as nowhere else a run reaches:
-    /// a reader on the thread stays on the thread and watches the run arrive in
-    /// it, and a reader on a document keeps the document. The thread's window
-    /// follows its newest line from this call, by `Card::accrue`'s rule and for
-    /// its reason — the reader pressed the key that started this run, so they
-    /// are asking to watch it, exactly as somebody who has just asked a question
-    /// is asking to see the answer.
+    /// The focus is rescued with it, because the account is a card with no field
+    /// under it (see [`App::composer_showable`]): a keyboard pointed at a
+    /// composer that has just stopped being drawn goes to the panel, exactly as
+    /// it does when a document takes the field away.
     pub fn start_account(&mut self, at: Instant) {
-        self.panel.account.place(Account::new(at), true);
-        if self.has_thread() {
-            self.panel.thread.accrue().open_run(at);
+        if !self.has_panel_content() {
+            self.panel.showing = Showing::Account;
+            self.rescue_focus();
         }
+        self.panel.account.place(Account::new(at), true);
     }
 
-    /// Do `write` to the account of the run in flight, and to the copy of it the
-    /// conversation is holding.
+    /// Do `write` to the account of the run in flight.
     ///
-    /// The one way a run's events reach the panel, and one call rather than two
-    /// so that the card and the turn cannot come to word the same event
-    /// differently: whatever `write` does — opening a directory's section,
-    /// recording an activity or a summarising pass, closing a section with its
-    /// outcome, finishing the run — is done to both accounts, in the same order,
-    /// with the same arguments. That is why it takes a closure and not the event:
-    /// [`Account`] already knows how to word every line a run will ever have, and
-    /// a method here per kind of event would be a second place a run's line could
-    /// come to be spelled.
+    /// The one way a run's events reach the panel. It takes a closure rather
+    /// than the event because [`Account`] already knows how to word every line a
+    /// run will ever have — opening a directory's section, recording an activity
+    /// or a summarising pass, closing a section with its outcome, finishing the
+    /// run — and a method here per kind of event would be a second place a run's
+    /// line could come to be spelled.
     ///
-    /// `write` is [`Fn`] because it is applied more than once. It is handed each
-    /// account in turn and must say the same thing to each of them; a closure
-    /// that counted its own calls would make the two copies disagree, which is
-    /// the one thing this method exists to prevent.
-    ///
-    /// Does nothing to a card that has no run to write to. Before the first
-    /// [`App::start_account`] there is no account at all — a run nobody started
-    /// this way, which is a test driving events straight down the channel — and
-    /// there is no run turn when the session has never chatted, when the run
-    /// started before the conversation did, or when the run's turn has been
-    /// closed. A line filed under a turn that is over would contradict a line
-    /// the reader can already see; dropping it is the honest way to fail. See
-    /// [`Thread::run_mut`].
-    pub fn write_run(&mut self, write: impl Fn(&mut Account)) {
+    /// Does nothing when there is no account to write to, which is a run nobody
+    /// started through [`App::start_account`]: a test driving events straight
+    /// down the channel. Dropping the line is the honest way to fail.
+    pub fn write_run(&mut self, write: impl FnOnce(&mut Account)) {
         if let Some(account) = self.panel.account.held.as_mut() {
             write(account);
-        }
-        if let Some(run) = self.panel.thread.held.as_mut().and_then(Thread::run_mut) {
-            write(run);
-        }
-    }
-
-    /// Close the conversation's run turn at `at`.
-    ///
-    /// The end of the run, said to the thread: the turn stops being the live one
-    /// and its account stops counting up, so a finished run sits in the
-    /// conversation at the length it took rather than ticking on under whatever
-    /// is asked next. Every ending comes through here — the run that wrote its
-    /// documents, the one that failed, the one the reader stopped — because all
-    /// four leave a run that is over.
-    ///
-    /// It adds no line. How the run went is its account's to say, in the outcome
-    /// lines and the summary its caller has already written through
-    /// [`App::write_run`], and a sentence of the thread's own about a run would
-    /// be a second wording of what is already on screen.
-    ///
-    /// A no-op with no conversation and on a thread whose newest turn is not a
-    /// live run, which is every session that has never chatted.
-    pub fn close_run(&mut self, at: Instant) {
-        if let Some(thread) = self.panel.thread.held.as_mut() {
-            thread.close_run(at);
         }
     }
 
@@ -2124,19 +2097,19 @@ impl App {
     /// [`App`] runs nothing and asks nobody, so whoever took the draft starts the
     /// worker themselves and reports back through the three methods below.
     ///
-    /// This is the only way an app comes to have a thread at all, and the only
-    /// thing besides [`App::show_document`] that decides which card is drawn:
-    /// somebody who has just asked a question is looking for the answer, so the
-    /// thread comes to the front and its window goes to the newest line. The card
-    /// accumulates rather than being replaced — one session, one conversation, so
-    /// the turn goes under every turn before it — which is `Card::accrue`'s whole
-    /// reason for existing beside `Card::place`.
+    /// This is the only way an app comes to have a turn in its thread at all, and
+    /// one of the three things that decide which card is drawn: somebody who has
+    /// just asked a question is looking for the answer, so the conversation comes
+    /// to the front and its window goes to the newest line. The card accumulates
+    /// rather than being replaced — one session, one conversation, so the turn
+    /// goes under every turn before it — which is `Card::accrue`'s whole reason
+    /// for existing beside `Card::place`.
     ///
     /// The other two cards are left exactly as they are, lines and windows and
     /// all: a run goes on filling the account behind the conversation, and a
     /// document read an hour ago is still on the line the reader left it on.
-    /// The composer is on screen over the thread as it is over the account, so
-    /// nothing here touches the focus.
+    /// The field is drawn under the conversation, so a question asked from a
+    /// field that was already on screen leaves the focus exactly where it was.
     ///
     /// Not a keystroke's whole answer: it says nothing and takes down nothing
     /// the last keystroke said, exactly as [`App::start_account`] does not.
@@ -2222,17 +2195,16 @@ impl App {
     ///
     /// A card nothing has filled is stepped over rather than shown, so the key
     /// never spends a press on warlock's mark: a session that has read no file
-    /// swaps between the run and the conversation, and one that has asked
-    /// nothing swaps between the run and the file exactly as it did when there
-    /// were two cards. The account is the exception and is never stepped over —
-    /// it is the card the panel opens on and the one the composer is drawn
-    /// under, so it is the way back from a document to a screen the reader can
-    /// type on.
+    /// swaps between the conversation and the run, and one that has run no pact
+    /// swaps between the conversation and the file. The conversation is the
+    /// exception and is never stepped over, empty or not — it is where the panel
+    /// opens and the one card the composer is drawn under, so it is always the
+    /// way back to a screen the reader can type on.
     ///
     /// Nothing else moves, with one exception. The focus stays on the pane it
-    /// was on — unless it was on the composer and this is the swap that brings
-    /// the document up, which hides the composer, and then it lands on the panel
-    /// as it does for [`App::show_document`]; see `rescue_focus`. The tree's
+    /// was on — unless it was on the composer and this is the swap that hides
+    /// it, and then it lands on the panel as it does for
+    /// [`App::show_document`]; see `rescue_focus`. The tree's
     /// selection and window stay where the reader left them, each card keeps its
     /// own window — so scrolling a card, swapping away and swapping back lands
     /// on the line they left, while an account or a thread left following goes on
@@ -2242,12 +2214,13 @@ impl App {
     /// card, which the reader can see, and a footer line announcing it would only
     /// push aside something they had not finished reading.
     ///
-    /// The one thing it says is the refusal, and there is one case left that can
-    /// reach it: the account showing with nothing asked and nothing read, where
-    /// every other card is empty and the swap has nowhere to go. The panel stays
-    /// where it is and the footer names the key that would make a second card —
-    /// the shape every refusal here takes, a fact about what is there and then
-    /// the keystroke that helps.
+    /// The one thing it says is the refusal, and there is exactly one press that
+    /// comes to it: the conversation showing on a session where no pact has run
+    /// and no file has been read, so both of the cards the key would reach are
+    /// cards about nothing (see `stops_on`). The panel stays where it is and the
+    /// footer names the key that would make one of them — the shape every
+    /// refusal here takes: a fact about what is there, and then the keystroke
+    /// that helps.
     ///
     /// Reads no file and asks the engine nothing: the cards are already in hand,
     /// and this only picks which of them is drawn.
@@ -2276,17 +2249,22 @@ impl App {
 
     /// Whether the swap key stops on `card`.
     ///
-    /// On anything filled, and on the account whether it is filled or not. The
-    /// account is where the panel opens, where warlock's mark is drawn and where
-    /// the composer is drawn under, so a reader who has read a file with no run
-    /// behind it still has one press back to a screen they can type on. The
-    /// other two are worth a press only once something is on them: a swap onto
-    /// an empty thread or an empty document would spend a keystroke showing the
-    /// mark, which is a thing the reader can already see on the account.
+    /// The conversation always, and the other two only once there is something
+    /// on them. The thread is where the field is and where the panel opens, so
+    /// it is always somewhere to go back to — a reader who has read a file, or
+    /// watched a pact, is one press from the place they can type. The account
+    /// and the document are worth a press only once a pact has run or a file has
+    /// been read: a press that landed on either of them empty would spend itself
+    /// showing warlock's mark, which is what the reader can already see on a
+    /// conversation nobody has started.
+    ///
+    /// So a swap is refused only from the thread on a session where nothing has
+    /// run and nothing has been read, and [`App::swap_card`] says so on the
+    /// footer rather than moving.
     const fn stops_on(&self, card: Showing) -> bool {
         match card {
-            Showing::Account => true,
-            Showing::Thread => self.has_thread(),
+            Showing::Thread => true,
+            Showing::Account => self.has_account(),
             Showing::Document => self.has_document(),
         }
     }
@@ -2389,11 +2367,9 @@ impl App {
     /// and only then: a run reports into its own card while a document is up,
     /// and finds the account it left there.
     ///
-    /// This card and no other. A run in flight is written into the conversation
-    /// as well when there is one, and what a run reports goes through
-    /// [`App::write_run`] for that reason — a write made here alone would put a
-    /// line on the account card that the same run's turn in the thread does not
-    /// have.
+    /// This card and no other, which is also the whole of where a run goes: what
+    /// a run reports reaches the panel through [`App::write_run`], and this is
+    /// the card it writes.
     pub const fn account_mut(&mut self) -> Option<&mut Account> {
         self.panel.account.held.as_mut()
     }
@@ -2814,21 +2790,24 @@ impl App {
     /// cut rows off the bottom of the panel's column at all, and the event loop
     /// asks it to decide whether a keystroke can be the composer's. It is the
     /// same answer for both, and it is here rather than in either of them
-    /// because it is a fact about which card the panel is showing: the composer
-    /// is hidden while the document card is up, so a file being read gives the
-    /// panel those rows back. It is on screen over the thread for the opposite
-    /// reason — the thread is what the field writes into, and a conversation
-    /// with no way to add to it would be a transcript.
+    /// because it is a fact about which card the panel is showing.
+    ///
+    /// The thread and nothing else. The field writes into the conversation, so
+    /// it belongs under the conversation: a document showing gives those rows
+    /// back to the file, and an account showing gives them back to the run. A
+    /// field under a run is a field about the wrong card — there is nothing on
+    /// the account a sentence could be added to — and a reader who wants to ask
+    /// something is one swap from the card that takes it.
     ///
     /// The rule is about the *card*, not about the draft. A composer holding
     /// nothing is still showable — that is the one empty row somebody types the
     /// first character into — and a draft somebody typed is not thrown away by
-    /// the document that hides it.
+    /// the card that hides it.
     #[must_use]
     pub const fn composer_showable(&self) -> bool {
         match self.panel.showing {
-            Showing::Account | Showing::Thread => true,
-            Showing::Document => false,
+            Showing::Thread => true,
+            Showing::Account | Showing::Document => false,
         }
     }
 
@@ -4350,16 +4329,16 @@ fn cut_at_cap_message() -> String {
     "— cut here: the file goes on past this line, and Warlock reads no further".to_owned()
 }
 
-/// What the app says when the swap key is pressed before anything has been read
-/// this session.
+/// What the app says when the swap key is pressed on a session with nothing but
+/// the conversation in the panel.
 ///
-/// The slot holds two cards and one of them is empty, so there is nowhere to
+/// The slot holds three cards and two of them are empty, so there is nowhere to
 /// swap to: said out loud rather than swallowed, because a key that did nothing
 /// and reported nothing is indistinguishable from a key that is broken. In the
 /// shape [`undocumented_view_message`] and `scoping::no_pact_message` share —
 /// the fact about what is there, then the key that would make the thing the
-/// reader asked for — and it names `v`, since a document on the other card is
-/// one press of it away.
+/// reader asked for — and it names `v` rather than `p`, since a file is a
+/// keystroke away where a pact is a run.
 fn no_document_message() -> String {
     "nothing has been read this session — press v on a file row, and there will be a document to swap to".to_owned()
 }
@@ -4456,7 +4435,7 @@ mod tests {
     use crate::account::Outcome;
     use crate::claude::Activity;
     use crate::fixture;
-    use crate::thread::{Ending, Turn};
+    use crate::thread::Ending;
 
     /// How many rows the scrolling tests work with, and how tall the window
     /// onto them is. A tree comfortably taller than its window, so there is a
@@ -8066,8 +8045,8 @@ mod tests {
     }
 
     /// The same app with the keyboard on the composer instead: mid-tree for
-    /// [`panel_focused`]'s reason, and with the account card up, since the
-    /// composer is not a place focus can be while a document is.
+    /// [`panel_focused`]'s reason, and on the conversation, which is the card
+    /// the field is drawn under and the card a session opens on.
     fn composer_focused() -> App {
         let mut app = scrolled_to(MANY / 2);
         app.set_focus(Focus::Composer);
@@ -8108,15 +8087,78 @@ mod tests {
     }
 
     #[test]
-    fn the_composer_is_showable_only_while_the_account_card_is_up() {
+    fn the_composer_is_showable_only_while_the_conversation_is_the_card_up() {
+        let base = Instant::now();
         let mut app = App::from_rows(three_rows());
         assert!(app.composer_showable(), "an app opens with room to type");
 
+        // The file gives the panel those rows back, and so does the run: a
+        // field under either is a field about the wrong card.
         app.show_document(["a line of a file"], false);
         assert!(!app.composer_showable(), "the document card hid nothing");
 
+        app.start_account(base);
+        assert_eq!(
+            app.panel.showing,
+            Showing::Document,
+            "the run took the panel"
+        );
+        assert!(!app.composer_showable());
+
         app.swap_card();
-        assert!(app.composer_showable(), "the account card gave it back");
+        assert_eq!(app.panel.showing, Showing::Thread);
+        assert!(app.composer_showable(), "the conversation gave it back");
+
+        app.swap_card();
+        assert_eq!(app.panel.showing, Showing::Account);
+        assert!(!app.composer_showable(), "the run drew a field of its own");
+    }
+
+    #[test]
+    fn a_run_takes_the_panel_only_from_a_card_with_nothing_on_it() {
+        let base = Instant::now();
+
+        // Nothing said and nothing read: the panel is warlock's mark, and the
+        // run the reader just asked for is worth more than that.
+        let mut app = App::from_rows(three_rows());
+        app.set_panel_height(PANEL);
+        app.start_account(base);
+        assert_eq!(app.panel.showing, Showing::Account);
+
+        // A conversation on screen is something they chose to look at, and a
+        // run started behind it leaves it exactly where it is.
+        let mut app = App::from_rows(three_rows());
+        app.set_panel_height(PANEL);
+        ask_and_answer(&mut app, base);
+        app.start_account(at(base, 10));
+        assert_eq!(app.panel.showing, Showing::Thread);
+
+        // And so is a file.
+        let mut app = App::from_rows(three_rows());
+        app.set_panel_height(PANEL);
+        app.show_document(document_lines(), false);
+        app.start_account(at(base, 10));
+        assert_eq!(app.panel.showing, Showing::Document);
+    }
+
+    #[test]
+    fn a_run_taking_an_empty_panel_takes_the_keyboard_off_the_field_with_it() {
+        // The account draws no field, so a keyboard left pointing at one would
+        // be pointing at nothing — the same rescue a document does.
+        let mut app = App::from_rows(three_rows());
+        app.set_panel_height(PANEL);
+        app.set_focus(Focus::Composer);
+        assert_eq!(app.focus(), Focus::Composer);
+
+        app.start_account(Instant::now());
+
+        assert_eq!(app.panel.showing, Showing::Account);
+        assert!(!app.composer_showable());
+        assert_eq!(
+            app.focus(),
+            Focus::Panel,
+            "the keys stayed on a hidden field"
+        );
     }
 
     #[test]
@@ -8151,11 +8193,11 @@ mod tests {
     fn swapping_to_the_document_takes_the_focus_off_the_composer() {
         let mut app = composer_focused();
         // A document to swap to, read while the tree had the keys, then the
-        // keyboard put back on the composer over the account card.
+        // keyboard put back on the composer over the conversation.
         app.show_document(["a line of a file"], false);
         app.swap_card();
         app.set_focus(Focus::Composer);
-        assert_eq!(app.focus(), Focus::Composer, "the account card allows it");
+        assert_eq!(app.focus(), Focus::Composer, "the thread card allows it");
 
         app.swap_card();
 
@@ -8198,12 +8240,16 @@ mod tests {
         // more lines than the panel is tall and a selection in the middle of the
         // tree, so both windows have somewhere to go if anything lets them.
         for (name, movement) in MOVEMENTS {
-            let mut app = app_pacting(9, Instant::now());
+            let base = Instant::now();
+            let mut app = app_pacting(9, base);
+            // The conversation, which is the card the field is drawn under, with
+            // enough on it that the panel's window has somewhere to go.
+            ask_and_answer(&mut app, base);
             app.scroll_panel_up(3);
             app.set_focus(Focus::Tree);
             app.select_next();
             app.set_focus(Focus::Composer);
-            assert_eq!(app.focus(), Focus::Composer, "the account card allows it");
+            assert_eq!(app.focus(), Focus::Composer, "the thread card allows it");
             let before = app.clone();
 
             movement(&mut app);
@@ -8394,7 +8440,8 @@ mod tests {
                 Line::Clocked { text, .. }
                 | Line::Summary { text }
                 | Line::Text { text }
-                | Line::Said { text } => text,
+                | Line::Said { text }
+                | Line::Wrapped { text, .. } => text,
             })
             .collect()
     }
@@ -8635,9 +8682,10 @@ mod tests {
     fn the_run_headers_row_costs_the_window_one_line_and_the_scrollback_counts_it() {
         // What a panel has inside its border at one fixed terminal size, and
         // what a frame with a run in flight leaves the account underneath the
-        // header's row. The row is [`crate::ui`]'s `RUN_HEADER_HEIGHT`, and
-        // that the layout really cuts one is asserted over there; here it is
-        // arithmetic, so nothing is measured and no frame is drawn.
+        // header. How many rows a header really takes is [`crate::ui`]'s
+        // `RUN_HEADER_HEIGHT` and is asserted over there; one is enough here,
+        // where the question is what a shorter window does, so nothing is
+        // measured and no frame is drawn.
         const WHOLE: usize = 6;
         const HEADER: usize = 1;
 
@@ -8881,19 +8929,49 @@ mod tests {
     }
 
     #[test]
-    fn an_account_is_not_wrapped_however_narrow_the_panel_is() {
-        // The panel's other card, at a width that would break every line of it:
-        // one thing that happened is one row, and the renderer cuts it. See
+    fn an_account_line_too_long_for_the_panel_is_broken_under_its_own_clock() {
+        // The panel's other card, at a width its lines do not fit in. A pass
+        // that reported a long path — or failed with a sentence of somebody
+        // else's stderr in it — is worth reading to the end, so the line is
+        // broken into the rows it needs, in the column it started in. See
         // [`mod@crate::wrap`].
         let base = Instant::now();
-        let mut app = app_pacting(9, base);
-        let wide = panel_text(&app, at(base, 9));
-        let below = app.panel_lines_below();
+        let mut app = app_pacting(0, base);
+        app.set_panel_height(9);
+        let account = app.account_mut().expect("a run has just started");
+        account.record(
+            &Activity::Tool {
+                name: "Read".to_owned(),
+                detail: Some("crates/warlock-engine/src/pact.rs".to_owned()),
+            },
+            at(base, 1),
+        );
 
-        app.set_panel_width(1);
+        // Nobody has measured the panel yet: two lines, two rows.
+        assert_eq!(app.panel_width(), 0);
+        assert_eq!(panel_text(&app, at(base, 9)).len(), 2);
 
-        assert_eq!(panel_text(&app, at(base, 9)), wide);
-        assert_eq!(app.panel_lines_below(), below, "the account was re-flowed");
+        app.set_panel_width(NARROW);
+
+        // Five rows, and the whole of the path on screen. The clock's own
+        // columns are blank under it rather than repeated, so a row with
+        // nothing in that column is the row above it still going.
+        assert_eq!(
+            panel_text(&app, at(base, 9)),
+            [
+                "crates/engine",
+                "Read",
+                "       crates/warl",
+                "       ock-engine/",
+                "       src/pact.rs",
+            ]
+        );
+        assert_eq!(app.panel_lines_below(), 0);
+
+        // And wider again is the account it always was: what a card holds is
+        // what happened, never the rows some width once broke it into.
+        app.set_panel_width(80);
+        assert_eq!(panel_text(&app, at(base, 9)).len(), 2);
     }
 
     /// Where the account's card would be if the reader swapped to it: the line
@@ -8950,7 +9028,8 @@ mod tests {
                 Line::Clocked { text, .. }
                 | Line::Summary { text }
                 | Line::Text { text }
-                | Line::Said { text } => text.clone(),
+                | Line::Said { text }
+                | Line::Wrapped { text, .. } => text.clone(),
             })
             .collect()
     }
@@ -9098,8 +9177,14 @@ mod tests {
         let document = panel_text(&app, at(base, 9));
         assert_ne!(document, account, "the two cards draw the same thing");
 
-        // Both directions, because a swap that only went one way would strand a
-        // reader on whichever card they were not reading.
+        // Round the cycle, because a swap that only went one way would strand a
+        // reader on whichever card they were not reading. The conversation sits
+        // between the two — always a stop, empty or not, because it is where the
+        // field is — so the file is two presses from the run either way.
+        app.swap_card();
+        assert_eq!(app.panel.showing, Showing::Thread);
+        assert!(!app.has_panel_content(), "nothing has been asked");
+
         app.swap_card();
         assert_eq!(panel_text(&app, at(base, 9)), account);
         assert!(app.has_panel_content());
@@ -9129,7 +9214,7 @@ mod tests {
         // focus, the selection, both windows and the footer are the app's own
         // clone, untouched — and nothing announces the swap, because the reader
         // can see it.
-        before.panel.showing = Showing::Account;
+        before.panel.showing = Showing::Thread;
         assert_eq!(app, before, "the swap moved something other than the card");
     }
 
@@ -9146,10 +9231,13 @@ mod tests {
     fn a_re_read_fills_the_document_card_without_bringing_it_to_the_front() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
-        // A document read once and then left: the reader is on the account,
-        // which is where a run they are watching puts them.
+        // A document read once and then left: the reader is back on the
+        // account, which is where a run they are watching puts them. Two presses
+        // from the file, since the conversation sits between them.
         app.show_document(document_lines(), false);
         app.swap_card();
+        app.swap_card();
+        assert_eq!(app.panel.showing, Showing::Account);
         let account = panel_text(&app, at(base, 9));
 
         app.refill_document(rewritten_lines(), false);
@@ -9254,9 +9342,11 @@ mod tests {
         let left = document_window(&app);
         assert_eq!(left, (1, false));
 
-        // Away: the account's window is the one the reader left it on, not the
-        // top and not the end.
+        // Away, past the empty conversation: the account's window is the one the
+        // reader left it on, not the top and not the end.
         app.swap_card();
+        app.swap_card();
+        assert_eq!(app.panel.showing, Showing::Account);
         assert_eq!(app.panel_scroll_offset(), parked.0);
         assert_eq!(panel_text(&app, at(base, 9))[0], "Read line 0");
 
@@ -9281,6 +9371,7 @@ mod tests {
         record_lines(&mut app, 9..12, base);
 
         app.swap_card();
+        app.swap_card();
         let drawn = panel_text(&app, at(base, 20));
         assert!(app.panel_follows());
         assert_eq!(drawn.last().expect("the account has lines"), "Read line 11");
@@ -9292,6 +9383,7 @@ mod tests {
         app.show_document(document_lines(), false);
         record_lines(&mut app, 9..12, base);
 
+        app.swap_card();
         app.swap_card();
         assert!(!app.panel_follows());
         assert_eq!(app.panel_scroll_offset(), 0);
@@ -9336,6 +9428,7 @@ mod tests {
         app.swap_card();
         app.select_next();
         app.swap_card();
+        app.swap_card();
         app.start_account(at(base, 100));
         app.account_mut()
             .expect("a second run has started")
@@ -9362,39 +9455,25 @@ mod tests {
     }
 
     #[test]
-    fn a_swap_before_any_document_is_refused_naming_the_view_key() {
-        let base = Instant::now();
-        let mut app = app_pacting(9, base);
+    fn a_swap_with_nothing_but_the_conversation_is_refused_naming_the_view_key() {
+        // The only press that has nowhere to go. The conversation is always a
+        // stop, so a swap is refused exactly when it is the only card there is:
+        // no pact has run and no file has been read, and the two cards the key
+        // would reach are both cards about nothing.
+        let mut app = App::from_rows(three_rows());
+        app.set_panel_height(PANEL);
         app.set_message("something the last keystroke said");
-        let account = panel_text(&app, at(base, 9));
         let mut before = app.clone();
 
         app.swap_card();
 
-        // There is no second card, so the panel stays on the account and the
-        // footer names the key that would make one.
+        // The mark stays up, the conversation stays showing, and the refusal is
+        // about the document because the document is the card a keystroke can
+        // make. The message is the whole of what the press changed.
         let message = app.message().expect("a swap with nothing read is refused");
         assert_eq!(message, no_document_message(), "{message}");
         assert!(message.contains("press v"), "{message}");
-        assert_eq!(panel_text(&app, at(base, 9)), account);
-        // And the message is the whole of what the press changed.
-        before.set_message(message);
-        assert_eq!(app, before, "the refusal moved something else");
-    }
-
-    #[test]
-    fn a_swap_with_nothing_in_the_panel_at_all_is_refused_the_same_way() {
-        let mut app = App::from_rows(three_rows());
-        app.set_panel_height(PANEL);
-        let mut before = app.clone();
-
-        app.swap_card();
-
-        // An app that has run no pact and read no file has one empty card
-        // showing and nothing behind it: the mark stays up, and the refusal is
-        // about the document because the document is what the key is for.
-        let message = app.message().expect("a swap with nothing read is refused");
-        assert_eq!(message, no_document_message(), "{message}");
+        assert_eq!(app.panel.showing, Showing::Thread);
         assert!(!app.has_panel_content());
         before.set_message(message);
         assert_eq!(app, before, "the refusal moved something else");
@@ -9456,11 +9535,11 @@ mod tests {
         assert_eq!(
             seen,
             [
-                account.clone(),
                 thread.clone(),
+                account.clone(),
                 document.clone(),
-                account,
                 thread,
+                account,
                 document,
             ]
         );
@@ -9485,6 +9564,56 @@ mod tests {
         assert_eq!(panel_text(&app, at(base, 9)), account);
         app.swap_card();
         assert_eq!(panel_text(&app, at(base, 9)), thread);
+        assert!(app.message().is_none(), "a swap that worked said something");
+    }
+
+    #[test]
+    fn a_swap_out_of_a_document_lands_on_the_conversation_rather_than_an_empty_account() {
+        // The session this is most of: somebody has been talking to the panel,
+        // no pact has run, and they open a file. The swap back has to be the
+        // conversation they left — an empty account here would take their chat
+        // off the screen and give them warlock's mark, which is the one thing
+        // on this screen that says nothing.
+        let base = Instant::now();
+        let mut app = App::from_rows(three_rows());
+        app.set_panel_height(PANEL);
+        ask_and_answer(&mut app, base);
+        let thread = panel_text(&app, at(base, 9));
+        assert!(!app.has_account(), "no pact has run this session");
+
+        app.show_document(document_lines(), false);
+        let document = panel_text(&app, at(base, 9));
+        assert_ne!(document, thread, "the file and the conversation draw alike");
+
+        app.swap_card();
+
+        assert_eq!(panel_text(&app, at(base, 9)), thread);
+        assert!(app.message().is_none(), "a swap that worked said something");
+
+        // And back to the file: a cycle of the two cards that have something on
+        // them, with the empty one stepped over in both directions.
+        app.swap_card();
+        assert_eq!(panel_text(&app, at(base, 9)), document);
+        app.swap_card();
+        assert_eq!(panel_text(&app, at(base, 9)), thread);
+    }
+
+    #[test]
+    fn a_swap_out_of_a_document_with_nothing_else_lands_where_the_field_is() {
+        // The other half of that rule, and why the empty account is not simply
+        // skipped: a document hides the composer, so the way back out of one
+        // has to land on a card the field is drawn under. With no conversation
+        // to go to, the empty account is the only one there is — and a reader
+        // who has read a file on a fresh session can still type.
+        let mut app = App::from_rows(three_rows());
+        app.set_panel_height(PANEL);
+        app.show_document(document_lines(), false);
+        assert!(!app.composer_showable());
+
+        app.swap_card();
+
+        assert!(app.composer_showable());
+        assert!(!app.has_panel_content(), "the account is the empty one");
         assert!(app.message().is_none(), "a swap that worked said something");
     }
 
@@ -9520,9 +9649,9 @@ mod tests {
         // And round the cycle: each card draws from the line the reader left it
         // on rather than from its top or its end.
         app.swap_card();
-        assert_eq!(panel_text(&app, at(base, 9))[0], "Read line 0");
-        app.swap_card();
         assert_eq!(panel_text(&app, at(base, 9))[0], "Grep thread line 0");
+        app.swap_card();
+        assert_eq!(panel_text(&app, at(base, 9))[0], "Read line 0");
         app.swap_card();
         assert_eq!(
             panel_text(&app, at(base, 9)),
@@ -9545,20 +9674,26 @@ mod tests {
         assert_eq!(document_window(&app), (0, false));
 
         // Whichever card is showing is the one the panel answers about, and the
-        // other two go on being what they were.
-        assert!(!app.panel_follows());
-        assert_eq!(app.panel_scroll_offset(), 0);
-        app.swap_card();
+        // other two go on being what they were. The document first, then round
+        // the cycle: the conversation it left following, then the account it
+        // left parked.
         assert!(!app.panel_follows());
         assert_eq!(app.panel_scroll_offset(), 0);
         app.swap_card();
         assert!(app.panel_follows());
         assert_eq!(app.panel_scroll_offset(), 2);
+        app.swap_card();
+        assert!(!app.panel_follows());
+        assert_eq!(app.panel_scroll_offset(), 0);
 
         // A turn already under way goes on being answered behind a document,
-        // and the document does not move an inch while it is.
+        // and the document does not move an inch while it is. Asking brings the
+        // conversation to the front, so the file is two presses back.
         app.start_turn("and how long does it take?", at(base, 6));
+        assert_eq!(app.panel.showing, Showing::Thread);
         app.swap_card();
+        app.swap_card();
+        assert_eq!(app.panel.showing, Showing::Document);
         assert_eq!(
             panel_text(&app, at(base, 9)),
             ["line 0", "line 1", "line 2"]
@@ -9572,7 +9707,7 @@ mod tests {
         // And the thread is at its newest row the moment the reader swaps back
         // to it, exactly as a run left following is.
         app.swap_card();
-        app.swap_card();
+        assert_eq!(app.panel.showing, Showing::Thread);
         assert!(app.panel_follows());
         assert_eq!(
             panel_text(&app, at(base, 9)).last().map(String::as_str),
@@ -9581,10 +9716,10 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_wider_than_the_panel_is_drawn_in_as_many_rows_as_it_needs() {
+    fn every_line_wider_than_the_panel_is_drawn_in_as_many_rows_as_it_needs() {
         let base = Instant::now();
-        let mut app = app_pacting(9, base);
-        app.set_panel_height(9);
+        let mut app = app_pacting(11, base);
+        app.set_panel_height(11);
         ask_and_answer(&mut app, base);
 
         // Nobody has measured the panel yet, so nothing is wrapped: five lines,
@@ -9594,17 +9729,21 @@ mod tests {
 
         app.set_panel_width(NARROW);
 
-        // Seven rows now. The answer is prose and is broken at spaces into
-        // three; the question and the work lines are one row each, however long
-        // they are, because a thing said and a thing done are cut rather than
-        // wrapped.
+        // Eleven rows now, and nothing has run off the edge. The answer is
+        // prose and is broken at spaces into three; the question is broken
+        // under its own marker and each work line under its own clock, so what
+        // continues a row sits in the column the row started in.
         assert_eq!(
             panel_text(&app, at(base, 5)),
             [
-                QUESTION,
-                "Grep thread line 0",
-                "Grep thread line 1",
-                "Grep thread line 2",
+                "what does the",
+                "  engine do?",
+                "Grep thread",
+                "       line 0",
+                "Grep thread",
+                "       line 1",
+                "Grep thread",
+                "       line 2",
                 "It walks the tree",
                 "and writes what it",
                 "finds.",
@@ -9613,13 +9752,13 @@ mod tests {
         assert_eq!(app.panel_lines_below(), 0);
 
         // The window is cut out of those rows and not out of the lines: a panel
-        // three tall over seven rows shows the last three and has four above
-        // them, and a reader who goes back to the top has those four below.
+        // three tall over eleven rows shows the last three and has eight above
+        // them, and a reader who goes back to the top has those eight below.
         app.set_panel_height(PANEL);
-        assert_eq!(app.panel_scroll_offset(), 4);
+        assert_eq!(app.panel_scroll_offset(), 8);
         assert_eq!(app.panel_lines_below(), 0);
         app.select_first();
-        assert_eq!(app.panel_lines_below(), 4);
+        assert_eq!(app.panel_lines_below(), 8);
 
         // And wider again is the answer it always was — the lines held are the
         // model's own, so a terminal dragged about re-flows what is on screen
@@ -9652,11 +9791,10 @@ mod tests {
         // the first is exactly as it was answered.
         let thread = app.thread().expect("a question has been asked");
         assert_eq!(thread.turns().len(), 2);
-        assert_eq!(thread.turns()[0].message(), Some(QUESTION));
+        assert_eq!(thread.turns()[0].message(), QUESTION);
         assert_eq!(thread.turns()[0].answer(), Some(ANSWER));
-        assert_eq!(thread.turns()[1].message(), Some("and what did that cost?"),);
+        assert_eq!(thread.turns()[1].message(), "and what did that cost?");
         assert_eq!(thread.turns()[1].ending(), Some(&Ending::Cancelled));
-        assert_eq!(thread.turns()[1].cost(), Some(0.02));
 
         // A second ending is the first one still: the line on screen wins.
         app.end_turn(&Ending::NothingSaid, at(base, 9));
@@ -9740,43 +9878,45 @@ mod tests {
             );
         });
         app.write_run(|account| account.finish(at(base, from + 5)));
-        app.close_run(at(base, from + 5));
     }
 
     #[test]
-    fn a_run_started_on_the_thread_appends_a_turn_nobody_typed() {
+    fn a_run_started_on_the_thread_puts_nothing_in_the_conversation() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
         ask_and_answer(&mut app, base);
         assert!(app.showing_thread());
+        let asked = panel_text(&app, at(base, 9));
 
         run_a_pact(&mut app, base, 10);
 
-        // The card the reader was on is the card they are on: no swap, no
-        // second history, and the turn they asked for is still above the run.
+        // The card the reader was on is the card they are on, drawing exactly
+        // what it drew: a pact has a card of its own, and a conversation that
+        // also carried it would be the same run written twice on one screen.
         assert!(app.showing_thread(), "the run took the panel");
+        assert_eq!(panel_text(&app, at(base, 20)), asked);
         let thread = app.thread().expect("a question has been asked");
-        assert_eq!(thread.turns().len(), 2);
-        assert_eq!(thread.turns()[0].message(), Some(QUESTION));
+        assert_eq!(thread.turns().len(), 1, "the run took a turn");
+        assert_eq!(thread.turns()[0].message(), QUESTION);
         assert_eq!(thread.turns()[0].answer(), Some(ANSWER));
-        // A turn nobody typed: no message over it, no answer under it, and its
-        // whole record is the run's own account.
-        assert_eq!(thread.turns()[1].message(), None);
-        assert_eq!(thread.turns()[1].answer(), None);
-        assert_eq!(thread.turns()[1].started(), at(base, 10));
-        // And it is over, so the conversation is the reader's again.
+        // And nothing is in flight, so the field is the reader's: a run is not
+        // a question and does not mute the composer.
         assert!(thread.in_flight().is_none());
+
+        // The run is all on its own card, whole.
+        assert_eq!(app.account().map(Account::line_count), Some(6));
     }
 
     #[test]
-    fn the_run_turn_and_the_account_card_are_the_same_lines_from_the_same_code() {
+    fn a_runs_events_reach_the_account_card_and_nowhere_else() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
         ask_and_answer(&mut app, base);
+        let asked = panel_text(&app, at(base, 9));
 
-        // Fed one event at a time, and after each of them the two copies say
-        // the same thing: the turn fills as the run's events arrive rather than
-        // being copied over at the end.
+        // Fed one event at a time, and after each of them the conversation is
+        // the conversation: a run fills one card, as it happens, and the other
+        // two are none of its business.
         app.start_account(at(base, 10));
         app.write_run(|account| account.open_section("crates/tui", at(base, 10)));
         let mut seen = Vec::new();
@@ -9791,18 +9931,15 @@ mod tests {
                 );
             });
             let card = app.account().expect("the run started its own card");
-            let turn = app
-                .thread()
-                .and_then(|thread| thread.turns().last().and_then(Turn::account))
-                .expect("the run took a turn of the conversation");
-            assert_eq!(turn.lines(at(base, 20)), card.lines(at(base, 20)));
             seen.push(card.line_count());
+            assert_eq!(panel_text(&app, at(base, 20)), asked);
         }
         // Something did arrive on each of the three passes, so the equality
         // above is about a card that was moving.
         assert_eq!(seen, [2, 3, 4]);
 
-        // The outcome and the summary are the same story: one call, both copies.
+        // And the outcome and the summary are the same story: the account says
+        // how the run went, and the thread still says what was asked.
         app.write_run(|account| {
             account.close_section(
                 &Outcome::Refused {
@@ -9812,18 +9949,18 @@ mod tests {
             );
             account.finish(at(base, 15));
         });
-        app.close_run(at(base, 15));
         let card = app.account().expect("the run started its own card");
-        let turn = app
-            .thread()
-            .and_then(|thread| thread.turns().last().and_then(Turn::account))
-            .expect("the run took a turn of the conversation");
-        assert_eq!(turn.lines(at(base, 30)), card.lines(at(base, 30)));
         assert!(
             card.lines(at(base, 30))
                 .iter()
                 .any(|line| matches!(line, Line::Summary { .. })),
             "the run never said how it went"
+        );
+        assert_eq!(panel_text(&app, at(base, 30)), asked);
+        assert_eq!(
+            app.thread().map(|thread| thread.turns().len()),
+            Some(1),
+            "the run took a turn of the conversation"
         );
     }
 
@@ -9835,22 +9972,37 @@ mod tests {
 
         run_a_pact(&mut app, base, 10);
 
-        // Nothing typed, no conversation: a run fills its own card and nothing
-        // else, so the swap key has nowhere but the account to go and says so
-        // rather than spending a press on warlock's mark.
+        // Nothing typed, no conversation held: a run fills its own card and
+        // nothing else, and it took the panel because the panel had nothing on
+        // it — the mark is not worth more than the run the reader just asked
+        // for.
         assert!(!app.has_thread());
         assert!(app.thread().is_none());
         assert_eq!(app.panel.showing, Showing::Account);
         assert_eq!(app.account().map(Account::line_count), Some(6));
 
+        // The conversation is still a card to swap to, empty or not: it is
+        // where the field is, so a reader who wants to ask something about the
+        // run they are watching is one press away from being able to.
+        app.swap_card();
+        assert_eq!(app.panel.showing, Showing::Thread);
+        assert!(!app.has_panel_content(), "nothing has been asked");
+        assert!(app.composer_showable(), "the field came with it");
+        assert!(app.message().is_none(), "a swap that worked said something");
+
+        // With no document read the key goes between those two and is never
+        // refused: there is always somewhere to go.
         app.swap_card();
         assert_eq!(app.panel.showing, Showing::Account);
-        assert_eq!(app.message(), Some(no_document_message().as_str()));
+        app.swap_card();
+        assert_eq!(app.panel.showing, Showing::Thread);
+        assert!(app.message().is_none(), "a swap that worked said something");
 
-        // And with a document read, the swap goes between those two exactly as
-        // it did before any of this: the empty thread is stepped over.
+        // With a document read the cycle is all three, in order.
         app.show_document(document_lines(), false);
         assert_eq!(app.panel.showing, Showing::Document);
+        app.swap_card();
+        assert_eq!(app.panel.showing, Showing::Thread);
         app.swap_card();
         assert_eq!(app.panel.showing, Showing::Account);
         app.swap_card();
@@ -9858,7 +10010,7 @@ mod tests {
     }
 
     #[test]
-    fn a_run_started_under_a_document_still_takes_its_turn_of_the_conversation() {
+    fn a_run_started_under_a_document_leaves_both_other_cards_alone() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
         ask_and_answer(&mut app, base);
@@ -9868,37 +10020,37 @@ mod tests {
         run_a_pact(&mut app, base, 10);
 
         // Which card is showing is the reader's: the file they were reading is
-        // still what is drawn, and the run went into both cards behind it.
+        // still what is drawn, and the run filled the one card it is about.
         assert_eq!(app.panel.showing, Showing::Document);
         assert_eq!(panel_text(&app, at(base, 20)), document);
         assert_eq!(app.account().map(Account::line_count), Some(6));
         assert_eq!(
             app.thread().map(|thread| thread.turns().len()),
-            Some(2),
-            "the run took no turn of the conversation"
+            Some(1),
+            "the run took a turn of the conversation"
         );
     }
 
     #[test]
-    fn the_account_is_a_swap_away_while_a_run_writes_into_the_conversation() {
+    fn the_account_is_a_swap_away_from_a_conversation_that_never_moved() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
         ask_and_answer(&mut app, base);
-        run_a_pact(&mut app, base, 10);
-
-        // The keystroke that started the run pulled the conversation to its
-        // newest line, `Card::accrue`'s rule and the same one a question
-        // follows. The reader then parks it a line down from its top.
-        assert_eq!(thread_window(&app), (11 - usize::from(PANEL), true));
         app.select_first();
         app.select_next();
         assert_eq!(thread_window(&app), (1, false));
         let parked = panel_text(&app, at(base, 20));
 
-        // One press to the account, which the run filled and which is still
-        // reachable, and one back to the conversation. The card is this run's
-        // own, at its own window: the reader's place in the thread had nothing
-        // to do with where the account is parked.
+        run_a_pact(&mut app, base, 10);
+
+        // A run behind the conversation moves nothing on it: not its lines, not
+        // its window, not where the reader parked it.
+        assert_eq!(thread_window(&app), (1, false));
+        assert_eq!(panel_text(&app, at(base, 20)), parked);
+
+        // One press to the account, which the run filled, and one back. The
+        // account is at its own window, following its own newest line: the
+        // reader's place in the thread had nothing to do with it.
         app.swap_card();
         assert_eq!(app.panel.showing, Showing::Account);
         assert_eq!(app.account().map(Account::line_count), Some(6));
@@ -9914,7 +10066,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rollback_keeps_the_run_that_ended_in_the_conversation() {
+    fn a_rollback_keeps_the_run_that_ended_and_the_conversation_beside_it() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
         ask_and_answer(&mut app, base);
@@ -9928,40 +10080,37 @@ mod tests {
 
         // A run that ends with nothing recorded is exactly the run a reader
         // most wants to see the end of, and the panel is what a rollback keeps:
-        // both copies of it survive, and so does the turn above them.
+        // the account survives whole, and so does the conversation beside it.
         assert!(app.showing_thread());
         assert_eq!(panel_text(&app, at(base, 20)), thread);
         assert_eq!(app.account().map(Account::line_count), Some(6));
         let held = app.thread().expect("a question has been asked");
-        assert_eq!(held.turns().len(), 2);
+        assert_eq!(held.turns().len(), 1);
         assert_eq!(held.turns()[0].answer(), Some(ANSWER));
-        assert_eq!(held.turns()[1].message(), None);
     }
 
     #[test]
-    fn a_run_that_started_before_the_conversation_files_nothing_under_it() {
+    fn a_run_under_way_when_a_question_is_asked_files_nothing_under_it() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
 
-        // The run is under way with no conversation to append to, and then
-        // somebody asks something.
+        // The run is under way, and then somebody asks something.
         app.start_account(at(base, 10));
         app.start_turn(QUESTION, at(base, 11));
         app.write_run(|account| account.open_section("crates/tui", at(base, 12)));
         app.write_run(|account| account.finish(at(base, 13)));
-        app.close_run(at(base, 13));
 
-        // The run has a card and no turn: a line filed under the question would
-        // put a pact's work under somebody's sentence.
+        // The run has a card and the question has a turn: a line filed under
+        // the question would put a pact's work under somebody's sentence.
         assert_eq!(app.account().map(Account::line_count), Some(3));
         let thread = app.thread().expect("a question has been asked");
         assert_eq!(thread.turns().len(), 1);
-        assert_eq!(thread.turns()[0].message(), Some(QUESTION));
-        assert_eq!(thread.turns()[0].account(), None);
+        assert_eq!(thread.turns()[0].message(), QUESTION);
+        assert_eq!(thread.turns()[0].answer(), None);
     }
 
     #[test]
-    fn a_line_written_after_a_run_is_closed_reaches_neither_the_turn_nor_a_new_one() {
+    fn a_line_written_after_a_run_is_over_reaches_nothing_at_all() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
         ask_and_answer(&mut app, base);
@@ -9970,14 +10119,14 @@ mod tests {
         let turns = app.thread().map(|thread| thread.turns().len());
 
         // A late event — a worker that reported after its outcome landed — is
-        // dropped by the conversation, whose turn is over and on screen. The
-        // account card is the run's own record and takes it, which is the one
-        // place the two are allowed to differ.
+        // dropped by the account, which is finished and says so on screen. The
+        // conversation hears nothing either, as it heard nothing about the rest
+        // of the run.
         app.write_run(|account| account.record(&Activity::Thinking, at(base, 21)));
-        app.close_run(at(base, 22));
 
         assert_eq!(app.thread().map(|thread| thread.turns().len()), turns);
         assert_eq!(panel_text(&app, at(base, 30)), thread);
+        assert_eq!(app.account().map(Account::line_count), Some(6));
     }
 
     #[test]
@@ -10403,8 +10552,10 @@ mod tests {
         // swap still comes back to the whole of what was read.
         assert_eq!(document_text(&reseated), document_lines());
         let mut reseated = reseated;
-        reseated.swap_card();
-        reseated.swap_card();
+        for _ in 0..3 {
+            reseated.swap_card();
+        }
+        assert_eq!(reseated.panel.showing, Showing::Document);
         assert_eq!(document_text(&reseated), document_lines());
         assert_eq!(panel_text(&reseated, at(base, 9)), showing);
     }
