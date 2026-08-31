@@ -32,11 +32,11 @@ use warlock_engine::{
     Tree, pact_subtree, refresh_subtree, to_manifest_path, unpact_subtree,
 };
 use warlock_tui::{
-    Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactToggle, Run, Section,
+    Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactToggle, Run, Section, Sigils,
 };
 
 use crate::error::{Error, one_line};
-use crate::session::{Scope, reload_tree};
+use crate::session::{Scope, closed_scope, reload_tree};
 
 /// What the footer says when the worker thread stopped without reporting
 /// anything — which, since it reports on every path it takes itself, means it
@@ -609,12 +609,41 @@ fn cancelled(toggled: Toggled) -> Toggled {
 /// activity and has nothing to account for, so wiping the record of the run that
 /// wrote those documents would be spending the panel on a keystroke with nothing
 /// to say.
-pub(crate) fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PactToggle> {
+///
+/// # The third refusal, and why it comes before the app is asked
+///
+/// A directory under a scope this machine does not hold turns the press down
+/// through [`closed_scope`], which words it. That check runs *before*
+/// `App::toggle_pact`, and it has to: the toggle is not a question, it paints a
+/// whole subtree and hands back what it painted, so there is no asking it what
+/// the press would mean and then declining. Ordering it first also states the
+/// rule the right way round — whether this operator may act here at all is a
+/// fact about the directory, settled before what the key would have done to it.
+///
+/// Both directions are refused, and the un-pact direction is the one this is
+/// really for. Un-pacting drops the entries, the scope among them, so a fumbled
+/// `p` on somebody else's subtree does not merely undo — it costs a full model
+/// pass to put back and does not bring the boundary back with it. That is the
+/// hazard the sigil is a guard against, and it is why the doc on
+/// [`action_for`](crate::input::action_for) calling `p` "its own undo" holds
+/// pacting-ward and not the other way.
+pub(crate) fn pact_press(
+    app: &mut App,
+    manifest: &Manifest,
+    repo_root: &Path,
+    sigils: &Sigils,
+    in_flight: bool,
+    at: Instant,
+) -> Option<PactToggle> {
     if in_flight {
         // The whole of the refusal: a bit of wording on a line that is already
         // on screen. Setting it again says the same thing, so a reader leaning
         // on the key changes nothing after the first press.
         app.set_pact_refused();
+        return None;
+    }
+    // Before the toggle, which paints rather than asks. See above.
+    if closed_scope(app, manifest, repo_root, sigils).is_some() {
         return None;
     }
     let toggle = app.toggle_pact()?;
@@ -648,11 +677,27 @@ pub(crate) fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<
 /// here as there is there: a refresh always runs passes when it runs at all, so
 /// there is nothing that changes the manifest without having anything to
 /// account for.
-pub(crate) fn refresh_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PathBuf> {
+///
+/// A directory under a scope this machine does not hold is refused here as it is
+/// there, through the same [`closed_scope`], in the same place and the same
+/// words. What a refresh spends is model time inside somebody else's boundary,
+/// on documents that are theirs to have an opinion about, which is the same
+/// crossing a pact makes and is refused on the same grounds.
+pub(crate) fn refresh_press(
+    app: &mut App,
+    manifest: &Manifest,
+    repo_root: &Path,
+    sigils: &Sigils,
+    in_flight: bool,
+    at: Instant,
+) -> Option<PathBuf> {
     if in_flight {
         // The whole of the refusal, and the very one a second pact press gets:
         // a bit of wording on a line that is already on screen.
         app.set_pact_refused();
+        return None;
+    }
+    if closed_scope(app, manifest, repo_root, sigils).is_some() {
         return None;
     }
     let directory = app.refresh()?;
@@ -1285,15 +1330,48 @@ mod tests {
     };
     use warlock_tui::{
         Account, Activities, Activity, App, Chrome, ClaudeAgent, Line, PactToggle, Run, Section,
+        Sigils,
     };
 
     use warlock_tui::Cancel;
 
     use super::{
         CancelGuard, PACT_CANCELLED, PACT_LOST, PactEvent, Running, Toggled, Work, activity_port,
-        apply_progress, apply_toggle, pact_press, refresh_press, run_pact, spawn_pact,
+        apply_progress, apply_toggle, run_pact, spawn_pact,
     };
     use crate::session::{NOT_REFRESHED, Scope};
+
+    /// [`super::pact_press`] with no boundary in the way.
+    ///
+    /// An empty manifest scopes nothing, so
+    /// [`closed_scope`](crate::session::closed_scope) answers `None` and the
+    /// press behaves exactly as it did before boundaries existed — which is what
+    /// every test below this line is about. The tests that *are* about the
+    /// boundary build a scoped manifest and call `super::pact_press` directly, so
+    /// this shadow makes the ordinary case short rather than hiding the new
+    /// argument from the suite.
+    fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PactToggle> {
+        super::pact_press(
+            app,
+            &Manifest::new(),
+            Path::new(ROOT),
+            &Sigils::Nothing,
+            in_flight,
+            at,
+        )
+    }
+
+    /// [`super::refresh_press`] with no boundary in the way. See [`pact_press`].
+    fn refresh_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PathBuf> {
+        super::refresh_press(
+            app,
+            &Manifest::new(),
+            Path::new(ROOT),
+            &Sigils::Nothing,
+            in_flight,
+            at,
+        )
+    }
 
     /// The file every pacted directory is documented in, as the engine
     /// writes it. Spelled out here so a test can go and look for it.
@@ -2656,6 +2734,249 @@ mod tests {
             refused
         };
         assert_eq!(app, refused, "the press did more than say so");
+    }
+
+    /// A manifest scoping `<ROOT>/crates` to `data-plane`, granted the way a
+    /// pact grants one.
+    fn scoped() -> Manifest {
+        Manifest::with_entries([PactEntry::new(
+            ROOT,
+            format!("{ROOT}/crates"),
+            format!("{ROOT}/crates/WARLOCK.md"),
+        )
+        .expect("a module under the root")
+        .with_scope("data-plane")])
+    }
+
+    /// What the footer says when the boundary turns a key down over that
+    /// directory.
+    ///
+    /// Named absolutely, because the directory the boundary refuses is the root
+    /// row of this fixture's tree: [`App::label_for`] spells a path relative to
+    /// that root and prints the root itself as it stands, rather than as the
+    /// `"."` it would otherwise come to.
+    const CLOSED: &str =
+        "/repo/crates is scoped `data-plane` — hold that sigil to work here, with `warlock config`";
+
+    /// An app over one directory in `state`, with the root row selected.
+    fn app_over(state: NodeState) -> App {
+        App::from_tree(&Tree::new(Node::new(
+            format!("{ROOT}/crates"),
+            None::<PathBuf>,
+            state,
+        )))
+    }
+
+    #[test]
+    fn p_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
+        let mut app = app_over(NodeState::Unpacted);
+        let before = app.clone();
+
+        let toggle = super::pact_press(
+            &mut app,
+            &scoped(),
+            Path::new(ROOT),
+            &Sigils::held(["web"]),
+            false,
+            Instant::now(),
+        );
+
+        assert_eq!(toggle, None, "the press must not paint or start a run");
+        assert_eq!(app.message(), Some(CLOSED));
+        assert!(
+            !app.has_account(),
+            "a refused press opened an account for a run that never happened"
+        );
+        let said = {
+            let mut said = before.clone();
+            said.set_message(CLOSED);
+            said
+        };
+        assert_eq!(app, said, "the refusal did more to the app than say so");
+    }
+
+    #[test]
+    fn the_un_pact_direction_is_refused_too_and_is_what_this_is_for() {
+        // The hazard the sigil guards against, spelled out: `p` on a pacted row
+        // is an un-pact, `unpact_subtree` drops the entries and the scope with
+        // them, and a second `p` costs a full model pass and does not bring the
+        // boundary back. So this direction is not "its own undo" and must not be
+        // one fumbled keystroke away in somebody else's subtree.
+        for state in [NodeState::PactedFresh, NodeState::PactedStale] {
+            let mut app = app_over(state);
+            let before = app.clone();
+
+            let toggle = super::pact_press(
+                &mut app,
+                &scoped(),
+                Path::new(ROOT),
+                &Sigils::held(["web"]),
+                false,
+                Instant::now(),
+            );
+
+            assert_eq!(toggle, None, "{state:?} was un-pacted across a boundary");
+            assert_eq!(app.message(), Some(CLOSED));
+            let said = {
+                let mut said = before.clone();
+                said.set_message(CLOSED);
+                said
+            };
+            assert_eq!(app, said, "{state:?} moved under a refused press");
+        }
+    }
+
+    #[test]
+    fn r_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
+        let mut app = app_over(NodeState::PactedStale);
+        let before = app.clone();
+
+        let directory = super::refresh_press(
+            &mut app,
+            &scoped(),
+            Path::new(ROOT),
+            &Sigils::held(["web"]),
+            false,
+            Instant::now(),
+        );
+
+        // What a refresh spends is model time inside somebody else's boundary,
+        // on documents that are theirs to have an opinion about.
+        assert_eq!(directory, None);
+        assert_eq!(app.message(), Some(CLOSED));
+        assert!(!app.has_account(), "a refused refresh opened an account");
+        let said = {
+            let mut said = before.clone();
+            said.set_message(CLOSED);
+            said
+        };
+        assert_eq!(app, said, "the refusal did more to the app than say so");
+    }
+
+    #[test]
+    fn holding_the_scope_lets_both_keys_through() {
+        for sigils in [
+            Sigils::held(["data-plane"]),
+            Sigils::held(["web", "data-plane"]),
+            Sigils::held(["*"]),
+        ] {
+            let mut app = app_over(NodeState::Unpacted);
+            let toggle = super::pact_press(
+                &mut app,
+                &scoped(),
+                Path::new(ROOT),
+                &sigils,
+                false,
+                Instant::now(),
+            )
+            .unwrap_or_else(|| panic!("{sigils:?} opens `data-plane` for a pact"));
+            assert!(toggle.pacted);
+            assert_eq!(app.message(), None, "{sigils:?} said something");
+
+            let mut app = app_over(NodeState::PactedStale);
+            assert_eq!(
+                super::refresh_press(
+                    &mut app,
+                    &scoped(),
+                    Path::new(ROOT),
+                    &sigils,
+                    false,
+                    Instant::now()
+                ),
+                Some(PathBuf::from(format!("{ROOT}/crates"))),
+                "{sigils:?} opens `data-plane` for a refresh"
+            );
+        }
+    }
+
+    #[test]
+    fn a_machine_that_holds_no_sigil_is_refused_by_both_keys() {
+        // The state every machine is in before anybody runs `warlock config`,
+        // and the one this was originally built the wrong way round: an empty
+        // set opens nothing that is scoped, because a sigil is what opens a
+        // scope. Reading it as unrestricted would make the default state of
+        // every machine a universal bypass.
+        for sigils in [Sigils::Nothing, Sigils::Unknown] {
+            let mut app = app_over(NodeState::Unpacted);
+            assert_eq!(
+                super::pact_press(
+                    &mut app,
+                    &scoped(),
+                    Path::new(ROOT),
+                    &sigils,
+                    false,
+                    Instant::now()
+                ),
+                None,
+                "{sigils:?} pacted across a boundary"
+            );
+            assert_eq!(app.message(), Some(CLOSED));
+
+            let mut app = app_over(NodeState::PactedStale);
+            assert_eq!(
+                super::refresh_press(
+                    &mut app,
+                    &scoped(),
+                    Path::new(ROOT),
+                    &sigils,
+                    false,
+                    Instant::now()
+                ),
+                None,
+                "{sigils:?} refreshed across a boundary"
+            );
+            assert_eq!(app.message(), Some(CLOSED));
+        }
+    }
+
+    #[test]
+    fn an_unscoped_directory_stays_open_to_a_machine_holding_nothing() {
+        // The permissive default is on the directory and only there: a
+        // repository nobody has scoped is unaffected by boundaries existing.
+        let mut app = app_over(NodeState::Unpacted);
+
+        let toggle = super::pact_press(
+            &mut app,
+            &Manifest::new(),
+            Path::new(ROOT),
+            &Sigils::Nothing,
+            false,
+            Instant::now(),
+        )
+        .expect("nothing scopes this directory");
+
+        assert!(toggle.pacted);
+        assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn a_run_in_flight_is_answered_before_the_boundary_is() {
+        let mut app = app_over(NodeState::PactedStale);
+        app.set_pact_in_flight(format!("{ROOT}/crates"), 1, 2);
+
+        // Both refusals apply, and the in-flight one is the one on screen: it
+        // goes on the progress line the reader is already watching, leaving the
+        // message line a run has taken alone.
+        assert_eq!(
+            super::pact_press(
+                &mut app,
+                &scoped(),
+                Path::new(ROOT),
+                &Sigils::held(["web"]),
+                true,
+                Instant::now()
+            ),
+            None
+        );
+        assert_eq!(
+            app.message(),
+            None,
+            "the boundary spoke over a run's own line"
+        );
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting /repo/crates (1/2) — already running")
+        );
     }
 
     #[test]

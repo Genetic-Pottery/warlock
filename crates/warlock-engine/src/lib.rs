@@ -210,10 +210,18 @@ pub use scope::Rule as ScopeRule;
 /// inner scope replaces an outer one outright and the outer one is a *default*
 /// for what has said nothing below it, never a second gate to also satisfy. A
 /// scope [`validate_scope`] refuses is stepped over as if it were not written,
-/// so the answer is never a string that is not a scope. Nothing in this
-/// workspace calls it yet: it exists so the matcher has one home when it is
-/// written, rather than three callers each walking up the tree their own way.
+/// so the answer is never a string that is not a scope. It is the one home
+/// callers ask coverage from, rather than three of them each walking up the
+/// tree their own way; [`scope_opens_to`] is the other half, and answers
+/// whether the boundary it names is open to the person at the keyboard.
 pub use scope::scope_covering;
+/// Whether the scope covering a directory is open to somebody holding a given
+/// set of sigils: a membership test, never an expression, since a directory
+/// carries at most one scope and any one matching sigil opens it. Both defaults
+/// are permissive and deliberately so — an unscoped directory is open to
+/// anyone, and a machine holding nothing is unrestricted rather than shut out —
+/// and the wildcard `*` is a sigil that opens everything, never a scope.
+pub use scope::scope_opens_to;
 /// Whether a string is a scope a pacted directory may carry: 1 to 24
 /// characters of ASCII lowercase letters, digits, `-` and `_`, beginning with a
 /// letter and not ending with a separator. Judges only — it never lower-cases,

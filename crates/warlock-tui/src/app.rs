@@ -714,6 +714,38 @@ impl Sigils {
         Self::Held(sigils)
     }
 
+    /// The sigils held, as the matcher takes them.
+    ///
+    /// The one place the three states are flattened into the two the boundary
+    /// question has, so what each one means to a refusal is written down once
+    /// rather than decided at each key that can refuse.
+    ///
+    /// [`Sigils::Nothing`] is the empty slice, which opens no scoped directory:
+    /// a sigil is what opens a scope, so holding none opens none. It still opens
+    /// every *unscoped* directory, because that permissiveness lives on the
+    /// directory rather than here — see
+    /// [`scope_opens_to`](warlock_engine::scope_opens_to), where the asymmetry is
+    /// argued. A machine that has never run `warlock config` is therefore refused
+    /// by a scoped repository until somebody records what it holds, which is the
+    /// onboarding this vocabulary was designed around rather than a failure mode.
+    ///
+    /// [`Sigils::Unknown`] is the empty slice **too**, and that is a decision
+    /// rather than a fallthrough. A config that will not parse leaves warlock
+    /// unable to establish that anything is held, and "nobody told me what you
+    /// hold" is already the same answer as "what you hold does not match" — so
+    /// refusing is the consistent reading rather than a second rule. The state is
+    /// not swallowed on the way: the header says `holding unknown` out loud for
+    /// as long as it lasts ([`Sigils::line`]), so a machine refused for a broken
+    /// file is told which of the two it is without pressing anything, and the fix
+    /// is to repair the file rather than to guess at it here.
+    #[must_use]
+    pub fn as_slice(&self) -> &[String] {
+        match self {
+            Self::Nothing | Self::Unknown => &[],
+            Self::Held(sigils) => sigils,
+        }
+    }
+
     /// What the header has to say about what is held, or `None` when it has
     /// nothing to say.
     ///
@@ -3240,7 +3272,14 @@ impl App {
     /// a second copy of it. A path that cannot be described relative to that
     /// root — including the root itself, which is `"."` — is printed as it
     /// stands: a label that says something odd beats a label that says nothing.
-    fn label_for(&self, path: &Path) -> String {
+    ///
+    /// Public because a refusal worded outside [`App`] still has to name its row
+    /// the way every refusal worded inside it does. The scope boundary is the
+    /// one such refusal: sigils live on [`Chrome`], which is deliberately not a
+    /// field here, so the app cannot word that message itself and must at least
+    /// lend its spelling of the path.
+    #[must_use]
+    pub fn label_for(&self, path: &Path) -> String {
         match self
             .rows
             .first()

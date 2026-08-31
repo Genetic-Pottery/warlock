@@ -31,12 +31,18 @@
 //! therefore reported and read as no scope, and left on disk exactly as it was
 //! written.
 //!
-//! # Nothing here enforces anything
+//! # What this module decides, and what it still does not
 //!
-//! A scope is a label. This module says whether a label is well formed, and —
-//! in [`scope_covering`] — which label a given path sits under; it has no
-//! opinion on who may work where, and nothing in this crate matches a scope
-//! against a person, a sigil or a change.
+//! A scope is a label. This module says whether a label is well formed, which
+//! label a given path sits under ([`scope_covering`]), and whether that label is
+//! open to somebody holding a given set of sigils ([`scope_opens_to`]). The
+//! three together are the whole of the boundary as a *question*.
+//!
+//! What is still not here is the answer's consequence. Nothing in this crate
+//! refuses anything, reports a crossing, or knows which verbs a closed boundary
+//! stops: a caller asks the question and decides what to do about it, which is
+//! how the same two functions serve a keystroke the TUI turns down and a diff a
+//! non-interactive check will one day walk.
 
 use std::fmt;
 use std::path::Path;
@@ -255,11 +261,11 @@ pub fn validate_sigil(sigil: &str) -> Result<(), Rule> {
 /// that is not a scope, and one typo in a hand-edited manifest widens the
 /// boundary to its parent's rather than inventing a boundary nobody wrote.
 ///
-/// # Nothing calls this yet
+/// # One home to ask coverage from
 ///
-/// It exists so that the matcher, when it is written, has one home to ask from
-/// rather than three callers each walking up the tree their own way. No
-/// enforcement in this workspace reads its answer.
+/// It exists so that callers have one home to ask from rather than three each
+/// walking up the tree their own way. [`scope_opens_to`] is the half that reads
+/// its answer, and the TUI's run keys are what pair them.
 ///
 /// ```
 /// use warlock_engine::{Manifest, PactEntry, scope_covering};
@@ -335,6 +341,86 @@ fn at_or_above(stored: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+/// Whether the scope `covering` a directory is open to somebody holding
+/// `held`.
+///
+/// The matcher [`scope_covering`] was written to have one home for: coverage
+/// says *which* boundary a path sits inside, and this says whether the person at
+/// the keyboard is on the inside of it. Both halves are pure functions of their
+/// arguments — no manifest walked twice, no config read, no keystroke — so the
+/// one question warlock refuses work over is answered in a place a test can hold
+/// up on its own.
+///
+/// # It is a membership test, never an expression
+///
+/// A directory carries at most one scope and a person may hold several sigils,
+/// so any one held sigil that matches opens the boundary. There is nothing here
+/// to evaluate: no AND across levels, no accumulation up the tree — the nearest
+/// scope is the whole of what applies, which is [`scope_covering`]'s promise
+/// rather than this function's — and no precedence to get wrong.
+///
+/// # The permissive default is on the directory, and only there
+///
+/// `None` is a directory that has said nothing, and it is open to anyone: an
+/// unscoped directory is not a locked one, it is one nobody has drawn a boundary
+/// on. That is the whole of the permissiveness, and it is why a repository that
+/// has never scoped anything is unaffected by this function existing — every
+/// path in it answers `None` and every key goes through.
+///
+/// An empty `held` is emphatically **not** the same principle from the other
+/// end, and the temptation to make it one has to be resisted. A sigil is what
+/// opens a scope; holding none opens none. A machine that has never run
+/// `warlock config` is refused by every scoped directory it meets, exactly as a
+/// machine holding the wrong sigil is, because "nobody told me what you hold" and
+/// "what you hold does not match" are the same answer to the only question asked
+/// here.
+///
+/// Reading the empty set as unrestricted would make the default state of every
+/// machine a universal bypass, which is not a permissive default but the absence
+/// of the feature: the boundary would hold for exactly those people who had
+/// already opted into being bound by it. Onboarding is where this is paid for
+/// instead — you are handed your scopes, you record them with `warlock config`,
+/// and until you do a scoped repository does not open for you.
+///
+/// # The wildcard is a sigil and never a scope
+///
+/// `*` held means "may work anywhere" and opens every scope. There is
+/// deliberately no matching case for a directory scoped `*`, because
+/// [`validate_scope`] refuses the character: on the directory side "open to
+/// anyone" is already spelled by having no scope at all, and two spellings of
+/// one meaning is how a vocabulary rots. See [`validate_sigil`], where the
+/// asymmetry is argued.
+///
+/// ```
+/// use warlock_engine::scope_opens_to;
+///
+/// let held = ["web".to_owned(), "billing".to_owned()];
+///
+/// // A directory nobody has scoped is open to anyone.
+/// assert!(scope_opens_to(None, &held));
+/// // Any one held sigil opens the scope it matches.
+/// assert!(scope_opens_to(Some("billing"), &held));
+/// // A scope none of them matches is closed.
+/// assert!(!scope_opens_to(Some("data-plane"), &held));
+/// // Holding nothing opens nothing that is scoped.
+/// assert!(!scope_opens_to(Some("data-plane"), &[]));
+/// // But an unscoped directory is still open to a machine holding nothing.
+/// assert!(scope_opens_to(None, &[]));
+/// // The wildcard sigil opens everything.
+/// assert!(scope_opens_to(Some("data-plane"), &["*".to_owned()]));
+/// ```
+#[must_use]
+pub fn scope_opens_to(covering: Option<&str>, held: &[String]) -> bool {
+    let Some(scope) = covering else {
+        // Nobody drew a boundary here, so there is none to be outside of.
+        return true;
+    };
+
+    // No special case for an empty `held`, deliberately: it falls through to the
+    // membership test below and matches nothing, which is the answer. See above.
+    held.iter().any(|sigil| sigil == WILDCARD || sigil == scope)
+}
+
 /// Whether `character` may appear anywhere in a scope.
 ///
 /// ASCII lowercase, digits and the two separators, and deliberately nothing
@@ -356,7 +442,7 @@ fn is_separator(character: char) -> bool {
 mod tests {
     use super::{
         MAXIMUM_CHARACTERS, RULES, Rule, at_or_above, is_scope_character, scope_covering,
-        validate_scope, validate_sigil,
+        scope_opens_to, validate_scope, validate_sigil,
     };
     use crate::{Manifest, PactEntry};
 
@@ -718,6 +804,128 @@ mod tests {
             validate_scope(&promised),
             Ok(()),
             "the line promises {promised:?} is a scope"
+        );
+    }
+
+    /// Sigils as `scope_opens_to` takes them.
+    fn held(sigils: &[&str]) -> Vec<String> {
+        sigils.iter().map(|sigil| (*sigil).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_directory_nobody_scoped_is_open_to_everyone() {
+        assert!(scope_opens_to(None, &held(&["web"])));
+        assert!(scope_opens_to(None, &[]));
+        assert!(
+            scope_opens_to(None, &held(&["data-plane"])),
+            "no scope is not a locked scope: there is no boundary to be outside of"
+        );
+    }
+
+    #[test]
+    fn holding_nothing_opens_nothing_that_is_scoped() {
+        assert!(
+            !scope_opens_to(Some("data-plane"), &[]),
+            "a sigil is what opens a scope, so holding none opens none"
+        );
+        assert!(
+            scope_opens_to(None, &[]),
+            "but an unscoped directory is open to a machine holding nothing: the \
+             permissive default is on the directory and only there"
+        );
+    }
+
+    #[test]
+    fn the_empty_set_is_refused_exactly_as_a_wrong_sigil_is() {
+        // "Nobody told me what you hold" and "what you hold does not match" are
+        // the same answer to the only question asked here. If they differed, the
+        // default state of every machine would be a universal bypass.
+        assert_eq!(
+            scope_opens_to(Some("data-plane"), &[]),
+            scope_opens_to(Some("data-plane"), &held(&["web"]))
+        );
+    }
+
+    #[test]
+    fn any_one_held_sigil_opens_the_scope_it_matches() {
+        let sigils = held(&["web", "billing", "data-plane"]);
+
+        for scope in ["web", "billing", "data-plane"] {
+            assert!(
+                scope_opens_to(Some(scope), &sigils),
+                "`{scope}` is held, so it opens: this is membership, not an expression"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scope_none_of_the_held_sigils_match_is_closed() {
+        assert!(!scope_opens_to(
+            Some("data-plane"),
+            &held(&["web", "billing"])
+        ));
+    }
+
+    #[test]
+    fn the_wildcard_sigil_opens_every_scope() {
+        assert!(scope_opens_to(Some("data-plane"), &held(&["*"])));
+        assert!(
+            scope_opens_to(Some("billing"), &held(&["web", "*"])),
+            "the wildcard opens alongside ordinary sigils, not only alone"
+        );
+    }
+
+    #[test]
+    fn matching_is_byte_for_byte_and_never_partial() {
+        assert!(
+            !scope_opens_to(Some("data-plane"), &held(&["data"])),
+            "a prefix is a different sigil"
+        );
+        assert!(
+            !scope_opens_to(Some("data"), &held(&["data-plane"])),
+            "and so is an extension of one"
+        );
+        assert!(
+            !scope_opens_to(Some("web"), &held(&["Web"])),
+            "case is not folded here: folding belongs where a person supplies the string"
+        );
+    }
+
+    #[test]
+    fn a_near_miss_wildcard_opens_nothing() {
+        for sigil in ["**", "*.rs", "?"] {
+            assert!(
+                !scope_opens_to(Some("web"), &held(&[sigil])),
+                "`{sigil}` is not the wildcard, and `validate_sigil` refuses it anyway"
+            );
+        }
+    }
+
+    #[test]
+    fn coverage_and_opening_compose_into_the_whole_question() {
+        let manifest = Manifest::with_entries([
+            entry("crates").with_scope("platform"),
+            entry("crates/engine").with_scope("data-plane"),
+            entry("docs"),
+        ]);
+        let sigils = held(&["platform"]);
+
+        let covering = |path| {
+            scope_covering(path, ".", &manifest).expect("a path under the root has a stored form")
+        };
+
+        assert!(
+            scope_opens_to(covering("crates/tui/src"), &sigils),
+            "the nearest scope is `platform`, which is held"
+        );
+        assert!(
+            !scope_opens_to(covering("crates/engine/src"), &sigils),
+            "the nearer scope replaces the outer one outright: an outer scope is a default, \
+             never a second gate that holding `platform` could satisfy on its behalf"
+        );
+        assert!(
+            scope_opens_to(covering("docs"), &sigils),
+            "nothing at or above `docs` carries a scope"
         );
     }
 }

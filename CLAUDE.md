@@ -70,19 +70,33 @@ open to anyone.
 The other half of the vocabulary is the **sigil**, which is what the operator
 holds. They may hold several, and any one of them opens a matching scope — so
 whether a scope is open to them is a membership test, not an expression to
-evaluate. `warlock config` prints what is held. Holding nothing means
-unrestricted, not shut out.
+evaluate. `warlock config` prints what is held. A sigil is what opens a scope, so
+holding none opens none: an operator who has recorded nothing is refused by every
+scoped directory, exactly as one holding the wrong sigil is. The permissive
+default sits on the directory instead — a pacted directory with no scope above it
+is open to anyone.
 
 **A scope is a term of the pact, not a thing beside it.** An unpacted
 directory cannot carry one, and un-pacting a directory takes its scope away
 with the rest of the pact. So a boundary is changed by changing a pact, and
 there is nowhere else to look for one.
 
-**Before planning or making a change, look at what the directories it would
-touch are scoped to, and at what the operator holds.** When the work crosses
-a scope they do not hold, say so plainly, and then either narrow the work to
-what they hold or name the sigil the work wants. Never refuse the work, never
-block it, and never quietly edit around the boundary: saying what is being
-crossed is the whole of the job here.
+**Warlock's own mutating keys refuse across a closed boundary.** `p` (in both
+directions), `r` and `s` are turned down on a directory whose covering scope
+this machine does not hold, with a footer line naming the scope wanted. It is a
+guardrail rather than a guarantee — the sigil file is machine-local and
+self-asserted, so anyone can grant themselves one — and it exists to stop a
+fumbled keystroke, not a determined person. The un-pact direction is what it is
+really for: un-pacting drops the scope along with the pact, so a mis-aimed `p`
+costs a full model pass to undo and does not bring the boundary back with it.
+`v` and `e` stay open, and an unscoped directory stays open to everyone.
+
+**You are not warlock, and this does not gate your edits.** The keys above
+refuse; you do not. **Before planning or making a change, look at what the
+directories it would touch are scoped to, and at what the operator holds.** When
+the work crosses a scope they do not hold, say so plainly, and then either narrow
+the work to what they hold or name the sigil the work wants. Never refuse the
+work, never block it, and never quietly edit around the boundary: saying what is
+being crossed is the whole of the job here.
 
 <!-- warlock:end -->

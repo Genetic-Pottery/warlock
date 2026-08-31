@@ -14,6 +14,11 @@
 //! cannot fail — a home that will not resolve or a config that will not parse is
 //! a state on that line rather than a reason not to draw a tree — and no reload
 //! re-reads it, because nothing a running warlock does can change it.
+//!
+//! [`closed_scope`] is what those sigils are then *for*, and it lives here for
+//! that reason: it is the one place the boundary question is asked, by all three
+//! keys that can be refused over it, so a pact, a refresh and a scope write are
+//! turned down on the same grounds in the same words.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -21,7 +26,7 @@ use std::time::Instant;
 
 use warlock_engine::{
     Loaded, Manifest, ManifestError, SigilError, Tree, load_sigils, load_tree, manifest_path,
-    repository_root,
+    repository_root, scope_covering, scope_opens_to,
 };
 use warlock_tui::{App, Chrome, Sigils, Watch, WatchPolicy, Watching, reseat_on};
 
@@ -303,6 +308,82 @@ pub(crate) fn start_watching(app: &mut App, scope: &Scope, tree: &Tree) -> Watch
     }
 
     watched
+}
+
+/// What the footer says when a key is refused over a boundary this machine does
+/// not hold, naming the directory as `label` and the boundary as `scope`.
+///
+/// The shape every other row-level refusal in warlock uses: the fact about the
+/// row, then the thing that would help. What would help here is not a keystroke
+/// — every key that could open this boundary is a key this boundary closes — so
+/// it names `warlock config`, which is the one place a sigil is recorded and the
+/// only road from this line to the work.
+///
+/// It names the scope out loud, and backticked the way `warlock config` and the
+/// header both spell a sigil. A refusal that said only "you may not" would leave
+/// the reader with nothing to ask their lead for; the whole social half of this
+/// design is somebody being told which sigil to go and get.
+fn closed_scope_message(label: &str, scope: &str) -> String {
+    format!("{label} is scoped `{scope}` — hold that sigil to work here, with `warlock config`")
+}
+
+/// The scope closed to this machine over the row `app` has selected, or `None`
+/// when the press may go ahead.
+///
+/// The one place the boundary question is asked, so `p`, `r` and `s` are refused
+/// on the same grounds in the same words. `Some` means refused, and the string
+/// is the scope that refused it — already worded onto the app's message line by
+/// the time this returns, exactly as [`App::scope_target`] and `App::toggle_pact`
+/// word their own row-level refusals before answering `None`.
+///
+/// # Why the check is here and not on the app
+///
+/// [`Chrome`] carries the sigils and is deliberately not a field on [`App`] —
+/// it is resolved once and cannot change under a running warlock, so an app
+/// rebuilt on every reload has no business holding it. That decision is what
+/// puts this function outside the app, and it is why the app cannot word this
+/// particular refusal itself even though it words every other one. What it lends
+/// is [`App::label_for`], so the row is named here the way it is named there.
+///
+/// # A file row is not this function's business
+///
+/// Coverage would happily answer for a file — [`scope_covering`] walks up from
+/// whatever it is handed — but `p`, `r` and `s` all refuse a file row on better
+/// grounds than this, and those refusals name the row for what it is. So a file
+/// is passed through as open and the key's own answer stands: the boundary has
+/// nothing to say about a press that was never going to happen.
+///
+/// # A path the manifest cannot spell is open
+///
+/// It takes a tree rooted outside its own repository to reach, which warlock
+/// cannot currently be started in, and the two ways to answer it are to refuse
+/// every scoped key on a technicality or to let the key give its own answer. The
+/// second is chosen for the reason the permissive defaults are chosen throughout:
+/// a boundary nobody could have drawn is not a boundary somebody is crossing, and
+/// `s` already has its own wording for exactly this path.
+pub(crate) fn closed_scope(
+    app: &mut App,
+    manifest: &Manifest,
+    repo_root: &Path,
+    sigils: &Sigils,
+) -> Option<String> {
+    let row = app.selected_row()?;
+    if row.is_file() {
+        return None;
+    }
+
+    let path = row.path.clone();
+    // `ok()?` and not a message: a path with no manifest-relative form is the
+    // key's own to explain, and explaining it twice would put this line under
+    // the one that actually says what went wrong.
+    let scope = scope_covering(&path, repo_root, manifest).ok()??.to_owned();
+    if scope_opens_to(Some(&scope), sigils.as_slice()) {
+        return None;
+    }
+
+    let label = app.label_for(&path);
+    app.set_message(closed_scope_message(&label, &scope));
+    Some(scope)
 }
 
 /// What this machine holds for the repository at `repo_root`, for the header to

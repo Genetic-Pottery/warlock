@@ -53,9 +53,10 @@
 use std::path::Path;
 
 use warlock_engine::{Manifest, PactEntry, to_manifest_path, validate_scope};
-use warlock_tui::{App, Edited, ScopeField, ScopePrompt};
+use warlock_tui::{App, Edited, ScopeField, ScopePrompt, Sigils};
 
 use crate::error::Error;
+use crate::session::closed_scope;
 
 /// What one press of the scope key comes to, given whether a run is going
 /// already: the prompt the event loop holds from here on.
@@ -93,6 +94,7 @@ pub(crate) fn scope_press(
     app: &mut App,
     manifest: &Manifest,
     repo_root: &Path,
+    sigils: &Sigils,
     in_flight: bool,
 ) -> ScopePrompt {
     if in_flight {
@@ -100,6 +102,15 @@ pub(crate) fn scope_press(
         // on screen. Setting it again says the same thing, so a reader leaning
         // on the key changes nothing after the first press.
         app.set_pact_refused();
+        return ScopePrompt::Closed;
+    }
+    // The third refusal, and the sharpest of the three this key can meet: you
+    // must hold a boundary to redraw it. Without this, the one key whose whole
+    // purpose is to move a scope would be the one key a scope did not cover, and
+    // a boundary anybody may retype is not a boundary. Before `scope_target` for
+    // the reason `pact_press` puts it before the toggle — whether this operator
+    // may act here is settled ahead of what the key would have done.
+    if closed_scope(app, manifest, repo_root, sigils).is_some() {
         return ScopePrompt::Closed;
     }
     // Every row-level refusal leaves through here as `None`, having already put
@@ -293,9 +304,29 @@ mod tests {
     use warlock_engine::{
         Manifest, ManifestError, Node, NodeState, PactEntry, Tree, validate_scope,
     };
-    use warlock_tui::{App, Edited, ScopeField, ScopePrompt, edit_for};
+    use warlock_tui::{App, Edited, ScopeField, ScopePrompt, Sigils, edit_for};
 
-    use super::{scope_edit, scope_press, scope_submit};
+    use super::{scope_edit, scope_submit};
+
+    /// [`super::scope_press`] with no boundary in the way.
+    ///
+    /// The wildcard sigil, which opens every scope, so
+    /// [`closed_scope`](crate::session::closed_scope) answers `None` and the
+    /// press behaves exactly as it did before boundaries existed — which is what
+    /// every test using this shadow is about. It is `*` rather than
+    /// [`Sigils::Nothing`] because the fixture manifest *does* scope
+    /// `crates/engine`, and holding nothing opens nothing that is scoped: an
+    /// empty set here would turn a suite about the scope prompt into a suite
+    /// about being refused. The tests that *are* about the boundary call
+    /// `super::scope_press` directly.
+    fn scope_press(
+        app: &mut App,
+        manifest: &Manifest,
+        repo_root: &Path,
+        in_flight: bool,
+    ) -> ScopePrompt {
+        super::scope_press(app, manifest, repo_root, &Sigils::held(["*"]), in_flight)
+    }
 
     /// The grant every entry below carries, so that "the write left the grant
     /// alone" is an assertion about two values that are really there.
@@ -420,6 +451,192 @@ mod tests {
     /// A plain press of `code`, as crossterm reports one.
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// What the footer says when the boundary turns `s` down over
+    /// `crates/engine`, which the fixture scopes `data-plane`.
+    const CLOSED: &str = "crates/engine is scoped `data-plane` — hold that sigil to work here, with `warlock config`";
+
+    #[test]
+    fn s_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
+        let repo = a_repo();
+        let mut app = app_on(repo.path(), ENGINE_ROW);
+        let before = app.clone();
+
+        let prompt = super::scope_press(
+            &mut app,
+            &pacts(),
+            repo.path(),
+            &Sigils::held(["web"]),
+            false,
+        );
+
+        // You must hold a boundary to redraw it. Without this the one key whose
+        // whole purpose is to move a scope would be the one key a scope did not
+        // cover.
+        assert_eq!(prompt, ScopePrompt::Closed, "the window must not open");
+        assert_eq!(
+            app.message(),
+            Some(CLOSED),
+            "the refusal names the scope wanted and where a sigil is recorded"
+        );
+        // Saying so is the whole of it: the same app with the new line on it and
+        // nothing else moved — no colour, no selection, no account started.
+        let said = {
+            let mut said = before.clone();
+            said.set_message(CLOSED);
+            said
+        };
+        assert_eq!(app, said, "the refusal did more to the app than say so");
+    }
+
+    #[test]
+    fn holding_a_matching_sigil_opens_the_prompt() {
+        let repo = a_repo();
+
+        for sigils in [
+            Sigils::held(["data-plane"]),
+            Sigils::held(["web", "data-plane"]),
+            Sigils::held(["*"]),
+        ] {
+            let mut app = app_on(repo.path(), ENGINE_ROW);
+
+            let prompt = super::scope_press(&mut app, &pacts(), repo.path(), &sigils, false);
+
+            assert_eq!(
+                prompt,
+                ScopePrompt::open("crates/engine", "data-plane"),
+                "{sigils:?} opens `data-plane`"
+            );
+            assert_eq!(app.message(), Some(LAST_KEY), "{sigils:?} said something");
+        }
+    }
+
+    #[test]
+    fn a_machine_that_holds_no_sigil_is_refused_by_a_scoped_directory() {
+        let repo = a_repo();
+
+        for sigils in [
+            // Nobody has run `warlock config` here. A sigil is what opens a
+            // scope, so holding none opens none — the empty set is not a
+            // universal bypass, or the boundary would hold for exactly those
+            // people who had already opted into being bound by it.
+            Sigils::Nothing,
+            // And a config that will not parse cannot establish that anything is
+            // held, which is the same answer. The header says `holding unknown`
+            // for as long as it lasts, so the two are told apart on screen.
+            Sigils::Unknown,
+        ] {
+            let mut app = app_on(repo.path(), ENGINE_ROW);
+
+            let prompt = super::scope_press(&mut app, &pacts(), repo.path(), &sigils, false);
+
+            assert_eq!(
+                prompt,
+                ScopePrompt::Closed,
+                "{sigils:?} opened `data-plane`"
+            );
+            assert_eq!(
+                app.message(),
+                Some(CLOSED),
+                "{sigils:?} said the wrong thing"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unscoped_directory_stays_open_to_a_machine_holding_nothing() {
+        let repo = a_repo();
+        let mut app = app_on(repo.path(), TUI_ROW);
+
+        // The permissive default lives on the directory and only there, which is
+        // what keeps a repository that has never scoped anything unaffected by
+        // boundaries existing at all.
+        let prompt = super::scope_press(&mut app, &pacts(), repo.path(), &Sigils::Nothing, false);
+
+        assert_eq!(prompt, ScopePrompt::open("crates/tui", ""));
+    }
+
+    #[test]
+    fn a_directory_no_scope_covers_is_open_to_a_machine_holding_something_else() {
+        let repo = a_repo();
+        let mut app = app_on(repo.path(), TUI_ROW);
+
+        // `crates/tui` carries no scope and nothing above it does either, so
+        // there is no boundary here to be outside of.
+        let prompt = super::scope_press(
+            &mut app,
+            &pacts(),
+            repo.path(),
+            &Sigils::held(["data-plane"]),
+            false,
+        );
+
+        assert_eq!(prompt, ScopePrompt::open("crates/tui", ""));
+    }
+
+    #[test]
+    fn an_inner_scope_replaces_the_outer_one_rather_than_adding_to_it() {
+        let repo = a_repo();
+        let manifest = Manifest::with_entries([
+            entry("crates/engine").with_scope("data-plane"),
+            entry("crates/tui"),
+            entry(".").with_scope("platform"),
+        ]);
+
+        // Holding the outer scope alone does not reach the inner one: an outer
+        // scope is a default for what said nothing below it, never a second gate
+        // that `platform` could satisfy on `data-plane`'s behalf.
+        let mut app = app_on(repo.path(), ENGINE_ROW);
+        assert_eq!(
+            super::scope_press(
+                &mut app,
+                &manifest,
+                repo.path(),
+                &Sigils::held(["platform"]),
+                false
+            ),
+            ScopePrompt::Closed
+        );
+
+        // And the outer scope does cover the directory that said nothing.
+        let mut app = app_on(repo.path(), TUI_ROW);
+        assert_eq!(
+            super::scope_press(
+                &mut app,
+                &manifest,
+                repo.path(),
+                &Sigils::held(["platform"]),
+                false
+            ),
+            ScopePrompt::open("crates/tui", "")
+        );
+    }
+
+    #[test]
+    fn a_run_in_flight_is_answered_before_the_boundary_is() {
+        let repo = a_repo();
+        let mut app = app_on(repo.path(), ENGINE_ROW);
+        app.set_pact_in_flight("/repo/crates/engine", 1, 2);
+
+        let prompt = super::scope_press(
+            &mut app,
+            &pacts(),
+            repo.path(),
+            &Sigils::held(["web"]),
+            true,
+        );
+
+        // Both refusals apply; the in-flight one is the one on screen. It goes
+        // on the progress line the reader is already watching, and the message
+        // line the run has taken is left alone — a boundary sentence written
+        // there would be the one sentence they could not see.
+        assert_eq!(prompt, ScopePrompt::Closed);
+        assert_eq!(
+            app.message(),
+            Some(LAST_KEY),
+            "the boundary spoke over a run's own line"
+        );
     }
 
     #[test]

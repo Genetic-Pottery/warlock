@@ -835,7 +835,13 @@ fn run() -> Result<(), Error> {
                     // a prompt that is still closed, so this arm needs no
                     // `None` case of its own. See `scoping::scope_press`.
                     Pressed::Act(Action::OpenScope) => {
-                        prompt = scope_press(&mut app, &manifest, &scope.repo_root, running);
+                        prompt = scope_press(
+                            &mut app,
+                            &manifest,
+                            &scope.repo_root,
+                            scope.chrome.sigils(),
+                            running,
+                        );
                     }
                     // Somebody typing into that window: a character more or
                     // less in the field, the window abandoned, or — on Enter —
@@ -1273,9 +1279,25 @@ fn start_press(
     let before = app.clone();
     let running = pact.is_some();
     let work = if action == Action::Refresh {
-        refresh_press(app, running, now).map(Work::Refresh)
+        refresh_press(
+            app,
+            manifest,
+            &scope.repo_root,
+            scope.chrome.sigils(),
+            running,
+            now,
+        )
+        .map(Work::Refresh)
     } else {
-        pact_press(app, running, now).map(Work::Pact)
+        pact_press(
+            app,
+            manifest,
+            &scope.repo_root,
+            scope.chrome.sigils(),
+            running,
+            now,
+        )
+        .map(Work::Pact)
     };
     if let Some(work) = work {
         // The worker, the channel and the say-when, in the one value the loop
