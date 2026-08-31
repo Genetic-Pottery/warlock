@@ -1507,7 +1507,9 @@ pub fn pact_directory(
 /// The whole of the difference is `observer`, which hears
 /// [`summarising`](Observer::summarising) immediately before every model pass
 /// spent describing a file too big to send — and hears nothing at all for a file
-/// whose account came from the cache, because that file costs no passes.
+/// whose account came from the cache, because that file costs no passes — and
+/// hears [`requesting`](Observer::requesting) once, when the request those
+/// passes were spent on is handed over.
 /// [`starting`](Observer::starting) is not called from here: which directory a
 /// pact is on is [`pact_subtree`]'s to say, and this function pacts exactly one.
 ///
@@ -1541,6 +1543,15 @@ fn pact_directory_watched(
     // when even the summaries do not fit. Infallible in the same way, and through
     // the same cache: a file already described costs no passes here either.
     let request = demote_to_budget(directory, root, request, &mut problems, agent, observer);
+
+    // What is about to be sent, said out loud before it is sent: the only point
+    // in the pass where both numbers are true, since summarising and demoting
+    // above are exactly what changes them. Nothing is measured here that the
+    // budget did not already measure.
+    observer.requesting(
+        request.files().len(),
+        carried_bytes(request.files(), request.child_documents()),
+    );
 
     let response = agent.run(&request).map_err(|source| Error::Refused {
         directory: directory.to_path_buf(),
@@ -3097,6 +3108,13 @@ fn carried_bytes(files: &[AgentFile], child_documents: &[AgentChildDocument]) ->
 /// it has a default body that does nothing, so an observer only interested in
 /// directories implements [`starting`](Observer::starting) and stops there.
 ///
+/// Between those two it calls [`requesting`](Observer::requesting), once per
+/// directory, at the moment that directory's request is handed to the
+/// [`Agent`]: how many files went into it and how many bytes that is. The
+/// silence a reader is looking at between then and the pass coming back is the
+/// pass itself, and these are the two numbers that say why it is as long as it
+/// is. An announcement with the same do-nothing default as `summarising`.
+///
 /// And when a directory comes out of its pass with its document written — and
 /// every directory beneath it already has one — it calls
 /// [`documented`](Observer::documented), so a front end can mark work done as
@@ -3178,6 +3196,47 @@ pub trait Observer {
     /// directories go past needs to write none of this.
     fn summarising(&mut self, file: &Path, part: usize, parts: usize) {
         let _ = (file, part, parts);
+    }
+
+    /// This directory's request is going to the [`Agent`] now: `files` files,
+    /// `bytes` bytes of them.
+    ///
+    /// Called once per directory, immediately before the pass that writes the
+    /// document, so what follows it is the wait for that pass and nothing else.
+    /// A front end with a line for that wait can say what is being waited on
+    /// instead of saying only that something is: a directory that is slow is
+    /// usually slow because of these two numbers.
+    ///
+    /// # What the two numbers count
+    ///
+    /// `files` is how many files the request carries, each one a name with
+    /// either its text, an account of it written by a summarising pass, or
+    /// neither. `bytes` is everything the request carries counted the way the
+    /// budget counts it — the files, plus every child directory's document —
+    /// so the two do not cover quite the same set, and `bytes` is the number
+    /// the caps are checked against. Both are read off the request as it
+    /// stands; nothing is measured for this call that was not measured already.
+    ///
+    /// # Why this is not part of [`starting`](Observer::starting)
+    ///
+    /// Because neither number is true yet when `starting` is called. That is
+    /// asked before the directory is read at all, and what the request holds is
+    /// settled only after gathering, after the summarising passes over files too
+    /// big to send, and after the demotions that bring the whole request under
+    /// its cap. Carrying the counts on `starting` would mean asking about
+    /// cancelling after all of that work, and answering [`Pacting::Stop`] would
+    /// then cost a directory's worth of passes to act on — the property worth
+    /// keeping is that a cancel costs nothing.
+    ///
+    /// # Nothing is asked
+    ///
+    /// An announcement, like [`summarising`](Observer::summarising) and for the
+    /// same reason: the pass it is about is handed over in the next breath, and
+    /// no answer here could be acted on before it comes back. The default body
+    /// does nothing, so an observer that does not care what a request weighs
+    /// writes none of this.
+    fn requesting(&mut self, files: usize, bytes: u64) {
+        let _ = (files, bytes);
     }
 
     /// `directory`'s pass has written its document, and so has every pass under
@@ -3881,9 +3940,9 @@ mod tests {
         MAP_PROMPT, MINIMUM_DOCUMENT_BYTES, MINIMUM_SUMMARY_BYTES, Observer, Omission,
         PER_FILE_BYTE_CAP, Pacted, PactedSubtree, Pacting, Problem, REDUCE_PROMPT,
         REQUEST_BYTE_CAP, Refusal, Unviewable, Unwatched, Viewed, byte_count, cache_summary,
-        cached_summary, chunk_utf8, gather_request, pact_directory, pact_directory_watched,
-        pact_subtree, pactable_directories, refresh_subtree, summarise_file, summary_dir,
-        summary_file_name, summary_key, unpact_subtree, view_file,
+        cached_summary, carried_bytes, chunk_utf8, gather_request, pact_directory,
+        pact_directory_watched, pact_subtree, pactable_directories, refresh_subtree,
+        summarise_file, summary_dir, summary_file_name, summary_key, unpact_subtree, view_file,
     };
     use crate::{
         Agent, AgentChildDocument, AgentError, AgentFile, AgentRequest, AgentResponse, Loaded,
@@ -8602,6 +8661,100 @@ mod tests {
                 Told::Ran(Kind::Document),
             ],
             "the observer handed to the subtree pact is the one the map-reduce reaches",
+        );
+    }
+
+    // Announcing the request itself: what the directory's own pass was handed.
+
+    /// An observer that hears what every request weighed and stops nothing.
+    ///
+    /// [`Observer::requesting`] only, plus the [`Observer::starting`] the trait
+    /// requires: the point of it is that the announcement carries its numbers
+    /// on its own, with no directory to match up and nothing else to remember.
+    #[derive(Default)]
+    struct Weighing(Vec<(usize, u64)>);
+
+    impl Observer for Weighing {
+        fn starting(&mut self, _directory: &Path, _position: usize, _total: usize) -> Pacting {
+            Pacting::Continue
+        }
+
+        fn requesting(&mut self, files: usize, bytes: u64) {
+            self.0.push((files, bytes));
+        }
+    }
+
+    #[test]
+    fn every_directory_announces_what_its_own_request_carries() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+
+        let agent = Canned::new(document(300));
+        let mut watching = Weighing::default();
+        pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &agent,
+            &mut watching,
+        )
+        .expect("pacts");
+
+        // Nothing here is over a cap, so every pass the agent ran is a
+        // directory's own pass: four directories, four requests, four
+        // announcements — and each one carries the numbers of the request that
+        // was run, measured the way the budget measures them.
+        let sent: Vec<(usize, u64)> = agent
+            .seen
+            .borrow()
+            .iter()
+            .map(|request| {
+                (
+                    request.files().len(),
+                    carried_bytes(request.files(), request.child_documents()),
+                )
+            })
+            .collect();
+
+        assert_eq!(sent.len(), 4, "one pass per directory in the subtree");
+        assert_eq!(
+            watching.0, sent,
+            "the announcement carries the file count and byte total of the request that ran",
+        );
+    }
+
+    #[test]
+    fn the_announced_bytes_are_the_budget_total_and_not_just_the_files() {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        let engine = repo.path().join("crates/engine");
+        write(&engine, "Cargo.toml", "[package]\n");
+        write(&engine, "src/lib.rs", "//! Core engine.\n");
+
+        let document = document(300);
+        let mut watching = Weighing::default();
+        pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &Canned::new(document.clone()),
+            &mut watching,
+        )
+        .expect("pacts");
+
+        // `src` first, with its one file and nothing under it; then the parent,
+        // whose one file is `Cargo.toml` and whose total also carries the
+        // document `src` has just been given. The counts cover different sets on
+        // purpose: the bytes are what the caps are checked against.
+        let child = u64::try_from(document.len()).expect("a test document fits in a u64");
+        assert_eq!(watching.0.len(), 2, "one announcement per directory");
+        let (files, bytes) = watching.0[1];
+        assert_eq!(
+            files, 1,
+            "the parent's own file, with the child's not in it"
+        );
+        assert!(
+            bytes > child,
+            "the total carries the child's document as well as the file: {bytes} against {child}",
         );
     }
 
