@@ -1253,9 +1253,9 @@ mod tests {
     use std::{env, fs, process};
 
     use warlock_engine::{
-        Agent, AgentError, AgentRequest, AgentResponse, Loaded, Manifest, Node, NodeState,
-        PER_FILE_BYTE_CAP, PactEntry, Tree, Unwatched, decide_state, load_tree, repository_root,
-        subtree_hash,
+        Agent, AgentError, AgentFile, AgentRequest, AgentResponse, Loaded, Manifest, Node,
+        NodeState, PER_FILE_BYTE_CAP, PactEntry, Tree, Unwatched, decide_state, load_tree,
+        repository_root, subtree_hash,
     };
     use warlock_tui::{
         Account, Activities, Activity, App, Chrome, ClaudeAgent, Line, PactToggle, Run, Section,
@@ -1291,9 +1291,15 @@ mod tests {
         /// to unless a test attached one, exactly as a real
         /// [`ClaudeAgent`]'s is.
         activities: Activities,
-        /// One entry per request in call order: which directory it was for,
-        /// and whether `.warlock/pacts.toml` existed at that moment.
-        seen: RefCell<Vec<(PathBuf, bool)>>,
+        /// One entry per request in call order: the request itself, exactly
+        /// as the engine built it, and whether `.warlock/pacts.toml` existed
+        /// at that moment.
+        ///
+        /// The whole request rather than the directory it names, because
+        /// what a run asks a model for is the thing one of the tests below
+        /// holds two runs up against — see
+        /// [`Canned::requests`].
+        seen: RefCell<Vec<(AgentRequest, bool)>>,
     }
 
     impl Canned {
@@ -1334,13 +1340,36 @@ mod tests {
             self
         }
 
-        /// The directories a pass ran for, in call order.
+        /// The directories a pass ran for, in call order, relative to the
+        /// root.
         fn directories(&self) -> Vec<PathBuf> {
             self.seen
                 .borrow()
                 .iter()
-                .map(|(directory, _)| directory.clone())
+                .map(|(request, _)| self.relative(request.directory()))
                 .collect()
+        }
+
+        /// Every request a pass was handed, whole and in call order.
+        ///
+        /// What the engine decided to send: the prompt, the files with their
+        /// bytes, the children's documents, in the engine's own order. Two
+        /// runs over the same directory are the same run when these are equal.
+        fn requests(&self) -> Vec<AgentRequest> {
+            self.seen
+                .borrow()
+                .iter()
+                .map(|(request, _)| request.clone())
+                .collect()
+        }
+
+        /// `directory` named from the root, so a test can say
+        /// `crates/engine` rather than a temporary directory's whole path.
+        fn relative(&self, directory: &Path) -> PathBuf {
+            directory
+                .strip_prefix(&self.root)
+                .unwrap_or(directory)
+                .to_path_buf()
         }
 
         /// Whether a manifest was on disk while the passes were running.
@@ -1351,14 +1380,10 @@ mod tests {
 
     impl Agent for Canned {
         fn run(&self, request: &AgentRequest) -> Result<AgentResponse, AgentError> {
-            let directory = request.directory();
-            let relative = directory
-                .strip_prefix(&self.root)
-                .unwrap_or(directory)
-                .to_path_buf();
+            let relative = self.relative(request.directory());
             self.seen
                 .borrow_mut()
-                .push((relative.clone(), saved(&self.root).is_some()));
+                .push((request.clone(), saved(&self.root).is_some()));
 
             // Reported before anything is answered, because that is when a
             // real pass reports: while it is still running.
@@ -4898,6 +4923,126 @@ mod tests {
                     .is_none()
             );
             assert_eq!(app, quiet, "a frame with no run in it changed something");
+        }
+    }
+
+    /// Every request one whole run over `scratch` handed a model, in call
+    /// order, with `talked_first` deciding whether somebody asked something
+    /// before pressing the key.
+    ///
+    /// The real chain from the keystroke down: [`pact_press`] on the row the
+    /// app has selected decides the [`Work`], [`run_pact`] is the worker's own
+    /// body over that work, and the fake agent in the middle writes down what
+    /// the engine asked it for. Nothing about the run is short-circuited, so a
+    /// conversation that reached the engine would reach it here.
+    fn requests_of_a_run(scratch: &Scratch, talked_first: bool) -> Vec<AgentRequest> {
+        let (mut app, scope) = load(scratch);
+        let mut manifest = Manifest::new();
+        let base = Instant::now();
+        if talked_first {
+            a_conversation(&mut app, base);
+        }
+
+        let toggle = pact_press(&mut app, false, base).expect("the root row is a directory");
+        let agent = Canned::new(scratch, []);
+        run_and_apply(
+            scratch,
+            &mut app,
+            &mut manifest,
+            &scope,
+            &Work::Pact(toggle),
+            &agent,
+        );
+        if talked_first {
+            assert!(
+                app.showing_thread(),
+                "the run was supposed to happen inside the conversation"
+            );
+        }
+        agent.requests()
+    }
+
+    /// Put `scratch` back the way the first run found it: the documents that
+    /// run wrote taken away, and warlock's record of them with them.
+    ///
+    /// So that the two runs compared below happen over one directory rather
+    /// than over two that merely look alike. A request names the directory it
+    /// is for by its whole path and carries the children's documents as they
+    /// sit on disk, so a second scratch repository would differ in every
+    /// request before a conversation could make any difference at all.
+    fn undo_the_run(scratch: &Scratch) {
+        fs::remove_dir_all(scratch.root.join(".warlock")).expect("the run saved a manifest");
+        remove_documents(&scratch.root);
+        assert!(
+            !scratch.path(DOCUMENT_FILE).exists(),
+            "a document the run wrote is still there"
+        );
+    }
+
+    /// Remove every `WARLOCK.md` at or under `directory`.
+    fn remove_documents(directory: &Path) {
+        for entry in fs::read_dir(directory).expect("a directory the run walked") {
+            let path = entry
+                .expect("an entry of a directory the run walked")
+                .path();
+            if path.is_dir() {
+                remove_documents(&path);
+            } else if path.file_name().is_some_and(|name| name == DOCUMENT_FILE) {
+                fs::remove_file(&path).expect("a document the run wrote");
+            }
+        }
+    }
+
+    #[test]
+    fn a_conversation_changes_nothing_about_what_a_run_asks_for() {
+        // The whole reason a pact may sit inside a thread: what the engine
+        // sends is a function of the directory and nothing else. Two runs over
+        // the one repository, the second of them started after a question was
+        // asked and answered on the very thread the run then writes its account
+        // into, hand the model the same requests — same prompt, same files with
+        // the same bytes, same children's documents, in the same order, for the
+        // same directories in the same order.
+        //
+        // A guard against a wiring nobody has written: the engine has no notion
+        // of a chat, so the only way this can ever fail is somebody deciding to
+        // pass the conversation down. `make` is what a pact has to be — two
+        // people with the same repository get the same documents — and green is
+        // only a fact for as long as that holds.
+        let scratch = one_crate_to_load("a-request-a-chat-cannot-reach");
+
+        let alone = requests_of_a_run(&scratch, false);
+        undo_the_run(&scratch);
+        let after_a_conversation = requests_of_a_run(&scratch, true);
+
+        assert!(
+            !alone.is_empty(),
+            "the run described nothing, so nothing was compared"
+        );
+        assert_eq!(
+            alone, after_a_conversation,
+            "the conversation reached what the run asks a model for"
+        );
+
+        // And said plainly, for a failure that would otherwise be two screens of
+        // bytes: neither the question nor the answer is anywhere in what was
+        // sent, whether as the prompt itself or smuggled into a file.
+        for request in &after_a_conversation {
+            for text in [QUESTION, ANSWER] {
+                assert!(
+                    !request.prompt().contains(text),
+                    "the prompt for {} carries the conversation",
+                    request.directory().display()
+                );
+                assert!(
+                    !request
+                        .files()
+                        .iter()
+                        .filter_map(AgentFile::bytes)
+                        .any(|bytes| bytes.windows(text.len()).any(|run| run == text.as_bytes())),
+                    "a file sent for {} carries the conversation",
+                    request.directory().display()
+                );
+            }
         }
     }
 
