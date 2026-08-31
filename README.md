@@ -31,11 +31,16 @@ main event.
 
 ## How the work flows
 
-A change does not start with a file. It starts with a conversation.
+A change does not start with a file. It starts with a conversation — and that
+conversation happens in Warlock, in the composer under the panel, rather than in
+some other window you paste the result out of.
 
 You talk the change through with the patron, and it pushes back: what exactly do
 you want, which modules does this touch, what does done look like. What comes
-out is a brief and a set of tickets, each carrying a predicted module footprint.
+out is a brief — `/brief` aims the conversation at one, `/write` puts it in your
+repository as a markdown document (see
+[The brief workflow](#the-brief-workflow)) — and a set of tickets, each carrying
+a predicted module footprint.
 Later, you or someone else pulls a ticket and works it, with the boundary
 already agreed and the context already written down. The tree goes yellow where
 the code moved. A refresh sends the AI back over its own diff to update what it
@@ -128,6 +133,11 @@ and the composer under the panel — and `Tab` moves between them. Almost every
 command is a single unshifted letter, which the composer is allowed to take back
 the moment it holds the keyboard: while you are typing a draft, `p` is the
 letter `p` and not the pact key.
+
+The composer is where the conversation with the patron happens, so it has
+commands of its own: a draft whose first word begins with `/` is read as a
+command rather than sent to the model. There are three, and they are what the
+[brief workflow](#the-brief-workflow) is made of.
 
 ### Moving around
 
@@ -223,10 +233,21 @@ draft.
 | `Esc` | Hand the keyboard back and keep the draft exactly as it was |
 | `Tab` | Move the focus on — the one key the composer does not take |
 | `Ctrl-C` | Cancel the turn if one is being answered; otherwise quit |
+| `/brief` | Enter brief mode: the same conversation is now converging on a document, sent the instruction the brief template describes |
+| `/write` | Only in brief mode: ask for the document, then open an editable path prompt already holding a proposal like `docs/warlock-brief-13-scopes-and-sigils.md` |
+| `/chat` | Leave brief mode, writing nothing — back to answering questions as they come |
 
 While a turn is being answered the field is muted and takes no keys at all — one
 question at a time. Shift-Enter is read as `Enter`, because too many terminals
 never report it as a keystroke of its own.
+
+Those three are the whole of the command list, none of them takes anything after
+it, and anything else beginning with a slash — a typo, a command some other
+program has, `/brief` with a paragraph under it — costs one line on the card
+saying so rather than a turn spent finding out. A path is not a command: a second
+slash makes `/home/cole/notes` ordinary words, and it goes to the model as it
+stands. `/write` outside brief mode and `/chat` while already in chat mode are
+each one line and no turn, for the same reason.
 
 ### At the quit question
 
@@ -260,6 +281,55 @@ Live only while capture is on, which is the default and what `m` turns off.
 Drags, moves, the other buttons and the horizontal wheel are read and dropped,
 and the pointer means nothing anywhere while the quit question or the scope
 prompt is up.
+
+## The brief workflow
+
+The conversation has two registers. In **chat** it answers questions about the
+repository as they come. `/brief` puts it in **brief mode**, where the same
+conversation — every turn already on the card is still on it, in order — is aimed
+at producing one document, and each turn is asked to think a step harder than a
+question is worth. The panel's top edge reads `thread · brief` while that holds,
+and `/chat` ends it.
+
+`/write` is only valid there. It asks for the whole document as one reply, and
+when that reply lands it opens an editable path prompt already holding a proposal
+like `docs/warlock-brief-13-scopes-and-sigils.md`: the brief directory, the next
+number above the highest one appearing in any name already in that directory, and
+a slug folded out of the document's own title. Edit the line and press `Enter` to
+write it, or `Esc` to write nothing. A path that already exists is refused rather
+than overwritten, and what lands on disk is the reply as it came back, but for a
+fence wrapped around the whole of it and a trailing newline.
+
+Four things worth knowing before you spend twenty turns on one:
+
+- **The written artifact is inert.** Warlock writes the file and is finished with
+  it. It never reads it back, never indexes it, and nothing it does afterwards is
+  informed by a word the brief says. The document is for you and for whoever
+  clones the repository.
+- **Nothing survives a quit before `/write`.** The session is per-process and in
+  memory: Warlock keeps no transcript on disk, mints a fresh session for every
+  run, and resumes nothing. A brief you have not written is gone with the
+  process.
+- **The shape is a template you can own.** `/brief` sends an instruction built
+  around `.warlock/brief-template.md` if the repository has written one, and
+  around Warlock's own built-in shape if it has not. The file is read again at
+  every `/brief`, so editing it with `e` takes effect on the next one without a
+  restart. A template that is there and cannot be read refuses the command with
+  one line — Warlock will not quietly aim a long conversation at its own shape
+  instead.
+- **Where briefs go is one key.** `.warlock/briefs.toml` holds a single
+  `directory`, relative to the repository root; with no file, or a file that does
+  not mention it, briefs go to `docs/`. It is read at `/brief` and held for the
+  life of that mode, so a `/write` twenty turns later cannot fail for the want of
+  a config file.
+
+A brief written into a pacted subtree makes that directory stale, exactly as any
+other new file under a pact does — the document above it now describes a
+directory holding a file it has never seen — and the write says so on the thread.
+If your brief directory sits inside a pact, that is a refresh you did not mean to
+buy, and `.warlockignore` is the only lever: naming the directory there keeps it
+out of the subtree hashes and out of every pass, in the gitignore syntax you
+already know. There is no setting that makes a written brief not count.
 
 ## Troubleshooting
 
