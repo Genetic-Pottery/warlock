@@ -983,10 +983,14 @@ pub fn draw(
     if let (Some(area), Some(composer)) = (field, composer) {
         // Two things have to be true for the field to be drawn as the place the
         // next character lands: the keys have to be pointed at it, and it has to
-        // be taking them. A muted field is one a turn is being answered over
-        // (see [`Composer::is_muted`]), and it is drawn exactly as a field
-        // nobody is pointed at — dim, and with no caret — because that is what
-        // is true of it.
+        // be taking them. A muted field is one a turn is being answered over, or
+        // one a pact or a refresh is writing under (see [`Composer::is_muted`]),
+        // and either is drawn exactly as a field nobody is pointed at — dim, and
+        // with no caret — because that is what is true of it. Muting only ever
+        // changes how the field is drawn: it is still on screen, still the
+        // panel's missing rows, still holding every character of the draft. The
+        // one thing that takes the field off the frame is the document card,
+        // which is [`on_screen`]'s question and not this one.
         let live = app.focus() == Focus::Composer && !composer.is_muted();
         draw_composer(frame, area, composer, live);
     }
@@ -7197,6 +7201,188 @@ mod tests {
         // the same rows, still there when the answer lands.
         assert_eq!(live_rows, muted_rows);
         assert_eq!(muted_rows.last().map(String::as_str), Some(live.draft()));
+    }
+
+    /// An app showing a conversation with a run writing into it: a question,
+    /// its answer, and then a pact started from the tree over the top of them,
+    /// which appends its account to the thread as a turn nobody typed.
+    ///
+    /// The two tests below are about the field under that thread, so what they
+    /// need of the app is that the thread is what is showing and that a run is
+    /// under way — the clocks are read at `at(base, 9)` by both.
+    fn app_running_under_a_thread(base: Instant) -> App {
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_focus(Focus::Composer);
+        app.start_turn("what does the engine do?", at(base, 1));
+        app.answer_turn("It walks the tree.", at(base, 2));
+        app.start_account(at(base, 3));
+        app.set_pact_in_flight("warlock/crates/engine", 1, 2);
+
+        assert!(app.showing_thread(), "the run swapped the card away");
+        assert!(app.composer_showable(), "the run hid the field");
+        app
+    }
+
+    #[test]
+    fn a_field_muted_by_a_run_is_dim_and_caretless_and_still_on_screen() {
+        // The other thing that mutes the field, drawn. A pact or a refresh
+        // started while the reader is looking at the conversation writes its
+        // account into the thread as a turn nobody typed, and the field under
+        // that thread is dim and caretless for as long as the run lasts — the
+        // same drawing as a turn being answered, because it is the same fact
+        // about the field.
+        //
+        // And it is only a drawing: muting leaves the field exactly where it is,
+        // same pane, same rows off the panel, same characters in it. Somebody
+        // who was half way through a question when a run started still has their
+        // question. The other reason a field is not typed into — the document
+        // card — is the test after this one, and it is a different rule.
+        let base = Instant::now();
+        let now = at(base, 9);
+        let app = app_running_under_a_thread(base);
+
+        let live = Composer::new("a question half written");
+        let mut muted = live.clone();
+        muted.set_muted(true);
+
+        // The border's corner, the cell the caret would sit in, and the rows of
+        // both panes — so what the run changed and what it left alone are read
+        // off the one frame.
+        let drawn = |composer: &Composer| {
+            let buffer = render_all(
+                &app,
+                &Chrome::default(),
+                WIDTH,
+                FIXTURE_HEIGHT,
+                now,
+                QuitConfirm::Closed,
+                &ScopePrompt::Closed,
+                Some(composer),
+            );
+            let field = areas(buffer.area, Some(composer))
+                .composer
+                .expect("a field on this frame");
+            let inner = pane_inner(field);
+            let caret = u16::try_from(display_width(composer.draft())).expect("a short draft");
+            let border = &buffer[(field.x, field.y)];
+            (
+                (border.fg, border.modifier),
+                buffer[(inner.x + caret, inner.y)].modifier,
+                composer_rows(&buffer, composer),
+                panel_rows(&buffer),
+                field,
+            )
+        };
+
+        let ((lit_fg, lit_modifier), live_caret, live_rows, live_panel, live_area) = drawn(&live);
+        let ((dim_fg, dim_modifier), muted_caret, muted_rows, muted_panel, muted_area) =
+            drawn(&muted);
+
+        assert_eq!(
+            (lit_fg, lit_modifier),
+            (FOCUS_COLOUR, Modifier::BOLD),
+            "a live field the keys are in is lit"
+        );
+        assert_ne!(dim_fg, FOCUS_COLOUR, "a field a run muted is lit");
+        assert!(
+            dim_modifier.contains(Modifier::DIM),
+            "a field a run muted should be dim: {dim_modifier:?}"
+        );
+        assert!(
+            live_caret.contains(Modifier::REVERSED),
+            "a live field draws its caret: {live_caret:?}"
+        );
+        assert!(
+            !muted_caret.contains(Modifier::REVERSED),
+            "a field a run muted drew a caret: {muted_caret:?}"
+        );
+
+        // Nothing else about the frame moved: the field is the same pane in the
+        // same place, holding the same draft, and the panel above it is drawing
+        // the same conversation on the same rows.
+        assert_eq!(live_area, muted_area, "muting resized the field");
+        assert_eq!(live_rows, muted_rows);
+        assert_eq!(muted_rows.last().map(String::as_str), Some(live.draft()));
+        assert_eq!(live_panel, muted_panel, "muting moved the panel's lines");
+        assert_eq!(
+            composer_on_screen(&app, &muted),
+            Some(&muted),
+            "a run takes the field's keys, not its rows"
+        );
+        assert_eq!(
+            panel_height(Size::new(WIDTH, FIXTURE_HEIGHT), Some(&muted), None),
+            panel_height(Size::new(WIDTH, FIXTURE_HEIGHT), Some(&live), None),
+            "a muted field costs the panel a different number of rows"
+        );
+    }
+
+    #[test]
+    fn a_document_read_during_a_run_hides_the_muted_field_and_gives_the_rows_back() {
+        // The two rules are separate and they compose. Muting takes the field's
+        // keys; the document card takes the field itself — so `v` during a run
+        // puts the file on the panel, the field goes off the frame altogether,
+        // and the panel gets those rows back exactly as it does for a live one.
+        // Neither loses the draft: the swap back puts it on screen again, still
+        // muted, with every character in it.
+        let base = Instant::now();
+        let now = at(base, 9);
+        let mut app = app_running_under_a_thread(base);
+        let size = Size::new(WIDTH, FIXTURE_HEIGHT);
+
+        let live = Composer::new("a question half written");
+        let mut muted = live.clone();
+        muted.set_muted(true);
+        assert_eq!(
+            composer_on_screen(&app, &muted),
+            Some(&muted),
+            "a run takes the field's keys, not its rows"
+        );
+
+        app.show_document(["# The engine", "", "It walks the tree."], false);
+
+        assert_eq!(
+            composer_on_screen(&app, &muted),
+            None,
+            "a document card left a muted field on screen"
+        );
+        assert_eq!(
+            panel_height(size, None, None),
+            panel_height(size, composer_on_screen(&app, &muted), None),
+            "the panel should have the rows the muted field was taking"
+        );
+        assert_eq!(
+            render_all(
+                &app,
+                &Chrome::default(),
+                WIDTH,
+                FIXTURE_HEIGHT,
+                now,
+                QuitConfirm::Closed,
+                &ScopePrompt::Closed,
+                Some(&muted),
+            ),
+            render_all(
+                &app,
+                &Chrome::default(),
+                WIDTH,
+                FIXTURE_HEIGHT,
+                now,
+                QuitConfirm::Closed,
+                &ScopePrompt::Closed,
+                None,
+            ),
+            "a muted draft reached a frame the document card has"
+        );
+
+        // Shift-Tab round the cycle to the conversation — the account is
+        // between them, because a run has filled it — and the field is there
+        // again, dim, with every character still in it.
+        app.swap_card();
+        assert!(!app.showing_thread(), "the cycle skipped the account");
+        app.swap_card();
+        assert!(app.showing_thread(), "the swap landed somewhere else");
+        assert_eq!(composer_on_screen(&app, &muted), Some(&muted));
+        assert_eq!(muted.draft(), live.draft());
     }
 
     #[test]

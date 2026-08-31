@@ -22,6 +22,8 @@
 //! flight and leaves the manifest as it was. Either way no half-state exists
 //! for an abandoned worker to leave — see [`spawn_pact`] for the bargain.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Instant;
@@ -654,6 +656,17 @@ pub(crate) fn refresh_press(app: &mut App, in_flight: bool, at: Instant) -> Opti
 /// inside them, because an account that is never closed is a finished run whose
 /// newest line goes on counting up for as long as warlock is open.
 ///
+/// Everything that lands on the account here lands on the conversation's copy of
+/// the same run as well, when there is one: a pact or a refresh started while the
+/// thread was on screen took a turn nobody typed ([`App::start_account`]), and
+/// each event drained above is applied to the card and to that turn in one call
+/// ([`App::write_run`]), so the turn fills as the run's events arrive rather than
+/// being copied over at the end. The endings and the summary go the same way, and
+/// the turn is closed with them. None of that changes which card is showing, and
+/// none of it is a second history: a reader watching the thread watches the run
+/// arrive in it, and a reader on the account card or a document has the run where
+/// they left it.
+///
 /// The tree is then re-read from disk and the view put
 /// back on top of it ([`reload_tree`]). One reload, at the bottom, for all four
 /// endings and for an un-pact as much as for a pact: a run writes `WARLOCK.md`
@@ -700,9 +713,16 @@ pub(crate) fn apply_progress(
                 // the run lasts. The section is opened first so that the
                 // activities drained after it — which may be in this same batch
                 // — land under the directory they belong to.
-                if let Some(account) = app.account_mut() {
-                    account.open_section(section_label(&scope.root, &directory), now);
-                }
+                //
+                // The panel's copy goes through `App::write_run`, here and for
+                // every other event below: a run reaches its own card and, when
+                // there is a conversation on screen, the turn nobody typed in
+                // it, and the one call is what keeps the two from wording the
+                // same event differently. The label is computed once, outside
+                // the closure, for the same reason — one spelling of a
+                // directory, handed to whoever is holding this run.
+                let heading = section_label(&scope.root, &directory);
+                app.write_run(|account| account.open_section(&heading, now));
                 // The fraction is the observer's own, whichever run is
                 // reporting: a refresh of a subtree of forty directories with
                 // seven stale ones counts to seven, because seven is what the
@@ -714,19 +734,19 @@ pub(crate) fn apply_progress(
             // Filed under whichever directory is open, which is the one the
             // `Starting` before it named: an activity carries no directory
             // because it needs none, and the account's live section is the
-            // answer. An account is always there during a run — the press that
-            // started it made one — so `None` is a run nobody started this way,
-            // which is a test driving the events directly; dropping the line is
-            // the honest thing to do with it either way.
+            // answer — in the card and in the conversation's run turn alike,
+            // since both were opened by the same `Starting`. An account is
+            // always there during a run — the press that started it made one —
+            // so a run with neither is one nobody started this way, which is a
+            // test driving the events directly; dropping the line is the honest
+            // thing to do with it either way. See `App::write_run`.
             //
             // What each activity comes to is the account's business and not this
             // file's: a tool is its name and its one detail, thinking is the
             // word `thinking`, and a cost is added to the section's spend rather
             // than drawn as a line of its own. See `Account::record`.
             Ok(PactEvent::Doing(activity)) => {
-                if let Some(account) = app.account_mut() {
-                    account.record(&activity, now);
-                }
+                app.write_run(|account| account.record(&activity, now));
             }
             // Both, and for two different readers. The panel gets a line per
             // pass because the passes over one over-cap file can be most of a
@@ -750,9 +770,8 @@ pub(crate) fn apply_progress(
             // moved past. The panel's line needs no such sweeping up: it is a
             // line, and a line stays where the run put it.
             Ok(PactEvent::Summarising { file, part, parts }) => {
-                if let Some(account) = app.account_mut() {
-                    account.record_summarising(section_label(&scope.root, &file), part, parts, now);
-                }
+                let spelled = section_label(&scope.root, &file);
+                app.write_run(|account| account.record_summarising(&spelled, part, parts, now));
                 app.set_pact_summarising(file, part, parts);
             }
             // The one recolouring a run does before it is over. The engine
@@ -899,8 +918,27 @@ const DOCUMENT_FILE: &str = "WARLOCK.md";
 /// which is what a killed `claude` otherwise comes back as. The sections above
 /// it are worded exactly as they would have been, because they finished.
 ///
-/// Does nothing when there is no account, which is a run nobody started through
-/// the pact key: a test driving the events straight down the channel.
+/// The endings go to the run wherever it is being kept — its own card, and the
+/// turn nobody typed when the run happened during a conversation — through the
+/// one call every other event goes through ([`App::write_run`]), so the
+/// conversation's copy of a run ends in the same words its card does. The turn is
+/// then closed ([`App::close_run`]), which adds no line and says only that the
+/// run is over: its clocks stop and the composer is the reader's again. Both
+/// happen on all four endings — the run that wrote its documents, the one whose
+/// engine call failed, the one whose worker was lost, and the one the reader
+/// stopped — because all four leave a run that is over, and a turn left open
+/// would go on ticking under whatever is asked next.
+///
+/// Each section's ending is worded once and given to both copies, from the memo
+/// below rather than from a second look at disk. `section_outcome` `stat`s the
+/// document it reports the size of, and a file that changed between two stats
+/// would put a different byte count in the thread than on the card — the one
+/// thing the single call exists to prevent. The keys are the section headings,
+/// which is what a section is looked up by everywhere here.
+///
+/// Writes nothing where there is no run to write to, which is a run nobody
+/// started through the pact key: a test driving the events straight down the
+/// channel.
 fn close_account(
     app: &mut App,
     scope: &Scope,
@@ -908,16 +946,21 @@ fn close_account(
     cancelled: bool,
     now: Instant,
 ) {
-    let Some(account) = app.account_mut() else {
-        return;
-    };
-    if cancelled {
-        account.close_section(&Outcome::Cancelled, now);
-    }
-    account.close_open_sections(now, |section| {
-        section_outcome(section, refusals, &scope.root)
+    let worded: RefCell<HashMap<PathBuf, Outcome>> = RefCell::new(HashMap::new());
+    app.write_run(|account| {
+        if cancelled {
+            account.close_section(&Outcome::Cancelled, now);
+        }
+        account.close_open_sections(now, |section| {
+            worded
+                .borrow_mut()
+                .entry(section.directory().to_path_buf())
+                .or_insert_with(|| section_outcome(section, refusals, &scope.root))
+                .clone()
+        });
+        account.finish(now);
     });
-    account.finish(now);
+    app.close_run(now);
 }
 
 /// How the section for one directory ends: the document it wrote, or the reason
@@ -1210,12 +1253,13 @@ mod tests {
     use std::{env, fs, process};
 
     use warlock_engine::{
-        Agent, AgentError, AgentRequest, AgentResponse, Loaded, Manifest, Node, NodeState,
-        PER_FILE_BYTE_CAP, PactEntry, Tree, Unwatched, decide_state, load_tree, repository_root,
-        subtree_hash,
+        Agent, AgentError, AgentFile, AgentRequest, AgentResponse, Loaded, Manifest, Node,
+        NodeState, PER_FILE_BYTE_CAP, PactEntry, Tree, Unwatched, decide_state, load_tree,
+        repository_root, subtree_hash,
     };
     use warlock_tui::{
         Account, Activities, Activity, App, Chrome, ClaudeAgent, Line, PactToggle, Run, Section,
+        Turn,
     };
 
     use warlock_tui::Cancel;
@@ -1247,9 +1291,15 @@ mod tests {
         /// to unless a test attached one, exactly as a real
         /// [`ClaudeAgent`]'s is.
         activities: Activities,
-        /// One entry per request in call order: which directory it was for,
-        /// and whether `.warlock/pacts.toml` existed at that moment.
-        seen: RefCell<Vec<(PathBuf, bool)>>,
+        /// One entry per request in call order: the request itself, exactly
+        /// as the engine built it, and whether `.warlock/pacts.toml` existed
+        /// at that moment.
+        ///
+        /// The whole request rather than the directory it names, because
+        /// what a run asks a model for is the thing one of the tests below
+        /// holds two runs up against — see
+        /// [`Canned::requests`].
+        seen: RefCell<Vec<(AgentRequest, bool)>>,
     }
 
     impl Canned {
@@ -1290,13 +1340,36 @@ mod tests {
             self
         }
 
-        /// The directories a pass ran for, in call order.
+        /// The directories a pass ran for, in call order, relative to the
+        /// root.
         fn directories(&self) -> Vec<PathBuf> {
             self.seen
                 .borrow()
                 .iter()
-                .map(|(directory, _)| directory.clone())
+                .map(|(request, _)| self.relative(request.directory()))
                 .collect()
+        }
+
+        /// Every request a pass was handed, whole and in call order.
+        ///
+        /// What the engine decided to send: the prompt, the files with their
+        /// bytes, the children's documents, in the engine's own order. Two
+        /// runs over the same directory are the same run when these are equal.
+        fn requests(&self) -> Vec<AgentRequest> {
+            self.seen
+                .borrow()
+                .iter()
+                .map(|(request, _)| request.clone())
+                .collect()
+        }
+
+        /// `directory` named from the root, so a test can say
+        /// `crates/engine` rather than a temporary directory's whole path.
+        fn relative(&self, directory: &Path) -> PathBuf {
+            directory
+                .strip_prefix(&self.root)
+                .unwrap_or(directory)
+                .to_path_buf()
         }
 
         /// Whether a manifest was on disk while the passes were running.
@@ -1307,14 +1380,10 @@ mod tests {
 
     impl Agent for Canned {
         fn run(&self, request: &AgentRequest) -> Result<AgentResponse, AgentError> {
-            let directory = request.directory();
-            let relative = directory
-                .strip_prefix(&self.root)
-                .unwrap_or(directory)
-                .to_path_buf();
+            let relative = self.relative(request.directory());
             self.seen
                 .borrow_mut()
-                .push((relative.clone(), saved(&self.root).is_some()));
+                .push((request.clone(), saved(&self.root).is_some()));
 
             // Reported before anything is answered, because that is when a
             // real pass reports: while it is still running.
@@ -2661,6 +2730,83 @@ mod tests {
         assert_eq!(
             app.pact_line().as_deref(),
             Some("pacting engine (3/12) — already running")
+        );
+    }
+
+    #[test]
+    fn a_second_run_is_refused_in_the_same_words_with_the_thread_showing() {
+        // The refusal a conversation changes nothing about. A run started while
+        // the reader is looking at the thread writes its account into the thread
+        // as a turn nobody typed, so the run key pressed again — from the tree,
+        // which is the only place it can be pressed from while the field under
+        // the thread is muted — has to bounce off the same in-flight check, in
+        // the same words, without touching the card, the conversation, or the
+        // turn the run is filling.
+        let tree = Tree::new(Node::new(
+            "/repo/crates",
+            None::<PathBuf>,
+            NodeState::Unpacted,
+        ));
+        let mut app = App::from_tree(&tree);
+        app.set_panel_height(WHOLE_PANEL);
+        let base = Instant::now();
+
+        // A question and its answer, then a run started over the top of them.
+        app.start_turn("what does the engine do?", at(base, 1));
+        app.answer_turn("It walks the tree.", at(base, 2));
+        app.start_account(at(base, 3));
+        // Through the one call the loop writes a run with, so the card and the
+        // thread's turn hold the same section.
+        app.write_run(|account| account.open_section("engine", at(base, 3)));
+        app.set_pact_in_flight("/repo/crates/engine", 3, 12);
+        app.set_message("something the last key said");
+        assert!(app.showing_thread(), "the run swapped the card away");
+        let before = app.clone();
+        // Read at the instant the assertion below reads it at, so what is
+        // compared is the lines and not how long the clocks have been running.
+        let thread = shown(&app, at(base, 6));
+
+        assert_eq!(
+            pact_press(&mut app, true, at(base, 4)),
+            None,
+            "no second run"
+        );
+        assert_eq!(
+            refresh_press(&mut app, true, at(base, 5)),
+            None,
+            "and not by the other key either"
+        );
+
+        // The same wording as the refusal with no conversation behind it, on the
+        // same line, and the flag is the whole of what the presses moved.
+        let refused = {
+            let mut refused = before.clone();
+            refused.set_pact_refused();
+            refused
+        };
+        assert_eq!(app, refused, "the presses did more than say so");
+        assert_eq!(
+            app.pact_line().as_deref(),
+            Some("pacting engine (3/12) — already running"),
+            "the refusal is worded onto the line the reader is watching"
+        );
+        assert_eq!(
+            app.message(),
+            Some("something the last key said"),
+            "the refusal did not go through the message"
+        );
+
+        // And the reader is still looking at what they were looking at: the same
+        // card, the same lines, with the run's turn still in it.
+        assert!(app.showing_thread(), "the refusal swapped the card");
+        assert_eq!(shown(&app, at(base, 6)), thread, "the refusal moved a line");
+        assert!(
+            thread.iter().any(|line| line == "what does the engine do?"),
+            "the typed turn is not in the thread: {thread:?}"
+        );
+        assert!(
+            thread.iter().any(|line| line == "engine"),
+            "the run's turn is not in the thread: {thread:?}"
         );
     }
 
@@ -4420,6 +4566,483 @@ mod tests {
                 ],
                 "the restore took the account of the run with the rows: {failure:?}"
             );
+        }
+    }
+
+    /// What the conversation the runs below happen during asked, and what came
+    /// back.
+    ///
+    /// Prose, because that is what a chat turn holds and what a run's turn must
+    /// not start holding: a pact says what it did and never what it thinks.
+    const QUESTION: &str = "what does the engine do?";
+    const ANSWER: &str = "It walks the tree and writes what it finds.";
+
+    /// Put one whole answered turn on `app`'s thread, with room to draw the
+    /// whole of any card.
+    ///
+    /// The state the runs below start from: somebody has asked something, the
+    /// conversation is the card on screen because asking brought it there, and
+    /// the run they then start has to arrive inside it rather than in place of
+    /// it.
+    fn a_conversation(app: &mut App, base: Instant) {
+        app.set_panel_height(WHOLE_PANEL);
+        app.start_turn(QUESTION, base);
+        app.record_turn(
+            &Activity::Tool {
+                name: "Grep".to_owned(),
+                detail: Some("engine".to_owned()),
+            },
+            base,
+        );
+        app.answer_turn(ANSWER, base);
+        assert!(
+            app.showing_thread(),
+            "a question brings the conversation to the front by itself"
+        );
+    }
+
+    /// Assert that the run that has just ended is in the conversation, in the
+    /// same words it is on its own card, under the turn somebody typed. What the
+    /// run's turn says, for the caller to go on and assert on.
+    ///
+    /// The whole of "a run started on the thread appends in place", written once
+    /// because four endings are held to it: a run that finished, one the reader
+    /// stopped, one whose outcome recorded nothing, and one whose worker was
+    /// lost. Every one of them fills the turn and the card alike, and none of
+    /// them may take the card the reader was on, empty the thread, or open a
+    /// second history.
+    ///
+    /// Swaps twice, which is how the account card is reached at all, and leaves
+    /// `app` showing the conversation again — so an assertion after this one is
+    /// about the same screen as the assertions inside it.
+    fn conversation_survived(app: &mut App, now: Instant) -> Vec<String> {
+        assert!(
+            app.showing_thread(),
+            "the run took the panel from the reader"
+        );
+        let thread = app.thread().expect("a question was asked before the run");
+        assert_eq!(
+            thread.turns().len(),
+            2,
+            "the run is not one turn of the one conversation"
+        );
+        assert_eq!(thread.turns()[0].message(), Some(QUESTION));
+        assert_eq!(
+            thread.turns()[0].answer(),
+            Some(ANSWER),
+            "the run overwrote the turn above it"
+        );
+        assert!(
+            thread.in_flight().is_none(),
+            "the run's turn is still counting up"
+        );
+        let turn = as_text(
+            &thread.turns()[1]
+                .account()
+                .expect("the run took a turn nobody typed")
+                .lines(now),
+        );
+        assert_eq!(
+            thread.turns()[1].message(),
+            None,
+            "somebody typed the run's turn"
+        );
+
+        // On screen, in place: the conversation is the question, the answer, and
+        // the run under them, and the reader scrolled nowhere to get it.
+        let shown_now = shown(app, now);
+        assert_eq!(
+            shown_now[shown_now.len() - turn.len()..],
+            turn[..],
+            "the run is not at the foot of the conversation: {shown_now:?}"
+        );
+
+        // And one swap away is the run's own card, which the same run filled
+        // through the same call and which therefore says the same thing.
+        assert!(app.has_account(), "the run left no account behind it");
+        app.swap_card();
+        let card = shown(app, now);
+        assert_eq!(
+            card,
+            panel_text(app, now),
+            "the account card is not what the run wrote"
+        );
+        assert_eq!(
+            turn, card,
+            "the conversation and the card word the same run differently"
+        );
+
+        app.swap_card();
+        assert!(
+            app.showing_thread(),
+            "the conversation did not come back whole"
+        );
+        assert_eq!(shown(app, now), shown_now);
+        turn
+    }
+
+    #[test]
+    fn a_run_started_while_the_thread_shows_fills_its_turn_as_the_events_arrive() {
+        // A whole pact, driven a frame at a time through the loop that hears the
+        // worker, with a conversation already on screen. After every frame the
+        // turn nobody typed and the run's own card say exactly the same thing —
+        // which is the point of feeding them in one call: the turn fills as the
+        // run reports rather than being copied over when it ends.
+        let scratch = one_crate_to_load("run-in-a-conversation");
+        let (mut app, scope) = load(&scratch);
+        let mut manifest = Manifest::new();
+        let base = Instant::now();
+        a_conversation(&mut app, base);
+        let asked = shown(&app, base);
+        // Everything the press does before the worker starts: one account, and
+        // the turn it takes of the conversation.
+        app.start_account(base);
+
+        let said = recorded(&scratch, "crates/engine", &Cancel::new(), |events| {
+            Canned::new(&scratch, []).reporting(activity_port(events))
+        });
+        let (events, received) = mpsc::channel();
+        let mut pact = Some(Running {
+            events: received,
+            cancel: CancelGuard::new(),
+            work: pact_of(scope.root.clone()),
+            before: app.clone(),
+        });
+        let mut lengths = Vec::new();
+        for (frame, event) in said.into_iter().enumerate() {
+            let frame = u64::try_from(frame).expect("a run of fewer than 2^64 events");
+            let now = at(base, frame * FRAME);
+            events.send(event).expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &scope, now);
+
+            assert!(app.showing_thread(), "the run swapped the card away");
+            let card = app
+                .account()
+                .expect("the press started the run's own card")
+                .lines(now);
+            let turn = app
+                .thread()
+                .and_then(|thread| thread.turns().last())
+                .and_then(Turn::account)
+                .expect("the run took a turn of the conversation")
+                .lines(now);
+            assert_eq!(turn, card, "the turn is behind the card at frame {frame}");
+            lengths.push(card.len());
+        }
+        assert!(pact.is_none(), "the run reported its outcome and is over");
+        // The equality above is about a card that was moving: something arrived
+        // over the run, and it ended longer than it started.
+        assert!(
+            lengths.first() < lengths.last(),
+            "nothing arrived over the whole run: {lengths:?}"
+        );
+
+        // The question is still above it, the run is under it, and both readings
+        // of the run are the same reading.
+        let turn = conversation_survived(&mut app, at(base, 10_000));
+        assert_eq!(
+            shown(&app, at(base, 10_000))[..asked.len()],
+            asked[..],
+            "the run rewrote the turn somebody typed"
+        );
+        assert_eq!(
+            turn,
+            [
+                "crates/engine/src".to_owned(),
+                "0:20 Read crates/engine/src".to_owned(),
+                "0:50 thinking".to_owned(),
+                format!(
+                    "0:50 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.25",
+                    document_bytes(&scratch, "crates/engine/src")
+                ),
+                "crates/engine".to_owned(),
+                "0:20 Read crates/engine".to_owned(),
+                "0:50 thinking".to_owned(),
+                format!(
+                    "0:50 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                    document_bytes(&scratch, "crates/engine")
+                ),
+                "pact finished — 2 directories, 1:40, $0.50".to_owned(),
+            ],
+            "the conversation is not holding the whole run"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_run_leaves_the_conversation_and_says_so_in_its_own_turn() {
+        // Esc during a run somebody started mid-conversation. The turn nobody
+        // typed says where the run got to and what stopped it; the turn above it
+        // is untouched, and the reader is where they were.
+        let scratch = one_crate_to_load("cancelled-in-a-conversation");
+        let (mut app, scope) = load(&scratch);
+        let mut manifest = Manifest::new();
+        let base = Instant::now();
+        a_conversation(&mut app, base);
+        app.start_account(base);
+
+        let guard = CancelGuard::new();
+        let cancel = guard.handle();
+        let said = recorded(&scratch, "crates/engine", &cancel, |events| {
+            Canned::new(&scratch, [])
+                .reporting(activity_port(events))
+                .cancelling_at("crates/engine/src", cancel.clone())
+        });
+        replay(&mut app, &mut manifest, &scope, guard, said, base);
+
+        assert_eq!(app.message(), Some(PACT_CANCELLED), "the run was stopped");
+        let turn = conversation_survived(&mut app, at(base, 10_000));
+        assert!(
+            turn.iter().any(|line| line.contains("cancelled")),
+            "the run's turn does not say the reader stopped it: {turn:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_a_pass_failed_in_says_so_in_its_turn_and_leaves_the_rest_alone() {
+        // The engine turns down the only answer it got. The failure goes where
+        // a run's failures have always gone — the footer and the account — and
+        // the account is now in two places, which have to agree.
+        let scratch = one_crate_to_load("refused-in-a-conversation");
+        let (mut app, scope) = load(&scratch);
+        let mut manifest = Manifest::new();
+        let base = Instant::now();
+        a_conversation(&mut app, base);
+        app.start_account(base);
+
+        let said = recorded(&scratch, "crates/engine", &Cancel::new(), |events| {
+            Canned::new(&scratch, ["crates/engine/src"]).reporting(activity_port(events))
+        });
+        replay(
+            &mut app,
+            &mut manifest,
+            &scope,
+            CancelGuard::new(),
+            said,
+            base,
+        );
+
+        let message = app.message().expect("a partial run reports it");
+        assert!(
+            message.contains("crates/engine/src"),
+            "the failing directory is named: {message}"
+        );
+        let turn = conversation_survived(&mut app, at(base, 10_000));
+        assert!(
+            turn.iter().any(|line| line.contains("refused")),
+            "the run's turn does not say why it failed: {turn:?}"
+        );
+    }
+
+    /// A run under way during a conversation, over a tree that is not on disk:
+    /// the app, the copy taken when the key was pressed, the manifest, the
+    /// worker's end of the channel and the run itself.
+    ///
+    /// [`a_run_in_flight`] with a question asked first, which is the whole
+    /// difference the run turn depends on: the conversation exists before the
+    /// account starts, so the press that starts the run takes a turn of it.
+    fn a_run_in_flight_during_a_conversation(
+        base: Instant,
+    ) -> (App, App, Manifest, mpsc::Sender<PactEvent>, Running) {
+        let tree = Tree::new(Node::new(
+            "/repo/crates",
+            None::<PathBuf>,
+            NodeState::Unpacted,
+        ));
+        let mut before = App::from_tree(&tree);
+        a_conversation(&mut before, base);
+        let mut app = before.clone();
+        app.start_account(base);
+        let (events, received) = mpsc::channel();
+        let running = Running {
+            events: received,
+            cancel: CancelGuard::new(),
+            work: pact_of("/repo/crates"),
+            before: before.clone(),
+        };
+        (app, before, Manifest::new(), events, running)
+    }
+
+    #[test]
+    fn a_run_whose_end_puts_the_view_back_keeps_its_turn_in_the_conversation() {
+        // The two endings that go through `App::restore_from`: an outcome that
+        // recorded nothing, and a worker that died without one. Both roll the
+        // rows back to what the manifest on disk still says, and neither may
+        // roll back the panel — the conversation, the turn somebody typed in it
+        // and the run's own turn all survive, and the loop goes on running.
+        for failure in [Some("the manifest could not be saved"), None] {
+            let base = Instant::now();
+            let (mut app, before, mut manifest, events, running) =
+                a_run_in_flight_during_a_conversation(base);
+            let mut pact = Some(running);
+
+            events
+                .send(PactEvent::Starting {
+                    directory: PathBuf::from("/repo/crates/engine"),
+                    position: 1,
+                    total: 2,
+                })
+                .expect("the loop is still listening");
+            events
+                .send(PactEvent::Doing(Activity::Thinking))
+                .expect("the loop is still listening");
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+            assert!(app.showing_thread(), "{failure:?}");
+
+            match failure {
+                Some(reason) => events
+                    .send(PactEvent::Finished(Err(reason.to_owned())))
+                    .expect("the loop is still listening"),
+                // The worker goes away with nothing behind it.
+                None => drop(events),
+            }
+            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 5));
+
+            assert!(pact.is_none(), "the run is over, however it ended");
+            assert_eq!(app.message(), Some(failure.unwrap_or(PACT_LOST)));
+            assert_eq!(app.rows(), before.rows(), "the rows match the manifest");
+
+            let turn = conversation_survived(&mut app, at(base, 5));
+            assert_eq!(
+                turn,
+                [
+                    "engine",
+                    "0:05 thinking",
+                    "0:05 refused — no document was written",
+                    "pact finished — 1 directory, 0:05, $0.00 \
+                         (incomplete: 1 pass reported no cost)",
+                ],
+                "the restore took the run's turn with the rows: {failure:?}"
+            );
+
+            // And the frame after the ending is the frame after any other run:
+            // nothing drained, nothing reloaded, nothing said. The loop kept
+            // running, which is the thing an early return here would cost.
+            let quiet = app.clone();
+            assert!(
+                apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 6))
+                    .is_none()
+            );
+            assert_eq!(app, quiet, "a frame with no run in it changed something");
+        }
+    }
+
+    /// Every request one whole run over `scratch` handed a model, in call
+    /// order, with `talked_first` deciding whether somebody asked something
+    /// before pressing the key.
+    ///
+    /// The real chain from the keystroke down: [`pact_press`] on the row the
+    /// app has selected decides the [`Work`], [`run_pact`] is the worker's own
+    /// body over that work, and the fake agent in the middle writes down what
+    /// the engine asked it for. Nothing about the run is short-circuited, so a
+    /// conversation that reached the engine would reach it here.
+    fn requests_of_a_run(scratch: &Scratch, talked_first: bool) -> Vec<AgentRequest> {
+        let (mut app, scope) = load(scratch);
+        let mut manifest = Manifest::new();
+        let base = Instant::now();
+        if talked_first {
+            a_conversation(&mut app, base);
+        }
+
+        let toggle = pact_press(&mut app, false, base).expect("the root row is a directory");
+        let agent = Canned::new(scratch, []);
+        run_and_apply(
+            scratch,
+            &mut app,
+            &mut manifest,
+            &scope,
+            &Work::Pact(toggle),
+            &agent,
+        );
+        if talked_first {
+            assert!(
+                app.showing_thread(),
+                "the run was supposed to happen inside the conversation"
+            );
+        }
+        agent.requests()
+    }
+
+    /// Put `scratch` back the way the first run found it: the documents that
+    /// run wrote taken away, and warlock's record of them with them.
+    ///
+    /// So that the two runs compared below happen over one directory rather
+    /// than over two that merely look alike. A request names the directory it
+    /// is for by its whole path and carries the children's documents as they
+    /// sit on disk, so a second scratch repository would differ in every
+    /// request before a conversation could make any difference at all.
+    fn undo_the_run(scratch: &Scratch) {
+        fs::remove_dir_all(scratch.root.join(".warlock")).expect("the run saved a manifest");
+        remove_documents(&scratch.root);
+        assert!(
+            !scratch.path(DOCUMENT_FILE).exists(),
+            "a document the run wrote is still there"
+        );
+    }
+
+    /// Remove every `WARLOCK.md` at or under `directory`.
+    fn remove_documents(directory: &Path) {
+        for entry in fs::read_dir(directory).expect("a directory the run walked") {
+            let path = entry
+                .expect("an entry of a directory the run walked")
+                .path();
+            if path.is_dir() {
+                remove_documents(&path);
+            } else if path.file_name().is_some_and(|name| name == DOCUMENT_FILE) {
+                fs::remove_file(&path).expect("a document the run wrote");
+            }
+        }
+    }
+
+    #[test]
+    fn a_conversation_changes_nothing_about_what_a_run_asks_for() {
+        // The whole reason a pact may sit inside a thread: what the engine
+        // sends is a function of the directory and nothing else. Two runs over
+        // the one repository, the second of them started after a question was
+        // asked and answered on the very thread the run then writes its account
+        // into, hand the model the same requests — same prompt, same files with
+        // the same bytes, same children's documents, in the same order, for the
+        // same directories in the same order.
+        //
+        // A guard against a wiring nobody has written: the engine has no notion
+        // of a chat, so the only way this can ever fail is somebody deciding to
+        // pass the conversation down. `make` is what a pact has to be — two
+        // people with the same repository get the same documents — and green is
+        // only a fact for as long as that holds.
+        let scratch = one_crate_to_load("a-request-a-chat-cannot-reach");
+
+        let alone = requests_of_a_run(&scratch, false);
+        undo_the_run(&scratch);
+        let after_a_conversation = requests_of_a_run(&scratch, true);
+
+        assert!(
+            !alone.is_empty(),
+            "the run described nothing, so nothing was compared"
+        );
+        assert_eq!(
+            alone, after_a_conversation,
+            "the conversation reached what the run asks a model for"
+        );
+
+        // And said plainly, for a failure that would otherwise be two screens of
+        // bytes: neither the question nor the answer is anywhere in what was
+        // sent, whether as the prompt itself or smuggled into a file.
+        for request in &after_a_conversation {
+            for text in [QUESTION, ANSWER] {
+                assert!(
+                    !request.prompt().contains(text),
+                    "the prompt for {} carries the conversation",
+                    request.directory().display()
+                );
+                assert!(
+                    !request
+                        .files()
+                        .iter()
+                        .filter_map(AgentFile::bytes)
+                        .any(|bytes| bytes.windows(text.len()).any(|run| run == text.as_bytes())),
+                    "a file sent for {} carries the conversation",
+                    request.directory().display()
+                );
+            }
         }
     }
 

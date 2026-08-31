@@ -48,6 +48,20 @@
 //! that shows prose, and it is still a value: no channel, no child process, and
 //! no clock of its own.
 //!
+//! A run that happens while a conversation is going on is in there too, as a
+//! turn nobody typed. It is not a second history and not a card swapped away
+//! under the reader: [`Thread::open_run`] appends it in order like any other
+//! turn, and what it holds is an [`Account`] — the same value the account card
+//! holds for the same run, fed as the run's events arrive — so a pact reads in
+//! the conversation exactly as it reads on its own card, from the account's own
+//! code, with no second spelling of a directory heading or an outcome line
+//! anywhere in warlock. What it does not take from the conversation is the
+//! conversation's vocabulary: a run has no message above it and no answer under
+//! it, it ends in its account's [`Outcome`]s rather than in an [`Ending`], and
+//! its money stays the account's — per pass, totalled in `pact finished — …` —
+//! where a question's says out loud that it belongs to no pact's total. Neither
+//! number is ever added to the other.
+//!
 //! *When* the tree is read again is decided the same way. The disk keeps moving
 //! after a load — a file saved in another window, a branch checked out, a build
 //! writing thousands of files nobody wants to hear about — and [`WatchPolicy`]
@@ -253,10 +267,12 @@ pub use prompt::edit_for;
 /// line it ends with.
 pub use thread::Ending;
 /// The conversation the panel's third card holds: every message somebody typed,
-/// the work the model was seen doing about it, and what it answered.
+/// the work the model was seen doing about it, what it answered — and, in the
+/// same sequence, every run that happened while it was going on.
 pub use thread::Thread;
-/// One question of a [`Thread`], everything the model was seen doing about it,
-/// the answer when it lands, and what that turn cost.
+/// One entry of a [`Thread`]: a question, everything the model was seen doing
+/// about it, the answer when it lands and what that turn cost — or a run nobody
+/// typed, which is its [`Account`] and nothing else.
 pub use thread::Turn;
 /// Which [`Ending`] a failed turn is: the model seam's failure vocabulary as
 /// the panel's, in one place, so whoever runs a turn hands the error over rather
