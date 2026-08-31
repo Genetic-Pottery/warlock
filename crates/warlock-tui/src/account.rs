@@ -622,6 +622,63 @@ impl Account {
             .push(format!("{SUMMARISING} {file} ({part}/{parts})"), at);
     }
 
+    /// Record that the live directory's request — `files` files, `bytes` bytes
+    /// of them — was handed to a pass at `at`.
+    ///
+    /// One line, `waiting · 11 files, 1.6 MB`, and it is filed at the handover:
+    /// the pass has the request and has said nothing about it yet, and this is
+    /// the silence a reader spends most of a directory looking at. The two
+    /// numbers are the only thing in warlock that can explain why one directory
+    /// is slower than the next, and both are already known at the handover —
+    /// nothing is measured for this line.
+    ///
+    /// # Why this is an entry and not the placeholder
+    ///
+    /// The drawn [`WAITING`] placeholder is only there while the section has
+    /// heard nothing at all, so it can say nothing about a directory that
+    /// summarised first — and it carries no numbers, because it is about the
+    /// silence rather than about whatever is being waited for. An entry does
+    /// both. It is also filed at the handover rather than at the section
+    /// opening, so the stretch it covers, from its arrival to whatever arrives
+    /// next, is the pass's own silence and not the disk read that came before
+    /// it; the placeholder covers that earlier stretch and stops being drawn
+    /// once this lands, nothing having been stored for it and nothing deleted.
+    /// Its clock is the module's ordinary one — elapsed since the section
+    /// opened, moving until something newer arrives.
+    ///
+    /// On a directory that summarised first there is no placeholder to replace,
+    /// and this lands below those lines exactly as it would land below any
+    /// other.
+    ///
+    /// Its text is deliberately not the bare [`WAITING`] constant, so
+    /// [`Log::extend_or_open`] cannot fold it into the line above or a later
+    /// one into it.
+    ///
+    /// # What the two numbers count
+    ///
+    /// `files` is how many files the request carries; `bytes` is everything it
+    /// carries counted the way the budget counts it, which includes each child
+    /// directory's document. The two do not cover the same set, and that is the
+    /// caller's arithmetic rather than this module's — `bytes` is what was sent,
+    /// and it is the number the caps are checked against.
+    ///
+    /// Pushed rather than extended, and silent when there is no live section or
+    /// the newest one is frozen, for the reasons
+    /// [`Account::record_summarising`] gives.
+    pub fn record_waiting(&mut self, files: usize, bytes: u64, at: Instant) {
+        let Some(section) = self.sections.last_mut() else {
+            return;
+        };
+        if section.is_closed() {
+            return;
+        }
+
+        let files = plural(files, "file", "files");
+        section
+            .log
+            .push(format!("{WAITING} · {files}, {}", size(bytes)), at);
+    }
+
     /// Stop whatever section is still live moving as of `at`, without ending
     /// the run.
     ///
@@ -892,6 +949,66 @@ fn spend(cost: Option<f64>) -> String {
     cost.map_or_else(|| "no cost reported".to_owned(), money)
 }
 
+/// A number of bytes as the panel spells it: `934 bytes`, `1.8 KB`, `403 KB`,
+/// `1.6 MB`, `12 MB`.
+///
+/// Base 1024, spelled `KB` rather than `KiB`, which is the spelling the panel
+/// is specified in. The engine's own prose writes `KiB` for the same
+/// arithmetic, so the two disagree in spelling while agreeing in the number;
+/// settling that is not this module's call.
+///
+/// # The tiers
+///
+/// Under a kilobyte the count is exact, because a small request is a fact worth
+/// stating precisely and `0.9 KB` says less than `934 bytes` does. Above it,
+/// one decimal while the number is under ten — `1.8 KB` and `1.6 MB`, where the
+/// first digit alone would throw away most of what the reader wanted — and
+/// whole units from ten up, where that digit is noise on a number nobody reads
+/// to three significant figures.
+///
+/// The unit is chosen by magnitude first and the rounding happens inside it, so
+/// nothing is ever promoted across a boundary by being rounded: 1048575 bytes
+/// is `1024 KB` and not `1.0 MB`, which would claim the request had reached a
+/// megabyte when it had not. `MB` is the largest unit, since the request cap is
+/// measured in megabytes and a `GB` here would be a unit for a number that
+/// cannot occur.
+///
+/// Integer arithmetic throughout: these are exact counts, and the halfway cases
+/// are the ones the tests pin.
+fn size(bytes: u64) -> String {
+    /// One kilobyte, as this file counts them.
+    const KB: u64 = 1024;
+    /// One megabyte, likewise.
+    const MB: u64 = KB * KB;
+
+    if bytes < KB {
+        // Worded here rather than through `plural`, which counts in `usize`: a
+        // byte total is the one count in the panel that is not a number of
+        // things held in memory.
+        let noun = if bytes == 1 { "byte" } else { "bytes" };
+        format!("{bytes} {noun}")
+    } else if bytes < MB {
+        scaled(bytes, KB, "KB")
+    } else {
+        scaled(bytes, MB, "MB")
+    }
+}
+
+/// `bytes` in units of `unit`, spelled with the digits that unit deserves.
+///
+/// The half of [`size`] that is arithmetic rather than choice: one decimal
+/// below ten of the unit, whole units at ten and above, rounding half up in
+/// both. The multiplication by ten only happens on the tenths branch, where
+/// the value is under ten units and so nowhere near overflowing.
+fn scaled(bytes: u64, unit: u64, name: &str) -> String {
+    if bytes < 10 * unit {
+        let tenths = (bytes * 10 + unit / 2) / unit;
+        format!("{}.{} {name}", tenths / 10, tenths % 10)
+    } else {
+        format!("{} {name}", (bytes + unit / 2) / unit)
+    }
+}
+
 /// `count` with the right noun after it: `1 directory`, `9 directories`.
 ///
 /// English, in the one place these lines need it, so no line has to be worded
@@ -906,7 +1023,7 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    use super::{Account, Line, Outcome, Section, clock};
+    use super::{Account, Line, Outcome, Section, clock, size};
     use crate::claude::Activity;
 
     /// The instant `seconds` after `base`, so a whole run can be driven without
@@ -1287,6 +1404,151 @@ mod tests {
         account.open_section("crates/engine", at(base, 2));
         account.close_section(&Outcome::Cancelled, at(base, 3));
         account.record_summarising("Cargo.lock", 1, 2, at(base, 4));
+
+        assert_eq!(
+            said(&account, at(base, 9)),
+            vec![
+                "crates/engine".to_owned(),
+                "0:01 cancelled — nothing reported spent".to_owned(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_size_is_spelled_with_the_digits_its_magnitude_deserves() {
+        // Exact under a kilobyte, one decimal under ten of a unit, whole units
+        // above that.
+        assert_eq!(size(0), "0 bytes");
+        assert_eq!(size(1), "1 byte");
+        assert_eq!(size(934), "934 bytes");
+        assert_eq!(size(1_843), "1.8 KB");
+        assert_eq!(size(34 * 1024), "34 KB");
+        assert_eq!(size(403 * 1024), "403 KB");
+        assert_eq!(size(1_677_722), "1.6 MB");
+        assert_eq!(size(12 * 1024 * 1024), "12 MB");
+    }
+
+    #[test]
+    fn a_size_never_rounds_itself_across_a_boundary() {
+        // The unit is chosen by magnitude and the rounding happens inside it,
+        // so no number ever claims to have reached the next unit or the next
+        // tier by being rounded into it.
+        assert_eq!(size(1_023), "1023 bytes");
+        assert_eq!(size(1_024), "1.0 KB");
+        assert_eq!(size(10_239), "10.0 KB", "one decimal still, not 10 KB");
+        assert_eq!(size(10_240), "10 KB");
+        assert_eq!(size(1_048_575), "1024 KB", "not 1.0 MB");
+        assert_eq!(size(1_048_576), "1.0 MB");
+    }
+
+    #[test]
+    fn the_handed_over_request_replaces_the_waiting_placeholder() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        // The section opens when the directory comes up, and the placeholder
+        // covers reading it off disk: one second of ticking with nothing filed.
+        account.open_section("crates/warlock-tui/src", base);
+        assert_eq!(
+            said(&account, at(base, 1)),
+            vec![
+                "crates/warlock-tui/src".to_owned(),
+                "0:01 waiting".to_owned(),
+            ],
+        );
+
+        // Then the request is handed over, and the wait that follows is the
+        // pass's own rather than the disk's. The placeholder is drawn rather
+        // than stored, so it is not left above the entry: there is an entry now,
+        // and `entries.is_empty()` being false is the whole of what stops it
+        // being drawn. Nothing was stored for it and nothing was deleted — the
+        // account is the same two rows it always was.
+        account.record_waiting(11, 1_677_722, at(base, 1));
+        assert_eq!(
+            said(&account, at(base, 60)),
+            vec![
+                "crates/warlock-tui/src".to_owned(),
+                "1:00 waiting · 11 files, 1.6 MB".to_owned(),
+            ],
+            "one row, the entry, ticking by the ordinary rule",
+        );
+        assert_eq!(account.line_count(), 2);
+
+        // And the stretch this line covers is the pass's silence: it froze when
+        // the pass first spoke, a minute after the handover a second in.
+        account.record(&Activity::Thinking, at(base, 61));
+        assert_eq!(
+            said(&account, at(base, 900))[1],
+            "1:01 waiting · 11 files, 1.6 MB",
+        );
+    }
+
+    #[test]
+    fn a_handed_over_request_lands_below_the_summarising_passes_before_it() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        // A directory holding a file over the cap: the summarising passes speak
+        // first, so the placeholder never appears at all, and the request line
+        // lands under them like any other line.
+        account.open_section("crates/engine", base);
+        account.record_summarising("crates/engine/Cargo.lock", 1, 2, at(base, 10));
+        account.record_summarising("crates/engine/Cargo.lock", 2, 2, at(base, 70));
+        account.record_waiting(11, 34 * 1024, at(base, 130));
+        account.record(&Activity::Thinking, at(base, 190));
+
+        assert_eq!(
+            said(&account, at(base, 200)),
+            vec![
+                "crates/engine".to_owned(),
+                "1:10 summarising crates/engine/Cargo.lock (1/2)".to_owned(),
+                "2:10 summarising crates/engine/Cargo.lock (2/2)".to_owned(),
+                // Frozen where thinking began: the wait for this pass's first
+                // word was a minute.
+                "3:10 waiting · 11 files, 34 KB".to_owned(),
+                "3:20 thinking".to_owned(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_handed_over_request_is_collapsed_into_nothing_and_swallows_nothing() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        // Its text differs from the bare `waiting` of the placeholder and from
+        // whatever follows it, so `extend_or_open` has nothing to fold: the
+        // repeated report after it opens its own line, and a second request
+        // line would too.
+        account.open_section("crates/engine", base);
+        account.record_waiting(1, 934, at(base, 1));
+        account.record(&Activity::Thinking, at(base, 2));
+        account.record(&Activity::Thinking, at(base, 3));
+
+        assert_eq!(
+            said(&account, at(base, 10)),
+            vec![
+                "crates/engine".to_owned(),
+                // One file, said as one file.
+                "0:02 waiting · 1 file, 934 bytes".to_owned(),
+                "0:10 thinking".to_owned(),
+            ],
+        );
+    }
+
+    #[test]
+    fn no_request_line_is_filed_where_there_is_no_live_section() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        // Before the first directory, and after the current one has been worded
+        // and frozen: the same silence `record` and `record_summarising` keep.
+        account.record_waiting(11, 34 * 1024, at(base, 1));
+        assert_eq!(account.line_count(), 0);
+
+        account.open_section("crates/engine", at(base, 2));
+        account.close_section(&Outcome::Cancelled, at(base, 3));
+        account.record_waiting(11, 34 * 1024, at(base, 4));
 
         assert_eq!(
             said(&account, at(base, 9)),
