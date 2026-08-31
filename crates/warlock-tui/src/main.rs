@@ -213,7 +213,9 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::Size;
-use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
+use warlock_engine::{
+    DEFAULT_BRIEF_DIRECTORY, Manifest, Written, repository_root, write_claude_md,
+};
 use warlock_tui::{
     App, CHAT_INSTRUCTION, ClaudeAgent, Composed, Composer, Focus, Mode, QuitConfirm, ScopePrompt,
     Submitted, TemplateError, WRITE_INSTRUCTION, brief_instruction, brief_template,
@@ -545,6 +547,20 @@ fn run() -> Result<(), Error> {
     // could swallow half a sentence into. Here, nothing a run does can reach it:
     // the keystrokes are the only thing that ever writes to it.
     let mut composer = Composer::default();
+    // Where a brief written from this conversation would go, relative to the
+    // repository root, and the only copy of it: the engine's built-in default
+    // as every session starts. It lives here with the two windows and the draft
+    // for their reason — it is state about this keystroke and the next one
+    // rather than about what warlock is showing, and an `App` that has never
+    // heard of it is an `App` that a restored copy cannot put an old answer
+    // back on.
+    //
+    // Read once, at `/brief`, and held for the life of the mode: `/write` is
+    // handed this string rather than looking anything up, so a document that has
+    // taken twenty turns to converge can never arrive at a window that will not
+    // open. What settles it is `apply_compose`'s `/brief` arm, which is also
+    // where anything that fails to be read has to fail.
+    let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
     // Which file the panel's document card is holding, and the only record of
     // it: `None` until the first `v` of the session that read something. It
     // lives here rather than on the app for the reason `mouse_captured` does —
@@ -641,6 +657,7 @@ fn run() -> Result<(), Error> {
                         prompt: &mut prompt,
                         path_prompt: &mut path_prompt,
                         composer: &mut composer,
+                        brief_directory: &mut brief_directory,
                         document: &mut document,
                         mouse_captured: &mut mouse_captured,
                     };
@@ -689,6 +706,7 @@ fn run() -> Result<(), Error> {
             &scope,
             &mut watched,
             &mut path_prompt,
+            &brief_directory,
         );
     }
 }
@@ -730,6 +748,9 @@ struct Pressing<'a> {
     path_prompt: &'a mut ScopePrompt,
     /// The draft under the panel, and the only copy of it.
     composer: &'a mut Composer,
+    /// Where a brief written from this conversation would go: settled at
+    /// `/brief` and read at `/write`, which is why one keystroke can move it.
+    brief_directory: &'a mut String,
     /// Which file the panel's document card is holding.
     document: &'a mut Option<PathBuf>,
     /// Whether the terminal is reporting its mouse.
@@ -1058,6 +1079,11 @@ fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result
         // handed the local above rather than reaching for anything on the app
         // — what is in the draft is not a fact about the tree.
         //
+        // The output directory goes in for the same reason and in the same
+        // shape: it is a local of the loop, `/brief` is the one thing that
+        // settles it, and this is where `/brief` is answered — so it goes in
+        // borrowed rather than being fetched from somewhere in there.
+        //
         // The last of the three is now a worker thread, so the agent and the
         // turn go in with it, and the instant the key was pressed goes in as
         // well for the pact key's reason: a turn is as old as the question
@@ -1070,6 +1096,7 @@ fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result
                 outcome,
                 pressing.chat,
                 &pressing.scope.repo_root,
+                pressing.brief_directory,
                 now,
             );
         }
@@ -1209,6 +1236,11 @@ fn draw_frame(
 /// land on screen — within one [`POLL_INTERVAL`] of when they were sent. It is
 /// read at the top rather than per call for the reason the frame reads its own:
 /// two readings a round would be two answers to one question.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the whole of what the bottom of one round has to keep up with, and \
+              the point of it is that the loop keeps up in one call"
+)]
 fn keep_up(
     pact: &mut Option<Running>,
     chat: &mut Chat,
@@ -1217,6 +1249,7 @@ fn keep_up(
     scope: &Scope,
     watched: &mut Watched,
     path_prompt: &mut ScopePrompt,
+    brief_directory: &str,
 ) {
     let now = Instant::now();
     let running = pact.is_some();
@@ -1236,8 +1269,14 @@ fn keep_up(
     // `claude` that is missing, a non-zero exit, a timeout and a cancel all
     // leave this line doing nothing: no window opens, no path is proposed, and
     // the ending is the one line the drain already put on the thread.
+    //
+    // The directory the path is proposed in comes in as a value the loop is
+    // already holding — settled at `/brief`, turns ago — so this line reads no
+    // file and has no failure to report. That is the whole of why it is a
+    // parameter: a window that opens over a finished document must be a window
+    // that opens.
     if let Some(document) = chat.keep_up(app, now) {
-        *path_prompt = write_opened(&scope.repo_root, &document);
+        *path_prompt = write_opened(&scope.repo_root, brief_directory, &document);
     }
 }
 
@@ -1456,6 +1495,14 @@ fn brief_asking(root: &Path) -> Result<String, TemplateError> {
 /// about a turn it is not performing. Nothing is waited for here — everything
 /// the turn produces arrives at the bottom of the loop, exactly as a run's does.
 ///
+/// It is also the one place `brief_directory` is written. Where a brief goes is
+/// a fact about the mode rather than about the write, so it is settled at
+/// `/brief`, on this thread, out of what the repository says at that keystroke,
+/// and then held: by the time `/write` proposes a path it is a string the loop
+/// has been carrying for the whole conversation (see [`keep_up`]). Today the
+/// value is only [`DEFAULT_BRIEF_DIRECTORY`], which is what makes this slice's
+/// behaviour end to end exactly what it was.
+///
 /// **`/brief`** is two things in the order the reader experiences them: the mode,
 /// and one ordinary turn. [`App::set_mode`] answers whether that was a *change*,
 /// and a change is worth exactly one unclocked note ([`BRIEF_NOTE`]) at the point
@@ -1547,6 +1594,7 @@ fn apply_compose(
     outcome: Composed,
     chat: &mut Chat,
     repo_root: &Path,
+    brief_directory: &mut String,
     now: Instant,
 ) {
     match outcome {
@@ -1576,6 +1624,16 @@ fn apply_compose(
                     // and a mode set first would be a register entered by a
                     // refusal.
                     Ok(instruction) => {
+                        // Where a `/write` in this mode will propose to put the
+                        // document, settled here and held until the next
+                        // `/brief` — which is what keeps `/write` from reading
+                        // anything and therefore from failing. Today it is only
+                        // the engine's built-in default, re-asserted on every
+                        // `/brief` rather than left wherever the last one put
+                        // it: the read that can answer something else is this
+                        // one line, and it belongs at the command that enters
+                        // the mode.
+                        *brief_directory = String::from(DEFAULT_BRIEF_DIRECTORY);
                         if app.set_mode(Mode::Brief) {
                             app.note(BRIEF_NOTE, now);
                         }
@@ -1855,6 +1913,7 @@ mod tests {
         use std::path::{Path, PathBuf};
         use std::time::{Duration, Instant};
 
+        use warlock_engine::DEFAULT_BRIEF_DIRECTORY;
         use warlock_tui::{
             Activity, App, ChatAgent, Composed, Composer, DEFAULT_TEMPLATE, Ending, Line, Mode,
             Submitted, brief_instruction,
@@ -1933,7 +1992,21 @@ mod tests {
             now: Instant,
         ) -> Composer {
             let mut composer = Composer::new(draft);
-            apply_compose(app, &mut composer, Composed::Submit, chat, root, now);
+            // The loop's own local, made fresh for the submit and dropped with
+            // it: these tests are about what a draft comes to, and where a brief
+            // would go is settled by `/brief` alone —
+            // `the_output_directory_is_settled_by_brief` below is the one test
+            // that looks at it.
+            let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
+            apply_compose(
+                app,
+                &mut composer,
+                Composed::Submit,
+                chat,
+                root,
+                &mut brief_directory,
+                now,
+            );
             composer
         }
 
@@ -2204,6 +2277,34 @@ mod tests {
 
             assert_eq!(app.mode(), Mode::Brief, "the mode was still not entered");
             assert_eq!(turns(&app), 1, "the second brief opened no turn");
+        }
+
+        #[test]
+        fn the_output_directory_is_settled_by_brief() {
+            // Where a `/write` in this mode would put the document is a value
+            // this command settles and the loop then holds: `/write` reads
+            // nothing, so a brief that has taken twenty turns cannot arrive at a
+            // window that will not open. Today the answer is only the engine's
+            // default, re-asserted here rather than left wherever it was.
+            let now = Instant::now();
+            let repo = a_root();
+            let mut app = App::default();
+            let mut chat = conversation();
+            let mut composer = Composer::new("/brief");
+            let mut brief_directory = String::from("somewhere a previous mode was pointed");
+
+            apply_compose(
+                &mut app,
+                &mut composer,
+                Composed::Submit,
+                &mut chat,
+                repo.path(),
+                &mut brief_directory,
+                now,
+            );
+
+            assert_eq!(app.mode(), Mode::Brief, "the mode was not entered");
+            assert_eq!(brief_directory, DEFAULT_BRIEF_DIRECTORY);
         }
 
         #[test]

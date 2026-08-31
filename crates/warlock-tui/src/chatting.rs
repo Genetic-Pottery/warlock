@@ -1090,6 +1090,12 @@ mod tests {
         let session = value_of(&opening, "--session-id").expect("a turn opens a conversation");
         let prompt = value_of(&opening, "--system-prompt").expect("a turn carries the prompt");
 
+        // The loop's own local for where a brief would be written, kept across
+        // the four commands as the loop keeps it. This test is about the
+        // conversation rather than about the setting, and `/brief` settling it
+        // is `main.rs`'s own assertion.
+        let mut brief_directory = warlock_engine::DEFAULT_BRIEF_DIRECTORY.to_owned();
+
         for draft in ["why nine passes?", "/brief", "/brief", "/chat"] {
             let mut composer = warlock_tui::Composer::new(draft);
             crate::apply_compose(
@@ -1098,6 +1104,7 @@ mod tests {
                 warlock_tui::Composed::Submit,
                 &mut chat,
                 repo.path(),
+                &mut brief_directory,
                 base,
             );
         }
