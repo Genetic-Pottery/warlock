@@ -565,7 +565,7 @@ impl Account {
             // begins again opens a new line, because something else will have
             // been filed in between.
             Activity::Thinking => section.log.extend_or_open(THINKING, at),
-            Activity::Writing => section.log.extend_or_open(WRITING, at),
+            Activity::Writing { .. } => section.log.extend_or_open(WRITING, at),
             Activity::Tool { name, detail } => {
                 section.log.push(tool_line(name, detail.as_ref()), at);
             }
@@ -1161,8 +1161,8 @@ mod tests {
         account.open_section("crates/engine", base);
         account.record(&Activity::Thinking, at(base, 2));
         account.record(&Activity::Thinking, at(base, 3));
-        account.record(&Activity::Writing, at(base, 4));
-        account.record(&Activity::Writing, at(base, 9));
+        account.record(&Activity::Writing { bytes: 0 }, at(base, 4));
+        account.record(&Activity::Writing { bytes: 0 }, at(base, 9));
 
         assert_eq!(
             said(&account, at(base, 25)),
@@ -1313,7 +1313,7 @@ mod tests {
         account.record_summarising("crates/engine/Cargo.lock", 2, 3, at(base, 70));
         account.record(&tool("Read", "src/lib.rs"), at(base, 130));
         account.record_summarising("crates/engine/Cargo.lock", 3, 3, at(base, 131));
-        account.record(&Activity::Writing, at(base, 190));
+        account.record(&Activity::Writing { bytes: 0 }, at(base, 190));
 
         assert_eq!(
             said(&account, at(base, 200)),
@@ -1379,7 +1379,7 @@ mod tests {
             said(&account, at(base, 41))[2],
             "0:41 summarising Cargo.lock (1/2)"
         );
-        account.record(&Activity::Writing, at(base, 50));
+        account.record(&Activity::Writing { bytes: 0 }, at(base, 50));
         for now in [at(base, 50), at(base, 900)] {
             assert_eq!(said(&account, now)[2], "0:50 summarising Cargo.lock (1/2)");
         }

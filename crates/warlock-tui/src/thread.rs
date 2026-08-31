@@ -720,7 +720,7 @@ impl Thread {
             // stretch is still going: the line already there goes on ticking,
             // and its clock is the count of how long the model has been at it.
             Activity::Thinking => said.log.extend_or_open(THINKING, at),
-            Activity::Writing => said.log.extend_or_open(WRITING, at),
+            Activity::Writing { .. } => said.log.extend_or_open(WRITING, at),
             Activity::Tool { name, detail } => {
                 said.log.push(tool_line(name, detail.as_ref()), at);
             }
@@ -962,7 +962,7 @@ mod tests {
             &tool("read", "crates/warlock-engine/src/pact.rs"),
             at(base, 11),
         );
-        thread.record(&Activity::Writing, at(base, 30));
+        thread.record(&Activity::Writing { bytes: 0 }, at(base, 30));
         thread.record(&Activity::Cost { usd: 0.02 }, at(base, 31));
         thread.answer("It pacts a tree.", at(base, 42));
 
@@ -1213,7 +1213,7 @@ mod tests {
         thread.record(&Activity::Thinking, at(base, 1));
         thread.record(&tool("grep", "fn pact_directory"), at(base, 4));
         thread.record(&tool("read", "src/pact.rs"), at(base, 6));
-        thread.record(&Activity::Writing, at(base, 9));
+        thread.record(&Activity::Writing { bytes: 0 }, at(base, 9));
         thread.answer(
             "The engine walks a tree and writes a document per directory.",
             at(base, 20),
@@ -1477,7 +1477,7 @@ mod tests {
         account.record(&Activity::Thinking, at(base, 2));
         account.record_summarising("crates/engine/Cargo.lock", 1, 2, at(base, 10));
         account.record(&tool("Read", "src/lib.rs"), at(base, 40));
-        account.record(&Activity::Writing, at(base, 50));
+        account.record(&Activity::Writing { bytes: 0 }, at(base, 50));
         account.record(&Activity::Cost { usd: 0.21 }, at(base, 55));
         account.open_section("crates/tui", at(base, 60));
         account.record(&Activity::Thinking, at(base, 61));
@@ -1557,7 +1557,7 @@ mod tests {
         thread.open_run(at(base, 10));
         let run = thread.run_mut().expect("the run is the live turn");
         run.open_section("crates/engine", at(base, 10));
-        run.record(&Activity::Writing, at(base, 12));
+        run.record(&Activity::Writing { bytes: 0 }, at(base, 12));
         run.finish(at(base, 40));
         thread.close_run(at(base, 40));
 
@@ -1732,7 +1732,7 @@ mod tests {
         thread.open_run(base);
         let run = thread.run_mut().expect("the run is the live turn");
         run.open_section("crates/engine", base);
-        run.record(&Activity::Writing, at(base, 2));
+        run.record(&Activity::Writing { bytes: 0 }, at(base, 2));
 
         let during = said(&thread, at(base, 20));
 
@@ -1767,7 +1767,7 @@ mod tests {
 
         let run = thread.run_mut().expect("the run is the live turn");
         run.open_section("crates/engine", base);
-        run.record(&Activity::Writing, at(base, 2));
+        run.record(&Activity::Writing { bytes: 0 }, at(base, 2));
         assert_eq!(said(&thread, at(base, 30))[1], "0:30 writing");
 
         // Closing a run stops its clocks with it, however the run went and
@@ -1801,7 +1801,7 @@ mod tests {
         thread.open_run(base);
         let run = thread.run_mut().expect("the run is the live turn");
         run.open_section("crates/engine", base);
-        run.record(&Activity::Writing, at(base, 2));
+        run.record(&Activity::Writing { bytes: 0 }, at(base, 2));
 
         // Nobody closed the run, and a question was asked anyway: the run
         // freezes where the question landed, exactly as a turn overtaken by a

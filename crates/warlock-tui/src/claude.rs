@@ -729,7 +729,7 @@ pub enum Activity {
     /// is visible as a stretch of *this*, which is all a reader needs to know
     /// the run is alive.
     Thinking,
-    /// The model began writing its answer.
+    /// The model is writing its answer, and this much of it has arrived.
     ///
     /// The other half of a pass, and on a toolless one the longer half: a pass
     /// thinks for a few seconds and then spends the rest of its time producing
@@ -737,11 +737,27 @@ pub enum Activity {
     /// which is the only way it is worth reporting at all — the finished text is
     /// the outcome, and the outcome already has a line.
     ///
-    /// Carries nothing, for the reason [`Thinking`](Activity::Thinking) carries
-    /// nothing: the words themselves are the document, the panel is a ledger
-    /// rather than a viewer, and how long the writing has taken is the clock's
-    /// business.
-    Writing,
+    /// The one thing carried is a size, which is the exception that proves
+    /// [`Thinking`](Activity::Thinking)'s rule: the words themselves are still
+    /// the document and the panel is still a ledger rather than a viewer, but
+    /// *how much* has arrived is a fact about the run rather than a word of the
+    /// answer, and it is the difference between a line that moves for the
+    /// minutes writing takes and one motionless word that looks like a hang.
+    Writing {
+        /// How many bytes of this text block have arrived so far.
+        ///
+        /// A running total within one block and never a delta, so successive
+        /// reports of a stretch of writing never go backwards; a second text
+        /// block starts again from zero, because it is its own stretch with its
+        /// own line. Bytes rather than characters or tokens: it is what was
+        /// counted, it needs no tokeniser to believe, and the wording helper
+        /// that puts it on a line speaks in bytes.
+        ///
+        /// A count with no denominator. Nothing here knows how long the answer
+        /// will be, so there is no fraction, no percentage and no bar — see the
+        /// port's docs.
+        bytes: u64,
+    },
     /// What the pass cost, in US dollars, as the pass itself reported it.
     ///
     /// The one number the transport keeps out of the run's own accounting, and
@@ -1540,6 +1556,23 @@ mod stream {
         pub(super) activities: Vec<Activity>,
         /// The document, if this was the line that carried it.
         pub(super) text: Option<String>,
+        /// Whether this line was a text block *opening* rather than a piece of
+        /// one already open.
+        ///
+        /// The one thing a caller cannot work out from the activities alone,
+        /// and the reason it is here. Both a block start and a delta come back
+        /// as [`Activity::Writing`], and the reader adding the deltas up has to
+        /// know when to start again from zero. Telling them apart by a zero
+        /// byte count would be the fragile version: an empty delta is a shape
+        /// the vendor is entitled to send, and reading one as a fresh block
+        /// would drop a running total back to nothing mid-block and make the
+        /// count go backwards, which is exactly what it exists to never do.
+        ///
+        /// Not an activity of its own, because it is not a thing the pass is
+        /// doing — it is a fact about *this line* that only the accumulator
+        /// upstairs cares about, and it goes no further than
+        /// [`read`](super::read).
+        pub(super) opens_text: bool,
     }
 
     /// What one line of `--output-format stream-json` means.
@@ -1567,7 +1600,7 @@ mod stream {
         match value.get("type").and_then(Value::as_str) {
             Some("assistant") => Reading {
                 activities: read_activities(&value),
-                text: None,
+                ..Reading::default()
             },
             Some("result") => read_result(&value),
             // The one `system` line worth hearing, and the only sign of life a
@@ -1586,21 +1619,36 @@ mod stream {
             {
                 Reading {
                     activities: vec![Activity::Thinking],
-                    text: None,
+                    ..Reading::default()
                 }
             }
-            // The moment the answer starts. `--include-partial-messages` breaks
-            // an assistant message into the events that build it, and the one
-            // worth hearing is the block opening: a `text` block starting is a
-            // pass that has stopped thinking and begun writing, said when it
-            // happens rather than when the finished block arrives sixteen
-            // seconds later. The deltas that follow it are the document
-            // arriving a few words at a time and are read by nobody — the
-            // document is taken whole from the result line, and a panel that
-            // showed the prose would be a viewer rather than a ledger.
-            Some("stream_event") => Reading {
-                activities: read_block_start(&value).into_iter().collect(),
-                text: None,
+            // The answer arriving. `--include-partial-messages` breaks an
+            // assistant message into the events that build it, and two of them
+            // are worth hearing: a `text` block starting is a pass that has
+            // stopped thinking and begun writing, said when it happens rather
+            // than when the finished block arrives sixteen seconds later, and
+            // each `text_delta` after it is a few more words of the answer —
+            // measured, never read. What comes out is a *size*, which is a
+            // fact about the run, and not the prose, which stays where it was:
+            // the document is taken whole from the result line, and a panel
+            // that showed the words would be a viewer rather than a ledger.
+            //
+            // The opening is checked first and the two are kept apart, because
+            // the reader adding these up needs to know which it has — see
+            // [`Reading::opens_text`].
+            Some("stream_event") => match read_block_start(&value) {
+                Some(activity) => Reading {
+                    activities: vec![activity],
+                    text: None,
+                    opens_text: true,
+                },
+                None => Reading {
+                    activities: read_text_delta(&value)
+                        .map(|bytes| Activity::Writing { bytes })
+                        .into_iter()
+                        .collect(),
+                    ..Reading::default()
+                },
             },
             // Every other `system` line, `user` — which is where tool results
             // come back — and whatever is added next: all of it is somebody
@@ -1631,8 +1679,11 @@ mod stream {
     /// Only `content_block_start` is read, and only for a `text` block. A
     /// `thinking` block starting says what the `thinking_tokens` lines above
     /// already say, and saying it twice would be two sources for one fact; the
-    /// deltas, the stops and the message-level events are the shape of a
-    /// message being assembled, which is nobody's business up here.
+    /// stops and the message-level events are the shape of a message being
+    /// assembled, which is nobody's business up here.
+    ///
+    /// Zero bytes, because none of the answer has arrived yet: the opening is
+    /// the moment writing began, and what it begins is a count.
     fn read_block_start(value: &Value) -> Option<Activity> {
         let event = value.get("event")?;
         if event.get("type").and_then(Value::as_str)? != "content_block_start" {
@@ -1643,9 +1694,43 @@ mod stream {
             .and_then(|block| block.get("type"))
             .and_then(Value::as_str)?
         {
-            "text" => Some(Activity::Writing),
+            "text" => Some(Activity::Writing { bytes: 0 }),
             _ => None,
         }
+    }
+
+    /// How many bytes of answer a `stream_event` line delivered, if it
+    /// delivered any.
+    ///
+    /// This delta's own length and never a running total: this function is as
+    /// stateless as everything else in here, so it can go on being tested from
+    /// string literals, and the adding up is done once, by the thread that sees
+    /// every line in order.
+    ///
+    /// Only a `content_block_delta` carrying a `text_delta` counts. A
+    /// `thinking_delta` is the model's private reasoning arriving in pieces,
+    /// which is the one thing the panel is most careful never to show and
+    /// whose *size* is no more interesting than its words — the thinking line
+    /// has a clock, and that is the measure of a thought. Every other shape,
+    /// including a delta with no text or a `text` that is not a string, is a
+    /// stream saying something this code was not told about, and reads as
+    /// nothing.
+    ///
+    /// The length is of the UTF-8 the vendor sent, which is what the pipe
+    /// carried and what the finished document will weigh.
+    fn read_text_delta(value: &Value) -> Option<u64> {
+        let event = value.get("event")?;
+        if event.get("type").and_then(Value::as_str)? != "content_block_delta" {
+            return None;
+        }
+        let delta = event.get("delta")?;
+        if delta.get("type").and_then(Value::as_str)? != "text_delta" {
+            return None;
+        }
+        delta
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| text.len() as u64)
     }
 
     /// What one content block is doing, if it is doing anything.
@@ -1702,6 +1787,7 @@ mod stream {
                 .get("result")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            opens_text: false,
         }
     }
 }
@@ -1729,6 +1815,15 @@ mod stream {
 /// and the engine's vocabulary has no variant for it. Nothing here bounds a
 /// line's length — a whole document arrives as one — so the buffer is reused
 /// rather than grown per line, and it is cleared as it goes.
+///
+/// This is also the one place that keeps a running total of the answer arriving,
+/// because it is the one place that sees every line of a stream in order.
+/// `stream::read_line` reports each delta's own length and stays a pure function
+/// of one string; the addition is here, where the state can be a local that dies
+/// with the thread. It starts again from zero at every text block opening, so a
+/// pass that writes twice counts each stretch on its own, and a total that has
+/// begun only ever grows — which is the whole promise of the number, since a
+/// count that went backwards would say less than no count at all.
 fn read<R: Read + Send + 'static>(
     source: R,
     activities: Activities,
@@ -1737,14 +1832,30 @@ fn read<R: Read + Send + 'static>(
         let mut source = io::BufReader::new(source);
         let mut line = Vec::new();
         let mut document = String::new();
+        let mut written: u64 = 0;
         loop {
             line.clear();
             if source.read_until(b'\n', &mut line)? == 0 {
                 return Ok(document);
             }
             let reading = stream::read_line(&String::from_utf8_lossy(&line));
+            if reading.opens_text {
+                written = 0;
+            }
             for activity in reading.activities {
-                activities.report(activity);
+                match activity {
+                    // Saturating rather than wrapping, for the same reason the
+                    // rest of this file never panics on a stream: an answer of
+                    // eighteen exabytes is not a thing that happens, and if the
+                    // arithmetic ever did run out of room, a count that stops
+                    // climbing is a better answer than a pass that dies over a
+                    // decoration.
+                    Activity::Writing { bytes } => {
+                        written = written.saturating_add(bytes);
+                        activities.report(Activity::Writing { bytes: written });
+                    }
+                    other => activities.report(other),
+                }
             }
             if let Some(text) = reading.text {
                 document = text;
@@ -1834,6 +1945,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -2612,7 +2724,71 @@ mod tests {
         // document is done, which is what the outcome line is for.
         let line = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#;
 
-        assert_eq!(stream::read_line(line).activities, vec![Activity::Writing]);
+        // Zero bytes, because none of the answer has arrived yet — and the one
+        // line that says so, which is how the reader knows to start counting
+        // again rather than to go on adding to whatever came before.
+        assert_eq!(
+            stream::read_line(line).activities,
+            vec![Activity::Writing { bytes: 0 }]
+        );
+        assert!(stream::read_line(line).opens_text);
+    }
+
+    #[test]
+    fn a_text_delta_is_that_much_more_of_the_answer_arrived() {
+        // The words are measured and thrown away: what comes back is a size,
+        // and the document still comes whole from the result line.
+        let line = r##"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"# engine"}}}"##;
+
+        let reading = stream::read_line(line);
+
+        assert_eq!(reading.activities, vec![Activity::Writing { bytes: 8 }]);
+        assert_eq!(reading.text, None);
+        // A delta is not an opening. Telling the two apart is the reader's
+        // whole means of knowing when a count starts over.
+        assert!(!reading.opens_text);
+    }
+
+    #[test]
+    fn a_delta_is_counted_in_bytes_and_not_in_characters() {
+        // Eleven characters and fifteen bytes: an em dash and a curly
+        // apostrophe are three bytes each, and what went down the pipe — and
+        // what the finished document will weigh — is the bytes.
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"it’s — done"}}}"#;
+
+        assert_eq!("it’s — done".chars().count(), 11);
+        assert_eq!(
+            stream::read_line(line).activities,
+            vec![Activity::Writing { bytes: 15 }]
+        );
+    }
+
+    #[test]
+    fn a_delta_reports_its_own_length_and_never_a_running_total() {
+        // The proof that reading a line is a pure function of that line: the
+        // same delta twice in a row reads the same both times, and three
+        // different ones read as three separate lengths rather than 2, 5, 9.
+        // Adding them up is the reading thread's job, and its alone.
+        let lines = ["ab", "ab", "cde", "fghi"].map(|text| {
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":1,"delta":{{"type":"text_delta","text":"{text}"}}}}}}"#
+            )
+        });
+
+        let counted: Vec<_> = lines
+            .iter()
+            .map(|line| stream::read_line(line).activities)
+            .collect();
+
+        assert_eq!(
+            counted,
+            vec![
+                vec![Activity::Writing { bytes: 2 }],
+                vec![Activity::Writing { bytes: 2 }],
+                vec![Activity::Writing { bytes: 3 }],
+                vec![Activity::Writing { bytes: 4 }],
+            ]
+        );
     }
 
     #[test]
@@ -2621,18 +2797,28 @@ mod tests {
             // A thinking block opening says what the `thinking_tokens` lines
             // already said, and one fact wants one source.
             r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}"#,
-            // The document arriving a few words at a time. Read by nobody: the
-            // document is taken whole from the result line.
-            r##"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"# engine"}}}"##,
+            // The thought arriving in pieces. Not the words, and not their
+            // size either: a thought is measured by the clock on its own line.
             r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQBCkYIBRgCKk"}}}"#,
             // The shape of a message being assembled.
             r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#,
             r#"{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant"}}}"#,
             r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
-            // And the shapes that are not there at all.
+            r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"}}}"#,
+            // And the shapes that are not there at all. Half of these are
+            // deltas now that deltas are looked at: no `delta`, a `text_delta`
+            // with no `text`, and a `text` that is not a string. A count of
+            // *something else* would be worse than no count.
             r#"{"type":"stream_event"}"#,
             r#"{"type":"stream_event","event":{"type":"content_block_start"}}"#,
             r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":128}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":{"was":"a string once"}}}}"#,
+            r##"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"something_added_later","text":"# engine"}}}"##,
         ] {
             assert_eq!(
                 stream::read_line(line),
@@ -2659,6 +2845,76 @@ mod tests {
                 "nothing, and no panic, from {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_stretch_of_writing_is_counted_up_and_each_block_counts_its_own() {
+        // The reading thread over a canned stream and no child process: bytes
+        // in on a `&[u8]`, activities out on a channel. Two text blocks with
+        // an empty delta in the middle of the first, which is the shape that
+        // would break a reader that took a zero for a fresh block.
+        let stream = [
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}"#,
+            r##"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"# En"}}}"##,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"gine"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}}"#,
+            // Two bytes, one character: the total climbs by what crossed the
+            // pipe.
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"é"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#,
+            // A second stretch of writing — a summarising pass, or a model
+            // that resumed after a tool. Its own line, its own count.
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ok"}}}"#,
+            r##"{"type":"result","subtype":"success","result":"# Engineé","total_cost_usd":0.0042}"##,
+        ]
+        .join("\n");
+
+        let (sender, received) = mpsc::channel();
+        let activities = Activities::new(move |activity| {
+            let _ = sender.send(activity);
+        });
+        let document = super::read(io::Cursor::new(stream), activities)
+            .join()
+            .expect("the reading thread does not panic")
+            .expect("reading a slice of bytes cannot fail");
+        let reported: Vec<Activity> = received.iter().collect();
+
+        assert_eq!(
+            reported,
+            vec![
+                // Nothing yet, the moment writing began.
+                Activity::Writing { bytes: 0 },
+                // Running totals, not deltas: 4, then 4 more.
+                Activity::Writing { bytes: 4 },
+                Activity::Writing { bytes: 8 },
+                // The empty delta holds, and does not send the count home.
+                Activity::Writing { bytes: 8 },
+                Activity::Writing { bytes: 10 },
+                // The second block starts again from nothing rather than
+                // carrying the first one's ten.
+                Activity::Writing { bytes: 0 },
+                Activity::Writing { bytes: 2 },
+                Activity::Cost { usd: 0.0042 },
+            ]
+        );
+
+        // And, since the counts are the only thing that changed: the totals
+        // never go backwards inside a stretch, and the document is still the
+        // result line's field, with not one delta accumulated into it.
+        for stretch in reported.split(|activity| *activity == Activity::Writing { bytes: 0 }) {
+            assert!(
+                stretch.windows(2).all(|pair| match pair {
+                    [
+                        Activity::Writing { bytes: before },
+                        Activity::Writing { bytes: after },
+                    ] => after >= before,
+                    _ => true,
+                }),
+                "a count went backwards in {stretch:?}"
+            );
+        }
+        assert_eq!(document, "# Engineé");
     }
 
     #[test]
@@ -3492,7 +3748,10 @@ mod tests {
                         detail: Some("fn load".to_owned()),
                     },
                     Activity::Thinking,
-                    Activity::Writing,
+                    // Zero, and only zero: [`TURN`] opens a text block and
+                    // never sends a delta, so the count begins and the answer
+                    // arrives whole on the result line.
+                    Activity::Writing { bytes: 0 },
                     Activity::Cost { usd: 0.0042 },
                 ]
             }
