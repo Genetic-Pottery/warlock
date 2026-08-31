@@ -583,7 +583,14 @@ fn run() -> Result<(), Error> {
         // and again below for the pointer, so the frame and the hit test are one
         // rule read twice rather than two opinions about the same rows.
         draw_frame(
-            &mut app, &mut guard, &scope, size, confirm, &prompt, &composer,
+            &mut app,
+            &mut guard,
+            &scope,
+            size,
+            confirm,
+            &prompt,
+            &path_prompt,
+            &composer,
         )?;
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
@@ -1090,7 +1097,11 @@ fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result
 /// open, it is a small window drawn over the middle of it with everything behind
 /// it cleared. The scope prompt goes in beside it for the same reason and is
 /// drawn the same way — by reference, since it carries the text somebody is
-/// typing.
+/// typing — and the path a brief is about to be written to goes in beside that,
+/// the same window with the other question in it (see `write_opened`). Both
+/// prompts are handed over on every frame and the renderer draws whichever is
+/// up; which of them has the keyboard while both are is `press_for`'s decision,
+/// and the order they are drawn in agrees with it.
 ///
 /// The composer comes in the same way and is the reason the panel's height is
 /// worth a second look: it is a pane cut off the bottom of the panel's column,
@@ -1113,6 +1124,11 @@ fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result
 /// would scroll by the row the header owns. What the frame will report is asked
 /// of the app once, and [`panel_height`] is handed the same answer the frame
 /// draws from, so the measurement and the drawing cannot disagree.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the whole of what one frame is drawn from, and the point of it is \
+              that the loop draws a frame in one call"
+)]
 fn draw_frame(
     app: &mut App,
     guard: &mut TerminalGuard,
@@ -1120,6 +1136,7 @@ fn draw_frame(
     size: Size,
     confirm: QuitConfirm,
     prompt: &ScopePrompt,
+    path_prompt: &ScopePrompt,
     composer: &Composer,
 ) -> io::Result<()> {
     let field = composer_on_screen(app, composer);
@@ -1135,6 +1152,7 @@ fn draw_frame(
             Instant::now(),
             confirm,
             prompt,
+            path_prompt,
             field,
         );
     })?;
