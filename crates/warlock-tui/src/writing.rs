@@ -1760,20 +1760,19 @@ mod writes {
     /// away with the test.
     #[cfg(unix)]
     mod whole {
-        use std::path::Path;
+
         use std::thread;
         use std::time::Duration;
 
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use warlock_engine::DEFAULT_BRIEF_DIRECTORY;
+
         use warlock_tui::{ChatAgent, Composed, Composer, Line, Mode, ScopePrompt, edit_for};
 
-        use super::super::{WRITE_HEADING, write_edit, write_opened};
+        use super::super::WRITE_HEADING;
         use super::{
             App, Instant, Node, NodeState, PathBuf, Tree, a_repo, everything_under, fs, notes, now,
             pacts,
         };
-        use crate::apply_compose;
         use crate::chatting::Chat;
 
         /// How long the rounds below go on before giving up on a turn that is
@@ -1823,32 +1822,23 @@ mod writes {
 
         /// The loop's bottom end, round after round, until the turn has ended.
         ///
-        /// [`Chat::keep_up`] and the one line above it in the event loop's own
-        /// `keep_up`, and nothing else: a `/write` answer comes back from the
-        /// drain and becomes the window, and every other round comes back with
-        /// nothing and leaves the window closed. Nothing here joins a thread,
-        /// receives from a channel or waits on a child.
+        /// [`Chat::keep_up`] and nothing else, which is exactly what the event
+        /// loop's own `keep_up` calls: nothing here waits on the worker, joins a
+        /// thread or receives from a channel — the round polls and comes back,
+        /// and the turn ending is the drain taking it down.
         ///
-        /// `directory` comes in the way the loop's own bottom end has it: a
-        /// value settled turns ago, carried down to the one line that proposes a
-        /// path, so no round of this loop reads a file or can fail.
-        fn rounds_until_answered(
-            chat: &mut Chat,
-            app: &mut App,
-            repo_root: &Path,
-            directory: &str,
-            now: Instant,
-        ) -> ScopePrompt {
-            let mut prompt = ScopePrompt::default();
+        /// Nothing comes back and nothing is opened here. This used to build the
+        /// window itself, calling `write_opened` over whatever the drain handed
+        /// up — a second spelling of a line the event loop also had, living in a
+        /// test. The conversation owns the window now, so the round is the one
+        /// call, and what opened is read off the conversation afterwards.
+        fn rounds_until_answered(chat: &mut Chat, app: &mut App, now: Instant) {
             let waited = Instant::now();
             while chat.answering() && waited.elapsed() < AT_MOST {
-                if let Some(document) = chat.keep_up(app, now) {
-                    prompt = write_opened(repo_root, directory, &document);
-                }
+                chat.keep_up(app, now);
                 thread::sleep(Duration::from_millis(10));
             }
             assert!(!chat.answering(), "the turn never ended");
-            prompt
         }
 
         #[test]
@@ -1864,34 +1854,29 @@ mod writes {
             // written file is about to make stale.
             app.set_mode(Mode::Brief);
             let manifest = pacts(&["docs"]);
-            let mut chat = Chat::with_agent(answering_with(DOCUMENT));
-            let mut composer = Composer::new("/write");
-            // The loop's own local, as a session that entered brief mode is
-            // holding it: the default, settled at `/brief` and carried from here
-            // to the window without being looked at again.
-            let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
+            // The conversation, rooted in that repository: where a brief goes
+            // is its own now, settled at `/brief` and read at `/write` without
+            // being looked at again.
+            let mut chat = Chat::with_agent(repo.path(), answering_with(DOCUMENT));
 
-            // The reader's Enter at the foot of the panel, through the very
-            // function the loop's composer arm calls.
-            apply_compose(
-                &mut app,
-                &mut composer,
-                Composed::Submit,
-                &mut chat,
-                repo.path(),
-                &mut brief_directory,
-                base,
-            );
+            // The reader typing the word and pressing Enter at the foot of the
+            // panel, through the very method the loop's composer arm calls.
+            chat.compose(&mut app, Composed::Typing(Composer::new("/write")), base);
+            chat.compose(&mut app, Composed::Submit, base);
 
             assert!(chat.answering(), "the command started no turn");
-            assert_eq!(composer.draft(), "", "the field kept the submitted word");
+            assert_eq!(
+                chat.composer().draft(),
+                "",
+                "the field kept the submitted word"
+            );
 
             // Then the rounds, until the answer lands and the window opens over
             // it — pre-filled, headed, and complaining about nothing.
-            let prompt =
-                rounds_until_answered(&mut chat, &mut app, repo.path(), &brief_directory, base);
+            rounds_until_answered(&mut chat, &mut app, base);
 
-            let field = prompt
+            let field = chat
+                .write_prompt()
                 .field()
                 .expect("the path prompt opened over the answer")
                 .clone();
@@ -1923,9 +1908,13 @@ mod writes {
             // And Enter in that window, through `edit_for` as `press_for` sends
             // it and `write_edit` as the loop's arm applies it.
             let edited = edit_for(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &field);
-            let prompt = write_edit(&mut app, &manifest, repo.path(), &prompt, edited, base);
+            chat.write(&mut app, &manifest, edited, base);
 
-            assert_eq!(prompt, ScopePrompt::Closed, "Enter left the window up");
+            assert_eq!(
+                *chat.write_prompt(),
+                ScopePrompt::Closed,
+                "Enter left the window up"
+            );
             let written =
                 fs::read_to_string(repo.path().join(PROPOSED)).expect("the artifact reads back");
             assert_eq!(written, DOCUMENT, "the bytes are not the document answered");

@@ -1580,7 +1580,6 @@ mod tests {
         activity_port, apply_toggle, run_pact, spawn_pact,
     };
     use crate::chatting::Chat;
-    use crate::field_muted;
     use crate::session::{NOT_REFRESHED, Scope};
 
     /// [`super::pact_press`] with no boundary in the way.
@@ -5595,7 +5594,7 @@ mod tests {
             // The field the run must not reach, held where the loop holds it:
             // the muting is derived from this and from nothing else, and the
             // run is never handed it.
-            let chat = Chat::new();
+            let chat = Chat::new("/warlock/no/such/repository");
             // Everything the press does before the worker starts: one account,
             // and nothing at all to the conversation.
             app.start_account(base);
@@ -5631,7 +5630,7 @@ mod tests {
                     "the run wrote into the conversation at frame {frame}"
                 );
                 assert!(
-                    !field_muted(chat.answering()),
+                    !chat.composer().is_muted(),
                     "the run took the field at frame {frame}"
                 );
             }
@@ -5642,10 +5641,7 @@ mod tests {
                 Mode::Brief,
                 "the register did not survive the run: {refreshing_it}"
             );
-            assert!(
-                !field_muted(chat.answering()),
-                "the run left the field muted"
-            );
+            assert!(!chat.composer().is_muted(), "the run left the field muted");
             // And the whole of the run is on the card one swap away, with the
             // conversation — question, work and answer — exactly as it was.
             let card = conversation_untouched(&mut app, at(base, 10_000));

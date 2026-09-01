@@ -7,7 +7,7 @@ This is `warlock_tui`'s library crate: the pure core of the terminal front end, 
 - **`lib.rs`** — the crate's manifest of exports; states the one hard rule: TUI depends on `warlock_engine`, never the reverse.
 - **`app.rs`** — `App`: the flattened, filtered, scrollable view over the engine's `Tree`, plus `reseat_on` for carrying that view across a freshly reloaded tree by path. Also `Chrome`, `Row`, `Focus`, `Sigils`, `PactToggle`, `Run`.
 - **`account.rs`** — `Account`, the running record of one pact's activity, clocked against a caller-supplied `Instant`.
-- **`chatting.rs`** — one chat turn on a worker thread: `spawn_turn`, `start_turn`, `run_turn`, `apply_turn` — the same not-blocking shape as `pacting.rs`, over a smaller job that writes nothing and reloads nothing.
+- **`chatting.rs`** — `Chat`: the whole conversation as one value — the agent, the turn in flight, the draft at the foot of the panel, where a brief would go, and the window a `/write` answer opens. Underneath it the same not-blocking shape as `pacting.rs` (`spawn_turn`, `start_turn`, `run_turn`, `apply_turn`) over a smaller job that writes no documents and reloads no tree. The register itself stays on `App`.
 - **`claude.rs`** — the *only* place that spawns a child process: runs the `claude` CLI as both the engine's `Agent` (`ClaudeAgent`, for pacts) and a read-only chat agent (`ChatAgent`, for conversation turns), with a documented multi-thread writer/reader/waiter arrangement and `Cancel`/`Activities` ports.
 - **`template.rs`** — `brief_template`: the shape a brief-mode conversation is aimed at, read fresh at the keystroke — warlock's built-in `DEFAULT_TEMPLATE`, or `<root>/.warlock/brief-template.md` where the repository has written one instead. Nothing points at the override and nothing turns it on.
 - **`colour.rs`** — the fixed, exhaustively-matched mapping from `NodeState`/focus/guide to indexed terminal colours.
@@ -20,12 +20,12 @@ This is `warlock_tui`'s library crate: the pure core of the terminal front end, 
 - **`watch.rs`** — filesystem watching split into an impure handle (`Watch`, wraps `notify`) and two pure decision types: `NodeSet` and `WatchPolicy`.
 - **`error.rs`** — `Error`, the binary's whole error vocabulary; every variant renders as one line via `one_line`.
 - **`fixture.rs`** — test-only, hand-written `Tree` values; unreachable outside `#[cfg(test)]`.
-- **`main.rs`** — the binary: terminal lifecycle, argument dispatch (`init`/`config`/`-h`/`--help`/else refused), the event loop, and its concurrency shape (pact/turn on worker threads, progress drained once per poll round).
+- **`main.rs`** — the binary: terminal lifecycle, argument dispatch (`init`/`config`/`-h`/`--help`/else refused), the event loop, and its concurrency shape (pact/turn on worker threads, progress drained once per poll round). The loop holds nine locals, and the two workers are two of them — `Pact` and `Chat`, the same four methods each.
 - **`input.rs`** — pure translation from crossterm events to `Action`/`MouseAction`/`Pressed`; `press_for` layers both modal gates and the composer in front of `action_for`.
-- **`pacting.rs`** — orchestrates a pact/refresh run: spawns the worker thread, drives `pact_subtree`/`refresh_subtree`/`unpact_subtree`, translates worker events into `Account` updates (and into the conversation's own run turn when one is open), reloads the tree once at the end.
+- **`pacting.rs`** — `Pact`: the agent runs are made with and the run in flight, with `press`/`keep_up`/`stop`/`running` — `Chat`'s opposite number. Spawns the worker thread, drives `pact_subtree`/`refresh_subtree`/`unpact_subtree`, translates worker events into `Account` updates (and into the conversation's own run turn when one is open), reloads the tree once at the end and says so with a `Reloaded`.
 - **`viewing.rs`** — the `v` key: reads a file into the panel's document card on the event loop's own thread. Never refused for an in-flight run, unlike pact/refresh/scope.
 - **`editing.rs`** — the `e` key: hands the terminal to `$EDITOR` via `TerminalGuard::suspended` and re-reads the file afterward if it's the one on the document card; also re-reads the tree, since an edited `WARLOCK.md` restales its own directory.
-- **`writing.rs`** — the `/write` artifact, in two halves with the field between them: `proposed_path` derives where a brief would go — fenced unwrap, slugged title, next `NN` in the directory — and writes nothing, while `write_opened`/`write_edit`/`write_submit` are the path prompt's lifecycle and the one place in warlock that puts a document somebody asked for on disk. Where a brief goes is handed in, never read here.
+- **`writing.rs`** — the `/write` artifact, in two halves with the field between them: `proposed_path` derives where a brief would go — fenced unwrap, slugged title, next `NN` in the directory — and writes nothing, while `write_opened`/`write_edit`/`write_submit` are what that window's keystrokes come to and the one place in warlock that puts a document somebody asked for on disk. The window itself belongs to `Chat`, which calls these; where a brief goes is handed in, never read here.
 - **`session.rs`** — `Scope` (root + repo root + `Chrome`, resolved once), `reload_tree`, `Watched`, `sigils_held`/`sigils_under`, manifest loading.
 - **`config.rs`** — `warlock config`: prints what sigils this machine holds, reads one line from stdin in cooked mode, writes the machine-local sigil config under the home directory. `home_directory()` is the crate's one point where `HOME`/`USERPROFILE` becomes a path.
 - **`terminal.rs`** — `TerminalGuard` and `install_panic_hook`: the one guaranteed spelling of "restore the terminal" on every exit path, plus `suspended`, which gives the terminal to a foreign process and takes it back.
@@ -38,7 +38,7 @@ This is `warlock_tui`'s library crate: the pure core of the terminal front end, 
 
 **Two clocks, one rule.** `Account`'s per-line clocks and `WatchPolicy`'s debounce/ceiling timers both freeze on the next event and tick against `now` only while still "live." `Thread`'s turns share the very same `Log` machinery as `Account`.
 
-**Two agents, one seam.** `ClaudeAgent` implements the engine's `Agent` port for pacts; `ChatAgent` is a sibling that is *not* an `Agent` — a turn is a typed message, not a request, one session for the process's life, granted only `Read`/`Grep`/`Glob`, never able to write.
+**Two agents, one seam, and one value apiece.** `ClaudeAgent` implements the engine's `Agent` port for pacts and lives inside `Pact`; `ChatAgent` is a sibling that is *not* an `Agent` and lives inside `Chat` — a turn is a typed message, not a request, one session for the process's life, granted only `Read`/`Grep`/`Glob`, never able to write. The two are deliberately symmetric in shape (`press`/`ask`, `keep_up`, `stop`, `running`/`answering`) and deliberately asymmetric in what they end in: only a run touches disk, so only `Pact::keep_up` reloads and hands back a `Reloaded`.
 
 **A run can happen inside a conversation.** A pact or refresh started while the thread is on screen appends as a turn nobody typed, holding the very `Account` the account card holds for the same run — one call (`App::write_run`) feeds both, so there is no second wording of a run's lines anywhere.
 
@@ -46,7 +46,7 @@ This is `warlock_tui`'s library crate: the pure core of the terminal front end, 
 
 **Footer messaging has one precedence rule**, enforced by `session::note`: housekeeping gives way to whatever a pact's own message says.
 
-**Modal gates and the composer layer in a fixed order** (documented on `input::press_for`): Ctrl-C first, then the quit question, then the scope prompt, then the write-path prompt, then the composer, then the ordinary keys. None of the four is a field on `App` — the write prompt least of all, since no key opens it and a `/write` turn landing does.
+**Modal gates and the composer layer in a fixed order** (documented on `input::press_for`): Ctrl-C first, then the quit question, then the scope prompt, then the write-path prompt, then the composer, then the ordinary keys. None of the four is a field on `App` — the write prompt least of all, since no key opens it and a `/write` turn landing does. Two of them, the write prompt and the composer, belong to `Chat` and are read through it; `press_for` still owns the whole order, because it interleaves the conversation's windows with ones that are not the conversation's.
 
 **A view (`v`) and a swap are not pacts**, and unlike `p`/`r`/`s` are never refused for an in-flight run.
 
