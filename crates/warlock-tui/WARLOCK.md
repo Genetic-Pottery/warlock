@@ -6,7 +6,7 @@ The terminal front end of warlock: the crate that ships the `warlock` executable
 
 Three things sit directly in this directory: `Cargo.toml`, stating the dependency contract; `README.md`, a long, detailed spec of the panel; and `src/`, where all the actual code lives, with its own `WARLOCK.md` inventorying it file by file. Read that document before touching anything under `src/`.
 
-**The README is stale relative to the code, and materially so.** It describes a footer with a plain tally/keys/message line and says nothing of a composer, a conversation thread, a document viewer, `v`/`e`/`s` keys, or a second `ChatAgent` — all of which are present and current in `src/`'s own document (composer, conversation thread, module scoping, file viewing, module editing, two agents sharing one process-spawning seam). Trust `src/`'s document and the source over the README wherever they disagree, and say so rather than treating the README as ground truth. This directory's own document is owed a pass to reconcile the two.
+**The README is stale relative to the code, and materially so.** It describes a footer with a plain tally/keys/message line and a `p`/`r` key set only. It says nothing of a composer, a conversation thread, a document viewer, `v`/`e`/`s` keys, or a second `ChatAgent` — all of which are present and current in `src/`'s own document (composer, conversation thread, module scoping, file viewing, module editing, two agents sharing one process-spawning seam). Trust `src/`'s document and the source over the README wherever they disagree, and say so rather than treating the README as ground truth. This directory's own document is owed a pass to reconcile the two.
 
 ## What this crate is for
 
