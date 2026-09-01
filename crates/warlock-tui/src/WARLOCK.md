@@ -42,7 +42,7 @@ This is `warlock_tui`'s library crate: the pure core of the terminal front end, 
 
 **A run can happen inside a conversation.** A pact or refresh started while the thread is on screen appends as a turn nobody typed, holding the very `Account` the account card holds for the same run — one call (`App::write_run`) feeds both, so there is no second wording of a run's lines anywhere.
 
-**Every keystroke that starts a run refuses to start a second one.** `p`, `r`, and `s` all check the one `Option<Running>`/`Option<Chatting>` the loop holds; `v` and the swap key never do, because they race nothing.
+**Every keystroke that starts a run refuses to start a second one.** `p` and `r` go through `Pact::press`, which reads the one run `Pact` holds before it decides anything, so neither key can start a second and neither has to be told not to; `s` checks the same fact through `Pact::running`. `v` and the swap key never do, because they race nothing.
 
 **Footer messaging has one precedence rule**, enforced by `session::note`: housekeeping gives way to whatever a pact's own message says.
 

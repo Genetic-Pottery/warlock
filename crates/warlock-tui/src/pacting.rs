@@ -2,19 +2,28 @@
 //!
 //! The pact key is the one keystroke that writes to disk and the one that
 //! takes longer than a frame, so it is the one that is not done on the event
-//! loop's thread. [`pact_press`] decides what a press comes to, [`spawn_pact`]
-//! starts the worker and hands back the channel it reports on, and
-//! [`apply_progress`] is the loop's other half: everything the worker says —
-//! which directory it is on, what its pass is doing, and finally how it went —
-//! lands on the app there, and the run ends with the one reload that puts the
-//! documents it wrote on screen.
+//! loop's thread. [`Pact`] is what the loop keeps about it — the agent runs are
+//! made with, and the run in flight when there is one — and it is the whole of
+//! this module's surface: [`Pact::press`] decides what a press comes to and
+//! starts the worker, [`Pact::keep_up`] is the loop's other half, and
+//! [`Pact::stop`] and [`Pact::running`] are the two questions the rest of the
+//! loop asks. Everything the worker says — which directory it is on, what its
+//! pass is doing, and finally how it went — lands on the app in `keep_up`, and
+//! the run ends with the one reload that puts the documents it wrote on screen.
 //!
-//! The refresh key is the same machinery over a shorter list. [`refresh_press`]
-//! is [`pact_press`]'s twin, [`Work`] is the one value that says which of the
-//! two a run is, and everything below that — the worker, the channel, the
-//! account, the say-when, the single save, the reload — is shared rather than
-//! written twice: the difference between the two runs is one engine call in
-//! [`apply_toggle`] and one verb on the footer.
+//! [`Chat`](crate::chatting::Chat) is the same four parts over a much smaller
+//! job, and the two are meant to be read together: a turn and a run are both
+//! work happening on another thread that a frame must never wait for.
+//!
+//! The refresh key is the same machinery over a shorter list. It is the same
+//! [`Pact::press`] with the other [`Run`], [`Work`] is the one value that says
+//! which of the two a run is, and everything below that — the worker, the
+//! channel, the account, the say-when, the single save, the reload — is shared
+//! rather than written twice: the difference between the two runs is one engine
+//! call in [`apply_toggle`] and one verb on the footer.
+//!
+//! One run at a time is a property of [`Pact`] rather than a rule the keys
+//! remember: both presses read the one run it holds before deciding anything.
 //!
 //! Stopping a run has two spellings kept deliberately apart: Esc *cancels*
 //! through [`CancelGuard`], and the worker still hashes, saves and reports
@@ -59,6 +68,233 @@ const PACT_LOST: &str = "the pact stopped without saying how it went; nothing ne
 /// written is on disk and recorded, and the tree says which parts those are the
 /// next time it is loaded.
 const PACT_CANCELLED: &str = "the pact was cancelled; what it finished first is recorded";
+
+/// The pact key's whole business: who runs a pass, and the run in flight when
+/// there is one.
+///
+/// [`Chat`](crate::chatting::Chat)'s opposite number, and deliberately the same
+/// four parts in the same order — [`Pact::press`] starts a run,
+/// [`Pact::keep_up`] drains it, [`Pact::stop`] says when, and
+/// [`Pact::running`] is the one fact the rest of the loop asks for. The agent
+/// and the run live together because neither is any use without the other: an
+/// agent nothing has asked to run is a command line and a timeout, and a run
+/// needs the very agent the session was started with.
+///
+/// **One run at a time is a property of this type rather than a rule two keys
+/// remember.** Both long keystrokes come through [`Pact::press`], which reads
+/// the one `Option<Running>` below before it decides anything, so neither key
+/// can start a second run and neither key has to be told not to. Before this
+/// existed the check was a `bool` the event loop worked out and handed down,
+/// which is the caller knowing something this module owns.
+///
+/// **What a run ends in is deliberately not symmetric with a turn.** A turn
+/// writes nothing, saves nothing and reloads nothing, so [`Chat`] answers to
+/// nobody when one finishes; a run writes documents, saves the manifest and
+/// leaves the tree on screen a load out of date, so [`Pact::keep_up`] re-reads
+/// it and says so with a [`Reloaded`]. Making the two look alike there would be
+/// the false symmetry — a run *is* the one that changes the disk, and this is
+/// the impure twin.
+///
+/// **The manifest is not here on purpose.** The scope key writes it
+/// ([`scope_submit`](crate::scoping::scope_submit)) and the write prompt reads
+/// it ([`write_edit`](crate::writing::write_edit)), as well as a run saving it
+/// at the end, so it stays the loop's and is handed in. A field here would be a
+/// third owner lending it back out through an accessor, which is the openness
+/// this type exists to close rather than to re-spell.
+pub(crate) struct Pact {
+    /// The agent every pass of every run is made with, built once because it is
+    /// a command line and a timeout rather than a connection: nothing is
+    /// spawned until a run actually asks for a pass.
+    agent: ClaudeAgent,
+    /// The run happening somewhere else, if one is. `None` is the ordinary
+    /// state and the state a session starts and ends in.
+    run: Option<Running>,
+}
+
+/// A run that ended this round, and the tree the reload at the end of it
+/// produced.
+///
+/// The one round in a run's life where something is owed outside this module:
+/// the watcher has to be told that the walk it is following has been replaced,
+/// and told *once*, on the round the run finished rather than on every round it
+/// was going. See [`Watched::caught_up`](crate::session::Watched::caught_up).
+///
+/// A value rather than something the caller works out, because working it out
+/// is what the loop used to do — reading `is_some()` either side of the drain
+/// and comparing the two answers, which is an edge detector kept by hand over a
+/// fact this module already had. The tree rides along because it is the only
+/// thing the caller does with the answer; `None` inside is a reload that failed,
+/// which keeps the tree already drawn and is not an error.
+pub(crate) struct Reloaded(pub(crate) Option<Tree>);
+
+impl Pact {
+    /// A session with nothing running yet.
+    ///
+    /// The agent is made here, once, for the reason [`Chat::new`] makes its
+    /// own: it is a command line and a timeout, so building it costs nothing
+    /// and no `claude` exists until a key asks for one.
+    pub(crate) fn new() -> Self {
+        Self::with_agent(ClaudeAgent::new())
+    }
+
+    /// A session with nothing running yet, over `agent`.
+    ///
+    /// [`Chat::with_agent`](crate::chatting::Chat::with_agent)'s twin and for
+    /// its reason: a test can drive the very value the loop keeps against a
+    /// stand-in program, rather than assembling the pieces underneath it and
+    /// proving something about an arrangement the loop never has.
+    pub(crate) fn with_agent(agent: ClaudeAgent) -> Self {
+        Self { agent, run: None }
+    }
+
+    /// A session with `run` already in flight, for a test that is about the
+    /// draining rather than the starting.
+    ///
+    /// The run's fields are what those tests are *about* — the channel it
+    /// reports on, the say-when, the work it covers and the app to put back —
+    /// so this hands the whole value in rather than taking a receiver and
+    /// building one, which would hide the thing under test.
+    #[cfg(test)]
+    pub(crate) fn with_run(run: Running) -> Self {
+        Self {
+            agent: ClaudeAgent::new(),
+            run: Some(run),
+        }
+    }
+
+    /// Whether a run is happening somewhere else.
+    ///
+    /// [`Chat::answering`](crate::chatting::Chat::answering)'s twin, and the one
+    /// fact the rest of the loop asks for: Esc cancels the run rather than
+    /// asking about quitting for exactly as long as this is true, and the
+    /// watcher holds its reloads back for exactly as long as well. Both
+    /// readings come from here, so the key and the watcher cannot disagree
+    /// about whether anything is running.
+    pub(crate) const fn running(&self) -> bool {
+        self.run.is_some()
+    }
+
+    /// Say when, if there is anything to say it to.
+    ///
+    /// Both halves at once, through the run's own handle: it latches, so the
+    /// descent stops at the next directory instead of starting a pass for it,
+    /// and it kills the `claude` running right now, so that stop happens in
+    /// milliseconds rather than at the end of a five-minute pass.
+    ///
+    /// The run is deliberately *not* taken down here. The worker is still going
+    /// to hash what it wrote, save the manifest and report, and all of that
+    /// arrives at the next [`Pact::keep_up`] like any other outcome; forgetting
+    /// about it now would leave the footer's progress line up for a run nobody
+    /// was listening to any more.
+    ///
+    /// Silent with nothing running, which is Esc pressed with no run in flight —
+    /// a keystroke the gate answers a different way entirely, and one this can
+    /// afford to do nothing about.
+    pub(crate) fn stop(&self) {
+        if let Some(run) = self.run.as_ref() {
+            run.cancel.cancel();
+        }
+    }
+
+    /// Start the run one of the two long keystrokes is asking for, if it is
+    /// asking for one.
+    ///
+    /// The pact key and the refresh key, in one place because they were already
+    /// one arm with one word changed: a refresh is a run like a pact — one
+    /// worker, one channel, one account, one say-when — over the stale
+    /// directories of a subtree rather than all of them, and which those are is
+    /// the engine's judgement and not this loop's. The word that changes is
+    /// which press decides; everything either side of it is the same three
+    /// statements.
+    ///
+    /// The copy is taken before the press paints anything, because the toggle is
+    /// not its own undo: it puts a whole subtree into one state, and the states
+    /// it painted over were not all the same one. The copy is a list of rows and
+    /// a tally, and it is taken once per press of one key.
+    ///
+    /// `now` is the instant the key was pressed, and the account counts its
+    /// clocks from it: a run is as old as the keystroke that asked for it, not
+    /// as old as the first thing the model got round to saying.
+    ///
+    /// Nothing comes back, and two different presses need nothing done about
+    /// them for the same reason: both have already said their piece on the app,
+    /// and the next frame draws it. A refused toggle put its sentence in
+    /// [`App::message`](warlock_tui::App::message); a press while a run is in
+    /// flight started nothing — a second run over a tree the first is still
+    /// writing to would be two of them racing for the same documents and the
+    /// same manifest — and said so by setting the flag that words
+    /// `App::pact_line` as already running.
+    ///
+    /// `kind` is the run the key asked for, which is the *only* thing the two
+    /// keys differ by all the way down. It is [`Run`], the app's own kind, so
+    /// nothing here has to know what a keystroke is.
+    pub(crate) fn press(
+        &mut self,
+        kind: Run,
+        app: &mut App,
+        manifest: &Manifest,
+        scope: &Scope,
+        now: Instant,
+    ) {
+        let before = app.clone();
+        // Read here, off the one run this type keeps, rather than handed in by a
+        // caller who would have had to look at the same field to know it.
+        let running = self.running();
+        let work = match kind {
+            Run::Refresh => refresh_press(
+                app,
+                manifest,
+                &scope.repo_root,
+                scope.chrome.sigils(),
+                running,
+                now,
+            )
+            .map(Work::Refresh),
+            Run::Pact => pact_press(
+                app,
+                manifest,
+                &scope.repo_root,
+                scope.chrome.sigils(),
+                running,
+                now,
+            )
+            .map(Work::Pact),
+        };
+        if let Some(work) = work {
+            // The worker, the channel and the say-when, in the one value this
+            // type keeps about a run it is not doing — see [`start_run`], which
+            // is where both keys start theirs.
+            self.run = Some(start_run(
+                work,
+                before,
+                manifest,
+                &scope.repo_root,
+                &self.agent,
+            ));
+        }
+    }
+
+    /// Everything the run has said since the last round, and whether it ended.
+    ///
+    /// [`Chat::keep_up`](crate::chatting::Chat::keep_up)'s twin over the longer
+    /// job, drained with `try_recv` so a frame is never spent waiting on a
+    /// worker. Almost every round of warlock's life this returns `None` having
+    /// done nothing, which is the ordinary state of a program with no run in it.
+    ///
+    /// A [`Reloaded`] means the run ended on *this* round — the outcome applied,
+    /// the manifest saved, the account closed and the tree re-read — and it is
+    /// the only round the caller has anything left to do. See [`Reloaded`] for
+    /// why the edge is a value rather than something the caller reconstructs.
+    pub(crate) fn keep_up(
+        &mut self,
+        app: &mut App,
+        manifest: &mut Manifest,
+        scope: &Scope,
+        now: Instant,
+    ) -> Option<Reloaded> {
+        drain(&mut self.run, app, manifest, scope, now)
+    }
+}
 
 /// A pact being run by a worker thread, from the point of view of the thread
 /// drawing the screen.
@@ -449,7 +685,7 @@ impl PactObserver for Reporting<'_> {
 /// waiting, and this thread is started precisely so that nobody waits for it.
 /// The worker reports on every path it takes itself, so the only way the channel
 /// closes without an outcome is a panic in the worker — which the caller reads
-/// as the run being over ([`apply_progress`]) rather than as a reason to hang.
+/// as the run being over ([`Pact::keep_up`]) rather than as a reason to hang.
 pub(crate) fn spawn_pact(
     manifest: &Manifest,
     repo_root: &Path,
@@ -487,7 +723,7 @@ pub(crate) fn spawn_pact(
 /// same code and the loop holds the same one value for either. The handle is
 /// made here and never reused — a cancel is final, so the run after a cancelled
 /// one has to start with a handle nobody has said stop to.
-pub(crate) fn start_run(
+fn start_run(
     work: Work,
     before: App,
     manifest: &Manifest,
@@ -627,7 +863,7 @@ fn cancelled(toggled: Toggled) -> Toggled {
 /// hazard the sigil is a guard against, and it is why the doc on
 /// [`action_for`](crate::input::action_for) calling `p` "its own undo" holds
 /// pacting-ward and not the other way.
-pub(crate) fn pact_press(
+fn pact_press(
     app: &mut App,
     manifest: &Manifest,
     repo_root: &Path,
@@ -683,7 +919,7 @@ pub(crate) fn pact_press(
 /// words. What a refresh spends is model time inside somebody else's boundary,
 /// on documents that are theirs to have an opinion about, which is the same
 /// crossing a pact makes and is refused on the same grounds.
-pub(crate) fn refresh_press(
+fn refresh_press(
     app: &mut App,
     manifest: &Manifest,
     repo_root: &Path,
@@ -749,10 +985,13 @@ pub(crate) fn refresh_press(
 /// lands on top of the arm's result rather than under it, and a reload that
 /// fails leaves that result standing.
 ///
-/// What comes back is the tree that reload read, when a run ended and the load
-/// succeeded, and `None` otherwise: it is the whole of what the caller needs to
-/// keep the watcher's filter on the tree that is now on screen, since this is
-/// one of the two places the tree is ever re-read. See [`Watched::caught_up`].
+/// What comes back is a [`Reloaded`] on the round a run ended, holding the tree
+/// that reload read — or holding `None` where the load itself failed, which
+/// keeps the tree already drawn. Every other round comes back `None`, meaning
+/// the run is still going or there was never one. That is the whole of what the
+/// caller needs to keep the watcher's filter on the tree now on screen, since
+/// this is one of the two places the tree is ever re-read. See
+/// [`Watched::caught_up`].
 ///
 /// `now` is the caller's clock, and this function reads none of its own: every
 /// event drained here is filed under it, so a run is drivable from a base
@@ -760,16 +999,16 @@ pub(crate) fn refresh_press(
 /// frame share it, which is the truth to a tenth of a second — the loop is the
 /// only thing that hears the worker, so an event's arrival is when the loop got
 /// round to it.
-pub(crate) fn apply_progress(
-    pact: &mut Option<Running>,
+fn drain(
+    run: &mut Option<Running>,
     app: &mut App,
     manifest: &mut Manifest,
     scope: &Scope,
     now: Instant,
-) -> Option<Tree> {
+) -> Option<Reloaded> {
     // No run, nothing drained, nothing reloaded — which is what almost every
     // frame of warlock's life does here.
-    let running = pact.as_ref()?;
+    let running = run.as_ref()?;
 
     let outcome = loop {
         match running.events.try_recv() {
@@ -896,7 +1135,7 @@ pub(crate) fn apply_progress(
         }
     };
 
-    let running = pact
+    let running = run
         .take()
         .expect("the pact drained just above is still here");
     app.clear_pact_in_flight();
@@ -970,8 +1209,9 @@ pub(crate) fn apply_progress(
     close_account(app, scope, &refusals, cancelled, now);
 
     // The run is over and everything it recorded is on disk, so the rows on
-    // screen are one load out of date whichever arm above ran.
-    reload_tree(app, scope)
+    // screen are one load out of date whichever arm above ran. Saying so is the
+    // whole of what is left owed outside this module.
+    Some(Reloaded(reload_tree(app, scope)))
 }
 
 /// The file each pacted directory's document is written to, as the engine writes
@@ -1336,8 +1576,8 @@ mod tests {
     use warlock_tui::Cancel;
 
     use super::{
-        CancelGuard, PACT_CANCELLED, PACT_LOST, PactEvent, Running, Toggled, Work, activity_port,
-        apply_progress, apply_toggle, run_pact, spawn_pact,
+        CancelGuard, PACT_CANCELLED, PACT_LOST, Pact, PactEvent, Reloaded, Running, Toggled, Work,
+        activity_port, apply_toggle, run_pact, spawn_pact,
     };
     use crate::chatting::Chat;
     use crate::field_muted;
@@ -1691,7 +1931,7 @@ mod tests {
     /// A scope for a tree that is not on disk anywhere.
     ///
     /// What the tests built around synthetic paths hand to
-    /// [`apply_progress`]: a load from here fails, which is the case where
+    /// [`Pact::keep_up`]: a load from here fails, which is the case where
     /// the tree already on screen is kept.
     fn nowhere() -> Scope {
         Scope {
@@ -1733,7 +1973,7 @@ mod tests {
     ///
     /// The two halves of a real run, joined by the real channel and with
     /// nothing faked but the model: [`run_pact`] is what the worker thread
-    /// runs, and [`apply_progress`] is what the frame after it does.
+    /// runs, and [`Pact::keep_up`] is what the frame after it does.
     fn run_and_apply(
         scratch: &Scratch,
         app: &mut App,
@@ -1753,14 +1993,14 @@ mod tests {
             &events,
         );
 
-        let mut pact = Some(Running {
+        let mut pact = Pact::with_run(Running {
             events: received,
             cancel: CancelGuard::new(),
             work: work.clone(),
             before,
         });
-        apply_progress(&mut pact, app, manifest, scope, Instant::now());
-        assert!(pact.is_none(), "the run reported its outcome and is over");
+        pact.keep_up(app, manifest, scope, Instant::now());
+        assert!(!pact.running(), "the run reported its outcome and is over");
     }
 
     #[test]
@@ -3618,6 +3858,69 @@ mod tests {
         (app, before, Manifest::new(), events, running)
     }
 
+    /// The edge, on its own: a run says it ended on exactly one round.
+    ///
+    /// The property [`Reloaded`] exists for, asserted directly rather than
+    /// through what a caller does with it. Before the value existed the event
+    /// loop worked this out by reading `is_some()` either side of the drain and
+    /// comparing the two answers, which is a detector kept by hand over a fact
+    /// this module already had — and a detector nothing could test without
+    /// standing up the loop around it.
+    ///
+    /// Three rounds, and the middle one is the whole of it: a round with the
+    /// run still talking, the round its outcome lands on, and a round after it
+    /// is over. Only the middle round comes back with anything, and the round
+    /// *after* the end is what would catch a value that latched — a watcher
+    /// told twice would re-follow a tree it is already following and hold its
+    /// next reload back for a quiet period nobody is owed.
+    #[test]
+    fn a_run_says_it_ended_on_one_round_and_no_other() {
+        let base = Instant::now();
+        let (mut app, _before, mut manifest, events, running) = a_run_in_flight(base);
+        let mut pact = Pact::with_run(running);
+
+        // Still going: the worker has named a directory and nothing more.
+        events
+            .send(PactEvent::Starting {
+                directory: PathBuf::from("/repo/crates/engine"),
+                position: 1,
+                total: 1,
+            })
+            .expect("the loop is still listening");
+        assert!(
+            pact.keep_up(&mut app, &mut manifest, &nowhere(), base)
+                .is_none(),
+            "a run that is still going said it had ended"
+        );
+        assert!(pact.running(), "the run was taken down while still talking");
+
+        // The round the outcome lands on, and the only one that answers.
+        events
+            .send(PactEvent::Finished(Ok(Toggled {
+                manifest: Manifest::new(),
+                granted: true,
+                message: None,
+                refusals: Vec::new(),
+            })))
+            .expect("the loop is still listening");
+        assert!(
+            pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 1))
+                .is_some(),
+            "the run ended without saying so"
+        );
+        assert!(
+            !pact.running(),
+            "the run is over and still says it is running"
+        );
+
+        // And every round after it, for as long as nothing else is started.
+        assert!(
+            pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 2))
+                .is_none(),
+            "the end was reported a second time"
+        );
+    }
+
     #[test]
     fn a_pass_fills_the_panel_under_the_directory_it_is_working_on() {
         // The directory the worker names opens a section, everything the
@@ -3626,7 +3929,7 @@ mod tests {
         // what it always said.
         let base = Instant::now();
         let (mut app, before, mut manifest, events, running) = a_run_in_flight(base);
-        let mut pact = Some(running);
+        let mut pact = Pact::with_run(running);
 
         // The first directory, on its own: the run has reached it and the
         // pass has not said anything yet.
@@ -3637,9 +3940,9 @@ mod tests {
                 total: 2,
             })
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
 
-        assert!(pact.is_some(), "a run that is talking is still running");
+        assert!(pact.running(), "a run that is talking is still running");
         assert_eq!(
             panel_text(&app, at(base, 2)),
             ["engine", "0:02 waiting"],
@@ -3668,7 +3971,7 @@ mod tests {
         ] {
             events.send(event).expect("the loop is still listening");
         }
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 4));
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 4));
 
         assert_eq!(
             panel_text(&app, at(base, 4)),
@@ -3681,7 +3984,7 @@ mod tests {
         events
             .send(PactEvent::Doing(Activity::Cost { usd: 0.21 }))
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 6));
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 6));
 
         assert_eq!(
             panel_text(&app, at(base, 6)).len(),
@@ -3719,7 +4022,7 @@ mod tests {
         // whole run is one base instant and some arithmetic.
         let base = Instant::now();
         let (mut app, before, mut manifest, events, running) = a_run_in_flight(base);
-        let mut pact = Some(running);
+        let mut pact = Pact::with_run(running);
 
         events
             .send(PactEvent::Starting {
@@ -3728,7 +4031,7 @@ mod tests {
                 total: 1,
             })
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
 
         // A pass every half minute, each drained on the frame it arrived on,
         // which is what the event loop does with them.
@@ -3740,8 +4043,7 @@ mod tests {
                     parts: 14,
                 })
                 .expect("the loop is still listening");
-            apply_progress(
-                &mut pact,
+            pact.keep_up(
                 &mut app,
                 &mut manifest,
                 &nowhere(),
@@ -3799,7 +4101,7 @@ mod tests {
         // what went in it.
         let base = Instant::now();
         let (mut app, before, mut manifest, events, running) = a_run_in_flight(base);
-        let mut pact = Some(running);
+        let mut pact = Pact::with_run(running);
 
         events
             .send(PactEvent::Starting {
@@ -3808,7 +4110,7 @@ mod tests {
                 total: 1,
             })
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
         assert_eq!(
             panel_text(&app, at(base, 5)),
             ["engine", "0:05 waiting"],
@@ -3822,7 +4124,7 @@ mod tests {
                 bytes: 34 * 1024,
             })
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 20));
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 20));
 
         // One line, under the heading the `Starting` before it opened, in
         // place of the placeholder that was there a moment ago — and it is the
@@ -3857,7 +4159,7 @@ mod tests {
         // nothing, and the account is still whole once the run is over.
         let base = Instant::now();
         let (mut app, before, mut manifest, events, running) = a_run_in_flight(base);
-        let mut pact = Some(running);
+        let mut pact = Pact::with_run(running);
 
         events
             .send(PactEvent::Starting {
@@ -3866,14 +4168,14 @@ mod tests {
                 total: 2,
             })
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
         events
             .send(PactEvent::Doing(Activity::Tool {
                 name: "Bash".to_owned(),
                 detail: Some("cargo test".to_owned()),
             }))
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 4));
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 4));
 
         // The next directory. Its clock starts again at nothing, and the
         // section above it stops where the run left it — seventy seconds in,
@@ -3885,11 +4187,11 @@ mod tests {
                 total: 2,
             })
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 70));
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 70));
         events
             .send(PactEvent::Doing(Activity::Thinking))
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 71));
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 71));
 
         assert_eq!(
             panel_text(&app, at(base, 100)),
@@ -3913,15 +4215,9 @@ mod tests {
                 refusals: Vec::new(),
             })))
             .expect("the loop is still listening");
-        apply_progress(
-            &mut pact,
-            &mut app,
-            &mut manifest,
-            &nowhere(),
-            at(base, 120),
-        );
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 120));
 
-        assert!(pact.is_none(), "the run is over");
+        assert!(!pact.running(), "the run is over");
         assert!(app.pact_line().is_none(), "so nothing is being pacted now");
         // Nothing the run did is on the footer, because nothing went wrong
         // in it. The line that is there belongs to the reload at the bottom
@@ -3973,7 +4269,7 @@ mod tests {
         app.start_account(base);
         let mut manifest = Manifest::new();
         let (events, received) = mpsc::channel();
-        let mut pact = Some(Running {
+        let mut pact = Pact::with_run(Running {
             events: received,
             cancel: CancelGuard::new(),
             work: pact_of("/repo/crates"),
@@ -3999,9 +4295,9 @@ mod tests {
         ] {
             events.send(event).expect("the loop is still listening");
         }
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
 
-        assert!(pact.is_some(), "the run is still going");
+        assert!(pact.running(), "the run is still going");
         assert_eq!(
             state_of(&app, Path::new("/repo/crates/engine/src")),
             Some(NodeState::PactedFresh),
@@ -4043,7 +4339,7 @@ mod tests {
 
     /// A run of `work` over `app` that nobody has said anything to yet, and the
     /// end of the channel a test sends its events down.
-    fn running_over(app: &App, work: Work) -> (Sender<PactEvent>, Option<Running>) {
+    fn running_over(app: &App, work: Work) -> (Sender<PactEvent>, Pact) {
         let (events, received) = mpsc::channel();
         let running = Running {
             events: received,
@@ -4051,7 +4347,7 @@ mod tests {
             work,
             before: app.clone(),
         };
-        (events, Some(running))
+        (events, Pact::with_run(running))
     }
 
     /// Every row the app is drawing, as a path and the state it is drawn in.
@@ -4082,15 +4378,9 @@ mod tests {
                 directory: PathBuf::from("/repo/crates/engine"),
             })
             .expect("the loop is still listening");
-        apply_progress(
-            &mut pact,
-            &mut app,
-            &mut manifest,
-            &nowhere(),
-            Instant::now(),
-        );
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), Instant::now());
 
-        assert!(pact.is_some(), "the run is still going");
+        assert!(pact.running(), "the run is still going");
         // Files are hidden — this is the view warlock opens on — and the
         // document is drawn all the same, because the default view keeps each
         // directory's own `WARLOCK.md`. The one row is the whole of the change:
@@ -4153,15 +4443,9 @@ mod tests {
                 })
                 .expect("the loop is still listening");
         }
-        apply_progress(
-            &mut pact,
-            &mut app,
-            &mut manifest,
-            &nowhere(),
-            Instant::now(),
-        );
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), Instant::now());
 
-        assert!(pact.is_some(), "the run is still going");
+        assert!(pact.running(), "the run is still going");
         assert_eq!(
             app.rows()
                 .iter()
@@ -4190,15 +4474,9 @@ mod tests {
                 directory: PathBuf::from("/repo/docs/adr"),
             })
             .expect("the loop is still listening");
-        apply_progress(
-            &mut pact,
-            &mut app,
-            &mut manifest,
-            &nowhere(),
-            Instant::now(),
-        );
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), Instant::now());
 
-        assert!(pact.is_some(), "the run is still going");
+        assert!(pact.running(), "the run is still going");
         assert_eq!(
             drawn(&app),
             before,
@@ -4228,15 +4506,9 @@ mod tests {
                 })
                 .expect("the loop is still listening");
         }
-        apply_progress(
-            &mut pact,
-            &mut app,
-            &mut manifest,
-            &nowhere(),
-            Instant::now(),
-        );
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), Instant::now());
 
-        assert!(pact.is_some(), "the run is still going");
+        assert!(pact.running(), "the run is still going");
         assert!(
             app.message().is_none(),
             "no reload was attempted, so no reload failed: {:?}",
@@ -4284,7 +4556,7 @@ mod tests {
         app.start_account(base);
         let mut manifest = Manifest::new();
         let (events, received) = mpsc::channel();
-        let mut pact = Some(Running {
+        let mut pact = Pact::with_run(Running {
             events: received,
             cancel: CancelGuard::new(),
             work: pact_of("/repo/crates"),
@@ -4313,7 +4585,7 @@ mod tests {
             events
                 .send(PactEvent::Doing(Activity::Thinking))
                 .expect("the loop is still listening");
-            apply_progress(&mut pact, app, &mut manifest, &nowhere(), now);
+            pact.keep_up(app, &mut manifest, &nowhere(), now);
         };
 
         round(base, "/repo/crates/engine", 1, &mut app);
@@ -4327,7 +4599,7 @@ mod tests {
         app.select_previous();
         app.select_next();
 
-        assert!(pact.is_some(), "the run is still going");
+        assert!(pact.running(), "the run is still going");
         assert_eq!(
             panel_text(&app, at(base, 10)),
             ["engine", "0:10 thinking", "tui", "0:00 thinking"],
@@ -4364,7 +4636,7 @@ mod tests {
         app.start_account(base);
         let mut manifest = Manifest::new();
         let (events, received) = mpsc::channel();
-        let mut pact = Some(Running {
+        let mut pact = Pact::with_run(Running {
             events: received,
             cancel: CancelGuard::new(),
             work: pact_of("/repo/crates"),
@@ -4381,13 +4653,13 @@ mod tests {
         events
             .send(PactEvent::Doing(Activity::Thinking))
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
 
         // The worker goes away without an outcome behind it.
         drop(events);
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 5));
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 5));
 
-        assert!(pact.is_none(), "the run is over, however it ended");
+        assert!(!pact.running(), "the run is over, however it ended");
         assert_eq!(app.message(), Some(PACT_LOST), "and the footer says so");
         assert_eq!(app.rows(), before.rows(), "the rows match the manifest");
         assert_eq!(
@@ -4500,7 +4772,7 @@ mod tests {
         base: Instant,
     ) -> Vec<String> {
         let (events, received) = mpsc::channel();
-        let mut pact = Some(Running {
+        let mut pact = Pact::with_run(Running {
             events: received,
             cancel,
             work: work.clone(),
@@ -4510,14 +4782,14 @@ mod tests {
         for (frame, event) in said.into_iter().enumerate() {
             let frame = u64::try_from(frame).expect("a run of fewer than 2^64 events");
             events.send(event).expect("the loop is still listening");
-            apply_progress(&mut pact, app, manifest, scope, at(base, frame * FRAME));
+            pact.keep_up(app, manifest, scope, at(base, frame * FRAME));
             if let Some(line) = app.pact_line()
                 && progress.last() != Some(&line)
             {
                 progress.push(line);
             }
         }
-        assert!(pact.is_none(), "the run reported its outcome and is over");
+        assert!(!pact.running(), "the run reported its outcome and is over");
         progress
     }
 
@@ -4834,7 +5106,7 @@ mod tests {
         // by line through the run, and after the outcome closes it off.
         let base = Instant::now();
         let (mut app, _before, mut manifest, events, running) = a_run_in_flight(base);
-        let mut pact = Some(running);
+        let mut pact = Pact::with_run(running);
         reading_a_file(&mut app);
 
         // A directory opening a section, and then a line under it.
@@ -4845,7 +5117,7 @@ mod tests {
                 total: 1,
             })
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
         assert_eq!(
             shown(&app, at(base, 2)),
             document_lines(),
@@ -4855,8 +5127,8 @@ mod tests {
         events
             .send(PactEvent::Doing(Activity::Thinking))
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 4));
-        assert!(pact.is_some(), "a run that is talking is still running");
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 4));
+        assert!(pact.running(), "a run that is talking is still running");
         assert_eq!(
             shown(&app, at(base, 4)),
             document_lines(),
@@ -4872,8 +5144,8 @@ mod tests {
                 refusals: Vec::new(),
             })))
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 6));
-        assert!(pact.is_none(), "the run is over");
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 6));
+        assert!(!pact.running(), "the run is over");
 
         let account = document_survived(&mut app, at(base, 6));
         assert_eq!(
@@ -4977,7 +5249,7 @@ mod tests {
         for failure in [Some("the manifest could not be saved"), None] {
             let base = Instant::now();
             let (mut app, before, mut manifest, events, running) = a_run_in_flight(base);
-            let mut pact = Some(running);
+            let mut pact = Pact::with_run(running);
             reading_a_file(&mut app);
 
             events
@@ -4990,7 +5262,7 @@ mod tests {
             events
                 .send(PactEvent::Doing(Activity::Thinking))
                 .expect("the loop is still listening");
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+            pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
             assert_eq!(shown(&app, base), document_lines(), "{failure:?}");
 
             match failure {
@@ -5000,9 +5272,9 @@ mod tests {
                 // The worker goes away with nothing behind it.
                 None => drop(events),
             }
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 5));
+            pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 5));
 
-            assert!(pact.is_none(), "the run is over, however it ended");
+            assert!(!pact.running(), "the run is over, however it ended");
             assert_eq!(app.message(), Some(failure.unwrap_or(PACT_LOST)));
             assert_eq!(app.rows(), before.rows(), "the rows match the manifest");
 
@@ -5140,7 +5412,7 @@ mod tests {
             Canned::new(&scratch, []).reporting(activity_port(events))
         });
         let (events, received) = mpsc::channel();
-        let mut pact = Some(Running {
+        let mut pact = Pact::with_run(Running {
             events: received,
             cancel: CancelGuard::new(),
             work: pact_of(scope.root.clone()),
@@ -5151,7 +5423,7 @@ mod tests {
             let frame = u64::try_from(frame).expect("a run of fewer than 2^64 events");
             let now = at(base, frame * FRAME);
             events.send(event).expect("the loop is still listening");
-            apply_progress(&mut pact, &mut app, &mut manifest, &scope, now);
+            pact.keep_up(&mut app, &mut manifest, &scope, now);
 
             assert!(app.showing_thread(), "the run swapped the card away");
             let card = app
@@ -5165,7 +5437,7 @@ mod tests {
             );
             lengths.push(card.len());
         }
-        assert!(pact.is_none(), "the run reported its outcome and is over");
+        assert!(!pact.running(), "the run reported its outcome and is over");
         // The equality above is about a card that was moving: something arrived
         // over the run, and it ended longer than it started.
         assert!(
@@ -5336,7 +5608,7 @@ mod tests {
                 "the run had nothing to say, so nothing was driven: {refreshing_it}"
             );
             let (events, received) = mpsc::channel();
-            let mut pact = Some(Running {
+            let mut pact = Pact::with_run(Running {
                 events: received,
                 cancel: CancelGuard::new(),
                 work,
@@ -5346,7 +5618,7 @@ mod tests {
                 let frame = u64::try_from(frame).expect("a run of fewer than 2^64 events");
                 let now = at(base, frame * FRAME);
                 events.send(event).expect("the loop is still listening");
-                apply_progress(&mut pact, &mut app, &mut manifest, &scope, now);
+                pact.keep_up(&mut app, &mut manifest, &scope, now);
 
                 assert_eq!(
                     app.mode(),
@@ -5364,7 +5636,7 @@ mod tests {
                 );
             }
 
-            assert!(pact.is_none(), "the run reported its outcome and is over");
+            assert!(!pact.running(), "the run reported its outcome and is over");
             assert_eq!(
                 app.mode(),
                 Mode::Brief,
@@ -5424,7 +5696,7 @@ mod tests {
             let base = Instant::now();
             let (mut app, before, mut manifest, events, running) =
                 a_run_in_flight_during_a_conversation(base);
-            let mut pact = Some(running);
+            let mut pact = Pact::with_run(running);
 
             events
                 .send(PactEvent::Starting {
@@ -5436,7 +5708,7 @@ mod tests {
             events
                 .send(PactEvent::Doing(Activity::Thinking))
                 .expect("the loop is still listening");
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), base);
+            pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
             assert!(app.showing_thread(), "{failure:?}");
 
             match failure {
@@ -5446,9 +5718,9 @@ mod tests {
                 // The worker goes away with nothing behind it.
                 None => drop(events),
             }
-            apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 5));
+            pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 5));
 
-            assert!(pact.is_none(), "the run is over, however it ended");
+            assert!(!pact.running(), "the run is over, however it ended");
             assert_eq!(app.message(), Some(failure.unwrap_or(PACT_LOST)));
             assert_eq!(app.rows(), before.rows(), "the rows match the manifest");
 
@@ -5470,7 +5742,7 @@ mod tests {
             // running, which is the thing an early return here would cost.
             let quiet = app.clone();
             assert!(
-                apply_progress(&mut pact, &mut app, &mut manifest, &nowhere(), at(base, 6))
+                pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 6))
                     .is_none()
             );
             assert_eq!(app, quiet, "a frame with no run in it changed something");
@@ -5804,7 +6076,7 @@ mod tests {
         let mut app = before.clone();
         let mut manifest = Manifest::new();
         let (events, received) = mpsc::channel();
-        let mut pact = Some(Running {
+        let mut pact = Pact::with_run(Running {
             events: received,
             cancel: CancelGuard::new(),
             work: pact_of("/repo/crates"),
@@ -5818,15 +6090,9 @@ mod tests {
                 total: 1,
             })
             .expect("the loop is still listening");
-        apply_progress(
-            &mut pact,
-            &mut app,
-            &mut manifest,
-            &nowhere(),
-            Instant::now(),
-        );
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), Instant::now());
 
-        assert!(pact.is_some(), "a run that has only started is still on");
+        assert!(pact.running(), "a run that has only started is still on");
         assert!(
             app.pact_line().is_some(),
             "and the footer says where it has got to"
@@ -5834,15 +6100,9 @@ mod tests {
 
         // The worker's end goes away with no `Finished` behind it.
         drop(events);
-        apply_progress(
-            &mut pact,
-            &mut app,
-            &mut manifest,
-            &nowhere(),
-            Instant::now(),
-        );
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), Instant::now());
 
-        assert!(pact.is_none(), "the run is over, however it ended");
+        assert!(!pact.running(), "the run is over, however it ended");
         assert!(
             app.pact_line().is_none(),
             "so nothing is being pacted now: {:?}",
@@ -6047,7 +6307,7 @@ mod tests {
         let mut app = before.clone();
         let mut manifest = Manifest::new();
         let (events, received) = mpsc::channel();
-        let mut pact = Some(Running {
+        let mut pact = Pact::with_run(Running {
             events: received,
             cancel: CancelGuard::new(),
             work: pact_of("/repo/crates"),
@@ -6064,15 +6324,9 @@ mod tests {
             .expect("the loop is still listening");
         // There is no repository at `/repo/crates`, so the reload at the
         // bottom of this call fails.
-        apply_progress(
-            &mut pact,
-            &mut app,
-            &mut manifest,
-            &nowhere(),
-            Instant::now(),
-        );
+        pact.keep_up(&mut app, &mut manifest, &nowhere(), Instant::now());
 
-        assert!(pact.is_none(), "the run is over");
+        assert!(!pact.running(), "the run is over");
         assert_eq!(
             app.rows().len(),
             before.rows().len(),
@@ -6120,7 +6374,7 @@ mod tests {
             let mut app = before.clone();
             let mut manifest = Manifest::new();
             let (events, received) = mpsc::channel();
-            let mut pact = Some(Running {
+            let mut pact = Pact::with_run(Running {
                 events: received,
                 cancel: CancelGuard::new(),
                 work: pact_of("/repo/crates"),
@@ -6137,13 +6391,7 @@ mod tests {
                 .expect("the loop is still listening");
             // Nothing is on disk at `/repo/crates`, so the reload has its
             // own line to offer in both cases.
-            apply_progress(
-                &mut pact,
-                &mut app,
-                &mut manifest,
-                &nowhere(),
-                Instant::now(),
-            );
+            pact.keep_up(&mut app, &mut manifest, &nowhere(), Instant::now());
             app.message().map(str::to_owned)
         };
 
@@ -6198,7 +6446,7 @@ mod tests {
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmods");
 
         let (events, received) = mpsc::channel();
-        let mut pact = Some(Running {
+        let mut pact = Pact::with_run(Running {
             events: received,
             cancel: CancelGuard::new(),
             work: pact_of(scratch.path("crates/engine")),
@@ -6212,7 +6460,7 @@ mod tests {
                 refusals: Vec::new(),
             })))
             .expect("the loop is still listening");
-        apply_progress(&mut pact, &mut app, &mut manifest, &scope, Instant::now());
+        pact.keep_up(&mut app, &mut manifest, &scope, Instant::now());
 
         let message = app.message().expect("problems are reported").to_owned();
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).expect("chmods back");
@@ -6260,8 +6508,8 @@ mod tests {
         use warlock_tui::{QUIET_PERIOD, RELOAD_CEILING, WatchPolicy, Watching};
 
         use super::{
-            CancelGuard, Canned, Loaded, Manifest, NodeState, PactEvent, Running, Scope, Toggled,
-            Unwatched, apply_progress, apply_toggle, load, load_tree, mpsc, one_crate_to_load,
+            CancelGuard, Canned, Loaded, Manifest, NodeState, Pact, PactEvent, Reloaded, Running,
+            Scope, Toggled, Unwatched, apply_toggle, load, load_tree, mpsc, one_crate_to_load,
             pact_of, state_of, toggle,
         };
         use crate::POLL_INTERVAL;
@@ -6420,7 +6668,7 @@ mod tests {
             // bottom of `apply_progress` — and the tree it read is what
             // the loop hands back to the policy.
             let (events, received) = mpsc::channel();
-            let mut pact = Some(Running {
+            let mut pact = Pact::with_run(Running {
                 events: received,
                 cancel: CancelGuard::new(),
                 work: pact_of(scratch.path("crates/engine")),
@@ -6435,8 +6683,13 @@ mod tests {
                 })))
                 .expect("the loop is still listening");
             let ended = base + Duration::from_secs(3);
-            let reloaded = apply_progress(&mut pact, &mut app, &mut manifest, &scope, ended);
-            assert!(pact.is_none(), "the run is over");
+            // The edge itself: `keep_up` says the run ended on this round and
+            // on no other, and hands over the tree its own reload read.
+            let Some(Reloaded(reloaded)) = pact.keep_up(&mut app, &mut manifest, &scope, ended)
+            else {
+                panic!("the run ended without saying so");
+            };
+            assert!(!pact.running(), "the run is over");
             assert!(reloaded.is_some(), "the run's own reload read the tree");
             watched.caught_up(reloaded.as_ref(), ended);
 

@@ -453,7 +453,7 @@ fn run_turn(message: &str, agent: &ChatAgent, cancel: &Cancel, events: &Sender<T
 /// Apply everything the turn has said since the last frame, and take it down
 /// once it has said how it ended.
 ///
-/// [`apply_progress`](crate::pacting)'s opposite number and the loop's whole
+/// [`Pact::keep_up`](crate::pacting::Pact::keep_up)'s opposite number and the loop's whole
 /// half of a turn. Drained rather than received: the worker is not waiting for
 /// this thread, so a burst of tool calls can arrive between two frames, and the
 /// loop ends the moment there is nothing left to read — which is the ordinary
