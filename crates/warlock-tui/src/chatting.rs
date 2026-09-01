@@ -77,8 +77,8 @@ use std::time::Instant;
 
 use warlock_engine::{BriefsError, DEFAULT_BRIEF_DIRECTORY, Manifest, load_briefs};
 use warlock_tui::{
-    Activities, Activity, App, BRIEF_EFFORT, CHAT_INSTRUCTION, Cancel, ChatAgent, Composed,
-    Composer, Edited, Ending, Focus, Mode, ScopePrompt, Submitted, TemplateError,
+    Activities, Activity, App, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, ChatAgent,
+    Composed, Composer, Edited, Ending, Focus, Mode, ScopePrompt, Submitted, TemplateError,
     WRITE_INSTRUCTION, brief_instruction, brief_template, ending_for, submitted_for,
 };
 
@@ -896,10 +896,11 @@ fn wired(agent: &ChatAgent, cancel: &Cancel, events: &Sender<TurnEvent>) -> Chat
 
 /// The loop's own agent, asked at the level `mode` is worth.
 ///
-/// The whole of what a mode changes about the model, and it is one word of one
-/// argument: a brief-mode turn is asked at [`BRIEF_EFFORT`] because proposing
-/// options, costing them and arguing for one is not what `low` is priced for,
-/// and a chat turn is asked at the level the agent was built with. Everything
+/// The whole of what a mode changes about the model, and it is two words of two
+/// arguments: a brief-mode turn is asked at [`BRIEF_EFFORT`] on [`BRIEF_MODEL`]
+/// because proposing options, costing them and arguing for one is neither what
+/// `low` is priced for nor what a mid-tier model is picked for, and a chat turn
+/// is asked at the level and on the model the agent was built with. Everything
 /// else is byte-identical between the two — the same system prompt, the same
 /// tools, the same session, down to whether this turn opens the conversation or
 /// resumes it — because the returned agent is a clone of the one long-lived
@@ -911,14 +912,15 @@ fn wired(agent: &ChatAgent, cancel: &Cancel, events: &Sender<TurnEvent>) -> Chat
 /// that had never heard any of them. Nothing here constructs one, and nothing
 /// anywhere else does either once the process has started.
 ///
-/// Chat mode is the agent untouched rather than the agent asked for `low` again,
-/// so the level a fresh agent takes — including a `WARLOCK_EFFORT` a reader set
-/// for the session — is carried rather than restated here. Brief mode goes
-/// through [`ChatAgent::at_effort`], which lets the same variable win over
-/// [`BRIEF_EFFORT`] too.
+/// Chat mode is the agent untouched rather than the agent asked for `low` on
+/// Sonnet again, so what a fresh agent takes — including a `WARLOCK_EFFORT` or
+/// `WARLOCK_MODEL` a reader set for the session — is carried rather than
+/// restated here. Brief mode goes through [`ChatAgent::at_effort`] and
+/// [`ChatAgent::at_model`], which let those same variables win over
+/// [`BRIEF_EFFORT`] and [`BRIEF_MODEL`] too.
 fn asking(agent: &ChatAgent, mode: Mode) -> ChatAgent {
     match mode {
-        Mode::Brief => agent.at_effort(BRIEF_EFFORT),
+        Mode::Brief => agent.at_effort(BRIEF_EFFORT).at_model(BRIEF_MODEL),
         Mode::Chat => agent.clone(),
     }
 }
@@ -1605,13 +1607,15 @@ mod tests {
             .collect();
         assert_eq!(
             moved.len(),
-            1,
-            "a mode changed something other than how hard the turn thinks: {moved:?}",
+            2,
+            "a mode changed something other than how hard the turn thinks and \
+             which model thinks it: {moved:?}",
         );
         assert_eq!(
             value_of(&brief, "--effort"),
             Some(warlock_tui::BRIEF_EFFORT)
         );
+        assert_eq!(value_of(&brief, "--model"), Some(warlock_tui::BRIEF_MODEL));
         assert_eq!(
             value_of(&brief, "--session-id"),
             value_of(&question, "--session-id"),

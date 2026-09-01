@@ -31,8 +31,12 @@
 //!   about the shape gets warlock's.
 //! * **Empty** is an empty template, used as it stands. A file somebody
 //!   deliberately emptied is a statement that the model is to be given no
-//!   shape, and nothing here parses, validates or lints what a template says —
-//!   a template full of nonsense is the same kind of user's business.
+//!   shape, and nothing here validates or lints what a template *says* — a
+//!   template full of nonsense is the same kind of user's business. Its `## `
+//!   lines are read back out of it by [`missing_sections`], which is a
+//!   different thing from judging them: whatever a template asks for is what a
+//!   document is held to, and a template asking for nothing holds a document to
+//!   nothing.
 //! * **Unreadable** — permissions, a directory in the file's place, bytes that
 //!   are not UTF-8 — is an [`Error`] naming the file, and never the default. A
 //!   file that exists is a file somebody meant, and quietly using warlock's own
@@ -185,6 +189,91 @@ impl std::error::Error for Error {
     }
 }
 
+/// Which of `template`'s sections `document` has not got, in the order the
+/// template asks for them.
+///
+/// The shape is a shape to aim at everywhere else in warlock — written into the
+/// instruction, argued over for twenty turns, and then not looked at again. This
+/// is the one place it is *checked*, and it exists because a model that has been
+/// arguing about a change for twenty turns writes the document it has been
+/// thinking about and quietly drops a section it stopped thinking about. That
+/// failure is silent: a brief missing its `## Scope` reads perfectly well right
+/// up until somebody goes looking for the slices, which is days later and in
+/// another conversation.
+///
+/// # What counts as a section, and what counts as having one
+///
+/// A section is a `## ` line of the template. Only that level: the `# ` line is
+/// an *instruction* about the title rather than a heading to reproduce — a
+/// document is supposed to name its own change there — and a `### ` line is
+/// inside a section rather than one of them, which is what the numbered slices
+/// under `## Scope` are.
+///
+/// A document has a section when some heading line of it, at any level, carries
+/// that text. Deliberately generous in both directions that a strict reading
+/// would refuse, because every false refusal here throws away a document that
+/// took twenty turns to arrive at, and neither of them is the failure this
+/// guards: a `### Outcome` is not a dropped outcome, and neither is an
+/// `## OUTCOME`. What is not generous is presence itself — a section that is not
+/// there in any spelling is a section the document has not got.
+///
+/// Order is not checked, though the template's own docs argue the order is the
+/// argument. Sections in an odd order is a document a reader can see is odd and
+/// fix by asking; a section that is not there is the one they cannot see.
+/// Folding is ASCII-only, which is the whole of what the built-in shape and any
+/// heading a model writes in English needs.
+///
+/// ```
+/// use warlock_tui::{DEFAULT_TEMPLATE, missing_sections};
+///
+/// let dropped = "# A change\n\nThe problem.\n\n## Outcome\n\n## Success criteria\n\n\
+///                ## Constraints\n\n## Out of scope\n";
+///
+/// assert_eq!(missing_sections(DEFAULT_TEMPLATE, dropped), ["Scope"]);
+/// // A template that asks for nothing holds a document to nothing.
+/// assert!(missing_sections("", dropped).is_empty());
+/// ```
+#[must_use]
+pub fn missing_sections<'a>(template: &'a str, document: &str) -> Vec<&'a str> {
+    sections_of(template)
+        .into_iter()
+        .filter(|section| !carries(document, section))
+        .collect()
+}
+
+/// The `## ` lines of `template`, trimmed, in the order they appear.
+///
+/// Leading whitespace is trimmed before the prefix is looked for, so an indented
+/// heading counts; `### ` does not match `"## "` at all, since its third byte is
+/// a `#` where the prefix wants a space. A heading with nothing after it is
+/// dropped rather than becoming a section no document could ever have.
+fn sections_of(template: &str) -> Vec<&str> {
+    template
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("## "))
+        .map(str::trim)
+        .filter(|section| !section.is_empty())
+        .collect()
+}
+
+/// Whether any heading line of `document` carries `section`.
+///
+/// The level is thrown away before the comparison — see
+/// [`missing_sections`], where that generosity is argued — so `#`, `##` and
+/// `###` all count, and a line that is not a heading at all never does. A
+/// document merely *mentioning* `## Scope` in its prose is not a document with a
+/// scope section, which is why this asks the line and not the text.
+fn carries(document: &str, section: &str) -> bool {
+    document.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with('#')
+            && line
+                .trim_start_matches('#')
+                .trim()
+                .eq_ignore_ascii_case(section)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -192,7 +281,144 @@ mod tests {
 
     use warlock_engine::manifest_path;
 
-    use super::{DEFAULT_TEMPLATE, Error, brief_template, template_path};
+    use std::fmt::Write as _;
+
+    use super::{
+        DEFAULT_TEMPLATE, Error, brief_template, missing_sections, sections_of, template_path,
+    };
+
+    /// A document carrying `sections` as `## ` headings, with the title and the
+    /// problem prose every brief opens with.
+    fn document_with(sections: &[&str]) -> String {
+        let mut document = String::from("# A change\n\nWhat is wrong now.\n");
+        for section in sections {
+            let _ = write!(document, "\n{section}\n\nSomething under it.\n");
+        }
+        document
+    }
+
+    /// Every section the built-in shape asks for, spelled as its headings.
+    const BUILT_IN: [&str; 5] = [
+        "## Outcome",
+        "## Success criteria",
+        "## Constraints",
+        "## Out of scope",
+        "## Scope",
+    ];
+
+    #[test]
+    fn the_built_in_shape_asks_for_its_five_sections_in_the_order_it_writes_them() {
+        assert_eq!(
+            sections_of(DEFAULT_TEMPLATE),
+            [
+                "Outcome",
+                "Success criteria",
+                "Constraints",
+                "Out of scope",
+                "Scope"
+            ],
+        );
+
+        // The title line is an instruction about a title rather than a heading
+        // to reproduce, and the slice headings live inside a section rather
+        // than being one. Neither is a section, and both are in the template.
+        assert!(DEFAULT_TEMPLATE.starts_with("# A title line"));
+        assert!(DEFAULT_TEMPLATE.contains("### N."));
+        assert!(
+            !sections_of(DEFAULT_TEMPLATE)
+                .iter()
+                .any(|section| section.starts_with("A title line") || section.starts_with("N."))
+        );
+    }
+
+    #[test]
+    fn a_document_with_every_section_is_missing_none() {
+        assert!(missing_sections(DEFAULT_TEMPLATE, &document_with(&BUILT_IN)).is_empty());
+    }
+
+    #[test]
+    fn a_dropped_section_is_named_and_the_rest_are_not() {
+        // The failure this whole check exists for: twenty turns of argument, a
+        // document that reads perfectly, and no slices at the end of it.
+        let dropped = document_with(&BUILT_IN[..4]);
+
+        assert_eq!(missing_sections(DEFAULT_TEMPLATE, &dropped), ["Scope"]);
+    }
+
+    #[test]
+    fn several_dropped_sections_come_back_in_the_shapes_own_order() {
+        let document = document_with(&["## Success criteria", "## Out of scope"]);
+
+        assert_eq!(
+            missing_sections(DEFAULT_TEMPLATE, &document),
+            ["Outcome", "Constraints", "Scope"],
+        );
+    }
+
+    #[test]
+    fn a_section_written_at_another_level_or_in_another_case_is_still_there() {
+        // Both are generous on purpose: neither is a dropped section, and a
+        // refusal here would throw away a document twenty turns in the making.
+        for spelling in [
+            "### Scope",
+            "# Scope",
+            "## SCOPE",
+            "## scope",
+            "##   Scope   ",
+            "  ## Scope",
+        ] {
+            let mut sections: Vec<&str> = BUILT_IN[..4].to_vec();
+            sections.push(spelling);
+
+            assert!(
+                missing_sections(DEFAULT_TEMPLATE, &document_with(&sections)).is_empty(),
+                "{spelling:?} was read as a dropped section",
+            );
+        }
+    }
+
+    #[test]
+    fn a_section_named_in_prose_is_not_a_section_the_document_has() {
+        // The line is asked, not the text: a document apologising for leaving
+        // the scope out has not thereby got one.
+        let mentioned = format!(
+            "{}\nThere was no room for a ## Scope section here.\n",
+            document_with(&BUILT_IN[..4]),
+        );
+
+        assert_eq!(missing_sections(DEFAULT_TEMPLATE, &mentioned), ["Scope"]);
+    }
+
+    #[test]
+    fn a_template_that_asks_for_nothing_holds_a_document_to_nothing() {
+        // What an emptied `brief-template.md` already meant everywhere else,
+        // said once more here: no shape is no sections, not five.
+        for shape in [
+            "",
+            "Just prose, and not one heading in it.\n",
+            "# Only a title\n",
+        ] {
+            assert!(
+                missing_sections(shape, "# A change\n").is_empty(),
+                "{shape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repositorys_own_shape_is_the_one_a_document_is_held_to() {
+        // The check follows the template rather than warlock's own idea of a
+        // brief, so a repository that wrote its own sections gets those.
+        let shape = "# A title\n\n## Background\n\n## Rollout\n";
+
+        assert_eq!(
+            missing_sections(shape, &document_with(&BUILT_IN)),
+            ["Background", "Rollout"],
+        );
+        assert!(
+            missing_sections(shape, &document_with(&["## Background", "## Rollout"])).is_empty()
+        );
+    }
 
     /// A throwaway repository root. Nothing in this module reads or writes a
     /// path the developer has anything in.

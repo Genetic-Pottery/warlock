@@ -48,9 +48,10 @@
 //! wants the artifact, are facts about warlock. They are not a second system
 //! prompt and are never passed as one — each is sent as an ordinary turn into
 //! the session already in progress, so a mode change costs one message and
-//! never the conversation, and the effort those turns are asked at
-//! ([`at_effort`](ChatAgent::at_effort), [`BRIEF_EFFORT`]) is the only word of
-//! the argument vector a mode moves.
+//! never the conversation, and the effort those turns are asked at and the
+//! model they are put to ([`at_effort`](ChatAgent::at_effort),
+//! [`BRIEF_EFFORT`], [`at_model`](ChatAgent::at_model), [`BRIEF_MODEL`]) are the
+//! only two words of the argument vector a mode moves.
 //!
 //! Everything after the spawn is one piece of code for both, [`invoke`], because
 //! the deadlocks below are the same deadlocks whichever kind of run is in flight.
@@ -205,6 +206,9 @@ const ARGS: [&str; 5] = [
 /// move without anything in this repository changing, and the reason this
 /// constant exists at all is that a pact's cost should never move on its own.
 /// Moving it is a one-line diff, which is where a decision like this belongs.
+///
+/// This is the model a pass and a question run on. A brief-mode turn does not —
+/// see [`BRIEF_MODEL`], which is this same argument read the other way round.
 const MODEL: &str = "claude-sonnet-5";
 
 /// How hard each pass is asked to think.
@@ -232,13 +236,38 @@ const EFFORT: &str = "low";
 /// is wrong. That is reasoning the task genuinely needs, and a turn that comes
 /// back agreeable and shallow is the failure this constant exists to avoid.
 ///
-/// One step up rather than to the CLI's own `high`, for the reason `low` was
-/// picked in the first place: the cost of a level is paid on *every* turn of a
-/// conversation that runs to twenty of them, and the cheap direction to be wrong
-/// in is the one a reader can see and fix. `medium` is visibly more argument
-/// than `low` and still not a bill nobody chose; a reader who wants more says so
-/// with [`EFFORT_VAR`], which overrides this exactly as it overrides `low`.
-pub const BRIEF_EFFORT: &str = "medium";
+/// The CLI's own `high`, and not one cautious step up, because this is the one
+/// register where the expensive direction is the cheap mistake. What a brief
+/// costs is a handful of turns; what a thin brief costs is every ticket cut
+/// from it and the second reading of the repository that finds out why they
+/// were wrong. A reader who wants it cheaper says so with [`EFFORT_VAR`], which
+/// overrides this exactly as it overrides `low`.
+pub const BRIEF_EFFORT: &str = "high";
+
+/// Which model a turn runs on once the conversation is aimed at a document.
+///
+/// [`MODEL`]'s exception, and it is [`BRIEF_EFFORT`]'s argument applied to the
+/// other half of the same decision. `MODEL` is Sonnet because a pass and a
+/// question are both "describe material somebody already handed you", which is
+/// not reasoning and should not be billed as though it were. A brief is the
+/// opposite task in the respects that decide a tier: [`brief_instruction`] asks
+/// for two or three ways a change could be made, a cost for each and an
+/// argument for one, and the turn making it holds [`CHAT_TOOLS`], so it can go
+/// and read the repository before it commits to a claim. That is work a
+/// frontier model is worth paying for, and work a mid-tier one comes back from
+/// agreeable and shallow.
+///
+/// What makes it affordable is that this register is rare and short. A pact is
+/// tens of passes over every directory of a subtree, which is why `MODEL` is
+/// priced the way it is; a brief is the last few turns of one conversation,
+/// entered deliberately, once a person has decided a change is worth writing
+/// down. Frontier rates there are a handful of turns and never a subtree walk.
+///
+/// The full name rather than the `opus` alias, for [`MODEL`]'s reason exactly:
+/// an alias is a price and a behaviour that can move without anything in this
+/// repository changing. [`MODEL_VAR`] overrides this too, and there is no second
+/// variable for it — [`EFFORT_VAR`] argues that decision out for both.
+pub const BRIEF_MODEL: &str = "claude-opus-5";
 
 /// The system prompt a pass runs under, in place of the CLI's own.
 ///
@@ -521,6 +550,12 @@ open, say so in a line instead of inventing an answer.";
 /// exception is that it is not about *behaviour* — the prompts, the budgets and
 /// the walk are all still fixed in code — but about what a reader is willing to
 /// spend on their own machine, which is theirs to say and cannot be known here.
+///
+/// It replaces [`BRIEF_MODEL`] as well, and there is no second variable for it,
+/// on the reasoning [`EFFORT_VAR`] gives: a reader who names a model has said
+/// what they are willing to spend on this machine, and warlock quietly reaching
+/// for a different one on some of the turns would make that statement untrue in
+/// the one place it was supposed to hold.
 const MODEL_VAR: &str = "WARLOCK_MODEL";
 
 /// The environment variable that replaces [`EFFORT`] for a run.
@@ -1492,9 +1527,11 @@ impl ChatAgent {
     /// The same agent and the same conversation, asking this turn for `effort`
     /// instead of the level it was built with.
     ///
-    /// The one thing a mode is allowed to vary. A brief-mode turn thinks harder
-    /// than a question does — see [`BRIEF_EFFORT`] — and *nothing else about it
-    /// differs*: the same [`CHAT_SYSTEM_PROMPT`], the same [`CHAT_TOOLS`], the
+    /// One of the two things a mode is allowed to vary, the other being
+    /// [`at_model`](ChatAgent::at_model). A brief-mode turn thinks harder than a
+    /// question does — see [`BRIEF_EFFORT`] — and *nothing about it differs but
+    /// that and which model it is put to*: the same [`CHAT_SYSTEM_PROMPT`], the
+    /// same [`CHAT_TOOLS`], the
     /// same [`Session`], down to whether this turn opens the conversation or
     /// resumes it, since the returned agent shares the very
     /// [`Arc`](std::sync::Arc) the claim is latched in. Nothing here constructs
@@ -1516,20 +1553,44 @@ impl ChatAgent {
     /// all of it, and there is no `--effort` in it to speak for.
     #[must_use]
     pub fn at_effort(&self, effort: &str) -> Self {
-        self.asking_for(overridden(EFFORT_VAR, effort))
+        self.replacing("--effort", overridden(EFFORT_VAR, effort))
     }
 
-    /// [`at_effort`](ChatAgent::at_effort) with the override already resolved.
+    /// The same agent and the same conversation, putting this turn to `model`
+    /// instead of the one it was built with.
+    ///
+    /// [`at_effort`](ChatAgent::at_effort)'s sibling, and every word said there
+    /// about what does *not* change holds here unaltered — the [`Session`] above
+    /// all, which is why a mode is two flags of one vector and never a second
+    /// [`ChatAgent`]. A brief-mode turn runs on [`BRIEF_MODEL`] for the reasons
+    /// that constant gives.
+    ///
+    /// [`MODEL_VAR`] still wins, exactly as [`EFFORT_VAR`] wins over a level: a
+    /// reader who named a model gets it in both registers.
+    #[must_use]
+    pub fn at_model(&self, model: &str) -> Self {
+        self.replacing("--model", overridden(MODEL_VAR, model))
+    }
+
+    /// [`at_effort`](ChatAgent::at_effort) and [`at_model`](ChatAgent::at_model)
+    /// with the override already resolved: this agent with one flag's value
+    /// replaced and nothing else touched.
     ///
     /// Split out for the reason [`or_default`] is: the environment is read in
     /// one line that a test cannot drive, and everything decided *after* that
-    /// read is a pure function of the level, which a test can hand any value at
+    /// read is a pure function of the value, which a test can hand anything at
     /// all without setting a process-wide variable.
-    fn asking_for(&self, level: OsString) -> Self {
+    ///
+    /// Written once for both flags rather than twice, so the two halves of a
+    /// mode cannot drift into two ways of performing the same edit. An agent
+    /// whose whole vector was handed in by [`with_args`](ChatAgent::with_args)
+    /// carries neither flag to find and is returned unchanged, which is where
+    /// that doctrine is actually kept.
+    fn replacing(&self, flag: &str, value: OsString) -> Self {
         let mut agent = self.clone();
-        let flag = agent.args.iter().position(|arg| arg == "--effort");
-        if let Some(value) = flag.and_then(|flag| agent.args.get_mut(flag + 1)) {
-            *value = level;
+        let at = agent.args.iter().position(|arg| arg == flag);
+        if let Some(slot) = at.and_then(|at| agent.args.get_mut(at + 1)) {
+            *slot = value;
         }
         agent
     }
@@ -2304,8 +2365,8 @@ mod tests {
 
     use super::stream;
     use super::{
-        Activities, Activity, BRIEF_EFFORT, CHAT_INSTRUCTION, CHAT_SYSTEM_PROMPT, Cancel,
-        ChatAgent, ClaudeAgent, EFFORT, INVOCATION_TIMEOUT, MODEL, OsString, SYSTEM_PROMPT,
+        Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, CHAT_SYSTEM_PROMPT,
+        Cancel, ChatAgent, ClaudeAgent, EFFORT, INVOCATION_TIMEOUT, MODEL, OsString, SYSTEM_PROMPT,
         WRITE_INSTRUCTION, brief_instruction, or_default, render, session_id,
     };
     use crate::template::DEFAULT_TEMPLATE;
@@ -2647,7 +2708,10 @@ mod tests {
         // Both registers, one assertion: a mode is a message and an effort
         // level, and a conversation aimed at a document is granted not one tool
         // more than a question about a file is. Warlock holds the pen in both.
-        for vector in [turn_args(&agent), turn_args(&agent.at_effort(BRIEF_EFFORT))] {
+        for vector in [
+            turn_args(&agent),
+            turn_args(&agent.at_effort(BRIEF_EFFORT).at_model(BRIEF_MODEL)),
+        ] {
             let granted = value_of(&vector, "--tools").expect("a turn says what it may reach for");
 
             // Exactly three, named rather than left to a default that could grow.
@@ -2826,7 +2890,10 @@ mod tests {
         // Still one prompt, and still not a pass's: the mode is a message and a
         // level, not a second configuration of the agent.
         let agent = ChatAgent::new();
-        for vector in [turn_args(&agent), turn_args(&agent.at_effort(BRIEF_EFFORT))] {
+        for vector in [
+            turn_args(&agent),
+            turn_args(&agent.at_effort(BRIEF_EFFORT).at_model(BRIEF_MODEL)),
+        ] {
             assert_eq!(
                 value_of(&vector, "--system-prompt"),
                 Some(CHAT_SYSTEM_PROMPT)
@@ -2835,10 +2902,10 @@ mod tests {
     }
 
     #[test]
-    fn a_brief_turn_thinks_harder_and_is_otherwise_the_same_turn() {
+    fn a_brief_turn_thinks_harder_on_a_better_model_and_is_otherwise_the_same_turn() {
         let agent = ChatAgent::new();
         let question = turn_args(&agent);
-        let brief = turn_args(&agent.at_effort(BRIEF_EFFORT));
+        let brief = turn_args(&agent.at_effort(BRIEF_EFFORT).at_model(BRIEF_MODEL));
 
         // Above `low`, which is the whole of what the raised level has to be:
         // one of the levels the CLI takes, and not the one a question runs at.
@@ -2850,9 +2917,20 @@ mod tests {
             "{BRIEF_EFFORT:?} is not a level above low",
         );
 
-        // And that is the only word of the vector that moved. Said as a count
-        // rather than by index so that an argument added to either register
-        // fails here rather than sliding past.
+        // The other half of a mode: a frontier model where a question runs on
+        // the mid-tier one, and a full name in both so neither register's price
+        // can move without a diff.
+        assert_eq!(value_of(&question, "--model"), Some(MODEL));
+        assert_eq!(value_of(&brief, "--model"), Some(BRIEF_MODEL));
+        assert_ne!(BRIEF_MODEL, MODEL);
+        assert!(
+            !BRIEF_MODEL.is_empty() && BRIEF_MODEL.contains('-'),
+            "{BRIEF_MODEL:?} is an alias rather than a pinned name",
+        );
+
+        // And those are the only two words of the vector that moved. Said as a
+        // count rather than by index so that an argument added to either
+        // register fails here rather than sliding past.
         assert_eq!(brief.len(), question.len());
         let moved: Vec<(&String, &String)> = brief
             .iter()
@@ -2861,15 +2939,15 @@ mod tests {
             .collect();
         assert_eq!(
             moved.len(),
-            1,
-            "a mode changed something other than how hard the turn thinks: {moved:?}",
+            2,
+            "a mode changed something other than how hard the turn thinks and \
+             which model thinks it: {moved:?}",
         );
         assert_eq!(value_of(&brief, "--tools"), Some("Read,Grep,Glob"));
         assert_eq!(
             value_of(&brief, "--system-prompt"),
             value_of(&question, "--system-prompt"),
         );
-        assert_eq!(value_of(&brief, "--model"), value_of(&question, "--model"));
     }
 
     #[test]
@@ -2903,7 +2981,7 @@ mod tests {
     }
 
     #[test]
-    fn the_effort_variable_wins_in_both_registers() {
+    fn the_effort_and_model_variables_win_in_both_registers() {
         // Driven as the pure function it is rather than by setting a real
         // variable: `set_var` is unsafe in this edition, process-wide, and racy
         // against every other test on the runner.
@@ -2918,16 +2996,41 @@ mod tests {
             );
         }
 
-        // And what the resolved level comes to on the vector, through the same
-        // seam `at_effort` uses once it has read the environment.
-        let agent = ChatAgent::new();
-        let overridden = agent.asking_for(or_default(Some(asked.clone()), BRIEF_EFFORT));
+        // The model half of the same variable question, and the same three
+        // answers: a named model wins, an unset one falls back, a blank one is
+        // a shell saying nothing rather than an empty `--model`.
+        let named = OsString::from("claude-haiku-4-5-20251001");
+        for model in [MODEL, BRIEF_MODEL] {
+            assert_eq!(or_default(Some(named.clone()), model), named);
+            assert_eq!(or_default(None, model), OsString::from(model));
+            assert_eq!(
+                or_default(Some(OsString::new()), model),
+                OsString::from(model)
+            );
+        }
 
-        assert_eq!(value_of(&turn_args(&overridden), "--effort"), Some("xhigh"));
-        // A vector a caller handed in whole is left exactly as it was handed in.
+        // And what a resolved value comes to on the vector, through the same
+        // seam `at_effort` and `at_model` use once they have read the
+        // environment. One flag moves and the other stays where it was, which
+        // is the property that keeps the two halves of a mode independent.
+        let agent = ChatAgent::new();
+        let overridden = agent
+            .replacing("--effort", or_default(Some(asked.clone()), BRIEF_EFFORT))
+            .replacing("--model", or_default(Some(named.clone()), BRIEF_MODEL));
+        let vector = turn_args(&overridden);
+
+        assert_eq!(value_of(&vector, "--effort"), Some("xhigh"));
+        assert_eq!(value_of(&vector, "--model"), Some(named.to_str().unwrap()));
+
+        // A vector a caller handed in whole is left exactly as it was handed
+        // in, by either half of a mode: there is no flag in it to speak for.
         let given = ChatAgent::new().with_args(["-c", "echo hello"]);
         assert_eq!(
             turn_args(&given.at_effort(BRIEF_EFFORT)),
+            ["-c", "echo hello"]
+        );
+        assert_eq!(
+            turn_args(&given.at_model(BRIEF_MODEL)),
             ["-c", "echo hello"]
         );
     }

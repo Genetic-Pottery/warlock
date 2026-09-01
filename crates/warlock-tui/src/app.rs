@@ -1208,8 +1208,9 @@ impl Showing {
 /// [`brief_instruction`](crate::brief_instruction) and
 /// [`CHAT_INSTRUCTION`](crate::CHAT_INSTRUCTION)) — so what the app keeps is
 /// only this word, and everything the word changes is said out loud somewhere
-/// else: which instruction a command sends, and how hard the turn is asked to
-/// think (see [`BRIEF_EFFORT`](crate::BRIEF_EFFORT)).
+/// else: which instruction a command sends, how hard the turn is asked to think
+/// (see [`BRIEF_EFFORT`](crate::BRIEF_EFFORT)), and which model is asked (see
+/// [`BRIEF_MODEL`](crate::BRIEF_MODEL)).
 ///
 /// What it does *not* change is the card. Nothing on the thread is cleared,
 /// hidden or reordered by a mode change, the session is the same session, the

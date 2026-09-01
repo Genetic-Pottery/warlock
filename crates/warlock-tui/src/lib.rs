@@ -247,6 +247,10 @@ pub use claude::Activity;
 /// document: a level above the one a question runs at, still overridden by
 /// `WARLOCK_EFFORT`.
 pub use claude::BRIEF_EFFORT;
+/// Which model a turn runs on once the conversation is aimed at a document: a
+/// frontier model in place of the mid-tier one a pass and a question run on,
+/// still overridden by `WARLOCK_MODEL`.
+pub use claude::BRIEF_MODEL;
 /// The same instruction the other way: no artifact, no shape, and back to
 /// answering questions about the repository as they come.
 pub use claude::CHAT_INSTRUCTION;
@@ -333,6 +337,10 @@ pub use template::Error as TemplateError;
 /// own skeleton when it is not. Read from disk on every call, never cached, so
 /// a template edited under a running warlock is a template that took effect.
 pub use template::brief_template;
+/// Which sections a brief template asks for that a written document has not
+/// got: the one check warlock makes on a document's shape, and the reason a
+/// dropped section refuses the write instead of landing on disk unnoticed.
+pub use template::missing_sections;
 /// One thing that stopped a turn short of an answer — a cancel, no `claude` to
 /// ask, a non-zero exit, a timeout, or a model that said nothing — in the one
 /// line it ends with.

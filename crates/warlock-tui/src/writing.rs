@@ -104,10 +104,33 @@
 //! The reply is written as it stands but for exactly two things: [`unfenced`]
 //! takes off a fence wrapped around the whole document, and a single trailing
 //! newline is ensured so the file ends the way a text file does. Nothing else is
-//! parsed, reformatted, re-indented, spell-checked or inspected — not the
-//! headings, not the links, not the width of a line — because the document is
-//! the model's and the reader's, and every further rule would be warlock editing
-//! prose it promised to copy.
+//! reformatted, re-indented, spell-checked or repaired — not the headings, not
+//! the links, not the width of a line — because the document is the model's and
+//! the reader's, and every further rule would be warlock editing prose it
+//! promised to copy.
+//!
+//! ## The headings are read, and only ever to refuse
+//!
+//! The one exception, and it is a check rather than a transformation: a document
+//! that has not got every section the shape asked for is refused, and warlock
+//! writes nothing rather than writing it. See [`missing_sections`], which
+//! decides that, and note what it does *not* do — it never adds a heading, never
+//! reorders one, and never edits a byte of the reply. A document either goes to
+//! disk exactly as the model wrote it or does not go at all.
+//!
+//! The reason is that this failure is the silent one. A brief with a section
+//! missing reads perfectly well; a model that has spent twenty turns arguing
+//! about a change writes what it has been thinking about and drops what it
+//! stopped thinking about, and nobody finds out until somebody goes looking for
+//! the slices days later. Every other thing a write can get wrong is visible on
+//! the card the moment it happens.
+//!
+//! The shape is read from `.warlock/brief-template.md` here rather than
+//! remembered from when brief mode was entered — [`brief_template`]'s own "read
+//! every time, cached never" — so a template edited during the conversation is
+//! the template the document is held to. A template that asks for no sections
+//! holds a document to none, which is what an empty one already meant
+//! everywhere else.
 //!
 //! The bytes come off the card. The reply is on the conversation as an ordinary
 //! answer, and [`write_submit`] writes the newest turn's answer, so what lands
@@ -147,7 +170,9 @@ use std::time::Instant;
 use std::{fs, io};
 
 use warlock_engine::{Manifest, PactEntry, from_manifest_path, to_manifest_path};
-use warlock_tui::{App, Edited, ScopeField, ScopePrompt, size};
+use warlock_tui::{
+    App, Edited, ScopeField, ScopePrompt, TemplateError, brief_template, missing_sections, size,
+};
 
 use crate::error::{Error, one_line};
 
@@ -331,6 +356,23 @@ pub(crate) fn write_submit(
         app.set_message(NOTHING_TO_WRITE);
         return ScopePrompt::Closed;
     };
+    // The shape the document is held to, read now rather than remembered. Both
+    // of the next two answers come down the prompt and go to the footer rather
+    // than back into the field, on `NOTHING_TO_WRITE`'s rule: what is wrong is
+    // the document and not the path, and the field cannot be the place a reader
+    // fixes it — the keyboard is theirs again only once the window is down.
+    let shape = match brief_template(repo_root) {
+        Ok(shape) => shape,
+        Err(source) => {
+            app.set_message(unreadable_shape_line(&source));
+            return ScopePrompt::Closed;
+        }
+    };
+    let missing = missing_sections(&shape, &document);
+    if !missing.is_empty() {
+        app.set_message(missing_line(&missing));
+        return ScopePrompt::Closed;
+    }
     if let Err(error) = put(&path, document.as_bytes()) {
         app.set_message(failure_line(&stored, &error));
         return ScopePrompt::Closed;
@@ -489,6 +531,47 @@ fn stale_line(module: &str) -> String {
 /// thing this key could do, so it is refused rather than confirmed.
 fn taken_rule(stored: &str) -> String {
     format!("{stored} already exists — nothing was written; change the path or press Esc")
+}
+
+/// The footer line when the document has not got every section the shape asked
+/// for.
+///
+/// Names the sections rather than counting them, because "one section is
+/// missing" is a line a reader has to go and diff the template to act on, and
+/// `## Scope` is one they can read and ask for in the same breath. Spelled back
+/// with the `## ` the template wrote them with, which is how they appear in
+/// both documents the reader has in front of them.
+///
+/// [`NOTHING_TO_WRITE`]'s shape — the fact, then what it cost — and no advice
+/// after it. Which turn puts this right is the reader's business, and a sentence
+/// telling them to ask the model again would be warlock narrating.
+fn missing_line(missing: &[&str]) -> String {
+    let named: Vec<String> = missing
+        .iter()
+        .map(|section| format!("## {section}"))
+        .collect();
+    let (last, rest) = named.split_last().expect("a refusal names what is missing");
+    let sections = if rest.is_empty() {
+        last.clone()
+    } else {
+        format!("{} and {last}", rest.join(", "))
+    };
+    format!("the document is missing {sections}, so nothing was written")
+}
+
+/// The footer line when the shape itself could not be read.
+///
+/// The one case where warlock knows it cannot tell whether the document is whole
+/// and refuses rather than guessing. `template.rs` never quietly puts the
+/// built-in shape in place of a file somebody wrote, and neither does this: a
+/// write let through on a shape that could not be read is a check that silently
+/// stopped checking, which is worse than one that says so. Nothing is lost —
+/// the document is still on the card, and the file is one edit from readable.
+fn unreadable_shape_line(error: &TemplateError) -> String {
+    format!(
+        "could not read the brief shape, so nothing was written: {}",
+        one_line(&error.to_string())
+    )
 }
 
 /// The footer line when the disk would not take the file.
@@ -1064,7 +1147,9 @@ mod writes {
     use std::time::Instant;
 
     use tempfile::TempDir;
-    use warlock_engine::{Manifest, Node, NodeState, PactEntry, Tree, to_manifest_path};
+    use warlock_engine::{
+        Manifest, Node, NodeState, PactEntry, Tree, manifest_path, to_manifest_path,
+    };
     use warlock_tui::{App, Line, ScopeField, ScopePrompt};
 
     use super::{NO_PATH, write_submit};
@@ -1169,11 +1254,41 @@ mod writes {
 
     /// A document of exactly `bytes` bytes, title and trailing newline included,
     /// so a test can assert the size the line spells it with.
+    ///
+    /// Carries every section the built-in shape asks for, because a document
+    /// that does not is refused before it ever reaches the disk — see
+    /// [`missing_sections`]. The padding is the problem prose, which is where a
+    /// brief's unheaded text belongs anyway.
     fn document_of(bytes: usize) -> String {
         let opening = "# Scopes and sigils\n\n";
-        let closing = "\n";
-        let prose = bytes - opening.len() - closing.len();
-        format!("{opening}{}{closing}", "x".repeat(prose))
+        let shape = "\n\n## Outcome\n\n## Success criteria\n\n## Constraints\n\n\
+                     ## Out of scope\n\n## Scope\n";
+        let prose = bytes - opening.len() - shape.len();
+        format!("{opening}{}{shape}", "x".repeat(prose))
+    }
+
+    /// The smallest reply that is a whole document: a title, the problem stated
+    /// in prose, and every section the built-in shape asks for.
+    ///
+    /// What most of these tests want is "a document that will be written", and
+    /// since the shape is checked before the disk is touched, that now means one
+    /// carrying its headings. The words under them are beside the point here and
+    /// there are none.
+    const WHOLE: &str = "# Freshness\n\nProse.\n\n## Outcome\n\n## Success criteria\n\n\
+                         ## Constraints\n\n## Out of scope\n\n## Scope\n";
+
+    /// A repository that asks a document for no shape at all, by writing the
+    /// empty template an emptied `.warlock/brief-template.md` already means.
+    ///
+    /// For the tests whose subject is not the shape — what the bytes come to,
+    /// where they land, what the lines say — so that adding five headings to
+    /// every literal reply below does not bury what each one is actually about.
+    /// The check itself has its own tests, against the built-in shape.
+    fn shapeless(root: &Path) {
+        let template = manifest_path(root).with_file_name("brief-template.md");
+        fs::create_dir_all(template.parent().expect("the template sits in a directory"))
+            .expect("makes .warlock");
+        fs::write(template, "").expect("writes an empty template");
     }
 
     #[test]
@@ -1258,6 +1373,9 @@ mod writes {
             ),
         ] {
             let repo = a_repo();
+            // The subject here is the bytes, so the shape is asked for nothing
+            // and each reply below stays the literal it is meant to be.
+            shapeless(repo.path());
             let mut app = app_answering(repo.path(), reply);
 
             write_submit(
@@ -1279,7 +1397,7 @@ mod writes {
     #[test]
     fn nothing_but_the_artifact_is_written() {
         let repo = a_repo();
-        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+        let mut app = app_answering(repo.path(), WHOLE);
 
         write_submit(
             &mut app,
@@ -1298,7 +1416,7 @@ mod writes {
     #[test]
     fn the_parent_directory_is_made_when_it_is_not_there() {
         let repo = a_repo();
-        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+        let mut app = app_answering(repo.path(), WHOLE);
         let deep = "docs/briefs/2026/warlock-brief-01-freshness.md";
 
         let prompt = write_submit(&mut app, &Manifest::new(), repo.path(), &field(deep), now());
@@ -1312,7 +1430,7 @@ mod writes {
         let repo = a_repo();
         fs::create_dir_all(repo.path().join("docs")).expect("makes the output directory");
         fs::write(repo.path().join(BRIEF), "what was already there\n").expect("writes it first");
-        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+        let mut app = app_answering(repo.path(), WHOLE);
         let before = app.clone();
         let typed = field(BRIEF);
 
@@ -1345,7 +1463,7 @@ mod writes {
         // asked about the path rather than about its kind.
         let repo = a_repo();
         fs::create_dir_all(repo.path().join(BRIEF)).expect("makes a directory of that name");
-        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+        let mut app = app_answering(repo.path(), WHOLE);
 
         let prompt = write_submit(
             &mut app,
@@ -1374,7 +1492,7 @@ mod writes {
             (&[][..], None),
         ] {
             let repo = a_repo();
-            let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+            let mut app = app_answering(repo.path(), WHOLE);
 
             write_submit(&mut app, &pacts(modules), repo.path(), &field(BRIEF), now());
 
@@ -1396,7 +1514,7 @@ mod writes {
         // No `/` in the path at all, which is the one case the ancestor walk
         // has to reach the root from directly.
         let repo = a_repo();
-        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+        let mut app = app_answering(repo.path(), WHOLE);
 
         write_submit(
             &mut app,
@@ -1415,7 +1533,7 @@ mod writes {
     #[test]
     fn an_empty_field_writes_nothing_and_stays_up() {
         let repo = a_repo();
-        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+        let mut app = app_answering(repo.path(), WHOLE);
 
         for typed in ["", "   "] {
             let prompt = write_submit(
@@ -1442,7 +1560,7 @@ mod writes {
         let root = repo.path().join("repo");
         fs::create_dir_all(&outside).expect("makes a directory beside the repository");
         fs::create_dir_all(&root).expect("makes the repository");
-        let mut app = app_answering(&root, "# Freshness\n\nProse.\n");
+        let mut app = app_answering(&root, WHOLE);
 
         let prompt = write_submit(
             &mut app,
@@ -1467,6 +1585,138 @@ mod writes {
     }
 
     #[test]
+    fn a_document_missing_a_section_is_refused_and_nothing_reaches_the_disk() {
+        let repo = a_repo();
+        // Every section but the last: the failure that reads perfectly well and
+        // is only noticed days later, by somebody looking for the slices.
+        let dropped = "# Freshness\n\nProse.\n\n## Outcome\n\n## Success criteria\n\n\
+                       ## Constraints\n\n## Out of scope\n";
+        let mut app = app_answering(repo.path(), dropped);
+
+        let prompt = write_submit(
+            &mut app,
+            &pacts(&["docs"]),
+            repo.path(),
+            &field(BRIEF),
+            now(),
+        );
+
+        // The window comes down rather than staying up over the field: what is
+        // wrong is the document, and the field is not where a reader fixes one.
+        assert_eq!(prompt, ScopePrompt::Closed, "the window stayed up");
+        assert_eq!(
+            app.message(),
+            Some("the document is missing ## Scope, so nothing was written"),
+        );
+        // Nothing on the conversation and nothing on disk. A refusal that had
+        // written the file and then complained would be the worst of both.
+        assert_eq!(notes(&app), Vec::<String>::new());
+        assert!(
+            !repo.path().join(BRIEF).exists(),
+            "the document was written"
+        );
+        assert_eq!(everything_under(repo.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn several_dropped_sections_are_all_named_in_the_shapes_own_order() {
+        let repo = a_repo();
+        let mut app = app_answering(
+            repo.path(),
+            "# Freshness\n\nProse.\n\n## Success criteria\n\n## Out of scope\n",
+        );
+
+        write_submit(
+            &mut app,
+            &Manifest::new(),
+            repo.path(),
+            &field(BRIEF),
+            now(),
+        );
+
+        assert_eq!(
+            app.message(),
+            Some(
+                "the document is missing ## Outcome, ## Constraints and ## Scope, \
+                 so nothing was written"
+            ),
+        );
+    }
+
+    #[test]
+    fn the_shape_a_document_is_held_to_is_the_repositorys_own() {
+        // Read at the write rather than remembered from when brief mode was
+        // entered, so a template edited mid-conversation is the one that counts.
+        let repo = a_repo();
+        let template = manifest_path(repo.path()).with_file_name("brief-template.md");
+        fs::create_dir_all(template.parent().expect("a directory")).expect("makes .warlock");
+        fs::write(&template, "# A title\n\n## Rollout\n").expect("writes a template");
+
+        // A document with warlock's own five sections and not this repository's.
+        let mut app = app_answering(repo.path(), WHOLE);
+        write_submit(
+            &mut app,
+            &Manifest::new(),
+            repo.path(),
+            &field(BRIEF),
+            now(),
+        );
+
+        assert_eq!(
+            app.message(),
+            Some("the document is missing ## Rollout, so nothing was written"),
+        );
+        assert!(!repo.path().join(BRIEF).exists());
+
+        // And the same document, once the shape asks for what it has.
+        fs::write(&template, "# A title\n\n## Outcome\n").expect("rewrites the template");
+        let mut app = app_answering(repo.path(), WHOLE);
+        write_submit(
+            &mut app,
+            &Manifest::new(),
+            repo.path(),
+            &field(BRIEF),
+            now(),
+        );
+
+        assert_eq!(
+            notes(&app),
+            [format!("wrote {BRIEF} — {} bytes", WHOLE.len())]
+        );
+    }
+
+    #[test]
+    fn a_shape_that_cannot_be_read_refuses_rather_than_letting_the_write_through() {
+        // `template.rs` never quietly puts the built-in shape in place of a file
+        // somebody wrote, and neither does this: a check that silently stopped
+        // checking is worse than one that says it could not.
+        let repo = a_repo();
+        let template = manifest_path(repo.path()).with_file_name("brief-template.md");
+        fs::create_dir_all(&template).expect("makes a directory where the file goes");
+        let mut app = app_answering(repo.path(), WHOLE);
+
+        let prompt = write_submit(
+            &mut app,
+            &Manifest::new(),
+            repo.path(),
+            &field(BRIEF),
+            now(),
+        );
+
+        assert_eq!(prompt, ScopePrompt::Closed);
+        let said = app.message().expect("a refusal says why");
+        assert!(
+            said.starts_with("could not read the brief shape, so nothing was written: ")
+                && said.contains("brief-template.md"),
+            "{said:?} does not name the file or what it cost",
+        );
+        assert!(
+            !repo.path().join(BRIEF).exists(),
+            "the document was written"
+        );
+    }
+
+    #[test]
     fn a_write_that_will_not_happen_puts_its_reason_on_the_message_line() {
         // A file where the output directory has to be: the parent cannot be
         // made, which is the cheapest real version of a disk that will not take
@@ -1474,7 +1724,7 @@ mod writes {
         let repo = a_repo();
         fs::write(repo.path().join("docs"), "not a directory\n")
             .expect("writes a file in the way of the output directory");
-        let mut app = app_answering(repo.path(), "# Freshness\n\nProse.\n");
+        let mut app = app_answering(repo.path(), WHOLE);
 
         let prompt = write_submit(&mut app, &pacts(&["."]), repo.path(), &field(BRIEF), now());
 
@@ -1541,7 +1791,9 @@ mod writes {
 
         /// The reply the `/write` turn answered with in every round below: one
         /// document, with a title the slug is plainly made of.
-        const REPLY: &str = "# Scopes and sigils\n\nA boundary somebody drew.\n";
+        const REPLY: &str = "# Scopes and sigils\n\nA boundary somebody drew.\n\n\
+                             ## Outcome\n\n## Success criteria\n\n## Constraints\n\n\
+                             ## Out of scope\n\n## Scope\n";
 
         /// Where the loop is holding briefs when it opens the window below: the
         /// engine's default, which is what a session that has entered brief mode
@@ -1630,7 +1882,7 @@ mod writes {
             assert_eq!(
                 notes(&app),
                 vec![
-                    format!("wrote {written} — 47 bytes"),
+                    format!("wrote {written} — {} bytes", REPLY.len()),
                     "docs is now stale".to_owned(),
                 ]
             );
@@ -1783,8 +2035,9 @@ mod writes {
 
         /// What the stand-in answers with: one document, with the title the slug
         /// is plainly made of and the trailing newline a document has.
-        const DOCUMENT: &str =
-            "# Scopes and sigils\n\nA boundary somebody drew, and the reason it is there.\n";
+        const DOCUMENT: &str = "# Scopes and sigils\n\nA boundary somebody drew, and the reason \
+                                it is there.\n\n## Outcome\n\n## Success criteria\n\n\
+                                ## Constraints\n\n## Out of scope\n\n## Scope\n";
 
         /// Where that document proposes to go in a repository that has never had
         /// a brief written into it.
