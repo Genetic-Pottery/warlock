@@ -9,13 +9,14 @@
 //!
 //! This file is the loop itself; each of the loop's concerns lives in a
 //! sibling module. What a keystroke or a click means is [`input`]'s, running a
-//! pact on a worker thread and applying what it says is [`pacting`]'s, running
-//! one chat turn the same way and putting the answer on the thread card is
-//! [`chatting`]'s, asking
+//! pact on a worker thread and applying what it says is [`pacting`]'s, the whole
+//! conversation — the draft at the foot of the panel, the register it is in, the
+//! turns it is made of and the window a `/write` opens — is [`chatting`]'s,
+//! asking
 //! for a scope and writing it is [`scoping`]'s, reading a file into the panel is
 //! [`viewing`]'s, handing one to `$EDITOR` and taking the terminal back
 //! afterwards is [`editing`]'s, what a brief written out of the conversation
-//! would be called is [`writing`]'s, where
+//! would be called and the bytes of it going to disk is [`writing`]'s, where
 //! the tree came from and when it is re-read is [`session`]'s, the terminal's
 //! setup and restoration is [`terminal`]'s, and the one-line errors `main`
 //! prints are [`error`]'s. The paragraphs below describe how the loop drives
@@ -42,17 +43,18 @@
 //!
 //! The refresh key is the second long keystroke and is not a second anything
 //! else: `r` asks the engine to describe only the stale directories under the
-//! selected one, and it does so through the same [`start_run`], the same
-//! channel, the same account and the same [`Running`] — which is what makes one
-//! run at a time a fact rather than a rule. The two keys refuse each other by
-//! that alone: whichever run is in flight, the other key's press finds a `Some`
-//! here and says so on the line the reader is already watching.
+//! selected one, and it does so through the same [`Pact`] — the same worker,
+//! the same channel, the same account and the same say-when — which is what
+//! makes one run at a time a fact rather than a rule. The two keys refuse each
+//! other by that alone, and neither has to be told: [`Pact::press`] reads the
+//! one run it holds before it decides anything, and says so on the line the
+//! reader is already watching.
 //!
 //! Those events are also what fills the panel. The press that really starts a
 //! run opens an [`warlock_tui::Account`] on the app — one pact, one account, so
 //! the next run clears the last one — each directory the worker names opens a
 //! section of it, and everything a pass is seen doing lands under the section it
-//! belongs to. Both halves are [`apply_progress`], which is handed the instant
+//! belongs to. Both halves are [`Pact::keep_up`], which is handed the instant
 //! it is called at rather than reading a clock, and so is the draw above it: the
 //! newest line of the live section counts up against that instant, which is what
 //! makes a pass that thinks for a minute look like something is happening. The
@@ -63,7 +65,7 @@
 //! other thing the shape of the loop is for. A pact writes a `WARLOCK.md` beside
 //! every directory it descends through, and those are rows the tree on screen
 //! has never had, so the moment a run ends the view is one load out of date. One
-//! rule covers it: [`apply_progress`] does its own arm's work first — the
+//! rule covers it: [`Pact::keep_up`] does its own arm's work first — the
 //! outcome applied, the manifest saved — and then [`reload_tree`] re-reads the
 //! tree from disk and re-seats the view on top of it, carrying the selection,
 //! the collapsed directories, the filters and the window across by path. The
@@ -108,7 +110,7 @@
 //! documents already written are whole, because each of them is written beside
 //! its directory and renamed over (WAR-21.01), and the manifest is written once
 //! by a rename too — so there is no half-state for an abandoned worker to leave.
-//! Both roads run through one [`Cancel`], which the run's [`Running`] owns and
+//! Both roads run through one [`Cancel`], which the run inside [`Pact`] owns and
 //! drops through, which is why every way out of the loop — a quit, an error, a
 //! `?` in the middle of a frame — takes the child with it.
 //!
@@ -139,11 +141,15 @@
 //! dropped, so a click cannot select a row behind a window that is about to
 //! close.
 //!
-//! The composer is the third place a keystroke can land, and the newest. It is a
-//! [`Composer`] on this stack — beside the two questions and for their reason,
-//! since a draft on the app would be a draft the copy put back after a run had
-//! never heard of — and it is offered to [`press_for`] exactly when
-//! [`App::focus`] is on it. While it holds the keyboard every key but Ctrl-C and
+//! The composer is the third place a keystroke can land, and the newest. It is
+//! not on this stack and it is not on the app: it lives inside the [`Chat`],
+//! with the turn that mutes it and the register it types commands into — and
+//! being off the app is still load-bearing for its original reason, since a
+//! draft on the app would be a draft the copy put back after a run had never
+//! heard of. It is offered to [`press_for`] exactly when [`App::focus`] is on
+//! it, read through [`Chat::composer`], which can only ever lend it out: this
+//! file's `draw` lives in the library and has no way even to name a `Chat`.
+//! While it holds the keyboard every key but Ctrl-C and
 //! Tab goes to [`warlock_tui::compose_for`] and never to [`input::action_for`],
 //! which is the whole point of the field: `p` is the letter p rather than a pact
 //! over whatever row happens to be selected. Ctrl-C still leaves, Tab still moves
@@ -203,7 +209,7 @@
 //! through [`restore_terminal`], which turns reporting off whichever state the
 //! toggle was left in.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use std::{env, io};
@@ -213,14 +219,10 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::Size;
-use warlock_engine::{
-    BriefsError, DEFAULT_BRIEF_DIRECTORY, Manifest, Written, load_briefs, repository_root,
-    write_claude_md,
-};
+use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
 use warlock_tui::{
-    App, CHAT_INSTRUCTION, ClaudeAgent, Composed, Composer, Focus, Mode, QuitConfirm, ScopePrompt,
-    Submitted, TemplateError, WRITE_INSTRUCTION, brief_instruction, brief_template,
-    composer_on_screen, draw, panel_height, panel_width, submitted_for, tree_height,
+    App, Composer, Focus, QuitConfirm, Run, ScopePrompt, composer_on_screen, draw, panel_height,
+    panel_width, tree_height,
 };
 
 mod chatting;
@@ -235,17 +237,16 @@ mod terminal;
 mod viewing;
 mod writing;
 
-use chatting::{Asked, Chat};
+use chatting::Chat;
 use config::configure;
 use editing::edit_press;
-use error::{Error, one_line};
+use error::Error;
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
-use pacting::{Running, Work, apply_progress, pact_press, refresh_press, start_run};
+use pacting::{Pact, Reloaded};
 use scoping::{scope_edit, scope_press};
 use session::{Scope, Watched, load_app, load_manifest, start_watching};
 use terminal::{TerminalGuard, install_panic_hook};
 use viewing::view_press;
-use writing::{write_edit, write_opened};
 
 /// How long the loop waits for a keystroke before going round again.
 ///
@@ -479,13 +480,6 @@ fn run() -> Result<(), Error> {
     // and keeps the front end from reaching into the loader's internals for a
     // value it needs to keep and edit.
     let mut manifest = load_manifest(&scope.repo_root)?;
-    // The one thing in this binary that runs a model for a pact, built once
-    // because it is a command line and a timeout rather than a connection:
-    // nothing is spawned until a pact actually asks for a pass. The other one,
-    // which answers questions, is inside the `Chat` below and is built once for
-    // the same reason and one more — the session it names is what makes a
-    // conversation a conversation.
-    let agent = ClaudeAgent::new();
     // Asked for once, over the tree the load just produced, and kept for as
     // long as warlock runs — dropping it stops the watch. Whether it was
     // granted is a fact for the footer and nothing more, which is why this is
@@ -500,17 +494,20 @@ fn run() -> Result<(), Error> {
     // sake, and copies of the app are taken and put back around a pact, which a
     // source of truth must survive.
     let mut mouse_captured = true;
-    // The pact running somewhere else, when one is: everything this thread
-    // needs to keep about a run it is not performing. `None` is the ordinary
-    // state, and it is what the pact key checks before starting anything.
-    let mut pact: Option<Running> = None;
+    // The pact key's business: the agent runs are made with, and the run
+    // happening somewhere else when one is. Built once, like the `Chat` below
+    // it and for the same reason — the agent is a command line and a timeout,
+    // so nothing is spawned until a key asks for a pass. Whether a run is in
+    // flight is this value's own answer now (`Pact::running`) rather than a
+    // `bool` this loop works out and hands down. See [`Pact`].
+    let mut pact = Pact::new();
     // The conversation, and the turn being answered somewhere else when one is:
     // `pact`'s opposite number, beside it rather than folded into it because a
     // turn and a run are two different things that can be in flight at the same
     // time — a reader can ask a question while a pact descends, and the key that
     // stops one must not stop the other. See [`Chat`], which is the agent and
     // the turn together because neither is any use without the other.
-    let mut chat = Chat::new();
+    let mut chat = Chat::new(&scope.repo_root);
     // The gate on the way out, closed as every session starts. It lives here
     // rather than on the app because it is state about this keystroke and the
     // next one rather than about what warlock is showing — which is also what
@@ -538,7 +535,6 @@ fn run() -> Result<(), Error> {
     // Which of the two has the keyboard when both are up is `press_for`'s
     // decision and is stated there: the scope prompt is asked first, so this one
     // waits underneath with its path intact.
-    let mut path_prompt = ScopePrompt::default();
     // What has been typed into the composer, and the only copy of it: empty as
     // every session starts. It lives here, beside the two questions above,
     // rather than on the app — and that is load-bearing rather than tidy. A
@@ -547,7 +543,6 @@ fn run() -> Result<(), Error> {
     // `App::restore_from`), so a draft stored on the app would be a draft a run
     // could swallow half a sentence into. Here, nothing a run does can reach it:
     // the keystrokes are the only thing that ever writes to it.
-    let mut composer = Composer::default();
     // Where a brief written from this conversation would go, relative to the
     // repository root, and the only copy of it: the engine's built-in default
     // as every session starts. It lives here with the two windows and the draft
@@ -561,7 +556,6 @@ fn run() -> Result<(), Error> {
     // taken twenty turns to converge can never arrive at a window that will not
     // open. What settles it is `apply_compose`'s `/brief` arm, which is also
     // where anything that fails to be read has to fail.
-    let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
     // Which file the panel's document card is holding, and the only record of
     // it: `None` until the first `v` of the session that read something. It
     // lives here rather than on the app for the reason `mouse_captured` does —
@@ -585,13 +579,6 @@ fn run() -> Result<(), Error> {
         // of a flag that may have been toggled since — is put right before it is
         // drawn.
         app.set_mouse_captured(mouse_captured);
-        // And the field is told whether it is listening, here and every round,
-        // for the reason the flag above is set every round: a turn ends in five
-        // different ways and none of them should have to remember to give the
-        // keyboard back. See [`field_muted`], which is the whole of the rule and
-        // is derived from the value the loop already keeps rather than from a
-        // flag somebody has to clear.
-        composer.set_muted(field_muted(chat.answering()));
         // The draft goes in beside the two questions: it is a pane cut off the
         // bottom of the panel's column, so the panel is drawn and scrolled a few
         // rows shorter for as long as there is a field on screen. Whether there
@@ -606,8 +593,8 @@ fn run() -> Result<(), Error> {
             size,
             confirm,
             &prompt,
-            &path_prompt,
-            &composer,
+            chat.write_prompt(),
+            chat.composer(),
         )?;
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
@@ -650,15 +637,11 @@ fn run() -> Result<(), Error> {
                         app: &mut app,
                         guard: &mut guard,
                         scope: &scope,
-                        agent: &agent,
                         manifest: &mut manifest,
                         pact: &mut pact,
                         chat: &mut chat,
                         confirm: &mut confirm,
                         prompt: &mut prompt,
-                        path_prompt: &mut path_prompt,
-                        composer: &mut composer,
-                        brief_directory: &mut brief_directory,
                         document: &mut document,
                         mouse_captured: &mut mouse_captured,
                     };
@@ -682,8 +665,8 @@ fn run() -> Result<(), Error> {
                         size,
                         confirm,
                         &prompt,
-                        &path_prompt,
-                        &composer,
+                        chat.write_prompt(),
+                        chat.composer(),
                     );
                 }
                 // Resizes, focus changes and pasted text: read and dropped. The
@@ -706,8 +689,6 @@ fn run() -> Result<(), Error> {
             &mut manifest,
             &scope,
             &mut watched,
-            &mut path_prompt,
-            &brief_directory,
         );
     }
 }
@@ -730,28 +711,18 @@ struct Pressing<'a> {
     guard: &'a mut TerminalGuard,
     /// The session: the repository root and what warlock was pointed at.
     scope: &'a Scope,
-    /// The agent a pact and a refresh are run with — never the conversation's,
-    /// which is inside `chat`.
-    agent: &'a ClaudeAgent,
     /// The manifest this thread holds, which the scope prompt reads and writes.
     manifest: &'a mut Manifest,
-    /// The pact running somewhere else, when there is one.
-    pact: &'a mut Option<Running>,
+    /// The pact key's business: the agent runs are made with, and the run
+    /// happening somewhere else when there is one. Never the conversation's
+    /// agent, which is inside `chat`.
+    pact: &'a mut Pact,
     /// The conversation, and the turn being answered when there is one.
     chat: &'a mut Chat,
     /// The gate on the way out.
     confirm: &'a mut QuitConfirm,
     /// The scope prompt: the window `s` opens.
     prompt: &'a mut ScopePrompt,
-    /// The write prompt: the window no key opens — a `/write` turn landing does
-    /// (see [`keep_up`]) — and that every key inside it types into, closes or
-    /// submits.
-    path_prompt: &'a mut ScopePrompt,
-    /// The draft under the panel, and the only copy of it.
-    composer: &'a mut Composer,
-    /// Where a brief written from this conversation would go: settled at
-    /// `/brief` and read at `/write`, which is why one keystroke can move it.
-    brief_directory: &'a mut String,
     /// Which file the panel's document card is holding.
     document: &'a mut Option<PathBuf>,
     /// Whether the terminal is reporting its mouse.
@@ -780,25 +751,19 @@ struct Pressing<'a> {
 /// quit produce it. Leaving is deliberately not done from in here: the run's
 /// handle and the terminal guard are [`run`]'s to drop, in the order it has
 /// always dropped them.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one arm per key and nothing else, and the length is the number of \
-              keys warlock has: splitting it would put half the list somewhere \
-              a reader looking for a key would not find it"
-)]
 fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result<bool, Error> {
     // The composer is offered on exactly the condition that lights its border,
     // which is the keyboard being pointed at it: with the keys anywhere else
     // this is `None`, there is no draft to type into, and every letter is the
     // command it has always been.
-    let typing = (pressing.app.focus() == Focus::Composer).then_some(&*pressing.composer);
-    let running = pressing.pact.is_some();
+    let typing = (pressing.app.focus() == Focus::Composer).then(|| pressing.chat.composer());
+    let running = pressing.pact.running();
     let asked = pressing.chat.answering();
     let pressed = press_for(
         key,
         *pressing.confirm,
         pressing.prompt,
-        pressing.path_prompt,
+        pressing.chat.write_prompt(),
         typing,
         running,
         asked,
@@ -836,11 +801,7 @@ fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result
         // of that arrives at the bottom of this loop like any other outcome;
         // forgetting about it now would leave the footer's progress line up
         // for a run nobody was listening to any more.
-        Pressed::Act(Action::CancelPact) => {
-            if let Some(running) = pressing.pact.as_ref() {
-                running.cancel.cancel();
-            }
-        }
+        Pressed::Act(Action::CancelPact) => pressing.pact.stop(),
         // Ctrl-C with a turn being answered, and the one keystroke in warlock
         // that stops something without leaving. The handle is the turn's own —
         // the same `Cancel` a run is stopped through — so it kills the
@@ -897,23 +858,33 @@ fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result
         Pressed::Act(Action::ToggleFiles) => pressing.app.toggle_files(),
         // The two keystrokes that write anything, and the two that take longer
         // than a frame — so they are the ones that are not done here. Both go
-        // to a worker thread and both fill the same `Option<Running>`, which
-        // is what makes them refuse each other; everything they produce
-        // arrives at the bottom of this loop, one directory at a time and
-        // finally as an outcome, and until it does the loop goes round as
-        // usual — drawing, scrolling, filtering.
+        // to a worker thread and both fill the one run `Pact` keeps, which is
+        // what makes them refuse each other; everything they produce arrives at
+        // the bottom of this loop, one directory at a time and finally as an
+        // outcome, and until it does the loop goes round as usual — drawing,
+        // scrolling, filtering.
         //
-        // One arm for the two of them because they were already one arm with
-        // one word changed, and the word is which press decides. Both of them,
-        // and everything they refuse, is [`start_press`]'s.
-        Pressed::Act(action @ (Action::TogglePact | Action::Refresh)) => {
-            start_press(
-                action,
+        // Two arms rather than one, because the list of keys is what this
+        // function is for and a key dispatching on a value computed elsewhere
+        // would be a key a reader could not find here. The kind is the app's own
+        // [`Run`], the only thing the two runs differ by all the way down;
+        // everything either side of it, and everything they refuse, is
+        // [`Pact::press`]'s.
+        Pressed::Act(Action::TogglePact) => {
+            pressing.pact.press(
+                Run::Pact,
                 pressing.app,
-                pressing.pact,
                 pressing.manifest,
                 pressing.scope,
-                pressing.agent,
+                now,
+            );
+        }
+        Pressed::Act(Action::Refresh) => {
+            pressing.pact.press(
+                Run::Refresh,
+                pressing.app,
+                pressing.manifest,
+                pressing.scope,
                 now,
             );
         }
@@ -1064,16 +1035,9 @@ fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result
         // stays on the card and the register stays what it was, because the
         // app was never told the question was asked. See
         // `writing::write_edit`.
-        Pressed::Write(edited) => {
-            *pressing.path_prompt = write_edit(
-                pressing.app,
-                pressing.manifest,
-                &pressing.scope.repo_root,
-                pressing.path_prompt,
-                edited,
-                now,
-            );
-        }
+        Pressed::Write(edited) => pressing
+            .chat
+            .write(pressing.app, pressing.manifest, edited, now),
         // Somebody typing at the foot of the panel's column: a character more
         // or less in the draft, the keyboard handed back, or a draft offered
         // up. What each of those comes to is [`apply_compose`], which is
@@ -1090,17 +1054,7 @@ fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result
         // well for the pact key's reason: a turn is as old as the question
         // that asked it, not as old as the first thing the model got round to
         // saying.
-        Pressed::Compose(outcome) => {
-            apply_compose(
-                pressing.app,
-                pressing.composer,
-                outcome,
-                pressing.chat,
-                &pressing.scope.repo_root,
-                pressing.brief_directory,
-                now,
-            );
-        }
+        Pressed::Compose(outcome) => pressing.chat.compose(pressing.app, outcome, now),
         // A key nothing is bound to, or one whose press has already been
         // answered where it was decided.
         Pressed::Nothing => {}
@@ -1203,7 +1157,7 @@ fn draw_frame(
 /// Keep up with what is happening off this thread: the run's progress, the
 /// turn's, and the disk moving under the tree.
 ///
-/// The bottom of every round, whether or not a key was pressed. [`apply_progress`]
+/// The bottom of every round, whether or not a key was pressed. [`Pact::keep_up`]
 /// is the only place anything the worker says reaches the screen, and it has to
 /// keep up with a thread that is not waiting for it; the scope is handed to it
 /// because the end of a run re-reads the tree.
@@ -1237,48 +1191,30 @@ fn draw_frame(
 /// land on screen — within one [`POLL_INTERVAL`] of when they were sent. It is
 /// read at the top rather than per call for the reason the frame reads its own:
 /// two readings a round would be two answers to one question.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the whole of what the bottom of one round has to keep up with, and \
-              the point of it is that the loop keeps up in one call"
-)]
 fn keep_up(
-    pact: &mut Option<Running>,
+    pact: &mut Pact,
     chat: &mut Chat,
     app: &mut App,
     manifest: &mut Manifest,
     scope: &Scope,
     watched: &mut Watched,
-    path_prompt: &mut ScopePrompt,
-    brief_directory: &str,
 ) {
     let now = Instant::now();
-    let running = pact.is_some();
-    let reloaded = apply_progress(pact, app, manifest, scope, now);
-    if running && pact.is_none() {
-        watched.caught_up(reloaded.as_ref(), now);
+    // The one round in a run's life the watcher has to hear about, and it says
+    // so itself: a `Reloaded` comes back on the round the run ended and on no
+    // other, carrying the tree that reload read. This loop used to work that
+    // edge out by reading `is_some()` either side of the drain and comparing —
+    // a detector kept by hand over a fact the run already knew. See
+    // [`Reloaded`].
+    if let Some(Reloaded(tree)) = pact.keep_up(app, manifest, scope, now) {
+        watched.caught_up(tree.as_ref(), now);
     }
-    watched.round(app, scope, pact.is_some(), now);
-    // The one thing a drain can hand back, and the one round in a session it
-    // does: the document a `/write` turn just answered with. It opens the path
-    // prompt over that answer — headed, and pre-filled with where the document
-    // would go — and it is the answer itself rather than the newest thing on
-    // the card, because which turn just ended is the drain's knowledge and a
-    // second reading here would be a second opinion about it.
-    //
-    // Every other way that turn could have gone hands back nothing, so a
-    // `claude` that is missing, a non-zero exit, a timeout and a cancel all
-    // leave this line doing nothing: no window opens, no path is proposed, and
-    // the ending is the one line the drain already put on the thread.
-    //
-    // The directory the path is proposed in comes in as a value the loop is
-    // already holding — settled at `/brief`, turns ago — so this line reads no
-    // file and has no failure to report. That is the whole of why it is a
-    // parameter: a window that opens over a finished document must be a window
-    // that opens.
-    if let Some(document) = chat.keep_up(app, now) {
-        *path_prompt = write_opened(&scope.repo_root, brief_directory, &document);
-    }
+    watched.round(app, scope, pact.running(), now);
+    // And the conversation's own bottom end. Nothing comes back: a `/write`
+    // turn's answer opens the window that goes over it, and that window is the
+    // conversation's, so it is opened in there rather than here out of two
+    // values this loop would otherwise have to be handed. See [`Chat::keep_up`].
+    chat.keep_up(app, now);
 }
 
 /// Do to the app whatever the pointer just asked for.
@@ -1349,510 +1285,6 @@ fn apply_mouse(
     }
 }
 
-/// What `/brief` is shown as on the thread card, and `/chat`.
-///
-/// The word the reader typed, spelled here rather than taken from the draft: a
-/// draft is trimmed and matched by [`submitted_for`], so `"  /brief  "` and
-/// `"/brief"` are one command and have to read as one row. What is actually sent
-/// is [`brief_asking`] and [`CHAT_INSTRUCTION`], which the card never shows
-/// (see [`Chat::say`](chatting::Chat::say)).
-const BRIEF_COMMAND: &str = "/brief";
-/// `/chat` as the card shows it. See [`BRIEF_COMMAND`].
-const CHAT_COMMAND: &str = "/chat";
-/// `/write` as the card shows it. See [`BRIEF_COMMAND`]: what is actually sent
-/// is [`WRITE_INSTRUCTION`], and a screenful of warlock's prose in the place the
-/// reader's own words go would be warlock putting words in their mouth.
-const WRITE_COMMAND: &str = "/write";
-
-/// The one line the thread gains when the conversation enters brief mode.
-///
-/// A note and not a turn: warlock saying what it did with the word it was given,
-/// unclocked, at the point in the history the command was typed. It is said on a
-/// *change* only — `/brief` in brief mode re-sends the instruction and has
-/// nothing new to say about the register — and it says what the mode is and how
-/// to leave it, because the way out is the one thing a reader in a mode cannot
-/// work out from the screen. The border title says which mode it is from then
-/// on; this line says when it started.
-const BRIEF_NOTE: &str =
-    "brief mode — this conversation is now converging on a document. /chat leaves it.";
-
-/// The one line the thread gains when the conversation leaves brief mode.
-///
-/// [`BRIEF_NOTE`]'s counterpart, on the same rule and for the same reason: one
-/// unclocked line where the command was typed, and only on a change.
-const CHAT_NOTE: &str = "chat mode — the brief is over and nothing is being converged on.";
-
-/// The one line `/chat` costs when the conversation is in chat mode already.
-///
-/// The command has nothing to do — there is no mode to leave — so it does
-/// nothing, and says so rather than spending a turn telling the model something
-/// it was never told the other way. One line, in warlock's own voice, where the
-/// refusal of a mistyped command goes.
-const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes that.";
-
-/// The one line `/write` costs when the conversation was never aimed at a
-/// document.
-///
-/// [`ALREADY_CHATTING`]'s sibling and the same bargain: there is nothing to ask
-/// for, so nothing is asked. A `/write` in chat mode would be warlock demanding
-/// a brief from a conversation about where the loader is, and the model,
-/// obliging, would invent one — a turn's wait and a screenful of fiction to
-/// discover that the command was typed in the wrong register.
-///
-/// It names the way in, because the way in is the one thing a reader who has
-/// just been refused cannot work out from the screen: the border title says
-/// which register the conversation is in, and this says which register `/write`
-/// wants and what puts it there. Decided from [`App::mode`] — the very state
-/// that title is drawn from — so the refusal and the header cannot disagree.
-const NOT_BRIEFING: &str = "/write is only in brief mode — /brief enters it";
-
-/// The one line `/brief` costs when the repository's own template is there and
-/// cannot be read.
-///
-/// [`ALREADY_CHATTING`]'s and [`NOT_BRIEFING`]'s third sibling, and the only one
-/// with something of somebody else's to quote: the file that was found and, in
-/// the loader's own words, why it could not be had (see [`TemplateError`], whose
-/// wording is `error.rs`'s for an unreadable sigil config). One line, unclocked,
-/// where a refusal goes.
-///
-/// The refusal itself is the point. A template file that exists is a shape
-/// somebody meant, so warlock will not quietly put its own in its place and open
-/// a twenty-turn conversation aimed at the wrong document — the same bargain
-/// `ignores.rs` makes about rules it cannot read and `sigils.rs` about a config
-/// it cannot read. Nothing else about the session moves: the mode is not entered,
-/// no turn is spent, and the card is what it was with one line added.
-///
-/// It says what the reader can do, because a reader who has just been refused
-/// cannot see from the screen that the fix is theirs: the file is in their
-/// repository and `e` opens it.
-fn unreadable_template(error: &TemplateError) -> String {
-    format!("{error} — /brief did nothing, so fix or remove the file and type it again")
-}
-
-/// The instruction a `/brief` sends, for the repository at `root`: its own
-/// template if it has written one, and warlock's if it has not.
-///
-/// The two halves of the command's one composition in one place — the load and
-/// the wording — so that what the turn carries is a function of a root and the
-/// bytes under it, testable without a terminal, a `claude` or a thread.
-///
-/// Read here, at the keystroke, and held nowhere: no copy on [`App`], on
-/// [`Chat`] or in the loop. That is the whole of what makes a template edited
-/// with `e` between two briefs a template the second one is held to (see
-/// [`brief_template`]).
-///
-/// # Errors
-///
-/// [`TemplateError`] when the file is there and cannot be read or decoded, which
-/// the caller turns into one line and no turn — never into the built-in default.
-fn brief_asking(root: &Path) -> Result<String, TemplateError> {
-    brief_template(root).map(|template| brief_instruction(&template))
-}
-
-/// The one line `/brief` costs when the repository's own `.warlock/briefs.toml`
-/// is there and cannot be had.
-///
-/// [`unreadable_template`]'s twin, in its wording and its shape, because the two
-/// are the same refusal about the two files `/brief` reads: the loader's own
-/// sentence — which names the file and quotes the parser (see [`BriefsError`]) —
-/// and what it cost, on one unclocked line where a refusal goes.
-///
-/// Flattened with [`one_line`] where that one is not, and only because the
-/// material differs: a `briefs.toml` that will not parse carries the TOML
-/// parser's multi-line diagnostic inside it, exactly as an unreadable
-/// `pacts.toml` does, and the thread card is one line per note. `error.rs` does
-/// the same to a manifest for the same reason.
-///
-/// The refusal, again, is the point. A `directory` that was written down is a
-/// place somebody meant, so warlock will not quietly aim twenty turns at
-/// `docs/` instead — a misspelled key is a line to go and fix rather than a
-/// silent write somewhere nobody asked for. Nothing else about the session
-/// moves: no mode, no turn, and the card is what it was with one line added.
-fn unreadable_briefs(error: &BriefsError) -> String {
-    format!(
-        "{} — /brief did nothing, so fix or remove the file and type it again",
-        one_line(&error.to_string())
-    )
-}
-
-/// Everything `/brief` has to read out of the repository at `root` before it can
-/// happen: the instruction to send, and the directory a `/write` in the mode it
-/// opens would propose.
-///
-/// The whole of the command's *load* in one place, and in one order, so that the
-/// arm below is a single question with a single refusal. Both files are optional
-/// and both are re-read at every `/brief`, which is what makes either of them
-/// edited with `e` between two briefs a file the second one is held to.
-///
-/// The template comes first, and that is the answer to a repository where both
-/// files are broken: the first failure stops the command, so what the reader is
-/// shown is one line about the template, and the `briefs.toml` line is what the
-/// next `/brief` says once that one is fixed. One refusal at a time is the rule
-/// the two must not disagree about — two notes for one keystroke would be
-/// warlock reporting its own reading order — and neither costs a turn.
-///
-/// # Errors
-///
-/// The finished line for whichever file could not be had, already worded for the
-/// card ([`unreadable_template`], [`unreadable_briefs`]) — the caller has a note
-/// to add and nothing to decide.
-fn brief_reading(root: &Path) -> Result<(String, String), String> {
-    let instruction = brief_asking(root).map_err(|error| unreadable_template(&error))?;
-    let directory = load_briefs(root).map_err(|error| unreadable_briefs(&error))?;
-
-    Ok((instruction, directory))
-}
-
-/// Do to the draft and to the keyboard whatever the composer just made of a
-/// key.
-///
-/// The other half of [`warlock_tui::compose_for`], in [`apply_mouse`]'s shape
-/// and for its reason: three short arms that would otherwise be three more
-/// paragraphs in the middle of the loop. Nothing here reads the terminal, draws,
-/// starts a thread or writes a file — typing at the foot of the panel is the one
-/// thing in warlock that costs nothing but a redraw.
-///
-/// The draft is a local of the loop and is handed in rather than read off the
-/// app, which is the whole of why it survives a run: a pact that recorded
-/// nothing puts the copy of the app taken before it back over the live one and
-/// keeps only the panel (see [`App::restore_from`]), and this function is the
-/// only thing in the binary that ever writes to the draft.
-///
-/// The three arms:
-///
-/// **Typing** is the draft replaced by the one [`compose_for`] just made —
-/// a character more, a character less, or a new line. The app is not told,
-/// because what somebody is halfway through writing is not a fact about the
-/// tree, and the next frame draws whatever the local now holds.
-///
-/// **Leave** is Esc, the one key that means something different here to what it
-/// means anywhere else: it hands the keyboard back and leaves every character
-/// where it is. Nothing is thrown away — what somebody typed is worth more than
-/// the keystroke that stopped typing it — and the draft is not this arm's
-/// business at all, since a focus change cannot reach it. The panel rather than
-/// the tree, and the same landing [`App::set_focus`] rescues a hidden composer
-/// onto: the field is drawn under the panel, so the panel is what the reader is
-/// looking at and what the movement keys they press next should be about. Tab
-/// from there is one press back into the field.
-///
-/// **Submit** is a draft offered up, and it is the one arm that can cost
-/// anything. Two statements happen whatever the draft turns out to be — it is
-/// taken, and the field is left empty — and then [`submitted_for`] says which of
-/// three things was submitted, because a submit is no longer the same as a
-/// question. Only a message is one.
-///
-/// A **message** is what it always was: it goes on the thread as a new turn —
-/// which is also what brings the thread card to the front, so the reader is
-/// looking at the conversation from the instant they asked rather than from
-/// whenever the model first says something (see [`App::start_turn`]) — and then
-/// the worker: [`chatting::start_turn`] owns the channel, the say-when and this
-/// turn's copy of the agent, and what comes back is the one value the loop keeps
-/// about a turn it is not performing. Nothing is waited for here — everything
-/// the turn produces arrives at the bottom of the loop, exactly as a run's does.
-///
-/// It is also the one place `brief_directory` is written. Where a brief goes is
-/// a fact about the mode rather than about the write, so it is settled at
-/// `/brief`, on this thread, out of what the repository says at that keystroke,
-/// and then held: by the time `/write` proposes a path it is a string the loop
-/// has been carrying for the whole conversation (see [`keep_up`]). What says so
-/// is `.warlock/briefs.toml` — [`load_briefs`], read here and nowhere else,
-/// answering [`DEFAULT_BRIEF_DIRECTORY`] where the repository has written no
-/// file or no `directory`.
-///
-/// **`/brief`** is two things in the order the reader experiences them: the mode,
-/// and one ordinary turn. [`App::set_mode`] answers whether that was a *change*,
-/// and a change is worth exactly one unclocked note ([`BRIEF_NOTE`]) at the point
-/// in the history the command was typed — where a `/brief` typed in brief mode is
-/// a re-send with nothing new to say about the register and adds none. Then the
-/// turn, whichever it was: [`brief_asking`] goes into the conversation already in
-/// progress through the very path a typed message takes, shown on the card as
-/// [`BRIEF_COMMAND`] and never as the paragraph. So it costs a turn every time —
-/// which is the point of typing it again when the register has drifted — and the
-/// reply lands under it like any other answer.
-///
-/// What that instruction states the shape is, and where the document it converges
-/// on would land, are both read out of the repository at this keystroke and at no
-/// other moment: `repo_root` is the root the loop already holds, and
-/// [`brief_reading`] loads `.warlock/brief-template.md` and `.warlock/briefs.toml`
-/// under it fresh every time. So a template edited between two briefs is a
-/// template the second one is held to, and a `directory` edited between them is
-/// where the next `/write` proposes — with `e` and no restart. Neither file is
-/// read at startup, and nothing about the template is kept on the app, on the
-/// conversation or in the loop; the directory is kept in exactly one place, the
-/// loop local this function writes.
-///
-/// The mode is set *before* the turn is sent, and that ordering is load-bearing:
-/// the effort the turn is asked at is read off the app when the worker starts
-/// (see [`Chat::say`](chatting::Chat::say)), so the instruction that enters the
-/// mode is itself asked at the mode's level. The *load* comes before both, which
-/// is the other half of the ordering: a file that is there and cannot be read is
-/// one line ([`unreadable_template`], [`unreadable_briefs`]) and nothing else —
-/// no mode, no turn, no `claude`, and never warlock's own shape or its own
-/// default quietly used in its place. Where both files are broken it is still one
-/// line, the template's, because [`brief_reading`] stops at the first.
-///
-/// **`/chat`** is the same shape pointed the other way, with one difference: it
-/// is refused when there is nothing to leave. In brief mode it leaves the mode,
-/// notes it once and sends [`CHAT_INSTRUCTION`] as one ordinary turn shown as
-/// [`CHAT_COMMAND`]; in chat mode it is [`ALREADY_CHATTING`] on the card and no
-/// turn at all, because the model was never told the register changed and telling
-/// it that it has not is a question nobody asked.
-///
-/// Nothing on the card is cleared, hidden or reordered by either of them. A mode
-/// is a word warlock holds and a message into a session that is not replaced: the
-/// turns already on screen are the material the document is made of, and every
-/// one of them is still there, in order, with its answer and its work lines.
-///
-/// **`/write`** is the ask for the artifact, and it is one ordinary turn: in
-/// brief mode [`WRITE_INSTRUCTION`] goes into the conversation already in
-/// progress by the path a typed message takes, shown on the card as
-/// [`WRITE_COMMAND`] and never as the paragraph, and what comes back lands as an
-/// answer like any other. It changes no mode and needs no ordering against one —
-/// the register is already what it is, and the effort the turn is asked at is
-/// already the mode's.
-///
-/// Outside brief mode it is refused, on [`ALREADY_CHATTING`]'s rule: one
-/// unclocked line ([`NOT_BRIEFING`]) and no turn, because there is no document
-/// being converged on and asking for one anyway is a screenful of invention
-/// nobody wanted. The decision is read off [`App::mode`], which is the same
-/// state the panel's border title is drawn from, so the line and the title can
-/// never disagree about which register the conversation is in.
-///
-/// A **refusal** is one line on the thread card and nothing else: no turn, no
-/// model, no `claude`. That line is the whole discovery mechanism for the three
-/// commands warlock has (see [`Submitted::refusal`]), and it is put on the card
-/// rather than the footer because it answers something the reader typed, in the
-/// place their own words are, and because a footer line is gone by the next
-/// keystroke that says anything.
-///
-/// Cleared rather than kept in all three cases, which is the one place in here
-/// that can lose somebody's typing and is now honest: a submitted message is on
-/// the thread card a row above the field, so nothing is lost, and a field still
-/// holding the question that is being answered would be a field the next Enter
-/// asked it from again. A refused draft is the one thing that is genuinely
-/// thrown away, and the line it leaves says what to type instead — keeping it
-/// would leave the reader editing a word that has already been rejected in a
-/// field that looks exactly as it did before. Nothing is said on the footer
-/// either — a question and a refusal are both on screen, and warlock announcing
-/// what the reader can read would be warlock talking about itself.
-///
-/// An empty or whitespace-only draft never arrives here at all — [`compose_for`]
-/// answers that Enter with the draft unchanged — so a submission with nothing in
-/// it is a keystroke rather than a mistake and has nothing to report. Neither
-/// does a submit while a turn is already in flight: the field is muted for the
-/// whole of one, so the Enter that would ask a second question is swallowed
-/// before it ever becomes a [`Composed`] (see [`press_for`]).
-///
-/// Nothing chat-shaped goes anywhere near the engine. The message is handed to
-/// the chat agent and to the thread card, and to nothing else: the request a
-/// pact builds is what it always was, and a run is never told a word of this.
-///
-/// [`compose_for`]: warlock_tui::compose_for
-/// [`submitted_for`]: warlock_tui::submitted_for
-/// [`Submitted::refusal`]: warlock_tui::Submitted::refusal
-fn apply_compose(
-    app: &mut App,
-    composer: &mut Composer,
-    outcome: Composed,
-    chat: &mut Chat,
-    repo_root: &Path,
-    brief_directory: &mut String,
-    now: Instant,
-) {
-    match outcome {
-        Composed::Typing(next) => *composer = next,
-        Composed::Leave => app.set_focus(Focus::Panel),
-        Composed::Submit => {
-            // Taken before the field is emptied, and emptied by replacing it
-            // outright: the muting is put back at the top of the next round from
-            // the turn alone, which is what makes "however the turn ends, the
-            // field comes back" one line in the loop rather than a flag to unset
-            // on five paths.
-            let draft = composer.draft().to_owned();
-            *composer = Composer::default();
-
-            match submitted_for(&draft) {
-                // The arm that was here before the other three existed: the
-                // words go to the model as they were typed.
-                Submitted::Message => chat.ask(app, &draft, now),
-                // The mode, then the turn — in that order, because the turn is
-                // asked at the level the mode it is entering is worth. The note
-                // is the change and not the command, so typing `/brief` twice
-                // costs two turns and one line.
-                Submitted::Brief => match brief_reading(repo_root) {
-                    // Both files are read from the repository at the keystroke
-                    // — before the mode is touched, because a file that cannot
-                    // be read is a command that does not happen at all and a
-                    // mode set first would be a register entered by a refusal.
-                    Ok((instruction, directory)) => {
-                        // Where a `/write` in this mode will propose to put the
-                        // document, settled here and held until the next
-                        // `/brief` — which is what keeps `/write` from reading
-                        // anything and therefore from failing. It is what
-                        // `.warlock/briefs.toml` says, or the engine's default
-                        // where it says nothing, and it is written on every
-                        // `/brief` rather than left wherever the last one put
-                        // it: that is the whole of what makes the file edited
-                        // between two briefs take effect without a restart.
-                        *brief_directory = directory;
-                        if app.set_mode(Mode::Brief) {
-                            app.note(BRIEF_NOTE, now);
-                        }
-                        chat.say(app, BRIEF_COMMAND, &instruction, Asked::Answer, now);
-                    }
-                    // A file that is there and cannot be had: one line, no
-                    // mode, no turn, and neither warlock's own shape nor its
-                    // own default quietly put in its place. See
-                    // [`brief_reading`], [`unreadable_template`] and
-                    // [`unreadable_briefs`].
-                    Err(line) => app.note(line, now),
-                },
-                // The same, one way only: there is no register to leave in chat
-                // mode, so the command says so on the card and stops. A turn
-                // spent telling the model it is where it already was would be a
-                // question nobody asked and money nobody meant to spend.
-                Submitted::Chat => {
-                    if app.set_mode(Mode::Chat) {
-                        app.note(CHAT_NOTE, now);
-                        chat.say(app, CHAT_COMMAND, CHAT_INSTRUCTION, Asked::Answer, now);
-                    } else {
-                        app.note(ALREADY_CHATTING, now);
-                    }
-                }
-                // The artifact, asked for as one ordinary turn — and only where
-                // there is one to ask for. The mode comes off the app rather
-                // than off anything this function remembers, because that is
-                // the state the border title is drawn from and two readings of
-                // the register would eventually be two answers.
-                Submitted::Write => {
-                    if app.mode() == Mode::Brief {
-                        chat.say(app, WRITE_COMMAND, WRITE_INSTRUCTION, Asked::Document, now);
-                    } else {
-                        app.note(NOT_BRIEFING, now);
-                    }
-                }
-                // The one that stops here, without a question and without a
-                // turn: a refusal has exactly one line to say, asked of the
-                // value rather than restated here, so the list of what exists is
-                // written down in one place.
-                said @ Submitted::Refused => {
-                    if let Some(line) = said.refusal() {
-                        app.note(line, now);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Whether the field is listening this round, or is dim and taking nothing.
-///
-/// The whole of the muting rule, and it is one thing: the turn being answered
-/// somewhere else. One question at a time is what a conversation is — a second
-/// asked while the first is out is a second conversation — so the field says
-/// nothing until the answer lands.
-///
-/// A pact is deliberately *not* a reason. The two workers share nothing: a run
-/// writes documents on its own thread and reports into its own card, a turn asks
-/// its own `claude` and reports into another, and the loop drains both every
-/// round. Muting the field for a run was a guess about a limit that does not
-/// exist, and it cost the reader the thing they most want while a long pact
-/// runs, which is to ask something about the repository it is walking. What a
-/// run does take is the field's *card*: an account showing has no composer under
-/// it at all (see [`App::composer_showable`]), so a question asked during a run
-/// is asked from the conversation, one swap away.
-///
-/// That is the point of it being derived rather than a `bool` somebody sets and
-/// clears. A turn ends in five ways and not one of those endings has to remember
-/// to give the keyboard back: the value is worked out again at the top of every
-/// round, so the round after the drain takes the turn down is the round the
-/// field types in. A second flag could disagree with the turn; this cannot.
-///
-/// It is deliberately not asked of the app. The turn is not something [`App`]
-/// performs — the loop holds it — and muting is a fact about the field rather
-/// than about what is on screen, which is why the *other* reason the field is
-/// not typed into, the card showing, is a separate question with a separate
-/// answer: that one hides the field outright and gives the panel its rows back
-/// (see [`composer_on_screen`]), where this one leaves it exactly where it is,
-/// draft and all.
-const fn field_muted(answering: bool) -> bool {
-    answering
-}
-
-/// Start the run one of the two long keystrokes is asking for, if it is asking
-/// for one.
-///
-/// The pact key and the refresh key, in one place because they were already one
-/// arm with one word changed: a refresh is a run like a pact — one worker, one
-/// channel, one account, one say-when — over the stale directories of a subtree
-/// rather than all of them, and which those are is the engine's judgement and
-/// not this loop's. The word that changes is which press decides; everything
-/// either side of it is the same three statements.
-///
-/// The copy is taken before the press paints anything, because the toggle is no
-/// longer its own undo: it puts a whole subtree into one state, and the states
-/// it painted over were not all the same one. The copy is a list of rows and a
-/// tally, and it is taken once per press of one key.
-///
-/// `now` is the instant the key was pressed, and the account counts its clocks
-/// from it: a run is as old as the keystroke that asked for it, not as old as
-/// the first thing the model got round to saying.
-///
-/// `None` from either press needs nothing done about it, and it covers two cases
-/// that are alike in exactly this way: both have already said their piece on the
-/// app, and the next frame draws it. A refused toggle put its sentence in
-/// [`App::message`](warlock_tui::App::message); a press while a run is in flight
-/// started nothing — a second run over a tree the first one is still writing to
-/// would be two of them racing for the same documents and the same manifest —
-/// and said so by setting the flag that words `App::pact_line` as already
-/// running. Which is also what makes the two keys refuse each other: the
-/// in-flight check both of them go through is this one `Option<Running>`,
-/// whichever run is the one in flight.
-///
-/// `action` is one of the two run keys and nothing else, because the one arm
-/// that calls this names both of them in its pattern; anything else would be the
-/// pact key, which is the safe half of that pair to be wrong in — it refuses
-/// every row a refresh would have refused and says so.
-fn start_press(
-    action: Action,
-    app: &mut App,
-    pact: &mut Option<Running>,
-    manifest: &Manifest,
-    scope: &Scope,
-    agent: &ClaudeAgent,
-    now: Instant,
-) {
-    let before = app.clone();
-    let running = pact.is_some();
-    let work = if action == Action::Refresh {
-        refresh_press(
-            app,
-            manifest,
-            &scope.repo_root,
-            scope.chrome.sigils(),
-            running,
-            now,
-        )
-        .map(Work::Refresh)
-    } else {
-        pact_press(
-            app,
-            manifest,
-            &scope.repo_root,
-            scope.chrome.sigils(),
-            running,
-            now,
-        )
-        .map(Work::Pact)
-    };
-    if let Some(work) = work {
-        // The worker, the channel and the say-when, in the one value the loop
-        // keeps about a run it is not doing — see [`start_run`], which is where
-        // both keys start theirs.
-        *pact = Some(start_run(work, before, manifest, &scope.repo_root, agent));
-    }
-}
-
 /// Ask the terminal to report its mouse, or to stop reporting it.
 ///
 /// The whole of what `m` does to a terminal, and the only thing that differs
@@ -1871,30 +1303,7 @@ fn report_mouse(on: bool) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Intention, USAGE, field_muted, intention_for};
-
-    #[test]
-    fn the_field_is_muted_by_a_turn_being_answered_and_by_nothing_else() {
-        // The whole of the rule: one question at a time, and the field types
-        // whenever there is not one out. A pact is not a reason — the two
-        // workers share nothing, and a reader watching a long run is exactly
-        // who most wants to ask something about the repository it is walking.
-        assert!(!field_muted(false), "an idle session cannot type");
-        assert!(field_muted(true), "a turn out leaves the field live");
-    }
-
-    #[test]
-    fn the_muting_follows_the_turn_rather_than_a_flag_somebody_clears() {
-        // The half that matters to somebody waiting. A turn ends in five ways —
-        // it answers, it is cancelled, there is no `claude`, it exits non-zero,
-        // it times out — and the field comes back on all five without any of
-        // them saying so, because what mutes it is the turn being out and
-        // nothing else.
-        assert!(field_muted(true));
-        // The round after the drain took the turn down: whatever ended it, the
-        // keyboard is back.
-        assert!(!field_muted(false), "the turn ended and the field is deaf");
-    }
+    use super::{Intention, USAGE, intention_for};
 
     #[test]
     fn the_binary_is_named_warlock() {
@@ -1956,986 +1365,5 @@ mod tests {
         assert!(USAGE.contains("init"), "{USAGE}");
         assert!(USAGE.contains("config"), "{USAGE}");
         assert!(USAGE.starts_with("usage: warlock"), "{USAGE}");
-    }
-
-    /// What a submitted draft comes to, through the function the loop calls.
-    ///
-    /// [`submitted_for`]'s own tests say what each draft *is*; these say what
-    /// the loop then does with it, which is the thing that costs a turn when it
-    /// is wrong. Nothing here has a terminal, a network or a `claude`: the
-    /// command and refusal drafts never reach [`Chat::ask`] at all, and the one
-    /// test that does submit a message hands the conversation an agent whose
-    /// program does not exist, so the worker it starts finds nothing to run.
-    ///
-    /// The repository these submit into is a temporary directory of the test's
-    /// own — `/brief` reads `.warlock/brief-template.md` and
-    /// `.warlock/briefs.toml` under it at the keystroke — and one that has
-    /// nothing in it is a repository that has written neither, which is the
-    /// ordinary case.
-    mod submitting {
-        use std::fs;
-        use std::path::{Path, PathBuf};
-        use std::time::{Duration, Instant};
-
-        use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs_path, load_briefs};
-        use warlock_tui::{
-            Activity, App, ChatAgent, Composed, Composer, DEFAULT_TEMPLATE, Ending, Line, Mode,
-            Submitted, brief_instruction,
-        };
-
-        use super::super::{
-            ALREADY_CHATTING, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, NOT_BRIEFING,
-            WRITE_COMMAND, apply_compose, brief_asking, one_line,
-        };
-        use crate::chatting::Chat;
-        use crate::writing::write_opened;
-
-        /// A `claude` that is not there, so a turn that does start spawns
-        /// nothing. `pacting.rs` and `chatting.rs` build their failures the
-        /// same way.
-        const NOT_A_PROGRAM: &str = "/warlock/no/such/program";
-
-        /// A repository that does not exist, and therefore has no template
-        /// under it.
-        ///
-        /// The root for every test here that is not *about* the template: an
-        /// absent file is an absent file whether the directory over it is there
-        /// or not, so these submit against warlock's own shape without a
-        /// temporary directory each. Nothing reads or writes it.
-        const NO_REPOSITORY: &str = "/warlock/no/such/repository";
-
-        /// A conversation with nothing asked and nothing runnable to ask.
-        fn conversation() -> Chat {
-            Chat::with_agent(ChatAgent::new().with_program(NOT_A_PROGRAM))
-        }
-
-        /// A throwaway repository root, for the tests that put a template in
-        /// one.
-        fn a_root() -> tempfile::TempDir {
-            tempfile::tempdir().expect("a temporary directory")
-        }
-
-        /// Put `text` at `<root>/.warlock/brief-template.md`, and hand back
-        /// where it went.
-        fn write_template(root: &Path, text: &str) -> PathBuf {
-            let directory = root.join(".warlock");
-            fs::create_dir_all(&directory).expect("a `.warlock` directory");
-            let path = directory.join("brief-template.md");
-            fs::write(&path, text).expect("a template file");
-
-            path
-        }
-
-        /// Put `text` at `<root>/.warlock/briefs.toml` the way a person with an
-        /// editor would — the only way that file is ever written — and hand back
-        /// where it went.
-        fn write_briefs(root: &Path, text: &str) -> PathBuf {
-            let path = briefs_path(root);
-            fs::create_dir_all(path.parent().expect("the file has a directory"))
-                .expect("a `.warlock` directory");
-            fs::write(&path, text).expect("a briefs config");
-
-            path
-        }
-
-        /// Submit `draft` from a fresh field, and hand back what the app, the
-        /// conversation and the field look like afterwards.
-        fn submit(draft: &str, now: Instant) -> (App, Chat, Composer) {
-            let mut app = App::default();
-            let mut chat = conversation();
-            let composer = submit_into(&mut app, &mut chat, draft, now);
-
-            (app, chat, composer)
-        }
-
-        /// Submit `draft` into a conversation that is already going, and hand
-        /// back the field it left behind.
-        ///
-        /// What [`submit`] does for one draft, over an app and a chat the caller
-        /// keeps: a mode is a state of *this* conversation, so the tests about
-        /// it are two and three commands long and every one of them has to be
-        /// the same session and the same card.
-        fn submit_into(app: &mut App, chat: &mut Chat, draft: &str, now: Instant) -> Composer {
-            submit_in(Path::new(NO_REPOSITORY), app, chat, draft, now)
-        }
-
-        /// [`submit_into`] over a stated repository root, for the tests that
-        /// care what is under it.
-        fn submit_in(
-            root: &Path,
-            app: &mut App,
-            chat: &mut Chat,
-            draft: &str,
-            now: Instant,
-        ) -> Composer {
-            // The loop's own local, made fresh for the submit and dropped with
-            // it: these tests are about what a draft comes to, and where a brief
-            // would go is settled by `/brief` alone — the tests below that name
-            // an output directory are the ones that keep it.
-            let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
-
-            submit_briefing(root, app, chat, &mut brief_directory, draft, now)
-        }
-
-        /// [`submit_in`] over a `brief_directory` the caller keeps, for the
-        /// tests about where a brief would go.
-        ///
-        /// In the loop that local outlives every keystroke — one `/brief`
-        /// settles it and every `/write` after is handed it — so the tests about
-        /// re-reading a file hold one string across two submits, exactly as the
-        /// loop does.
-        fn submit_briefing(
-            root: &Path,
-            app: &mut App,
-            chat: &mut Chat,
-            brief_directory: &mut String,
-            draft: &str,
-            now: Instant,
-        ) -> Composer {
-            let mut composer = Composer::new(draft);
-            apply_compose(
-                app,
-                &mut composer,
-                Composed::Submit,
-                chat,
-                root,
-                brief_directory,
-                now,
-            );
-            composer
-        }
-
-        /// The card as one unclocked note of warlock's own.
-        fn note(text: &str) -> Line {
-            Line::Note {
-                text: text.to_owned(),
-            }
-        }
-
-        /// A turn on the card as it is drawn the instant it is asked: the
-        /// message it is shown as, and the clocked row a turn with nothing back
-        /// yet draws under it.
-        fn asked(shown: &str) -> [Line; 2] {
-            [
-                Line::Said {
-                    text: shown.to_owned(),
-                },
-                Line::Clocked {
-                    clock: "0:00".to_owned(),
-                    text: "waiting".to_owned(),
-                },
-            ]
-        }
-
-        /// Every row of the app's thread card, or none at all when nothing has
-        /// put a card there.
-        fn rows(app: &App, now: Instant) -> Vec<Line> {
-            app.thread()
-                .map(|thread| thread.lines(now))
-                .unwrap_or_default()
-        }
-
-        /// How many turns the thread holds, card or no card.
-        fn turns(app: &App) -> usize {
-            app.thread().map_or(0, |thread| thread.turns().len())
-        }
-
-        /// The path a `/write` would pre-fill for a mode pointed at
-        /// `directory`, through the very function the loop opens that window
-        /// with.
-        ///
-        /// What the setting actually comes to, rather than the string it was
-        /// read as: `writing.rs` owns the numbering and the slug, and this asks
-        /// it where the document would land. Spelled relative to the repository
-        /// root, as that window spells it.
-        fn proposal(root: &Path, directory: &str) -> String {
-            let prompt = write_opened(root, directory, "# A brief\n\nsomething was said.");
-
-            prompt
-                .field()
-                .expect("the write window opened")
-                .text()
-                .to_owned()
-        }
-
-        #[test]
-        fn write_outside_brief_mode_is_one_note_and_costs_no_turn() {
-            // Nothing is being converged on, so there is nothing to ask for: the
-            // command says which register it wants and how to get there, and
-            // spends neither a turn nor a `claude`. The line is decided from
-            // `App::mode`, which is the state the border title is drawn from, so
-            // it cannot say one register while the header says the other.
-            let now = Instant::now();
-
-            for draft in ["/write", "  /write  "] {
-                let (app, chat, composer) = submit(draft, now);
-
-                assert_eq!(app.mode(), Mode::Chat, "{draft:?} moved the register");
-                assert_eq!(
-                    rows(&app, now),
-                    vec![note(NOT_BRIEFING)],
-                    "{draft:?} did not leave exactly one note"
-                );
-                assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
-                assert!(!chat.answering(), "{draft:?} started something");
-                assert!(
-                    composer.draft().is_empty(),
-                    "{draft:?} was left in the field"
-                );
-            }
-
-            // And after a mode that was entered and left again: the refusal is
-            // about the register the conversation is in now, not about whether
-            // it was ever in the other one.
-            let mut app = App::default();
-            let mut chat = conversation();
-            submit_into(&mut app, &mut chat, "/brief", now);
-            submit_into(&mut app, &mut chat, "/chat", now);
-            let before = turns(&app);
-            submit_into(&mut app, &mut chat, "/write", now);
-
-            assert_eq!(turns(&app), before, "/write out of the mode cost a turn");
-            assert_eq!(rows(&app, now).last(), Some(&note(NOT_BRIEFING)));
-        }
-
-        #[test]
-        fn write_in_brief_mode_sends_one_turn_shown_as_the_command() {
-            // The ask for the artifact, and it is an ordinary turn in every
-            // respect but the one word it is shown as: the card carries `/write`
-            // and never the paragraph that went to the model, and no note is
-            // added because no register changed. `chatting.rs` asserts the
-            // instruction really is what reaches the child's stdin.
-            let now = Instant::now();
-            let mut app = App::default();
-            let mut chat = conversation();
-
-            submit_into(&mut app, &mut chat, "/brief", now);
-            let composer = submit_into(&mut app, &mut chat, "  /write  ", now);
-
-            assert_eq!(app.mode(), Mode::Brief, "/write moved the register");
-            assert_eq!(
-                rows(&app, now),
-                [
-                    vec![note(BRIEF_NOTE)],
-                    asked(BRIEF_COMMAND).to_vec(),
-                    asked(WRITE_COMMAND).to_vec(),
-                ]
-                .concat(),
-                "/write is not one turn shown as the command",
-            );
-            assert_eq!(turns(&app), 2, "/write did not open one turn");
-            assert!(chat.answering(), "/write asked the model nothing");
-            assert!(composer.draft().is_empty(), "/write was left in the field");
-
-            // And again, because asking twice is asking twice: a second document
-            // costs a second turn and still says nothing about the mode.
-            submit_into(&mut app, &mut chat, "/write", now);
-
-            assert_eq!(turns(&app), 3, "the second /write cost no turn");
-            assert_eq!(
-                rows(&app, now).len(),
-                1 + 2 + 2 + 2,
-                "the second /write said something about the register",
-            );
-        }
-
-        #[test]
-        fn brief_notes_the_mode_once_and_sends_one_turn_shown_as_the_command() {
-            // What `/brief` costs: one unclocked note where it was typed, and
-            // one ordinary turn under it. The card shows the word that was
-            // typed and never the paragraph that went to the model — a screen of
-            // prose the reader did not write, in the place their own questions
-            // go, would be warlock putting words in their mouth.
-            let now = Instant::now();
-
-            for draft in ["/brief", "  /brief  "] {
-                let (app, chat, composer) = submit(draft, now);
-
-                assert_eq!(app.mode(), Mode::Brief, "{draft:?} did not enter the mode");
-                assert_eq!(
-                    rows(&app, now),
-                    [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
-                    "{draft:?} is not one note and one turn"
-                );
-                assert_eq!(turns(&app), 1, "{draft:?} did not open one turn");
-                assert!(chat.answering(), "{draft:?} asked the model nothing");
-                assert!(
-                    composer.draft().is_empty(),
-                    "{draft:?} was left in the field"
-                );
-            }
-        }
-
-        #[test]
-        fn a_brief_in_a_repository_with_no_template_states_the_built_in_shape() {
-            // The ordinary case, and the one nobody configures anything for: a
-            // repository that has written no `.warlock/brief-template.md` is a
-            // repository that has said nothing about the shape, so the command
-            // behaves exactly as it did before there was a file to write —
-            // mode, note, one turn — and what it sends is warlock's own
-            // skeleton.
-            let now = Instant::now();
-            let repo = a_root();
-            let mut app = App::default();
-            let mut chat = conversation();
-
-            let composer = submit_in(repo.path(), &mut app, &mut chat, "/brief", now);
-
-            assert_eq!(app.mode(), Mode::Brief, "the mode was not entered");
-            assert_eq!(
-                rows(&app, now),
-                [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
-            );
-            assert_eq!(turns(&app), 1, "the brief did not open one turn");
-            assert!(chat.answering(), "the brief asked the model nothing");
-            assert!(composer.draft().is_empty());
-            // And the instruction it sent, composed through the very function
-            // the arm above composes it with: the built-in shape, because there
-            // was nothing else to state.
-            assert_eq!(
-                brief_asking(repo.path()).expect("a repository with no template"),
-                brief_instruction(DEFAULT_TEMPLATE),
-            );
-        }
-
-        #[test]
-        fn a_brief_carries_the_shape_the_repository_wrote_rather_than_the_built_in_one() {
-            // A repository that has stated its own shape gets its own: the file
-            // is read at this keystroke, and the built-in skeleton is nowhere in
-            // what goes out. The card and the register are unchanged by any of
-            // that — a template is what the instruction says, not what the
-            // command does.
-            const SHAPE: &str = "## The only heading we want\n\nOne section, and no others.";
-
-            let now = Instant::now();
-            let repo = a_root();
-            write_template(repo.path(), SHAPE);
-            let mut app = App::default();
-            let mut chat = conversation();
-
-            submit_in(repo.path(), &mut app, &mut chat, "/brief", now);
-
-            assert_eq!(app.mode(), Mode::Brief, "the mode was not entered");
-            assert_eq!(turns(&app), 1, "the brief did not open one turn");
-            assert!(chat.answering());
-
-            let instruction = brief_asking(repo.path()).expect("a template that reads");
-            assert!(
-                instruction.contains(SHAPE),
-                "the template is not in the instruction: {instruction}"
-            );
-            assert!(
-                !instruction.contains("## Success criteria"),
-                "the built-in shape was sent as well: {instruction}"
-            );
-        }
-
-        #[test]
-        fn a_template_that_cannot_be_read_refuses_the_brief_and_changes_nothing_else() {
-            // Refused rather than degraded: a file somebody wrote is a shape
-            // somebody meant, and quietly aiming twenty turns at warlock's own
-            // instead would be the wrong document arrived at slowly. So the
-            // command is one line naming the file and what the filesystem said
-            // about it, and the session is otherwise exactly as it was — no
-            // mode, no turn, no `claude`, nothing on the footer.
-            //
-            // Bytes that are not UTF-8 are the portable way to have a file that
-            // exists and cannot be had; `template.rs` fails the same way for the
-            // same reason.
-            let now = Instant::now();
-            let repo = a_root();
-            let path = write_template(repo.path(), "");
-            fs::write(&path, [0x23, 0x20, 0xff, 0xfe, 0x0a]).expect("a template file");
-            let reason = warlock_tui::brief_template(repo.path())
-                .expect_err("a template that cannot be read")
-                .to_string();
-            let mut app = App::default();
-            let mut chat = conversation();
-
-            let composer = submit_in(repo.path(), &mut app, &mut chat, "/brief", now);
-
-            assert_eq!(app.mode(), Mode::Chat, "a refusal entered the mode");
-            assert_eq!(turns(&app), 0, "a refusal spent a turn");
-            assert!(!chat.answering(), "a refusal asked the model something");
-            assert!(composer.draft().is_empty());
-            assert_eq!(
-                app.message(),
-                None,
-                "a refusal said something on the footer"
-            );
-
-            let said = rows(&app, now);
-            assert_eq!(said.len(), 1, "a refusal is one line: {said:?}");
-            let Some(Line::Note { text }) = said.first() else {
-                panic!("a refusal is a note of warlock's own: {said:?}");
-            };
-            assert!(
-                text.contains(&reason),
-                "the loader's own words are not in it: {text}"
-            );
-            assert!(
-                text.contains(&path.display().to_string()),
-                "the file is not named: {text}"
-            );
-            assert!(!text.contains('\n'), "the refusal wrapped: {text}");
-            assert!(
-                !text.contains("## Success criteria"),
-                "the built-in shape leaked into the refusal: {text}"
-            );
-
-            // And the next `/brief`, once the file reads again, is an ordinary
-            // one: the refusal left nothing behind to recover from.
-            fs::write(&path, "## Ours\n\nsay the thing.").expect("a template file");
-            submit_in(repo.path(), &mut app, &mut chat, "/brief", now);
-
-            assert_eq!(app.mode(), Mode::Brief, "the mode was still not entered");
-            assert_eq!(turns(&app), 1, "the second brief opened no turn");
-        }
-
-        #[test]
-        fn a_repository_that_says_nothing_briefs_into_the_default_directory() {
-            // Where a `/write` in this mode would put the document is a value
-            // this command settles and the loop then holds: `/write` reads
-            // nothing, so a brief that has taken twenty turns cannot arrive at a
-            // window that will not open. A repository with no
-            // `.warlock/briefs.toml` has stated no preference, which is the
-            // engine's default and nothing said on the card — and it is written
-            // here rather than left wherever a previous mode pointed.
-            let now = Instant::now();
-            let repo = a_root();
-            let mut app = App::default();
-            let mut chat = conversation();
-            let mut brief_directory = String::from("somewhere a previous mode was pointed");
-
-            submit_briefing(
-                repo.path(),
-                &mut app,
-                &mut chat,
-                &mut brief_directory,
-                "/brief",
-                now,
-            );
-
-            assert_eq!(app.mode(), Mode::Brief, "the mode was not entered");
-            assert_eq!(turns(&app), 1, "the brief did not open one turn");
-            assert_eq!(rows(&app, now).len(), 1 + 2, "something was said about it");
-            assert_eq!(brief_directory, DEFAULT_BRIEF_DIRECTORY);
-            // And that is a proposal under `docs/`, through the very function
-            // the loop opens the write window with.
-            let proposed = proposal(repo.path(), &brief_directory);
-            assert!(
-                proposed.starts_with("docs/"),
-                "the default is not where a write would go: {proposed}",
-            );
-        }
-
-        #[test]
-        fn the_repositorys_own_directory_is_what_brief_settles_on() {
-            // One key in one hand-written file, read at this keystroke: a
-            // repository that keeps its briefs in `plans/` gets `plans/`, and
-            // nothing about the command changes — the mode is entered, the note
-            // is the note, and the turn is the turn.
-            let now = Instant::now();
-            let repo = a_root();
-            write_briefs(repo.path(), "directory = \"plans\"\n");
-            let mut app = App::default();
-            let mut chat = conversation();
-            let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
-
-            submit_briefing(
-                repo.path(),
-                &mut app,
-                &mut chat,
-                &mut brief_directory,
-                "/brief",
-                now,
-            );
-
-            assert_eq!(app.mode(), Mode::Brief, "the mode was not entered");
-            assert_eq!(
-                rows(&app, now),
-                [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
-                "a setting that reads said something on the card",
-            );
-            assert_eq!(brief_directory, "plans");
-            let proposed = proposal(repo.path(), &brief_directory);
-            assert!(
-                proposed.starts_with("plans/"),
-                "the setting is not where a write would go: {proposed}",
-            );
-        }
-
-        #[test]
-        fn a_briefs_config_that_cannot_be_read_refuses_the_brief_and_changes_nothing_else() {
-            // The template's refusal, over the other file and for the same
-            // reason: a `directory` somebody wrote down is a place somebody
-            // meant, so warlock will not quietly aim twenty turns at `docs/`
-            // instead. One line naming the file and quoting the parser, and the
-            // session otherwise exactly as it was — no mode, no turn, no
-            // `claude`, nothing on the footer, and the directory the loop was
-            // carrying untouched.
-            let now = Instant::now();
-            let repo = a_root();
-            let path = write_briefs(repo.path(), "directory = [\n");
-            // The loader's own sentence, flattened the way the note flattens it:
-            // a `briefs.toml` that will not parse carries the TOML parser's
-            // multi-line diagnostic, and the card is one line a note.
-            let reason = one_line(
-                &load_briefs(repo.path())
-                    .expect_err("a config that is not TOML")
-                    .to_string(),
-            );
-            let mut app = App::default();
-            let mut chat = conversation();
-            let mut brief_directory = String::from("somewhere a previous mode was pointed");
-
-            let composer = submit_briefing(
-                repo.path(),
-                &mut app,
-                &mut chat,
-                &mut brief_directory,
-                "/brief",
-                now,
-            );
-
-            assert_eq!(app.mode(), Mode::Chat, "a refusal entered the mode");
-            assert_eq!(turns(&app), 0, "a refusal spent a turn");
-            assert!(!chat.answering(), "a refusal asked the model something");
-            assert!(composer.draft().is_empty());
-            assert_eq!(
-                app.message(),
-                None,
-                "a refusal said something on the footer"
-            );
-            assert_eq!(
-                brief_directory, "somewhere a previous mode was pointed",
-                "a refusal moved where a brief would go",
-            );
-
-            let said = rows(&app, now);
-            assert_eq!(said.len(), 1, "a refusal is one line: {said:?}");
-            let Some(Line::Note { text }) = said.first() else {
-                panic!("a refusal is a note of warlock's own: {said:?}");
-            };
-            assert!(
-                text.contains(&path.display().to_string()),
-                "the file is not named: {text}"
-            );
-            assert!(
-                text.contains(&reason),
-                "the parser's own words are not in it: {text}"
-            );
-            assert!(!text.contains('\n'), "the refusal wrapped: {text}");
-
-            // And the next `/brief`, once the file reads again, is an ordinary
-            // one: the refusal left nothing behind to recover from, and the
-            // setting that now parses is the setting the mode is entered with.
-            fs::write(&path, "directory = \"plans\"\n").expect("a briefs config");
-            submit_briefing(
-                repo.path(),
-                &mut app,
-                &mut chat,
-                &mut brief_directory,
-                "/brief",
-                now,
-            );
-
-            assert_eq!(app.mode(), Mode::Brief, "the mode was still not entered");
-            assert_eq!(turns(&app), 1, "the second brief opened no turn");
-            assert_eq!(brief_directory, "plans");
-        }
-
-        #[test]
-        fn two_broken_files_are_still_one_line_and_no_turn() {
-            // The decision when both files under `.warlock/` are broken: the
-            // load stops at the first, so the reader gets one refusal rather
-            // than two, and the second file's line is what the next `/brief`
-            // says once this one is fixed. Two notes for one keystroke would be
-            // warlock reporting its own reading order.
-            let now = Instant::now();
-            let repo = a_root();
-            let template = write_template(repo.path(), "");
-            fs::write(&template, [0x23, 0x20, 0xff, 0xfe, 0x0a]).expect("a template file");
-            write_briefs(repo.path(), "directroy = \"plans\"\n");
-            let mut app = App::default();
-            let mut chat = conversation();
-            let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
-
-            submit_briefing(
-                repo.path(),
-                &mut app,
-                &mut chat,
-                &mut brief_directory,
-                "/brief",
-                now,
-            );
-
-            assert_eq!(app.mode(), Mode::Chat, "a refusal entered the mode");
-            assert_eq!(turns(&app), 0, "a refusal spent a turn");
-            let said = rows(&app, now);
-            assert_eq!(said.len(), 1, "two files, two lines: {said:?}");
-            let Some(Line::Note { text }) = said.first() else {
-                panic!("a refusal is a note of warlock's own: {said:?}");
-            };
-            assert!(
-                text.contains(&template.display().to_string()),
-                "the first file read is not the one named: {text}"
-            );
-
-            // The template fixed, the misspelled key is what the next one says
-            // — and it is still one line and still no turn.
-            fs::write(&template, "## Ours\n\nsay the thing.").expect("a template file");
-            submit_briefing(
-                repo.path(),
-                &mut app,
-                &mut chat,
-                &mut brief_directory,
-                "/brief",
-                now,
-            );
-
-            assert_eq!(
-                app.mode(),
-                Mode::Chat,
-                "the second refusal entered the mode"
-            );
-            assert_eq!(turns(&app), 0, "the second refusal spent a turn");
-            let said = rows(&app, now);
-            assert_eq!(
-                said.len(),
-                2,
-                "the second refusal is one more line: {said:?}"
-            );
-            let Some(Line::Note { text }) = said.last() else {
-                panic!("a refusal is a note of warlock's own: {said:?}");
-            };
-            assert!(
-                text.contains(&briefs_path(repo.path()).display().to_string()),
-                "the second file is not named: {text}"
-            );
-            assert!(
-                text.contains("directroy"),
-                "the offending key is not named: {text}"
-            );
-            assert_eq!(
-                brief_directory, DEFAULT_BRIEF_DIRECTORY,
-                "a refusal moved where a brief would go",
-            );
-        }
-
-        #[test]
-        fn a_second_brief_re_reads_the_file_and_takes_the_new_directory() {
-            // The file is read at every `/brief` and never held, so editing it
-            // with `e` and typing the command again is the whole of changing
-            // where a brief lands — no restart, and nothing on the app or the
-            // conversation remembering the old answer.
-            let now = Instant::now();
-            let repo = a_root();
-            write_briefs(repo.path(), "directory = \"plans\"\n");
-            let mut app = App::default();
-            let mut chat = conversation();
-            let mut brief_directory = DEFAULT_BRIEF_DIRECTORY.to_owned();
-
-            submit_briefing(
-                repo.path(),
-                &mut app,
-                &mut chat,
-                &mut brief_directory,
-                "/brief",
-                now,
-            );
-            assert_eq!(brief_directory, "plans");
-
-            write_briefs(repo.path(), "directory = \"notes/adr\"\n");
-            submit_briefing(
-                repo.path(),
-                &mut app,
-                &mut chat,
-                &mut brief_directory,
-                "/brief",
-                now,
-            );
-
-            assert_eq!(
-                brief_directory, "notes/adr",
-                "the second /brief re-read nothing"
-            );
-            assert_eq!(app.mode(), Mode::Brief);
-            assert_eq!(turns(&app), 2, "the second /brief cost no turn");
-        }
-
-        #[test]
-        fn brief_in_brief_mode_re_sends_the_instruction_and_notes_nothing() {
-            // Typing it again is the remedy for a register that has drifted, so
-            // it costs a turn every time — and says nothing new about the mode,
-            // because the mode did not change.
-            let now = Instant::now();
-            let mut app = App::default();
-            let mut chat = conversation();
-
-            submit_into(&mut app, &mut chat, "/brief", now);
-            submit_into(&mut app, &mut chat, "/brief", now);
-
-            assert_eq!(app.mode(), Mode::Brief);
-            assert_eq!(
-                rows(&app, now),
-                [
-                    vec![note(BRIEF_NOTE)],
-                    asked(BRIEF_COMMAND).to_vec(),
-                    asked(BRIEF_COMMAND).to_vec(),
-                ]
-                .concat(),
-            );
-            assert_eq!(turns(&app), 2, "the second /brief cost no turn");
-        }
-
-        #[test]
-        fn chat_leaves_the_mode_with_one_note_and_one_turn() {
-            // The way out, and the same shape as the way in: the register is
-            // left, warlock says so once, and the model is told the other
-            // instruction as one ordinary turn shown as `/chat`.
-            let now = Instant::now();
-            let mut app = App::default();
-            let mut chat = conversation();
-
-            submit_into(&mut app, &mut chat, "/brief", now);
-            submit_into(&mut app, &mut chat, "/chat", now);
-
-            assert_eq!(app.mode(), Mode::Chat, "/chat did not leave the mode");
-            assert_eq!(
-                rows(&app, now),
-                [
-                    vec![note(BRIEF_NOTE)],
-                    asked(BRIEF_COMMAND).to_vec(),
-                    vec![note(CHAT_NOTE)],
-                    asked(CHAT_COMMAND).to_vec(),
-                ]
-                .concat(),
-            );
-            assert_eq!(turns(&app), 2);
-            assert!(chat.answering(), "the instruction was never sent");
-        }
-
-        #[test]
-        fn chat_in_chat_mode_is_one_line_and_costs_no_turn() {
-            // There is nothing to leave, so there is nothing to tell the model:
-            // a turn spent saying the conversation is where it already was is a
-            // question nobody asked and money nobody meant to spend.
-            let now = Instant::now();
-            let (app, chat, composer) = submit("/chat", now);
-
-            assert_eq!(app.mode(), Mode::Chat);
-            assert_eq!(rows(&app, now), vec![note(ALREADY_CHATTING)]);
-            assert_eq!(turns(&app), 0, "/chat in chat mode opened a turn");
-            assert!(!chat.answering(), "/chat in chat mode asked the model");
-            assert!(composer.draft().is_empty());
-
-            // And the same after a mode that really was left: the refusal is
-            // about the state, not about how the conversation got into it.
-            let mut app = App::default();
-            let mut chat = conversation();
-            submit_into(&mut app, &mut chat, "/brief", now);
-            submit_into(&mut app, &mut chat, "/chat", now);
-            let before = turns(&app);
-            submit_into(&mut app, &mut chat, "/chat", now);
-
-            assert_eq!(turns(&app), before, "the second /chat cost a turn");
-            assert_eq!(
-                rows(&app, now).last(),
-                Some(&note(ALREADY_CHATTING)),
-                "the second /chat said something else",
-            );
-        }
-
-        #[test]
-        fn a_mode_clears_hides_and_reorders_nothing_that_was_already_said() {
-            // The property the whole design rests on: the turns already on the
-            // card are the material a document is made of. Entering the mode and
-            // leaving it again puts rows *under* them and moves none of them.
-            let now = Instant::now();
-            let mut app = App::default();
-            let mut chat = conversation();
-
-            submit_into(&mut app, &mut chat, "why nine passes?", now);
-            let before = rows(&app, now);
-            submit_into(&mut app, &mut chat, "/brief", now);
-            submit_into(&mut app, &mut chat, "/chat", now);
-
-            let after = rows(&app, now);
-            assert_eq!(after[..before.len()], before[..], "the card was rewritten");
-            assert_eq!(
-                after,
-                [
-                    before,
-                    vec![note(BRIEF_NOTE)],
-                    asked(BRIEF_COMMAND).to_vec(),
-                    vec![note(CHAT_NOTE)],
-                    asked(CHAT_COMMAND).to_vec(),
-                ]
-                .concat(),
-            );
-            assert_eq!(turns(&app), 3);
-        }
-
-        #[test]
-        fn a_mode_leaves_every_answer_and_every_work_line_exactly_where_it_was() {
-            // The same property with the card full rather than empty, which is
-            // the state a `/brief` is actually typed in: the conversation worth
-            // converging on is one that has been going for a while, and by then
-            // the turns on the card carry the answers and the work lines that
-            // are the material a document is made of. Losing those to a mode
-            // change would be losing the brief before it started — and it is
-            // the failure a second session would show up as, because a session
-            // that starts again starts with nothing on the card.
-            //
-            // The rows come first, because that is what the reader has, and
-            // then the turns themselves, because a row that merely *drew* the
-            // same is not the same answer.
-            let now = Instant::now();
-            let later = now + Duration::from_secs(30);
-            let mut app = App::default();
-            let mut chat = conversation();
-
-            // One turn that was worked at and answered, and one that ended
-            // without an answer: both are things a mode change could drop.
-            submit_into(&mut app, &mut chat, "why nine passes?", now);
-            app.record_turn(
-                &Activity::Tool {
-                    name: "Read".to_owned(),
-                    detail: Some("crates/warlock-engine/src/lib.rs".to_owned()),
-                },
-                now,
-            );
-            app.record_turn(&Activity::Thinking, now);
-            app.answer_turn("One pass per directory, bottom up.", now);
-            submit_into(&mut app, &mut chat, "and the manifest?", now);
-            app.end_turn(&Ending::NothingSaid, now);
-
-            let before = rows(&app, later);
-            let asked_already: Vec<_> = app
-                .thread()
-                .expect("two questions were asked")
-                .turns()
-                .into_iter()
-                .cloned()
-                .collect();
-            // The history is really a history: an answer, work lines and an
-            // ending are all on the card before the mode is touched, so the
-            // equalities below are about something rather than about nothing.
-            assert!(
-                before.iter().any(|line| matches!(line, Line::Text { .. })),
-                "there is no answer on the card to survive anything: {before:?}"
-            );
-            assert!(
-                before
-                    .iter()
-                    .filter(|line| matches!(line, Line::Clocked { .. }))
-                    .count()
-                    >= 3,
-                "there is no work on the card to survive anything: {before:?}"
-            );
-
-            submit_into(&mut app, &mut chat, "/brief", later);
-            submit_into(&mut app, &mut chat, "/chat", later);
-
-            // Every row that was there is still there, at the index it was at:
-            // nothing cleared, nothing hidden, nothing reordered, and the two
-            // answers and every work line word for word.
-            let after = rows(&app, later);
-            assert_eq!(
-                after[..before.len()],
-                before[..],
-                "entering and leaving the register rewrote the conversation"
-            );
-            // And the turns under those rows: the message, the answer and the
-            // ending of each, unchanged and in the order they were asked in.
-            let asked_now: Vec<_> = app
-                .thread()
-                .expect("the conversation is still there")
-                .turns()
-                .into_iter()
-                .cloned()
-                .collect();
-            assert_eq!(
-                asked_now[..asked_already.len()],
-                asked_already[..],
-                "a mode change took a turn of the conversation"
-            );
-            assert_eq!(
-                asked_now.len(),
-                asked_already.len() + 2,
-                "the two commands did not cost the two turns they are supposed to"
-            );
-            assert_eq!(app.mode(), Mode::Chat, "the register was never left");
-        }
-
-        #[test]
-        fn a_refusal_is_exactly_one_note_and_never_a_turn() {
-            // The whole of what a missed command costs: one line on the card,
-            // in warlock's own voice, and not a question anybody paid for.
-            let now = Instant::now();
-            let refusal = Submitted::Refused
-                .refusal()
-                .expect("a refused draft has a line");
-
-            for draft in ["/breif", "/plan", "/BRIEF", "/", "/brief now", "/brief\nx"] {
-                let (app, chat, composer) = submit(draft, now);
-
-                assert_eq!(
-                    rows(&app, now),
-                    vec![Line::Note {
-                        text: refusal.to_owned()
-                    }],
-                    "{draft:?} did not leave exactly one note"
-                );
-                assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
-                assert!(!chat.answering(), "{draft:?} was asked of the model");
-                assert!(
-                    composer.draft().is_empty(),
-                    "{draft:?} was left in the field"
-                );
-            }
-        }
-
-        #[test]
-        fn a_message_submits_as_it_always_did() {
-            // The behaviour the classifier must not have changed: the words go
-            // on the card as the reader's own, one turn is opened, the question
-            // is out, and the field is empty behind it. A path is here too,
-            // because `/home/cole/notes` is a message and the reader who typed
-            // it is talking about a file.
-            let now = Instant::now();
-
-            for draft in [
-                "why nine passes?",
-                "/home/cole/notes",
-                "tell me about /brief",
-            ] {
-                let (app, chat, composer) = submit(draft, now);
-
-                assert_eq!(turns(&app), 1, "{draft:?} did not open one turn");
-                // The question as it was typed, and under it the clocked row a
-                // turn with nothing back yet draws — a live turn, which is
-                // exactly what a command and a refusal never leave.
-                assert_eq!(
-                    rows(&app, now),
-                    vec![
-                        Line::Said {
-                            text: draft.to_owned()
-                        },
-                        Line::Clocked {
-                            clock: "0:00".to_owned(),
-                            text: "waiting".to_owned()
-                        }
-                    ],
-                    "{draft:?} is not on the card as it was typed"
-                );
-                assert!(chat.answering(), "{draft:?} was never asked");
-                assert!(
-                    composer.draft().is_empty(),
-                    "{draft:?} was left in the field"
-                );
-            }
-        }
     }
 }
