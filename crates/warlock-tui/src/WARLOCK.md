@@ -1,55 +1,30 @@
-# src
+# `src`
 
-This is `warlock_tui`'s library crate: the pure core of the terminal front end, plus `main.rs`'s binary shell around it. Three modal gates (confirm-on-quit, scope prompt, write-path prompt) and the session/pact/scoping plumbing wire it together. Almost everything here is a pure function over data — no terminal, no clock read internally, no process spawned — which is what lets minutes-long pacts and a whole UI be driven through tests in microseconds against in-memory buffers and hand-fed instants.
+## What this is
 
-## What is here
+This is the source directory of `warlock-tui`, the crate that implements warlock's terminal front end minus the actual terminal handling — that lives one crate over, in the binary (`main.rs` and its siblings: `pacting.rs`, `chatting.rs`, `scoping.rs`, `viewing.rs`, `editing.rs`, `writing.rs`, `session.rs`, `terminal.rs`, `input.rs`, `config.rs`, `error.rs`). Per `lib.rs`, this crate is deliberately almost all data and pure functions over data: the flattened tree, colours, layout arithmetic, key-to-intention mappings, and three panel "cards" (an account of a pact, a conversation thread, a document). The one impure corner is `claude.rs`, which runs the `claude` CLI as a child process; everything else here touches no terminal, spawns no thread, and reads no clock of its own — instants are always handed in by a caller, which is what makes almost the entire crate testable against in-memory buffers.
 
-- **`lib.rs`** — the crate's manifest of exports; states the one hard rule: TUI depends on `warlock_engine`, never the reverse.
-- **`app.rs`** — `App`: the flattened, filtered, scrollable view over the engine's `Tree`, plus `reseat_on` for carrying that view across a freshly reloaded tree by path. Also `Chrome`, `Row`, `Focus`, `Sigils`, `PactToggle`, `Run`.
-- **`account.rs`** — `Account`, the running record of one pact's activity, clocked against a caller-supplied `Instant`.
-- **`chatting.rs`** — `Chat`: the whole conversation as one value — the agent, the turn in flight, the draft at the foot of the panel, where a brief would go, and the window a `/write` answer opens. Underneath it the same not-blocking shape as `pacting.rs` (`spawn_turn`, `start_turn`, `run_turn`, `apply_turn`) over a smaller job that writes no documents and reloads no tree.
-- **`claude.rs`** — the *only* place that spawns a child process: runs the `claude` CLI as both the engine's `Agent` (`ClaudeAgent`, for pacts) and a read-only chat agent (`ChatAgent`, for conversation turns).
-- **`template.rs`** — `brief_template`: the shape a brief-mode conversation is aimed at, read fresh at the keystroke — warlock's built-in `DEFAULT_TEMPLATE`, or `<root>/.warlock/brief-template.md` where the repository has written one instead.
-- **`colour.rs`** — the fixed, exhaustively-matched mapping from `NodeState`/focus/guide to indexed terminal colours.
-- **`composer.rs`** — the composer: the several-line draft field at the foot of the panel, and `compose_for`, which lets every single-letter command go back to being a letter while it holds the keyboard.
-- **`submission.rs`** — `submitted_for`/`Submitted`: what a submitted draft turns out to be — one of the three slash commands, an ordinary message for the model, or a refusal that words its own line.
-- **`confirm.rs`** — the quit-confirmation gate (`QuitConfirm`/`Answer`/`Answered`, `answer_for`). Not a field on `App`, so answering No leaves the app untouched. Ctrl-C bypasses it.
-- **`prompt.rs`** — the scope-entry field's sibling gate (`ScopePrompt`/`ScopeField`/`Edited`, `edit_for`). Judges nothing about scope validity.
-- **`scoping.rs`** — binary-side glue from keystroke to manifest write for the scope key: `scope_press`, `scope_edit`, `scope_submit`. Runs synchronously on the event loop's own thread.
-- **`ui.rs`** — pure rendering: `draw` builds one frame from `App`, `Account`, an `Instant`, `QuitConfirm`, `ScopePrompt`, and the composer; `hit_test` maps a screen point back to a named region.
-- **`watch.rs`** — filesystem watching split into an impure handle (`Watch`, wraps `notify`) and two pure decision types: `NodeSet` and `WatchPolicy`.
-- **`error.rs`** — `Error`, the binary's whole error vocabulary; every variant renders as one line via `one_line`.
-- **`fixture.rs`** — test-only, hand-written `Tree` values; unreachable outside `#[cfg(test)]`.
-- **`main.rs`** — the binary: terminal lifecycle, argument dispatch (`init`/`config`/`-h`/`--help`/else refused), the event loop, and its concurrency shape (pact/turn on worker threads, progress drained once per poll round).
-- **`input.rs`** — pure translation from crossterm events to `Action`/`MouseAction`/`Pressed`; `press_for` layers both modal gates and the composer in front of `action_for`.
-- **`pacting.rs`** — `Pact`: the agent runs are made with and the run in flight, with `press`/`keep_up`/`stop`/`running` — `Chat`'s opposite number. Spawns the worker thread, drives `pact_subtree`/`refresh_subtree`/`unpact_subtree`, translates worker events into `Account` updates, reloads the tree once at the end.
-- **`viewing.rs`** — the `v` key: reads a file into the panel's document card on the event loop's own thread. Never refused for an in-flight run, unlike pact/refresh/scope.
-- **`editing.rs`** — the `e` key: hands the terminal to `$EDITOR` via `TerminalGuard::suspended` and re-reads the file afterward if it's the one on the document card; also re-reads the tree, since an edited `WARLOCK.md` restales its own directory.
-- **`writing.rs`** — the `/write` artifact: `proposed_path` derives where a brief would go, while `write_opened`/`write_edit`/`write_submit` are the window's keystrokes and the one place warlock puts a document on disk.
-- **`session.rs`** — `Scope` (root + repo root + `Chrome`, resolved once), `reload_tree`, `Watched`, `sigils_held`/`sigils_under`, manifest loading.
-- **`config.rs`** — `warlock config`: prints what sigils this machine holds, reads one line from stdin in cooked mode, writes the machine-local sigil config under the home directory.
-- **`terminal.rs`** — `TerminalGuard` and `install_panic_hook`: the one guaranteed spelling of "restore the terminal" on every exit path, plus `suspended`, which gives the terminal to a foreign process and takes it back.
-- **`thread.rs`** — `Thread`/`Turn`/`Ending`: the panel's third card, the conversation.
-- **`wrap.rs`** — `wrapped`/`shape`/`rows`: breaks one card's lines into as many panel rows as they need at a given width.
+The dependency edge is one-way: this crate (`warlock-tui`) knows the engine's (`warlock_engine`) vocabulary; the engine knows nothing about terminals.
 
-## What a reader has to know before changing anything
+## How the files fit together
 
-**The purity boundary is the whole design.** Only `claude.rs` spawns a process; only `main.rs`/`terminal.rs`/`watch.rs`'s `Watch`/`config.rs`'s stdin touch a real terminal, clock, OS watcher handle, or interactive stdin. Everything else is a pure function of its arguments, including the current instant, always passed in rather than read via `Instant::now()`.
+**The state and its rendering.** `app.rs` (given here only as a large summary — the file itself was too large to send in full) is the central `App` type: flattened tree rows, selection, scroll, filters, the three-card `Panel`, and `reseat_on` for carrying view state across a tree reload. `ui.rs` (also summarised) is where `App` becomes pixels: `draw`, layout (`areas`, `tree_height`, `panel_height`, `composer_height`), `hit_test` for the mouse, and all the visual vocabulary (markers, guides, the mark logo, the quit-confirmation and scope-prompt windows). `colour.rs` is the small, load-bearing map from `NodeState` (and focus) to terminal colour — the one place that mapping lives, with tests asserting no two meanings share a colour. `wrap.rs` breaks one logical line from a card into the rows a panel of a given width can draw, without truncating or losing any text (the alternative to horizontal scrolling this UI refuses to offer).
 
-**Two clocks, one rule.** `Account`'s per-line clocks and `WatchPolicy`'s debounce/ceiling timers both freeze on the next event and tick against `now` only while still "live." `Thread`'s turns share the very same `Log` machinery as `Account`.
+**The three panel cards.** `account.rs` is the record of one pact run: `Account`/`Section`/`Log`, the ticking-clock rules for the "newest line counts up" behaviour, `Outcome` wording, byte/money formatting shared with the rest of the UI. `thread.rs` is the conversation card: `Thread`/`Turn`/`Ending`, the same clock machinery reused (via `Log`) rather than duplicated, and the rule that a pact running behind a conversation never leaks into it. Both deliberately hold no channel, no clock, and no model prose beyond what's explicitly captured.
 
-**Two agents, one seam, and one value apiece.** `ClaudeAgent` implements the engine's `Agent` port for pacts and lives inside `Pact`; `ChatAgent` is a sibling that is *not* an `Agent` and lives inside `Chat` — a turn is a typed message, not a request, one session for the process's life, granted only `Read`/`Grep`/`Glob`, never able to write.
+**Keyboard, mouse, and the small stateful widgets that sit over the frame.** `input.rs` translates raw key/mouse events into `Action`/`MouseAction`/`Pressed`, including the "gate on the way out" logic threading through the quit confirmation, scope prompt, write prompt, and composer, all as pure functions. `confirm.rs` (`QuitConfirm`/`Answer`/`answer_for`) and `prompt.rs` (`ScopePrompt`/`ScopeField`/`edit_for`) are small pure state machines for those two modal windows, kept off `App` on purpose so answering "No"/Esc can never have mutated anything. `composer.rs` is the multi-line draft field at the foot of the panel (`Composer`, `compose_for`, `Composed`), with its own row-wrapping and height-under-cap logic. `submission.rs` (`submitted_for`/`Submitted`) is the tiny, case-sensitive parser deciding whether a submitted draft is `/brief`, `/write`, `/chat`, an ordinary message, or a refusal.
 
-**A run can happen inside a conversation.** A pact or refresh started while the thread is on screen appends as a turn nobody typed, holding the very `Account` the account card holds for the same run.
+**The model/agent seam.** `claude.rs` is the one file that runs anything: `ClaudeAgent` (implements the engine's `Agent` port for pacts) and `ChatAgent` (a separate, read-only, session-persistent conversational agent for turns) both wrap the `claude` CLI as a child process, with the plumbing to avoid the three classic pipe/wait deadlocks, a `Cancel`/`Activities` port pair for stopping and observing a run from another thread, and a private `stream` submodule that turns `stream-json` lines into `Activity` values.
 
-**Every keystroke that starts a run refuses to start a second one.** `p` and `r` go through `Pact::press`, which reads the one run `Pact` holds before it decides anything; `s` checks the same fact through `Pact::running`.
+**Brief-mode support.** `template.rs` owns `DEFAULT_TEMPLATE`, `brief_template` (reads a repo's own `.warlock/brief-template.md` fresh every call, never caching), and `missing_sections` (the one place a written document's headings are checked against the template — generously, and only to refuse a bad write, never to edit one).
 
-**Footer messaging has one precedence rule**, enforced by `session::note`: housekeeping gives way to whatever a pact's own message says.
+**Test-only.** `fixture.rs` is a hand-written `Tree` (and a post-run variant) used throughout this crate's own tests so no test needs a real filesystem; it's `#[cfg(test)]` and private, and it documents its own shape carefully since many other tests' line-by-line assertions depend on it exactly.
 
-**Modal gates and the composer layer in a fixed order** (documented on `input::press_for`): Ctrl-C first, then the quit question, then the scope prompt, then the write-path prompt, then the composer, then the ordinary keys.
+## What a reader needs to know before changing anything here
 
-**A view (`v`) and a swap are not pacts**, and unlike `p`/`r`/`s` are never refused for an in-flight run.
-
-**Colours are fixed and few on purpose**: three state colours plus focus plus guide, all indexed and exhaustively matched. Adding a `NodeState` variant fails compilation deliberately.
-
-**This is not an IDE.** No prompt box beyond the narrow composer, no chat vocabulary bleeding into the account's lines or vice versa; the panel is a freshness ledger with a conversation bolted on, not a dashboard.
+- **Nothing here reads a clock or touches a terminal except `claude.rs`.** Every function that draws or computes layout takes `now`/`size` as a parameter. Preserve this if you add anything — it's what keeps the whole crate testable without a tty.
+- **The three modal windows (`QuitConfirm`, `ScopePrompt` used for both scope and write, and the composer) are deliberately not fields on `App`.** This is so that abandoning them (Esc) is guaranteed to leave `App` byte-for-byte unchanged, rather than relying on careful field-by-field restoration.
+- **Colour means node state, and only node state** (see `colour.rs`); `FOCUS_COLOUR` and `GUIDE_COLOUR` are deliberately picked to be distinct from every `NodeState` colour, and tests enforce pairwise distinctness. Don't reach for a new colour to distinguish something else — the codebase's convention is to use bold/dim/markers instead.
+- **A run (pact/refresh) writing into the account card must never leak into the thread card, and vice versa** — this is asserted repeatedly across `account.rs`/`thread.rs`/`ui.rs` tests. If you touch the panel-swap or card-filling logic, preserve that separation.
+- **`app.rs` and `ui.rs` were summarised rather than sent in full** (they're very large — hundreds of KB each). Treat the descriptions above as a guide to their shape, not a substitute for reading them directly before making non-trivial changes to `App` or the drawing code.
+- **This crate's own `Cargo.toml`/manifest and the workspace's dependency graph were not part of this request**, so nothing here can be said about build configuration beyond what's implied by the code (e.g., `ratatui`, `crossterm`, `serde_json`, `notify`, `tempfile` for dev-deps).

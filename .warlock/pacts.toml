@@ -1,38 +1,37 @@
 version = 1
 
 [[pact]]
+module = "crates/warlock-tui/src"
+document = "crates/warlock-tui/src/WARLOCK.md"
+granted_hash = "17e71f666d8e592dec7eb02204cf1381b36ec0d5d6d01c4f3e9f65a766d158b8"
+granted_at = "2026-09-01T11:45:39Z"
+
+[[pact]]
 module = "."
 document = "WARLOCK.md"
-scope = "warlock-team"
-granted_hash = "c4f37dba66d944aef62f83cee354ce84d7aae91e1e3ae264ae8adcc41cafcf10"
-granted_at = "2026-09-01T10:06:58Z"
+granted_hash = "062590b19b0d135d018c281dcb2c20c569af25a60005989747a0178c2577cdc5"
+granted_at = "2026-09-01T11:45:39Z"
 
 [[pact]]
 module = "crates"
 document = "crates/WARLOCK.md"
-granted_hash = "44348be2393d40d740b51720f6949bd56a6a34ff64bb9b44a68bbf6049ad75e9"
-granted_at = "2026-09-01T10:06:58Z"
+granted_hash = "f67e0e190394a093a14013d3f0be8a1f6a3b57bc22522852c0db40e9e4c98a56"
+granted_at = "2026-09-01T11:45:39Z"
 
 [[pact]]
 module = "crates/warlock-engine"
 document = "crates/warlock-engine/WARLOCK.md"
-granted_hash = "2ca0a2fb5a5b3913876c43d66595489ffe8c58322506e3982ed41f4ba48cbcc3"
-granted_at = "2026-09-01T02:21:18Z"
+granted_hash = "d095f5f2de3f304e5adacfb1dc76b69674daa74ec148c0d1dc74b10f2e07036b"
+granted_at = "2026-09-01T11:45:39Z"
 
 [[pact]]
 module = "crates/warlock-engine/src"
 document = "crates/warlock-engine/src/WARLOCK.md"
-granted_hash = "8eacd27e81f890fb1561bd04e79a88c94379a674ea6ac65535bf471a243ad275"
-granted_at = "2026-09-01T02:21:18Z"
+granted_hash = "82e5ce399212769e809e7af911dad4ee623d80650a5e38882fb0019317e7ec53"
+granted_at = "2026-09-01T11:45:39Z"
 
 [[pact]]
 module = "crates/warlock-tui"
 document = "crates/warlock-tui/WARLOCK.md"
-granted_hash = "13e3978c98cc64523ad2ff4819d65c71de394000e34dc8ee7e0cd69a6c8f5cd3"
-granted_at = "2026-09-01T10:06:58Z"
-
-[[pact]]
-module = "crates/warlock-tui/src"
-document = "crates/warlock-tui/src/WARLOCK.md"
-granted_hash = "8a9104ca0ed4f7d1926c74a4522faa68c72c102216da312b5f1935a82bbac258"
-granted_at = "2026-09-01T10:06:58Z"
+granted_hash = "6fbb87b41b97aeebe2093c57cef21407c69b13b3da02c71f6f2734ee1d7b42da"
+granted_at = "2026-09-01T11:45:39Z"

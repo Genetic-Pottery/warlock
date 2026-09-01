@@ -3779,11 +3779,13 @@ mod tests {
             &lines[lines.len() - 6..],
             [
                 "crates/alpha".to_owned(),
-                // What the stopped pass had been handed: this directory's own
-                // document, which a refresh finds sitting there as a file, and
-                // its child's on top of it.
+                // What the stopped pass had been handed: no files at all — this
+                // directory holds nothing but documents — and the bytes of two
+                // of those, its own previous one and its child's. The document
+                // it already had is carried apart from the listing now, so it
+                // is counted here without being counted as a file.
                 format!(
-                    "0:20 waiting · 1 file, {} bytes",
+                    "0:20 waiting · 0 files, {} bytes",
                     document_bytes(&scratch, "crates/alpha")
                         + document_bytes(&scratch, "crates/alpha/src")
                 ),
