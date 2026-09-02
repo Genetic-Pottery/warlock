@@ -191,7 +191,9 @@
 //! machine holds for this repository and reads a line replacing them
 //! ([`config`]); `stale` and `fresh` print the pacted directories at or below a
 //! path that are in that state, a path a line or, with `--json`, one object
-//! ([`query`]); `-h` and `--help` print clap's help; and every other word, and
+//! ([`query`]); `check` says which scope covers a path, what this machine holds
+//! and whether the two meet, as prose or as one object ([`check`]); `-h` and
+//! `--help` print clap's help; and every other word, and
 //! every argument warlock has no place for, is clap's error and usage on stderr.
 //! Refusing is the point of the last of those: warlock used to open the tree for
 //! `warlock status`, which reads as the typed command having run.
@@ -201,10 +203,10 @@
 //! alternate screen, no raw mode and no panic hook — the hook exists to restore
 //! a terminal these paths never take, and `config` reads its line in cooked
 //! mode, which is also what makes Ctrl-C at its prompt an ordinary SIGINT that
-//! ends the process before anything is written. The two listings add a second
-//! reason of their own: their answer is read by a script through a pipe, and a
-//! program that had taken the alternate screen to print one would have piped its
-//! answer into a repaint.
+//! ends the process before anything is written. The two listings and the check
+//! add a second reason of their own: their answer is read by a script through a
+//! pipe, and a program that had taken the alternate screen to print one would
+//! have piped its answer into a repaint.
 //!
 //! The reader can hand the pointer back. `m` turns the terminal's reporting off
 //! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
@@ -233,6 +235,7 @@ use warlock_tui::{
 };
 
 mod chatting;
+mod check;
 mod config;
 mod editing;
 mod error;
@@ -246,6 +249,7 @@ mod viewing;
 mod writing;
 
 use chatting::Chat;
+use check::check;
 use config::configure;
 use editing::edit_press;
 use error::Error;
@@ -379,6 +383,24 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// `warlock check <path>`.
+    #[command(
+        about = "Say which scope covers a path and whether this machine's sigils open it.",
+        long_about = None
+    )]
+    Check {
+        // Required, unlike the two listings' optional path, and the doc comment
+        // below is one line for the reason every other one here is: clap lifts
+        // it into `--help`. A check is a walk up from one place, so there is no
+        // whole-repository answer for an omitted path to mean — leaving it off
+        // is a malformed invocation and clap's own exit status of 2.
+        /// Which path to answer about.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        /// Answer as one JSON object instead of three lines of prose.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -423,6 +445,12 @@ fn main() -> ExitCode {
         // is no terminal for it to restore.
         Some(Command::Stale { path, json }) => list(Listing::Stale, path, json),
         Some(Command::Fresh { path, json }) => list(Listing::Fresh, path, json),
+        // The third question, beside the two listings and for their reasons. It
+        // is the one that can answer "no" — a scope this machine's sigils do not
+        // open — and it still exits 0 for it: a closed boundary is the answer,
+        // not a failure to reach one, which is what leaves `jq -e '.opens'` to
+        // spend the non-zero status on the verdict. See [`check`].
+        Some(Command::Check { path, json }) => check(path, json),
     };
 
     match outcome {
@@ -1453,6 +1481,48 @@ mod tests {
     }
 
     #[test]
+    fn a_check_takes_the_path_it_is_a_check_of_and_a_json_flag_in_either_order() {
+        assert_eq!(
+            parse(&["check", "crates/engine"]).unwrap().command,
+            Some(Command::Check {
+                path: PathBuf::from("crates/engine"),
+                json: false
+            })
+        );
+        for args in [
+            ["check", "crates/engine", "--json"],
+            ["check", "--json", "crates/engine"],
+        ] {
+            assert_eq!(
+                parse(&args).unwrap().command,
+                Some(Command::Check {
+                    path: PathBuf::from("crates/engine"),
+                    json: true
+                }),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_check_with_no_path_is_a_malformed_invocation_rather_than_a_whole_repository_answer() {
+        // Unlike the two listings, whose omitted path means the repository
+        // root: a check is a walk up from one place, so there is no
+        // whole-repository answer for an absence to mean. Clap's refusal, so it
+        // is a 2 and not warlock answering about something nobody named.
+        for args in [
+            ["check"].as_slice(),
+            ["check", "--json"].as_slice(),
+            // And one path, as everywhere else here.
+            ["check", "a", "b"].as_slice(),
+        ] {
+            let error = parse(args).unwrap_err();
+            assert!(error.use_stderr(), "{args:?}");
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+        }
+    }
+
+    #[test]
     fn both_spellings_of_help_are_a_help_exit_that_succeeded() {
         // Not an error in the sense that matters: help was asked for, so it
         // goes to stdout and the process exits zero.
@@ -1471,6 +1541,7 @@ mod tests {
             ["config", "--help"],
             ["stale", "--help"],
             ["fresh", "--help"],
+            ["check", "--help"],
         ] {
             let error = parse(&args).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{args:?}");
@@ -1489,6 +1560,7 @@ mod tests {
             ("config", "sigils"),
             ("stale", "stale"),
             ("fresh", "fresh"),
+            ("check", "scope"),
         ] {
             let mut command = Cli::command();
             let help = command
@@ -1558,7 +1630,7 @@ mod tests {
         // `long_about = None` is what stands between `warlock --help` and the
         // essays above; without it clap lifts the doc comments wholesale.
         let help = Cli::command().render_long_help().to_string();
-        for subcommand in ["init", "config", "stale", "fresh"] {
+        for subcommand in ["init", "config", "stale", "fresh", "check"] {
             assert!(help.contains(subcommand), "{subcommand}: {help}");
         }
         assert!(!help.contains("panic hook"), "{help}");

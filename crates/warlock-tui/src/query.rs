@@ -242,8 +242,10 @@ fn listed(tree: &Tree, repo_root: &Path, wanted: NodeState) -> Result<Vec<Listed
 ///
 /// One line, in one place, so that the root check and every row of the answer
 /// cannot disagree about what a path is called or about what it means for one
-/// to have no name.
-fn spelled(repo_root: &Path, path: &Path) -> Result<String, Error> {
+/// to have no name. `warlock check` spells the path it was pointed at through
+/// the same line, so the three subcommands name one directory one way and
+/// refuse an unspellable one on the same grounds.
+pub(crate) fn spelled(repo_root: &Path, path: &Path) -> Result<String, Error> {
     to_manifest_path(repo_root, path).map_err(|source| Error::Unspellable { source })
 }
 
@@ -268,9 +270,18 @@ fn object(listing: Listing, directories: &[Listed]) -> Value {
 ///
 /// The envelope in one small place because it is shared rather than this
 /// listing's own — a check's answer is the same envelope with `scope`, `sigils`
-/// and `opens` in it — and because "exactly one parseable object" is a promise
-/// easier to keep in one function than in each subcommand that makes it.
-fn envelope(command: &str, body: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
+/// and `opens` in it, built in [`check`](crate::check) — and because "exactly
+/// one parseable object" is a promise easier to keep in one function than in
+/// each subcommand that makes it.
+///
+/// The order the fields go in is the order they are printed in, which is what
+/// makes `command` first a fact rather than an accident of the alphabet: see
+/// the `preserve_order` feature in the workspace manifest, taken for exactly
+/// this.
+pub(crate) fn envelope(
+    command: &str,
+    body: impl IntoIterator<Item = (&'static str, Value)>,
+) -> Value {
     let mut object = Map::new();
     object.insert(COMMAND.to_owned(), Value::String(command.to_owned()));
     for (field, value) in body {
@@ -285,7 +296,10 @@ fn envelope(command: &str, body: impl IntoIterator<Item = (&'static str, Value)>
 /// makes "exactly one object" visible from the shape of the output rather than
 /// only from parsing it. [`Value`]'s own [`Display`](std::fmt::Display) is that
 /// form, so there is no serialisation here that could fail.
-fn print_object(object: &Value) {
+///
+/// Shared with `warlock check` for the reason [`envelope`] is: every `--json`
+/// answer warlock prints is one line printed one way.
+pub(crate) fn print_object(object: &Value) {
     println!("{object}");
 }
 

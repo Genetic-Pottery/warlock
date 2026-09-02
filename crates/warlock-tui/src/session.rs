@@ -422,7 +422,15 @@ fn sigils_held(repo_root: &Path) -> Sigils {
 /// [`load_sigils`]) and joins the empty set as [`Sigils::Nothing`]: a machine
 /// that has never run `warlock config` and one that cleared its sigils hold the
 /// same nothing, and the header says nothing about either.
-fn sigils_under(home: &Path, repo_root: &Path) -> Sigils {
+///
+/// Shared with `warlock check`, which asks the same question with nothing on
+/// screen: what a machine holds is one resolution of one file, and a second
+/// reading of these three cases somewhere else would be a second answer waiting
+/// to disagree with the header. It takes `home` rather than looking one up for
+/// the reason [`sigils_held`] resolves one and hands it down — see
+/// [`home_directory`], the single point where the environment becomes a home
+/// path, which is what keeps every test off the developer's own.
+pub(crate) fn sigils_under(home: &Path, repo_root: &Path) -> Sigils {
     match load_sigils(home, repo_root) {
         Ok(sigils) => Sigils::held(sigils),
         Err(SigilError::NotFound { .. }) => Sigils::Nothing,

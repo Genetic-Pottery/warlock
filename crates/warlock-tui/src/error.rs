@@ -28,7 +28,9 @@ use warlock_engine::{ClaudeMdError, LoadError, LoadProblem, ManifestError, Scope
 /// second wording of the same sentences. Where one of them needs a sentence of
 /// its own, it is a variant here beside the others: [`Error::ClaudeMd`] is
 /// `init`'s, [`Error::NoHome`] and [`Error::Sigil`] are `config`'s, and
-/// [`Error::Unspellable`] is the listings'.
+/// [`Error::Unspellable`] belongs to the queries — the two listings and the
+/// check, which refuse a path with no repository-relative form on the same
+/// grounds and in the same words.
 #[derive(Debug)]
 pub(crate) enum Error {
     /// The working directory could not be read, so there is nothing to scope
@@ -74,6 +76,13 @@ pub(crate) enum Error {
     /// directory quietly left out would tell a script that nothing is stale
     /// there, which is the one thing warlock does not know about it. So it is a
     /// refusal with an exit status rather than a line dropped.
+    ///
+    /// `warlock check` refuses the same path on the same grounds, and the
+    /// reasoning is
+    /// [`scope_covering`](warlock_engine::scope_covering)'s own: a path the
+    /// manifest cannot spell is not an unscoped path, it is one this manifest
+    /// has nothing whatever to say about, and reporting it as `scope: null`
+    /// would tell a script it is open to anyone.
     ///
     /// Kept apart from [`Error::Manifest`] even though both carry the engine's
     /// [`ManifestError`]: that one is a file that would not read or write, and
