@@ -181,17 +181,18 @@
 //! them would be a question asked of somebody who has answered it.
 //!
 //! One thing now happens before any of that, and it happens with nothing
-//! attached to the terminal: the arguments are read. Zero of them is the whole
+//! attached to the terminal: the arguments are read. The parser is [`Cli`], a
+//! clap derive type, so the whole command line is a data structure rather than a
+//! chain of string comparisons and every case below is testable with no
+//! terminal, no repository and no process to spawn. No subcommand is the whole
 //! of warlock as it was — the panic hook, the loop, the alternate screen — and
 //! anything else is answered here and exits. `init` writes a `CLAUDE.md` at the
 //! repository root and says which file it wrote; `config` prints the sigils this
 //! machine holds for this repository and reads a line replacing them
-//! ([`config`]); `-h` and `--help` print the one usage line; and every other
-//! word, and every second argument, prints that same line on stderr and fails.
+//! ([`config`]); `-h` and `--help` print clap's help; and every other word, and
+//! every argument warlock has no place for, is clap's error and usage on stderr.
 //! Refusing is the point of the last of those: warlock used to open the tree for
-//! `warlock status`, which reads as the typed command having run. The decision
-//! is [`intention_for`], a function of the arguments alone, so all of it is
-//! testable with no terminal, no repository and no process to spawn.
+//! `warlock status`, which reads as the typed command having run.
 //!
 //! Both subcommands share one rule, and it is why they are dispatched here
 //! rather than anywhere inside [`run`]: neither goes near the terminal. No
@@ -214,6 +215,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use std::{env, io};
 
+use clap::{Parser, Subcommand};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, MouseEvent,
 };
@@ -265,20 +267,6 @@ use viewing::view_press;
 /// few timer wakeups.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// The whole of warlock's command line, in the one line it is printed as.
-///
-/// Printed on stdout when it was asked for and on stderr when it was not, and
-/// the same string either way: a reader who typed something warlock does not
-/// have should be shown exactly what a reader who asked for help is shown.
-///
-/// One line, because that is all there is to say — warlock is a terminal
-/// interface with two subcommands, not a CLI with a manual — and because the
-/// refusal path shares it, where several lines of help in answer to a typo would
-/// bury the fact that nothing ran.
-const USAGE: &str = "usage: warlock [init|config] — no arguments opens the tree; \
-                     `init` writes CLAUDE.md at the repository root; `config` sets \
-                     the sigils this machine holds for it";
-
 /// What `warlock init` wants the repository root for, as the tail of
 /// [`Error::NoRepository`]'s sentence. `config`'s own tail is spelled beside
 /// `config`, in its module.
@@ -293,36 +281,93 @@ const CREATED: &str = "created";
 /// twice is not owed a third word for it.
 const UPDATED: &str = "updated";
 
+/// What warlock was asked to do, as read off the command line and nothing else.
+///
+/// `name` is spelled out rather than taken from the package, because the package
+/// is `warlock-tui` and the executable it ships is `warlock`; the help and the
+/// usage lines have to say the word a reader typed.
+///
+/// `about` is written here and `long_about` is switched off, on this type and on
+/// every subcommand, because clap's derive otherwise lifts the doc comment above
+/// it into `--help`. This file's comments are essays for whoever maintains
+/// warlock, and a paragraph on why the panic hook is installed where it is would
+/// be a strange answer to `warlock --help`. Short help is the only help.
+///
+/// No `version` is declared, and that is a decision rather than an omission:
+/// `--version` and `-V` are unrecognized arguments, refused with everything else
+/// warlock does not have. Warlock is not installed from a registry and nobody is
+/// diagnosing a version skew in it yet, so the honest answer today is that the
+/// flag does not exist. Adding it later is `version` in the attribute below —
+/// not a reason to carry a half-answer in the meantime.
+///
+/// The subcommand is an `Option`, never `arg_required_else_help`: bare `warlock`
+/// is the tree, which is the thing warlock mostly is, not a mistake to be
+/// answered with help.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Parser)]
+#[command(
+    name = "warlock",
+    about = "A freshness ledger for a repository's documentation.",
+    long_about = None
+)]
+struct Cli {
+    /// Which of warlock's operations to run; none of them opens the tree.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// The operations warlock will do without opening the tree.
+///
+/// A unit variant each for now, and an enum rather than a parsed word so that
+/// the flags these grow — a `--json` per subcommand, next — are fields on a
+/// variant that turns into a struct, with nothing above here to change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+enum Command {
+    /// `warlock init`.
+    #[command(
+        about = "Write warlock's section of CLAUDE.md at the repository root.",
+        long_about = None
+    )]
+    Init,
+    /// `warlock config`.
+    #[command(
+        about = "Set the sigils this machine holds for this repository.",
+        long_about = None
+    )]
+    Config,
+}
+
 fn main() -> ExitCode {
     // Read before anything else happens and, deliberately, before anything
     // touches the terminal: `init`, help and a refusal all print on the ordinary
     // screen, and a program that entered the alternate screen to write one line
-    // would tear it down around a message nobody saw.
-    let outcome = match intention_for(env::args().skip(1)) {
-        Intention::Tui => {
+    // would tear it down around a message nobody saw. `parse` exits the process
+    // itself on a parse error or on `--help`, which is only safe because of that
+    // ordering: nothing is attached to the terminal yet, so there is nothing
+    // left un-restored by an exit from inside here.
+    //
+    // Two registers of failure, kept deliberately distinct. A command line clap
+    // could not parse is clap's: its wording, its usage line, its exit status of
+    // 2. Anything warlock itself could not do is warlock's: the `warlock: `
+    // prefix below and exit status 1. The split is load-bearing rather than
+    // cosmetic, and later slices are what it is for — when `warlock stale` can
+    // refuse because a path is outside the configured scope, a reader and a
+    // script both have to be able to tell that refusal from a typo by the exit
+    // status alone, without reading a word of either message.
+    let cli = Cli::parse();
+
+    let outcome = match cli.command {
+        None => {
             // Before anything touches the terminal: a panic during setup has to
             // leave the terminal usable too.
             install_panic_hook();
             run()
         }
-        Intention::Init => init(),
+        Some(Command::Init) => init(),
         // The second subcommand, dispatched here for the first one's reasons:
         // it prints on the ordinary screen and reads a line from stdin in cooked
         // mode, so nothing about it may touch the terminal — including the panic
         // hook, which exists to restore a terminal this path never takes.
-        Intention::Config => configure(),
-        // Asked for, so it goes to stdout and the exit status says it worked.
-        Intention::Help => {
-            println!("{USAGE}");
-            return ExitCode::SUCCESS;
-        }
-        // Not asked for, so the same line goes to stderr and the exit status
-        // says nothing ran. This is the arm that stops `warlock status` opening
-        // the tree as if the word had meant something.
-        Intention::Refuse => {
-            eprintln!("{USAGE}");
-            return ExitCode::FAILURE;
-        }
+        Some(Command::Config) => configure(),
     };
 
     match outcome {
@@ -336,64 +381,6 @@ fn main() -> ExitCode {
             eprintln!("warlock: {error}");
             ExitCode::FAILURE
         }
-    }
-}
-
-/// What warlock was asked to do, as decided by its arguments and nothing else.
-///
-/// Five things, which is all a program with two subcommands has: open the tree,
-/// write the file, set the sigils, say how it is invoked, or say that and fail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Intention {
-    /// No arguments: warlock as it has always been.
-    Tui,
-    /// `warlock init`.
-    Init,
-    /// `warlock config`.
-    Config,
-    /// `-h` or `--help`: [`USAGE`] on stdout, exit success.
-    Help,
-    /// Anything else at all: [`USAGE`] on stderr, exit failure.
-    Refuse,
-}
-
-/// What `args` — the arguments after the program's own name — asks warlock to
-/// do.
-///
-/// A handful of string comparisons rather than an argument parser, and
-/// deliberately so: warlock's command line is one optional word, and a
-/// dependency to compare one word against four is a dependency to keep up to
-/// date forever. A second subcommand is a second arm below, which is the whole
-/// of what it costs. Pure, so every arm is a test rather than a process to
-/// spawn.
-///
-/// More than one argument is refused before the first is even looked at, which
-/// is the rule that matters most here: `warlock init extra` typed by somebody
-/// who meant something by `extra` must not run an `init` that silently ignored
-/// it. `warlock config` takes no argument at all — the sigils are typed at its
-/// prompt, where the line that clears them can be explained first — so
-/// `warlock config data-plane` lands in the same refusal.
-fn intention_for(args: impl IntoIterator<Item = impl AsRef<str>>) -> Intention {
-    let mut args = args.into_iter();
-    let Some(first) = args.next() else {
-        return Intention::Tui;
-    };
-    if args.next().is_some() {
-        return Intention::Refuse;
-    }
-
-    match first.as_ref() {
-        "init" => Intention::Init,
-        "config" => Intention::Config,
-        "-h" | "--help" => Intention::Help,
-        // `--version` was considered and is deliberately left out: it lands
-        // here, in the refusal, along with everything else warlock does not
-        // have. Warlock is not installed from a registry and nobody is
-        // diagnosing a version skew in it yet, so the honest answer today is
-        // that the flag does not exist. Adding it later is one arm above this
-        // one and a `println!` of `env!("CARGO_PKG_VERSION")` — not a reason to
-        // carry a half-answer in the meantime.
-        _ => Intention::Refuse,
     }
 }
 
@@ -1303,7 +1290,20 @@ fn report_mouse(on: bool) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Intention, USAGE, intention_for};
+    use clap::error::ErrorKind;
+    use clap::{CommandFactory, Parser};
+
+    use super::{Cli, Command};
+
+    /// What warlock would do, given `args` after the program's own name.
+    ///
+    /// `try_parse_from` wants argv as the process gets it, program name and all,
+    /// so the name is put back here and every test below reads as the words a
+    /// person types.
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let typed = std::iter::once("warlock").chain(args.iter().copied());
+        Cli::try_parse_from(typed)
+    }
 
     #[test]
     fn the_binary_is_named_warlock() {
@@ -1311,59 +1311,104 @@ mod tests {
     }
 
     #[test]
+    fn the_parser_itself_is_well_formed() {
+        // Every misuse of the derive that clap can catch — a duplicate long
+        // flag, a subcommand named twice — is a panic here rather than in
+        // somebody's terminal.
+        Cli::command().debug_assert();
+    }
+
+    #[test]
     fn no_arguments_opens_the_tree() {
-        assert_eq!(intention_for(Vec::<String>::new()), Intention::Tui);
+        assert_eq!(parse(&[]).unwrap().command, None);
     }
 
     #[test]
     fn init_and_config_are_the_subcommands() {
-        assert_eq!(intention_for(["init"]), Intention::Init);
-        assert_eq!(intention_for(["config"]), Intention::Config);
+        assert_eq!(parse(&["init"]).unwrap().command, Some(Command::Init));
+        assert_eq!(parse(&["config"]).unwrap().command, Some(Command::Config));
     }
 
     #[test]
-    fn both_spellings_of_help_are_help() {
-        assert_eq!(intention_for(["-h"]), Intention::Help);
-        assert_eq!(intention_for(["--help"]), Intention::Help);
+    fn both_spellings_of_help_are_a_help_exit_that_succeeded() {
+        // Not an error in the sense that matters: help was asked for, so it
+        // goes to stdout and the process exits zero.
+        for spelling in ["-h", "--help"] {
+            let error = parse(&[spelling]).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{spelling}");
+            assert_eq!(error.exit_code(), 0, "{spelling}");
+            assert!(!error.use_stderr(), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn per_subcommand_help_is_a_help_exit_too() {
+        for args in [["init", "--help"], ["config", "--help"]] {
+            let error = parse(&args).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{args:?}");
+            assert_eq!(error.exit_code(), 0, "{args:?}");
+        }
     }
 
     #[test]
     fn a_word_warlock_does_not_have_is_refused_rather_than_opening_the_tree() {
         // The whole reason the dispatch exists: `warlock status` used to open
         // the tree, which reads as the typed command having run.
-        assert_eq!(intention_for(["status"]), Intention::Refuse);
-        assert_eq!(intention_for(["nonsense"]), Intention::Refuse);
-        assert_eq!(intention_for([""]), Intention::Refuse);
+        for word in ["status", "nonsense", ""] {
+            let error = parse(&[word]).unwrap_err();
+            assert!(error.use_stderr(), "{word}");
+            assert_eq!(error.exit_code(), 2, "{word}");
+        }
     }
 
     #[test]
     fn version_is_refused_because_warlock_does_not_have_one_yet() {
-        // Deliberate, and recorded on `intention_for`: the flag is not
-        // implemented, so it is refused like any other word warlock does not
-        // have rather than answered with a half-truth.
-        assert_eq!(intention_for(["--version"]), Intention::Refuse);
-        assert_eq!(intention_for(["-V"]), Intention::Refuse);
+        // Deliberate, and recorded on `Cli`: no version is declared, so the
+        // flag is an unrecognized argument like any other word warlock does not
+        // have rather than a half-truth about which warlock this is.
+        for spelling in ["--version", "-V"] {
+            let error = parse(&[spelling]).unwrap_err();
+            assert_ne!(error.kind(), ErrorKind::DisplayVersion, "{spelling}");
+            assert_eq!(error.exit_code(), 2, "{spelling}");
+        }
     }
 
     #[test]
     fn a_trailing_argument_is_refused_and_never_quietly_dropped() {
-        assert_eq!(intention_for(["init", "extra"]), Intention::Refuse);
-        assert_eq!(intention_for(["--help", "init"]), Intention::Refuse);
-        assert_eq!(intention_for(["init", "init", "init"]), Intention::Refuse);
-        assert_eq!(intention_for(["config", "extra"]), Intention::Refuse);
-        // The one somebody will try: the sigils are typed at the prompt, where
-        // the answer that clears them can be explained before it is given, and
-        // never as an argument.
-        assert_eq!(intention_for(["config", "data-plane"]), Intention::Refuse);
+        // `warlock init extra` typed by somebody who meant something by `extra`
+        // must not run an `init` that silently ignored it.
+        let refused: [&[&str]; 4] = [
+            &["init", "extra"],
+            &["init", "init", "init"],
+            &["config", "extra"],
+            // The one somebody will try: the sigils are typed at `config`'s
+            // prompt, where the answer that clears them can be explained before
+            // it is given, and never as an argument.
+            &["config", "data-plane"],
+        ];
+        for args in refused {
+            let error = parse(args).unwrap_err();
+            assert!(error.use_stderr(), "{args:?}");
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+        }
     }
 
     #[test]
-    fn the_usage_line_is_one_line_and_names_both_subcommands() {
-        // Printed on stdout when asked for and on stderr when not, and a usage
-        // line that wraps is a usage line that reads like a crash.
-        assert!(!USAGE.contains('\n'), "{USAGE}");
-        assert!(USAGE.contains("init"), "{USAGE}");
-        assert!(USAGE.contains("config"), "{USAGE}");
-        assert!(USAGE.starts_with("usage: warlock"), "{USAGE}");
+    fn a_parse_failure_and_a_warlock_failure_do_not_share_an_exit_status() {
+        // The split `main` records: clap's refusals are 2, and warlock's own
+        // failures are the 1 that `ExitCode::FAILURE` is. Later slices' scope
+        // refusals have to be tellable from a typo by the status alone.
+        assert_eq!(parse(&["status"]).unwrap_err().exit_code(), 2);
+    }
+
+    #[test]
+    fn help_prints_a_few_lines_rather_than_this_file() {
+        // `long_about = None` is what stands between `warlock --help` and the
+        // essays above; without it clap lifts the doc comments wholesale.
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("init"), "{help}");
+        assert!(help.contains("config"), "{help}");
+        assert!(!help.contains("panic hook"), "{help}");
+        assert!(help.lines().count() < 20, "{help}");
     }
 }
