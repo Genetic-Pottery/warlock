@@ -10,7 +10,9 @@
 use std::path::PathBuf;
 use std::{fmt, io};
 
-use warlock_engine::{ClaudeMdError, LoadError, LoadProblem, ManifestError, ScopeRule, SigilError};
+use warlock_engine::{
+    ClaudeMdError, LoadError, LoadProblem, ManifestError, PactError, ScopeRule, SigilError,
+};
 
 use crate::session::{blocking_scopes_message, closed_scope_message};
 
@@ -37,7 +39,9 @@ use crate::session::{blocking_scopes_message, closed_scope_message};
 /// the headless writes, which refuse a boundary this machine does not hold in
 /// the footer's own words, an un-pact that would drop one it does not hold in
 /// the footer's other ones, a scope that is not one in the engine's, and a
-/// directory nobody has pacted in the manifest's.
+/// directory nobody has pacted in the manifest's. [`Error::Pact`] is the
+/// headless run's — the one way `warlock pact` and `warlock refresh` fail as a
+/// whole rather than one directory at a time.
 #[derive(Debug)]
 pub(crate) enum Error {
     /// The working directory could not be read, so there is nothing to scope
@@ -193,6 +197,28 @@ pub(crate) enum Error {
         /// with forward slashes, and `.` for the root itself.
         module: String,
     },
+    /// The subtree a headless `warlock pact` or `warlock refresh` was aimed at
+    /// could not be walked, so the run never started.
+    ///
+    /// The one thing that fails a run as a whole rather than one directory of
+    /// it: everything else that goes wrong goes wrong for a single directory and
+    /// comes back in [`PactedSubtree::failures`](warlock_engine::PactedSubtree),
+    /// beside the manifest the rest of the subtree earned. A pact planned from
+    /// half a walk would silently leave directories out, which is why the engine
+    /// refuses it outright — see
+    /// [`pact_subtree`](warlock_engine::pact_subtree).
+    ///
+    /// Nothing has been written when this arrives, and no model pass has been
+    /// spent: the walk is the first thing either operation does, before any
+    /// directory is offered to the agent.
+    ///
+    /// The engine's own sentence, flattened, for [`Error::Manifest`]'s reason —
+    /// the walker names the directory and what the filesystem said, and there is
+    /// nothing warlock could add to that.
+    Pact {
+        /// Which of the engine's cases it was, with the directory it names.
+        source: PactError,
+    },
     /// A subcommand was run somewhere with no repository above it, so there is
     /// no root to write a `CLAUDE.md` at or to hold sigils for.
     ///
@@ -333,6 +359,10 @@ impl fmt::Display for Error {
             Self::Manifest { source } | Self::Unspellable { source } => {
                 write!(f, "{}", one_line(&source.to_string()))
             }
+            // The walker's own sentence, flattened like the manifest's: it names
+            // the directory it could not list and what the filesystem said,
+            // which is the whole of what happened.
+            Self::Pact { source } => write!(f, "{}", one_line(&source.to_string())),
             // The footer's own sentence, to the letter: the same fact refused
             // at a keystroke and at a shell prompt says the same thing, names
             // the same scope and points at the same `warlock config`.
@@ -410,6 +440,7 @@ impl std::error::Error for Error {
             | Self::Prompt { source } => Some(source),
             Self::Load { source } => Some(source),
             Self::Manifest { source } | Self::Unspellable { source } => Some(source),
+            Self::Pact { source } => Some(source),
             Self::ClaudeMd { source } => Some(source),
             Self::Sigil { rule, .. } | Self::Scope { rule } => Some(rule),
             Self::Sigils { source } => Some(source),

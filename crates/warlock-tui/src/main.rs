@@ -196,7 +196,9 @@
 //! drops the pact on a directory and every pact below it, and `scope add` and
 //! `scope remove` write and clear the boundary on one directory's pact — all
 //! three only if this machine holds the boundary covering the path
-//! ([`mod@edits`]); `-h` and
+//! ([`mod@edits`]); `pact` and `refresh` descend a subtree, spending a model
+//! pass per directory and saying on stdout where they have got to, behind that
+//! same boundary ([`mod@running`]); `-h` and
 //! `--help` print clap's help; and every other word, and
 //! every argument warlock has no place for, is clap's error and usage on stderr.
 //! Refusing is the point of the last of those: warlock used to open the tree for
@@ -252,6 +254,18 @@
 //! The whole vocabulary, and why the refusal is worth a number of its own, is in
 //! [`status_for`].
 //!
+//! `pact` and `refresh` are the writes that are not only a rewritten
+//! `.warlock/pacts.toml`, and they are the reason the boundary is worth a check
+//! that costs a file read before anything else happens. A run is minutes long,
+//! it hands one `claude --print` per directory to a model and it writes a
+//! `WARLOCK.md` beside each one, so a boundary asked any later than first would
+//! be asked after somebody's tokens were spent and somebody else's prose was
+//! overwritten. It is the same gate the three cheap writes pass through, in the
+//! same words and with the same 3 ([`mod@running`]), and past it the only thing
+//! that reaches the terminal is one line per directory entered and one per
+//! directory documented, on stdout, because a run is watched through a pipe.
+//! Nothing is drawn.
+//!
 //! The reader can hand the pointer back. `m` turns the terminal's reporting off
 //! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
 //! off the terminal keeps its own text selection and no `Event::Mouse` arrives
@@ -287,6 +301,7 @@ mod error;
 mod input;
 mod pacting;
 mod query;
+mod running;
 mod scoping;
 mod session;
 mod terminal;
@@ -302,6 +317,7 @@ use error::Error;
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Pact, Reloaded};
 use query::{Listing, list};
+use running::{pact, refresh};
 use scoping::{scope_edit, scope_press};
 use session::{Scope, Watched, load_app, load_manifest, start_watching};
 use terminal::{TerminalGuard, install_panic_hook};
@@ -461,6 +477,31 @@ enum Command {
         #[arg(value_name = "PATH")]
         path: PathBuf,
     },
+    /// `warlock pact <path>`.
+    #[command(
+        about = "Describe a directory and everything below it, writing a WARLOCK.md for each.",
+        long_about = None
+    )]
+    Pact {
+        // Required, like the un-pact's and for the same reason turned the other
+        // way up: a run is minutes of model passes over whatever it is pointed
+        // at, and the largest one warlock can start must not be the one an
+        // omitted argument starts by itself. `warlock pact .` is somebody
+        // saying so.
+        /// Which directory to describe, with everything below it.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
+    /// `warlock refresh <path>`.
+    #[command(
+        about = "Describe the stale directories at or below one, leaving the fresh ones alone.",
+        long_about = None
+    )]
+    Refresh {
+        /// Which directory to refresh, with everything below it.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
     /// `warlock scope <add|remove>`.
     ///
     /// The one subcommand with subcommands of its own, and the nesting is the
@@ -581,6 +622,16 @@ fn main() -> ExitCode {
         // thread, no subprocess, no model pass. What keeps it honest is the
         // boundary, asked before anything else it does; see [`mod@edits`].
         Some(Command::Unpact { path }) => unpact(&path),
+        // The two runs, and the first subcommands that spend anything: minutes
+        // of model passes, one `claude --print` per directory, a `WARLOCK.md`
+        // beside each of them and one manifest save at the end. Dispatched here
+        // with every other subcommand and for the same reasons — their progress
+        // is lines on the ordinary screen that a script reads through a pipe, so
+        // no alternate screen, no raw mode and no panic hook — and gated at the
+        // same boundary the cheap writes are, asked before a single directory is
+        // walked. See [`mod@running`].
+        Some(Command::Pact { path }) => pact(&path),
+        Some(Command::Refresh { path }) => refresh(&path),
         // The other two writes, dispatched beside it and through the same gate:
         // the boundary is asked before either of them looks at whether the path
         // has an entry at all, so a closed scope answers with the scope refusal
@@ -1775,15 +1826,68 @@ mod tests {
     }
 
     #[test]
-    fn no_flag_on_the_three_writes_gets_past_the_boundary_or_asks_for_an_object() {
+    fn the_two_runs_take_the_one_subtree_they_descend_and_take_it_from_the_reader() {
+        assert_eq!(
+            parse(&["pact", "crates/engine"]).unwrap().command,
+            Some(Command::Pact {
+                path: PathBuf::from("crates/engine")
+            })
+        );
+        assert_eq!(
+            parse(&["refresh", "crates/engine"]).unwrap().command,
+            Some(Command::Refresh {
+                path: PathBuf::from("crates/engine")
+            })
+        );
+        // The whole repository, spelled by somebody who meant it. The largest
+        // run warlock can start — minutes of passes over every directory there
+        // is — is never the one an omitted argument starts by itself.
+        assert_eq!(
+            parse(&["pact", "."]).unwrap().command,
+            Some(Command::Pact {
+                path: PathBuf::from(".")
+            })
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_path_or_with_two_is_a_malformed_invocation() {
+        // Clap's 2, for the un-pact's reason with the money on it: a run that
+        // guessed at what to descend would have spent the tokens before anybody
+        // could say it guessed wrong.
+        let malformed: [&[&str]; 6] = [
+            &["pact"],
+            &["pact", "a", "b"],
+            &["pact", "--nonsense"],
+            &["refresh"],
+            &["refresh", "a", "b"],
+            &["refresh", "--nonsense"],
+        ];
+
+        for args in malformed {
+            let error = parse(args).unwrap_err();
+            assert!(error.use_stderr(), "{args:?}");
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn no_flag_on_a_write_or_a_run_gets_past_the_boundary_or_asks_for_an_object() {
         // Two absences, pinned where they are decided. There is no `--force`,
         // `--yes` or any other word that skips the scope check — `warlock
         // config` is the one road past a boundary, and a flag that existed
         // would be a second. And there is no `--json`: the three questions
         // answer in objects because something reads their answers, while these
-        // three say what they did in one line and spend the status on whether
-        // it happened.
-        let refused: [&[&str]; 9] = [
+        // five say what they did as they do it and spend the status on whether
+        // it happened. The two runs are here for the stronger form of the first
+        // reason: a flag past their boundary would spend somebody's tokens
+        // rewriting somebody else's documents.
+        let refused: [&[&str]; 14] = [
+            &["pact", "crates", "--force"],
+            &["pact", "--force", "crates"],
+            &["pact", "crates", "--json"],
+            &["refresh", "crates", "--force"],
+            &["refresh", "crates", "--json"],
             &["unpact", "crates", "--force"],
             &["unpact", "--force", "crates"],
             &["unpact", "crates", "--json"],
@@ -1890,6 +1994,11 @@ mod tests {
             ["fresh", "--help"].as_slice(),
             ["check", "--help"].as_slice(),
             ["unpact", "--help"].as_slice(),
+            // The two runs: the help for a command that spends minutes and
+            // tokens is the one a reader is likeliest to ask for before typing
+            // it for real.
+            ["pact", "--help"].as_slice(),
+            ["refresh", "--help"].as_slice(),
             // The nested pair, asked for at both depths: `warlock scope --help`
             // is the noun's two verbs, and each verb has a help of its own.
             ["scope", "--help"].as_slice(),
@@ -1915,6 +2024,11 @@ mod tests {
             ("fresh", "fresh"),
             ("check", "scope"),
             ("unpact", "pact"),
+            // The two runs say what they leave behind and which directories
+            // they spend a pass on, because that is the difference somebody
+            // typing one of them is choosing between.
+            ("pact", "WARLOCK.md"),
+            ("refresh", "stale"),
             ("scope", "scope"),
         ] {
             let mut command = Cli::command();
@@ -1991,7 +2105,7 @@ mod tests {
         // essays above; without it clap lifts the doc comments wholesale.
         let help = Cli::command().render_long_help().to_string();
         for subcommand in [
-            "init", "config", "stale", "fresh", "check", "unpact", "scope",
+            "init", "config", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope",
         ] {
             assert!(help.contains(subcommand), "{subcommand}: {help}");
         }
