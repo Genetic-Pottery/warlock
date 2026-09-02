@@ -311,6 +311,7 @@ mod tests {
 
     use super::{Listed, Listing, listed, object, state_word};
     use crate::error::Error;
+    use crate::status_for;
 
     /// The repository root every tree here is spelled against.
     const REPO: &str = "/repo";
@@ -420,6 +421,13 @@ mod tests {
         );
 
         assert_eq!(rows(&tree, Listing::Stale), Vec::new());
+        // And the exit contract's own half of that fact: an answer with nothing
+        // in it is still an answer warlock reached, so what `main` makes of it
+        // is a 0 and not the status it spends on a refusal.
+        let answer = listed(&tree, Path::new(REPO), NodeState::PactedStale)
+            .map(|listed| assert!(listed.is_empty()));
+        assert_eq!(status_for(&answer), 0);
+
         assert_eq!(paths(&rows(&tree, Listing::Fresh)), [".", "docs"]);
     }
 
@@ -434,9 +442,12 @@ mod tests {
             NodeState::PactedStale,
         ));
 
-        let error = listed(&elsewhere, Path::new(REPO), NodeState::PactedStale)
-            .expect_err("a path outside the repository has no manifest form");
+        let refused = listed(&elsewhere, Path::new(REPO), NodeState::PactedStale).map(|_| ());
+        // A question warlock could not answer, so the other status: 1, and
+        // never the 0 an empty listing gets.
+        assert_eq!(status_for(&refused), 1);
 
+        let error = refused.expect_err("a path outside the repository has no manifest form");
         assert!(
             matches!(error, Error::Unspellable { .. }),
             "the engine's own case was rewrapped: {error:?}"

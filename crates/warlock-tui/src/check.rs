@@ -354,6 +354,7 @@ mod tests {
 
     use super::{Checked, checked, object, prose};
     use crate::error::Error;
+    use crate::status_for;
 
     /// The repository every check here is asked about. A path rather than a
     /// directory on disk, deliberately: coverage is a walk up the manifest's
@@ -473,6 +474,24 @@ mod tests {
         // `platform` does not open what `data-plane` covers.
         let closed = answer(home.path(), "crates/engine");
         assert!(!closed.opens);
+        // A closed scope is the answer and not a failure to reach one, so what
+        // `main` makes of it is a 0: the verdict is in the output, and the
+        // non-zero status is left for `jq -e '.opens'` to spend. Asked a second
+        // time for its `Result` alone, which the helper above unwraps — a check
+        // reads one config file and walks a manifest already in hand, so asking
+        // twice costs nothing.
+        assert_eq!(
+            status_for(
+                &checked(
+                    Path::new(REPO),
+                    Some(home.path()),
+                    &a_manifest(),
+                    &Path::new(REPO).join("crates/engine"),
+                )
+                .map(|_| ())
+            ),
+            0
+        );
         assert_eq!(
             prose(&closed),
             "`crates/engine` is scoped `data-plane`\n\
@@ -553,9 +572,13 @@ mod tests {
             Path::new("/elsewhere").to_path_buf(),
             Path::new(REPO).join("..").join("elsewhere"),
         ] {
-            let error = checked(Path::new(REPO), Some(home.path()), &a_manifest(), &outside)
-                .expect_err("a path outside the repository has no manifest form");
+            let refused =
+                checked(Path::new(REPO), Some(home.path()), &a_manifest(), &outside).map(|_| ());
+            // A question warlock could not answer, so 1 — the status a closed
+            // scope above deliberately does not take.
+            assert_eq!(status_for(&refused), 1, "{}", outside.display());
 
+            let error = refused.expect_err("a path outside the repository has no manifest form");
             assert!(
                 matches!(error, Error::Unspellable { .. }),
                 "the engine's own case was rewrapped: {error:?}"

@@ -208,6 +208,24 @@
 //! pipe, and a program that had taken the alternate screen to print one would
 //! have piped its answer into a repaint.
 //!
+//! The three questions — `stale`, `fresh` and `check` — share a second rule,
+//! and it is the one that makes them safe to put in a script, a CI job or an
+//! agent's hands: they only read. None of them writes to `.warlock/pacts.toml`
+//! — no grant, no scope, no entry — none of them spawns a process, and none of
+//! them runs a model pass, so asking costs no tokens, no minutes and no risk of
+//! a manifest left in a state nobody asked for. What they read is what the loop
+//! itself reads: the tree through [`load_tree`](warlock_engine::load_tree) with
+//! its states already decided, coverage through the engine's
+//! [`scope_covering`](warlock_engine::scope_covering) — never a second
+//! staleness rule or a second walk written on this side of the edge. What they
+//! leave behind is one answer on stdout and an exit status, and that status is
+//! the whole of the contract a script reads: 0 means the question was answered,
+//! whatever the answer turned out to be — nothing stale, nothing covering the
+//! path, a scope closed to this machine — 1 means warlock could not answer it,
+//! and 2 is clap's, for a command line that was never a question. Which is why
+//! `warlock check <path> --json | jq -e '.opens'` is the recipe: the verdict is
+//! `jq`'s non-zero status, and warlock spends none of its own on saying no.
+//!
 //! The reader can hand the pointer back. `m` turns the terminal's reporting off
 //! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
 //! off the terminal keeps its own text selection and no `Event::Mouse` arrives
@@ -453,17 +471,39 @@ fn main() -> ExitCode {
         Some(Command::Check { path, json }) => check(path, json),
     };
 
+    // `run` has returned, so the guard inside it has already dropped and the
+    // terminal is back to normal; only now is it worth printing anything,
+    // because on the alternate screen nobody would ever see it. `init` and the
+    // three questions never went near the terminal, and print through the same
+    // line so that a failure looks the same however warlock was invoked.
+    if let Err(error) = &outcome {
+        eprintln!("warlock: {error}");
+    }
+    ExitCode::from(status_for(&outcome))
+}
+
+/// The status warlock leaves behind for `outcome`, as the number a shell sees.
+///
+/// One line, given a name and pulled out of `main`, because it is the whole of
+/// the exit contract the three questions promise and `main` itself is the one
+/// function here that no test can call: a test that ran it would run the event
+/// loop, or would have to spawn a process to avoid doing so. As a function of
+/// the outcome it is ordinary code, and the modules that produce those outcomes
+/// ([`query`], [`check`]) pin their own end of the contract against it — an
+/// empty listing and a scope closed to this machine are both `Ok(())`, and both
+/// are a 0.
+///
+/// Two statuses and not three, deliberately. 0 means the question was answered
+/// and the answer is in the output, whatever it says; 1 means warlock could not
+/// answer it. The third, 2, is never produced here at all: it is clap's, for a
+/// command line that was never a question, and `Cli::parse` has exited the
+/// process with it long before this is reached. So no verdict of warlock's own
+/// — nothing stale, nothing covering a path, a closed scope — ever spends a
+/// non-zero status, which is what leaves that status free for `jq -e`.
+const fn status_for(outcome: &Result<(), Error>) -> u8 {
     match outcome {
-        Ok(()) => ExitCode::SUCCESS,
-        // `run` has returned, so the guard inside it has already dropped and
-        // the terminal is back to normal; only now is it worth printing
-        // anything, because on the alternate screen nobody would ever see it.
-        // `init` never went near the terminal, and prints through the same line
-        // so that a failure looks the same however warlock was invoked.
-        Err(error) => {
-            eprintln!("warlock: {error}");
-            ExitCode::FAILURE
-        }
+        Ok(()) => 0,
+        Err(_) => 1,
     }
 }
 
@@ -1373,12 +1413,13 @@ fn report_mouse(on: bool) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use clap::error::ErrorKind;
     use clap::{CommandFactory, Parser};
 
-    use super::{Cli, Command};
+    use super::{Cli, Command, Error, FOR_CLAUDE_MD, status_for};
+    use crate::query::spelled;
 
     /// What warlock would do, given `args` after the program's own name.
     ///
@@ -1571,6 +1612,11 @@ mod tests {
             assert!(help.contains(said), "{name}: {help}");
             assert!(!help.contains("essays"), "{name}: {help}");
             assert!(help.lines().count() < 20, "{name}: {help}");
+            // The doc comment above each variant is the command in backticks
+            // and nothing an `about` here writes is, so a backtick in the help
+            // is a doc comment clap lifted — which for `stale` would be the
+            // name back rather than what it does.
+            assert!(!help.contains('`'), "{name}: {help}");
         }
     }
 
@@ -1635,5 +1681,86 @@ mod tests {
         }
         assert!(!help.contains("panic hook"), "{help}");
         assert!(help.lines().count() < 20, "{help}");
+        // Every doc comment on `Cli` and its variants spells the command in
+        // backticks, and no `about` above does, so a backtick reaching the help
+        // is a doc comment that got lifted into it.
+        assert!(!help.contains('`'), "{help}");
+    }
+
+    #[test]
+    fn an_answered_question_is_a_zero_whatever_the_answer_was() {
+        // The half of the exit contract that carries the verdicts: warlock ran
+        // the query and the answer is in the output, so the status says the
+        // question was answered and nothing more. The two answers that read
+        // most like failures and are not — an empty listing and a scope closed
+        // to this machine — are `Ok(())` where they are produced, pinned in
+        // `query::tests` and `check::tests` against this same function.
+        assert_eq!(status_for(&Ok(())), 0);
+    }
+
+    #[test]
+    fn a_question_warlock_could_not_answer_is_a_one_and_never_a_two() {
+        // The other half: no repository above the working directory, a load
+        // that could not colour what it was asked about, and a path with no
+        // repository-relative spelling — the last of them built by the very
+        // function the three subcommands spell their paths through, so this is
+        // the refusal a reader would actually get.
+        let refusals = [
+            Error::NoRepository {
+                start: PathBuf::from("/nowhere"),
+                wanted: FOR_CLAUDE_MD,
+            },
+            Error::Problems {
+                first: "`/repo/docs`: `WARLOCK.md` could not be read".to_owned(),
+                rest: 2,
+            },
+            spelled(Path::new("/repo"), Path::new("/elsewhere"))
+                .expect_err("a path outside the repository has no manifest form"),
+        ];
+
+        for refusal in refusals {
+            let said = refusal.to_string();
+            assert_eq!(status_for(&Err(refusal)), 1, "{said}");
+            // One line, because `main` prints it as one line with a `warlock: `
+            // in front of it.
+            assert!(!said.contains('\n'), "{said}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_invocation_is_clap_s_two_across_all_three_questions() {
+        // The third status, and the one warlock never produces itself: clap
+        // exits the process with it before `main` has anything to map. Held
+        // here over each of the three so that a script can tell a typo from a
+        // refusal by the status alone, without reading a word of either.
+        let malformed: [&[&str]; 6] = [
+            &["stale", "--nonsense"],
+            &["stale", "here", "there"],
+            &["fresh", "--json=yes"],
+            &["check"],
+            &["check", "here", "there"],
+            &["check", "--nonsense", "here"],
+        ];
+
+        for args in malformed {
+            let error = parse(args).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+            assert!(error.use_stderr(), "{args:?}");
+            // And distinct from the status warlock spends on its own failures,
+            // which is the whole reason the split is worth keeping.
+            assert_ne!(
+                error.exit_code(),
+                i32::from(status_for(&Ok(()))),
+                "{args:?}"
+            );
+            assert_ne!(
+                error.exit_code(),
+                i32::from(status_for(&Err(Error::NoRepository {
+                    start: PathBuf::from("/nowhere"),
+                    wanted: FOR_CLAUDE_MD,
+                }))),
+                "{args:?}"
+            );
+        }
     }
 }
