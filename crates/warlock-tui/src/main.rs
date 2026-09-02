@@ -196,7 +196,9 @@
 //! drops the pact on a directory and every pact below it, and `scope add` and
 //! `scope remove` write and clear the boundary on one directory's pact — all
 //! three only if this machine holds the boundary covering the path
-//! ([`mod@edits`]); `-h` and
+//! ([`mod@edits`]); `pact` and `refresh` descend a subtree, spending a model
+//! pass per directory and saying on stdout where they have got to, behind that
+//! same boundary ([`mod@running`]); `-h` and
 //! `--help` print clap's help; and every other word, and
 //! every argument warlock has no place for, is clap's error and usage on stderr.
 //! Refusing is the point of the last of those: warlock used to open the tree for
@@ -252,6 +254,38 @@
 //! The whole vocabulary, and why the refusal is worth a number of its own, is in
 //! [`status_for`].
 //!
+//! `pact` and `refresh` are the writes that are not only a rewritten
+//! `.warlock/pacts.toml`, and they are the reason the boundary is worth a check
+//! that costs a file read before anything else happens. A run is minutes long,
+//! it hands one `claude --print` per directory to a model and it writes a
+//! `WARLOCK.md` beside each one, so a boundary asked any later than first would
+//! be asked after somebody's tokens were spent and somebody else's prose was
+//! overwritten. It is the same gate the three cheap writes pass through, in the
+//! same words and with the same 3 ([`mod@running`]), and past it the only thing
+//! that reaches the terminal is one line per directory entered and one per
+//! directory documented, on stdout, because a run is watched through a pipe.
+//! Nothing is drawn.
+//!
+//! They are also the two subcommands that can half-work, and that is where they
+//! spend a status nothing else does. Each directory fails on its own — a pass
+//! refused, a document that would not write — without ending the run, so a run
+//! that had failures still saves the manifest the rest of the subtree earned,
+//! names every failing directory on stderr a line at a time, ends with one line
+//! saying how many of how many failed, and exits **4**. The split between the
+//! two streams is what makes that readable: progress on stdout, every failure
+//! and the count on stderr, so `warlock pact . > run.log` puts the descent in
+//! the file and leaves what went wrong on the terminal.
+//!
+//! And they are the two subcommands with a key: minutes of somebody's tokens
+//! with no panel to press Esc in leaves Ctrl-C as the only say-when, so a
+//! headless run listens for it ([`mod@running`]). The first press is the
+//! panel's Esc — the `claude` in flight is killed, the descent ends at the next
+//! directory rather than part way through one, and what finished is hashed,
+//! granted and saved before the process leaves with **130**. The second is the
+//! panel's `q`: it exits at once, saving nothing and printing nothing. The same
+//! [`Cancel`] does both halves of the first press, which is why a stop takes
+//! milliseconds rather than the rest of a five-minute pass.
+//!
 //! The reader can hand the pointer back. `m` turns the terminal's reporting off
 //! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
 //! off the terminal keeps its own text selection and no `Event::Mouse` arrives
@@ -287,6 +321,7 @@ mod error;
 mod input;
 mod pacting;
 mod query;
+mod running;
 mod scoping;
 mod session;
 mod terminal;
@@ -302,6 +337,7 @@ use error::Error;
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Pact, Reloaded};
 use query::{Listing, list};
+use running::{pact, refresh};
 use scoping::{scope_edit, scope_press};
 use session::{Scope, Watched, load_app, load_manifest, start_watching};
 use terminal::{TerminalGuard, install_panic_hook};
@@ -461,6 +497,31 @@ enum Command {
         #[arg(value_name = "PATH")]
         path: PathBuf,
     },
+    /// `warlock pact <path>`.
+    #[command(
+        about = "Describe a directory and everything below it, writing a WARLOCK.md for each.",
+        long_about = None
+    )]
+    Pact {
+        // Required, like the un-pact's and for the same reason turned the other
+        // way up: a run is minutes of model passes over whatever it is pointed
+        // at, and the largest one warlock can start must not be the one an
+        // omitted argument starts by itself. `warlock pact .` is somebody
+        // saying so.
+        /// Which directory to describe, with everything below it.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
+    /// `warlock refresh <path>`.
+    #[command(
+        about = "Describe the stale directories at or below one, leaving the fresh ones alone.",
+        long_about = None
+    )]
+    Refresh {
+        /// Which directory to refresh, with everything below it.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
     /// `warlock scope <add|remove>`.
     ///
     /// The one subcommand with subcommands of its own, and the nesting is the
@@ -581,6 +642,16 @@ fn main() -> ExitCode {
         // thread, no subprocess, no model pass. What keeps it honest is the
         // boundary, asked before anything else it does; see [`mod@edits`].
         Some(Command::Unpact { path }) => unpact(&path),
+        // The two runs, and the first subcommands that spend anything: minutes
+        // of model passes, one `claude --print` per directory, a `WARLOCK.md`
+        // beside each of them and one manifest save at the end. Dispatched here
+        // with every other subcommand and for the same reasons — their progress
+        // is lines on the ordinary screen that a script reads through a pipe, so
+        // no alternate screen, no raw mode and no panic hook — and gated at the
+        // same boundary the cheap writes are, asked before a single directory is
+        // walked. See [`mod@running`].
+        Some(Command::Pact { path }) => pact(&path),
+        Some(Command::Refresh { path }) => refresh(&path),
         // The other two writes, dispatched beside it and through the same gate:
         // the boundary is asked before either of them looks at whether the path
         // has an entry at all, so a closed scope answers with the scope refusal
@@ -625,8 +696,33 @@ fn main() -> ExitCode {
 /// with nothing spent: this machine's sigils do not open the scope covering the
 /// path a write was aimed at, so no byte of `.warlock/pacts.toml` moved,
 /// retrying changes nothing, and the road out is `warlock config` rather than
-/// anything in the message. **4**, completed with failures, and **130**,
-/// cancelled, belong to the pact/refresh slice and are not produced here yet.
+/// anything in the message. **4** completed with failures: a `warlock pact` or
+/// `warlock refresh` descended the subtree, wrote the documents it could and
+/// saved the manifest, and some of its directories did not come out of it — the
+/// directories are named on stderr, one line each, and the line this status goes
+/// with says how many of how many ([`mod@running`]). **130** cancelled: somebody
+/// pressed Ctrl-C during one of those two runs, the descent stopped at the next
+/// directory and the pass in flight was killed, and what had finished by then is
+/// hashed, granted and saved before the status is reached — 128 plus SIGINT, so
+/// a shell, `make` and CI read it as interrupted without being told to.
+///
+/// 4 is not 1 for the reason 3 is not: they want different things done about
+/// them. A 1 is warlock unable to do the thing and nothing having happened
+/// — including a run whose manifest would not save, which stays a 1 however many
+/// directories failed inside it, because a run whose record never reached the
+/// disk is the bigger news and the one worth retrying. A 4 is the work done and
+/// partly not taken: the grants that were earned are on disk, so the thing to do
+/// is read the lines above the count and re-run over what failed.
+///
+/// 130 is not 4 for the same kind of reason, one step further along: a 4 is
+/// warlock's news about a run, and a 130 is the reader's own news back. Nothing
+/// went wrong in a cancelled run — the passes that finished are on disk and
+/// granted, the rest were never asked for — so a script that retries a 4 over
+/// the directories that failed must not retry a 130 at all, because the thing
+/// that stopped it was somebody deciding to stop it. The number is not warlock's
+/// invention: 128 plus the signal is what a shell reports for a killed process,
+/// SIGINT is 2, and every wrapper that already special-cases 130 gets this run
+/// right without being told anything about warlock.
 ///
 /// 3 is here so that a script can act without reading English: the two non-zero
 /// results a write can have want opposite things done about them, and telling
@@ -657,9 +753,30 @@ const fn status_for(outcome: &Result<(), Error>) -> u8 {
         Ok(()) => 0,
         // The boundary, and only the upward one: see the decision above.
         Err(Error::ClosedScope { .. }) => 3,
+        // A run that finished with some of its directories failed. Above the
+        // catch-all rather than folded into it, because it is the one non-zero
+        // status that comes with the work having been done: the documents that
+        // could be written are written and the manifest is saved, and the line
+        // printed for it is a count under a list already on stderr.
+        Err(Error::Failures { .. }) => 4,
+        // A run somebody stopped, and the one status here that is not warlock's
+        // verdict on anything: the work up to the Ctrl-C is saved, so this sits
+        // beside the 4 rather than under the catch-all, and it is the number a
+        // shell already spells an interrupted process with.
+        Err(Error::Cancelled) => CANCELLED,
         Err(_) => 1,
     }
 }
+
+/// What an interrupted run leaves behind: 128 plus SIGINT, the number every
+/// shell already reports for a process that took a Ctrl-C.
+///
+/// Named once and read twice, which is the whole reason it is a constant: the
+/// first Ctrl-C ends with [`status_for`] mapping [`Error::Cancelled`] to it, and
+/// the second leaves through the handler in [`mod@running`] without any outcome
+/// to map — and the two must not be able to drift into telling one shell two
+/// different stories about the same keypress.
+const CANCELLED: u8 = 130;
 
 /// `warlock init`: write the `CLAUDE.md` at the repository root and say which
 /// file was written.
@@ -1775,15 +1892,68 @@ mod tests {
     }
 
     #[test]
-    fn no_flag_on_the_three_writes_gets_past_the_boundary_or_asks_for_an_object() {
+    fn the_two_runs_take_the_one_subtree_they_descend_and_take_it_from_the_reader() {
+        assert_eq!(
+            parse(&["pact", "crates/engine"]).unwrap().command,
+            Some(Command::Pact {
+                path: PathBuf::from("crates/engine")
+            })
+        );
+        assert_eq!(
+            parse(&["refresh", "crates/engine"]).unwrap().command,
+            Some(Command::Refresh {
+                path: PathBuf::from("crates/engine")
+            })
+        );
+        // The whole repository, spelled by somebody who meant it. The largest
+        // run warlock can start — minutes of passes over every directory there
+        // is — is never the one an omitted argument starts by itself.
+        assert_eq!(
+            parse(&["pact", "."]).unwrap().command,
+            Some(Command::Pact {
+                path: PathBuf::from(".")
+            })
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_path_or_with_two_is_a_malformed_invocation() {
+        // Clap's 2, for the un-pact's reason with the money on it: a run that
+        // guessed at what to descend would have spent the tokens before anybody
+        // could say it guessed wrong.
+        let malformed: [&[&str]; 6] = [
+            &["pact"],
+            &["pact", "a", "b"],
+            &["pact", "--nonsense"],
+            &["refresh"],
+            &["refresh", "a", "b"],
+            &["refresh", "--nonsense"],
+        ];
+
+        for args in malformed {
+            let error = parse(args).unwrap_err();
+            assert!(error.use_stderr(), "{args:?}");
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn no_flag_on_a_write_or_a_run_gets_past_the_boundary_or_asks_for_an_object() {
         // Two absences, pinned where they are decided. There is no `--force`,
         // `--yes` or any other word that skips the scope check — `warlock
         // config` is the one road past a boundary, and a flag that existed
         // would be a second. And there is no `--json`: the three questions
         // answer in objects because something reads their answers, while these
-        // three say what they did in one line and spend the status on whether
-        // it happened.
-        let refused: [&[&str]; 9] = [
+        // five say what they did as they do it and spend the status on whether
+        // it happened. The two runs are here for the stronger form of the first
+        // reason: a flag past their boundary would spend somebody's tokens
+        // rewriting somebody else's documents.
+        let refused: [&[&str]; 14] = [
+            &["pact", "crates", "--force"],
+            &["pact", "--force", "crates"],
+            &["pact", "crates", "--json"],
+            &["refresh", "crates", "--force"],
+            &["refresh", "crates", "--json"],
             &["unpact", "crates", "--force"],
             &["unpact", "--force", "crates"],
             &["unpact", "crates", "--json"],
@@ -1890,6 +2060,11 @@ mod tests {
             ["fresh", "--help"].as_slice(),
             ["check", "--help"].as_slice(),
             ["unpact", "--help"].as_slice(),
+            // The two runs: the help for a command that spends minutes and
+            // tokens is the one a reader is likeliest to ask for before typing
+            // it for real.
+            ["pact", "--help"].as_slice(),
+            ["refresh", "--help"].as_slice(),
             // The nested pair, asked for at both depths: `warlock scope --help`
             // is the noun's two verbs, and each verb has a help of its own.
             ["scope", "--help"].as_slice(),
@@ -1915,6 +2090,11 @@ mod tests {
             ("fresh", "fresh"),
             ("check", "scope"),
             ("unpact", "pact"),
+            // The two runs say what they leave behind and which directories
+            // they spend a pass on, because that is the difference somebody
+            // typing one of them is choosing between.
+            ("pact", "WARLOCK.md"),
+            ("refresh", "stale"),
             ("scope", "scope"),
         ] {
             let mut command = Cli::command();
@@ -1991,7 +2171,7 @@ mod tests {
         // essays above; without it clap lifts the doc comments wholesale.
         let help = Cli::command().render_long_help().to_string();
         for subcommand in [
-            "init", "config", "stale", "fresh", "check", "unpact", "scope",
+            "init", "config", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope",
         ] {
             assert!(help.contains(subcommand), "{subcommand}: {help}");
         }
@@ -2076,13 +2256,15 @@ mod tests {
     }
 
     #[test]
-    fn the_four_statuses_a_write_can_leave_are_all_different_numbers() {
+    fn the_six_statuses_a_write_can_leave_are_all_different_numbers() {
         // The vocabulary, held together in one place so that a script reading
-        // only the status can tell the four apart: a write that happened, one
+        // only the status can tell them apart: a write that happened, one
         // warlock could not finish, one refused at the boundary with nothing
-        // spent, and a command line that was never a request. Each is taken from
-        // the thing that really produces it — `status_for` for warlock's own
-        // three, clap for the fourth — rather than written down as a number.
+        // spent, a command line that was never a request, a run that descended a
+        // subtree and came back with some of its directories failed, and a run
+        // somebody stopped with Ctrl-C. Each is taken from the thing that really
+        // produces it — `status_for` for warlock's own five, clap for the sixth
+        // — rather than written down as a number.
         let completed = i32::from(status_for(&Ok(())));
         let could_not = i32::from(status_for(&Err(Error::NoRepository {
             start: PathBuf::from("/nowhere"),
@@ -2092,19 +2274,38 @@ mod tests {
             path: "crates/engine".to_owned(),
             scope: "data-plane".to_owned(),
         })));
+        // The half-worked run: the manifest is saved and the documents that
+        // could be written are written, so this is neither the 0 of a run with
+        // nothing wrong with it nor the 1 of a warlock that could not do the
+        // thing.
+        let with_failures = i32::from(status_for(&Err(Error::Failures {
+            failed: 3,
+            total: 12,
+        })));
+        // The run somebody stopped: neither warlock's inability nor its verdict
+        // on anything, and the one number here a shell already has a meaning
+        // for — 128 plus SIGINT.
+        let cancelled = i32::from(status_for(&Err(Error::Cancelled)));
         // Clap's, from a write invocation rather than a question's, because it
-        // is a write's four statuses that are being told apart.
+        // is a write's statuses that are being told apart.
         let malformed = parse(&["scope", "add", "crates"])
             .expect_err("a scope write with the scope missing is clap's")
             .exit_code();
 
-        let vocabulary = [completed, could_not, refused, malformed];
-        assert_eq!(vocabulary, [0, 1, 3, 2]);
+        let vocabulary = [
+            completed,
+            could_not,
+            refused,
+            malformed,
+            with_failures,
+            cancelled,
+        ];
+        assert_eq!(vocabulary, [0, 1, 3, 2, 4, 130]);
         for (first, one) in vocabulary.iter().enumerate() {
             for (second, other) in vocabulary.iter().enumerate() {
                 assert!(
                     first == second || one != other,
-                    "two of the four outcomes share a status: {vocabulary:?}"
+                    "two of the outcomes share a status: {vocabulary:?}"
                 );
             }
         }

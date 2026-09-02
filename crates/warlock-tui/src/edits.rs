@@ -194,6 +194,14 @@ const FOR_SCOPE_REMOVE: &str = "clear a scope in";
 /// that wants to edit the manifest from a shell asks for one of these and
 /// inherits the check rather than remembering to repeat it.
 ///
+/// [`mod@crate::running`] is the first such subcommand, and it is the one the
+/// gate matters most for: `warlock pact` and `warlock refresh` spend model
+/// passes and rewrite documents, so a boundary asked *after* the descent had
+/// started would already have cost somebody's tokens and somebody else's prose.
+/// It takes the three fields below through [`Opened::repo_root`],
+/// [`Opened::manifest`] and [`Opened::target`] rather than reaching for the
+/// environment again, which is what keeps there being one gate rather than two.
+///
 /// Three of the fields are the whole of what such a write needs: where the
 /// manifest lives, what it currently says, and where the reader pointed. The
 /// fourth is this machine's sigils, kept because there is a *second* boundary
@@ -246,7 +254,7 @@ impl Opened {
     /// [`Error::ClosedScope`], naming the path and the scope, when a scope
     /// covers `target` and this machine's sigils do not open it. Nothing is read
     /// or written after that, and the caller has no `Opened` to write with.
-    fn new(
+    pub(crate) fn new(
         repo_root: PathBuf,
         home: Option<&Path>,
         manifest: Manifest,
@@ -295,6 +303,28 @@ impl Opened {
             path: spelled(&repo_root, &target)?,
             scope: scope.to_owned(),
         })
+    }
+
+    /// Where `.warlock/pacts.toml` lives, and what every stored path is spelled
+    /// against.
+    ///
+    /// One of the three readers a subcommand outside this module needs. They are
+    /// getters rather than public fields because the fields being private is the
+    /// gate: a caller may look at what an open boundary gave it and may not
+    /// assemble one of these out of parts it found lying around.
+    pub(crate) fn repo_root(&self) -> &Path {
+        &self.repo_root
+    }
+
+    /// The manifest as it stood when the boundary was asked. A missing one is an
+    /// empty one — see [`load_manifest`].
+    pub(crate) const fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// The path the reader named, joined onto the working directory.
+    pub(crate) fn target(&self) -> &Path {
+        &self.target
     }
 
     /// Drop the entry for this path and every entry below it, save, and say what
@@ -522,6 +552,11 @@ impl Opened {
 /// Nothing on disk has to exist for the boundary to be asked: coverage is a walk
 /// up the manifest's stored paths and never a walk of the filesystem.
 ///
+/// Shared with [`mod@crate::running`] rather than copied there: `warlock pact`
+/// and `warlock refresh` resolve the same three things from the same
+/// environment and are refused at the same boundary, and a second function
+/// doing it would be a second order for those steps to be in.
+///
 /// # Errors
 ///
 /// [`Error::WorkingDirectory`] and [`Error::NoRepository`] before anything is
@@ -530,7 +565,7 @@ impl Opened {
 /// config that will not read is deliberately not among them: it is a state of
 /// the answer — nothing held, so nothing scoped is open — rather than a failure
 /// to reach one.
-fn opened(wanted: &'static str, path: &Path) -> Result<Opened, Error> {
+pub(crate) fn opened(wanted: &'static str, path: &Path) -> Result<Opened, Error> {
     let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
     // Asked directly rather than through a load, as `init`, `config` and the
     // three questions ask: this edits one file, and walking the tree to find its
