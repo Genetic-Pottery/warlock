@@ -189,17 +189,42 @@
 //! anything else is answered here and exits. `init` writes a `CLAUDE.md` at the
 //! repository root and says which file it wrote; `config` prints the sigils this
 //! machine holds for this repository and reads a line replacing them
-//! ([`config`]); `-h` and `--help` print clap's help; and every other word, and
+//! ([`config`]); `stale` and `fresh` print the pacted directories at or below a
+//! path that are in that state, a path a line or, with `--json`, one object
+//! ([`query`]); `check` says which scope covers a path, what this machine holds
+//! and whether the two meet, as prose or as one object ([`check`]); `-h` and
+//! `--help` print clap's help; and every other word, and
 //! every argument warlock has no place for, is clap's error and usage on stderr.
 //! Refusing is the point of the last of those: warlock used to open the tree for
 //! `warlock status`, which reads as the typed command having run.
 //!
-//! Both subcommands share one rule, and it is why they are dispatched here
-//! rather than anywhere inside [`run`]: neither goes near the terminal. No
+//! Every subcommand shares one rule, and it is why they are dispatched here
+//! rather than anywhere inside [`run`]: none of them goes near the terminal. No
 //! alternate screen, no raw mode and no panic hook — the hook exists to restore
 //! a terminal these paths never take, and `config` reads its line in cooked
 //! mode, which is also what makes Ctrl-C at its prompt an ordinary SIGINT that
-//! ends the process before anything is written.
+//! ends the process before anything is written. The two listings and the check
+//! add a second reason of their own: their answer is read by a script through a
+//! pipe, and a program that had taken the alternate screen to print one would
+//! have piped its answer into a repaint.
+//!
+//! The three questions — `stale`, `fresh` and `check` — share a second rule,
+//! and it is the one that makes them safe to put in a script, a CI job or an
+//! agent's hands: they only read. None of them writes to `.warlock/pacts.toml`
+//! — no grant, no scope, no entry — none of them spawns a process, and none of
+//! them runs a model pass, so asking costs no tokens, no minutes and no risk of
+//! a manifest left in a state nobody asked for. What they read is what the loop
+//! itself reads: the tree through [`load_tree`](warlock_engine::load_tree) with
+//! its states already decided, coverage through the engine's
+//! [`scope_covering`](warlock_engine::scope_covering) — never a second
+//! staleness rule or a second walk written on this side of the edge. What they
+//! leave behind is one answer on stdout and an exit status, and that status is
+//! the whole of the contract a script reads: 0 means the question was answered,
+//! whatever the answer turned out to be — nothing stale, nothing covering the
+//! path, a scope closed to this machine — 1 means warlock could not answer it,
+//! and 2 is clap's, for a command line that was never a question. Which is why
+//! `warlock check <path> --json | jq -e '.opens'` is the recipe: the verdict is
+//! `jq`'s non-zero status, and warlock spends none of its own on saying no.
 //!
 //! The reader can hand the pointer back. `m` turns the terminal's reporting off
 //! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
@@ -228,11 +253,13 @@ use warlock_tui::{
 };
 
 mod chatting;
+mod check;
 mod config;
 mod editing;
 mod error;
 mod input;
 mod pacting;
+mod query;
 mod scoping;
 mod session;
 mod terminal;
@@ -240,11 +267,13 @@ mod viewing;
 mod writing;
 
 use chatting::Chat;
+use check::check;
 use config::configure;
 use editing::edit_press;
 use error::Error;
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Pact, Reloaded};
+use query::{Listing, list};
 use scoping::{scope_edit, scope_press};
 use session::{Scope, Watched, load_app, load_manifest, start_watching};
 use terminal::{TerminalGuard, install_panic_hook};
@@ -303,7 +332,11 @@ const UPDATED: &str = "updated";
 /// The subcommand is an `Option`, never `arg_required_else_help`: bare `warlock`
 /// is the tree, which is the thing warlock mostly is, not a mistake to be
 /// answered with help.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Parser)]
+///
+/// Not [`Copy`] any more, and it is the path arguments below that took it away:
+/// a [`PathBuf`] owns its bytes. Nothing here misses it — the whole of what
+/// `main` does with this value is move it into one `match`.
+#[derive(Debug, Clone, PartialEq, Eq, Parser)]
 #[command(
     name = "warlock",
     about = "A freshness ledger for a repository's documentation.",
@@ -317,10 +350,18 @@ struct Cli {
 
 /// The operations warlock will do without opening the tree.
 ///
-/// A unit variant each for now, and an enum rather than a parsed word so that
-/// the flags these grow — a `--json` per subcommand, next — are fields on a
-/// variant that turns into a struct, with nothing above here to change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+/// An enum rather than a parsed word, which is what makes the two listings
+/// below cost a field each rather than an argument parser of their own: the
+/// path they take and the `--json` they answer in are declared here, beside
+/// what they dispatch to, with nothing above this to change.
+///
+/// The two of them are one shape twice over rather than one variant carrying a
+/// state, and deliberately: what a reader types is the whole of the difference
+/// between them, and a `Command::List { state }` would be a variant nobody can
+/// find by grepping for the word they typed. What they *do* is one function
+/// ([`query::list`]) taking a [`Listing`], so the sameness is where the work is
+/// and the difference is where the words are.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum Command {
     /// `warlock init`.
     #[command(
@@ -334,6 +375,50 @@ enum Command {
         long_about = None
     )]
     Config,
+    /// `warlock stale [path]`.
+    #[command(
+        about = "List the pacted directories that are stale.",
+        long_about = None
+    )]
+    Stale {
+        /// Where to answer about; the repository root when it is left off.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// Answer as one JSON object instead of one path per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// `warlock fresh [path]`.
+    #[command(
+        about = "List the pacted directories that are fresh.",
+        long_about = None
+    )]
+    Fresh {
+        /// Where to answer about; the repository root when it is left off.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// Answer as one JSON object instead of one path per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// `warlock check <path>`.
+    #[command(
+        about = "Say which scope covers a path and whether this machine's sigils open it.",
+        long_about = None
+    )]
+    Check {
+        // Required, unlike the two listings' optional path, and the doc comment
+        // below is one line for the reason every other one here is: clap lifts
+        // it into `--help`. A check is a walk up from one place, so there is no
+        // whole-repository answer for an omitted path to mean — leaving it off
+        // is a malformed invocation and clap's own exit status of 2.
+        /// Which path to answer about.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        /// Answer as one JSON object instead of three lines of prose.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -349,10 +434,12 @@ fn main() -> ExitCode {
     // could not parse is clap's: its wording, its usage line, its exit status of
     // 2. Anything warlock itself could not do is warlock's: the `warlock: `
     // prefix below and exit status 1. The split is load-bearing rather than
-    // cosmetic, and later slices are what it is for — when `warlock stale` can
-    // refuse because a path is outside the configured scope, a reader and a
-    // script both have to be able to tell that refusal from a typo by the exit
-    // status alone, without reading a word of either message.
+    // cosmetic, and the listings are what it is for: `warlock stale` refuses a
+    // path with no repository-relative spelling with a 1, and a script has to
+    // be able to tell that refusal from a typo by the exit status alone,
+    // without reading a word of either message. A 0 means the question was
+    // answered whatever the answer was — including an empty answer, which is
+    // "nothing is stale" and not the absence of one.
     let cli = Cli::parse();
 
     let outcome = match cli.command {
@@ -368,19 +455,55 @@ fn main() -> ExitCode {
         // mode, so nothing about it may touch the terminal — including the panic
         // hook, which exists to restore a terminal this path never takes.
         Some(Command::Config) => configure(),
+        // The two questions, dispatched here for the same reason and with one
+        // more of their own: they print their answer on the ordinary screen and
+        // a script reads it, so a program that had entered the alternate screen
+        // would have piped its answer into a repaint. Neither writes anything,
+        // neither spawns anything, and neither installs the panic hook — there
+        // is no terminal for it to restore.
+        Some(Command::Stale { path, json }) => list(Listing::Stale, path, json),
+        Some(Command::Fresh { path, json }) => list(Listing::Fresh, path, json),
+        // The third question, beside the two listings and for their reasons. It
+        // is the one that can answer "no" — a scope this machine's sigils do not
+        // open — and it still exits 0 for it: a closed boundary is the answer,
+        // not a failure to reach one, which is what leaves `jq -e '.opens'` to
+        // spend the non-zero status on the verdict. See [`check`].
+        Some(Command::Check { path, json }) => check(path, json),
     };
 
+    // `run` has returned, so the guard inside it has already dropped and the
+    // terminal is back to normal; only now is it worth printing anything,
+    // because on the alternate screen nobody would ever see it. `init` and the
+    // three questions never went near the terminal, and print through the same
+    // line so that a failure looks the same however warlock was invoked.
+    if let Err(error) = &outcome {
+        eprintln!("warlock: {error}");
+    }
+    ExitCode::from(status_for(&outcome))
+}
+
+/// The status warlock leaves behind for `outcome`, as the number a shell sees.
+///
+/// One line, given a name and pulled out of `main`, because it is the whole of
+/// the exit contract the three questions promise and `main` itself is the one
+/// function here that no test can call: a test that ran it would run the event
+/// loop, or would have to spawn a process to avoid doing so. As a function of
+/// the outcome it is ordinary code, and the modules that produce those outcomes
+/// ([`query`], [`check`]) pin their own end of the contract against it — an
+/// empty listing and a scope closed to this machine are both `Ok(())`, and both
+/// are a 0.
+///
+/// Two statuses and not three, deliberately. 0 means the question was answered
+/// and the answer is in the output, whatever it says; 1 means warlock could not
+/// answer it. The third, 2, is never produced here at all: it is clap's, for a
+/// command line that was never a question, and `Cli::parse` has exited the
+/// process with it long before this is reached. So no verdict of warlock's own
+/// — nothing stale, nothing covering a path, a closed scope — ever spends a
+/// non-zero status, which is what leaves that status free for `jq -e`.
+const fn status_for(outcome: &Result<(), Error>) -> u8 {
     match outcome {
-        Ok(()) => ExitCode::SUCCESS,
-        // `run` has returned, so the guard inside it has already dropped and
-        // the terminal is back to normal; only now is it worth printing
-        // anything, because on the alternate screen nobody would ever see it.
-        // `init` never went near the terminal, and prints through the same line
-        // so that a failure looks the same however warlock was invoked.
-        Err(error) => {
-            eprintln!("warlock: {error}");
-            ExitCode::FAILURE
-        }
+        Ok(()) => 0,
+        Err(_) => 1,
     }
 }
 
@@ -1290,10 +1413,13 @@ fn report_mouse(on: bool) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use clap::error::ErrorKind;
     use clap::{CommandFactory, Parser};
 
-    use super::{Cli, Command};
+    use super::{Cli, Command, Error, FOR_CLAUDE_MD, status_for};
+    use crate::query::spelled;
 
     /// What warlock would do, given `args` after the program's own name.
     ///
@@ -1330,6 +1456,114 @@ mod tests {
     }
 
     #[test]
+    fn a_listing_with_no_path_asks_about_the_whole_repository() {
+        // `None` and not the working directory: what an omitted path means is
+        // `query::list`'s to decide, and it decides on the repository root, so
+        // the parser hands over the absence rather than filling it in.
+        assert_eq!(
+            parse(&["stale"]).unwrap().command,
+            Some(Command::Stale {
+                path: None,
+                json: false
+            })
+        );
+        assert_eq!(
+            parse(&["fresh"]).unwrap().command,
+            Some(Command::Fresh {
+                path: None,
+                json: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_listing_takes_a_path_and_a_json_flag_in_either_order() {
+        assert_eq!(
+            parse(&["stale", "crates"]).unwrap().command,
+            Some(Command::Stale {
+                path: Some(PathBuf::from("crates")),
+                json: false
+            })
+        );
+        for args in [["stale", "crates", "--json"], ["stale", "--json", "crates"]] {
+            assert_eq!(
+                parse(&args).unwrap().command,
+                Some(Command::Stale {
+                    path: Some(PathBuf::from("crates")),
+                    json: true
+                }),
+                "{args:?}"
+            );
+        }
+        assert_eq!(
+            parse(&["fresh", "--json"]).unwrap().command,
+            Some(Command::Fresh {
+                path: None,
+                json: true
+            })
+        );
+    }
+
+    #[test]
+    fn a_listing_answers_about_one_path_rather_than_a_list_of_them() {
+        // `warlock stale a b` is somebody expecting one of two things warlock
+        // does not do — several paths, or a second flag spelled as a word — and
+        // either way an answer about `a` alone would be an answer to a question
+        // nobody asked. Clap's refusal, so it is a 2 and not a 1.
+        for args in [
+            ["stale", "a", "b"].as_slice(),
+            ["fresh", "a", "b"].as_slice(),
+            ["stale", "--jsonn"].as_slice(),
+        ] {
+            let error = parse(args).unwrap_err();
+            assert!(error.use_stderr(), "{args:?}");
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_check_takes_the_path_it_is_a_check_of_and_a_json_flag_in_either_order() {
+        assert_eq!(
+            parse(&["check", "crates/engine"]).unwrap().command,
+            Some(Command::Check {
+                path: PathBuf::from("crates/engine"),
+                json: false
+            })
+        );
+        for args in [
+            ["check", "crates/engine", "--json"],
+            ["check", "--json", "crates/engine"],
+        ] {
+            assert_eq!(
+                parse(&args).unwrap().command,
+                Some(Command::Check {
+                    path: PathBuf::from("crates/engine"),
+                    json: true
+                }),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_check_with_no_path_is_a_malformed_invocation_rather_than_a_whole_repository_answer() {
+        // Unlike the two listings, whose omitted path means the repository
+        // root: a check is a walk up from one place, so there is no
+        // whole-repository answer for an absence to mean. Clap's refusal, so it
+        // is a 2 and not warlock answering about something nobody named.
+        for args in [
+            ["check"].as_slice(),
+            ["check", "--json"].as_slice(),
+            // And one path, as everywhere else here.
+            ["check", "a", "b"].as_slice(),
+        ] {
+            let error = parse(args).unwrap_err();
+            assert!(error.use_stderr(), "{args:?}");
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+        }
+    }
+
+    #[test]
     fn both_spellings_of_help_are_a_help_exit_that_succeeded() {
         // Not an error in the sense that matters: help was asked for, so it
         // goes to stdout and the process exits zero.
@@ -1343,7 +1577,13 @@ mod tests {
 
     #[test]
     fn per_subcommand_help_is_a_help_exit_too() {
-        for args in [["init", "--help"], ["config", "--help"]] {
+        for args in [
+            ["init", "--help"],
+            ["config", "--help"],
+            ["stale", "--help"],
+            ["fresh", "--help"],
+            ["check", "--help"],
+        ] {
             let error = parse(&args).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{args:?}");
             assert_eq!(error.exit_code(), 0, "{args:?}");
@@ -1356,7 +1596,13 @@ mod tests {
         // subcommand at a time: without the `about` clap falls back to the doc
         // comment, and `warlock init --help` answers "`warlock init`." — the
         // name back, which is not what a reader asked for.
-        for (name, said) in [("init", "CLAUDE.md"), ("config", "sigils")] {
+        for (name, said) in [
+            ("init", "CLAUDE.md"),
+            ("config", "sigils"),
+            ("stale", "stale"),
+            ("fresh", "fresh"),
+            ("check", "scope"),
+        ] {
             let mut command = Cli::command();
             let help = command
                 .find_subcommand_mut(name)
@@ -1366,6 +1612,11 @@ mod tests {
             assert!(help.contains(said), "{name}: {help}");
             assert!(!help.contains("essays"), "{name}: {help}");
             assert!(help.lines().count() < 20, "{name}: {help}");
+            // The doc comment above each variant is the command in backticks
+            // and nothing an `about` here writes is, so a backtick in the help
+            // is a doc comment clap lifted — which for `stale` would be the
+            // name back rather than what it does.
+            assert!(!help.contains('`'), "{name}: {help}");
         }
     }
 
@@ -1425,9 +1676,91 @@ mod tests {
         // `long_about = None` is what stands between `warlock --help` and the
         // essays above; without it clap lifts the doc comments wholesale.
         let help = Cli::command().render_long_help().to_string();
-        assert!(help.contains("init"), "{help}");
-        assert!(help.contains("config"), "{help}");
+        for subcommand in ["init", "config", "stale", "fresh", "check"] {
+            assert!(help.contains(subcommand), "{subcommand}: {help}");
+        }
         assert!(!help.contains("panic hook"), "{help}");
         assert!(help.lines().count() < 20, "{help}");
+        // Every doc comment on `Cli` and its variants spells the command in
+        // backticks, and no `about` above does, so a backtick reaching the help
+        // is a doc comment that got lifted into it.
+        assert!(!help.contains('`'), "{help}");
+    }
+
+    #[test]
+    fn an_answered_question_is_a_zero_whatever_the_answer_was() {
+        // The half of the exit contract that carries the verdicts: warlock ran
+        // the query and the answer is in the output, so the status says the
+        // question was answered and nothing more. The two answers that read
+        // most like failures and are not — an empty listing and a scope closed
+        // to this machine — are `Ok(())` where they are produced, pinned in
+        // `query::tests` and `check::tests` against this same function.
+        assert_eq!(status_for(&Ok(())), 0);
+    }
+
+    #[test]
+    fn a_question_warlock_could_not_answer_is_a_one_and_never_a_two() {
+        // The other half: no repository above the working directory, a load
+        // that could not colour what it was asked about, and a path with no
+        // repository-relative spelling — the last of them built by the very
+        // function the three subcommands spell their paths through, so this is
+        // the refusal a reader would actually get.
+        let refusals = [
+            Error::NoRepository {
+                start: PathBuf::from("/nowhere"),
+                wanted: FOR_CLAUDE_MD,
+            },
+            Error::Problems {
+                first: "`/repo/docs`: `WARLOCK.md` could not be read".to_owned(),
+                rest: 2,
+            },
+            spelled(Path::new("/repo"), Path::new("/elsewhere"))
+                .expect_err("a path outside the repository has no manifest form"),
+        ];
+
+        for refusal in refusals {
+            let said = refusal.to_string();
+            assert_eq!(status_for(&Err(refusal)), 1, "{said}");
+            // One line, because `main` prints it as one line with a `warlock: `
+            // in front of it.
+            assert!(!said.contains('\n'), "{said}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_invocation_is_clap_s_two_across_all_three_questions() {
+        // The third status, and the one warlock never produces itself: clap
+        // exits the process with it before `main` has anything to map. Held
+        // here over each of the three so that a script can tell a typo from a
+        // refusal by the status alone, without reading a word of either.
+        let malformed: [&[&str]; 6] = [
+            &["stale", "--nonsense"],
+            &["stale", "here", "there"],
+            &["fresh", "--json=yes"],
+            &["check"],
+            &["check", "here", "there"],
+            &["check", "--nonsense", "here"],
+        ];
+
+        for args in malformed {
+            let error = parse(args).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+            assert!(error.use_stderr(), "{args:?}");
+            // And distinct from the status warlock spends on its own failures,
+            // which is the whole reason the split is worth keeping.
+            assert_ne!(
+                error.exit_code(),
+                i32::from(status_for(&Ok(()))),
+                "{args:?}"
+            );
+            assert_ne!(
+                error.exit_code(),
+                i32::from(status_for(&Err(Error::NoRepository {
+                    start: PathBuf::from("/nowhere"),
+                    wanted: FOR_CLAUDE_MD,
+                }))),
+                "{args:?}"
+            );
+        }
     }
 }

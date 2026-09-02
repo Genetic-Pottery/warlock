@@ -59,7 +59,15 @@ serde = { version = "1", features = ["derive"] }
 # the vendor may extend at any time. Reading it through `Value` with defensive
 # field access is the only honest way to consume a schema written elsewhere, and
 # writing a tolerant JSON reader by hand is strictly worse than taking serde's.
-serde_json = { version = "1" }
+#
+# `preserve_order` because the objects `--json` prints are a shell contract:
+# `command` first and then what that command has to say, in the order the
+# subcommand wrote them. Without it a `Map` is a `BTreeMap` and the keys come
+# out alphabetically, which would print a check's answer as `command`, `opens`,
+# `path`, `scope`, `sigils` — readable, but not the shape the CLI promises. The
+# feature costs no new crate in the tree: it swaps that `BTreeMap` for
+# `indexmap`, which `toml` already brings in.
+serde_json = { version = "1", features = ["preserve_order"] }
 # The on-disk format for `.warlock/pacts.toml`: the manifest is committed to git
 # and hand-editable, so it needs a format people can read and diff, and `toml` is
 # the serde-native reader/writer for the one this repo already writes Cargo in.
