@@ -691,7 +691,11 @@ mod tests {
     // The other door onto the un-pact rule, pressed here so that the two are
     // held to one answer in one place. See `pressed_p`.
     use crate::pacting::pressed_p;
-    use crate::session::{load_manifest, sigils_under};
+    // The sentence itself, asked of the one function that writes it rather than
+    // retyped: the footer and the shell refuse the same boundary in the same
+    // words, and a test holding a copy of those words is a test that would go on
+    // passing while the two doors drifted apart.
+    use crate::session::{closed_scope_message, load_manifest, sigils_under};
     use crate::status_for;
 
     /// The grant every entry below carries, so that "the scope write left the
@@ -878,10 +882,11 @@ mod tests {
             matches!(error, Error::ClosedScope { .. }),
             "the boundary was refused as something else: {error:?}"
         );
+        // The footer's own sentence, named rather than copied, about this path
+        // and this scope: the shell says what the keystroke says.
         assert_eq!(
             error.to_string(),
-            "crates/engine is scoped `data-plane` — hold that sigil to work here, \
-             with `warlock config`"
+            closed_scope_message("crates/engine", "data-plane")
         );
         assert!(!error.to_string().contains('\n'), "`main` prints one line");
         // The refusal's own status: not the 1 warlock spends on something it
@@ -1226,10 +1231,11 @@ mod tests {
                 matches!(error, Error::ClosedScope { .. }),
                 "the boundary was refused as something else: {error:?}"
             );
+            // The same sentence the un-pact is refused with and the same one
+            // the footer puts up, asked of the one function that writes it.
             assert_eq!(
                 error.to_string(),
-                "crates/engine is scoped `data-plane` — hold that sigil to work here, \
-                 with `warlock config`"
+                closed_scope_message("crates/engine", "data-plane")
             );
             assert!(!error.to_string().contains('\n'), "`main` prints one line");
             // The same boundary, so the same status the un-pact gets: one

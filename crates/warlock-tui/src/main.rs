@@ -1585,6 +1585,26 @@ mod tests {
         Cli::try_parse_from(typed)
     }
 
+    /// The parser clap built for the subcommand spelled by `names`, walked one
+    /// word at a time so that a nested pair — `["scope", "add"]` — is reached the
+    /// way a reader types it.
+    ///
+    /// A clone rather than a borrow, because [`clap::Command::render_long_help`]
+    /// wants the command by mutable reference and the tests below want several of
+    /// them from one parser.
+    fn subcommand(names: &[&str]) -> clap::Command {
+        let mut command = Cli::command();
+        for name in names {
+            let found = command
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("warlock has a `{name}` subcommand"))
+                .clone();
+            command = found;
+        }
+
+        command
+    }
+
     #[test]
     fn the_binary_is_named_warlock() {
         assert_eq!(env!("CARGO_BIN_NAME"), "warlock");
@@ -2053,6 +2073,76 @@ mod tests {
             })),
             1
         );
+    }
+
+    #[test]
+    fn the_four_statuses_a_write_can_leave_are_all_different_numbers() {
+        // The vocabulary, held together in one place so that a script reading
+        // only the status can tell the four apart: a write that happened, one
+        // warlock could not finish, one refused at the boundary with nothing
+        // spent, and a command line that was never a request. Each is taken from
+        // the thing that really produces it — `status_for` for warlock's own
+        // three, clap for the fourth — rather than written down as a number.
+        let completed = i32::from(status_for(&Ok(())));
+        let could_not = i32::from(status_for(&Err(Error::NoRepository {
+            start: PathBuf::from("/nowhere"),
+            wanted: FOR_CLAUDE_MD,
+        })));
+        let refused = i32::from(status_for(&Err(Error::ClosedScope {
+            path: "crates/engine".to_owned(),
+            scope: "data-plane".to_owned(),
+        })));
+        // Clap's, from a write invocation rather than a question's, because it
+        // is a write's four statuses that are being told apart.
+        let malformed = parse(&["scope", "add", "crates"])
+            .expect_err("a scope write with the scope missing is clap's")
+            .exit_code();
+
+        let vocabulary = [completed, could_not, refused, malformed];
+        assert_eq!(vocabulary, [0, 1, 3, 2]);
+        for (first, one) in vocabulary.iter().enumerate() {
+            for (second, other) in vocabulary.iter().enumerate() {
+                assert!(
+                    first == second || one != other,
+                    "two of the four outcomes share a status: {vocabulary:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_argument_the_parser_accepts_gets_a_write_past_the_boundary() {
+        // The absence stated over the parser itself rather than over a list of
+        // spellings somebody thought of: `--force` is refused in the test above,
+        // and this says there is no word at all — however spelled — that a write
+        // takes besides its path, its scope and clap's own `--help`. The one
+        // road past a boundary is `warlock config`, and an option here would be
+        // a second one.
+        for names in [
+            vec!["unpact"],
+            vec!["scope"],
+            vec!["scope", "add"],
+            vec!["scope", "remove"],
+        ] {
+            let mut command = subcommand(&names);
+            // The positionals are the path, and the scope on an `add`; every
+            // other argument a write accepts has to be clap's own help.
+            for argument in command.get_arguments().filter(|a| !a.is_positional()) {
+                assert_eq!(
+                    argument.get_long(),
+                    Some("help"),
+                    "{names:?} takes an option other than clap's help"
+                );
+            }
+
+            // And the help a reader is shown offers none of the words an
+            // override would be spelled with, in case one arrives later as a
+            // subcommand rather than as a flag.
+            let help = command.render_long_help().to_string().to_lowercase();
+            for word in ["force", "override", "skip", "anyway", "ignore", "sudo"] {
+                assert!(!help.contains(word), "{names:?}: {help}");
+            }
+        }
     }
 
     #[test]
