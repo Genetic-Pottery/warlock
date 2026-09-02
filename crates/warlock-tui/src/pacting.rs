@@ -865,6 +865,14 @@ fn cancelled(toggled: Toggled) -> Toggled {
 /// [`action_for`](crate::input::action_for) calling `p` "its own undo" holds
 /// pacting-ward and not the other way.
 ///
+/// This refusal is only half of that guard, and it is the half that asks about
+/// the row: coverage walks up, so a boundary held by a directory *underneath*
+/// the cursor has never been in its answer. The other half is the fourth
+/// refusal below, and the two together are the rule argued in
+/// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md` — the same
+/// rule `warlock unpact` is refused by, in the same words, so a key press and a
+/// shell prompt over one path cannot come to two answers.
+///
 /// # The fourth refusal, which is the third one aimed downwards
 ///
 /// [`closed_scope`] asks whether this operator may act *here*, and coverage
@@ -971,6 +979,29 @@ fn blocked_unpact(app: &mut App, manifest: &Manifest, repo_root: &Path, sigils: 
     let label = app.label_for(&path);
     app.set_message(blocking_scopes_message(&label, &blocking));
     true
+}
+
+/// One press of `p`, for the test in [`mod@crate::edits`] that holds this door
+/// and `warlock unpact` to one answer.
+///
+/// The un-pact rule has two doors, and the only way to show they agree is to
+/// press both over one repository — so the shell's tests need the key handler,
+/// which is private to this module and stays private in every build that is not
+/// a test. A named seam rather than a widened visibility, so production cannot
+/// grow a second caller through the hole a test wanted.
+///
+/// The two arguments filled in are the two a boundary question has no opinion
+/// about: nothing is in flight, because a press refused by a running pact is
+/// refused before either door is asked, and the account's clock is whenever the
+/// press happened.
+#[cfg(test)]
+pub(crate) fn pressed_p(
+    app: &mut App,
+    manifest: &Manifest,
+    repo_root: &Path,
+    sigils: &Sigils,
+) -> Option<PactToggle> {
+    pact_press(app, manifest, repo_root, sigils, false, Instant::now())
 }
 
 /// What one press of the refresh key comes to, given whether a run is going

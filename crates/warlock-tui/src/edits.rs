@@ -78,17 +78,25 @@
 //! # The blast radius, and why the success line is what it is
 //!
 //! `at_or_below` in the engine begins `selected == ROOT_MODULE`, so
-//! `warlock unpact .` drops every entry in the manifest — and if the repository
-//! root itself carries no scope, the boundary above waves it straight through
-//! whatever the directories underneath are scoped. That is exactly what the `p`
-//! key does today and this subcommand deliberately does not change it.
+//! `warlock unpact .` drops every entry in the manifest, and an entry is the
+//! only home a scope has. What keeps that from erasing somebody's boundary from
+//! outside it is the second question in [`Opened::unpacted`]: a subtree carrying
+//! a scope this machine does not hold refuses the un-pact, and an unscoped
+//! repository root buys nothing, because the absence of a statement over a path
+//! is not permission over the statements below it. That rule is argued in
+//! `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`, and the `p`
+//! key is held to it in the same words — neither door refuses where the other
+//! permits, which is a fact the tests at the foot of this file press both doors
+//! to state.
 //!
-//! What it changes is where the reader is standing. In the TUI you navigate to a
+//! Inside the boundary the radius is still the whole subtree, and a scope this
+//! machine *does* hold goes with its entry like any other. What differs from
+//! the TUI there is where the reader is standing: in the panel you navigate to a
 //! visible row, with the scopes drawn beside it and the subtree under the
 //! cursor; from a shell it is one line in a script that scrolls past. So the
 //! success line is the mitigation rather than decoration: it says how many
 //! entries went, and it names every one of them that carried a scope, with the
-//! scope. A run that quietly dropped somebody else's boundary now says whose.
+//! scope. A run that dropped a boundary this machine was inside of says which.
 //!
 //! # What a scope write is, and where its rules come from
 //!
@@ -659,11 +667,17 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use warlock_engine::{Manifest, PactEntry, manifest_path, save_sigils, validate_scope};
+    use warlock_engine::{
+        Manifest, Node, NodeState, PactEntry, Tree, manifest_path, save_sigils, validate_scope,
+    };
+    use warlock_tui::App;
 
     use super::{Opened, scoped_line, unpacted_line, unscoped_line};
     use crate::error::Error;
-    use crate::session::load_manifest;
+    // The other door onto the un-pact rule, pressed here so that the two are
+    // held to one answer in one place. See `pressed_p`.
+    use crate::pacting::pressed_p;
+    use crate::session::{load_manifest, sigils_under};
     use crate::status_for;
 
     /// The grant every entry below carries, so that "the scope write left the
@@ -1379,5 +1393,195 @@ mod tests {
             "crates/engine is no longer scoped — was `data-plane`"
         );
         assert_eq!(unscoped_line("docs", None), "docs carried no scope");
+    }
+
+    /// The scope this machine's one sigil opens, on both doors and in every
+    /// case below.
+    const HELD: &str = "platform";
+
+    /// The scope it does not, which is the one every refusal here is by.
+    const CLOSED: &str = "data-plane";
+
+    /// One manifest holding every shape the two doors have to answer alike: a
+    /// root entry carrying no scope, a boundary this machine holds on `crates`,
+    /// one it does not on `crates/engine` below that, and a second subtree whose
+    /// only boundary below is one it does hold.
+    ///
+    /// One manifest rather than one per case, because a parity test over several
+    /// fixtures would be showing that the two doors agree about several
+    /// different repositories.
+    fn a_manifest_of_boundaries_both_ways() -> Manifest {
+        Manifest::with_entries([
+            // Spelled out rather than through `entry`, which would document the
+            // root as `./WARLOCK.md`.
+            PactEntry::new(".", ".", "WARLOCK.md")
+                .expect("the repository root is inside itself")
+                .with_grant(HASH, AT),
+            entry("crates").with_scope(HELD),
+            entry("crates/engine").with_scope(CLOSED),
+            entry("crates/engine/src"),
+            entry("docs"),
+            entry("docs/api").with_scope(HELD),
+        ])
+    }
+
+    /// A repository holding that manifest, and a home holding the one sigil,
+    /// both throwaway.
+    ///
+    /// No documents on disk: what these tests are about is which un-pacts are
+    /// allowed, and neither door reads a `WARLOCK.md` to decide that. The
+    /// promise that an un-pact leaves every document where it was is pinned
+    /// above, over a repository that has them.
+    fn a_repository_of_boundaries() -> (tempfile::TempDir, tempfile::TempDir) {
+        let repo = a_dir();
+        let home = a_dir();
+        a_manifest_of_boundaries_both_ways()
+            .save(repo.path())
+            .expect("a manifest that saves");
+        holding(home.path(), repo.path(), &[HELD]);
+
+        (repo, home)
+    }
+
+    /// The panel over that repository: every directory the manifest names, each
+    /// one pacted, so that `p` on any of its rows is an un-pact.
+    fn a_panel_over(repo_root: &Path) -> App {
+        let node = |name: &str, children: Vec<Node>| {
+            Node::new(
+                repo_root.join(name),
+                None::<PathBuf>,
+                NodeState::PactedFresh,
+            )
+            .with_children(children)
+        };
+
+        App::from_tree(&Tree::new(
+            Node::new(repo_root, None::<PathBuf>, NodeState::PactedFresh).with_children([
+                node(
+                    "crates",
+                    vec![node(
+                        "crates/engine",
+                        vec![node("crates/engine/src", Vec::new())],
+                    )],
+                ),
+                node("docs", vec![node("docs/api", Vec::new())]),
+            ]),
+        ))
+    }
+
+    /// What one door said about one un-pact: it went ahead, or it was refused
+    /// with this sentence.
+    ///
+    /// The answer, and deliberately not the mechanism. The panel refuses by
+    /// painting nothing and putting a line on the footer, the shell by handing
+    /// `main` an error to print; those are two shapes of one rule, and this is
+    /// what the two of them have to be equal in.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Answer {
+        WentAhead,
+        Refused(String),
+    }
+
+    /// `sentence` with the panel's name for the repository root written the way
+    /// the shell writes it.
+    ///
+    /// The one difference between the doors that is not about the rule:
+    /// [`App::label_for`](warlock_tui::App::label_for) spells a row relative to
+    /// the tree's root and falls back to the absolute path for the root row
+    /// itself, where the shell spells that row `.`. Every other row is named by
+    /// the manifest's own spelling on both sides, so this is a no-op for them.
+    fn as_the_shell_says_it(sentence: &str, repo_root: &Path) -> String {
+        sentence.replace(&repo_root.display().to_string(), ".")
+    }
+
+    /// What the `p` key answers about un-pacting `path`, pressed on that row of
+    /// [`a_panel_over`].
+    fn panel_answer(repo_root: &Path, home: &Path, path: &str) -> Answer {
+        let manifest = load_manifest(repo_root).expect("a manifest that reads");
+        // The header's own reading of the config `warlock config` wrote, which
+        // is what the running app holds and what the shell reads for itself.
+        let sigils = sigils_under(home, repo_root);
+        let mut app = a_panel_over(repo_root);
+        let target = if path == "." {
+            repo_root.to_path_buf()
+        } else {
+            repo_root.join(path)
+        };
+        let row = app
+            .rows()
+            .iter()
+            .position(|row| row.path == target)
+            .expect("the panel draws a row for this directory");
+        app.select_row(row);
+
+        match pressed_p(&mut app, &manifest, repo_root, &sigils) {
+            Some(toggle) => {
+                assert!(!toggle.pacted, "{path}: the press was not an un-pact");
+                Answer::WentAhead
+            }
+            None => Answer::Refused(as_the_shell_says_it(
+                app.message().expect("a refused press says why"),
+                repo_root,
+            )),
+        }
+    }
+
+    /// What `warlock unpact <path>` answers about the same directory, on the
+    /// production road: the boundary through [`Opened::new`], the edit through
+    /// [`Opened::unpacted`].
+    fn shell_answer(repo_root: &Path, home: &Path, path: &str) -> Answer {
+        match unpact(repo_root, home, path) {
+            Ok(_) => Answer::WentAhead,
+            Err(error) => Answer::Refused(error.to_string()),
+        }
+    }
+
+    #[test]
+    fn a_key_press_and_a_shell_prompt_answer_the_same_un_pact_alike() {
+        // The rule's own last clause: there is no path by which one door refuses
+        // and the other permits. Both are pressed over one manifest, by one
+        // machine holding one sigil, and the answers are held against each other
+        // *and* against what the answer is supposed to be — so a change to
+        // either door alone fails here, and so does a change to both that moves
+        // the rule.
+        //
+        // The rule is `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
+        let refused_here = format!(
+            "crates/engine is scoped `{CLOSED}` — hold that sigil to work here, \
+             with `warlock config`"
+        );
+        let refused_below = |label: &str| {
+            format!(
+                "un-pacting {label} would drop pacts scoped `{CLOSED}` — hold that sigil with \
+                 `warlock config`, or un-pact the parts you hold"
+            )
+        };
+
+        for (path, expected) in [
+            // A scope on the target itself, which coverage has always seen.
+            ("crates/engine", Answer::Refused(refused_here)),
+            // A target this machine's own sigil opens, over an entry below it
+            // that it does not: passing the first question is not permission for
+            // the second.
+            ("crates", Answer::Refused(refused_below("crates"))),
+            // A boundary below that this machine holds is no obstacle, so the
+            // subtree goes — the rule refuses over scopes, not over having any.
+            ("docs", Answer::WentAhead),
+            // The root, which carries no scope of its own. That is the absence
+            // of a statement rather than permission over the statements below.
+            (".", Answer::Refused(refused_below("."))),
+        ] {
+            // A repository each, because the un-pact that goes ahead saves.
+            let (repo, home) = a_repository_of_boundaries();
+
+            let panel = panel_answer(repo.path(), home.path(), path);
+            let shell = shell_answer(repo.path(), home.path(), path);
+
+            assert_eq!(
+                panel, shell,
+                "`p` and `warlock unpact` disagree over {path}"
+            );
+            assert_eq!(panel, expected, "the answer over {path} has changed");
+        }
     }
 }

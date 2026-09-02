@@ -409,6 +409,19 @@ pub(crate) fn blocking_scopes_message(label: &str, scopes: &[&str]) -> String {
 /// the time this returns, exactly as [`App::scope_target`] and `App::toggle_pact`
 /// word their own row-level refusals before answering `None`.
 ///
+/// # It asks "here", and an un-pact asks a second question elsewhere
+///
+/// [`scope_covering`] walks *up*, so what this answers is whether the operator
+/// may act at the selected row — never what the act would reach below it.
+/// Un-pacting reaches the whole subtree and takes the scopes on it, so it is
+/// refused by a second, downward question, asked in `pacting.rs` on the un-pact
+/// path and by `warlock unpact` in `edits.rs`, and worded by
+/// [`blocking_scopes_message`]. This function is deliberately *not* widened to
+/// cover it: it is `r`'s and `s`'s too, a pact and a refresh provably leave
+/// every scope where they found it, and gating a root refresh on holding every
+/// sigil in a monorepo would refuse the ordinary gesture. The reasoning is
+/// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
+///
 /// # Why the check is here and not on the app
 ///
 /// [`Chrome`] carries the sigils and is deliberately not a field on [`App`] —

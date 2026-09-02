@@ -1357,12 +1357,19 @@ fn rewrite(
 /// only home a scope has, so dropping the entry is dropping the scope, and this
 /// function does not special-case it — but it is worth saying in as many words,
 /// because it is the one place a boundary is lost. It is lost because somebody
-/// pressed a key on the directory holding it, not because a run wandered over
-/// it: no pact operation can touch a scope, since a run hands over outcomes and
-/// an outcome has nowhere to put one. A later re-pact of the same directory
-/// brings back an entry with no scope, to be written again by whoever wants it.
-/// Scopes on entries outside the subtree are untouched, like everything else on
-/// them.
+/// asked for the subtree holding it, not because a run wandered over it: no pact
+/// operation can touch a scope, since a run hands over outcomes and an outcome
+/// has nowhere to put one. A later re-pact of the same directory brings back an
+/// entry with no scope, to be written again by whoever wants it. Scopes on
+/// entries outside the subtree are untouched, like everything else on them.
+///
+/// **Who may ask is not settled here.** This function is arithmetic on a
+/// manifest and holds no opinion about sigils; both callers of it — the `p` key
+/// and `warlock unpact` — ask [`closed_scopes_at_or_below`] first and refuse
+/// when any scope at or below the directory is one this machine does not hold,
+/// so a boundary is never dropped by a machine standing outside it. The rule and
+/// its reasoning are
+/// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
 ///
 /// # What counts as below
 ///
