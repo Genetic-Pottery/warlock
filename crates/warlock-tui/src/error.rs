@@ -112,6 +112,11 @@ pub(crate) enum Error {
     /// written: the boundary is asked before the path is spelled and before the
     /// manifest is looked into (see [`mod@crate::edits`]), so this refusal
     /// cannot have leaked what the manifest holds on the far side of it.
+    ///
+    /// The one variant here that is not exit status 1: nothing was spent and
+    /// nothing can be retried into working, so `main` leaves a 3 behind and a
+    /// script can act on it without reading the sentence. See
+    /// [`status_for`](crate::status_for).
     ClosedScope {
         /// The path, as the manifest spells it: repository-root-relative with
         /// forward slashes, and `.` for the root itself. Never the absolute

@@ -65,6 +65,19 @@
 //! so a scoped directory refuses them both. There is no `--force`, no
 //! environment variable and no flag past this: `warlock config` is the one road.
 //!
+//! # What the refusal costs, and the number it leaves behind
+//!
+//! A boundary this machine does not open is one line on stderr and **exit
+//! status 3**, with `.warlock/pacts.toml` byte-identical to what was read. 3 is
+//! the refusal's own number across every write warlock grows, and it is not 1
+//! because the two want opposite things done about them: a 1 is warlock unable
+//! to do the thing, and the line is there to be read; a 3 is warlock declining
+//! to, nothing was spent, and re-running it will never work — the road out is
+//! `warlock config` and a sigil somebody else has to hand over. A script that
+//! had to tell those apart by their wording would be parsing prose. The
+//! vocabulary in full, and the reasoning for the un-pact's *second* refusal
+//! keeping a 1, is on [`status_for`](crate::status_for).
+//!
 //! # What an un-pact is, and what it is not
 //!
 //! It is the manifest edit the TUI's `p` on an already-pacted subtree performs
@@ -543,7 +556,8 @@ fn opened(wanted: &'static str, path: &Path) -> Result<Opened, Error> {
 ///
 /// The line is `init`'s shape, `warlock: ` and then the fact, on stdout, and the
 /// status is 0. A refusal is one line on stderr through `main`'s own
-/// `eprintln!`, and a 1.
+/// `eprintln!`: a 3 when the boundary over the path is closed to this machine,
+/// and a 1 for everything else it can refuse.
 ///
 /// # Errors
 ///
@@ -677,7 +691,11 @@ mod tests {
     // The other door onto the un-pact rule, pressed here so that the two are
     // held to one answer in one place. See `pressed_p`.
     use crate::pacting::pressed_p;
-    use crate::session::{load_manifest, sigils_under};
+    // The sentence itself, asked of the one function that writes it rather than
+    // retyped: the footer and the shell refuse the same boundary in the same
+    // words, and a test holding a copy of those words is a test that would go on
+    // passing while the two doors drifted apart.
+    use crate::session::{closed_scope_message, load_manifest, sigils_under};
     use crate::status_for;
 
     /// The grant every entry below carries, so that "the scope write left the
@@ -864,13 +882,17 @@ mod tests {
             matches!(error, Error::ClosedScope { .. }),
             "the boundary was refused as something else: {error:?}"
         );
+        // The footer's own sentence, named rather than copied, about this path
+        // and this scope: the shell says what the keystroke says.
         assert_eq!(
             error.to_string(),
-            "crates/engine is scoped `data-plane` — hold that sigil to work here, \
-             with `warlock config`"
+            closed_scope_message("crates/engine", "data-plane")
         );
         assert!(!error.to_string().contains('\n'), "`main` prints one line");
-        assert_eq!(status_for(&Err(error)), 1);
+        // The refusal's own status: not the 1 warlock spends on something it
+        // could not do, because nothing was spent and nothing here can be
+        // retried into working.
+        assert_eq!(status_for(&Err(error)), 3);
         assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
     }
 
@@ -943,6 +965,10 @@ mod tests {
              `warlock config`, or un-pact the parts you hold"
         );
         assert!(!error.to_string().contains('\n'), "`main` prints one line");
+        // A 1 and deliberately not the boundary's 3: this machine may work at
+        // `crates`, and the second road out of the sentence — un-pact the parts
+        // you hold — needs no sigil at all, so it is not the "you are outside,
+        // go and ask" verdict 3 exists for. Argued on `status_for`.
         assert_eq!(status_for(&Err(error)), 1);
 
         // The root, whose own unscoped-ness bought the whole repository today:
@@ -982,6 +1008,9 @@ mod tests {
             "un-pacting . would drop pacts scoped `platform`, `data-plane` — hold those sigils \
              with `warlock config`, or un-pact the parts you hold"
         );
+        // The descendant refusal's 1 again, and holding nothing does not change
+        // it: what decides the status is which question was refused, not how
+        // much this machine holds. See `status_for`.
         assert_eq!(status_for(&Err(error)), 1);
     }
 
@@ -1202,13 +1231,16 @@ mod tests {
                 matches!(error, Error::ClosedScope { .. }),
                 "the boundary was refused as something else: {error:?}"
             );
+            // The same sentence the un-pact is refused with and the same one
+            // the footer puts up, asked of the one function that writes it.
             assert_eq!(
                 error.to_string(),
-                "crates/engine is scoped `data-plane` — hold that sigil to work here, \
-                 with `warlock config`"
+                closed_scope_message("crates/engine", "data-plane")
             );
             assert!(!error.to_string().contains('\n'), "`main` prints one line");
-            assert_eq!(status_for(&Err(error)), 1);
+            // The same boundary, so the same status the un-pact gets: one
+            // refusal, one number, whichever write met it.
+            assert_eq!(status_for(&Err(error)), 3);
         }
         assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
     }
@@ -1271,7 +1303,10 @@ mod tests {
                 !error.to_string().contains("not in the manifest"),
                 "{error}"
             );
-            assert_eq!(status_for(&Err(error)), 1);
+            // And the status leaks nothing either: a closed boundary over a
+            // path with no entry is the boundary's 3, the same number it would
+            // be over a path with one.
+            assert_eq!(status_for(&Err(error)), 3);
         }
         assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
 

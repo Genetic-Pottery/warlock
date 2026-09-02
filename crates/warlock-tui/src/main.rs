@@ -241,14 +241,16 @@
 //! at anything else at all — before the path is even checked for an entry, so
 //! `warlock scope add` inside a closed boundary answers with the scope refusal
 //! and never with what the manifest holds — and a boundary this machine does not
-//! hold is one line on stderr and a 1, with the manifest untouched. That check is
+//! hold is one line on stderr and a 3, with the manifest untouched. That check is
 //! [`mod@edits`]'s, it is the engine's own
 //! [`scope_covering`](warlock_engine::scope_covering) and
 //! [`scope_opens_to`](warlock_engine::scope_opens_to) rather than a second
 //! reading of them, and there is no flag past it: `warlock config` is the only
-//! road. Its exit statuses are the questions' — 0 for a write that happened, 1
-//! for one warlock refused or could not finish, 2 for a command line that was
-//! never a request.
+//! road. So the writes have one status the questions never spend: 0 for a write
+//! that happened, 3 for one refused at the boundary with nothing spent, 1 for
+//! one warlock could not finish, 2 for a command line that was never a request.
+//! The whole vocabulary, and why the refusal is worth a number of its own, is in
+//! [`status_for`].
 //!
 //! The reader can hand the pointer back. `m` turns the terminal's reporting off
 //! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
@@ -540,6 +542,10 @@ fn main() -> ExitCode {
     // without reading a word of either message. A 0 means the question was
     // answered whatever the answer was — including an empty answer, which is
     // "nothing is stale" and not the absence of one.
+    //
+    // The writes below add a third register, which is warlock's too and is not
+    // a failure at all: a boundary this machine's sigils do not open is refused
+    // with nothing spent, and that is a 3. See `status_for`.
     let cli = Cli::parse();
 
     let outcome = match cli.command {
@@ -600,25 +606,57 @@ fn main() -> ExitCode {
 
 /// The status warlock leaves behind for `outcome`, as the number a shell sees.
 ///
-/// One line, given a name and pulled out of `main`, because it is the whole of
-/// the exit contract the three questions promise and `main` itself is the one
-/// function here that no test can call: a test that ran it would run the event
-/// loop, or would have to spawn a process to avoid doing so. As a function of
-/// the outcome it is ordinary code, and the modules that produce those outcomes
-/// ([`query`], [`check`]) pin their own end of the contract against it — an
-/// empty listing and a scope closed to this machine are both `Ok(())`, and both
-/// are a 0.
+/// A few lines, given a name and pulled out of `main`, because they are the
+/// whole of the exit contract every headless subcommand promises and `main`
+/// itself is the one function here that no test can call: a test that ran it
+/// would run the event loop, or would have to spawn a process to avoid doing so.
+/// As a function of the outcome it is ordinary code, and the modules that
+/// produce those outcomes ([`query`], [`check`], [`mod@edits`]) pin their own end
+/// of the contract against it — an empty listing and a scope closed to this
+/// machine are both `Ok(())` from a question, and both are a 0.
 ///
-/// Two statuses and not three, deliberately. 0 means the question was answered
-/// and the answer is in the output, whatever it says; 1 means warlock could not
-/// answer it. The third, 2, is never produced here at all: it is clap's, for a
-/// command line that was never a question, and `Cli::parse` has exited the
-/// process with it long before this is reached. So no verdict of warlock's own
-/// — nothing stale, nothing covering a path, a closed scope — ever spends a
-/// non-zero status, which is what leaves that status free for `jq -e`.
+/// The vocabulary the project agreed, in full. **0** completed: the question
+/// was answered or the write happened, whatever the answer turned out to be.
+/// **1** warlock could not do it: the repository will not resolve, the manifest
+/// will not parse or will not save, the path has no repository-relative
+/// spelling — the line on stderr is the thing to go and read. **2** a malformed
+/// invocation, which is clap's and is never produced here at all: `Cli::parse`
+/// has exited the process with it long before this is reached. **3** refused,
+/// with nothing spent: this machine's sigils do not open the scope covering the
+/// path a write was aimed at, so no byte of `.warlock/pacts.toml` moved,
+/// retrying changes nothing, and the road out is `warlock config` rather than
+/// anything in the message. **4**, completed with failures, and **130**,
+/// cancelled, belong to the pact/refresh slice and are not produced here yet.
+///
+/// 3 is here so that a script can act without reading English: the two non-zero
+/// results a write can have want opposite things done about them, and telling
+/// them apart by their wording is telling them apart by parsing prose. It is
+/// spent on a write refused and never on a question — `warlock check` over a
+/// boundary this machine does not hold still exits 0, because there a closed
+/// scope is the answer rather than a failure to reach one. So no verdict a
+/// question reached — nothing stale, nothing covering a path, a scope closed to
+/// this machine — ever spends a non-zero status, which is what leaves that
+/// status free for `jq -e '.opens'`.
+///
+/// [`Error::ClosedScopeBelow`] — the un-pact refused because the subtree it
+/// would drop carries a scope this machine does not hold — stays a 1, and that
+/// is a decision rather than an oversight. A 3 says the reader is *outside*:
+/// the path they aimed at is not theirs to touch, they were told nothing about
+/// what the manifest holds past it, and one road leads out. The descendant
+/// refusal says the reverse about the same reader — the boundary over that path
+/// already said yes and they may work there — and what it refuses is the blast
+/// radius, which is why its own sentence offers a second road that needs no
+/// sigil at all: un-pact the parts you hold. A script reading a 3 as "this
+/// checkout is locked out of that path, stop" would be wrong about it, and it
+/// is that wrongness which decides this rather than the tidiness of one number
+/// per rule. It is the weaker half of the fit — nothing was spent there either
+/// — so if the pact/refresh slice finds callers wanting the two together,
+/// moving it is one arm of the match below.
 const fn status_for(outcome: &Result<(), Error>) -> u8 {
     match outcome {
         Ok(()) => 0,
+        // The boundary, and only the upward one: see the decision above.
+        Err(Error::ClosedScope { .. }) => 3,
         Err(_) => 1,
     }
 }
@@ -1547,6 +1585,26 @@ mod tests {
         Cli::try_parse_from(typed)
     }
 
+    /// The parser clap built for the subcommand spelled by `names`, walked one
+    /// word at a time so that a nested pair — `["scope", "add"]` — is reached the
+    /// way a reader types it.
+    ///
+    /// A clone rather than a borrow, because [`clap::Command::render_long_help`]
+    /// wants the command by mutable reference and the tests below want several of
+    /// them from one parser.
+    fn subcommand(names: &[&str]) -> clap::Command {
+        let mut command = Cli::command();
+        for name in names {
+            let found = command
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("warlock has a `{name}` subcommand"))
+                .clone();
+            command = found;
+        }
+
+        command
+    }
+
     #[test]
     fn the_binary_is_named_warlock() {
         assert_eq!(env!("CARGO_BIN_NAME"), "warlock");
@@ -1982,6 +2040,108 @@ mod tests {
             // One line, because `main` prints it as one line with a `warlock: `
             // in front of it.
             assert!(!said.contains('\n'), "{said}");
+        }
+    }
+
+    #[test]
+    fn a_boundary_this_machine_does_not_hold_is_a_three_and_nothing_else_is() {
+        // The write half of the contract, and the only verdict of warlock's own
+        // that is neither a 0 nor a 1: nothing was spent, so it is not a
+        // failure, and re-running it will never work, so it is not something to
+        // read on stderr and try again. Pinned here beside the other statuses;
+        // the three write commands pin their own ends in `edits::tests`.
+        let refusal = Error::ClosedScope {
+            path: "crates/engine".to_owned(),
+            scope: "data-plane".to_owned(),
+        };
+        assert_eq!(status_for(&Err(refusal)), 3);
+
+        // And it is the refusal's alone. The descendant refusal keeps a 1 by
+        // the argument on `status_for`, and so does everything warlock could
+        // not do.
+        assert_eq!(
+            status_for(&Err(Error::ClosedScopeBelow {
+                path: ".".to_owned(),
+                scopes: vec!["platform".to_owned()],
+            })),
+            1
+        );
+        assert_eq!(
+            status_for(&Err(Error::NoRepository {
+                start: PathBuf::from("/nowhere"),
+                wanted: FOR_CLAUDE_MD,
+            })),
+            1
+        );
+    }
+
+    #[test]
+    fn the_four_statuses_a_write_can_leave_are_all_different_numbers() {
+        // The vocabulary, held together in one place so that a script reading
+        // only the status can tell the four apart: a write that happened, one
+        // warlock could not finish, one refused at the boundary with nothing
+        // spent, and a command line that was never a request. Each is taken from
+        // the thing that really produces it — `status_for` for warlock's own
+        // three, clap for the fourth — rather than written down as a number.
+        let completed = i32::from(status_for(&Ok(())));
+        let could_not = i32::from(status_for(&Err(Error::NoRepository {
+            start: PathBuf::from("/nowhere"),
+            wanted: FOR_CLAUDE_MD,
+        })));
+        let refused = i32::from(status_for(&Err(Error::ClosedScope {
+            path: "crates/engine".to_owned(),
+            scope: "data-plane".to_owned(),
+        })));
+        // Clap's, from a write invocation rather than a question's, because it
+        // is a write's four statuses that are being told apart.
+        let malformed = parse(&["scope", "add", "crates"])
+            .expect_err("a scope write with the scope missing is clap's")
+            .exit_code();
+
+        let vocabulary = [completed, could_not, refused, malformed];
+        assert_eq!(vocabulary, [0, 1, 3, 2]);
+        for (first, one) in vocabulary.iter().enumerate() {
+            for (second, other) in vocabulary.iter().enumerate() {
+                assert!(
+                    first == second || one != other,
+                    "two of the four outcomes share a status: {vocabulary:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_argument_the_parser_accepts_gets_a_write_past_the_boundary() {
+        // The absence stated over the parser itself rather than over a list of
+        // spellings somebody thought of: `--force` is refused in the test above,
+        // and this says there is no word at all — however spelled — that a write
+        // takes besides its path, its scope and clap's own `--help`. The one
+        // road past a boundary is `warlock config`, and an option here would be
+        // a second one.
+        for names in [
+            vec!["unpact"],
+            vec!["scope"],
+            vec!["scope", "add"],
+            vec!["scope", "remove"],
+        ] {
+            let mut command = subcommand(&names);
+            // The positionals are the path, and the scope on an `add`; every
+            // other argument a write accepts has to be clap's own help.
+            for argument in command.get_arguments().filter(|a| !a.is_positional()) {
+                assert_eq!(
+                    argument.get_long(),
+                    Some("help"),
+                    "{names:?} takes an option other than clap's help"
+                );
+            }
+
+            // And the help a reader is shown offers none of the words an
+            // override would be spelled with, in case one arrives later as a
+            // subcommand rather than as a flag.
+            let help = command.render_long_help().to_string().to_lowercase();
+            for word in ["force", "override", "skip", "anyway", "ignore", "sudo"] {
+                assert!(!help.contains(word), "{names:?}: {help}");
+            }
         }
     }
 
