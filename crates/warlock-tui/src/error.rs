@@ -12,7 +12,7 @@ use std::{fmt, io};
 
 use warlock_engine::{ClaudeMdError, LoadError, LoadProblem, ManifestError, ScopeRule, SigilError};
 
-use crate::session::closed_scope_message;
+use crate::session::{blocking_scopes_message, closed_scope_message};
 
 /// Everything that can stop warlock showing a tree, or writing a `CLAUDE.md`.
 ///
@@ -32,10 +32,12 @@ use crate::session::closed_scope_message;
 /// `init`'s, [`Error::NoHome`] and [`Error::Sigil`] are `config`'s,
 /// [`Error::Unspellable`] belongs to the queries — the two listings and the
 /// check, which refuse a path with no repository-relative form on the same
-/// grounds and in the same words — and [`Error::ClosedScope`], [`Error::Scope`]
-/// and [`Error::NoPact`] belong to the headless writes, which refuse a boundary
-/// this machine does not hold in the footer's own words, a scope that is not one
-/// in the engine's, and a directory nobody has pacted in the manifest's.
+/// grounds and in the same words — and [`Error::ClosedScope`],
+/// [`Error::ClosedScopeBelow`], [`Error::Scope`] and [`Error::NoPact`] belong to
+/// the headless writes, which refuse a boundary this machine does not hold in
+/// the footer's own words, an un-pact that would drop one it does not hold in
+/// the footer's other ones, a scope that is not one in the engine's, and a
+/// directory nobody has pacted in the manifest's.
 #[derive(Debug)]
 pub(crate) enum Error {
     /// The working directory could not be read, so there is nothing to scope
@@ -118,6 +120,38 @@ pub(crate) enum Error {
         /// The scope covering it — the sigil to go and ask for, which is the
         /// whole social half of the refusal.
         scope: String,
+    },
+    /// `warlock unpact` was pointed at a subtree carrying boundaries this
+    /// machine's sigils do not open.
+    ///
+    /// [`Error::ClosedScope`]'s question aimed downwards, and the only refusal
+    /// in this enum that an un-pact has and the other two writes do not.
+    /// Coverage walks up, so the variant above answers whether this machine may
+    /// act *at* the path; this one answers what the act would **reach**, which
+    /// only an un-pact raises — it drops every entry below as well, and an entry
+    /// is the only home a scope has, so without this a boundary could be erased
+    /// by aiming at its parent. The decision is argued in
+    /// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
+    ///
+    /// Its sentence is written elsewhere for [`Error::ClosedScope`]'s reason:
+    /// [`blocking_scopes_message`] is what the TUI's footer says when `p` is
+    /// refused un-pacting-ward over the same subtree, and one rule refused in
+    /// two registers must not be refused in two wordings.
+    ///
+    /// The path has been spelled and the boundary *over* it has already said
+    /// yes; nothing has been written, and nothing the manifest holds has been
+    /// disclosed beyond the scopes named — which are committed inside the
+    /// repository and visible to everyone who clones it.
+    ClosedScopeBelow {
+        /// The path the un-pact was aimed at, as the manifest spells it. Not the
+        /// paths underneath: what a reader must hold to proceed is the scopes,
+        /// and `warlock check` is what locates the directories carrying them.
+        path: String,
+        /// Every distinct scope at or below it that this machine does not open,
+        /// deduplicated and in the manifest's own order — see
+        /// [`closed_scopes_at_or_below`](warlock_engine::closed_scopes_at_or_below).
+        /// Never empty: no blocking scope is nothing to refuse.
+        scopes: Vec<String>,
     },
     /// `warlock scope add` was handed something that is not a scope.
     ///
@@ -300,6 +334,14 @@ impl fmt::Display for Error {
             Self::ClosedScope { path, scope } => {
                 write!(f, "{}", closed_scope_message(path, scope))
             }
+            // The footer's other boundary sentence, to the letter and for the
+            // same reason: `p` un-pacting-ward over this subtree is refused by
+            // the same engine answer, names the same scopes in the same order,
+            // and offers the same two roads out.
+            Self::ClosedScopeBelow { path, scopes } => {
+                let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
+                write!(f, "{}", blocking_scopes_message(path, &scopes))
+            }
             // The engine's sentence about the one rule that was broken, alone
             // on the line: it says what a scope may be and what this one was,
             // which is the whole of the answer and the whole of the fix.
@@ -374,6 +416,7 @@ impl std::error::Error for Error {
             | Self::NoRepository { .. }
             | Self::NoHome
             | Self::ClosedScope { .. }
+            | Self::ClosedScopeBelow { .. }
             | Self::NoPact { .. } => None,
         }
     }
