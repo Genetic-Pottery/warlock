@@ -19,6 +19,16 @@
 //! that reason: it is the one place the boundary question is asked, by all three
 //! keys that can be refused over it, so a pact, a refresh and a scope write are
 //! turned down on the same grounds in the same words.
+//!
+//! There is a second boundary question, asked by an un-pact alone — whether the
+//! subtree about to go carries a scope this machine does not hold — and it is
+//! decided by the engine
+//! ([`closed_scopes_at_or_below`](warlock_engine::closed_scopes_at_or_below))
+//! and worded here, by
+//! [`blocking_scopes_message`], for [`closed_scope_message`]'s reason: the two
+//! doors onto that rule are a keystroke in `pacting.rs` and a shell prompt in
+//! `edits.rs`, and one rule refused in two registers must not be refused in two
+//! wordings.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -335,6 +345,61 @@ pub(crate) fn closed_scope_message(label: &str, scope: &str) -> String {
     format!("{label} is scoped `{scope}` — hold that sigil to work here, with `warlock config`")
 }
 
+/// What an un-pact of `label` is refused with when the subtree under it carries
+/// boundaries this machine does not hold, naming every one of `scopes`.
+///
+/// The second boundary sentence, and the only other one warlock has. Where
+/// [`closed_scope_message`] answers "may this operator act *here*" — coverage,
+/// which walks up — this answers the question an un-pact alone raises: what does
+/// the act **reach**. Dropping an entry drops the scope written on it, so an
+/// un-pact aimed at a parent can take a boundary with it; the answer is to
+/// refuse, argued in full in
+/// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
+///
+/// The same shape as the sentence beside it — the fact, then the two roads out —
+/// because it is the same refusal wearing a different reason. It names the
+/// directory that was aimed at rather than the ones underneath: what a reader
+/// must hold to proceed is the scopes, and they are few by design, while the
+/// paths carrying them are not and `warlock check` is the thing that locates
+/// them. Every distinct blocking scope is named, deduplicated and in the
+/// manifest's own order (see
+/// [`closed_scopes_at_or_below`](warlock_engine::closed_scopes_at_or_below)),
+/// because naming one and stopping would turn a refusal into whack-a-mole where
+/// each sigil obtained reveals the next.
+///
+/// The second road is the one this refusal has and the other does not:
+/// un-pacting the parts you *do* hold gets the work done without anybody's
+/// boundary going, and it is the honest suggestion for the ordinary case, which
+/// is a cursor one row higher than it was meant to be. There is no third road —
+/// no `--force`, no flag, no environment variable — here or anywhere past this.
+///
+/// Shared with the headless write rather than retyped there: `warlock unpact`
+/// refuses the same path on the same grounds and prints this sentence through
+/// [`Error::ClosedScopeBelow`](crate::error::Error), so a `p` on a pacted
+/// subtree and a `warlock unpact` of it give one answer in one wording. What
+/// differs is only what `label` is: a row's label there, the manifest's spelling
+/// of the path here.
+///
+/// An empty `scopes` is not a sentence this function can be asked for: both
+/// callers word a refusal they are already holding the reason for, and nothing
+/// blocking is nothing to refuse.
+pub(crate) fn blocking_scopes_message(label: &str, scopes: &[&str]) -> String {
+    let named: Vec<String> = scopes.iter().map(|scope| format!("`{scope}`")).collect();
+    // Singular for one, because the ordinary refusal is by a single boundary and
+    // a line a person reads should not say "hold those sigils" about one of them.
+    let sigils = if scopes.len() == 1 {
+        "that sigil"
+    } else {
+        "those sigils"
+    };
+
+    format!(
+        "un-pacting {label} would drop pacts scoped {} — hold {sigils} with `warlock config`, \
+         or un-pact the parts you hold",
+        named.join(", ")
+    )
+}
+
 /// The scope closed to this machine over the row `app` has selected, or `None`
 /// when the press may go ahead.
 ///
@@ -343,6 +408,19 @@ pub(crate) fn closed_scope_message(label: &str, scope: &str) -> String {
 /// is the scope that refused it — already worded onto the app's message line by
 /// the time this returns, exactly as [`App::scope_target`] and `App::toggle_pact`
 /// word their own row-level refusals before answering `None`.
+///
+/// # It asks "here", and an un-pact asks a second question elsewhere
+///
+/// [`scope_covering`] walks *up*, so what this answers is whether the operator
+/// may act at the selected row — never what the act would reach below it.
+/// Un-pacting reaches the whole subtree and takes the scopes on it, so it is
+/// refused by a second, downward question, asked in `pacting.rs` on the un-pact
+/// path and by `warlock unpact` in `edits.rs`, and worded by
+/// [`blocking_scopes_message`]. This function is deliberately *not* widened to
+/// cover it: it is `r`'s and `s`'s too, a pact and a refresh provably leave
+/// every scope where they found it, and gating a root refresh on holding every
+/// sigil in a monorepo would refuse the ordinary gesture. The reasoning is
+/// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
 ///
 /// # Why the check is here and not on the app
 ///

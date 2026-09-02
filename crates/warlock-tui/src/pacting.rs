@@ -38,14 +38,15 @@ use std::{fs, io, thread};
 
 use warlock_engine::{
     Agent, Manifest, NodeState, PactFailure, PactObserver, PactProblem, PactedSubtree, Pacting,
-    Tree, pact_subtree, refresh_subtree, to_manifest_path, unpact_subtree,
+    Tree, closed_scopes_at_or_below, pact_subtree, refresh_subtree, to_manifest_path,
+    unpact_subtree,
 };
 use warlock_tui::{
     Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactToggle, Run, Section, Sigils,
 };
 
 use crate::error::{Error, one_line};
-use crate::session::{Scope, closed_scope, reload_tree};
+use crate::session::{Scope, blocking_scopes_message, closed_scope, reload_tree};
 
 /// What the footer says when the worker thread stopped without reporting
 /// anything — which, since it reports on every path it takes itself, means it
@@ -863,6 +864,33 @@ fn cancelled(toggled: Toggled) -> Toggled {
 /// hazard the sigil is a guard against, and it is why the doc on
 /// [`action_for`](crate::input::action_for) calling `p` "its own undo" holds
 /// pacting-ward and not the other way.
+///
+/// This refusal is only half of that guard, and it is the half that asks about
+/// the row: coverage walks up, so a boundary held by a directory *underneath*
+/// the cursor has never been in its answer. The other half is the fourth
+/// refusal below, and the two together are the rule argued in
+/// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md` — the same
+/// rule `warlock unpact` is refused by, in the same words, so a key press and a
+/// shell prompt over one path cannot come to two answers.
+///
+/// # The fourth refusal, which is the third one aimed downwards
+///
+/// [`closed_scope`] asks whether this operator may act *here*, and coverage
+/// walks up, so it has never looked below the row. An un-pact is the one act
+/// that needs it to: `unpact_subtree` drops every entry underneath as well, and
+/// an entry is the only home a scope has, so a boundary can be lost by standing
+/// above it and pressing `p` on its parent. [`blocked_unpact`] is that second
+/// question, and it turns the press down for the same reason as the third and in
+/// the same place — before the toggle, which paints rather than asks. The
+/// decision is argued in
+/// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
+///
+/// It binds this key un-pacting-ward and nothing else. A pact and a refresh
+/// provably leave every scope where they found it, and `r` at the repository
+/// root is the ordinary gesture — gating it on holding every sigil in a
+/// monorepo would make the feature worst for the teams that adopted it hardest.
+/// So [`closed_scope`] itself is untouched and this check is asked only where
+/// the direction of the press is already known.
 fn pact_press(
     app: &mut App,
     manifest: &Manifest,
@@ -882,11 +910,98 @@ fn pact_press(
     if closed_scope(app, manifest, repo_root, sigils).is_some() {
         return None;
     }
+    // And the downward question, asked in the same place and for the same
+    // reason. Second, because "may this operator act here at all" is settled
+    // before "what would this press reach".
+    if blocked_unpact(app, manifest, repo_root, sigils) {
+        return None;
+    }
     let toggle = app.toggle_pact()?;
     if toggle.pacted {
         app.start_account(at);
     }
     Some(toggle)
+}
+
+/// Whether the press [`pact_press`] is about to make would un-pact a boundary
+/// this machine does not hold, worded onto the message line when it would.
+///
+/// `true` means refused, and the sentence is already on the app by the time this
+/// returns — [`closed_scope`]'s shape, for the same reason: the wording of a
+/// row-level refusal belongs beside the row it is about, and a caller translating
+/// an outcome into a sentence would be a second place deciding what a refused
+/// press means.
+///
+/// # The direction is read off the row, and it has to be read here
+///
+/// `p` is one key with two meanings, and which one it has is
+/// `!row.state.is_pacted()` — the very expression `App::toggle_pact` uses to
+/// decide what to paint. It is asked here rather than of the toggle because the
+/// toggle is not a question: it paints a whole subtree and hands back what it
+/// painted, so there is no asking it what the press would mean and then
+/// declining. A row that is not pacted is passed through: pacting-ward, `p`
+/// writes documents and leaves every scope exactly as it found it.
+///
+/// # A file row is not this function's business either
+///
+/// For [`closed_scope`]'s reason and by the same test: `App::toggle_pact`
+/// refuses a file on better grounds — a file is part of a module rather than
+/// being one — and that refusal names the row for what it is. An *ignored*
+/// directory is not passed through, which is deliberate and matches
+/// [`closed_scope`]: whether a boundary would be lost is settled before what the
+/// repository's own rules would have made of the press.
+///
+/// # A path the manifest cannot spell is open
+///
+/// [`closed_scope`]'s answer again, for the third time and for its reasons: a
+/// boundary nobody could have drawn is not one anybody is crossing, and the
+/// press's own answer is the better sentence than a refusal on a technicality.
+fn blocked_unpact(app: &mut App, manifest: &Manifest, repo_root: &Path, sigils: &Sigils) -> bool {
+    let Some(row) = app.selected_row() else {
+        return false;
+    };
+    if row.is_file() || !row.state.is_pacted() {
+        return false;
+    }
+
+    let path = row.path.clone();
+    // `Nothing` and `Unknown` are both the empty slice (`Sigils::as_slice`),
+    // which is what closes every scope below to a machine that has never been
+    // configured and to one whose config will not parse.
+    let Ok(blocking) = closed_scopes_at_or_below(&path, repo_root, manifest, sigils.as_slice())
+    else {
+        return false;
+    };
+    if blocking.is_empty() {
+        return false;
+    }
+
+    let label = app.label_for(&path);
+    app.set_message(blocking_scopes_message(&label, &blocking));
+    true
+}
+
+/// One press of `p`, for the test in [`mod@crate::edits`] that holds this door
+/// and `warlock unpact` to one answer.
+///
+/// The un-pact rule has two doors, and the only way to show they agree is to
+/// press both over one repository — so the shell's tests need the key handler,
+/// which is private to this module and stays private in every build that is not
+/// a test. A named seam rather than a widened visibility, so production cannot
+/// grow a second caller through the hole a test wanted.
+///
+/// The two arguments filled in are the two a boundary question has no opinion
+/// about: nothing is in flight, because a press refused by a running pact is
+/// refused before either door is asked, and the account's clock is whenever the
+/// press happened.
+#[cfg(test)]
+pub(crate) fn pressed_p(
+    app: &mut App,
+    manifest: &Manifest,
+    repo_root: &Path,
+    sigils: &Sigils,
+) -> Option<PactToggle> {
+    pact_press(app, manifest, repo_root, sigils, false, Instant::now())
 }
 
 /// What one press of the refresh key comes to, given whether a run is going
@@ -3065,6 +3180,121 @@ mod tests {
                 said
             };
             assert_eq!(app, said, "{state:?} moved under a refused press");
+        }
+    }
+
+    /// A manifest scoping only a directory *below* the row this fixture selects:
+    /// `<ROOT>/crates` carries no scope at all, and `<ROOT>/crates/engine`
+    /// carries `data-plane`.
+    ///
+    /// The shape the whole descendant rule is about — coverage walks up, so the
+    /// selected row's own boundary opens to everybody, and an un-pact of it
+    /// takes the entry below with it and the scope written on that entry.
+    fn scoped_below() -> Manifest {
+        let entry = |module: &str| {
+            PactEntry::new(
+                ROOT,
+                format!("{ROOT}/{module}"),
+                format!("{module}/WARLOCK.md"),
+            )
+            .expect("a module under the root")
+        };
+        Manifest::with_entries([
+            entry("crates"),
+            entry("crates/engine").with_scope("data-plane"),
+        ])
+    }
+
+    /// What the footer says when the un-pact would take that boundary with it.
+    const CLOSED_BELOW: &str = "un-pacting /repo/crates would drop pacts scoped `data-plane` — \
+                                hold that sigil with `warlock config`, or un-pact the parts you \
+                                hold";
+
+    #[test]
+    fn p_un_pacting_ward_is_refused_by_a_boundary_below_the_row() {
+        // The row is unscoped and opens to anybody, and the entry under it is
+        // not: an un-pact drops that entry, an entry is the only home a scope
+        // has, and a boundary that can be erased by aiming at its parent is not
+        // one. Argued in
+        // `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
+        for state in [NodeState::PactedFresh, NodeState::PactedStale] {
+            let mut app = app_over(state);
+            let before = app.clone();
+
+            let toggle = super::pact_press(
+                &mut app,
+                &scoped_below(),
+                Path::new(ROOT),
+                &Sigils::held(["web"]),
+                false,
+                Instant::now(),
+            );
+
+            assert_eq!(toggle, None, "{state:?} un-pacted a boundary below it");
+            assert_eq!(app.message(), Some(CLOSED_BELOW));
+            let said = {
+                let mut said = before.clone();
+                said.set_message(CLOSED_BELOW);
+                said
+            };
+            assert_eq!(app, said, "{state:?} moved under a refused press");
+        }
+    }
+
+    #[test]
+    fn the_boundary_below_binds_the_un_pact_direction_and_no_other_key() {
+        // The rule follows destruction, not traversal. A pact and a refresh
+        // provably leave every scope where they found it, and gating `r` at the
+        // root of a scoped monorepo would refuse the ordinary gesture for
+        // everybody holding fewer than all of its sigils.
+        let mut app = app_over(NodeState::Unpacted);
+        let toggle = super::pact_press(
+            &mut app,
+            &scoped_below(),
+            Path::new(ROOT),
+            &Sigils::held(["web"]),
+            false,
+            Instant::now(),
+        )
+        .expect("a pact leaves every scope below exactly as it found it");
+        assert!(toggle.pacted);
+        assert_eq!(app.message(), None, "the pact direction was told something");
+
+        let mut app = app_over(NodeState::PactedStale);
+        assert_eq!(
+            super::refresh_press(
+                &mut app,
+                &scoped_below(),
+                Path::new(ROOT),
+                &Sigils::held(["web"]),
+                false,
+                Instant::now()
+            ),
+            Some(PathBuf::from(format!("{ROOT}/crates"))),
+            "a refresh was gated on a boundary it cannot destroy"
+        );
+        assert_eq!(app.message(), None, "the refresh was told something");
+    }
+
+    #[test]
+    fn holding_the_boundary_below_lets_the_un_pact_through() {
+        for sigils in [Sigils::held(["data-plane"]), Sigils::held(["*"])] {
+            let mut app = app_over(NodeState::PactedFresh);
+
+            let toggle = super::pact_press(
+                &mut app,
+                &scoped_below(),
+                Path::new(ROOT),
+                &sigils,
+                false,
+                Instant::now(),
+            )
+            .unwrap_or_else(|| panic!("{sigils:?} opens the boundary below"));
+
+            assert!(!toggle.pacted, "the press was an un-pact");
+            // The toggle words its own success line, so `None` is not the
+            // assertion here: what matters is that the boundary did not speak.
+            assert_ne!(app.message(), Some(CLOSED_BELOW), "{sigils:?} was refused");
         }
     }
 

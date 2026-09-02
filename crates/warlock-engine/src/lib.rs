@@ -188,6 +188,17 @@ pub use pact::Unwatched;
 /// cap a request is built under, and whether the cap cut it. No marker line and
 /// no lines at all — the caller words the cut and splits the text.
 pub use pact::Viewed;
+/// The distinct scopes at or below a directory that a set of held sigils does
+/// not open: the downward half of the boundary question, asked where an act
+/// would reach past the target rather than stop at it. [`scope_covering`] walks
+/// *up* and says whose a path is; this walks over exactly the entries
+/// [`unpact_subtree`] would drop — segment-wise, on the manifest's stored paths,
+/// the repository root above everything — and says which of their boundaries
+/// this machine is outside of. Deduplicated, in manifest file order, so two
+/// callers name the same scope in the same words; a scope [`validate_scope`]
+/// refuses reads as no scope here as everywhere. It reports and refuses
+/// nothing.
+pub use pact::closed_scopes_at_or_below;
 /// Build the request for one model pass over one directory: its own files, its
 /// children's documents, and what the byte caps left out.
 pub use pact::gather_request;
