@@ -1101,6 +1101,51 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_boundary_answers_a_clear_and_an_unpact_before_either_reads_the_manifest() {
+        // The ordering the test above pins for `scope add`, held over the other
+        // two writes, because it is one rule and the gate is one place: from
+        // outside the boundary `crates` draws, neither may say what the manifest
+        // holds about `crates/tui` — not "is not in the manifest" for the clear,
+        // and not "0 entries dropped" for the un-pact, which is the same fact
+        // about an empty subtree worded as a success.
+        let repo = a_repository();
+        let home = a_dir();
+        let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+        for refused in [
+            scope_remove(repo.path(), home.path(), "crates/tui"),
+            unpact(repo.path(), home.path(), "crates/tui"),
+        ] {
+            let error = refused.expect_err("holding nothing opens nothing that is scoped");
+            assert!(
+                matches!(error, Error::ClosedScope { .. }),
+                "the manifest's shape leaked past a closed boundary: {error:?}"
+            );
+            assert!(
+                !error.to_string().contains("not in the manifest"),
+                "{error}"
+            );
+            assert_eq!(status_for(&Err(error)), 1);
+        }
+        assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+
+        // And past the same boundary held, each answers about the manifest
+        // after all: the clear with the refusal naming the pact that is not
+        // there, the un-pact with a subtree that had nothing in it — so both
+        // sentences exist and are only ever reached from inside.
+        holding(home.path(), repo.path(), &["platform"]);
+        let error = scope_remove(repo.path(), home.path(), "crates/tui")
+            .expect_err("there is no entry to clear a scope on");
+        assert!(matches!(error, Error::NoPact { .. }), "{error:?}");
+        assert_eq!(
+            unpact(repo.path(), home.path(), "crates/tui")
+                .expect("nothing is pacted at or below `crates/tui`"),
+            "unpacted crates/tui — 0 entries dropped"
+        );
+        assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+    }
+
+    #[test]
     fn a_scope_the_engine_refuses_prints_its_rule_and_writes_nothing() {
         let repo = a_repository();
         let home = a_dir();

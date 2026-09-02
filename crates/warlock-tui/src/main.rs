@@ -1680,6 +1680,71 @@ mod tests {
     }
 
     #[test]
+    fn an_unpact_takes_the_one_directory_it_un_pacts_and_takes_it_from_the_reader() {
+        assert_eq!(
+            parse(&["unpact", "crates/engine"]).unwrap().command,
+            Some(Command::Unpact {
+                path: PathBuf::from("crates/engine")
+            })
+        );
+        // The whole-manifest edit is a path somebody typed, and it is spelled
+        // like any other: the parser has no default standing behind it, so the
+        // largest edit warlock can make is never the one a missing argument
+        // makes by itself.
+        assert_eq!(
+            parse(&["unpact", "."]).unwrap().command,
+            Some(Command::Unpact {
+                path: PathBuf::from(".")
+            })
+        );
+    }
+
+    #[test]
+    fn an_unpact_with_no_path_or_with_two_is_a_malformed_invocation() {
+        // An omitted path is not the repository root here, unlike the two
+        // listings: it is clap's 2, for the reason above.
+        let malformed: [&[&str]; 3] = [
+            &["unpact"],
+            &["unpact", "a", "b"],
+            &["unpact", "--nonsense"],
+        ];
+
+        for args in malformed {
+            let error = parse(args).unwrap_err();
+            assert!(error.use_stderr(), "{args:?}");
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn no_flag_on_the_three_writes_gets_past_the_boundary_or_asks_for_an_object() {
+        // Two absences, pinned where they are decided. There is no `--force`,
+        // `--yes` or any other word that skips the scope check — `warlock
+        // config` is the one road past a boundary, and a flag that existed
+        // would be a second. And there is no `--json`: the three questions
+        // answer in objects because something reads their answers, while these
+        // three say what they did in one line and spend the status on whether
+        // it happened.
+        let refused: [&[&str]; 9] = [
+            &["unpact", "crates", "--force"],
+            &["unpact", "--force", "crates"],
+            &["unpact", "crates", "--json"],
+            &["scope", "add", "crates", "web", "--force"],
+            &["scope", "add", "crates", "web", "--yes"],
+            &["scope", "add", "crates", "web", "--json"],
+            &["scope", "remove", "crates", "--force"],
+            &["scope", "remove", "crates", "--json"],
+            &["scope", "--force", "remove", "crates"],
+        ];
+
+        for args in refused {
+            let error = parse(args).unwrap_err();
+            assert!(error.use_stderr(), "{args:?}");
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+        }
+    }
+
+    #[test]
     fn the_two_scope_writes_are_a_noun_and_a_verb_rather_than_two_words_run_together() {
         assert_eq!(
             parse(&["scope", "add", "crates/engine", "data-plane"])
@@ -1761,13 +1826,19 @@ mod tests {
     #[test]
     fn per_subcommand_help_is_a_help_exit_too() {
         for args in [
-            ["init", "--help"],
-            ["config", "--help"],
-            ["stale", "--help"],
-            ["fresh", "--help"],
-            ["check", "--help"],
+            ["init", "--help"].as_slice(),
+            ["config", "--help"].as_slice(),
+            ["stale", "--help"].as_slice(),
+            ["fresh", "--help"].as_slice(),
+            ["check", "--help"].as_slice(),
+            ["unpact", "--help"].as_slice(),
+            // The nested pair, asked for at both depths: `warlock scope --help`
+            // is the noun's two verbs, and each verb has a help of its own.
+            ["scope", "--help"].as_slice(),
+            ["scope", "add", "--help"].as_slice(),
+            ["scope", "remove", "--help"].as_slice(),
         ] {
-            let error = parse(&args).unwrap_err();
+            let error = parse(args).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{args:?}");
             assert_eq!(error.exit_code(), 0, "{args:?}");
         }
@@ -1785,6 +1856,8 @@ mod tests {
             ("stale", "stale"),
             ("fresh", "fresh"),
             ("check", "scope"),
+            ("unpact", "pact"),
+            ("scope", "scope"),
         ] {
             let mut command = Cli::command();
             let help = command
@@ -1859,7 +1932,9 @@ mod tests {
         // `long_about = None` is what stands between `warlock --help` and the
         // essays above; without it clap lifts the doc comments wholesale.
         let help = Cli::command().render_long_help().to_string();
-        for subcommand in ["init", "config", "stale", "fresh", "check"] {
+        for subcommand in [
+            "init", "config", "stale", "fresh", "check", "unpact", "scope",
+        ] {
             assert!(help.contains(subcommand), "{subcommand}: {help}");
         }
         assert!(!help.contains("panic hook"), "{help}");
