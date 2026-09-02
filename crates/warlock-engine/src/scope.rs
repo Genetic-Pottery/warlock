@@ -47,7 +47,7 @@
 use std::fmt;
 use std::path::Path;
 
-use crate::manifest::{Error as ManifestError, Manifest, ROOT_MODULE, to_manifest_path};
+use crate::manifest::{Error as ManifestError, Manifest, PactEntry, ROOT_MODULE, to_manifest_path};
 
 /// The most characters a scope may hold.
 ///
@@ -312,10 +312,19 @@ fn valid_scope_on<'manifest>(
     manifest: &'manifest Manifest,
     module: &str,
 ) -> Option<&'manifest str> {
-    manifest
-        .entry(module)?
-        .scope()
-        .filter(|scope| validate_scope(scope).is_ok())
+    valid_scope(manifest.entry(module)?)
+}
+
+/// The scope written on `entry`, if it carries one and that one is a scope.
+///
+/// The half of [`valid_scope_on`] that has an entry in hand already, split out
+/// so that a caller walking the entries itself —
+/// [`closed_scopes_at_or_below`](crate::closed_scopes_at_or_below), which
+/// visits each entry once rather than looking each one up by module —
+/// reads an invalid scope as no scope by calling *this* rule rather than by
+/// writing a second copy of it.
+pub(crate) fn valid_scope(entry: &PactEntry) -> Option<&str> {
+    entry.scope().filter(|scope| validate_scope(scope).is_ok())
 }
 
 /// The stored path `stored` and every stored path above it, nearest first,
