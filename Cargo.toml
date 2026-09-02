@@ -85,6 +85,16 @@ blake3 = { version = "1" }
 # three is polling the tree on a timer, which is the re-walk this watching exists
 # to avoid doing when nothing has changed.
 notify = { version = "8" }
+# Argument parsing for the `warlock` binary. Two subcommands were cheaper to
+# match on by hand; ten are not, and one of them (`scope add`/`scope remove`) is
+# nested, with per-subcommand `-h` and later `--json` on each. That is past the
+# point where hand-rolled string comparison is the smaller thing: the help text,
+# the usage lines, the "did you mean" on a typo and the distinct exit status for
+# a parse failure all come from the parser rather than from code somebody has to
+# keep in step with the command surface. The `derive` feature is not on by
+# default and is the whole reason for taking clap over a minimal parser — the
+# command surface is then declared once, as types, next to what it dispatches to.
+clap = { version = "4", features = ["derive"] }
 # Dev-only: round-trips a value through serde's own token stream, so the derives
 # can be tested in memory, independently of how any one format spells them.
 serde_test = { version = "1" }
