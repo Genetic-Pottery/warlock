@@ -1351,6 +1351,25 @@ mod tests {
     }
 
     #[test]
+    fn each_subcommands_help_says_what_that_subcommand_does() {
+        // The same `about` and `long_about = None` pair as on `Cli`, pinned one
+        // subcommand at a time: without the `about` clap falls back to the doc
+        // comment, and `warlock init --help` answers "`warlock init`." — the
+        // name back, which is not what a reader asked for.
+        for (name, said) in [("init", "CLAUDE.md"), ("config", "sigils")] {
+            let mut command = Cli::command();
+            let help = command
+                .find_subcommand_mut(name)
+                .unwrap_or_else(|| panic!("no `{name}` subcommand"))
+                .render_long_help()
+                .to_string();
+            assert!(help.contains(said), "{name}: {help}");
+            assert!(!help.contains("essays"), "{name}: {help}");
+            assert!(help.lines().count() < 20, "{name}: {help}");
+        }
+    }
+
+    #[test]
     fn a_word_warlock_does_not_have_is_refused_rather_than_opening_the_tree() {
         // The whole reason the dispatch exists: `warlock status` used to open
         // the tree, which reads as the typed command having run.
