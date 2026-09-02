@@ -41,7 +41,9 @@ use crate::session::{blocking_scopes_message, closed_scope_message};
 /// the footer's other ones, a scope that is not one in the engine's, and a
 /// directory nobody has pacted in the manifest's. [`Error::Pact`] is the
 /// headless run's — the one way `warlock pact` and `warlock refresh` fail as a
-/// whole rather than one directory at a time.
+/// whole rather than one directory at a time — and [`Error::Failures`] is the
+/// other end of the same run: the count under the directories that failed one
+/// at a time, which is a run that finished rather than one that did not.
 #[derive(Debug)]
 pub(crate) enum Error {
     /// The working directory could not be read, so there is nothing to scope
@@ -219,6 +221,33 @@ pub(crate) enum Error {
         /// Which of the engine's cases it was, with the directory it names.
         source: PactError,
     },
+    /// A headless `warlock pact` or `warlock refresh` finished with some of its
+    /// directories failed.
+    ///
+    /// The one variant here that is not a refusal to do something and not an
+    /// inability to: the run happened, the documents that could be written are
+    /// written, and the manifest holding what the rest of the subtree earned is
+    /// saved before this is built. What it carries is the count under a list —
+    /// [`mod@crate::running`] has already named every failing directory on
+    /// stderr, one line each, because a shell reader's list of what to go and
+    /// look at must not be summarised away — and its whole job is to be the
+    /// last line and the exit status.
+    ///
+    /// That status is 4 and not 1: warlock did the thing, so a script that
+    /// re-runs on a 1 and stops on a 3 needs a third answer for "it ran, and
+    /// some of it did not take". See [`status_for`](crate::status_for).
+    ///
+    /// The counts are directories, both of them: how many failed, out of how
+    /// many the run offered — which for a refresh is the stale ones and not the
+    /// whole subtree, since those are the directories it set out to describe.
+    Failures {
+        /// How many directories failed. Never zero: a run with nothing wrong
+        /// with it is `Ok(())`.
+        failed: usize,
+        /// How many directories the run offered a pass, which is the engine's
+        /// own denominator — the number every progress line counted against.
+        total: usize,
+    },
     /// A subcommand was run somewhere with no repository above it, so there is
     /// no root to write a `CLAUDE.md` at or to hold sigils for.
     ///
@@ -363,6 +392,23 @@ impl fmt::Display for Error {
             // the directory it could not list and what the filesystem said,
             // which is the whole of what happened.
             Self::Pact { source } => write!(f, "{}", one_line(&source.to_string())),
+            // The count, under the lines that named each of them, and the fact
+            // a reader most needs next: the run's record is on disk, so the
+            // directories that did work are granted and re-running describes
+            // the ones that did not. Singular when the run was one directory,
+            // because "1 of 1 directories" is a sentence nobody writes.
+            Self::Failures { failed, total } => {
+                let directories = if *total == 1 {
+                    "directory"
+                } else {
+                    "directories"
+                };
+                write!(
+                    f,
+                    "{failed} of {total} {directories} failed — the manifest holds what the \
+                     rest earned"
+                )
+            }
             // The footer's own sentence, to the letter: the same fact refused
             // at a keystroke and at a shell prompt says the same thing, names
             // the same scope and points at the same `warlock config`.
@@ -453,7 +499,12 @@ impl std::error::Error for Error {
             | Self::NoHome
             | Self::ClosedScope { .. }
             | Self::ClosedScopeBelow { .. }
-            | Self::NoPact { .. } => None,
+            | Self::NoPact { .. }
+            // Nor here, and there could not be one: a run's failures are N
+            // errors rather than one, they have already been printed in full,
+            // and picking a first to be "the" cause would be the summary
+            // pretending to be a failure.
+            | Self::Failures { .. } => None,
         }
     }
 }
@@ -614,6 +665,14 @@ mod tests {
             },
             Error::NoPact {
                 module: "crates/engine".to_owned(),
+            },
+            Error::Failures {
+                failed: 3,
+                total: 12,
+            },
+            Error::Failures {
+                failed: 1,
+                total: 1,
             },
         ];
 

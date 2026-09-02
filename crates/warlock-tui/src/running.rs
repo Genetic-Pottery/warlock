@@ -72,6 +72,41 @@
 //! [`Observer`](warlock_engine::PactObserver) are what makes not writing them
 //! the same thing as saying nothing.
 //!
+//! # Failures are named on stderr, one line each, and then counted
+//!
+//! A run is N directories and each of them fails on its own: a pass refused, a
+//! document that would not write, a directory that could not be hashed. None of
+//! them ends the run — the engine carries on and hands them back in
+//! [`PactedSubtree::failures`] beside the manifest the rest of the subtree
+//! earned — so what is owed at the end is a report rather than an error.
+//!
+//! [`report`] builds it, and the shape is deliberate: **every** failing
+//! directory is named, on its own line, in the order the run reached them, and
+//! then one line says how many of how many directories failed. Not the footer's
+//! shape. [`pact_message`](crate::pacting) quotes one failure and counts the
+//! rest because a footer is one line tall and the reader is sitting in front of
+//! a panel that has the others; a shell has as many lines as it likes, the
+//! reader is often a script or a log read tomorrow, and a run that says
+//! "and 99 more" has thrown away the only list of what to go and look at. The
+//! count is what stops that list being illegible in the case that produces it
+//! most often — no `claude` on this machine, so every directory fails the same
+//! way — because a hundred identical sentences say nothing about how big the
+//! run was, and `3 of 100` says it in one line.
+//!
+//! Each line is the directory as the manifest spells it, then the engine's own
+//! sentence about it, flattened. The engine's sentence names the directory too,
+//! absolutely, and that repetition is left alone on purpose: the root-relative
+//! name at the front is the word a reader can hold against
+//! `.warlock/pacts.toml` and against the progress lines on stdout, and editing
+//! somebody else's error text to cut a prefix out of it is how a sentence ends
+//! up mangled by a case nobody anticipated.
+//!
+//! All of it goes to stderr, and the summary is [`Error::Failures`] rather than
+//! a line printed here — so `main` prints it in the one place every other
+//! refusal is printed, and the run leaves **exit status 4**: completed, with
+//! failures, and the manifest saved. `warlock pact . > run.log` therefore shows
+//! on the terminal exactly what went wrong while the progress goes to the file.
+//!
 //! # One save, at the end
 //!
 //! The engine saves nothing: [`pact_subtree`](warlock_engine::pact_subtree)
@@ -96,12 +131,13 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use warlock_engine::{
-    Agent, PactObserver, PactedSubtree, Pacting, pact_subtree, refresh_subtree, to_manifest_path,
+    Agent, PactFailure, PactObserver, PactedSubtree, Pacting, pact_subtree, refresh_subtree,
+    to_manifest_path,
 };
 use warlock_tui::ClaudeAgent;
 
 use crate::edits::{Opened, opened};
-use crate::error::Error;
+use crate::error::{Error, one_line};
 
 /// What a pact wants a repository root for, as the tail of
 /// [`Error::NoRepository`]'s sentence. Every other subcommand's tail is spelled
@@ -174,12 +210,37 @@ struct Progress<W: Write> {
     root: PathBuf,
     /// Where the lines go: stdout on the real road, a `Vec<u8>` under test.
     out: W,
+    /// How many directories the run said it would describe, as last told, and
+    /// `0` before it has said anything.
+    ///
+    /// Kept because the failure report needs it and nothing else has it: the
+    /// [`PactedSubtree`] carries the failures but not the size of the run they
+    /// happened in, and "3 failed" without "of 100" is the illegible half of
+    /// the report. The engine's own denominator, unaltered, and it does not
+    /// move for the length of a run — see [`PactObserver::starting`], which is
+    /// handed `directories.len()` every time — so reading it after the descent
+    /// is reading the number every progress line was counting against.
+    ///
+    /// A field rather than a count of the lines written, because the run's size
+    /// is a thing the engine states and this port's arithmetic about it would
+    /// be a second opinion waiting to disagree.
+    total: usize,
 }
 
 impl<W: Write> Progress<W> {
     /// A port naming directories against `root` and writing to `out`.
     const fn new(root: PathBuf, out: W) -> Self {
-        Self { root, out }
+        Self {
+            root,
+            out,
+            total: 0,
+        }
+    }
+
+    /// How many directories the run offered, or `0` for a run that offered
+    /// none.
+    const fn total(&self) -> usize {
+        self.total
     }
 
     /// One line, in the shape every subcommand prints on stdout: `warlock: `
@@ -201,6 +262,11 @@ impl<W: Write> PactObserver for Progress<W> {
     /// where it means something: it counts the directories offered, and the one
     /// being offered is the one it is about.
     fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
+        // Remembered as well as printed, and remembered every time rather than
+        // only the first: the engine states one denominator for a run, so the
+        // last thing it said and the first are the same number, and a port that
+        // only recorded one of them would be a port with a rule about which.
+        self.total = total;
         let named = named(&self.root, directory);
         self.say(&format!("[{position}/{total}] documenting {named}"));
         Pacting::Continue
@@ -235,6 +301,102 @@ impl<W: Write> PactObserver for Progress<W> {
 /// nothing.
 fn named(root: &Path, directory: &Path) -> String {
     to_manifest_path(root, directory).unwrap_or_else(|_| directory.display().to_string())
+}
+
+/// What a run's failures come to: a line naming each directory that failed, and
+/// the count that goes under them.
+///
+/// A value rather than a printing function, for the reason
+/// [`Opened::unpacted`](crate::edits) hands its success line back instead of
+/// printing it: the report is the interesting half of this module and a test
+/// that could only read it by spawning a process would be a test of the shell
+/// rather than of the report. Built by [`report`], written by [`Report::onto`],
+/// and finished by [`Report::status`], which is the sentence `main` prints and
+/// the exit status a script reads.
+///
+/// Only ever built for a run that had failures: [`report`] answers `None` for
+/// the whole-subtree success, so there is no empty report to be printed as a
+/// row of nothing and no `0 of 12 directories failed` line on a run that went
+/// perfectly.
+#[derive(Debug)]
+struct Report {
+    /// One line per failing directory, in the order the run reached them:
+    /// the directory as the manifest spells it, then the engine's own sentence
+    /// about it. Never empty.
+    lines: Vec<String>,
+    /// How many directories failed — the number of `lines`, named so the
+    /// summary does not have to explain itself.
+    failed: usize,
+    /// How many directories the run offered, which is [`Progress::total`] and
+    /// therefore the engine's own denominator.
+    total: usize,
+}
+
+impl Report {
+    /// Write the per-directory lines to `err`, in the shape every other line
+    /// warlock prints has: `warlock: ` and then the fact.
+    ///
+    /// The lines only. The count is [`Report::status`]'s, so that it is printed
+    /// by the one line of `main` that prints every refusal warlock has —
+    /// otherwise a run's summary would be the single sentence in warlock going
+    /// to stderr by a road of its own.
+    ///
+    /// A write that fails is ignored, for [`Progress`]'s reason and more
+    /// bluntly: the documents are written and the manifest is saved by the time
+    /// this runs, so there is nothing left for a broken pipe to save.
+    fn onto<W: Write>(&self, err: &mut W) {
+        for line in &self.lines {
+            // Ignored on purpose; see above.
+            let _ = writeln!(err, "warlock: {line}");
+        }
+    }
+
+    /// The run's ending: the summary line to print and the 4 to exit with,
+    /// as the one value `main` already knows how to do both with.
+    fn status(&self) -> Error {
+        Error::Failures {
+            failed: self.failed,
+            total: self.total,
+        }
+    }
+}
+
+/// The report `failures` deserve in a run of `total` directories, or `None`
+/// when nothing failed.
+///
+/// One line per failing directory and no line for any other, which is the whole
+/// rule. Directories are named against `root` the way [`Progress`] names them,
+/// so the failure line for a directory and the progress line that entered it
+/// say the same word; the engine's sentence is flattened by [`one_line`]
+/// because a report is read a line at a time and a TOML diagnostic wrapping
+/// over four of them would be four directories' worth of screen for one.
+///
+/// A directory is named once however many ways it went wrong. Today it can only
+/// go wrong once — a directory phase one failed to document is skipped by phase
+/// two, and being unrecordable and being unhashable are exclusive — so this is
+/// a promise about the report rather than a filter that fires: `failed` counts
+/// directories, `total` counts directories, and the two have to be countable
+/// against each other.
+fn report(root: &Path, failures: &[PactFailure], total: usize) -> Option<Report> {
+    let mut named_already: Vec<String> = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
+    for failure in failures {
+        let directory = named(root, failure.directory());
+        if named_already.contains(&directory) {
+            continue;
+        }
+        lines.push(format!("{directory} — {}", one_line(&failure.to_string())));
+        named_already.push(directory);
+    }
+
+    if lines.is_empty() {
+        return None;
+    }
+    Some(Report {
+        failed: lines.len(),
+        lines,
+        total,
+    })
 }
 
 /// Descend the subtree past an open boundary, save the manifest once, and hand
@@ -306,20 +468,33 @@ fn ran(
 /// `claude --print` per directory, on the terms a pass is always asked on, from
 /// the one file in this crate that spawns a process.
 ///
-/// What the run came to is not read yet. A run whose failures are empty is the
-/// case this slice is about — every directory documented, the manifest saved,
-/// exit 0 — and naming the directories that failed, counting them and spending
-/// an exit status on them is the report that comes next.
+/// What the run came to is read at the end, and only then: a run with no
+/// failures is `Ok(())` and exit 0, and a run with some is every failing
+/// directory on stderr and [`Error::Failures`] behind them, which `main` prints
+/// as the count and exits 4 for. The manifest is saved either way — that
+/// happened in [`ran`], before this function had an opinion about anything —
+/// which is what makes 4 "completed with failures" rather than a failure.
 ///
 /// # Errors
 ///
-/// Everything [`opened`] and [`ran`] refuse, unchanged and unwrapped: this adds
-/// no sentence of its own.
+/// Everything [`opened`] and [`ran`] refuse, unchanged and unwrapped, plus
+/// [`Error::Failures`] for a run some of whose directories failed. The order is
+/// the load-bearing part: a manifest that would not save leaves through [`ran`]
+/// as [`Error::Manifest`] and a 1, failures or no failures, because a run whose
+/// record never reached the disk is warlock unable to do the thing rather than a
+/// run that completed imperfectly, and the 1 is the news.
 fn started(descent: Descent, path: &Path) -> Result<(), Error> {
     let opened = opened(descent.wanted(), path)?;
     let mut progress = Progress::new(opened.repo_root().to_path_buf(), io::stdout());
-    ran(&opened, descent, &ClaudeAgent::new(), &mut progress)?;
-    Ok(())
+    let subtree = ran(&opened, descent, &ClaudeAgent::new(), &mut progress)?;
+
+    match report(opened.repo_root(), &subtree.failures, progress.total()) {
+        None => Ok(()),
+        Some(report) => {
+            report.onto(&mut io::stderr());
+            Err(report.status())
+        }
+    }
 }
 
 /// `warlock pact <path>`: describe every directory at or below that one, and
@@ -357,7 +532,7 @@ mod tests {
         manifest_path, save_sigils,
     };
 
-    use super::{Descent, Progress, ran};
+    use super::{Descent, Progress, Report, ran, report};
     use crate::edits::Opened;
     use crate::error::Error;
     // The sentence itself, asked of the one function that writes it rather than
@@ -429,8 +604,13 @@ mod tests {
         fs::read(manifest_path(repo_root)).ok()
     }
 
-    /// A model that always answers with a document long enough to be accepted,
-    /// and remembers what it was asked.
+    /// The program a machine with no model on it is missing, as the fake below
+    /// names it and as [`ClaudeAgent`](warlock_tui::ClaudeAgent) would.
+    const CLAUDE: &str = "claude";
+
+    /// A model that answers with a document long enough to be accepted — unless
+    /// the directory is one it was told to refuse — and remembers what it was
+    /// asked.
     ///
     /// [`pacting`](crate::pacting)'s `Canned` with everything this module does
     /// not test taken out: no activities, because there is no panel; no cancel,
@@ -438,20 +618,32 @@ mod tests {
     /// tests turn on — which directories were offered a pass, in order, and
     /// whether a manifest was on disk while the passes were running, which is
     /// how "saved once, at the end" is asked of a run rather than of a mock.
+    ///
+    /// The refusal it can be given is
+    /// [`AgentError::NotFound`](warlock_engine::AgentError), which is not an
+    /// arbitrary choice of failure: it is what every directory of every run gets
+    /// on a machine with no `claude` on `PATH`, which is the case the failure
+    /// report is shaped around.
     #[derive(Debug)]
     struct Canned {
         /// The root each remembered directory is named against.
         root: PathBuf,
+        /// The directories to refuse a pass, as the manifest spells them.
+        /// Empty is the model that answers everything.
+        refused: Vec<String>,
         /// One entry per pass: the directory, and whether the manifest existed
         /// on disk at the moment the pass ran.
         seen: RefCell<Vec<(PathBuf, bool)>>,
     }
 
     impl Canned {
-        /// A model that answers every pass, for a repository at `root`.
-        fn new(root: &Path) -> Self {
+        /// A model that answers every pass but the ones over `refused`, which
+        /// fail the way a missing `claude` fails. An empty `refused` is the
+        /// model that answers everything.
+        fn refusing(root: &Path, refused: &[&str]) -> Self {
             Self {
                 root: root.to_path_buf(),
+                refused: refused.iter().map(|module| (*module).to_owned()).collect(),
                 seen: RefCell::new(Vec::new()),
             }
         }
@@ -473,10 +665,15 @@ mod tests {
 
     impl Agent for Canned {
         fn run(&self, request: &AgentRequest) -> Result<AgentResponse, AgentError> {
-            self.seen.borrow_mut().push((
-                request.directory().to_path_buf(),
-                manifest_path(&self.root).is_file(),
-            ));
+            let directory = request.directory().to_path_buf();
+            self.seen
+                .borrow_mut()
+                .push((directory.clone(), manifest_path(&self.root).is_file()));
+            if self.refused.contains(&named(&self.root, &directory)) {
+                return Err(AgentError::NotFound {
+                    program: CLAUDE.to_owned(),
+                });
+            }
             Ok(AgentResponse::new(document()))
         }
     }
@@ -497,6 +694,9 @@ mod tests {
     /// printed.
     #[derive(Debug)]
     struct Run {
+        /// The root the run was over, so what came of it can be asked about
+        /// without the test handing the path in twice.
+        root: PathBuf,
         /// The subtree the engine handed back, saved.
         subtree: PactedSubtree,
         /// The model, with every pass it was given still in it.
@@ -504,6 +704,40 @@ mod tests {
         /// The lines that would have gone to stdout, in order and without their
         /// newlines.
         lines: Vec<String>,
+        /// How many directories the run offered, as the observer was told —
+        /// [`Progress::total`], which is what the report counts against.
+        total: usize,
+    }
+
+    impl Run {
+        /// What this run's failures came to, asked of the production function
+        /// with the production observer's own denominator.
+        fn report(&self) -> Option<Report> {
+            report(&self.root, &self.subtree.failures, self.total)
+        }
+
+        /// The stderr a run with failures would have produced in full: the
+        /// per-directory lines, then the count `main` prints, without their
+        /// newlines.
+        ///
+        /// Assembled here rather than in [`started`](super::started) because
+        /// that is the one function in this module a test cannot call — it reads
+        /// the working directory and spawns `claude` — and the two halves it
+        /// puts together are exactly these.
+        fn stderr(&self) -> Vec<String> {
+            let Some(report) = self.report() else {
+                return Vec::new();
+            };
+            let mut written = Vec::new();
+            report.onto(&mut written);
+            let mut lines: Vec<String> = String::from_utf8(written)
+                .expect("the lines warlock writes are its own text")
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            lines.push(format!("warlock: {}", report.status()));
+            lines
+        }
     }
 
     /// `warlock pact <path>` or `warlock refresh <path>` in the repository at
@@ -517,6 +751,21 @@ mod tests {
     /// [`ClaudeAgent`](warlock_tui::ClaudeAgent) — and they are exactly the
     /// three things a test must not have.
     fn run(repo_root: &Path, home: &Path, descent: Descent, path: &str) -> Result<Run, Error> {
+        run_refusing(repo_root, home, descent, path, &[])
+    }
+
+    /// The same run, by a machine whose model refuses every pass over `refused`.
+    ///
+    /// One directory named is a run that half-worked; every directory named is
+    /// a machine with no `claude` on it, which is the case the failure report
+    /// exists for.
+    fn run_refusing(
+        repo_root: &Path,
+        home: &Path,
+        descent: Descent,
+        path: &str,
+        refused: &[&str],
+    ) -> Result<Run, Error> {
         let manifest = load_manifest(repo_root).expect("a manifest that reads");
         let opened = Opened::new(
             repo_root.to_path_buf(),
@@ -524,18 +773,21 @@ mod tests {
             manifest,
             repo_root.join(path),
         )?;
-        let agent = Canned::new(repo_root);
+        let agent = Canned::refusing(repo_root, refused);
         let mut progress = Progress::new(repo_root.to_path_buf(), Vec::new());
         let subtree = ran(&opened, descent, &agent, &mut progress)?;
+        let total = progress.total();
         let lines = String::from_utf8(progress.out)
             .expect("the lines warlock writes are its own text")
             .lines()
             .map(str::to_owned)
             .collect();
         Ok(Run {
+            root: repo_root.to_path_buf(),
             subtree,
             agent,
             lines,
+            total,
         })
     }
 
@@ -576,6 +828,11 @@ mod tests {
         );
         assert_eq!(stored_modules(repo.path()), [".", "alpha", "beta"]);
         assert_eq!(status_for(&Ok(())), 0);
+        // And nothing on stderr: a run with nothing wrong with it has no
+        // report, so there is no `0 of 3 directories failed` for a script to
+        // read as news.
+        assert!(run.report().is_none());
+        assert!(run.stderr().is_empty());
     }
 
     #[test]
@@ -705,5 +962,175 @@ mod tests {
             Some(&alpha)
         );
         assert_eq!(stored_modules(repo.path()), [".", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn one_directory_failing_names_it_counts_it_and_leaves_the_rest_of_the_run_granted() {
+        let repo = a_repository();
+        let home = a_dir();
+
+        let run = run_refusing(repo.path(), home.path(), Descent::Pact, ".", &["alpha"])
+            .expect("a refused pass fails one directory, not the run");
+
+        // The run happened: every directory was offered a pass, and the two the
+        // model answered have their documents.
+        assert_eq!(run.agent.directories(), ["beta", "alpha", "."]);
+        assert!(repo.path().join("beta").join("WARLOCK.md").is_file());
+        assert!(!repo.path().join("alpha").join("WARLOCK.md").exists());
+        // And the manifest was saved anyway, holding what the rest of the
+        // subtree earned: `beta` is granted, `alpha` has no entry at all, and
+        // the root sits above a directory with no document so it is pacted
+        // without a grant. Throwing that away would mean paying for it twice.
+        assert_eq!(stored_modules(repo.path()), [".", "beta"]);
+        let manifest = load_manifest(repo.path()).expect("a manifest that reads");
+        assert!(
+            manifest
+                .entry("beta")
+                .expect("`beta` was documented")
+                .granted_hash()
+                .is_some()
+        );
+
+        let report = run.report().expect("one directory failed");
+        // One line, naming the directory the manifest's way and then saying
+        // what happened to it in the engine's own words.
+        assert_eq!(report.lines.len(), 1, "{:?}", report.lines);
+        assert!(
+            report.lines[0].starts_with("alpha — "),
+            "the failing directory is not named root-relative first: {:?}",
+            report.lines[0]
+        );
+        assert!(
+            report.lines[0].contains(CLAUDE),
+            "the reason went missing: {:?}",
+            report.lines[0]
+        );
+        assert!(
+            !report.lines[0].contains('\n'),
+            "a report is read a line at a time: {:?}",
+            report.lines[0]
+        );
+        // The pair of counts: one directory of the three the run offered.
+        assert_eq!((report.failed, report.total), (1, 3));
+        assert_eq!(
+            report.status().to_string(),
+            "1 of 3 directories failed — the manifest holds what the rest earned"
+        );
+        // Completed with failures, which is neither the 0 of a run that worked
+        // nor the 1 of a warlock that could not do the thing.
+        assert_eq!(status_for(&Err(report.status())), 4);
+        // Every failure and the count go to stderr; the progress stays on
+        // stdout, so `warlock pact . > run.log` still shows what went wrong.
+        assert_eq!(
+            run.stderr(),
+            [
+                format!("warlock: {}", report.lines[0]),
+                format!("warlock: {}", report.status()),
+            ]
+        );
+        assert!(
+            !run.lines.iter().any(|line| line.contains(CLAUDE)),
+            "a failure was announced on stdout: {:?}",
+            run.lines
+        );
+        // The directory that failed was entered and never completed, which is
+        // what makes the report the only place its name is bad news.
+        assert!(
+            run.lines
+                .contains(&"warlock: [2/3] documenting alpha".to_owned())
+        );
+        assert!(!run.lines.contains(&"warlock: documented alpha".to_owned()));
+    }
+
+    #[test]
+    fn a_machine_with_no_model_names_every_directory_once_and_says_how_many_of_how_many() {
+        let repo = a_repository();
+        let home = a_dir();
+
+        // Every pass refused, which is what a machine with no `claude` on PATH
+        // does to every directory of every run.
+        let run = run_refusing(
+            repo.path(),
+            home.path(),
+            Descent::Pact,
+            ".",
+            &[".", "alpha", "beta"],
+        )
+        .expect("a run where everything fails is still a run");
+
+        assert_eq!(run.subtree.failures.len(), 3, "{:?}", run.subtree.failures);
+        // Saved even so: the file did not exist before the run, so its being
+        // there is the save having happened.
+        assert!(manifest_bytes(repo.path()).is_some());
+        assert!(stored_modules(repo.path()).is_empty());
+
+        let report = run.report().expect("every directory failed");
+        // Every one of them named, and each of them once: a run over a hundred
+        // directories is a hundred names to go and look at, not "and 99 more".
+        assert_eq!(report.lines.len(), 3);
+        for module in [".", "alpha", "beta"] {
+            let named: Vec<&String> = report
+                .lines
+                .iter()
+                .filter(|line| line.starts_with(&format!("{module} — ")))
+                .collect();
+            assert_eq!(named.len(), 1, "{module} is not named once: {named:?}");
+        }
+        // And one line of arithmetic under them, which is the whole of what
+        // stops a hundred identical sentences being illegible.
+        assert_eq!((report.failed, report.total), (3, 3));
+        assert_eq!(
+            report.status().to_string(),
+            "3 of 3 directories failed — the manifest holds what the rest earned"
+        );
+        assert_eq!(status_for(&Err(report.status())), 4);
+        assert_eq!(run.stderr().len(), 4, "{:?}", run.stderr());
+        // Nothing was documented, so nothing said so.
+        assert!(
+            !run.lines.iter().any(|line| line.contains("documented")),
+            "{:?}",
+            run.lines
+        );
+    }
+
+    /// Chmod cannot deny root anything, so this checks the fixture really is
+    /// unwritable before asserting on it and steps aside when it is not.
+    #[cfg(unix)]
+    #[test]
+    fn a_manifest_that_will_not_save_is_the_one_warlock_could_not_do_rather_than_a_four() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let repo = a_repository();
+        let home = a_dir();
+        // A manifest to read, and then a `.warlock/` nothing new can be created
+        // in — so the run reads what it always reads and the save at the end of
+        // it is the thing that fails.
+        Manifest::new()
+            .save(repo.path())
+            .expect("a manifest that saves");
+        let warlock = repo.path().join(".warlock");
+        fs::set_permissions(&warlock, fs::Permissions::from_mode(0o555)).expect("chmods");
+        if fs::write(warlock.join("probe"), "").is_ok() {
+            // Running as root: no directory is unwritable, so there is nothing
+            // here to assert against.
+            fs::remove_file(warlock.join("probe")).expect("removes the probe");
+            fs::set_permissions(&warlock, fs::Permissions::from_mode(0o755)).expect("chmods");
+            return;
+        }
+
+        // Failures as well, so this is the case where the two endings compete.
+        let refused = run_refusing(repo.path(), home.path(), Descent::Pact, ".", &["alpha"]);
+
+        let error = refused.expect_err("the manifest could not be saved");
+        assert!(
+            matches!(error, Error::Manifest { .. }),
+            "the save failure was reported as something else: {error:?}"
+        );
+        // 1, not 4: a run whose record never reached the disk is warlock unable
+        // to do the thing, and that is the news rather than which directories
+        // failed inside it.
+        assert_eq!(status_for(&Err(error)), 1);
+
+        fs::set_permissions(&warlock, fs::Permissions::from_mode(0o755)).expect("chmods back");
     }
 }

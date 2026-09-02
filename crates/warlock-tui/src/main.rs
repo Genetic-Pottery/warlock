@@ -266,6 +266,16 @@
 //! directory documented, on stdout, because a run is watched through a pipe.
 //! Nothing is drawn.
 //!
+//! They are also the two subcommands that can half-work, and that is where they
+//! spend a status nothing else does. Each directory fails on its own — a pass
+//! refused, a document that would not write — without ending the run, so a run
+//! that had failures still saves the manifest the rest of the subtree earned,
+//! names every failing directory on stderr a line at a time, ends with one line
+//! saying how many of how many failed, and exits **4**. The split between the
+//! two streams is what makes that readable: progress on stdout, every failure
+//! and the count on stderr, so `warlock pact . > run.log` puts the descent in
+//! the file and leaves what went wrong on the terminal.
+//!
 //! The reader can hand the pointer back. `m` turns the terminal's reporting off
 //! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
 //! off the terminal keeps its own text selection and no `Event::Mouse` arrives
@@ -676,8 +686,20 @@ fn main() -> ExitCode {
 /// with nothing spent: this machine's sigils do not open the scope covering the
 /// path a write was aimed at, so no byte of `.warlock/pacts.toml` moved,
 /// retrying changes nothing, and the road out is `warlock config` rather than
-/// anything in the message. **4**, completed with failures, and **130**,
-/// cancelled, belong to the pact/refresh slice and are not produced here yet.
+/// anything in the message. **4** completed with failures: a `warlock pact` or
+/// `warlock refresh` descended the subtree, wrote the documents it could and
+/// saved the manifest, and some of its directories did not come out of it — the
+/// directories are named on stderr, one line each, and the line this status goes
+/// with says how many of how many ([`mod@running`]). **130**, cancelled, belongs
+/// to the same pair of subcommands and is not produced here yet.
+///
+/// 4 is not 1 for the reason 3 is not: they want different things done about
+/// them. A 1 is warlock unable to do the thing and nothing having happened
+/// — including a run whose manifest would not save, which stays a 1 however many
+/// directories failed inside it, because a run whose record never reached the
+/// disk is the bigger news and the one worth retrying. A 4 is the work done and
+/// partly not taken: the grants that were earned are on disk, so the thing to do
+/// is read the lines above the count and re-run over what failed.
 ///
 /// 3 is here so that a script can act without reading English: the two non-zero
 /// results a write can have want opposite things done about them, and telling
@@ -708,6 +730,12 @@ const fn status_for(outcome: &Result<(), Error>) -> u8 {
         Ok(()) => 0,
         // The boundary, and only the upward one: see the decision above.
         Err(Error::ClosedScope { .. }) => 3,
+        // A run that finished with some of its directories failed. Above the
+        // catch-all rather than folded into it, because it is the one non-zero
+        // status that comes with the work having been done: the documents that
+        // could be written are written and the manifest is saved, and the line
+        // printed for it is a count under a list already on stderr.
+        Err(Error::Failures { .. }) => 4,
         Err(_) => 1,
     }
 }
@@ -2190,13 +2218,15 @@ mod tests {
     }
 
     #[test]
-    fn the_four_statuses_a_write_can_leave_are_all_different_numbers() {
+    fn the_five_statuses_a_write_can_leave_are_all_different_numbers() {
         // The vocabulary, held together in one place so that a script reading
-        // only the status can tell the four apart: a write that happened, one
+        // only the status can tell them apart: a write that happened, one
         // warlock could not finish, one refused at the boundary with nothing
-        // spent, and a command line that was never a request. Each is taken from
-        // the thing that really produces it — `status_for` for warlock's own
-        // three, clap for the fourth — rather than written down as a number.
+        // spent, a command line that was never a request, and a run that
+        // descended a subtree and came back with some of its directories
+        // failed. Each is taken from the thing that really produces it —
+        // `status_for` for warlock's own four, clap for the fifth — rather than
+        // written down as a number.
         let completed = i32::from(status_for(&Ok(())));
         let could_not = i32::from(status_for(&Err(Error::NoRepository {
             start: PathBuf::from("/nowhere"),
@@ -2206,19 +2236,27 @@ mod tests {
             path: "crates/engine".to_owned(),
             scope: "data-plane".to_owned(),
         })));
+        // The half-worked run: the manifest is saved and the documents that
+        // could be written are written, so this is neither the 0 of a run with
+        // nothing wrong with it nor the 1 of a warlock that could not do the
+        // thing.
+        let with_failures = i32::from(status_for(&Err(Error::Failures {
+            failed: 3,
+            total: 12,
+        })));
         // Clap's, from a write invocation rather than a question's, because it
-        // is a write's four statuses that are being told apart.
+        // is a write's statuses that are being told apart.
         let malformed = parse(&["scope", "add", "crates"])
             .expect_err("a scope write with the scope missing is clap's")
             .exit_code();
 
-        let vocabulary = [completed, could_not, refused, malformed];
-        assert_eq!(vocabulary, [0, 1, 3, 2]);
+        let vocabulary = [completed, could_not, refused, malformed, with_failures];
+        assert_eq!(vocabulary, [0, 1, 3, 2, 4]);
         for (first, one) in vocabulary.iter().enumerate() {
             for (second, other) in vocabulary.iter().enumerate() {
                 assert!(
                     first == second || one != other,
-                    "two of the four outcomes share a status: {vocabulary:?}"
+                    "two of the outcomes share a status: {vocabulary:?}"
                 );
             }
         }
