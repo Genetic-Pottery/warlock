@@ -193,8 +193,10 @@
 //! path that are in that state, a path a line or, with `--json`, one object
 //! ([`query`]); `check` says which scope covers a path, what this machine holds
 //! and whether the two meet, as prose or as one object ([`check`]); `unpact`
-//! drops the pact on a directory and every pact below it, if this machine holds
-//! the boundary that covers it ([`edits`]); `-h` and
+//! drops the pact on a directory and every pact below it, and `scope add` and
+//! `scope remove` write and clear the boundary on one directory's pact — all
+//! three only if this machine holds the boundary covering the path
+//! ([`mod@edits`]); `-h` and
 //! `--help` print clap's help; and every other word, and
 //! every argument warlock has no place for, is clap's error and usage on stderr.
 //! Refusing is the point of the last of those: warlock used to open the tree for
@@ -228,15 +230,18 @@
 //! `warlock check <path> --json | jq -e '.opens'` is the recipe: the verdict is
 //! `jq`'s non-zero status, and warlock spends none of its own on saying no.
 //!
-//! `unpact` is the first subcommand that does not only read, and it is the
-//! reason the rule above is stated as being the three questions' rather than
-//! every subcommand's. It still takes no terminal, spawns no process and runs no
-//! model pass — an un-pact is `.warlock/pacts.toml` rewritten and nothing else,
-//! with every `WARLOCK.md` left where it was — but it is a write, so it is the
-//! first one asked who is asking. The boundary covering the path is held against
+//! `unpact`, `scope add` and `scope remove` are the subcommands that do not only
+//! read, and they are the reason the rule above is stated as being the three
+//! questions' rather than
+//! every subcommand's. They still take no terminal, spawn no process and run no
+//! model pass — all three are `.warlock/pacts.toml` rewritten and nothing else,
+//! with every `WARLOCK.md` left where it was — but they are writes, so they are
+//! the ones asked who is asking. The boundary covering the path is held against
 //! the sigils `warlock config` wrote for this machine before the command looks
-//! at anything else at all, and a boundary this machine does not hold is one
-//! line on stderr and a 1, with the manifest untouched. That check is
+//! at anything else at all — before the path is even checked for an entry, so
+//! `warlock scope add` inside a closed boundary answers with the scope refusal
+//! and never with what the manifest holds — and a boundary this machine does not
+//! hold is one line on stderr and a 1, with the manifest untouched. That check is
 //! [`mod@edits`]'s, it is the engine's own
 //! [`scope_covering`](warlock_engine::scope_covering) and
 //! [`scope_opens_to`](warlock_engine::scope_opens_to) rather than a second
@@ -290,7 +295,7 @@ use chatting::Chat;
 use check::check;
 use config::configure;
 use editing::edit_press;
-use edits::unpact;
+use edits::{scope_add, scope_remove, unpact};
 use error::Error;
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Pact, Reloaded};
@@ -454,6 +459,66 @@ enum Command {
         #[arg(value_name = "PATH")]
         path: PathBuf,
     },
+    /// `warlock scope <add|remove>`.
+    ///
+    /// The one subcommand with subcommands of its own, and the nesting is the
+    /// vocabulary rather than decoration: a scope is a noun with two things a
+    /// person does to it, and `warlock scope-add` would be two commands that
+    /// merely start with the same letters. It carries no work of its own — every
+    /// arm below dispatches into [`mod@edits`] exactly as `unpact` does, through
+    /// the same boundary and the same manifest save.
+    #[command(
+        about = "Set or clear the scope on a pacted directory.",
+        long_about = None
+    )]
+    Scope {
+        /// Which of the two writes; there is no bare `warlock scope`.
+        #[command(subcommand)]
+        command: ScopeCommand,
+    },
+}
+
+/// The two things `warlock scope` will do to a directory's boundary.
+///
+/// Add and remove and nothing else — no `list`, because that is `warlock check`
+/// and a second spelling of a question is how a vocabulary rots, and no `set`
+/// beside `add`, because one write with one name is what keeps the shell and the
+/// `s` key describable as one rule.
+///
+/// Clearing is [`ScopeCommand::Remove`] and only that. The TUI's field clears a
+/// scope by being empty, which is the right answer for a window somebody is
+/// typing in; at a shell the empty string is far more often an argument that
+/// went missing than a clear somebody meant, so `warlock scope add <path> ''` is
+/// the engine's `Empty` rule and the reader is told which command clears.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+enum ScopeCommand {
+    /// `warlock scope add <path> <scope>`.
+    #[command(
+        about = "Write a scope onto a pacted directory.",
+        long_about = None
+    )]
+    Add {
+        /// Which directory to scope.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        // A `String` and not a validated type: what a scope may be is the
+        // engine's to say, and a parser that judged it here would be a second
+        // opinion about it in the one place clap's exit status of 2 would be
+        // spent on a rule warlock words itself.
+        /// The scope to write, lower-cased before it is judged.
+        #[arg(value_name = "SCOPE")]
+        scope: String,
+    },
+    /// `warlock scope remove <path>`.
+    #[command(
+        about = "Clear the scope on a pacted directory.",
+        long_about = None
+    )]
+    Remove {
+        /// Which directory to clear the scope on.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -510,6 +575,16 @@ fn main() -> ExitCode {
         // thread, no subprocess, no model pass. What keeps it honest is the
         // boundary, asked before anything else it does; see [`mod@edits`].
         Some(Command::Unpact { path }) => unpact(&path),
+        // The other two writes, dispatched beside it and through the same gate:
+        // the boundary is asked before either of them looks at whether the path
+        // has an entry at all, so a closed scope answers with the scope refusal
+        // rather than with what the manifest does or does not hold. The nesting
+        // is clap's and stops here — each arm is one call into [`mod@edits`],
+        // with no work done in this match.
+        Some(Command::Scope { command }) => match command {
+            ScopeCommand::Add { path, scope } => scope_add(&path, &scope),
+            ScopeCommand::Remove { path } => scope_remove(&path),
+        },
     };
 
     // `run` has returned, so the guard inside it has already dropped and the
@@ -1459,7 +1534,7 @@ mod tests {
     use clap::error::ErrorKind;
     use clap::{CommandFactory, Parser};
 
-    use super::{Cli, Command, Error, FOR_CLAUDE_MD, status_for};
+    use super::{Cli, Command, Error, FOR_CLAUDE_MD, ScopeCommand, status_for};
     use crate::query::spelled;
 
     /// What warlock would do, given `args` after the program's own name.
@@ -1598,6 +1673,73 @@ mod tests {
             // And one path, as everywhere else here.
             ["check", "a", "b"].as_slice(),
         ] {
+            let error = parse(args).unwrap_err();
+            assert!(error.use_stderr(), "{args:?}");
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn the_two_scope_writes_are_a_noun_and_a_verb_rather_than_two_words_run_together() {
+        assert_eq!(
+            parse(&["scope", "add", "crates/engine", "data-plane"])
+                .unwrap()
+                .command,
+            Some(Command::Scope {
+                command: ScopeCommand::Add {
+                    path: PathBuf::from("crates/engine"),
+                    scope: "data-plane".to_owned(),
+                }
+            })
+        );
+        assert_eq!(
+            parse(&["scope", "remove", "crates/engine"])
+                .unwrap()
+                .command,
+            Some(Command::Scope {
+                command: ScopeCommand::Remove {
+                    path: PathBuf::from("crates/engine"),
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn a_scope_is_taken_as_it_was_typed_and_judged_by_the_engine_rather_than_by_clap() {
+        // Both of these are refusals — one is not a scope, the other is the
+        // `Empty` rule — and both are warlock's to word and to spend a 1 on.
+        // Clap's job is to hand over the string, so that what a reader typed is
+        // what the engine's sentence is about.
+        for typed in ["Data Plane", ""] {
+            assert_eq!(
+                parse(&["scope", "add", "crates", typed]).unwrap().command,
+                Some(Command::Scope {
+                    command: ScopeCommand::Add {
+                        path: PathBuf::from("crates"),
+                        scope: typed.to_owned(),
+                    }
+                }),
+                "{typed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scope_write_with_a_piece_missing_is_a_malformed_invocation() {
+        // A bare `warlock scope` is a noun with nothing done to it, an `add`
+        // with one argument is a scope that went missing rather than a clear —
+        // clearing is `scope remove` — and a third argument is somebody
+        // expecting something warlock does not do. All three are clap's 2.
+        let malformed: [&[&str]; 6] = [
+            &["scope"],
+            &["scope", "add"],
+            &["scope", "add", "crates"],
+            &["scope", "add", "crates", "web", "extra"],
+            &["scope", "remove"],
+            &["scope", "remove", "crates", "web"],
+        ];
+
+        for args in malformed {
             let error = parse(args).unwrap_err();
             assert!(error.use_stderr(), "{args:?}");
             assert_eq!(error.exit_code(), 2, "{args:?}");

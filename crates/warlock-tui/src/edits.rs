@@ -1,5 +1,6 @@
-//! The headless writes: the boundary they are all asked over, and
-//! `warlock unpact <path>`.
+//! The headless writes: the boundary they are all asked over, and the three of
+//! them — `warlock unpact <path>`, `warlock scope add <path> <scope>` and
+//! `warlock scope remove <path>`.
 //!
 //! The sixth subcommand, and the first one that changes anything. It keeps
 //! every shape the five before it gave — dispatched before anything touches the
@@ -77,6 +78,39 @@
 //! entries went, and it names every one of them that carried a scope, with the
 //! scope. A run that quietly dropped somebody else's boundary now says whose.
 //!
+//! # What a scope write is, and where its rules come from
+//!
+//! `warlock scope add` and `warlock scope remove` are the `s` key's write with
+//! the window taken off the front of it, and every rule they keep is a rule
+//! [`scope_submit`] keeps. The scope is lower-cased with `to_ascii_lowercase`
+//! and then judged by [`validate_scope`], in that order and never the other way
+//! round: `Data-Plane` and `data-plane` are one boundary, so folding is what a
+//! caller that took a string from a person does, and judging is the engine's and
+//! nobody else's. There is no length constant, no character predicate and no
+//! second opinion about scopes anywhere in this file.
+//!
+//! Folding is also the *only* thing done to what was typed. Nothing is trimmed,
+//! split on a comma or repaired into acceptability: `control-plane, data-plane`
+//! is one refused string rather than two scopes somebody might have meant, and
+//! what comes back is the engine's own sentence about the one rule that was
+//! broken, on stderr, with `.warlock/pacts.toml` untouched.
+//!
+//! The write itself is [`with_scope_on`], borrowed from [`mod@crate::scoping`]
+//! rather than written again: the manifest is rebuilt through
+//! [`PactEntry::with_scope`] and [`PactEntry::without_scope`], every other entry
+//! cloned as it stands and the order kept, so the saved file differs from the
+//! one on disk by the scope line and nothing else — the document, the granted
+//! hash and the granted timestamp are the run's and are not this edit's to move.
+//!
+//! Two things the shell has that the window does not, and two it does not have.
+//! Clearing is `warlock scope remove` rather than an empty field, so there is no
+//! empty-argument case here at all — `warlock scope add <path> ''` is
+//! [`validate_scope`]'s `Empty` rule, which is what a person who typed it by
+//! accident is owed. And a remove over a directory carrying no scope is success
+//! rather than a refusal: it says the directory carried no scope, exits 0, and
+//! writes a manifest identical to the one it read, because a command whose job
+//! is to make a fact true has nothing to complain about when it already is.
+//!
 //! # An un-pact in a repository that never pacted anything
 //!
 //! [`load_manifest`] reads a missing `.warlock/pacts.toml` as an empty manifest,
@@ -94,18 +128,27 @@ use std::path::{Path, PathBuf};
 
 use warlock_engine::{
     Manifest, PactEntry, repository_root, scope_covering, scope_opens_to, unpact_subtree,
+    validate_scope,
 };
 use warlock_tui::Sigils;
 
 use crate::config::home_directory;
 use crate::error::Error;
 use crate::query::spelled;
+use crate::scoping::with_scope_on;
 use crate::session::{load_manifest, sigils_under};
 
 /// What an un-pact wants a repository root for, as the tail of
 /// [`Error::NoRepository`]'s sentence. The other subcommands' tails are spelled
 /// beside them, each where its subcommand is written.
 const FOR_UNPACT: &str = "un-pact anything under";
+
+/// What `warlock scope add` wants one for, in the same shape.
+const FOR_SCOPE_ADD: &str = "write a scope in";
+
+/// And `warlock scope remove`, which is the same fact about `.git` with the
+/// other consequence on the end of it.
+const FOR_SCOPE_REMOVE: &str = "clear a scope in";
 
 /// A repository a headless write may go ahead in, with the boundary already
 /// asked.
@@ -273,6 +316,103 @@ impl Opened {
 
         Ok(unpacted_line(&path, &dropped))
     }
+
+    /// Write `scope` onto this path's entry, save, and say what the directory is
+    /// scoped now.
+    ///
+    /// The whole of `warlock scope add` past the boundary, in the order
+    /// [`scope_submit`](crate::scoping::scope_submit) does it: fold, judge,
+    /// find the entry, rebuild, save. The fold is `to_ascii_lowercase` and the
+    /// judge is [`validate_scope`], which is the only thing in warlock that
+    /// decides what a scope may be — see the module docs for why nothing here
+    /// trims or repairs.
+    ///
+    /// The path is spelled first because the module docs' ordering rule stops at
+    /// the boundary and not at the write: a path with no manifest form is this
+    /// command's own refusal, exactly as it is for an un-pact, and it is asked
+    /// before anything is judged so that a run with two things wrong with it
+    /// answers about where it was pointed.
+    ///
+    /// What comes back is the line without its `warlock: ` prefix, and it names
+    /// the scope that was there before when there was a different one. A scope
+    /// is somebody's boundary and moving one silently is the thing the
+    /// informative success line exists to prevent — the same reasoning as
+    /// [`unpacted_line`]'s, over one directory instead of a subtree.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unspellable`] for a path with no repository-relative form,
+    /// [`Error::Scope`] for a string that is not a scope, [`Error::NoPact`] for
+    /// a directory the manifest has no entry for, and [`Error::Manifest`] for a
+    /// manifest that will not save. Nothing at all is written for the first
+    /// three, and the save is a write beside and a rename over, so there is no
+    /// half-written state to leave behind for the fourth.
+    fn scoped(&self, scope: &str) -> Result<String, Error> {
+        let module = spelled(&self.repo_root, &self.target)?;
+        // `to_ascii_lowercase` rather than `to_lowercase`, for `scope_submit`'s
+        // reason: a scope is drawn from ASCII, so folding a non-ASCII capital
+        // would produce a character the judge refuses anyway, and this way what
+        // is refused is closer to what was typed.
+        let folded = scope.to_ascii_lowercase();
+        validate_scope(&folded).map_err(|rule| Error::Scope { rule })?;
+
+        let was = self.scope_on(&module)?.map(str::to_owned);
+        with_scope_on(&self.manifest, &module, Some(&folded))
+            .save(&self.repo_root)
+            .map_err(|source| Error::Manifest { source })?;
+
+        Ok(scoped_line(&module, &folded, was.as_deref()))
+    }
+
+    /// Clear the scope on this path's entry, save, and say what was cleared.
+    ///
+    /// `warlock scope remove` past the boundary, and the same rebuild with a
+    /// `None` in it: [`PactEntry::without_scope`] takes the one field a person
+    /// owns and leaves the document, the granted hash and the granted timestamp
+    /// exactly as the run left them.
+    ///
+    /// A directory carrying no scope is success and not a refusal, and the save
+    /// still happens — one road through this function, and what it writes is a
+    /// manifest identical to the one it read. That is the un-pact's decision
+    /// about an empty repository, for the same reason: a second, quieter road
+    /// through a write is a thing a caller then has to reason about.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unspellable`], [`Error::NoPact`] and [`Error::Manifest`], as
+    /// [`Opened::scoped`] refuses them. There is no [`Error::Scope`] here
+    /// because there is nothing to judge: clearing is not a scope.
+    fn unscoped(&self) -> Result<String, Error> {
+        let module = spelled(&self.repo_root, &self.target)?;
+        let was = self.scope_on(&module)?.map(str::to_owned);
+        with_scope_on(&self.manifest, &module, None)
+            .save(&self.repo_root)
+            .map_err(|source| Error::Manifest { source })?;
+
+        Ok(unscoped_line(&module, was.as_deref()))
+    }
+
+    /// The scope the entry for `module` carries now, or `None` when it carries
+    /// none.
+    ///
+    /// The existence check and the "what was there before" both, because they
+    /// are one look at one entry: a scope write has to know whether there is an
+    /// entry to write on, and the success line has to know what it replaced.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoPact`], naming the directory, when the manifest has no entry
+    /// for it. Only ever reached past an open boundary — this is a fact about
+    /// what the manifest holds, and the gate above is what keeps it from being
+    /// asked from outside a scope this machine does not open.
+    fn scope_on(&self, module: &str) -> Result<Option<&str>, Error> {
+        self.manifest
+            .entry(module)
+            .map(PactEntry::scope)
+            .ok_or_else(|| Error::NoPact {
+                module: module.to_owned(),
+            })
+    }
 }
 
 /// Everything a headless write needs, resolved from the environment, with the
@@ -340,6 +480,34 @@ pub(crate) fn unpact(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// `warlock scope add <path> <scope>`: write that scope onto that directory's
+/// pact, and say what it is scoped now.
+///
+/// Two lines for [`unpact`]'s reasons, over the same two halves: [`opened`] is
+/// the boundary and the resolution, [`Opened::scoped`] is the judging, the edit
+/// and the sentence.
+///
+/// # Errors
+///
+/// Everything [`opened`] and [`Opened::scoped`] refuse, unchanged and
+/// unwrapped: this adds no sentence of its own.
+pub(crate) fn scope_add(path: &Path, scope: &str) -> Result<(), Error> {
+    println!("warlock: {}", opened(FOR_SCOPE_ADD, path)?.scoped(scope)?);
+    Ok(())
+}
+
+/// `warlock scope remove <path>`: clear the scope on that directory's pact, and
+/// say what was cleared.
+///
+/// # Errors
+///
+/// Everything [`opened`] and [`Opened::unscoped`] refuse, unchanged and
+/// unwrapped.
+pub(crate) fn scope_remove(path: &Path) -> Result<(), Error> {
+    println!("warlock: {}", opened(FOR_SCOPE_REMOVE, path)?.unscoped()?);
+    Ok(())
+}
+
 /// What an un-pact of `path` that dropped `dropped` says it did.
 ///
 /// The count first, because it is the fact that says whether the blast radius
@@ -387,17 +555,58 @@ fn unpacted_line(path: &str, dropped: &[&PactEntry]) -> String {
     )
 }
 
+/// What a scope write on `module` says it did, having replaced `was`.
+///
+/// The fact first — this directory is scoped that — because it is the state the
+/// reader asked for and the one a second run would find. The scope that was
+/// there before comes after it and only when there was a different one: moving
+/// somebody's boundary is worth saying out loud, for [`unpacted_line`]'s reason,
+/// while re-writing the scope a directory already carried is a no-op nobody
+/// needs a clause about.
+///
+/// The scope is backticked the way [`closed_scope_message`](crate::session) and
+/// `warlock config` both spell one, so a sigil reads the same wherever warlock
+/// prints it.
+fn scoped_line(module: &str, scope: &str, was: Option<&str>) -> String {
+    match was {
+        Some(was) if was != scope => format!("{module} is scoped `{scope}` — was `{was}`"),
+        _ => format!("{module} is scoped `{scope}`"),
+    }
+}
+
+/// What a scope clear on `module` says it did, having cleared `was`.
+///
+/// Two sentences, because there are two things that can have happened and a
+/// reader is owed the difference: a boundary that was there and is not any more,
+/// named so that the run is auditable, and a directory that carried no scope to
+/// begin with — which is success, exits 0, and says so rather than implying a
+/// removal nobody performed.
+fn unscoped_line(module: &str, was: Option<&str>) -> String {
+    match was {
+        Some(was) => format!("{module} is no longer scoped — was `{was}`"),
+        None => format!("{module} carried no scope"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use warlock_engine::{Manifest, PactEntry, manifest_path, save_sigils};
+    use warlock_engine::{Manifest, PactEntry, manifest_path, save_sigils, validate_scope};
 
-    use super::{Opened, unpacted_line};
+    use super::{Opened, scoped_line, unpacted_line, unscoped_line};
     use crate::error::Error;
     use crate::session::load_manifest;
     use crate::status_for;
+
+    /// The grant every entry below carries, so that "the scope write left the
+    /// run's own fields alone" is an assertion about two values that are really
+    /// there.
+    const HASH: &str = "d0f5a1";
+
+    /// When that grant happened, in the form the manifest stores.
+    const AT: &str = "2026-08-19T07:32:00Z";
 
     /// A throwaway directory. Every test here builds both its repository and
     /// its home out of one of these, so nothing goes near the developer's real
@@ -406,10 +615,15 @@ mod tests {
         tempfile::tempdir().expect("a temporary directory")
     }
 
-    /// An entry for `module`, documented the way a pact would document it.
+    /// An entry for `module`, documented and granted the way a pact leaves one.
+    ///
+    /// Granted rather than bare, because a scope write promises to leave the run's
+    /// own fields where it found them and a promise about a hash needs a hash to
+    /// be about. An un-pact drops whole entries, so it neither knows nor cares.
     fn entry(module: &str) -> PactEntry {
         PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
             .expect("a relative module path is inside the root")
+            .with_grant(HASH, AT)
     }
 
     /// A manifest with a scope on `crates`, a nearer one on `crates/engine`, an
@@ -477,6 +691,50 @@ mod tests {
             repo_root.join(path),
         )?
         .unpacted()
+    }
+
+    /// `warlock scope add <path> <scope>`, on the production road: the boundary
+    /// through [`Opened::new`] and then the write, with no way to reach the
+    /// second without the first.
+    fn scope_add(repo_root: &Path, home: &Path, path: &str, scope: &str) -> Result<String, Error> {
+        let manifest = load_manifest(repo_root).expect("a manifest that reads");
+        Opened::new(
+            repo_root.to_path_buf(),
+            Some(home),
+            manifest,
+            repo_root.join(path),
+        )?
+        .scoped(scope)
+    }
+
+    /// `warlock scope remove <path>`, the same way.
+    fn scope_remove(repo_root: &Path, home: &Path, path: &str) -> Result<String, Error> {
+        let manifest = load_manifest(repo_root).expect("a manifest that reads");
+        Opened::new(
+            repo_root.to_path_buf(),
+            Some(home),
+            manifest,
+            repo_root.join(path),
+        )?
+        .unscoped()
+    }
+
+    /// The entry stored for `module` in the manifest on disk under `repo_root`.
+    fn stored(repo_root: &Path, module: &str) -> PactEntry {
+        load_manifest(repo_root)
+            .expect("a manifest that reads")
+            .entry(module)
+            .expect("the manifest holds this module")
+            .clone()
+    }
+
+    /// The engine's own sentence about why `text` is not a scope: asked of the
+    /// one judge rather than retyped here, so a test cannot agree with a wording
+    /// warlock no longer uses.
+    fn refusal(text: &str) -> String {
+        validate_scope(text)
+            .expect_err("this text is not a scope")
+            .to_string()
     }
 
     #[test]
@@ -655,5 +913,294 @@ mod tests {
             unpacted_line("crates", &[&dropped]),
             "unpacted crates — 1 entry dropped, 1 scoped (crates/engine: Data Plane!)"
         );
+    }
+
+    #[test]
+    fn an_open_boundary_writes_the_scope_and_moves_nothing_else_in_the_file() {
+        let repo = a_repository();
+        let home = a_dir();
+
+        // `docs` carries no scope and nothing above it does, so it is open to a
+        // machine that has never run `warlock config`.
+        let said =
+            scope_add(repo.path(), home.path(), "docs", "billing").expect("nothing scopes `docs`");
+
+        assert_eq!(said, "docs is scoped `billing`");
+        assert_eq!(status_for(&Ok(())), 0);
+        let docs = stored(repo.path(), "docs");
+        assert_eq!(docs.scope(), Some("billing"));
+        // The one field a person owns, and nothing else on the entry.
+        assert_eq!(docs.document(), "docs/WARLOCK.md");
+        assert_eq!(docs.granted_hash(), Some(HASH));
+        assert_eq!(docs.granted_at(), Some(AT));
+
+        // Every other entry cloned untouched, in the order they were in, so the
+        // diff against what was there is the one scope line.
+        let after = load_manifest(repo.path()).expect("a manifest that reads");
+        let before = a_manifest();
+        assert_eq!(
+            after
+                .entries()
+                .iter()
+                .map(PactEntry::module)
+                .collect::<Vec<_>>(),
+            before
+                .entries()
+                .iter()
+                .map(PactEntry::module)
+                .collect::<Vec<_>>(),
+        );
+        for module in ["crates", "crates/engine", "crates/engine/src"] {
+            assert_eq!(after.entry(module), before.entry(module), "{module}");
+        }
+    }
+
+    #[test]
+    fn a_scope_that_replaces_another_says_whose_boundary_it_moved() {
+        let repo = a_repository();
+        let home = a_dir();
+        holding(home.path(), repo.path(), &["data-plane"]);
+
+        let said = scope_add(repo.path(), home.path(), "crates/engine", "billing")
+            .expect("the machine holds the scope covering this directory");
+
+        // The mitigation the un-pact line is: a boundary that moved is named,
+        // because a script that quietly redrew somebody else's says whose.
+        assert_eq!(said, "crates/engine is scoped `billing` — was `data-plane`");
+        assert_eq!(
+            stored(repo.path(), "crates/engine").scope(),
+            Some("billing")
+        );
+        // And re-writing the scope a directory already carries has nothing to
+        // report about a boundary nobody moved.
+        assert_eq!(
+            scoped_line("docs", "billing", Some("billing")),
+            "docs is scoped `billing`"
+        );
+    }
+
+    #[test]
+    fn what_was_given_is_folded_before_it_is_judged_and_stored() {
+        // `Data-Plane` and `data-plane` are one boundary, and folding belongs to
+        // the caller that took the string from a person — the judge refuses a
+        // capital outright, as the assertion below shows.
+        let repo = a_repository();
+        let home = a_dir();
+
+        let said = scope_add(repo.path(), home.path(), "docs", "Data-Plane")
+            .expect("the fold happened before the judge");
+
+        assert!(validate_scope("Data-Plane").is_err());
+        assert_eq!(said, "docs is scoped `data-plane`");
+        assert_eq!(stored(repo.path(), "docs").scope(), Some("data-plane"));
+    }
+
+    #[test]
+    fn removing_a_scope_clears_it_and_leaves_the_document_and_the_grant() {
+        let repo = a_repository();
+        let home = a_dir();
+        holding(home.path(), repo.path(), &["data-plane"]);
+
+        let said = scope_remove(repo.path(), home.path(), "crates/engine")
+            .expect("the machine holds the scope covering this directory");
+
+        assert_eq!(said, "crates/engine is no longer scoped — was `data-plane`");
+        assert_eq!(status_for(&Ok(())), 0);
+        let engine = stored(repo.path(), "crates/engine");
+        assert_eq!(engine.scope(), None);
+        assert_eq!(engine.document(), "crates/engine/WARLOCK.md");
+        assert_eq!(engine.granted_hash(), Some(HASH));
+        assert_eq!(engine.granted_at(), Some(AT));
+        // The entry above it kept its own boundary: this is one entry's field.
+        assert_eq!(stored(repo.path(), "crates").scope(), Some("platform"));
+    }
+
+    #[test]
+    fn removing_a_scope_from_a_directory_that_carries_none_is_success_and_writes_the_same_file() {
+        // Idempotence, said as a fact rather than as a refusal: the command's
+        // job is to make "this directory carries no scope" true, and it already
+        // was.
+        let repo = a_repository();
+        let home = a_dir();
+        let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+        let said = scope_remove(repo.path(), home.path(), "docs").expect("nothing scopes `docs`");
+
+        assert_eq!(said, "docs carried no scope");
+        assert_eq!(status_for(&Ok(())), 0);
+        assert_eq!(
+            manifest_bytes(repo.path()).as_deref(),
+            Some(&before[..]),
+            "an idempotent clear rewrote the file differently"
+        );
+    }
+
+    #[test]
+    fn a_closed_boundary_refuses_both_scope_writes_and_leaves_the_manifest_byte_identical() {
+        let repo = a_repository();
+        let home = a_dir();
+        // The nearest scope wins, so the machine holding the outer boundary is
+        // still outside the inner one.
+        holding(home.path(), repo.path(), &["platform"]);
+        let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+        let refusals = [
+            scope_add(repo.path(), home.path(), "crates/engine", "billing")
+                .expect_err("a scope this machine does not hold refuses an add"),
+            scope_remove(repo.path(), home.path(), "crates/engine")
+                .expect_err("and refuses a remove"),
+        ];
+
+        for error in refusals {
+            assert!(
+                matches!(error, Error::ClosedScope { .. }),
+                "the boundary was refused as something else: {error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                "crates/engine is scoped `data-plane` — hold that sigil to work here, \
+                 with `warlock config`"
+            );
+            assert!(!error.to_string().contains('\n'), "`main` prints one line");
+            assert_eq!(status_for(&Err(error)), 1);
+        }
+        assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+    }
+
+    #[test]
+    fn the_boundary_is_asked_before_the_path_is_checked_for_an_entry() {
+        // The ordering that is the security property: `crates/tui` has no entry
+        // in the manifest and sits inside the boundary `crates` draws, so from
+        // outside that boundary the answer is the scope refusal — never "is not
+        // in the manifest", which is a fact about the inside of a file the
+        // reader has just been told they may not work in.
+        let repo = a_repository();
+        let home = a_dir();
+        let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+        let error = scope_add(repo.path(), home.path(), "crates/tui", "billing")
+            .expect_err("holding nothing opens nothing that is scoped");
+
+        assert!(
+            matches!(error, Error::ClosedScope { .. }),
+            "the manifest's shape leaked past a closed boundary: {error:?}"
+        );
+        assert!(
+            !error.to_string().contains("not in the manifest"),
+            "{error}"
+        );
+        assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+
+        // And past the same boundary held, the same path answers with what the
+        // manifest holds — so the sentence exists and is only ever reached from
+        // inside.
+        holding(home.path(), repo.path(), &["platform"]);
+        let error = scope_add(repo.path(), home.path(), "crates/tui", "billing")
+            .expect_err("there is no entry to write a scope on");
+        assert!(matches!(error, Error::NoPact { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn a_scope_the_engine_refuses_prints_its_rule_and_writes_nothing() {
+        let repo = a_repository();
+        let home = a_dir();
+        let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+        // The list, the capital-with-a-space, and the empty argument — which is
+        // the `Empty` rule rather than a clear, because clearing is `scope
+        // remove`. Each is judged after the fold, so the text held against the
+        // judge here is the lower-cased one.
+        for (given, folded) in [
+            ("control-plane, data-plane", "control-plane, data-plane"),
+            ("Control Plane", "control plane"),
+            ("", ""),
+            ("data-plane-", "data-plane-"),
+        ] {
+            let error = scope_add(repo.path(), home.path(), "docs", given)
+                .expect_err("this is not a scope");
+
+            assert!(matches!(error, Error::Scope { .. }), "{given:?}: {error:?}");
+            // The engine's own sentence about the one rule that was broken,
+            // asked of the judge rather than retyped — and asked about the
+            // folded text, because folding is the one thing done to what was
+            // given.
+            assert_eq!(error.to_string(), refusal(folded), "{given:?}");
+            assert!(!error.to_string().contains('\n'), "{given:?}");
+            assert_eq!(status_for(&Err(error)), 1, "{given:?}");
+        }
+
+        assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+    }
+
+    #[test]
+    fn a_directory_with_no_entry_is_refused_past_an_open_boundary_and_writes_nothing() {
+        // Nothing scopes `docs/adr` and nothing above it does, so the boundary
+        // waves it through and the manifest gets the next word: there is no pact
+        // here to carry a scope.
+        let repo = a_repository();
+        let home = a_dir();
+        let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+        let refusals = [
+            scope_add(repo.path(), home.path(), "docs/adr", "billing")
+                .expect_err("`docs/adr` has no entry"),
+            scope_remove(repo.path(), home.path(), "docs/adr")
+                .expect_err("and has none to clear either"),
+        ];
+
+        for error in refusals {
+            assert!(matches!(error, Error::NoPact { .. }), "{error:?}");
+            let said = error.to_string();
+            // `no_pact_message`'s shape: it names the directory and points at
+            // pacting it.
+            assert!(said.contains("docs/adr"), "{said}");
+            assert!(said.contains("`p`"), "{said}");
+            assert!(!said.contains('\n'), "`main` prints one line");
+            assert_eq!(status_for(&Err(error)), 1);
+        }
+        assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+    }
+
+    #[test]
+    fn a_path_with_no_manifest_form_is_refused_by_both_scope_writes() {
+        let repo = a_repository();
+        let home = a_dir();
+        let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+        for outside in [PathBuf::from("/elsewhere"), repo.path().join("..")] {
+            let manifest = load_manifest(repo.path()).expect("a manifest that reads");
+            let opened = || {
+                Opened::new(
+                    repo.path().to_path_buf(),
+                    Some(home.path()),
+                    manifest.clone(),
+                    outside.clone(),
+                )
+            };
+
+            for refused in [
+                opened().and_then(|opened| opened.scoped("billing")),
+                opened().and_then(|opened| opened.unscoped()),
+            ] {
+                let error =
+                    refused.expect_err("a path outside the repository has no manifest form");
+                assert!(
+                    matches!(error, Error::Unspellable { .. }),
+                    "{}: {error:?}",
+                    outside.display()
+                );
+                assert!(!error.to_string().contains('\n'), "`main` prints one line");
+            }
+            assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+        }
+    }
+
+    #[test]
+    fn a_clear_that_took_a_boundary_away_names_it_and_one_that_took_nothing_says_so() {
+        assert_eq!(
+            unscoped_line("crates/engine", Some("data-plane")),
+            "crates/engine is no longer scoped — was `data-plane`"
+        );
+        assert_eq!(unscoped_line("docs", None), "docs carried no scope");
     }
 }

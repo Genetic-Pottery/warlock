@@ -256,8 +256,17 @@ pub(crate) fn scope_submit(
 /// differs from the one on disk in one place.
 ///
 /// A `module` no entry matches hands back a copy of the manifest, and no caller
-/// gets that far: [`scope_submit`] has already refused such a submit above.
-fn with_scope_on(manifest: &Manifest, module: &str, scope: Option<&str>) -> Manifest {
+/// gets that far: [`scope_submit`] and
+/// [`Opened::scoped`](crate::edits) each refuse such a write before reaching
+/// here.
+///
+/// Shared with the headless writes rather than copied into them: `warlock scope
+/// add` and `warlock scope remove` write the same field of the same file as the
+/// keystroke above, and a second rebuild would be a second chance to forget that
+/// the grant, the document and the entry order are not this edit's to move. The
+/// sharing is a visibility and nothing else — what this does, and what
+/// [`scope_submit`] does with it, are unchanged.
+pub(crate) fn with_scope_on(manifest: &Manifest, module: &str, scope: Option<&str>) -> Manifest {
     Manifest::with_entries(manifest.entries().iter().map(|entry| {
         let entry = entry.clone();
         if entry.module() != module {
