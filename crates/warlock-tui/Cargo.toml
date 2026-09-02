@@ -22,6 +22,11 @@ path = "src/lib.rs"
 # vocabulary, and the engine knows nothing about terminals.
 [dependencies]
 clap = { workspace = true }
+# Only the headless runs press it into service, and only from `src/running.rs`:
+# a `warlock pact` is minutes of model passes with no panel to press Esc in, so
+# Ctrl-C is the one say-when a shell has. See the workspace manifest for why the
+# job is worth a crate rather than a handler written here.
+ctrlc = { workspace = true }
 notify = { workspace = true }
 ratatui = { workspace = true }
 serde_json = { workspace = true }

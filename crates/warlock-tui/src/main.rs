@@ -276,6 +276,16 @@
 //! and the count on stderr, so `warlock pact . > run.log` puts the descent in
 //! the file and leaves what went wrong on the terminal.
 //!
+//! And they are the two subcommands with a key: minutes of somebody's tokens
+//! with no panel to press Esc in leaves Ctrl-C as the only say-when, so a
+//! headless run listens for it ([`mod@running`]). The first press is the
+//! panel's Esc — the `claude` in flight is killed, the descent ends at the next
+//! directory rather than part way through one, and what finished is hashed,
+//! granted and saved before the process leaves with **130**. The second is the
+//! panel's `q`: it exits at once, saving nothing and printing nothing. The same
+//! [`Cancel`] does both halves of the first press, which is why a stop takes
+//! milliseconds rather than the rest of a five-minute pass.
+//!
 //! The reader can hand the pointer back. `m` turns the terminal's reporting off
 //! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
 //! off the terminal keeps its own text selection and no `Event::Mouse` arrives
@@ -690,8 +700,11 @@ fn main() -> ExitCode {
 /// `warlock refresh` descended the subtree, wrote the documents it could and
 /// saved the manifest, and some of its directories did not come out of it — the
 /// directories are named on stderr, one line each, and the line this status goes
-/// with says how many of how many ([`mod@running`]). **130**, cancelled, belongs
-/// to the same pair of subcommands and is not produced here yet.
+/// with says how many of how many ([`mod@running`]). **130** cancelled: somebody
+/// pressed Ctrl-C during one of those two runs, the descent stopped at the next
+/// directory and the pass in flight was killed, and what had finished by then is
+/// hashed, granted and saved before the status is reached — 128 plus SIGINT, so
+/// a shell, `make` and CI read it as interrupted without being told to.
 ///
 /// 4 is not 1 for the reason 3 is not: they want different things done about
 /// them. A 1 is warlock unable to do the thing and nothing having happened
@@ -700,6 +713,16 @@ fn main() -> ExitCode {
 /// disk is the bigger news and the one worth retrying. A 4 is the work done and
 /// partly not taken: the grants that were earned are on disk, so the thing to do
 /// is read the lines above the count and re-run over what failed.
+///
+/// 130 is not 4 for the same kind of reason, one step further along: a 4 is
+/// warlock's news about a run, and a 130 is the reader's own news back. Nothing
+/// went wrong in a cancelled run — the passes that finished are on disk and
+/// granted, the rest were never asked for — so a script that retries a 4 over
+/// the directories that failed must not retry a 130 at all, because the thing
+/// that stopped it was somebody deciding to stop it. The number is not warlock's
+/// invention: 128 plus the signal is what a shell reports for a killed process,
+/// SIGINT is 2, and every wrapper that already special-cases 130 gets this run
+/// right without being told anything about warlock.
 ///
 /// 3 is here so that a script can act without reading English: the two non-zero
 /// results a write can have want opposite things done about them, and telling
@@ -736,9 +759,24 @@ const fn status_for(outcome: &Result<(), Error>) -> u8 {
         // could be written are written and the manifest is saved, and the line
         // printed for it is a count under a list already on stderr.
         Err(Error::Failures { .. }) => 4,
+        // A run somebody stopped, and the one status here that is not warlock's
+        // verdict on anything: the work up to the Ctrl-C is saved, so this sits
+        // beside the 4 rather than under the catch-all, and it is the number a
+        // shell already spells an interrupted process with.
+        Err(Error::Cancelled) => CANCELLED,
         Err(_) => 1,
     }
 }
+
+/// What an interrupted run leaves behind: 128 plus SIGINT, the number every
+/// shell already reports for a process that took a Ctrl-C.
+///
+/// Named once and read twice, which is the whole reason it is a constant: the
+/// first Ctrl-C ends with [`status_for`] mapping [`Error::Cancelled`] to it, and
+/// the second leaves through the handler in [`mod@running`] without any outcome
+/// to map — and the two must not be able to drift into telling one shell two
+/// different stories about the same keypress.
+const CANCELLED: u8 = 130;
 
 /// `warlock init`: write the `CLAUDE.md` at the repository root and say which
 /// file was written.
@@ -2218,15 +2256,15 @@ mod tests {
     }
 
     #[test]
-    fn the_five_statuses_a_write_can_leave_are_all_different_numbers() {
+    fn the_six_statuses_a_write_can_leave_are_all_different_numbers() {
         // The vocabulary, held together in one place so that a script reading
         // only the status can tell them apart: a write that happened, one
         // warlock could not finish, one refused at the boundary with nothing
-        // spent, a command line that was never a request, and a run that
-        // descended a subtree and came back with some of its directories
-        // failed. Each is taken from the thing that really produces it —
-        // `status_for` for warlock's own four, clap for the fifth — rather than
-        // written down as a number.
+        // spent, a command line that was never a request, a run that descended a
+        // subtree and came back with some of its directories failed, and a run
+        // somebody stopped with Ctrl-C. Each is taken from the thing that really
+        // produces it — `status_for` for warlock's own five, clap for the sixth
+        // — rather than written down as a number.
         let completed = i32::from(status_for(&Ok(())));
         let could_not = i32::from(status_for(&Err(Error::NoRepository {
             start: PathBuf::from("/nowhere"),
@@ -2244,14 +2282,25 @@ mod tests {
             failed: 3,
             total: 12,
         })));
+        // The run somebody stopped: neither warlock's inability nor its verdict
+        // on anything, and the one number here a shell already has a meaning
+        // for — 128 plus SIGINT.
+        let cancelled = i32::from(status_for(&Err(Error::Cancelled)));
         // Clap's, from a write invocation rather than a question's, because it
         // is a write's statuses that are being told apart.
         let malformed = parse(&["scope", "add", "crates"])
             .expect_err("a scope write with the scope missing is clap's")
             .exit_code();
 
-        let vocabulary = [completed, could_not, refused, malformed, with_failures];
-        assert_eq!(vocabulary, [0, 1, 3, 2, 4]);
+        let vocabulary = [
+            completed,
+            could_not,
+            refused,
+            malformed,
+            with_failures,
+            cancelled,
+        ];
+        assert_eq!(vocabulary, [0, 1, 3, 2, 4, 130]);
         for (first, one) in vocabulary.iter().enumerate() {
             for (second, other) in vocabulary.iter().enumerate() {
                 assert!(

@@ -107,6 +107,48 @@
 //! failures, and the manifest saved. `warlock pact . > run.log` therefore shows
 //! on the terminal exactly what went wrong while the progress goes to the file.
 //!
+//! # Ctrl-C is the only key a run has
+//!
+//! A pact is minutes of somebody's tokens, and the panel's answer to "enough"
+//! is Esc. There is no panel here and no keys are read, so the say-when is the
+//! signal the shell already sends: SIGINT, delivered to [`listening`]'s handler
+//! and spent on the run's [`Cancel`] — the same handle the `p` key's Esc
+//! latches, attached to this run's [`ClaudeAgent`] and read by [`Progress`].
+//!
+//! The pair is what makes a stop quick rather than polite. Latching kills the
+//! `claude` in flight, so the pass being paid for right now ends in
+//! milliseconds instead of at the end of its five minutes; the observer's
+//! `starting` then answers [`Pacting::Stop`] and the engine leaves at the next
+//! directory boundary, which is the only place a descent can be stopped without
+//! abandoning a document half-written. Nothing else about the run changes: the
+//! directories that finished are hashed, granted and saved by the same single
+//! write at the end, and the process leaves with **status 130** — 128 plus
+//! SIGINT, which shells, `make` and CI already read as interrupted.
+//!
+//! A second Ctrl-C is not patience running out — it is the other question, and
+//! it is answered with [`process::exit`] from inside the handler. Nothing is
+//! saved on that road: the descent's own thread is abandoned wherever it stood,
+//! and because the manifest is written beside and renamed over, what is on disk
+//! is either the file the run read or the file it earned and never a half of
+//! either.
+//!
+//! What a cancelled run does *not* do is report. The killed pass comes back in
+//! [`PactedSubtree::failures`] like any other failure, and there is nothing in
+//! that list saying which entries the reader caused, so naming them would put
+//! directories on stderr as though somebody had to go and look at them when the
+//! only thing that happened is that they pressed Ctrl-C. So a cancel prints one
+//! line and nothing else — [`Error::Cancelled`], through the one line of `main`
+//! that prints everything — and stdout has already said which directories
+//! finished. It is the footer's decision about the same event, made again for
+//! the same reason.
+//!
+//! None of it is `unsafe`, and none of it needs to be: the crate in the manifest
+//! does the registration and hands the press to a thread of its own, where
+//! latching a flag and killing a child are ordinary. The handler goes in after
+//! the boundary is asked and before the first pass, so a machine that will not
+//! take one refuses the run with [`Error::Signal`] and a 1 rather than starting
+//! a descent nobody could stop.
+//!
 //! # One save, at the end
 //!
 //! The engine saves nothing: [`pact_subtree`](warlock_engine::pact_subtree)
@@ -120,22 +162,28 @@
 //!
 //! # What the environment touches, and where
 //!
-//! In exactly one place, [`started`], which resolves the [`Opened`] and builds
-//! the [`ClaudeAgent`] and the [`Progress`] writing to stdout. Everything under
-//! it — [`ran`] — takes the repository, the agent and the observer as
+//! In exactly one place, [`started`], which resolves the [`Opened`], installs
+//! the signal handler and builds the [`ClaudeAgent`] and the [`Progress`]
+//! writing to stdout. Everything under it — [`ran`], [`report`] and [`ending`] —
+//! takes the repository, the agent, the observer and the say-when as
 //! parameters, which is the seam the tests below run through: a scratch
-//! repository, a throwaway home, a fake agent and a `Vec<u8>` for stdout, so
-//! nothing reads the developer's real home and nothing spawns `claude`.
+//! repository, a throwaway home, a fake agent, a [`Cancel`] latched from inside
+//! a pass in place of a keypress, and a `Vec<u8>` for stdout, so nothing reads
+//! the developer's real home, nothing spawns `claude` and no test sends itself
+//! a signal.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use warlock_engine::{
     Agent, PactFailure, PactObserver, PactedSubtree, Pacting, pact_subtree, refresh_subtree,
     to_manifest_path,
 };
-use warlock_tui::ClaudeAgent;
+use warlock_tui::{Cancel, ClaudeAgent};
 
+use crate::CANCELLED;
 use crate::edits::{Opened, opened};
 use crate::error::{Error, one_line};
 
@@ -186,12 +234,13 @@ impl Descent {
 /// The headless counterpart of [`Reporting`](crate::pacting), and a much smaller
 /// thing than it: there is no channel, no thread and no screen, so where that
 /// one forwards five kinds of event to an event loop that decides what to draw,
-/// this one writes the two that a person watching a pipe can act on and answers
-/// [`Pacting::Continue`] to everything.
+/// this one writes the two that a person watching a pipe can act on.
 ///
-/// It always continues, and today that is the only answer it has: nobody is
-/// holding a key down. Stopping a headless run is the signal handler's, and it
-/// arrives here later.
+/// The other direction of the port is the same one that one has, reached by a
+/// different key: the answer to `starting` comes off a [`Cancel`] somebody else
+/// holds, and here that somebody is [`listening`]'s handler rather than a reader
+/// pressing Esc. Both are the same handle the run's [`ClaudeAgent`] was built
+/// with, so the pass in flight is already dead by the time the engine asks this.
 ///
 /// Generic over the writer rather than reaching for [`io::stdout`] itself, for
 /// the reason every other seam in this crate is a parameter: the tests below
@@ -210,6 +259,13 @@ struct Progress<W: Write> {
     root: PathBuf,
     /// Where the lines go: stdout on the real road, a `Vec<u8>` under test.
     out: W,
+    /// Whether anybody has said stop, cloned from the handle the run's agent
+    /// answers to and the signal handler latches.
+    ///
+    /// Read rather than written here: this port has no opinion about when a run
+    /// should end, it only carries somebody else's to the one place the engine
+    /// asks.
+    cancel: Cancel,
     /// How many directories the run said it would describe, as last told, and
     /// `0` before it has said anything.
     ///
@@ -228,11 +284,13 @@ struct Progress<W: Write> {
 }
 
 impl<W: Write> Progress<W> {
-    /// A port naming directories against `root` and writing to `out`.
-    const fn new(root: PathBuf, out: W) -> Self {
+    /// A port naming directories against `root`, writing to `out` and stopping
+    /// when `cancel` says so.
+    const fn new(root: PathBuf, out: W, cancel: Cancel) -> Self {
         Self {
             root,
             out,
+            cancel,
             total: 0,
         }
     }
@@ -253,7 +311,16 @@ impl<W: Write> Progress<W> {
 
 impl<W: Write> PactObserver for Progress<W> {
     /// Say which directory is being entered and where it sits in the run, and
-    /// let it go ahead.
+    /// let it go ahead — unless somebody has pressed Ctrl-C, in which case say
+    /// nothing and end the descent here.
+    ///
+    /// The say-when is read before anything is printed, so a cancelled run
+    /// neither announces a directory it will not describe nor describes it.
+    /// This is the only question the engine asks that a run can be stopped at,
+    /// and it is asked between directories, which is what makes a stop leave
+    /// whole documents behind rather than half of one; the pass being paid for
+    /// when the key was pressed was killed by the same latch, so the wait to
+    /// get here is milliseconds rather than the rest of a pass.
     ///
     /// The fraction is the engine's own, unaltered and one-based, and its
     /// denominator does not move for the length of the run — so `[3/12]` is a
@@ -262,6 +329,9 @@ impl<W: Write> PactObserver for Progress<W> {
     /// where it means something: it counts the directories offered, and the one
     /// being offered is the one it is about.
     fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
+        if self.cancel.is_cancelled() {
+            return Pacting::Stop;
+        }
         // Remembered as well as printed, and remembered every time rather than
         // only the first: the engine states one denominator for a run, so the
         // last thing it said and the first are the same number, and a port that
@@ -454,47 +524,141 @@ fn ran(
     Ok(subtree)
 }
 
+/// Listen for Ctrl-C for the rest of the process, and hand back the say-when it
+/// latches.
+///
+/// The whole of the signal handling, and it is a flag and two lines: the first
+/// press latches the [`Cancel`] this run's agent and observer were built with,
+/// which kills the pass in flight and ends the descent at the next directory;
+/// the second leaves at once with [`CANCELLED`], the status the first press was
+/// heading for anyway.
+///
+/// Two presses rather than one because they are two different questions. The
+/// first is "stop when you can", and what it buys is the manifest: the
+/// directories already documented are hashed, granted and saved by the save at
+/// the end of [`ran`], which cannot happen if the process dies here. The second
+/// is "stop now", asked by somebody who has decided that whatever the run is
+/// still doing is not worth waiting for — and it is honoured literally, with
+/// nothing saved and nothing printed. Nothing is corrupted by taking it: each
+/// document and the manifest are written beside and renamed over, so what is on
+/// disk is always a whole file, and the descent's own thread is simply
+/// abandoned. It is the panel's Esc-then-quit split, at a shell prompt.
+///
+/// No `unsafe`, and none is needed: [`ctrlc::set_handler`] does the registration
+/// itself and calls this closure on an ordinary thread of its own, where
+/// latching an [`AtomicBool`], taking a mutex and killing a child process are
+/// ordinary things to do rather than the undefined behaviour they would be in
+/// signal context. That is the whole reason the dependency is in the manifest.
+///
+/// `pressed` is this function's own flag and not [`Cancel::is_cancelled`],
+/// because the two say different things: a handle can be latched by the run
+/// itself, and "has anybody pressed Ctrl-C" is a question about the keyboard.
+///
+/// # Errors
+///
+/// [`Error::Signal`] when the handler cannot be installed, which is a handler
+/// already registered in this process or the system refusing one. Called once
+/// per process, after the boundary is asked and before the first pass, so a run
+/// refused here has spent nothing and written nothing.
+fn listening() -> Result<Cancel, Error> {
+    let cancel = Cancel::new();
+    let latch = cancel.clone();
+    let pressed = AtomicBool::new(false);
+    ctrlc::set_handler(move || {
+        if pressed.swap(true, Ordering::SeqCst) {
+            // The second press, honoured as asked: no save, no report, and the
+            // status the run was going to leave with anyway.
+            process::exit(i32::from(CANCELLED));
+        }
+        latch.cancel();
+    })
+    .map_err(|source| Error::Signal { source })?;
+    Ok(cancel)
+}
+
+/// What a descent that finished comes to: nothing, a report, or a cancel.
+///
+/// The three endings a run can have, decided in one place and in this order,
+/// which is the whole of the function. `cancelled` wins because a stopped run's
+/// failures are the stopping — the killed pass comes back in
+/// [`PactedSubtree::failures`] like any other, and nothing in that list says
+/// which entries the reader caused — so a cancelled run prints no per-directory
+/// lines at all and leaves with [`Error::Cancelled`] and its 130. What finished
+/// is on stdout, where it has been all along.
+///
+/// Otherwise it is [`report`]'s answer: `None` is the run with nothing wrong
+/// with it and exit 0, and a report is every failing directory written to `err`
+/// with [`Error::Failures`] behind it, which `main` prints as the count and
+/// exits 4 for.
+///
+/// A function taking the stderr to write to rather than three lines inside
+/// [`started`], for the reason [`Progress`] is generic over its writer: this is
+/// the decision the endings of a run are made by, and a test that could only
+/// read it by spawning a process would be a test of the shell.
+///
+/// # Errors
+///
+/// [`Error::Cancelled`] for a run somebody stopped, and [`Error::Failures`] for
+/// a run some of whose directories failed. Both are runs that happened, with the
+/// manifest already saved.
+fn ending<W: Write>(cancelled: bool, report: Option<Report>, err: &mut W) -> Result<(), Error> {
+    if cancelled {
+        return Err(Error::Cancelled);
+    }
+    match report {
+        None => Ok(()),
+        Some(report) => {
+            report.onto(err);
+            Err(report.status())
+        }
+    }
+}
+
 /// The subcommand: resolve the environment, ask the boundary, run, and print as
 /// it goes.
 ///
 /// The one place in this module that reads the working directory, the home
-/// directory or stdout, kept to three lines so that everything worth testing is
-/// underneath it in [`ran`]. [`opened`] is the resolution and the gate together
-/// — see [`mod@crate::edits`] for why those are one step and not two — and a
-/// closed boundary leaves through the `?` with nothing spawned and nothing
-/// written.
+/// directory, stdout or the keyboard, kept to five lines so that everything
+/// worth testing is underneath it in [`ran`] and [`ending`]. [`opened`] is the
+/// resolution and the gate together — see [`mod@crate::edits`] for why those are
+/// one step and not two — and a closed boundary leaves through the `?` with
+/// nothing spawned, nothing written and no handler installed.
 ///
 /// [`ClaudeAgent::new`] is built here and nowhere else in this module: one
 /// `claude --print` per directory, on the terms a pass is always asked on, from
-/// the one file in this crate that spawns a process.
+/// the one file in this crate that spawns a process. It is given the same
+/// [`Cancel`] the observer reads and [`listening`]'s handler latches, and that
+/// one handle is the whole of the cancellation: one call kills the pass in
+/// flight and stops the descent at the next directory.
 ///
-/// What the run came to is read at the end, and only then: a run with no
-/// failures is `Ok(())` and exit 0, and a run with some is every failing
-/// directory on stderr and [`Error::Failures`] behind them, which `main` prints
-/// as the count and exits 4 for. The manifest is saved either way — that
-/// happened in [`ran`], before this function had an opinion about anything —
-/// which is what makes 4 "completed with failures" rather than a failure.
+/// What the run came to is read at the end, and only then, by [`ending`]. The
+/// manifest is saved before any of that — in [`ran`], before this function has
+/// an opinion about anything — which is what makes 4 "completed with failures"
+/// rather than a failure, and what makes 130 a run that recorded what it
+/// finished.
 ///
 /// # Errors
 ///
-/// Everything [`opened`] and [`ran`] refuse, unchanged and unwrapped, plus
-/// [`Error::Failures`] for a run some of whose directories failed. The order is
-/// the load-bearing part: a manifest that would not save leaves through [`ran`]
-/// as [`Error::Manifest`] and a 1, failures or no failures, because a run whose
-/// record never reached the disk is warlock unable to do the thing rather than a
-/// run that completed imperfectly, and the 1 is the news.
+/// Everything [`opened`], [`listening`] and [`ran`] refuse, unchanged and
+/// unwrapped, plus [`ending`]'s [`Error::Cancelled`] and [`Error::Failures`].
+/// The order is the load-bearing part: a manifest that would not save leaves
+/// through [`ran`] as [`Error::Manifest`] and a 1, failures or cancel or
+/// neither, because a run whose record never reached the disk is warlock unable
+/// to do the thing rather than a run that completed imperfectly, and the 1 is
+/// the news.
 fn started(descent: Descent, path: &Path) -> Result<(), Error> {
     let opened = opened(descent.wanted(), path)?;
-    let mut progress = Progress::new(opened.repo_root().to_path_buf(), io::stdout());
-    let subtree = ran(&opened, descent, &ClaudeAgent::new(), &mut progress)?;
+    let cancel = listening()?;
+    let agent = ClaudeAgent::new().with_cancel(cancel.clone());
+    let mut progress = Progress::new(
+        opened.repo_root().to_path_buf(),
+        io::stdout(),
+        cancel.clone(),
+    );
+    let subtree = ran(&opened, descent, &agent, &mut progress)?;
 
-    match report(opened.repo_root(), &subtree.failures, progress.total()) {
-        None => Ok(()),
-        Some(report) => {
-            report.onto(&mut io::stderr());
-            Err(report.status())
-        }
-    }
+    let report = report(opened.repo_root(), &subtree.failures, progress.total());
+    ending(cancel.is_cancelled(), report, &mut io::stderr())
 }
 
 /// `warlock pact <path>`: describe every directory at or below that one, and
@@ -532,7 +696,9 @@ mod tests {
         manifest_path, save_sigils,
     };
 
-    use super::{Descent, Progress, Report, ran, report};
+    use warlock_tui::Cancel;
+
+    use super::{Descent, Progress, Report, ending, ran, report};
     use crate::edits::Opened;
     use crate::error::Error;
     // The sentence itself, asked of the one function that writes it rather than
@@ -613,11 +779,12 @@ mod tests {
     /// asked.
     ///
     /// [`pacting`](crate::pacting)'s `Canned` with everything this module does
-    /// not test taken out: no activities, because there is no panel; no cancel,
-    /// because there is no key to press. What is kept is the pair of facts these
-    /// tests turn on — which directories were offered a pass, in order, and
-    /// whether a manifest was on disk while the passes were running, which is
-    /// how "saved once, at the end" is asked of a run rather than of a mock.
+    /// not test taken out: no activities, because there is no panel. What is
+    /// kept is the pair of facts these tests turn on — which directories were
+    /// offered a pass, in order, and whether a manifest was on disk while the
+    /// passes were running, which is how "saved once, at the end" is asked of a
+    /// run rather than of a mock — and the say-when, because a cancel arrives
+    /// during a pass and this is the only thing here that is inside one.
     ///
     /// The refusal it can be given is
     /// [`AgentError::NotFound`](warlock_engine::AgentError), which is not an
@@ -631,6 +798,9 @@ mod tests {
         /// The directories to refuse a pass, as the manifest spells them.
         /// Empty is the model that answers everything.
         refused: Vec<String>,
+        /// The directory during whose pass somebody presses Ctrl-C, and the
+        /// handle their press latches, or `None` for a run nobody stops.
+        cancel_at: Option<(String, Cancel)>,
         /// One entry per pass: the directory, and whether the manifest existed
         /// on disk at the moment the pass ran.
         seen: RefCell<Vec<(PathBuf, bool)>>,
@@ -644,8 +814,24 @@ mod tests {
             Self {
                 root: root.to_path_buf(),
                 refused: refused.iter().map(|module| (*module).to_owned()).collect(),
+                cancel_at: None,
                 seen: RefCell::new(Vec::new()),
             }
+        }
+
+        /// The same model, with somebody pressing Ctrl-C while `directory` is
+        /// being described.
+        ///
+        /// [`pacting`](crate::pacting)'s `cancelling_at`, for the same reason
+        /// and with the same shape: latching from inside a pass is where a
+        /// press really lands, and it is the one way to have one arrive in the
+        /// middle of a run without a test sending its own process a signal. On
+        /// the real road the handler in [`listening`](super::listening) does
+        /// this, and the [`Cancel`] it latches is the same handle the agent was
+        /// built with, so the pass in flight is killed too.
+        fn cancelling_at(mut self, directory: &str, cancel: Cancel) -> Self {
+            self.cancel_at = Some((directory.to_owned(), cancel));
+            self
         }
 
         /// The directories a pass ran for, in call order, named from the root.
@@ -669,6 +855,16 @@ mod tests {
             self.seen
                 .borrow_mut()
                 .push((directory.clone(), manifest_path(&self.root).is_file()));
+            // Pressed while this pass is running, and the pass still answers:
+            // the press beats the engine to the *next* directory rather than to
+            // this one's answer. A real Ctrl-C kills the child as well, and the
+            // pass it kills comes back as a failure — which is what `refused`
+            // already produces, so a test that wants both asks for both.
+            if let Some((at, cancel)) = &self.cancel_at
+                && *at == named(&self.root, &directory)
+            {
+                cancel.cancel();
+            }
             if self.refused.contains(&named(&self.root, &directory)) {
                 return Err(AgentError::NotFound {
                     program: CLAUDE.to_owned(),
@@ -707,6 +903,10 @@ mod tests {
         /// How many directories the run offered, as the observer was told —
         /// [`Progress::total`], which is what the report counts against.
         total: usize,
+        /// Whether anybody had said stop by the time the descent was over,
+        /// which is what [`started`](super::started) reads off the run's
+        /// [`Cancel`] and hands to [`ending`](super::ending).
+        cancelled: bool,
     }
 
     impl Run {
@@ -716,26 +916,32 @@ mod tests {
             report(&self.root, &self.subtree.failures, self.total)
         }
 
-        /// The stderr a run with failures would have produced in full: the
-        /// per-directory lines, then the count `main` prints, without their
-        /// newlines.
+        /// How this run ended and what it wrote to stderr getting there, asked
+        /// of the production function.
         ///
-        /// Assembled here rather than in [`started`](super::started) because
-        /// that is the one function in this module a test cannot call — it reads
-        /// the working directory and spawns `claude` — and the two halves it
-        /// puts together are exactly these.
-        fn stderr(&self) -> Vec<String> {
-            let Some(report) = self.report() else {
-                return Vec::new();
-            };
+        /// [`ending`](super::ending) with this run's cancel and this run's
+        /// report: the last two lines of [`started`](super::started), which is
+        /// the one function in this module a test cannot call — it reads the
+        /// working directory and spawns `claude`.
+        fn ended(&self) -> (Result<(), Error>, Vec<String>) {
             let mut written = Vec::new();
-            report.onto(&mut written);
-            let mut lines: Vec<String> = String::from_utf8(written)
+            let outcome = ending(self.cancelled, self.report(), &mut written);
+            let lines = String::from_utf8(written)
                 .expect("the lines warlock writes are its own text")
                 .lines()
                 .map(str::to_owned)
                 .collect();
-            lines.push(format!("warlock: {}", report.status()));
+            (outcome, lines)
+        }
+
+        /// The stderr this run would have produced in full: whatever
+        /// [`ending`](super::ending) wrote, and then the one line `main` prints
+        /// for what it came to, without their newlines.
+        fn stderr(&self) -> Vec<String> {
+            let (outcome, mut lines) = self.ended();
+            if let Err(error) = outcome {
+                lines.push(format!("warlock: {error}"));
+            }
             lines
         }
     }
@@ -744,12 +950,11 @@ mod tests {
     /// `repo_root`, run by a machine whose sigils are under `home`, with
     /// everything the environment would have settled handed in instead.
     ///
-    /// The production road exactly: the boundary through [`Opened::new`], the
-    /// descent through [`ran`], in that order and with no way to reach the
-    /// second without the first. What [`started`](super::started) adds on top of
-    /// this is three lines — the working directory, the real home and
-    /// [`ClaudeAgent`](warlock_tui::ClaudeAgent) — and they are exactly the
-    /// three things a test must not have.
+    /// [`driven`] with a model that answers everything and a say-when nobody
+    /// pulls, which is the ordinary run. What [`started`](super::started) adds
+    /// on top of it is four lines — the working directory, the real home,
+    /// [`ClaudeAgent`](warlock_tui::ClaudeAgent) and the signal handler — and
+    /// they are exactly the things a test must not have.
     fn run(repo_root: &Path, home: &Path, descent: Descent, path: &str) -> Result<Run, Error> {
         run_refusing(repo_root, home, descent, path, &[])
     }
@@ -766,6 +971,48 @@ mod tests {
         path: &str,
         refused: &[&str],
     ) -> Result<Run, Error> {
+        let cancel = Cancel::new();
+        let agent = Canned::refusing(repo_root, refused);
+        driven(repo_root, home, descent, path, agent, &cancel)
+    }
+
+    /// The same run again, with somebody pressing Ctrl-C during the pass over
+    /// `at` — and their model refusing `refused` besides.
+    ///
+    /// The signal itself is not sent: what the handler does is latch the run's
+    /// [`Cancel`], and a test that latched it by raising SIGINT at its own
+    /// process would be testing the operating system's delivery of a signal to
+    /// a test binary running beside a hundred others. So the latch is pulled
+    /// where a press really lands, from inside a pass, and everything below it
+    /// — the descent stopping, the manifest holding what finished, the 130 — is
+    /// the production code being asked what it does about that.
+    fn run_cancelling(
+        repo_root: &Path,
+        home: &Path,
+        descent: Descent,
+        path: &str,
+        refused: &[&str],
+        at: &str,
+    ) -> Result<Run, Error> {
+        let cancel = Cancel::new();
+        let agent = Canned::refusing(repo_root, refused).cancelling_at(at, cancel.clone());
+        driven(repo_root, home, descent, path, agent, &cancel)
+    }
+
+    /// The run itself, whatever the model was told to do and whoever holds the
+    /// say-when.
+    ///
+    /// The production road exactly: the boundary through [`Opened::new`], the
+    /// descent through [`ran`] with `cancel` in the observer, in that order and
+    /// with no way to reach the second without the first.
+    fn driven(
+        repo_root: &Path,
+        home: &Path,
+        descent: Descent,
+        path: &str,
+        agent: Canned,
+        cancel: &Cancel,
+    ) -> Result<Run, Error> {
         let manifest = load_manifest(repo_root).expect("a manifest that reads");
         let opened = Opened::new(
             repo_root.to_path_buf(),
@@ -773,8 +1020,7 @@ mod tests {
             manifest,
             repo_root.join(path),
         )?;
-        let agent = Canned::refusing(repo_root, refused);
-        let mut progress = Progress::new(repo_root.to_path_buf(), Vec::new());
+        let mut progress = Progress::new(repo_root.to_path_buf(), Vec::new(), cancel.clone());
         let subtree = ran(&opened, descent, &agent, &mut progress)?;
         let total = progress.total();
         let lines = String::from_utf8(progress.out)
@@ -788,6 +1034,7 @@ mod tests {
             agent,
             lines,
             total,
+            cancelled: cancel.is_cancelled(),
         })
     }
 
@@ -1091,6 +1338,102 @@ mod tests {
             "{:?}",
             run.lines
         );
+    }
+
+    #[test]
+    fn a_cancel_stops_the_descent_between_directories_and_saves_what_finished() {
+        let repo = a_repository();
+        let home = a_dir();
+
+        // Ctrl-C during the pass over `alpha`. The engine walks children before
+        // parents in reverse path order, so the run is `beta`, `alpha`, and
+        // then the root — which is the directory the press arrives in time for.
+        let run = run_cancelling(repo.path(), home.path(), Descent::Pact, ".", &[], "alpha")
+            .expect("a cancelled run is still a run");
+
+        // Two passes of the three the run offered, and the third never asked
+        // for: the descent ended at a directory boundary rather than part way
+        // through a directory.
+        assert_eq!(run.agent.directories(), ["beta", "alpha"]);
+        assert!(
+            !run.lines
+                .iter()
+                .any(|line| line.contains("documenting .") || line == "warlock: documented ."),
+            "the directory the run stopped before was announced: {:?}",
+            run.lines
+        );
+        assert!(!repo.path().join("WARLOCK.md").exists());
+        // What did finish is on disk and in the manifest, hashed and granted:
+        // the whole point of stopping between directories rather than dying
+        // where the key was pressed.
+        for module in ["alpha", "beta"] {
+            assert!(repo.path().join(module).join("WARLOCK.md").is_file());
+        }
+        let manifest = load_manifest(repo.path()).expect("a manifest that reads");
+        assert_eq!(stored_modules(repo.path()), ["alpha", "beta"]);
+        for module in ["alpha", "beta"] {
+            assert!(
+                manifest
+                    .entry(module)
+                    .expect("a documented directory is in the manifest")
+                    .granted_hash()
+                    .is_some(),
+                "{module} was documented and not granted"
+            );
+        }
+
+        // And the ending: one line, and the status a shell already reads as
+        // interrupted.
+        let (outcome, lines) = run.ended();
+        let error = outcome.expect_err("a cancelled run is not a run that worked");
+        assert!(
+            matches!(error, Error::Cancelled),
+            "the cancel was reported as something else: {error:?}"
+        );
+        assert!(lines.is_empty(), "a cancel named directories: {lines:?}");
+        assert_eq!(status_for(&Err(error)), 130);
+        assert_eq!(
+            run.stderr(),
+            ["warlock: the run was cancelled; what it finished first is recorded"]
+        );
+    }
+
+    #[test]
+    fn a_cancelled_run_says_it_was_cancelled_rather_than_naming_the_pass_it_killed() {
+        let repo = a_repository();
+        let home = a_dir();
+
+        // The shape a real Ctrl-C makes: the pass in flight is killed, so the
+        // directory it was over fails the way any dead `claude` fails, and the
+        // press that killed it is the reason.
+        let run = run_cancelling(
+            repo.path(),
+            home.path(),
+            Descent::Pact,
+            ".",
+            &["alpha"],
+            "alpha",
+        )
+        .expect("a cancelled run is still a run");
+
+        assert_eq!(run.agent.directories(), ["beta", "alpha"]);
+        // There is a failure to report, and the run has the report — this is
+        // not a run that happens to have nothing to say.
+        assert_eq!(run.subtree.failures.len(), 1, "{:?}", run.subtree.failures);
+        let report = run.report().expect("the killed pass failed its directory");
+        assert!(report.lines[0].starts_with("alpha — "));
+
+        // And it is not printed. Nothing in the engine's list says which
+        // failures the reader caused, so naming them would send somebody to
+        // look at a directory whose only problem was Ctrl-C. One line instead,
+        // and `beta` is on stdout where it has been all along.
+        let (outcome, lines) = run.ended();
+        assert!(matches!(outcome, Err(Error::Cancelled)));
+        assert!(lines.is_empty(), "a cancel named directories: {lines:?}");
+        assert_eq!(run.stderr().len(), 1, "{:?}", run.stderr());
+        assert!(run.lines.contains(&"warlock: documented beta".to_owned()));
+        // The manifest still holds what the run earned before the press.
+        assert_eq!(stored_modules(repo.path()), ["beta"]);
     }
 
     /// Chmod cannot deny root anything, so this checks the fixture really is

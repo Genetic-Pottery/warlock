@@ -41,9 +41,12 @@ use crate::session::{blocking_scopes_message, closed_scope_message};
 /// the footer's other ones, a scope that is not one in the engine's, and a
 /// directory nobody has pacted in the manifest's. [`Error::Pact`] is the
 /// headless run's — the one way `warlock pact` and `warlock refresh` fail as a
-/// whole rather than one directory at a time — and [`Error::Failures`] is the
-/// other end of the same run: the count under the directories that failed one
-/// at a time, which is a run that finished rather than one that did not.
+/// whole rather than one directory at a time — and [`Error::Failures`] and
+/// [`Error::Cancelled`] are the other two ends of the same run: the count under
+/// the directories that failed one at a time, and the run somebody stopped with
+/// Ctrl-C, both of which are runs that finished rather than runs that did not.
+/// [`Error::Signal`] is the run that never started because that Ctrl-C could
+/// not be listened for.
 #[derive(Debug)]
 pub(crate) enum Error {
     /// The working directory could not be read, so there is nothing to scope
@@ -248,6 +251,47 @@ pub(crate) enum Error {
         /// own denominator — the number every progress line counted against.
         total: usize,
     },
+    /// A headless `warlock pact` or `warlock refresh` was stopped from the
+    /// keyboard.
+    ///
+    /// Neither a refusal nor an inability, and not [`Error::Failures`] either:
+    /// the run was doing what it was asked and the reader ended it. Ctrl-C
+    /// latches the run's [`Cancel`](warlock_tui::Cancel), which kills the pass
+    /// in flight and ends the descent at the next directory boundary, and
+    /// everything that finished before that is hashed, granted and saved
+    /// exactly as a run that reached the end saves it — so this is built after
+    /// the manifest is already on disk.
+    ///
+    /// It carries no count, and it is printed *instead of* the list of failing
+    /// directories rather than under it. A cancel makes failures of its own —
+    /// the killed pass comes back as one — and there is nothing in the engine's
+    /// list saying which of them the reader caused, so naming any of them would
+    /// put directories on stderr as though somebody had to go and look at them
+    /// when the only thing that happened is that Ctrl-C was pressed. It is the
+    /// footer's decision about the same event, for the same reason, and what
+    /// finished is on stdout either way. See [`mod@crate::running`].
+    ///
+    /// Exit status 130 — 128 plus SIGINT, which shells, `make` and CI already
+    /// read as interrupted. See [`status_for`](crate::status_for).
+    Cancelled,
+    /// Ctrl-C could not be listened for, so a headless run was never started.
+    ///
+    /// The other half of [`Error::Cancelled`], and the reason it is a refusal
+    /// rather than a shrug: a `warlock pact` is minutes of somebody's tokens
+    /// with no panel to press Esc in, and the signal is the only say-when a
+    /// shell has over it. A run nobody could stop is not the run that was asked
+    /// for, so warlock declines to start one — which it can do here for free,
+    /// because the handler is installed after the boundary is asked and before
+    /// the first pass is spent, so nothing has been paid for and nothing is
+    /// written.
+    ///
+    /// Warlock unable to do the thing, and so exit status 1 like every other
+    /// inability. See [`status_for`](crate::status_for).
+    Signal {
+        /// What the signal crate said: a handler already registered for this
+        /// process, or the system refusing the registration.
+        source: ctrlc::Error,
+    },
     /// A subcommand was run somewhere with no repository above it, so there is
     /// no root to write a `CLAUDE.md` at or to hold sigils for.
     ///
@@ -409,6 +453,27 @@ impl fmt::Display for Error {
                      rest earned"
                 )
             }
+            // What was stopped and what survives it, in that order, because the
+            // second half is the thing a reader wonders about a run they killed
+            // half way through: the documents that were written are still
+            // written and the manifest records them, so the next run picks up
+            // from there rather than starting again. The footer says the same
+            // two things about the same event over a pact stopped with Esc.
+            Self::Cancelled => write!(
+                f,
+                "the run was cancelled; what it finished first is recorded"
+            ),
+            // What could not be arranged, then what warlock did about it: the
+            // crate's own sentence is "Ctrl-C signal handler already
+            // registered" or the system's complaint, neither of which says on
+            // its own that no pass was spent — and that is the half a reader at
+            // a shell prompt needs, because it is the difference between
+            // re-running and going to look at a subtree.
+            Self::Signal { source } => write!(
+                f,
+                "{source}, so no run was started — a pact nobody could stop with Ctrl-C is not \
+                 one warlock will spend passes on"
+            ),
             // The footer's own sentence, to the letter: the same fact refused
             // at a keystroke and at a shell prompt says the same thing, names
             // the same scope and points at the same `warlock config`.
@@ -490,6 +555,7 @@ impl std::error::Error for Error {
             Self::ClaudeMd { source } => Some(source),
             Self::Sigil { rule, .. } | Self::Scope { rule } => Some(rule),
             Self::Sigils { source } => Some(source),
+            Self::Signal { source } => Some(source),
             // No source, and there is none to have: a boundary this machine
             // does not hold, and a directory nobody has pacted, are facts about
             // two files agreeing rather than failures anything underneath
@@ -503,8 +569,10 @@ impl std::error::Error for Error {
             // Nor here, and there could not be one: a run's failures are N
             // errors rather than one, they have already been printed in full,
             // and picking a first to be "the" cause would be the summary
-            // pretending to be a failure.
-            | Self::Failures { .. } => None,
+            // pretending to be a failure. A cancel has no cause underneath it
+            // at all — somebody pressed Ctrl-C.
+            | Self::Failures { .. }
+            | Self::Cancelled => None,
         }
     }
 }
@@ -673,6 +741,10 @@ mod tests {
             Error::Failures {
                 failed: 1,
                 total: 1,
+            },
+            Error::Cancelled,
+            Error::Signal {
+                source: ctrlc::Error::MultipleHandlers,
             },
         ];
 

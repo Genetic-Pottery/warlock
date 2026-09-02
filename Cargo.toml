@@ -103,6 +103,16 @@ notify = { version = "8" }
 # default and is the whole reason for taking clap over a minimal parser — the
 # command surface is then declared once, as types, next to what it dispatches to.
 clap = { version = "4", features = ["derive"] }
+# Ctrl-C, and the one thing in this program that cannot be written in safe std.
+# A handler installed the standard way runs in signal context, where locking a
+# mutex or killing a child process is undefined behaviour rather than merely
+# rude, and `unsafe_code = "deny"` above says warlock does not get to attempt it.
+# ctrlc exists for exactly that one job: it does the registration once, behind a
+# `set_handler` that delivers the press on an ordinary thread where stopping a
+# run is an ordinary thing to do. That is what lets a headless `warlock pact`
+# end its descent between directories and kill the pass in flight, instead of
+# dying somewhere in the middle of writing somebody's document.
+ctrlc = { version = "3" }
 # Dev-only: round-trips a value through serde's own token stream, so the derives
 # can be tested in memory, independently of how any one format spells them.
 serde_test = { version = "1" }
