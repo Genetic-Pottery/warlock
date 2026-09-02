@@ -323,7 +323,15 @@ pub(crate) fn start_watching(app: &mut App, scope: &Scope, tree: &Tree) -> Watch
 /// header both spell a sigil. A refusal that said only "you may not" would leave
 /// the reader with nothing to ask their lead for; the whole social half of this
 /// design is somebody being told which sigil to go and get.
-fn closed_scope_message(label: &str, scope: &str) -> String {
+///
+/// Shared with the headless writes rather than retyped there. `warlock unpact`
+/// is refused over the same boundary by the same two engine calls, and prints
+/// this sentence through [`Error::ClosedScope`](crate::error::Error) — one rule
+/// refused in two registers, in one wording, so the day this sentence changes it
+/// changes for the keystroke and the shell prompt together. What differs is only
+/// what `label` is: a row's label there, the manifest's spelling of the path
+/// here.
+pub(crate) fn closed_scope_message(label: &str, scope: &str) -> String {
     format!("{label} is scoped `{scope}` — hold that sigil to work here, with `warlock config`")
 }
 

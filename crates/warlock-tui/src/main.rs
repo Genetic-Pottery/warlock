@@ -192,7 +192,9 @@
 //! ([`config`]); `stale` and `fresh` print the pacted directories at or below a
 //! path that are in that state, a path a line or, with `--json`, one object
 //! ([`query`]); `check` says which scope covers a path, what this machine holds
-//! and whether the two meet, as prose or as one object ([`check`]); `-h` and
+//! and whether the two meet, as prose or as one object ([`check`]); `unpact`
+//! drops the pact on a directory and every pact below it, if this machine holds
+//! the boundary that covers it ([`edits`]); `-h` and
 //! `--help` print clap's help; and every other word, and
 //! every argument warlock has no place for, is clap's error and usage on stderr.
 //! Refusing is the point of the last of those: warlock used to open the tree for
@@ -226,6 +228,23 @@
 //! `warlock check <path> --json | jq -e '.opens'` is the recipe: the verdict is
 //! `jq`'s non-zero status, and warlock spends none of its own on saying no.
 //!
+//! `unpact` is the first subcommand that does not only read, and it is the
+//! reason the rule above is stated as being the three questions' rather than
+//! every subcommand's. It still takes no terminal, spawns no process and runs no
+//! model pass — an un-pact is `.warlock/pacts.toml` rewritten and nothing else,
+//! with every `WARLOCK.md` left where it was — but it is a write, so it is the
+//! first one asked who is asking. The boundary covering the path is held against
+//! the sigils `warlock config` wrote for this machine before the command looks
+//! at anything else at all, and a boundary this machine does not hold is one
+//! line on stderr and a 1, with the manifest untouched. That check is
+//! [`mod@edits`]'s, it is the engine's own
+//! [`scope_covering`](warlock_engine::scope_covering) and
+//! [`scope_opens_to`](warlock_engine::scope_opens_to) rather than a second
+//! reading of them, and there is no flag past it: `warlock config` is the only
+//! road. Its exit statuses are the questions' — 0 for a write that happened, 1
+//! for one warlock refused or could not finish, 2 for a command line that was
+//! never a request.
+//!
 //! The reader can hand the pointer back. `m` turns the terminal's reporting off
 //! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
 //! off the terminal keeps its own text selection and no `Event::Mouse` arrives
@@ -256,6 +275,7 @@ mod chatting;
 mod check;
 mod config;
 mod editing;
+mod edits;
 mod error;
 mod input;
 mod pacting;
@@ -270,6 +290,7 @@ use chatting::Chat;
 use check::check;
 use config::configure;
 use editing::edit_press;
+use edits::unpact;
 use error::Error;
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Pact, Reloaded};
@@ -419,6 +440,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// `warlock unpact <path>`.
+    #[command(
+        about = "Drop the pact on a directory and every pact below it.",
+        long_about = None
+    )]
+    Unpact {
+        // Required, like the check's and for the same reason: the whole-manifest
+        // answer is `warlock unpact .`, which somebody has to have typed. An
+        // omitted path defaulting to the repository root would make the largest
+        // edit warlock can make the one that is easiest to make by accident.
+        /// Which directory to un-pact, with everything below it.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -469,6 +504,12 @@ fn main() -> ExitCode {
         // not a failure to reach one, which is what leaves `jq -e '.opens'` to
         // spend the non-zero status on the verdict. See [`check`].
         Some(Command::Check { path, json }) => check(path, json),
+        // The first subcommand that writes, dispatched here for every reason
+        // the questions are — it prints one line on the ordinary screen and
+        // takes no terminal — and with none of a run's machinery: no worker
+        // thread, no subprocess, no model pass. What keeps it honest is the
+        // boundary, asked before anything else it does; see [`mod@edits`].
+        Some(Command::Unpact { path }) => unpact(&path),
     };
 
     // `run` has returned, so the guard inside it has already dropped and the

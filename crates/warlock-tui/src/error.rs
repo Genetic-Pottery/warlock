@@ -12,6 +12,8 @@ use std::{fmt, io};
 
 use warlock_engine::{ClaudeMdError, LoadError, LoadProblem, ManifestError, ScopeRule, SigilError};
 
+use crate::session::closed_scope_message;
+
 /// Everything that can stop warlock showing a tree, or writing a `CLAUDE.md`.
 ///
 /// Richer than the `io::Error` this used to return, because loading brings
@@ -27,10 +29,12 @@ use warlock_engine::{ClaudeMdError, LoadError, LoadProblem, ManifestError, Scope
 /// they are printed by the same line of `main`, so a second enum would be a
 /// second wording of the same sentences. Where one of them needs a sentence of
 /// its own, it is a variant here beside the others: [`Error::ClaudeMd`] is
-/// `init`'s, [`Error::NoHome`] and [`Error::Sigil`] are `config`'s, and
+/// `init`'s, [`Error::NoHome`] and [`Error::Sigil`] are `config`'s,
 /// [`Error::Unspellable`] belongs to the queries — the two listings and the
 /// check, which refuse a path with no repository-relative form on the same
-/// grounds and in the same words.
+/// grounds and in the same words — and [`Error::ClosedScope`] belongs to the
+/// headless writes, which refuse a boundary this machine does not hold in the
+/// footer's own words.
 #[derive(Debug)]
 pub(crate) enum Error {
     /// The working directory could not be read, so there is nothing to scope
@@ -90,6 +94,29 @@ pub(crate) enum Error {
     Unspellable {
         /// Which of the engine's two path cases it was, naming the path.
         source: ManifestError,
+    },
+    /// A headless write was pointed at a path inside a boundary this machine's
+    /// sigils do not open.
+    ///
+    /// The one refusal in this enum that is about *who* rather than about what
+    /// is on disk, and the only one whose sentence is written somewhere else:
+    /// [`closed_scope_message`] is what the TUI's footer says when `p`, `r` or
+    /// `s` is refused over the same boundary, and one rule refused in two
+    /// registers must not be refused in two wordings. Borrowed rather than
+    /// retyped, so the day that sentence changes it changes in one place.
+    ///
+    /// Nothing has been read past this point and nothing at all has been
+    /// written: the boundary is asked before the path is spelled and before the
+    /// manifest is looked into (see [`mod@crate::edits`]), so this refusal
+    /// cannot have leaked what the manifest holds on the far side of it.
+    ClosedScope {
+        /// The path, as the manifest spells it: repository-root-relative with
+        /// forward slashes, and `.` for the root itself. Never the absolute
+        /// path typed, so the sentence reads the way the TUI's does over a row.
+        path: String,
+        /// The scope covering it — the sigil to go and ask for, which is the
+        /// whole social half of the refusal.
+        scope: String,
     },
     /// A subcommand was run somewhere with no repository above it, so there is
     /// no root to write a `CLAUDE.md` at or to hold sigils for.
@@ -231,6 +258,12 @@ impl fmt::Display for Error {
             Self::Manifest { source } | Self::Unspellable { source } => {
                 write!(f, "{}", one_line(&source.to_string()))
             }
+            // The footer's own sentence, to the letter: the same fact refused
+            // at a keystroke and at a shell prompt says the same thing, names
+            // the same scope and points at the same `warlock config`.
+            Self::ClosedScope { path, scope } => {
+                write!(f, "{}", closed_scope_message(path, scope))
+            }
             // The engine's `.git` wording, with what it cost the caller on the
             // end: this is a refusal to do the thing that was typed rather than
             // a refusal to draw a tree, and the reader asked for that thing.
@@ -285,7 +318,13 @@ impl std::error::Error for Error {
             Self::ClaudeMd { source } => Some(source),
             Self::Sigil { rule, .. } => Some(rule),
             Self::Sigils { source } => Some(source),
-            Self::Problems { .. } | Self::NoRepository { .. } | Self::NoHome => None,
+            // No source, and there is none to have: a boundary this machine
+            // does not hold is a fact about two files agreeing, not a failure
+            // anything underneath reported.
+            Self::Problems { .. }
+            | Self::NoRepository { .. }
+            | Self::NoHome
+            | Self::ClosedScope { .. } => None,
         }
     }
 }
