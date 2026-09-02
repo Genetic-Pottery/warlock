@@ -189,17 +189,22 @@
 //! anything else is answered here and exits. `init` writes a `CLAUDE.md` at the
 //! repository root and says which file it wrote; `config` prints the sigils this
 //! machine holds for this repository and reads a line replacing them
-//! ([`config`]); `-h` and `--help` print clap's help; and every other word, and
+//! ([`config`]); `stale` and `fresh` print the pacted directories at or below a
+//! path that are in that state, a path a line or, with `--json`, one object
+//! ([`query`]); `-h` and `--help` print clap's help; and every other word, and
 //! every argument warlock has no place for, is clap's error and usage on stderr.
 //! Refusing is the point of the last of those: warlock used to open the tree for
 //! `warlock status`, which reads as the typed command having run.
 //!
-//! Both subcommands share one rule, and it is why they are dispatched here
-//! rather than anywhere inside [`run`]: neither goes near the terminal. No
+//! Every subcommand shares one rule, and it is why they are dispatched here
+//! rather than anywhere inside [`run`]: none of them goes near the terminal. No
 //! alternate screen, no raw mode and no panic hook — the hook exists to restore
 //! a terminal these paths never take, and `config` reads its line in cooked
 //! mode, which is also what makes Ctrl-C at its prompt an ordinary SIGINT that
-//! ends the process before anything is written.
+//! ends the process before anything is written. The two listings add a second
+//! reason of their own: their answer is read by a script through a pipe, and a
+//! program that had taken the alternate screen to print one would have piped its
+//! answer into a repaint.
 //!
 //! The reader can hand the pointer back. `m` turns the terminal's reporting off
 //! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
@@ -233,6 +238,7 @@ mod editing;
 mod error;
 mod input;
 mod pacting;
+mod query;
 mod scoping;
 mod session;
 mod terminal;
@@ -245,6 +251,7 @@ use editing::edit_press;
 use error::Error;
 use input::{Action, MouseAction, Pressed, mouse_action, press_for};
 use pacting::{Pact, Reloaded};
+use query::{Listing, list};
 use scoping::{scope_edit, scope_press};
 use session::{Scope, Watched, load_app, load_manifest, start_watching};
 use terminal::{TerminalGuard, install_panic_hook};
@@ -303,7 +310,11 @@ const UPDATED: &str = "updated";
 /// The subcommand is an `Option`, never `arg_required_else_help`: bare `warlock`
 /// is the tree, which is the thing warlock mostly is, not a mistake to be
 /// answered with help.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Parser)]
+///
+/// Not [`Copy`] any more, and it is the path arguments below that took it away:
+/// a [`PathBuf`] owns its bytes. Nothing here misses it — the whole of what
+/// `main` does with this value is move it into one `match`.
+#[derive(Debug, Clone, PartialEq, Eq, Parser)]
 #[command(
     name = "warlock",
     about = "A freshness ledger for a repository's documentation.",
@@ -317,10 +328,18 @@ struct Cli {
 
 /// The operations warlock will do without opening the tree.
 ///
-/// A unit variant each for now, and an enum rather than a parsed word so that
-/// the flags these grow — a `--json` per subcommand, next — are fields on a
-/// variant that turns into a struct, with nothing above here to change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+/// An enum rather than a parsed word, which is what makes the two listings
+/// below cost a field each rather than an argument parser of their own: the
+/// path they take and the `--json` they answer in are declared here, beside
+/// what they dispatch to, with nothing above this to change.
+///
+/// The two of them are one shape twice over rather than one variant carrying a
+/// state, and deliberately: what a reader types is the whole of the difference
+/// between them, and a `Command::List { state }` would be a variant nobody can
+/// find by grepping for the word they typed. What they *do* is one function
+/// ([`query::list`]) taking a [`Listing`], so the sameness is where the work is
+/// and the difference is where the words are.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum Command {
     /// `warlock init`.
     #[command(
@@ -334,6 +353,32 @@ enum Command {
         long_about = None
     )]
     Config,
+    /// `warlock stale [path]`.
+    #[command(
+        about = "List the pacted directories that are stale.",
+        long_about = None
+    )]
+    Stale {
+        /// Where to answer about; the repository root when it is left off.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// Answer as one JSON object instead of one path per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// `warlock fresh [path]`.
+    #[command(
+        about = "List the pacted directories that are fresh.",
+        long_about = None
+    )]
+    Fresh {
+        /// Where to answer about; the repository root when it is left off.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// Answer as one JSON object instead of one path per line.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -349,10 +394,12 @@ fn main() -> ExitCode {
     // could not parse is clap's: its wording, its usage line, its exit status of
     // 2. Anything warlock itself could not do is warlock's: the `warlock: `
     // prefix below and exit status 1. The split is load-bearing rather than
-    // cosmetic, and later slices are what it is for — when `warlock stale` can
-    // refuse because a path is outside the configured scope, a reader and a
-    // script both have to be able to tell that refusal from a typo by the exit
-    // status alone, without reading a word of either message.
+    // cosmetic, and the listings are what it is for: `warlock stale` refuses a
+    // path with no repository-relative spelling with a 1, and a script has to
+    // be able to tell that refusal from a typo by the exit status alone,
+    // without reading a word of either message. A 0 means the question was
+    // answered whatever the answer was — including an empty answer, which is
+    // "nothing is stale" and not the absence of one.
     let cli = Cli::parse();
 
     let outcome = match cli.command {
@@ -368,6 +415,14 @@ fn main() -> ExitCode {
         // mode, so nothing about it may touch the terminal — including the panic
         // hook, which exists to restore a terminal this path never takes.
         Some(Command::Config) => configure(),
+        // The two questions, dispatched here for the same reason and with one
+        // more of their own: they print their answer on the ordinary screen and
+        // a script reads it, so a program that had entered the alternate screen
+        // would have piped its answer into a repaint. Neither writes anything,
+        // neither spawns anything, and neither installs the panic hook — there
+        // is no terminal for it to restore.
+        Some(Command::Stale { path, json }) => list(Listing::Stale, path, json),
+        Some(Command::Fresh { path, json }) => list(Listing::Fresh, path, json),
     };
 
     match outcome {
@@ -1290,6 +1345,8 @@ fn report_mouse(on: bool) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::error::ErrorKind;
     use clap::{CommandFactory, Parser};
 
@@ -1330,6 +1387,72 @@ mod tests {
     }
 
     #[test]
+    fn a_listing_with_no_path_asks_about_the_whole_repository() {
+        // `None` and not the working directory: what an omitted path means is
+        // `query::list`'s to decide, and it decides on the repository root, so
+        // the parser hands over the absence rather than filling it in.
+        assert_eq!(
+            parse(&["stale"]).unwrap().command,
+            Some(Command::Stale {
+                path: None,
+                json: false
+            })
+        );
+        assert_eq!(
+            parse(&["fresh"]).unwrap().command,
+            Some(Command::Fresh {
+                path: None,
+                json: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_listing_takes_a_path_and_a_json_flag_in_either_order() {
+        assert_eq!(
+            parse(&["stale", "crates"]).unwrap().command,
+            Some(Command::Stale {
+                path: Some(PathBuf::from("crates")),
+                json: false
+            })
+        );
+        for args in [["stale", "crates", "--json"], ["stale", "--json", "crates"]] {
+            assert_eq!(
+                parse(&args).unwrap().command,
+                Some(Command::Stale {
+                    path: Some(PathBuf::from("crates")),
+                    json: true
+                }),
+                "{args:?}"
+            );
+        }
+        assert_eq!(
+            parse(&["fresh", "--json"]).unwrap().command,
+            Some(Command::Fresh {
+                path: None,
+                json: true
+            })
+        );
+    }
+
+    #[test]
+    fn a_listing_answers_about_one_path_rather_than_a_list_of_them() {
+        // `warlock stale a b` is somebody expecting one of two things warlock
+        // does not do — several paths, or a second flag spelled as a word — and
+        // either way an answer about `a` alone would be an answer to a question
+        // nobody asked. Clap's refusal, so it is a 2 and not a 1.
+        for args in [
+            ["stale", "a", "b"].as_slice(),
+            ["fresh", "a", "b"].as_slice(),
+            ["stale", "--jsonn"].as_slice(),
+        ] {
+            let error = parse(args).unwrap_err();
+            assert!(error.use_stderr(), "{args:?}");
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+        }
+    }
+
+    #[test]
     fn both_spellings_of_help_are_a_help_exit_that_succeeded() {
         // Not an error in the sense that matters: help was asked for, so it
         // goes to stdout and the process exits zero.
@@ -1343,7 +1466,12 @@ mod tests {
 
     #[test]
     fn per_subcommand_help_is_a_help_exit_too() {
-        for args in [["init", "--help"], ["config", "--help"]] {
+        for args in [
+            ["init", "--help"],
+            ["config", "--help"],
+            ["stale", "--help"],
+            ["fresh", "--help"],
+        ] {
             let error = parse(&args).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{args:?}");
             assert_eq!(error.exit_code(), 0, "{args:?}");
@@ -1356,7 +1484,12 @@ mod tests {
         // subcommand at a time: without the `about` clap falls back to the doc
         // comment, and `warlock init --help` answers "`warlock init`." — the
         // name back, which is not what a reader asked for.
-        for (name, said) in [("init", "CLAUDE.md"), ("config", "sigils")] {
+        for (name, said) in [
+            ("init", "CLAUDE.md"),
+            ("config", "sigils"),
+            ("stale", "stale"),
+            ("fresh", "fresh"),
+        ] {
             let mut command = Cli::command();
             let help = command
                 .find_subcommand_mut(name)
@@ -1425,8 +1558,9 @@ mod tests {
         // `long_about = None` is what stands between `warlock --help` and the
         // essays above; without it clap lifts the doc comments wholesale.
         let help = Cli::command().render_long_help().to_string();
-        assert!(help.contains("init"), "{help}");
-        assert!(help.contains("config"), "{help}");
+        for subcommand in ["init", "config", "stale", "fresh"] {
+            assert!(help.contains(subcommand), "{subcommand}: {help}");
+        }
         assert!(!help.contains("panic hook"), "{help}");
         assert!(help.lines().count() < 20, "{help}");
     }

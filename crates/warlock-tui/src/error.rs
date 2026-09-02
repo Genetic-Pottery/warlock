@@ -21,12 +21,14 @@ use warlock_engine::{ClaudeMdError, LoadError, LoadProblem, ManifestError, Scope
 /// terminal is back, and a message wrapping onto a second line in a restored
 /// shell is a message that looks like a crash.
 ///
-/// `warlock init` and `warlock config` share the vocabulary rather than having
-/// one each: they fail in the same ways the tree does — a working directory
-/// outside any repository, a file that will not write — and they are printed by
-/// the same line of `main`, so a second enum would be a second wording of the
-/// same sentences. Where one of them needs a sentence of its own, it is a
-/// variant here beside the others.
+/// Every subcommand shares the vocabulary rather than having one each: they
+/// fail in the same ways the tree does — a working directory outside any
+/// repository, a manifest that will not parse, a file that will not write — and
+/// they are printed by the same line of `main`, so a second enum would be a
+/// second wording of the same sentences. Where one of them needs a sentence of
+/// its own, it is a variant here beside the others: [`Error::ClaudeMd`] is
+/// `init`'s, [`Error::NoHome`] and [`Error::Sigil`] are `config`'s, and
+/// [`Error::Unspellable`] is the listings'.
 #[derive(Debug)]
 pub(crate) enum Error {
     /// The working directory could not be read, so there is nothing to scope
@@ -61,6 +63,23 @@ pub(crate) enum Error {
     /// line goes to stderr, and the exit status says it did not work.
     Manifest {
         /// Which of the manifest's cases it was, with the path it names.
+        source: ManifestError,
+    },
+    /// A path a query was pointed at, or a directory it would have listed, has
+    /// no form the manifest could spell: it is outside the repository root, or
+    /// some component of it is not valid UTF-8.
+    ///
+    /// A listing prints repository-root-relative paths, so a directory it
+    /// cannot spell is a directory it cannot report — and an answer with that
+    /// directory quietly left out would tell a script that nothing is stale
+    /// there, which is the one thing warlock does not know about it. So it is a
+    /// refusal with an exit status rather than a line dropped.
+    ///
+    /// Kept apart from [`Error::Manifest`] even though both carry the engine's
+    /// [`ManifestError`]: that one is a file that would not read or write, and
+    /// this one never opens a file at all.
+    Unspellable {
+        /// Which of the engine's two path cases it was, naming the path.
         source: ManifestError,
     },
     /// A subcommand was run somewhere with no repository above it, so there is
@@ -193,7 +212,16 @@ impl fmt::Display for Error {
             Self::Load { source } => write!(f, "{}", one_line(&source.to_string())),
             // Flattened for the same reason as a load: the manifest's own
             // errors carry the TOML parser's multi-line diagnostic.
-            Self::Manifest { source } => write!(f, "{}", one_line(&source.to_string())),
+            //
+            // One arm for two variants, because the engine's wording is already
+            // the sentence to show in both cases and there is nothing either
+            // could add to it — a listing has nothing to say beyond
+            // "`/elsewhere` is not inside the manifest root `/repo`". What the
+            // two do not share is what happened, and that is on the variants
+            // themselves rather than in this line.
+            Self::Manifest { source } | Self::Unspellable { source } => {
+                write!(f, "{}", one_line(&source.to_string()))
+            }
             // The engine's `.git` wording, with what it cost the caller on the
             // end: this is a refusal to do the thing that was typed rather than
             // a refusal to draw a tree, and the reader asked for that thing.
@@ -244,7 +272,7 @@ impl std::error::Error for Error {
             | Self::Terminal { source }
             | Self::Prompt { source } => Some(source),
             Self::Load { source } => Some(source),
-            Self::Manifest { source } => Some(source),
+            Self::Manifest { source } | Self::Unspellable { source } => Some(source),
             Self::ClaudeMd { source } => Some(source),
             Self::Sigil { rule, .. } => Some(rule),
             Self::Sigils { source } => Some(source),
@@ -355,6 +383,17 @@ mod tests {
                 start: PathBuf::from("/elsewhere"),
                 wanted: FOR_CLAUDE_MD,
             },
+            Error::Unspellable {
+                source: ManifestError::PathOutsideRoot {
+                    root: PathBuf::from("/repo"),
+                    path: PathBuf::from("/elsewhere"),
+                },
+            },
+            Error::Unspellable {
+                source: ManifestError::NonUtf8Path {
+                    path: PathBuf::from("/repo/odd"),
+                },
+            },
             Error::NoRepository {
                 start: PathBuf::from("/elsewhere"),
                 wanted: FOR_SIGILS,
@@ -410,6 +449,23 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "could not read or write `/repo/.warlock/pacts.toml`: permission denied"
+        );
+    }
+
+    #[test]
+    fn a_path_with_no_repository_relative_form_says_which_root_it_is_not_inside() {
+        // What `warlock stale /elsewhere` prints. The engine's sentence is
+        // already the whole fact, so nothing is wrapped around it.
+        let error = Error::Unspellable {
+            source: ManifestError::PathOutsideRoot {
+                root: PathBuf::from("/repo"),
+                path: PathBuf::from("/elsewhere"),
+            },
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "`/elsewhere` is not inside the manifest root `/repo`"
         );
     }
 
