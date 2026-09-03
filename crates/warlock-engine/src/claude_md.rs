@@ -142,6 +142,24 @@ you start opening source files. A parent's document is written from its
 children's documents, so reading downwards from the top gives you the shape
 of the project in a few files instead of a few dozen.
 
+**They are maps, not specifications.** A `WARLOCK.md` is written to get you
+to the right file quickly, and it is not the last word on anything it
+describes. Use it to find the surface area a question touches — which
+directory, which file, which function — and then open that file and check.
+Every document says this at the top, in the line warlock stamps on it.
+
+Two habits follow from that, and they matter more than anything else here:
+
+- **Verify before you rely.** Confirm a claim against the source before you
+  build on it, quote it in a review, or repeat it to someone. A document is
+  the fastest way to find the evidence; it is not the evidence.
+- **Silence is not absence.** If a document does not mention something, that
+  is not a finding. It may be missing because the code changed, because the
+  pass had no room for it, or because nobody thought it worth a line — and a
+  document covering a large directory necessarily leaves things out. Never
+  conclude that a thing does not exist because no document says it does. Go
+  and look.
+
 One caveat, and it is what the colours below exist for: **a document can be
 behind the code it describes.** Where a document and the code disagree, the
 code is right. Say so in your work, because that gap is the thing warlock
@@ -198,20 +216,34 @@ open to anyone.
 The other half of the vocabulary is the **sigil**, which is what the operator
 holds. They may hold several, and any one of them opens a matching scope — so
 whether a scope is open to them is a membership test, not an expression to
-evaluate. `warlock config` prints what is held. Holding nothing means
-unrestricted, not shut out.
+evaluate. `warlock config` prints what is held. A sigil is what opens a scope, so
+holding none opens none: an operator who has recorded nothing is refused by every
+scoped directory, exactly as one holding the wrong sigil is. The permissive
+default sits on the directory instead — a pacted directory with no scope above it
+is open to anyone.
 
 **A scope is a term of the pact, not a thing beside it.** An unpacted
 directory cannot carry one, and un-pacting a directory takes its scope away
 with the rest of the pact. So a boundary is changed by changing a pact, and
 there is nowhere else to look for one.
 
-**Before planning or making a change, look at what the directories it would
-touch are scoped to, and at what the operator holds.** When the work crosses
-a scope they do not hold, say so plainly, and then either narrow the work to
-what they hold or name the sigil the work wants. Never refuse the work, never
-block it, and never quietly edit around the boundary: saying what is being
-crossed is the whole of the job here.";
+**Warlock's own mutating keys refuse across a closed boundary.** `p` (in both
+directions), `r` and `s` are turned down on a directory whose covering scope
+this machine does not hold, with a footer line naming the scope wanted. It is a
+guardrail rather than a guarantee — the sigil file is machine-local and
+self-asserted, so anyone can grant themselves one — and it exists to stop a
+fumbled keystroke, not a determined person. The un-pact direction is what it is
+really for: un-pacting drops the scope along with the pact, so a mis-aimed `p`
+costs a full model pass to undo and does not bring the boundary back with it.
+`v` and `e` stay open, and an unscoped directory stays open to everyone.
+
+**You are not warlock, and this does not gate your edits.** The keys above
+refuse; you do not. **Before planning or making a change, look at what the
+directories it would touch are scoped to, and at what the operator holds.** When
+the work crosses a scope they do not hold, say so plainly, and then either narrow
+the work to what they hold or name the sigil the work wants. Never refuse the
+work, never block it, and never quietly edit around the boundary: saying what is
+being crossed is the whole of the job here.";
 
 /// Warlock's block, markers and all, as it is written into a `CLAUDE.md`.
 ///
@@ -485,6 +517,40 @@ mod tests {
 
     use super::{BEGIN, BODY, END, Error, FILE, Written, splice, write_claude_md};
 
+    /// This repository's own `CLAUDE.md` carries the very block [`BODY`]
+    /// writes, and this is what keeps the two the same.
+    ///
+    /// Warlock writes a project's `CLAUDE.md`, and this project is one of them:
+    /// the file at the workspace root has warlock's markers in it and warlock's
+    /// text between them. Nothing but a test can hold that true, because the
+    /// two copies are edited by hand in different files and a change to either
+    /// alone is invisible — the constant compiles, the markdown renders, and
+    /// the repository quietly starts telling its readers something its own tool
+    /// no longer says. Failing here is the reminder to change both.
+    ///
+    /// The root is reached from `CARGO_MANIFEST_DIR` rather than discovered,
+    /// which is exact for a workspace member and needs no git.
+    #[test]
+    fn this_repositorys_own_claude_md_holds_exactly_what_warlock_writes() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("a workspace member sits two levels under its root");
+        let ours =
+            std::fs::read_to_string(root.join(FILE)).expect("this repository has a CLAUDE.md");
+
+        let start = ours.find(BEGIN).expect("with warlock's opening marker");
+        let end = ours.find(END).expect("and its closing one");
+        let between = ours[start + BEGIN.len()..end].trim();
+
+        assert_eq!(
+            between,
+            BODY.trim(),
+            "the block in this repository's CLAUDE.md and the one `warlock init` \
+             writes have drifted apart; change both or neither"
+        );
+    }
+
     /// The entries of a directory, sorted, as strings: what a test asserting
     /// "one file and nothing else" compares against.
     fn listing(dir: &Path) -> Vec<String> {
@@ -518,7 +584,10 @@ mod tests {
             "granted",
             "trigger, not the judgement",
         ] {
-            assert!(BODY.contains(phrase), "the body should mention {phrase:?}");
+            assert!(
+                flat(BODY).contains(&flat(phrase)),
+                "the body should mention {phrase:?}"
+            );
         }
     }
 
@@ -539,8 +608,22 @@ mod tests {
             "`r` in warlock's tree",
             "owed a pass",
         ] {
-            assert!(BODY.contains(phrase), "the body should mention {phrase:?}");
+            assert!(
+                flat(BODY).contains(&flat(phrase)),
+                "the body should mention {phrase:?}"
+            );
         }
+    }
+
+    /// `text` with every run of whitespace flattened to one space.
+    ///
+    /// Every phrase test below goes through this. What they assert is that a
+    /// claim is in the body, and a claim does not stop being there because the
+    /// paragraph around it was rewrapped — but a `contains` over the raw
+    /// constant fails on exactly that, which made a handful of these tests
+    /// break on edits that changed no words at all.
+    fn flat(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     #[test]
@@ -561,7 +644,12 @@ mod tests {
             "any one of them opens a matching scope",
             "membership test, not an expression to\nevaluate",
             "`warlock config` prints what is held",
-            "unrestricted",
+            // Was "unrestricted", from the sentence "Holding nothing means
+            // unrestricted, not shut out" — which `scope_opens_to` contradicts:
+            // an empty `held` falls through to the membership test and matches
+            // nothing. The permissive default lives on the directory instead.
+            "holding none opens none",
+            "no scope above it\nis open to anyone",
             "A scope is a term of the pact, not a thing beside it",
             "unpacted\ndirectory cannot carry one",
             "un-pacting a directory takes its scope away",
@@ -572,36 +660,51 @@ mod tests {
             "Never refuse the work, never\nblock it",
             "never quietly edit around the boundary",
         ] {
-            assert!(BODY.contains(phrase), "the body should mention {phrase:?}");
+            assert!(
+                flat(BODY).contains(&flat(phrase)),
+                "the body should mention {phrase:?}"
+            );
         }
     }
 
     #[test]
-    fn the_body_promises_no_enforcement() {
-        // Nothing in this workspace matches a sigil against a scope, so the
-        // text must not imply that anything does. A file that promises a wall
-        // warlock does not build is worse than no file: the first person to
-        // sail through it learns the document lies. (The instruction *to* the
-        // agent says "never block" and "never refuse", which is why these are
-        // claim-shaped phrases rather than bare words.)
+    fn the_body_describes_the_refusal_it_has_without_promising_one_it_has_not() {
+        // This test used to assert the opposite — that nothing in this
+        // workspace matches a sigil against a scope, so the text must never say
+        // anything is refused. That stopped being true the day
+        // [`scope_opens_to`](crate::scope_opens_to) shipped and the TUI began
+        // turning `p`, `r` and `s` down on it, and the assertion outlived the
+        // fact by holding the stale claim in place with a green test. Both
+        // halves below are the replacement, and the second half is what the
+        // original was really protecting.
         for phrase in [
-            "enforc",
-            "warlock check",
-            "blocks",
-            "blocked",
-            "refuses",
-            "refused",
-            "will refuse",
-            "will block",
-            "checks that",
-            "not allowed",
-            "permission",
-            "exit code",
-            "CI",
+            "mutating keys refuse across a closed boundary",
+            "`v` and `e` stay open",
         ] {
             assert!(
+                flat(BODY).contains(&flat(phrase)),
+                "the body should say what really is refused: {phrase:?}"
+            );
+        }
+
+        // And it must still not sell that refusal as a wall. The sigil file is
+        // machine-local and self-asserted, so anyone can grant themselves one; a
+        // file promising a guarantee warlock does not build is worse than no
+        // file, because the first person to sail through it learns the document
+        // lies.
+        for phrase in [
+            "guardrail rather than a guarantee",
+            "anyone can grant themselves one",
+        ] {
+            assert!(
+                flat(BODY).contains(&flat(phrase)),
+                "the body should say what the refusal is not: {phrase:?}"
+            );
+        }
+        for phrase in ["warlock check", "not allowed", "permission", "exit code"] {
+            assert!(
                 !BODY.contains(phrase),
-                "the body should promise no enforcement: {phrase:?}"
+                "and should still promise no machinery that does not exist: {phrase:?}"
             );
         }
     }

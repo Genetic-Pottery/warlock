@@ -4030,10 +4030,16 @@ mod tests {
                 // of those, its own previous one and its child's. The document
                 // it already had is carried apart from the listing now, so it
                 // is counted here without being counted as a file.
+                // Through `account::size` rather than with the unit spelled
+                // out: what this line asserts is the count, and a fixture that
+                // grew past a kilobyte should not be able to fail a test about
+                // where a cancel is recorded.
                 format!(
-                    "0:20 waiting · 0 files, {} bytes",
-                    document_bytes(&scratch, "crates/alpha")
-                        + document_bytes(&scratch, "crates/alpha/src")
+                    "0:20 waiting · 0 files, {}",
+                    warlock_tui::size(
+                        document_bytes(&scratch, "crates/alpha")
+                            + document_bytes(&scratch, "crates/alpha/src")
+                    )
                 ),
                 "0:30 Read crates/alpha".to_owned(),
                 "1:00 thinking".to_owned(),

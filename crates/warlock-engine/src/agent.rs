@@ -97,7 +97,40 @@ pub trait Agent {
     /// did not finish in time, or the attempt failed with some other I/O
     /// error.
     fn run(&self, request: &Request) -> Result<Response, Error>;
+
+    /// How many tokens of context a pass on this agent can actually read.
+    ///
+    /// The one thing the engine cannot work out for itself. A budget exists
+    /// because a context window does, and the window is a property of the model
+    /// — which is the front end's business, not the engine's: the engine has
+    /// never known what it is talking to, and this keeps that true by asking
+    /// rather than guessing.
+    ///
+    /// **Answer low rather than high.** [`fitting`](crate::fitting) turns this into a byte
+    /// budget and gives files up until the request meets it, so an answer that
+    /// is too large does not fail — it sends more than the model can read, and
+    /// whatever silently drops the excess downstream does it with none of the
+    /// care this crate takes: no order, no ladder, no [`Problem`](crate::fitting::Problem) naming what
+    /// went. Over-reporting the window converts warlock's disclosed policy into
+    /// somebody else's undisclosed one, which is the failure the budget is
+    /// there to prevent.
+    ///
+    /// The default is [`DEFAULT_CONTEXT_TOKENS`], deliberately modest, so an
+    /// agent that has not thought about it is merely thrifty rather than
+    /// wrong.
+    fn context_tokens(&self) -> u64 {
+        DEFAULT_CONTEXT_TOKENS
+    }
 }
+
+/// The context window assumed of an [`Agent`] that does not name its own.
+///
+/// Small on purpose. Every model worth pointing warlock at has a larger window
+/// than this, so the cost of the default is a little summarising nobody needed
+/// — while the cost of a default set optimistically would be requests quietly
+/// too big for the model, which is the failure this number exists to make
+/// impossible for an agent whose author never considered it.
+pub const DEFAULT_CONTEXT_TOKENS: u64 = 128_000;
 
 /// What one pass needs in order to run: a prompt, where to run it, and the
 /// context it is scoped to.
@@ -331,6 +364,18 @@ impl Request {
 /// Truncation stays forbidden and omit-and-list stays the floor: a summary is
 /// something better than a bare name and a size, not something less than the
 /// whole file.
+///
+/// Above the summary, and below the whole file, sits one more
+/// ([`agent::File::elided`](crate::agent::File::elided)): the file's own lines, verbatim and in order,
+/// with whole regions a documenter has no use for — test bodies — replaced by a
+/// marker saying how many lines stood there. It is still not truncation, and
+/// the difference is the one that matters: truncation stops at an arbitrary
+/// byte and says nothing, while an elision drops named regions on whole-line
+/// boundaries and leaves a marker where each one was. Nothing here is
+/// paraphrased, so unlike a summary it may be quoted as the file's own text —
+/// which is why it comes back through [`agent::File::kept`](crate::agent::File::kept) rather than through
+/// [`agent::File::summary`](crate::agent::File::summary), and why it is text rather than bytes: a file that is
+/// not UTF-8 has no lines to keep.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct File {
     /// Where the file is, relative to the request's directory, spelled with
@@ -354,6 +399,16 @@ enum Content {
     Bytes(Vec<u8>),
     /// The file's size in bytes, its contents left out.
     Omitted(u64),
+    /// The file's size in bytes, and the file's own lines with regions a
+    /// documenter does not need dropped and marked.
+    Elided {
+        /// How many bytes the file has on disk — what it costs to store, not
+        /// what it costs to send.
+        size: u64,
+        /// The surviving lines, verbatim, with a marker where each dropped
+        /// region was.
+        kept: String,
+    },
     /// The file's size in bytes, and an account of its contents that is
     /// explicitly not its text — never a prefix, never an excerpt, never
     /// something to quote as what the file says.
@@ -386,6 +441,44 @@ impl File {
         Self {
             path: path.into(),
             content: Content::Omitted(size),
+        }
+    }
+
+    /// A file sent with regions dropped: `path`, the `size` in bytes it has on
+    /// disk, and `kept` — its own lines, in order, with a marker standing where
+    /// each dropped region was.
+    ///
+    /// The size is the file's size on disk rather than the length of `kept`,
+    /// for [`agent::File::summarised`](crate::agent::File::summarised)'s reason exactly: how big the file is and how
+    /// much of it was sent are two facts, and collapsing them would hide the
+    /// second.
+    ///
+    /// Every line in `kept` is a line the file really contains. That is what
+    /// separates this from truncation and what lets a reader quote it, which a
+    /// summary may never be.
+    ///
+    /// ```
+    /// use warlock_engine::agent;
+    ///
+    /// let file = agent::File::elided(
+    ///     "scope.rs",
+    ///     40_000,
+    ///     "pub fn covering() -> Option<&str> {\n    None\n}\n… 900 lines of test bodies elided …",
+    /// );
+    ///
+    /// assert_eq!(file.size(), 40_000, "the size on disk, not the size sent");
+    /// assert!(file.kept().is_some_and(|text| text.contains("pub fn covering")));
+    /// assert_eq!(file.summary(), None, "kept text is not prose about the file");
+    /// assert!(!file.is_omitted(), "nothing about it is a bare name");
+    /// ```
+    #[must_use]
+    pub fn elided(path: impl Into<String>, size: u64, kept: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            content: Content::Elided {
+                size,
+                kept: kept.into(),
+            },
         }
     }
 
@@ -442,7 +535,22 @@ impl File {
     pub fn bytes(&self) -> Option<&[u8]> {
         match &self.content {
             Content::Bytes(bytes) => Some(bytes),
-            Content::Omitted(_) | Content::Summarised { .. } => None,
+            Content::Omitted(_) | Content::Elided { .. } | Content::Summarised { .. } => None,
+        }
+    }
+
+    /// The file's surviving lines, or `None` if it was sent whole, summarised
+    /// or merely listed.
+    ///
+    /// Verbatim text of the file, unlike [`agent::File::summary`](crate::agent::File::summary): what comes back
+    /// here may be quoted as what the file says, as long as nothing reads the
+    /// absence of a line as the absence of the thing — which is what the
+    /// markers in it are for.
+    #[must_use]
+    pub fn kept(&self) -> Option<&str> {
+        match &self.content {
+            Content::Elided { kept, .. } => Some(kept),
+            Content::Bytes(_) | Content::Omitted(_) | Content::Summarised { .. } => None,
         }
     }
 
@@ -455,7 +563,9 @@ impl File {
     pub fn size(&self) -> u64 {
         match &self.content {
             Content::Bytes(bytes) => bytes.len() as u64,
-            Content::Omitted(size) | Content::Summarised { size, .. } => *size,
+            Content::Omitted(size)
+            | Content::Elided { size, .. }
+            | Content::Summarised { size, .. } => *size,
         }
     }
 
@@ -468,7 +578,7 @@ impl File {
     pub fn summary(&self) -> Option<&str> {
         match &self.content {
             Content::Summarised { summary, .. } => Some(summary),
-            Content::Bytes(_) | Content::Omitted(_) => None,
+            Content::Bytes(_) | Content::Omitted(_) | Content::Elided { .. } => None,
         }
     }
 

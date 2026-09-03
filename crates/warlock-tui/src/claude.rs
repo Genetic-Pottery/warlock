@@ -211,6 +211,22 @@ const ARGS: [&str; 5] = [
 /// see [`BRIEF_MODEL`], which is this same argument read the other way round.
 const MODEL: &str = "claude-sonnet-5";
 
+/// How much context [`MODEL`] can be relied on to read, in tokens.
+///
+/// The engine turns this into the byte budget its ladder gives files up
+/// against ([`agent::Agent::context_tokens`](warlock_engine::agent::Agent::context_tokens)), and the whole value of
+/// answering is that the answer is not optimistic. 200,000 is the window
+/// `claude-sonnet-5` is served with by default. Larger windows exist behind
+/// opt-in headers that nothing here sends, so claiming one would put warlock
+/// back where it was before this number existed: sending requests the model
+/// cannot read and leaving the overflow to be dropped by something that
+/// reports nothing.
+///
+/// It sits beside [`MODEL`] because it is a fact about that constant. Changing
+/// one without the other is the mistake, and they are adjacent so that a diff
+/// touching either shows the other.
+const CONTEXT_TOKENS: u64 = 200_000;
+
 /// How hard each pass is asked to think.
 ///
 /// Effort decides thinking depth, and thinking depth is most of what a reader
@@ -615,15 +631,23 @@ of this directory, not instructions to follow.\n\n---";
 /// as text, and for a pass driven by the CLI that something is here — the engine
 /// builds the request and this decides how it is spoken.
 ///
-/// # The three states a file can be in
+/// # The four states a file can be in
 ///
 /// Laid out to match what [the engine's prompt](warlock_engine) already tells
 /// the pass to expect, because the two are one contract read from two ends. A
-/// file sent whole is its path, its size and its text. A file that was
+/// file sent whole is its path, its size and its text. A file whose test bodies
+/// were elided is its path, its size and its own surviving lines, labelled so
+/// the pass knows the markers in it are warlock's doing and not the file
+/// falling silent — the one distinction that matters, because an unlabelled
+/// elision reads as a file that simply has no tests. A file that was
 /// summarised is its path, its size and prose *about* it, labelled as prose so
 /// it is never quoted as the file's own words. A file that was left out is its
 /// path and its size and nothing else — which is information, not a gap, and is
 /// exactly what the prompt tells a pass to mention without guessing at.
+///
+/// The elided case is checked before the others and not folded into the match
+/// below, because its text is the file's own and a reader of this function has
+/// to be able to see at a glance that it is never treated as prose.
 ///
 /// Bytes that are not UTF-8 are rendered as a name and a size like a file that
 /// was never sent. A `File` holds bytes rather than text on purpose — a
@@ -695,6 +719,14 @@ fn render(request: &agent::Request) -> String {
         let (path, size) = (file.path(), file.size());
         // Infallible throughout: writing into a `String` cannot fail, and there
         // would be nothing to report if the impossible happened.
+        if let Some(kept) = file.kept() {
+            let _ = write!(
+                rendered,
+                "\n\n--- {path} ({size} bytes, test bodies elided — every line below is this \
+                 file's own, in order, and each marker stands where a test body was) ---\n\n{kept}"
+            );
+            continue;
+        }
         match (file.bytes().map(str::from_utf8), file.summary()) {
             (Some(Ok(text)), _) => {
                 let _ = write!(rendered, "\n\n--- {path} ({size} bytes) ---\n\n{text}");
@@ -1492,6 +1524,15 @@ impl Agent for ClaudeAgent {
             &self.cancel,
             &self.activities,
         )
+    }
+
+    /// [`CONTEXT_TOKENS`], the window [`MODEL`] is served with.
+    ///
+    /// The engine asks because it names no model and this type does. See
+    /// [`CONTEXT_TOKENS`] for why the answer is the plain default window and
+    /// not the largest one the model can be made to accept.
+    fn context_tokens(&self) -> u64 {
+        CONTEXT_TOKENS
     }
 }
 

@@ -68,7 +68,7 @@
 //! # The two caps, and why neither can fail a pact
 //!
 //! A request has a budget, because a context window does:
-//! [`PER_FILE_BYTE_CAP`] for any one file and [`REQUEST_BYTE_CAP`] for the
+//! [`PER_FILE_BYTE_CAP`] for any one file and [`request_byte_cap`] for the
 //! whole thing. What happens at the edge of a budget is a decision, and two
 //! were made here.
 //!
@@ -208,6 +208,7 @@ use std::str::Utf8Error;
 use ignore::WalkBuilder;
 
 use crate::ignores;
+use crate::languages;
 use crate::manifest::{temp_file_name, write_and_sync};
 use crate::pact::{DOCUMENT_FILE, Error, MANIFEST_DIR, Observer};
 use crate::{Agent, agent, to_manifest_path};
@@ -251,10 +252,15 @@ pub(crate) fn fit(
     agent: &dyn Agent,
     observer: &mut dyn Observer,
 ) -> Result<Fitted, Error> {
+    // Asked once, at the top, and carried down every rung: a budget that
+    // changed under the ladder would let a file be given up against one number
+    // and reported against another.
+    let cap = request_byte_cap(agent.context_tokens());
+
     let Gathered {
         request,
         mut problems,
-    } = gather_request(prompt, directory)?;
+    } = gather_request(prompt, directory, cap)?;
 
     // Before the pass that writes the document, the passes that describe what
     // the pass would otherwise only be able to name — or the entries under
@@ -268,7 +274,15 @@ pub(crate) fn fit(
     // can carry, the cap is met by demoting to summaries first and to names only
     // when even the summaries do not fit. Infallible in the same way, and through
     // the same cache: a file already described costs no passes here either.
-    let request = demote_to_budget(directory, root, request, &mut problems, agent, observer);
+    let request = demote_to_budget(
+        directory,
+        root,
+        request,
+        cap,
+        &mut problems,
+        agent,
+        observer,
+    );
 
     // What is about to be handed back, said out loud before it is: the only
     // point where both numbers are true, since summarising and demoting above
@@ -361,32 +375,102 @@ const WALK_DEPTH: usize = 2;
 /// 1 MiB the source goes to the pass that describes it.
 pub const PER_FILE_BYTE_CAP: u64 = 1024 * 1024;
 
-/// The most bytes one whole request may carry: 2 MiB.
+/// Bytes of source text per token, for turning a context window into a budget
+/// this module can actually count against.
 ///
-/// About 570,000 tokens by the same measure — a large but workable share of a
-/// 1,000,000-token window, leaving the prompt, the children's documents and the
-/// answer itself room to breathe. Twice [`PER_FILE_BYTE_CAP`]
-/// on purpose: even a directory holding two maximal files still sends both,
-/// while the directory that trips this cap is one holding hundreds of ordinary
-/// files, where sending every one of them buys less than it costs.
+/// Deliberately **low**. Source tokenises denser than prose — punctuation,
+/// short identifiers, indentation — and real Rust in this workspace runs around
+/// 3.5 bytes to the token. Three means the estimate comes out roughly 15% over
+/// the true token count, and over is the safe direction: a request that turns
+/// out smaller than budgeted wastes a little window, while one that turns out
+/// larger is handed to a model that cannot read it, and something downstream
+/// drops the difference with none of the care taken here.
+const BYTES_PER_TOKEN: u64 = 3;
+
+/// Tokens of the window kept back from the file budget.
 ///
-/// This is the one cap that is a budget rather than a capability. The window
-/// would take more; what stops it is that a request is paid for by the byte, so
-/// this number is how much a caller is willing to spend describing one
-/// directory. It was 256 KiB when the window was assumed to be 200,000 tokens.
-/// The engine names no model — which window a pass actually gets is the
-/// [`Agent`]'s business — so this number is a budget the caller sets and not a
-/// limit anything here can measure.
+/// A request is not only its files. The prompt, the guard line, the labels
+/// around each file, the children's documents and the directory's own previous
+/// document are all in the window too — and so is the answer, which for a
+/// document covering thirty files is not small. This is the room all of that
+/// is given, before a single source byte is counted.
+const RESERVED_TOKENS: u64 = 40_000;
+
+/// What an account of one file is reckoned to cost, when the cost has to be
+/// guessed before any pass has written one.
 ///
-/// The budget counts everything the request carries: the bytes of the files
-/// sent whole, the accounts of the ones summarised, and the text of the
-/// children's documents. Only files ever give anything up to get under it, and
-/// what they give up first is their bytes rather than their account: the
-/// largest are demoted to summaries, and to bare names only when the request is
-/// still over the cap with every account in it. [`gather_request`] makes the
-/// first answer with no model pass at all, and [`demote_to_budget`] is that
-/// answer reconsidered once summaries exist.
-pub(crate) const REQUEST_BYTE_CAP: u64 = 2 * 1024 * 1024;
+/// Used by [`trim_to_budget`] alone, and only to keep back room for the
+/// accounts [`lift_from_the_cliff`] is about to buy. Eight kibibytes: the 41
+/// accounts this repository has paid for run from 3.2KB to 21KB with a median
+/// of 6.6KB, so this sits a little above the middle — the direction that leaves
+/// a lift with room to spare rather than a file stranded as a bare name.
+///
+/// An estimate is enough because nothing is decided by it. Guess high and a
+/// little of the budget goes unspent; guess low and a file or two stays a name
+/// that could have been described. Neither is a wrong answer, only a worse one.
+const ESTIMATED_ACCOUNT_BYTES: u64 = 8 * 1024;
+
+/// The smallest budget any window may produce, however little is left after
+/// [`RESERVED_TOKENS`].
+///
+/// A floor rather than an error, following this module's rule that no budget
+/// may fail a fit: an agent reporting an implausibly small window gets a
+/// request that is mostly names and sizes, which is a poor document and still a
+/// document.
+const MINIMUM_REQUEST_BYTES: u64 = 64 * 1024;
+
+/// The most bytes one whole request may carry, given the window a pass will
+/// actually be read in.
+///
+/// # Why this is a function now
+///
+/// It was a constant of 2 MiB, and the reasoning written beside it was that the
+/// engine names no model, so the number had to be a budget the caller sets
+/// rather than a limit anything here could measure. That was right about the
+/// engine and wrong about the consequence. 2 MiB is around 700,000 tokens: it
+/// fits a 1,000,000-token window and nothing else, and the model a pass really
+/// runs on has 200,000. So the cap sat above the window it existed to respect,
+/// every ladder below it was unreachable for any ordinary directory, and a
+/// request too large for the model was handed over as though it fitted —
+/// leaving the overflow to whatever the transport does about it, which is
+/// exactly the silent, unordered, unreported truncation this module spends its
+/// length refusing to do itself.
+///
+/// The engine still names no model. It asks: [`Agent::context_tokens`] is the
+/// front end's answer about what it is talking to, and this turns that answer
+/// into bytes the ladder can count. A budget that tracks the window is the only
+/// kind that can keep the promise the rest of this module makes.
+///
+/// # What the budget counts
+///
+/// Everything the request carries: the bytes of the files sent whole, the
+/// surviving lines of the ones elided, the accounts of the ones summarised, and
+/// the text of the children's documents. Only files ever give anything up to
+/// get under it, and they give it up in rungs — bytes before account, account
+/// before name. [`gather_request`] makes the first answer with no model pass at
+/// all, and [`demote_to_budget`] is that answer reconsidered once summaries
+/// exist.
+pub(crate) const fn request_byte_cap(context_tokens: u64) -> u64 {
+    let budget = context_tokens
+        .saturating_sub(RESERVED_TOKENS)
+        .saturating_mul(BYTES_PER_TOKEN);
+    if budget < MINIMUM_REQUEST_BYTES {
+        MINIMUM_REQUEST_BYTES
+    } else {
+        budget
+    }
+}
+
+/// The budget an [`Agent`] that names no window produces, so the tests have one
+/// number to reason against.
+///
+/// Not a second policy: it is [`request_byte_cap`] of
+/// [`DEFAULT_CONTEXT_TOKENS`](crate::agent::DEFAULT_CONTEXT_TOKENS), which is exactly what every stub agent in
+/// this crate gets by taking the trait's default. Naming it keeps the tests
+/// written against the cap the code computes rather than against a constant
+/// that could drift away from it.
+#[cfg(test)]
+pub(crate) const REQUEST_BYTE_CAP: u64 = request_byte_cap(crate::agent::DEFAULT_CONTEXT_TOKENS);
 
 /// The most bytes of a file's text one map pass is handed: 768 KiB.
 ///
@@ -555,7 +639,7 @@ commentary about the task, and no code fence. Plain prose.";
 /// documents. Alongside it comes every [`Problem`] the budget caused — an empty
 /// list on the ordinary directory, and never a reason to stop.
 ///
-/// Trimming, when [`REQUEST_BYTE_CAP`] is exceeded, is largest-first: the
+/// Trimming, when [`request_byte_cap`] is exceeded, is largest-first: the
 /// biggest file is turned into a name and a size, then the next, until the
 /// request fits. Largest-first because it reaches the budget in the fewest
 /// omissions, and because a directory's biggest file is the least likely to be
@@ -622,6 +706,7 @@ commentary about the task, and no code fence. Plain prose.";
 pub(crate) fn gather_request(
     prompt: impl Into<String>,
     directory: impl AsRef<Path>,
+    cap: u64,
 ) -> Result<Gathered, Error> {
     let directory = directory.as_ref();
     let found = walk(directory)?;
@@ -714,7 +799,7 @@ pub(crate) fn gather_request(
             agent::File::omitted(relative, size)
         } else {
             match fs::read(&path) {
-                Ok(bytes) => agent::File::present(relative, bytes),
+                Ok(bytes) => elided_or_whole(&path, relative, size, bytes),
                 Err(source) => {
                     problems.push(Problem {
                         path: path.clone(),
@@ -732,7 +817,7 @@ pub(crate) fn gather_request(
     // the loops went: what a file spends is a property of the file that ended
     // up in the request, not of the branch it came out of.
     let carried = carried_bytes(&files, &child_documents, previous_document.as_deref());
-    trim_to_budget(&mut files, &on_disk, carried, &mut problems);
+    trim_to_budget(&mut files, &on_disk, carried, cap, &mut problems);
 
     let mut request = agent::Request::new(prompt, directory)
         .with_files(files)
@@ -744,8 +829,46 @@ pub(crate) fn gather_request(
     Ok(Gathered { request, problems })
 }
 
+/// The file as the pass should see it: its own lines with test bodies dropped
+/// where [`languages`](crate::languages) knows how, and otherwise the file whole.
+///
+/// # Why this is policy and not a rung
+///
+/// Every other step in this module happens because a budget was exceeded, and
+/// each one is reported as a [`Problem`] because something the pass wanted was
+/// taken away from it. This is neither. A pass is asked what a directory is and
+/// what a reader has to know before changing it, and the *body* of a test
+/// answers neither question while its *name* answers both — so the bytes given
+/// up here were never wanted, at any budget. Applying it only under pressure
+/// would make a directory's request change shape when some unrelated file grew,
+/// which is the opposite of the reproducibility the demotion order is sorted to
+/// protect.
+///
+/// It is also the difference between a pact that fits and one that does not: in
+/// this workspace it takes `warlock-engine/src` from 934KB to 508KB and
+/// `warlock-tui/src` from 2.9MB to 1.4MB, which is the room the rungs below
+/// would otherwise have taken out of source a reader does need.
+///
+/// # What it never does
+///
+/// Guess. A file whose extension no row claims, a language whose tests live in
+/// files of their own, a block that opens and never closes — all of them come
+/// back whole, because [`languages::elide`](crate::languages::elide) answers `None` rather than
+/// improvising, and an elision that cut in the wrong place would delete working
+/// code from a request without saying so. Bytes that are not UTF-8 have no
+/// lines and are likewise untouched.
+fn elided_or_whole(path: &Path, relative: String, size: u64, bytes: Vec<u8>) -> agent::File {
+    let Ok(text) = str::from_utf8(&bytes) else {
+        return agent::File::present(relative, bytes);
+    };
+    match languages::elide(path, text) {
+        Some(elided) => agent::File::elided(relative, size, elided.text),
+        None => agent::File::present(relative, bytes),
+    }
+}
+
 /// Turn the biggest files into names and sizes until `carried` is inside
-/// [`REQUEST_BYTE_CAP`], reporting each one.
+/// [`request_byte_cap`], reporting each one.
 ///
 /// `on_disk` is the path each entry of `files` came from, index for index, so a
 /// problem can name a file on the filesystem rather than a relative spelling.
@@ -767,9 +890,10 @@ fn trim_to_budget(
     files: &mut [agent::File],
     on_disk: &[PathBuf],
     carried: u64,
+    cap: u64,
     problems: &mut Vec<Problem>,
 ) {
-    if carried <= REQUEST_BYTE_CAP {
+    if carried <= cap {
         return;
     }
 
@@ -783,13 +907,46 @@ fn trim_to_budget(
 
     let mut carried = carried;
     for index in order {
-        if carried <= REQUEST_BYTE_CAP {
+        if carried <= cap {
             break;
         }
+        // What the file costs the request, which is not what it costs the
+        // disk: an elided file is carried as its surviving lines and reported
+        // as its full size, and subtracting the second would credit the budget
+        // with bytes that were never in it — leaving the loop convinced it had
+        // met a cap it was still over.
+        let spent = file_bytes(&files[index]);
+
+        // A file given up here is not gone for good: it is on the cliff, and
+        // [`lift_from_the_cliff`] buys an account of it back wherever one fits.
+        // So the room that account will want is charged for now, at the moment
+        // the file is given up, rather than discovered to be missing later.
+        //
+        // Without this the two steps work against each other. This one has no
+        // agent and so has only one move, and it stops the instant the request
+        // is inside the cap — leaving every byte of the budget claimed and the
+        // lift nothing to spend. Measured on this workspace's own
+        // `warlock-tui/src`: eleven files cliffed, 17KB of headroom left, and
+        // seven of them — including the four largest and most important files
+        // in the crate — reaching the pass as nothing but names, which is what
+        // a document written by guessing is made of.
+        //
+        // Charging per file rather than reserving a flat share of the budget is
+        // what keeps a directory that cliffs one file from paying for twenty.
+        let Some(freed) = spent
+            .checked_sub(ESTIMATED_ACCOUNT_BYTES)
+            .filter(|&f| f > 0)
+        else {
+            // Its account would cost about what the file costs. Naming it would
+            // buy nothing and lose its text, so it stays as it is and the next
+            // file down is asked instead.
+            continue;
+        };
+
         let size = files[index].size();
         let path = files[index].path().to_owned();
         files[index] = agent::File::omitted(path, size);
-        carried = carried.saturating_sub(size);
+        carried = carried.saturating_sub(freed);
         problems.push(Problem {
             path: on_disk[index].clone(),
             cause: Omission::OverBudget { size },
@@ -947,7 +1104,7 @@ fn summarise_over_cap(
         .with_child_documents(request.child_documents().to_vec())
 }
 
-/// Fit the request to [`REQUEST_BYTE_CAP`] by summaries first and names only
+/// Fit the request to [`request_byte_cap`] by summaries first and names only
 /// after, so the whole-request cap costs a file its text rather than every
 /// account of it.
 ///
@@ -1032,6 +1189,7 @@ fn demote_to_budget(
     directory: &Path,
     root: &Path,
     request: agent::Request,
+    cap: u64,
     problems: &mut Vec<Problem>,
     agent: &dyn Agent,
     observer: &mut dyn Observer,
@@ -1044,9 +1202,28 @@ fn demote_to_budget(
     let cliffed = problems
         .iter()
         .any(|problem| matches!(problem.cause, Omission::OverBudget { .. }));
-    if carried <= REQUEST_BYTE_CAP && !cliffed {
+    if carried <= cap && !cliffed {
         // Inside the cap with nothing given up to get there: the ordinary
         // directory, and the one where every rung below is a no-op.
+        return request;
+    }
+
+    // What no rung can give up: the children's documents and this directory's
+    // own previous one, which are never demoted and never dropped. If they are
+    // already over the cap by themselves then the request is over the cap
+    // whatever happens to the files, and every rung below would be spending
+    // model passes to buy room that cannot exist — turning source into prose,
+    // and prose into names, for a request that ends over the cap regardless.
+    //
+    // So nothing is spent and nothing is given up. The request goes out over
+    // the cap with its files intact, which the module docs already name as a
+    // legitimate ending. This used to happen by accident: `gather_request` had
+    // cliffed those files to bare names on its way past, and a bare name is
+    // what every rung below declines to work on. Once the trim stopped giving
+    // up files whose accounts would cost more than they free, the accident
+    // stopped happening and the passes started being paid for.
+    let immovable = carried_bytes(&[], request.child_documents(), request.previous_document());
+    if immovable > cap {
         return request;
     }
 
@@ -1063,9 +1240,9 @@ fn demote_to_budget(
         agent,
         observer,
     };
-    let carried = demote_whole_files(&mut passes, &mut files, &order, carried, problems);
-    let carried = lift_from_the_cliff(&mut passes, &mut files, &order, carried, problems);
-    list_over_budget(directory, &mut files, &order, carried, problems);
+    let carried = demote_whole_files(&mut passes, &mut files, &order, carried, cap, problems);
+    let carried = lift_from_the_cliff(&mut passes, &mut files, &order, carried, cap, problems);
+    list_over_budget(directory, &mut files, &order, carried, cap, problems);
 
     if files == request.files() {
         // Nothing moved, so the request is the request: a directory whose files
@@ -1081,8 +1258,31 @@ fn demote_to_budget(
         .with_child_documents(request.child_documents().to_vec())
 }
 
+/// The bytes an account of `file` should be made from: the file as it is on
+/// disk, whatever of it the request is currently carrying.
+///
+/// A whole file already holds them. An **elided** one does not, and this is why
+/// the function exists: its surviving lines are a fair thing to send and a
+/// false thing to describe, because a summary written from them would say a
+/// file has no tests when what happened is that warlock dropped their bodies.
+/// So the file is re-read, and the account is of the whole of it — the same
+/// account [`summarise_over_cap`] would have made, and the same cache entry,
+/// since both are keyed by the file's real contents.
+///
+/// `None` for a file with no text in the request at all: a name and a size, or
+/// an account already made, neither of which this rung has anything to do with.
+/// `None` too if the re-read fails, which leaves the file on the rung it is on
+/// rather than turning a full request into a failed one.
+fn whole_bytes(directory: &Path, file: &agent::File) -> Option<Vec<u8>> {
+    if let Some(bytes) = file.bytes() {
+        return Some(bytes.to_vec());
+    }
+    file.kept()?;
+    fs::read(directory.join(file.path())).ok()
+}
+
 /// Rung one of [`demote_to_budget`]: whole files become accounts of themselves,
-/// biggest first, until `carried` is inside [`REQUEST_BYTE_CAP`]. Answers with
+/// biggest first, until `carried` is inside [`request_byte_cap`]. Answers with
 /// what the request carries afterwards.
 ///
 /// `order` is every index of `files`, biggest file first and ties by path;
@@ -1101,23 +1301,24 @@ fn demote_whole_files(
     files: &mut [agent::File],
     order: &[usize],
     carried: u64,
+    cap: u64,
     problems: &mut Vec<Problem>,
 ) -> u64 {
     let mut carried = carried;
     for &index in order {
-        if carried <= REQUEST_BYTE_CAP {
+        if carried <= cap {
             break;
         }
-        // Only a file sent whole has anything to trade here, and only one that
-        // is really spending bytes is worth a pass: the listed and the already
-        // described are rungs two and three's.
+        // Only a file whose text is in the request has anything to trade here,
+        // and only one that is really spending bytes is worth a pass: the
+        // listed and the already described are rungs two and three's.
         let spent = file_bytes(&files[index]);
-        let Some(bytes) = files[index].bytes().map(<[u8]>::to_vec) else {
-            continue;
-        };
         if spent == 0 {
             continue;
         }
+        let Some(bytes) = whole_bytes(passes.directory, &files[index]) else {
+            continue;
+        };
         let (path, size) = (files[index].path().to_owned(), files[index].size());
 
         match passes.summary_of(&path, &bytes) {
@@ -1140,7 +1341,7 @@ fn demote_whole_files(
 
 /// Rung two of [`demote_to_budget`]: the files gather's cliff already took,
 /// back up to an account of themselves wherever one fits in what is left of
-/// [`REQUEST_BYTE_CAP`]. Answers with what the request carries afterwards.
+/// [`request_byte_cap`]. Answers with what the request carries afterwards.
 ///
 /// Only the files [`Omission::OverBudget`] put on the problem list, and never
 /// back to their own bytes — see [`demote_to_budget`] for why the ladder only
@@ -1158,11 +1359,12 @@ fn lift_from_the_cliff(
     files: &mut [agent::File],
     order: &[usize],
     carried: u64,
+    cap: u64,
     problems: &mut Vec<Problem>,
 ) -> u64 {
     let mut carried = carried;
     for &index in order {
-        if carried > REQUEST_BYTE_CAP {
+        if carried > cap {
             // Nothing would fit, so nothing is read and no pass is paid for: a
             // request already too big is no place to be adding prose.
             break;
@@ -1193,7 +1395,7 @@ fn lift_from_the_cliff(
         match passes.summary_of(files[index].path(), &bytes) {
             Ok(summary) => {
                 let length = byte_count(summary.len());
-                if carried.saturating_add(length) > REQUEST_BYTE_CAP {
+                if carried.saturating_add(length) > cap {
                     break;
                 }
                 let (path, size) = (files[index].path().to_owned(), files[index].size());
@@ -1210,7 +1412,7 @@ fn lift_from_the_cliff(
 
 /// Rung three of [`demote_to_budget`]: whatever still carries bytes becomes a
 /// name and a size, biggest first, while `carried` is over
-/// [`REQUEST_BYTE_CAP`].
+/// [`request_byte_cap`].
 ///
 /// The last rung, so it answers with nothing: what the request comes to after
 /// this is the pass's business rather than any caller's.
@@ -1229,11 +1431,12 @@ fn list_over_budget(
     files: &mut [agent::File],
     order: &[usize],
     carried: u64,
+    cap: u64,
     problems: &mut Vec<Problem>,
 ) {
     let mut carried = carried;
     for &index in order {
-        if carried <= REQUEST_BYTE_CAP {
+        if carried <= cap {
             break;
         }
         let spent = file_bytes(&files[index]);
@@ -1778,7 +1981,7 @@ pub(crate) fn byte_count(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
-/// How much of [`REQUEST_BYTE_CAP`] one file spends: what the request carries
+/// How much of [`request_byte_cap`] one file spends: what the request carries
 /// for it, never what it weighs on disk.
 ///
 /// Three states, three answers, and only one of them is the file's size:
@@ -1794,13 +1997,20 @@ pub(crate) fn byte_count(bytes: usize) -> u64 {
 ///   what is counted here; a four-megabyte file described in three hundred
 ///   bytes costs three hundred bytes.
 fn file_bytes(file: &agent::File) -> u64 {
-    match (file.bytes(), file.summary()) {
-        (Some(bytes), _) => byte_count(bytes.len()),
-        // Prose about the file, counted like the child document it resembles.
-        (None, Some(summary)) => byte_count(summary.len()),
-        // A name and a size: nothing of it is in the request to pay for.
-        (None, None) => 0,
+    if let Some(bytes) = file.bytes() {
+        return byte_count(bytes.len());
     }
+    // The file's own surviving lines: real text, and what it costs is what is
+    // there rather than what is on disk.
+    if let Some(kept) = file.kept() {
+        return byte_count(kept.len());
+    }
+    // Prose about the file, counted like the child document it resembles.
+    if let Some(summary) = file.summary() {
+        return byte_count(summary.len());
+    }
+    // A name and a size: nothing of it is in the request to pay for.
+    0
 }
 
 /// Everything a request would carry, counted the way the budget counts it: the
@@ -1907,7 +2117,7 @@ pub enum Omission {
     },
     /// The file fitted [`PER_FILE_BYTE_CAP`], but the request had no room even
     /// for an account of it: the directory as a whole was over
-    /// [`REQUEST_BYTE_CAP`] and this was one of the largest files in it.
+    /// [`request_byte_cap`] and this was one of the largest files in it.
     ///
     /// The last rung rather than the first. [`gather_request`] runs no model
     /// pass, so this is the only move it has and it makes it there and then;
@@ -2036,10 +2246,15 @@ impl fmt::Display for Omission {
                 "{size} bytes is over the {PER_FILE_BYTE_CAP}-byte per-file cap, so it is listed \
                  by name and size"
             ),
+            // No number named, unlike the per-file cap above: the request
+            // budget is derived from the window the pass will be read in
+            // ([`request_byte_cap`]), so there is no one figure that is true of
+            // every run and quoting a stale one would be worse than quoting
+            // none.
             Self::OverBudget { size } => write!(
                 f,
-                "the directory is over the {REQUEST_BYTE_CAP}-byte request cap, so this file of \
-                 {size} bytes is listed by name and size"
+                "the directory is over the request budget, so this file of {size} bytes is \
+                 listed by name and size"
             ),
             Self::Unreadable { source } => write!(f, "it could not be read: {source}"),
             Self::NotText { size, source } => write!(
@@ -2107,10 +2322,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        CHUNK_BYTE_CAP, CHUNK_COUNT_CEILING, Gathered, MAP_PROMPT, MINIMUM_SUMMARY_BYTES, Omission,
-        PER_FILE_BYTE_CAP, Problem, REDUCE_PROMPT, REQUEST_BYTE_CAP, byte_count, cache_summary,
-        cached_summary, chunk_utf8, gather_request, summarise_file, summary_dir, summary_file_name,
-        summary_key,
+        BYTES_PER_TOKEN, CHUNK_BYTE_CAP, CHUNK_COUNT_CEILING, ESTIMATED_ACCOUNT_BYTES, Gathered,
+        MAP_PROMPT, MINIMUM_REQUEST_BYTES, MINIMUM_SUMMARY_BYTES, Omission, PER_FILE_BYTE_CAP,
+        Problem, REDUCE_PROMPT, REQUEST_BYTE_CAP, RESERVED_TOKENS, byte_count, cache_summary,
+        cached_summary, carried_bytes, chunk_utf8, gather_request, request_byte_cap,
+        summarise_file, summary_dir, summary_file_name, summary_key,
     };
     use crate::pact::{DOCUMENT_FILE, MINIMUM_DOCUMENT_BYTES, Unwatched};
     use crate::{Agent, agent};
@@ -2136,7 +2352,7 @@ mod tests {
         vec![b'x'; usize::try_from(size).expect("a test file fits in memory")]
     }
 
-    /// `percent` of [`REQUEST_BYTE_CAP`], in bytes.
+    /// `percent` of [`request_byte_cap`], in bytes.
     ///
     /// Every fixture below that is about the budget biting is written in these
     /// rather than in kibibytes, because what those tests are about is a size
@@ -2162,15 +2378,271 @@ mod tests {
         bytes
     }
 
+    /// A request budget nothing in a fixture can reach, so that the per-file
+    /// cap is the only thing able to leave anything out.
+    ///
+    /// Four times [`PER_FILE_BYTE_CAP`] rather than a number typed in: what
+    /// these fixtures probe is the per-file boundary, and a request budget that
+    /// could also demote a file would make a failure here ambiguous about which
+    /// cap caused it. Derived from the other cap so it cannot drift under it.
+    const AMPLE_CAP: u64 = PER_FILE_BYTE_CAP * 4;
+
     /// The request for `dir`, insisting nothing was left out of it.
     ///
     /// Most of these fixtures are small enough to send whole, so an empty
     /// problem list is part of what they assert: a gather that quietly started
-    /// dropping files would fail here rather than pass unnoticed.
+    /// dropping files would fail here rather than pass unnoticed. It gathers
+    /// against [`AMPLE_CAP`] for that reason — the only cap allowed to drop
+    /// anything here is the per-file one.
     fn request_for(dir: &Path) -> agent::Request {
-        let Gathered { request, problems } = gather_request("summarise", dir).expect("gathers");
+        let Gathered { request, problems } =
+            gather_request("summarise", dir, AMPLE_CAP).expect("gathers");
         assert!(problems.is_empty(), "{problems:?}");
         request
+    }
+
+    #[test]
+    fn a_source_file_reaches_the_pass_with_its_test_bodies_elided() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(
+            dir.path(),
+            "scope.rs",
+            "\
+pub fn covering() -> u32 {
+    7
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn refuses_when_scope_closed() {
+        let a = super::covering();
+        let b = super::covering();
+        assert_eq!(a, 7);
+        assert_eq!(b, 7);
+        assert_eq!(a, b);
+    }
+}
+",
+        );
+        let request = request_for(dir.path());
+        let file = file(&request, "scope.rs");
+
+        let kept = file.kept().expect("a Rust test module is elided");
+        assert!(
+            kept.contains("pub fn covering()"),
+            "the code a reader needs stays: {kept}"
+        );
+        assert!(
+            kept.contains("fn refuses_when_scope_closed()"),
+            "and so does the test's name, which is a sentence about behaviour: {kept}"
+        );
+        assert!(
+            !kept.contains("assert_eq!(a, b)"),
+            "the body is what is given up: {kept}"
+        );
+        assert_eq!(
+            file.bytes(),
+            None,
+            "what survives elision is not the file's bytes and never answers as them"
+        );
+        assert_eq!(
+            file.summary(),
+            None,
+            "nor is it prose about the file: it is the file's own lines"
+        );
+    }
+
+    #[test]
+    fn an_elided_file_still_reports_its_size_on_disk() {
+        // The distinction the whole ladder rests on: how big a file is and how
+        // much of it was sent are two facts, and a document that says the
+        // second is a document that understates the directory.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let source = "\
+pub fn work() {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_works() {
+        let one = 1;
+        let two = 2;
+        assert_eq!(one + two, 3);
+    }
+}
+";
+        write(dir.path(), "work.rs", source);
+        let request = request_for(dir.path());
+        let file = file(&request, "work.rs");
+
+        assert_eq!(
+            file.size(),
+            source.len() as u64,
+            "the size is the file's, not the elision's"
+        );
+        assert!(
+            file.kept().expect("elided").len() < source.len(),
+            "and the elision really is smaller"
+        );
+    }
+
+    #[test]
+    fn a_file_in_a_language_with_no_row_is_sent_exactly_as_it_is() {
+        // The property that lets the table grow one language at a time: an
+        // extension nobody has described is never guessed at.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let source = "section .text\nglobal _start\n_start:\n    mov eax, 1\n";
+        write(dir.path(), "boot.asm", source);
+        let request = request_for(dir.path());
+        let file = file(&request, "boot.asm");
+
+        assert_eq!(
+            file.bytes(),
+            Some(source.as_bytes()),
+            "an unknown language is sent whole and untouched"
+        );
+        assert_eq!(file.kept(), None, "and nothing claims to have elided it");
+    }
+
+    #[test]
+    fn the_request_budget_follows_the_window_it_will_be_read_in() {
+        // The defect this replaced: a fixed 2 MiB cap sat above every window it
+        // was meant to respect, so nothing was ever demoted and the overflow
+        // was left to whatever the transport does about it.
+        let small = request_byte_cap(200_000);
+        let large = request_byte_cap(1_000_000);
+        assert!(
+            small < large,
+            "a bigger window buys a bigger request: {small} vs {large}"
+        );
+        assert!(
+            small < 200_000 * BYTES_PER_TOKEN,
+            "and the prompt, the children's documents and the answer are kept back"
+        );
+    }
+
+    #[test]
+    fn trimming_an_elided_file_credits_the_budget_only_what_it_carried() {
+        // The bug this pins: `trim_to_budget` demoted a file and then credited
+        // the budget with the file's size *on disk*. That is right for a file
+        // sent whole and wrong for an elided one, which is carried as its
+        // surviving lines and reported as its full size — so the loop
+        // over-counted what it had recovered, stopped early, and handed back a
+        // request still over the cap while believing it had met it. Silently
+        // over the cap is the one outcome the whole ladder exists to prevent.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // Each file is real code that survives elision plus a test module that
+        // does not, so after eliding they are still collectively over the cap
+        // and trimming has to run — which is the only situation in which the
+        // miscounting could bite.
+        for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+            let code = (0..400).fold(String::new(), |mut code, n| {
+                use std::fmt::Write as _;
+                let _ = write!(code, "pub fn work_{n}() -> u32 {{\n    {n}\n}}\n\n");
+                code
+            });
+            let body = "        let filler = 1;\n".repeat(2_000);
+            write(
+                dir.path(),
+                name,
+                format!(
+                    "{code}#[cfg(test)]\nmod tests {{\n    #[test]\n    \
+                     fn it_works() {{\n{body}    }}\n}}\n"
+                ),
+            );
+        }
+
+        let cap = 40_000;
+        let Gathered { request, problems } =
+            gather_request("summarise", dir.path(), cap).expect("gathers");
+
+        let carried = carried_bytes(
+            request.files(),
+            request.child_documents(),
+            request.previous_document(),
+        );
+        assert!(
+            carried <= cap,
+            "the request really is inside the cap it reports meeting: {carried} > {cap}"
+        );
+        assert!(
+            !problems.is_empty(),
+            "and it said out loud what it gave up to get there"
+        );
+    }
+
+    #[test]
+    fn a_file_whose_account_would_cost_more_than_it_frees_is_not_given_up() {
+        // Naming a file frees what it was carrying and commits the lift to
+        // buying an account back, so for a small file the trade loses before it
+        // starts. It also used to be how the biggest files in a directory ended
+        // as bare names: the trim stopped the instant it was inside the cap,
+        // leaving the lift nothing to spend, and `warlock-tui/src` reached its
+        // pass with `app.rs`, `ui.rs`, `pacting.rs` and `claude.rs` as names
+        // alone. Charging each cliff for the account it will want is what fixed
+        // that, and this is the other end of the same rule.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "small.txt", filler(512));
+        write(dir.path(), "big.txt", filler(200_000));
+
+        let cap = 100_000;
+        let Gathered { request, problems } =
+            gather_request("summarise", dir.path(), cap).expect("gathers");
+
+        assert!(
+            file(&request, "big.txt").is_omitted(),
+            "the file whose account is worth buying is given up",
+        );
+        assert!(
+            !file(&request, "small.txt").is_omitted(),
+            "the file whose account would cost more than it frees is kept whole",
+        );
+        assert_eq!(
+            problems.len(),
+            1,
+            "and only the real trade is reported: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn the_trim_leaves_room_for_the_accounts_the_lift_will_buy() {
+        // The defect this pins, measured on `warlock-tui/src`: the trim met the
+        // cap exactly, so 17KB of headroom stood against eleven cliffed files
+        // and seven of them stayed bare names all the way to the pass. A
+        // document written about a file nobody could read is a document written
+        // by guessing.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            write(dir.path(), name, filler(60_000));
+        }
+
+        let cap = 100_000;
+        let Gathered { request, problems } =
+            gather_request("summarise", dir.path(), cap).expect("gathers");
+
+        let carried = carried_bytes(
+            request.files(),
+            request.child_documents(),
+            request.previous_document(),
+        );
+        let cliffed = problems.len() as u64;
+        assert!(cliffed > 0, "the fixture is over the cap");
+        assert!(
+            cap - carried >= cliffed * ESTIMATED_ACCOUNT_BYTES,
+            "every cliffed file has room left for an account of it: {} spare for \
+             {cliffed} files",
+            cap - carried,
+        );
+    }
+
+    #[test]
+    fn an_implausible_window_still_yields_a_usable_budget() {
+        // No budget may fail a fit, this module's oldest rule: an agent that
+        // reports a window smaller than the room reserved gets a poor request
+        // rather than an impossible one.
+        assert_eq!(request_byte_cap(0), MINIMUM_REQUEST_BYTES);
+        assert_eq!(request_byte_cap(RESERVED_TOKENS), MINIMUM_REQUEST_BYTES);
     }
 
     /// The paths of a request's files, in the order it carries them.
@@ -2323,7 +2795,7 @@ mod tests {
         write(dir.path(), "assets/WARLOCK.md", "# not a module at all\n");
 
         let Gathered { request, problems } =
-            gather_request("summarise", dir.path()).expect("gathers");
+            gather_request("summarise", dir.path(), REQUEST_BYTE_CAP).expect("gathers");
 
         assert_eq!(
             file_paths(&request),
@@ -2353,7 +2825,7 @@ mod tests {
         // A range that runs backwards: a glob the matcher will not compile.
         write(dir.path(), ".warlockignore", "a[z-a]\n");
 
-        let error = gather_request("summarise", dir.path())
+        let error = gather_request("summarise", dir.path(), REQUEST_BYTE_CAP)
             .expect_err("rules that cannot be read are not no rules");
 
         assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
@@ -2422,7 +2894,8 @@ mod tests {
         write(dir.path(), "lib.rs", "//! Core engine.\n");
 
         let Gathered { request, problems } =
-            gather_request("summarise", dir.path()).expect("an enormous document is not fatal");
+            gather_request("summarise", dir.path(), REQUEST_BYTE_CAP)
+                .expect("an enormous document is not fatal");
 
         assert_eq!(request.previous_document(), None);
         let about_document: Vec<&Problem> = problems
@@ -2477,7 +2950,7 @@ mod tests {
         }
 
         let Gathered { request, problems } =
-            gather_request("summarise", dir.path()).expect("gathers");
+            gather_request("summarise", dir.path(), REQUEST_BYTE_CAP).expect("gathers");
 
         assert_eq!(
             request.previous_document(),
@@ -2515,7 +2988,8 @@ mod tests {
         write(dir.path(), "lib.rs", "//! Core engine.\n");
 
         let Gathered { request, problems } =
-            gather_request("summarise", dir.path()).expect("a huge file is not fatal");
+            gather_request("summarise", dir.path(), REQUEST_BYTE_CAP)
+                .expect("a huge file is not fatal");
 
         let listed = file(&request, "Cargo.lock");
         assert!(listed.is_omitted());
@@ -2569,7 +3043,8 @@ mod tests {
         }
 
         let Gathered { request, problems } =
-            gather_request("summarise", dir.path()).expect("a fat directory is not fatal");
+            gather_request("summarise", dir.path(), REQUEST_BYTE_CAP)
+                .expect("a fat directory is not fatal");
 
         assert_eq!(
             file_paths(&request),
@@ -2641,8 +3116,9 @@ mod tests {
         );
         write(dir.path(), "lib.rs", filler(1024));
 
-        let Gathered { request, problems } = gather_request("summarise", dir.path())
-            .expect("an enormous child document is not fatal either");
+        let Gathered { request, problems } =
+            gather_request("summarise", dir.path(), REQUEST_BYTE_CAP)
+                .expect("an enormous child document is not fatal either");
 
         assert_eq!(
             request.child_documents().len(),
@@ -2650,15 +3126,27 @@ mod tests {
             "the account of a whole subtree is the one thing that never gives \
              way: dropping it would leave nothing in its place",
         );
+        // And the file does not give way either, which is the newer half of
+        // this. Naming a 1KB file frees 1KB and commits the lift to buying an
+        // account that costs several times that, so the trade is a loss before
+        // it starts — and here it cannot even help, since the child document
+        // alone is already the whole budget. Giving it up would cost its text
+        // and buy nothing at all.
         assert!(
-            file(&request, "lib.rs").is_omitted(),
-            "the file gives way instead, and still says its name and size",
+            !file(&request, "lib.rs").is_omitted(),
+            "a file too small for the trade to pay keeps its contents",
         );
-        assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(
-            matches!(problems[0].cause, Omission::OverBudget { size: 1024 }),
-            "{:?}",
-            problems[0],
+            problems.is_empty(),
+            "and nothing is reported as given up, because nothing was: {problems:?}",
+        );
+        assert!(
+            carried_bytes(
+                request.files(),
+                request.child_documents(),
+                request.previous_document(),
+            ) > REQUEST_BYTE_CAP,
+            "the request stays honestly over the cap, which this module allows",
         );
     }
 
@@ -2725,7 +3213,8 @@ mod tests {
         }
 
         let Gathered { request, problems } =
-            gather_request("summarise", dir.path()).expect("an unreadable file is not fatal");
+            gather_request("summarise", dir.path(), REQUEST_BYTE_CAP)
+                .expect("an unreadable file is not fatal");
 
         assert!(file(&request, "secret.rs").is_omitted());
         assert_eq!(
@@ -2757,7 +3246,7 @@ mod tests {
     fn a_directory_that_is_not_there_is_a_walk_error() {
         let dir = tempfile::tempdir().expect("a temporary directory");
 
-        let error = gather_request("summarise", dir.path().join("nowhere"))
+        let error = gather_request("summarise", dir.path().join("nowhere"), REQUEST_BYTE_CAP)
             .expect_err("there is nothing to walk");
 
         assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");

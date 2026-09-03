@@ -21,6 +21,24 @@ you start opening source files. A parent's document is written from its
 children's documents, so reading downwards from the top gives you the shape
 of the project in a few files instead of a few dozen.
 
+**They are maps, not specifications.** A `WARLOCK.md` is written to get you
+to the right file quickly, and it is not the last word on anything it
+describes. Use it to find the surface area a question touches — which
+directory, which file, which function — and then open that file and check.
+Every document says this at the top, in the line warlock stamps on it.
+
+Two habits follow from that, and they matter more than anything else here:
+
+- **Verify before you rely.** Confirm a claim against the source before you
+  build on it, quote it in a review, or repeat it to someone. A document is
+  the fastest way to find the evidence; it is not the evidence.
+- **Silence is not absence.** If a document does not mention something, that
+  is not a finding. It may be missing because the code changed, because the
+  pass had no room for it, or because nobody thought it worth a line — and a
+  document covering a large directory necessarily leaves things out. Never
+  conclude that a thing does not exist because no document says it does. Go
+  and look.
+
 One caveat, and it is what the colours below exist for: **a document can be
 behind the code it describes.** Where a document and the code disagree, the
 code is right. Say so in your work, because that gap is the thing warlock

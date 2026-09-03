@@ -293,10 +293,48 @@ behaviour of half a directory has left its reader unable to tell what is even \
 here, which is worse: the second half is written in addition to covering the \
 directory, never instead of it.
 
+Give every file in this request an entry of its own, naming it. Every file, \
+not the ones that seemed most interesting: a directory of thirty files gets \
+thirty entries. Covering the directory is the half of this that can be checked \
+by counting, and a document that writes at length about eight files and leaves \
+the other twenty-two unnamed has failed at it however good those eight entries \
+are. If a file is small, or dull, or exists only to re-export what is beside \
+it, say so in a line — that is its entry, and it is a fact a reader needs.
+
+Let the document be as long as the directory needs. There is no target length \
+and no length worth aiming for. A directory of three files gets a short \
+document and a directory of forty gets a much longer one; writing the same \
+amount about both means the second is mostly missing.
+
+Write so that every claim can be checked, because it will be. Whenever you say \
+what something does, name the thing that does it — the function, the type, the \
+constant, the file — so a reader can go straight to it and see for themselves. \
+Saying that `closed_scope` in `session.rs` is the one check, and that `p`, `r` \
+and `s` all go through it, sends a reader to a definite place; saying that the \
+boundary is enforced here sends them nowhere and can be neither confirmed nor \
+contradicted. Prefer the sentence that gives a reader the address over the \
+sentence that tries to save them the trip.
+
+That is what this document is for. It is a map of a directory, written to be \
+read before the source and to say which source to read: someone arriving here \
+should learn fast what is in this directory, which parts of it bear on the \
+question they came with, and where to open the file and check. It is not a \
+specification, it does not stand in place of the code, and it is not the last \
+word on anything it describes. Write it as the thing that gets a reader to the \
+right file, not as the thing that means they need not go.
+
 Every file in this request sits in this directory, whatever build target \
 compiles it and whatever crate it belongs to. Never write that a file you were \
 given lives somewhere else, and never describe as missing from here something \
 you were handed.
+
+One directory may hold more than one build target — a library and a binary, an \
+entry point and its modules, several programs side by side. That is a fact \
+about the directory to report, not a reason to pick one of them and write the \
+document about it. If both a `lib.rs` and a `main.rs` are here, both are here: \
+say so, say which files belong to which, and cover all of them. Writing that \
+one of the files in front of you does not exist is the worst sentence this \
+document can contain, because a reader has no way to tell it from a fact.
 
 You are given this directory's own files and the WARLOCK.md of each immediate \
 subdirectory. The subdirectories have already described themselves: summarise \
@@ -316,6 +354,14 @@ reporting a silence — that no document describes something, that no document \
 claims something exists — is the same unverifiable claim written from the other \
 side. Say nothing rather than report a gap you cannot see.
 
+A superlative is a claim about every file here, not about the ones you could \
+read. The largest file, the only one that does some thing, the one place \
+something happens — check it against the whole listing, including the files \
+that arrived as a summary or as a name and a size, or do not make the claim. \
+Two sentences naming different files as the largest is the failure this \
+prevents, and it happens when the biggest file in a directory is also the one \
+that had to be described rather than sent.
+
 Where two things you were given disagree, settle it rather than passing both on. \
 A file outranks any document, including this directory's previous one and its \
 children's: a document is what somebody concluded, a file is what is there. Do \
@@ -334,13 +380,29 @@ it. A document that keeps a sentence nobody can still check is how a wrong \
 sentence survives forever.
 
 Some files may appear as a name and a byte size with no contents. Those were \
-too large to send. Mention such a file if it matters what it is, and never \
-guess what is inside it.
+too large to send. Such a file still gets its entry like every other, and that \
+entry is its name, its size, and that its contents were not available. That is \
+a complete entry and the whole of what you can honestly write: do not reason \
+from its name, from how other files use it, or from what a file of that size \
+in a directory like this usually does. A sentence beginning presumably, \
+likely, almost certainly or by its exports is the error this paragraph exists \
+to prevent, and hedging the guess does not make it one. Covering every file \
+and never guessing are not in tension — the entry for a file you cannot see is \
+simply short.
 
 Some files may instead appear with a summary: an account of the file written \
 by an earlier pass that read the whole of it. Trust it as a description of \
 what that file contains, and never quote it as the file's own text — it is \
 prose about the file, not any part of it.
+
+Some files may appear with lines removed, marked as having had their test \
+bodies elided. Every line still there is the file's own, in its own order, and \
+may be relied on and quoted exactly like a file sent whole; each marker stands \
+where a test body was. The names left around those markers are the point of \
+keeping them — a test's name usually says what the code is required to do, and \
+is worth reporting as behaviour. A marker means bodies were dropped to make \
+the request fit. It never means the file has no tests, and a file elided this \
+way is not a file anything was left out of in the sense worth writing about.
 
 Write about the directory, not about warlock's bookkeeping and not about \
 yourself. Whether *this directory* is itself pacted or scoped, which sigil would \
@@ -1217,7 +1279,13 @@ pub fn closed_scopes_at_or_below<'manifest>(
 ///     pact_directory(dir.path(), dir.path(), &Canned(markdown.clone()))?;
 ///
 /// assert_eq!(document, dir.path().join("WARLOCK.md"));
-/// assert_eq!(fs::read_to_string(&document)?, markdown, "written verbatim");
+///
+/// // The answer, byte for byte, behind the one constant warlock puts in front
+/// // of every document saying what kind of thing it is: a map of the directory
+/// // to be checked against the source, not a specification of it.
+/// let written = fs::read_to_string(&document)?;
+/// assert!(written.starts_with("<!-- warlock -->"));
+/// assert!(written.ends_with(&markdown), "the answer itself is written verbatim");
 /// assert!(problems.is_empty());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -1262,6 +1330,61 @@ pub fn pact_directory(
 /// [`pact_directory`] above it: a caller pacting one directory has nothing to
 /// report progress about, and a caller that does have a front end reaches this
 /// through [`pact_subtree`], which hands down the observer it was given.
+/// The line every document opens with, saying what kind of thing it is.
+///
+/// Warlock writes this; no pass is asked for it. A rule in [`PROMPT`] would be
+/// a rule a model could word differently on every directory, drift away from,
+/// or drop under a long request — and the one sentence whose exact wording is
+/// the point is a bad candidate for that. Written here it is the same in every
+/// document in every repository, and it costs no tokens.
+///
+/// # What it is for
+///
+/// A `WARLOCK.md` is read by people and by models, and both have been observed
+/// treating it as the specification of the directory rather than as a guide to
+/// it — concluding that a thing is absent because the document does not mention
+/// it. That reading is wrong in a way the document cannot correct from the
+/// inside, because a confident paragraph looks the same whether or not anybody
+/// has checked it lately. So the document says what it is before it says
+/// anything else: written from one pass over one directory, ahead of the
+/// source, and answerable to the source.
+///
+/// It names the freshness rule as well, because the other half of the same
+/// misreading is not knowing that a document may simply be behind. Where this
+/// document and the code disagree, the code is right — the sentence the rest of
+/// warlock exists to make actionable.
+///
+/// # Why it carries no date
+///
+/// There is one already: `granted_at` in `.warlock/pacts.toml`, written when
+/// the hash is granted, which is the record that means something. A second date
+/// in the document would change these bytes on every pass whether or not a word
+/// of the document changed, turning every re-pact into a diff. The stamp is
+/// constant so that a document that says the same thing is the same file.
+const STAMP: &str = "<!-- warlock -->\n\
+> Written by a model pass over this directory alone, to be read before its \
+source and to say which source to read. A map, not a specification: check \
+anything you are about to rely on against the files themselves, and where this \
+document and the code disagree, the code is right.\n";
+
+/// `text` with [`STAMP`] in front of it, and nothing else changed.
+///
+/// The answer itself is not touched — not trimmed, not parsed, not reformatted
+/// — which is the promise this function had to be written around rather than
+/// through. Everything warlock adds is in front of the first byte the pass
+/// wrote, so the document is still the answer, preceded by a constant.
+///
+/// Idempotent by inspection rather than by trust: a pass that somehow returned
+/// a document already carrying the stamp — a previous document echoed back
+/// verbatim — is not given a second one. That is cheaper than the alternative,
+/// which is a document that grows a stamp per pass forever.
+fn stamped(text: &str) -> String {
+    if text.starts_with(STAMP) {
+        return text.to_owned();
+    }
+    format!("{STAMP}\n{text}")
+}
+
 fn pact_directory_watched(
     directory: &Path,
     root: &Path,
@@ -1308,7 +1431,9 @@ fn pact_directory_watched(
     // removed on both ways out.
     let document = directory.join(DOCUMENT_FILE);
     let temp = directory.join(temp_file_name(DOCUMENT_FILE));
-    let write = write_and_sync(&temp, text.as_bytes()).and_then(|()| fs::rename(&temp, &document));
+    let stamped = stamped(&text);
+    let write =
+        write_and_sync(&temp, stamped.as_bytes()).and_then(|()| fs::rename(&temp, &document));
     if let Err(source) = write {
         // Best effort, and nothing to report if it fails: the caller is already
         // being told the document was not written, and a stray dot file is
@@ -2172,9 +2297,9 @@ mod tests {
 
     use super::{
         DOCUMENT_FILE, Failure, MANIFEST_DIR, MINIMUM_DOCUMENT_BYTES, Observer, Pacted,
-        PactedSubtree, Pacting, Refusal, Unviewable, Unwatched, Viewed, closed_scopes_at_or_below,
-        pact_directory, pact_directory_watched, pact_subtree, pactable_directories,
-        refresh_subtree, unpact_subtree, view_file,
+        PactedSubtree, Pacting, Refusal, STAMP, Unviewable, Unwatched, Viewed,
+        closed_scopes_at_or_below, pact_directory, pact_directory_watched, pact_subtree,
+        pactable_directories, refresh_subtree, unpact_subtree, view_file,
     };
     use crate::fitting::{
         CHUNK_BYTE_CAP, CHUNK_COUNT_CEILING, Gathered, MAP_PROMPT, MINIMUM_SUMMARY_BYTES, Omission,
@@ -2284,15 +2409,46 @@ mod tests {
         bytes
     }
 
+    /// A request budget nothing in a fixture can reach, so that the per-file
+    /// cap is the only thing able to leave anything out.
+    ///
+    /// Four times [`PER_FILE_BYTE_CAP`] rather than a number typed in: what
+    /// these fixtures probe is the per-file boundary, and a request budget that
+    /// could also demote a file would make a failure here ambiguous about which
+    /// cap caused it. Derived from the other cap so it cannot drift under it.
+    const AMPLE_CAP: u64 = PER_FILE_BYTE_CAP * 4;
+
     /// The request for `dir`, insisting nothing was left out of it.
     ///
     /// Most of these fixtures are small enough to send whole, so an empty
     /// problem list is part of what they assert: a gather that quietly started
-    /// dropping files would fail here rather than pass unnoticed.
+    /// dropping files would fail here rather than pass unnoticed. It gathers
+    /// against [`AMPLE_CAP`] for that reason — the only cap allowed to drop
+    /// anything here is the per-file one.
     fn request_for(dir: &Path) -> agent::Request {
-        let Gathered { request, problems } = gather_request("summarise", dir).expect("gathers");
+        let Gathered { request, problems } =
+            gather_request("summarise", dir, AMPLE_CAP).expect("gathers");
         assert!(problems.is_empty(), "{problems:?}");
         request
+    }
+
+    /// What the pass actually wrote, with warlock's own stamp taken back off —
+    /// and an assertion that the stamp was there to take off.
+    ///
+    /// Every test that cares what a document says goes through here, so the one
+    /// fact that warlock prepends a constant to every document is stated once
+    /// rather than folded into a dozen expected values. What follows the stamp
+    /// is still the answer byte for byte: not trimmed, not parsed, not
+    /// reformatted.
+    fn body(dir: &Path) -> Option<Vec<u8>> {
+        let written = written(dir)?;
+        let text = String::from_utf8(written).expect("a document is text");
+        let rest = text
+            .strip_prefix(STAMP)
+            .unwrap_or_else(|| panic!("every document opens with warlock's stamp: {text:?}"))
+            .strip_prefix('\n')
+            .expect("the stamp is followed by a blank line");
+        Some(rest.as_bytes().to_vec())
     }
 
     /// The paths of a request's files, in the order it carries them.
@@ -2615,7 +2771,7 @@ mod tests {
 
         assert_eq!(path, dir.path().join("WARLOCK.md"));
         assert_eq!(
-            written(dir.path()).as_deref(),
+            body(dir.path()).as_deref(),
             Some(answer.as_bytes()),
             "byte for byte: not trimmed, not parsed, not reformatted",
         );
@@ -2643,10 +2799,21 @@ mod tests {
             prompt.contains("a name and a byte size with no contents"),
             "the listed file has to be explained: {prompt}",
         );
-        assert!(
-            prompt.contains("never guess what is inside it"),
-            "and guessing at it forbidden: {prompt}",
-        );
+        // Reworded when a real run showed the rule was not enough on its own:
+        // the pass wrote entries for seven name-only files, each hedged with
+        // "presumably", "likely" or "by its exports". Covering every file and
+        // never guessing had read as a conflict, so the prompt now says the
+        // short entry is the complete one and names the hedges by name.
+        for phrase in [
+            "do not reason from its name",
+            "presumably",
+            "hedging the guess does not make it one",
+        ] {
+            assert!(
+                prompt.contains(phrase),
+                "guessing at a listed file has to stay forbidden ({phrase:?}): {prompt}",
+            );
+        }
         assert!(
             prompt.contains("appear with a summary"),
             "the summarised file has to be explained too: {prompt}",
@@ -2692,7 +2859,11 @@ mod tests {
         }
 
         pact_directory(pacted.path(), pacted.path(), &Canned::new(&answer)).expect("pacts");
-        write(plain.path(), DOCUMENT_FILE, &answer);
+        // The same bytes by hand, stamp and all: what is being compared is the
+        // mechanism — the hidden temporary and the rename — not what warlock
+        // puts at the top of a document, which is on both sides here.
+        let on_disk = super::stamped(&answer);
+        write(plain.path(), DOCUMENT_FILE, &on_disk);
 
         assert_eq!(
             subtree_hash(pacted.path()).expect("hashes"),
@@ -2700,7 +2871,7 @@ mod tests {
         );
         assert_eq!(
             request_for(pacted.path()).previous_document(),
-            Some(answer.as_str()),
+            Some(on_disk.as_str()),
             "and the next request carries the document it just wrote, as the \
              previous document rather than as a file",
         );
@@ -2779,7 +2950,7 @@ mod tests {
         pact_directory(dir.path(), dir.path(), &agent).expect("pacts");
 
         assert_eq!(
-            written(dir.path()).as_deref(),
+            body(dir.path()).as_deref(),
             Some(answer.as_bytes()),
             "the old document is gone, whole, with nothing merged into it",
         );
@@ -2870,6 +3041,54 @@ mod tests {
     }
 
     #[test]
+    fn every_document_opens_by_saying_it_is_a_map_and_not_a_specification() {
+        // The misreading this exists to head off: a document treated as the
+        // specification of a directory, so that what it does not mention is
+        // taken not to exist. Warlock writes the correction rather than asking
+        // a pass for it, so it is the same in every document and cannot be
+        // reworded, shortened or dropped under a long request.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+        let answer = document(300);
+
+        pact_directory(dir.path(), dir.path(), &Canned::new(&answer)).expect("pacts");
+
+        let written = String::from_utf8(written(dir.path()).expect("a document")).expect("text");
+        assert!(written.starts_with(STAMP), "{written}");
+        assert!(
+            written.contains("check anything you are about to rely on against the files"),
+            "the reader is told to verify: {written}"
+        );
+        assert!(
+            written.contains("the code is right"),
+            "and told which side wins when it does not match: {written}"
+        );
+        assert!(
+            written.ends_with(&answer),
+            "and the pass's own answer is untouched behind it"
+        );
+    }
+
+    #[test]
+    fn the_stamp_is_not_added_twice_and_carries_no_date() {
+        // Two properties in one place because they are the same property: the
+        // stamp is constant, so a document that says the same thing is the same
+        // file. A date would make every re-pact a diff, and a second stamp
+        // would make every re-pact a longer document.
+        let once = super::stamped("# engine\n\nCore.\n");
+        assert_eq!(
+            super::stamped(&once),
+            once,
+            "a document already stamped is not stamped again"
+        );
+        assert_eq!(
+            super::stamped("# engine\n\nCore.\n"),
+            once,
+            "and the stamp does not vary between runs"
+        );
+    }
+
+    #[test]
     fn an_answer_exactly_at_the_minimum_is_written() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let answer = document(MINIMUM_DOCUMENT_BYTES);
@@ -2877,7 +3096,7 @@ mod tests {
         pact_directory(dir.path(), dir.path(), &Canned::new(&answer))
             .expect("the floor is what a document has to reach, not exceed");
 
-        assert_eq!(written(dir.path()).as_deref(), Some(answer.as_bytes()));
+        assert_eq!(body(dir.path()).as_deref(), Some(answer.as_bytes()));
     }
 
     #[test]
@@ -2889,7 +3108,7 @@ mod tests {
             .expect("a byte past the floor is over it");
 
         assert_eq!(
-            written(dir.path()).as_deref(),
+            body(dir.path()).as_deref(),
             Some(answer.as_bytes()),
             "the two sides of the floor differ by one byte and nothing else",
         );
@@ -2953,7 +3172,7 @@ mod tests {
         let Pacted { problems, .. } = pact_directory(dir.path(), dir.path(), &agent)
             .expect("an over-cap file never fails a pact");
 
-        assert_eq!(written(dir.path()).as_deref(), Some(answer.as_bytes()));
+        assert_eq!(body(dir.path()).as_deref(), Some(answer.as_bytes()));
         assert_eq!(
             agent.passes(),
             1,
@@ -3327,9 +3546,12 @@ mod tests {
     fn an_account_that_does_not_fit_leaves_the_file_on_the_cliff_it_was_taken_to() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         // Three files of one size: the budget takes one of them, and which one
-        // is decided by path because the sizes cannot decide it.
+        // is decided by path because the sizes cannot decide it. Sized against
+        // the trim's reserved target rather than the cap — 105% of the budget
+        // has to come down to the 75% `trim_to_budget` aims for, and one file
+        // of the three is what does it.
         for name in ["a.bin", "b.bin", "c.bin"] {
-            write(dir.path(), name, filler(share(39)));
+            write(dir.path(), name, filler(share(35)));
         }
         // An account far too long to fit in what is left of the budget: two
         // files of 100 KiB are already in the request. One pass makes it —
@@ -3360,7 +3582,7 @@ mod tests {
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_eq!(problems[0].path, dir.path().join("a.bin"));
         assert!(
-            matches!(problems[0].cause, Omission::OverBudget { size } if size == share(39)),
+            matches!(problems[0].cause, Omission::OverBudget { size } if size == share(35)),
             "the cause is the whole-request cap, which is what there was no room in: {:?}",
             problems[0],
         );
@@ -3687,7 +3909,7 @@ mod tests {
             .expect("nothing about a declined account is fatal");
 
         assert_eq!(
-            written(dir.path()).as_deref(),
+            body(dir.path()).as_deref(),
             Some(document(300).as_bytes()),
             "and the pact finishes and writes its document anyway",
         );
@@ -3771,8 +3993,11 @@ mod tests {
         // for one a second time.
         let parts = CHUNK_COUNT_CEILING + 1;
         let bundle = write(dir.path(), "bundle.js", text_of_chunks(parts));
+        // Sized against the trim's reserved target, as in the cliff test above:
+        // one of the three is what brings 105% of the budget down to the 75%
+        // `trim_to_budget` aims for, so exactly one file is there to lift back.
         for name in ["a.bin", "b.bin", "c.bin"] {
-            write(dir.path(), name, filler(share(39)));
+            write(dir.path(), name, filler(share(35)));
         }
         let agent = Counting::new(document(300)).scripted([Ok(account("the file the cliff took"))]);
 
@@ -3868,18 +4093,19 @@ mod tests {
              than the pact going nowhere",
             carried(pass),
         );
-        assert_eq!(
+        // The files do not give way either. Each is small enough that naming it
+        // would free less than the account the lift would then buy, so the
+        // trade loses before it starts — and against a child document that is
+        // the whole budget on its own, no number of them could have helped.
+        // They keep their text, and nothing is reported as given up.
+        assert!(
+            listed(pass).is_empty(),
+            "files too small for the trade to pay keep their contents: {:?}",
             listed(pass),
-            ["lib.rs", "main.rs"],
-            "the files give way instead, and still say their names and sizes",
         );
-        assert_eq!(
-            problems
-                .iter()
-                .map(|problem| problem.path.clone())
-                .collect::<Vec<_>>(),
-            ["main.rs", "lib.rs"].map(|name| dir.path().join(name)),
-            "reported largest first, and no entry for either document",
+        assert!(
+            problems.is_empty(),
+            "and nothing was left out to report: {problems:?}",
         );
         assert!(
             problems

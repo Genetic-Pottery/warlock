@@ -23,6 +23,7 @@ pub mod decide;
 pub mod fitting;
 pub mod hash;
 mod ignores;
+mod languages;
 pub mod load;
 pub mod manifest;
 pub mod pact;
