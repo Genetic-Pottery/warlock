@@ -438,28 +438,30 @@ const RESERVED_TOKENS: u64 = 40_000;
 /// guessed before any pass has written one.
 ///
 /// Used by [`trim_to_budget`] alone, and only to keep back room for the
-/// accounts [`lift_from_the_cliff`] is about to buy. Eight kibibytes, against
-/// the 52 accounts this repository has paid for:
+/// accounts [`lift_from_the_cliff`] is about to buy. Six kibibytes, measured
+/// against the twenty accounts written under the `v2` prompts:
 ///
-/// | min | p25 | median | mean | p75 | p90 | max |
-/// |---|---|---|---|---|---|---|
-/// | 3.2KB | 5.4KB | 6.2KB | 7.6KB | 9.3KB | 11.5KB | 21.3KB |
+/// | min | median | mean | p75 | p90 | max |
+/// |---|---|---|---|---|---|
+/// | 3.6KB | 5.3KB | 5.5KB | 5.9KB | 7.4KB | 8.1KB |
 ///
-/// Just above the mean, which is the direction that leaves a lift with room to
-/// spare rather than a file stranded as a bare name.
+/// It was eight, taken from the 52 accounts the `v1` prompts had produced —
+/// a wider and heavier spread (mean 7.6KB, max 21.3KB). Asking for exact names
+/// and visibility instead of free prose turned out to make accounts *shorter*
+/// and far more uniform, so eight sat above the whole `v2` distribution and
+/// reserved about half again as much as any account actually wanted. Six is a
+/// little above the mean, which is where this number belongs.
 ///
-/// An estimate is enough because nothing is decided by it: it only sets how
-/// much room is kept back, and [`lift_from_the_cliff`] still measures each
-/// account against the real budget before committing to it. Guess high and a
-/// little of the budget goes unspent; guess low and a file or two stays a name
-/// that could have been described.
+/// **Which way to be wrong.** Reserving too much is not free: every extra byte
+/// held back is a file cliffed that need not have been, and a file cliffed
+/// loses its own text to prose about it. Reserving too little strands a file as
+/// a bare name, which is worse. So this errs high — but by a margin taken from
+/// a measurement rather than by a whole multiple.
 ///
-/// **Owed a re-measurement.** Those 52 were written under the `v1` summary
-/// prompts. `v2` asks for the exact spelling and visibility of every name a
-/// file declares, which is more to say and will very likely run longer — so
-/// this number is measured against summaries that no longer exist. It errs
-/// high today and may not once the cache refills.
-const ESTIMATED_ACCOUNT_BYTES: u64 = 8 * 1024;
+/// Nothing is decided by it in any case: [`lift_from_the_cliff`] measures each
+/// account against the real budget before committing to it, so this only sets
+/// how much room is kept back, never whether an account fits.
+const ESTIMATED_ACCOUNT_BYTES: u64 = 6 * 1024;
 
 /// The smallest budget any window may produce, however little is left after
 /// [`RESERVED_TOKENS`].

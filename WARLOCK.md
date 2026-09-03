@@ -3,7 +3,7 @@
 
 # warlock
 
-The repository root of Warlock — the freshness-ledger tool this codebase builds. It holds the workspace-level Cargo configuration, the project's licence, the pitch and complete reference document, the pact/freshness/scope vocabulary the whole repository operates under, and a short vocabulary crib. All executable code lives one level down under `crates/`, whose `WARLOCK.md` describes its two members — `warlock-engine` (headless domain library) and `warlock-tui` (terminal front end and sole spawner of a `claude` subprocess) — joined by a dependency edge that runs one direction only: TUI → engine, never back.
+The repository root of Warlock — the freshness-ledger tool this codebase builds. It holds the workspace-level Cargo configuration, the project's licence, the pitch and complete reference document, the pact/freshness/scope vocabulary the whole repository operates under, and a short vocabulary crib. No executable code lives at this level; all of it is one directory down under `crates/`, whose `WARLOCK.md` describes its two members — `warlock-engine` (headless domain library) and `warlock-tui` (terminal front end and sole spawner of a `claude` subprocess) — joined by a dependency edge that runs one direction only: TUI → engine, never back.
 
 ## What is here
 
