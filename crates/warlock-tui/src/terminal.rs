@@ -8,7 +8,7 @@
 //! of what "put it back" means.
 //!
 //! There is a fourth way out now, and it is the only one warlock comes back
-//! from: [`TerminalGuard::suspended`] gives the terminal up for as long as a
+//! from: [`Screen::suspended`] gives the terminal up for as long as a
 //! child process needs it and takes it again afterwards. It is not a second
 //! lifecycle. Giving up is the same [`restore_terminal`] every other way out
 //! runs through, and taking back is the same [`take_terminal`]
@@ -20,7 +20,6 @@
 use std::io::{self, Stdout};
 use std::panic;
 
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
@@ -28,6 +27,76 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui::layout::Size;
+use ratatui::{Frame, Terminal};
+
+/// The screen a session is drawn on: how big it is, how a frame reaches it,
+/// what happens when a child process wants it, and whether the pointer is
+/// reported.
+///
+/// Four methods, which is everything warlock does to a terminal that is not
+/// taking it and putting it back — and those two are [`TerminalGuard`]'s own,
+/// by ownership, because they happen once at each end of a session rather than
+/// on a round.
+///
+/// It is the seam the whole event loop sits behind. [`TerminalGuard`] is the
+/// adapter warlock runs on: raw mode, the alternate screen, a real `stdout`. A
+/// test's own draws into an in-memory buffer, never gives anything away, and
+/// remembers what it was asked — so a
+/// [`Session`](crate::Session) can be built and driven round after round on a
+/// machine with no terminal attached at all. Two adapters, so the seam is a
+/// real one.
+///
+/// What it deliberately does *not* cover is what a frame contains. That is
+/// [`draw`](warlock_tui::draw)'s, over an [`App`](warlock_tui::App), and it is
+/// already testable against a `TestBackend` without any of this.
+pub(crate) trait Screen {
+    /// How big the screen is right now.
+    ///
+    /// Asked once a round rather than cached, because a terminal is resized by
+    /// somebody else: the size a frame is cut by has to be the size the screen
+    /// has at the moment it is cut, not the size it had when warlock started.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backend says when it cannot be measured.
+    fn size(&self) -> io::Result<Size>;
+
+    /// Draw one frame, by handing `render` the frame to fill.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backend says when the frame cannot be written.
+    fn draw<F: FnOnce(&mut Frame<'_>)>(&mut self, render: F) -> io::Result<()>;
+
+    /// Give the screen back for as long as `body` runs, take it again
+    /// afterwards, and hand over whatever `body` said.
+    ///
+    /// `mouse` says whether the terminal was reporting its pointer when it was
+    /// given up: `m` may have turned reporting off, and resuming without asking
+    /// would quietly switch back on something the reader turned off.
+    ///
+    /// `body` gets a value out rather than a `?`, and that is part of the
+    /// interface rather than an implementation detail: there is no road from
+    /// the teardown to the setup that skips the setup, because there is no `?`
+    /// between them. A caller with something to say about how the child went
+    /// says it afterwards, with the screen back.
+    fn suspended<T, F: FnOnce() -> T>(&mut self, mouse: bool, body: F) -> io::Result<T>;
+
+    /// Ask the terminal to report its mouse, or to stop reporting it.
+    ///
+    /// The whole of what `m` does to a terminal. It is here rather than at the
+    /// keystroke for the reason [`restore_terminal`] is here: this module is
+    /// meant to be the only place that knows what warlock does to a terminal,
+    /// and a keystroke writing its own escape sequence to stdout is that rule
+    /// broken quietly — invisible until a test runs the key and the sequence
+    /// lands in the test's own output.
+    ///
+    /// The caller moves the flag it keeps only after this has returned, which
+    /// is what holds what warlock believes about the terminal down to what it
+    /// last successfully told it.
+    fn report_mouse(&mut self, on: bool) -> io::Result<()>;
+}
 
 /// A terminal in raw mode on the alternate screen, reporting its mouse,
 /// restored when dropped.
@@ -46,8 +115,11 @@ use ratatui::crossterm::terminal::{
 /// — `q`, Esc, Ctrl-C, an error out of [`run`], a panic — goes through
 /// [`restore_terminal`], and that is where the reporting is switched off.
 pub(crate) struct TerminalGuard {
-    /// The ratatui terminal the event loop draws frames on.
-    pub(crate) terminal: Terminal<CrosstermBackend<Stdout>>,
+    /// The ratatui terminal every frame is written to.
+    ///
+    /// Private: everything outside this module reaches it through [`Screen`],
+    /// which is what lets the event loop be driven without one.
+    terminal: Terminal<CrosstermBackend<Stdout>>,
 }
 
 impl TerminalGuard {
@@ -62,7 +134,7 @@ impl TerminalGuard {
     ///
     /// A session always starts with the pointer reported — `m` is the one thing
     /// that changes that, and it cannot have been pressed yet — which is the
-    /// whole of why this reads as a `true` and [`TerminalGuard::suspended`]
+    /// whole of why this reads as a `true` and [`Screen::suspended`]
     /// does not.
     pub(crate) fn enter() -> io::Result<Self> {
         if let Err(error) = take_terminal(true) {
@@ -76,6 +148,17 @@ impl TerminalGuard {
                 Err(error)
             }
         }
+    }
+}
+
+impl Screen for TerminalGuard {
+    fn size(&self) -> io::Result<Size> {
+        self.terminal.size()
+    }
+
+    fn draw<F: FnOnce(&mut Frame<'_>)>(&mut self, render: F) -> io::Result<()> {
+        self.terminal.draw(render)?;
+        Ok(())
     }
 
     /// Give the terminal back for as long as `body` runs, take it again
@@ -120,7 +203,7 @@ impl TerminalGuard {
     /// through [`restore_terminal`] as well: whatever the setup managed is
     /// undone before the error goes up, so the caller returning it prints on a
     /// terminal that works.
-    pub(crate) fn suspended<T>(&mut self, mouse: bool, body: impl FnOnce() -> T) -> io::Result<T> {
+    fn suspended<T, F: FnOnce() -> T>(&mut self, mouse: bool, body: F) -> io::Result<T> {
         restore_terminal();
         let said = body();
         if let Err(error) = take_terminal(mouse) {
@@ -130,6 +213,14 @@ impl TerminalGuard {
         let area = self.terminal.size()?.into();
         self.terminal.resize(area)?;
         Ok(said)
+    }
+
+    fn report_mouse(&mut self, on: bool) -> io::Result<()> {
+        if on {
+            execute!(io::stdout(), EnableMouseCapture)
+        } else {
+            execute!(io::stdout(), DisableMouseCapture)
+        }
     }
 }
 

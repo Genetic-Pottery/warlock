@@ -78,8 +78,8 @@ use std::time::Instant;
 use warlock_engine::{BriefsError, DEFAULT_BRIEF_DIRECTORY, Manifest, load_briefs};
 use warlock_tui::{
     Activities, Activity, App, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, ChatAgent,
-    Composed, Composer, Edited, Ending, Focus, Mode, ScopePrompt, Submitted, TemplateError,
-    WRITE_INSTRUCTION, brief_instruction, brief_template, ending_for, submitted_for,
+    Composed, Composer, Converses, Edited, Ending, Focus, Mode, ScopePrompt, Submitted,
+    TemplateError, WRITE_INSTRUCTION, brief_instruction, brief_template, ending_for, submitted_for,
 };
 
 use crate::error::one_line;
@@ -269,11 +269,15 @@ fn brief_reading(root: &Path) -> Result<(String, String), String> {
 /// and the conversation itself is on the app's thread card, where the panel can
 /// draw it — this value is the *machinery*, and machinery that also held the
 /// text would be a second copy of the conversation for somebody to keep in step.
-pub(crate) struct Chat {
+pub(crate) struct Chat<C> {
     /// Who is asked, and the session every turn belongs to. Never spoken to
     /// directly: each turn works off a copy of it wired to that turn's own
     /// cancel and activity port (see [`wired`]).
-    agent: ChatAgent,
+    ///
+    /// The seam rather than the child process: warlock talks to a
+    /// [`ChatAgent`], and a test talks to a value that answers out of memory.
+    /// See [`Converses`].
+    agent: C,
     /// The turn being answered, if one is. `None` is the ordinary state and the
     /// state a session starts and ends in.
     turn: Option<Chatting>,
@@ -314,7 +318,7 @@ pub(crate) struct Chat {
     prompt: ScopePrompt,
 }
 
-impl Chat {
+impl Chat<ChatAgent> {
     /// A conversation with nothing asked yet.
     ///
     /// The agent is made here, once, and the session id it names is fixed from
@@ -323,17 +327,19 @@ impl Chat {
     pub(crate) fn new(root: impl Into<PathBuf>) -> Self {
         Self::with_agent(root, ChatAgent::new())
     }
+}
 
+impl<C: Converses> Chat<C> {
     /// A conversation with nothing asked yet, over `agent`.
     ///
     /// [`Chat::new`]'s body with the one thing that varies handed in, so that a
     /// test can drive the very value the loop keeps — the agent and the turn
-    /// together — against a stand-in program. A conversation whose failures
-    /// could only be asserted through the pieces underneath it would be a
-    /// conversation nothing had ever run twice — including the loop's own
-    /// submit path, which is why this is reachable from the binary's tests and
-    /// not only from this module's.
-    pub(crate) fn with_agent(root: impl Into<PathBuf>, agent: ChatAgent) -> Self {
+    /// together — against a stand-in that answers out of memory. A conversation
+    /// whose failures could only be asserted through the pieces underneath it
+    /// would be a conversation nothing had ever run twice — including the loop's
+    /// own submit path, which is why this is reachable from the binary's tests
+    /// and not only from this module's.
+    pub(crate) fn with_agent(root: impl Into<PathBuf>, agent: C) -> Self {
         Self {
             agent,
             turn: None,
@@ -887,11 +893,8 @@ fn activity_port(events: &Sender<TurnEvent>) -> Activities {
 /// costs nothing and the loop's own agent keeps the handles it was built
 /// with — which nobody holds and nothing listens to, so a cancel can never
 /// reach out of the turn it was pressed for.
-fn wired(agent: &ChatAgent, cancel: &Cancel, events: &Sender<TurnEvent>) -> ChatAgent {
-    agent
-        .clone()
-        .with_cancel(cancel.clone())
-        .with_activities(activity_port(events))
+fn wired<C: Converses>(agent: &C, cancel: &Cancel, events: &Sender<TurnEvent>) -> C {
+    agent.wired(cancel.clone(), activity_port(events))
 }
 
 /// The loop's own agent, asked at the level `mode` is worth.
@@ -918,9 +921,9 @@ fn wired(agent: &ChatAgent, cancel: &Cancel, events: &Sender<TurnEvent>) -> Chat
 /// restated here. Brief mode goes through [`ChatAgent::at_effort`] and
 /// [`ChatAgent::at_model`], which let those same variables win over
 /// [`BRIEF_EFFORT`] and [`BRIEF_MODEL`] too.
-fn asking(agent: &ChatAgent, mode: Mode) -> ChatAgent {
+fn asking<C: Converses>(agent: &C, mode: Mode) -> C {
     match mode {
-        Mode::Brief => agent.at_effort(BRIEF_EFFORT).at_model(BRIEF_MODEL),
+        Mode::Brief => agent.raised(BRIEF_MODEL, BRIEF_EFFORT),
         Mode::Chat => agent.clone(),
     }
 }
@@ -943,7 +946,11 @@ fn asking(agent: &ChatAgent, mode: Mode) -> ChatAgent {
 /// the only way the channel closes without a [`TurnEvent::Finished`] is a panic
 /// in the worker — which [`apply_turn`] reads as the turn being over rather than
 /// as a reason to hang.
-pub(crate) fn spawn_turn(message: &str, agent: &ChatAgent, cancel: Cancel) -> Receiver<TurnEvent> {
+pub(crate) fn spawn_turn<C: Converses>(
+    message: &str,
+    agent: &C,
+    cancel: Cancel,
+) -> Receiver<TurnEvent> {
     let (events, received) = mpsc::channel();
     let message = message.to_owned();
     let agent = wired(agent, &cancel, &events);
@@ -970,7 +977,7 @@ pub(crate) fn spawn_turn(message: &str, agent: &ChatAgent, cancel: Cancel) -> Re
 ///
 /// `asked` is carried rather than acted on: it is what the drain reads when this
 /// turn ends, and nothing between here and there consults it.
-pub(crate) fn start_turn(message: &str, agent: &ChatAgent, asked: Asked) -> Chatting {
+pub(crate) fn start_turn<C: Converses>(message: &str, agent: &C, asked: Asked) -> Chatting {
     let cancel = CancelGuard::new();
     Chatting {
         events: spawn_turn(message, agent, cancel.handle()),
@@ -999,7 +1006,7 @@ pub(crate) fn start_turn(message: &str, agent: &ChatAgent, asked: Asked) -> Chat
 /// could not run — …` into `the turn was cancelled` for the one person who
 /// already knows why. An answer that beat the cancel by a hair is kept: it is a
 /// real answer, and throwing it away would be a lie in the other direction.
-fn run_turn(message: &str, agent: &ChatAgent, cancel: &Cancel, events: &Sender<TurnEvent>) {
+fn run_turn<C: Converses>(message: &str, agent: &C, cancel: &Cancel, events: &Sender<TurnEvent>) {
     let finished = match agent.turn(message) {
         Ok(answer) => Ok(answer),
         Err(_) if cancel.is_cancelled() => Err(Ending::Cancelled),
@@ -1732,6 +1739,8 @@ mod tests {
 
         use warlock_tui::{Activity, App, Cancel, ChatAgent, Ending, Mode, ScopePrompt};
 
+        use warlock_tui::Converses;
+
         use super::super::{Asked, Chat, TurnEvent, run_turn, spawn_turn, start_turn, wired};
         use super::{ASKED, at, chatting, clocked, drain, rows, said};
 
@@ -1898,7 +1907,7 @@ mod tests {
         /// window off the conversation afterwards. [`settle`] is this with the
         /// closed window asserted, and is what the tests about an ordinary turn
         /// call.
-        fn settled(chat: &mut Chat, app: &mut App, now: Instant) -> ScopePrompt {
+        fn settled<C: Converses>(chat: &mut Chat<C>, app: &mut App, now: Instant) -> ScopePrompt {
             let waited = Instant::now();
             while chat.answering() && waited.elapsed() < AT_MOST {
                 chat.keep_up(app, now);
@@ -1910,7 +1919,7 @@ mod tests {
 
         /// [`settled`] for a turn that is not the write request: the rounds go
         /// by and no window opens over anything.
-        fn settle(chat: &mut Chat, app: &mut App, now: Instant) {
+        fn settle<C: Converses>(chat: &mut Chat<C>, app: &mut App, now: Instant) {
             assert_eq!(
                 settled(chat, app, now),
                 ScopePrompt::Closed,
@@ -2417,6 +2426,8 @@ mod tests {
             Submitted, brief_instruction,
         };
 
+        use warlock_tui::Converses;
+
         use super::super::{
             ALREADY_CHATTING, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, Chat,
             NOT_BRIEFING, WRITE_COMMAND, brief_asking,
@@ -2440,7 +2451,7 @@ mod tests {
 
         /// A conversation with nothing asked and nothing runnable to ask,
         /// rooted where nothing is.
-        fn conversation() -> Chat {
+        fn conversation() -> Chat<ChatAgent> {
             conversation_in(Path::new(NO_REPOSITORY))
         }
 
@@ -2450,7 +2461,7 @@ mod tests {
         /// The root is settled when the conversation is built and never moves
         /// afterwards, which is why it is here and no longer an argument to
         /// every submit below.
-        fn conversation_in(root: &Path) -> Chat {
+        fn conversation_in(root: &Path) -> Chat<ChatAgent> {
             Chat::with_agent(root, ChatAgent::new().with_program(NOT_A_PROGRAM))
         }
 
@@ -2488,7 +2499,7 @@ mod tests {
         ///
         /// The field comes back inside the conversation now rather than beside
         /// it: `chat.composer()` is the same field this used to return.
-        fn submit(draft: &str, now: Instant) -> (App, Chat) {
+        fn submit(draft: &str, now: Instant) -> (App, Chat<ChatAgent>) {
             let mut app = App::default();
             let mut chat = conversation();
             submit_into(&mut app, &mut chat, draft, now);
@@ -2509,7 +2520,7 @@ mod tests {
         /// repository it is read from are the conversation's own now, so neither
         /// is a parameter here — which is the whole of why the three rungs this
         /// helper used to sit on top of are gone.
-        fn submit_into(app: &mut App, chat: &mut Chat, draft: &str, now: Instant) {
+        fn submit_into<C: Converses>(app: &mut App, chat: &mut Chat<C>, draft: &str, now: Instant) {
             chat.compose(app, Composed::Typing(Composer::new(draft)), now);
             chat.compose(app, Composed::Submit, now);
         }

@@ -264,6 +264,11 @@ pub use claude::ChatAgent;
 /// The engine's model-pass port, implemented by running the `claude` CLI as a
 /// child process.
 pub use claude::ClaudeAgent;
+/// A conversation with a model: one message in, one answer out, plus the
+/// register a brief runs in. The reading half of the model seam, as the panel's
+/// conversation needs it — deliberately not the engine's
+/// [`Agent`](warlock_engine::Agent), which a typed sentence does not fit.
+pub use claude::Converses;
 /// How long one model pass is given before it is killed: five minutes, per
 /// invocation rather than per pact.
 pub use claude::INVOCATION_TIMEOUT;
@@ -271,6 +276,9 @@ pub use claude::INVOCATION_TIMEOUT;
 /// document as the entire reply, in the shape restated inline, and the decision
 /// rather than a summary of the conversation.
 pub use claude::WRITE_INSTRUCTION;
+/// One copy of the model per unit of work — one run, or one turn — answering
+/// that unit's say-when and reporting to that unit's port.
+pub use claude::Wired;
 /// What warlock says into the conversation already in progress when somebody
 /// asks for brief mode, given the shape the document has to take: the artifact,
 /// that template placed verbatim, and that the job is to argue toward a

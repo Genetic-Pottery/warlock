@@ -301,17 +301,15 @@ use std::time::{Duration, Instant};
 use std::{env, io};
 
 use clap::{Parser, Subcommand};
-use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, MouseEvent,
-};
-use ratatui::crossterm::execute;
+use ratatui::crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use ratatui::layout::Size;
-use warlock_engine::{Manifest, Written, repository_root, write_claude_md};
+use warlock_engine::{Agent, Manifest, Written, repository_root, write_claude_md};
 use warlock_tui::{
-    App, Composer, Focus, QuitConfirm, Run, ScopePrompt, composer_on_screen, draw, panel_height,
-    panel_width, tree_height,
+    App, Composer, Converses, Focus, QuitConfirm, Run, ScopePrompt, Wired, composer_on_screen,
+    draw, panel_height, panel_width, tree_height,
 };
 
+mod boundary;
 mod chatting;
 mod check;
 mod config;
@@ -324,6 +322,11 @@ mod query;
 mod running;
 mod scoping;
 mod session;
+/// In-memory stand-ins for the two model seams, so a test that is not about the
+/// model does not have to spawn one. Test-only, and private on purpose: warlock
+/// itself talks to `claude`.
+#[cfg(test)]
+mod stubs;
 mod terminal;
 mod viewing;
 mod writing;
@@ -340,7 +343,7 @@ use query::{Listing, list};
 use running::{pact, refresh};
 use scoping::{scope_edit, scope_press};
 use session::{Scope, Watched, load_app, load_manifest, start_watching};
-use terminal::{TerminalGuard, install_panic_hook};
+use terminal::{Screen, TerminalGuard, install_panic_hook};
 use viewing::view_press;
 
 /// How long the loop waits for a keystroke before going round again.
@@ -854,129 +857,51 @@ fn init() -> Result<(), Error> {
 /// [`press_for`] is what decides what each key does to it — see the module docs
 /// above for why Ctrl-C goes round it and why a run in flight suppresses it.
 fn run() -> Result<(), Error> {
-    let (mut app, scope, tree) = load_app()?;
+    let (app, scope, tree) = load_app()?;
     // Loaded before the terminal is touched, for the same reason the tree is:
     // a manifest that will not parse should say so on the normal screen. This
     // is a second read of the file the loader already parsed, which is cheap
     // and keeps the front end from reaching into the loader's internals for a
     // value it needs to keep and edit.
-    let mut manifest = load_manifest(&scope.repo_root)?;
+    let manifest = load_manifest(&scope.repo_root)?;
     // Asked for once, over the tree the load just produced, and kept for as
     // long as warlock runs — dropping it stops the watch. Whether it was
     // granted is a fact for the footer and nothing more, which is why this is
     // not a `?` and why the line about it is put up in there rather than here:
     // warlock with no live updates is warlock as it was. See [`start_watching`].
-    let mut watched = start_watching(&mut app, &scope, &tree);
-    let mut guard = TerminalGuard::enter()?;
-    // Whether the terminal is reporting its mouse, and the only record of it:
-    // the guard has just asked it to, and `m` is the one thing that changes the
-    // answer. It lives here rather than on the app because it is a fact about a
-    // terminal — the app is handed a copy of it every frame for the footer's
-    // sake, and copies of the app are taken and put back around a pact, which a
-    // source of truth must survive.
-    let mut mouse_captured = true;
-    // The pact key's business: the agent runs are made with, and the run
-    // happening somewhere else when one is. Built once, like the `Chat` below
-    // it and for the same reason — the agent is a command line and a timeout,
-    // so nothing is spawned until a key asks for a pass. Whether a run is in
-    // flight is this value's own answer now (`Pact::running`) rather than a
-    // `bool` this loop works out and hands down. See [`Pact`].
-    let mut pact = Pact::new();
-    // The conversation, and the turn being answered somewhere else when one is:
-    // `pact`'s opposite number, beside it rather than folded into it because a
-    // turn and a run are two different things that can be in flight at the same
-    // time — a reader can ask a question while a pact descends, and the key that
-    // stops one must not stop the other. See [`Chat`], which is the agent and
-    // the turn together because neither is any use without the other.
-    let mut chat = Chat::new(&scope.repo_root);
-    // The gate on the way out, closed as every session starts. It lives here
-    // rather than on the app because it is state about this keystroke and the
-    // next one rather than about what warlock is showing — which is also what
-    // makes "answering No leaves the app exactly as it was" true by
-    // construction: the app is never told the question was asked.
-    let mut confirm = QuitConfirm::default();
-    // The other question this loop can be carrying: the scope prompt, closed as
-    // every session starts, and here for the reason the gate is — it is state
-    // about this keystroke and the next one, and an `App` that has never heard
-    // of it is an `App` that Esc cannot have changed.
-    //
-    // `prompt` and not `scope`: the `scope` this function already holds is the
-    // session's — the repo root and what warlock was pointed at — and two things
-    // by that name in one loop is one of them being read as the other.
-    let mut prompt = ScopePrompt::default();
-    // The third window, and the only one nothing on the keyboard opens: the
-    // path a brief is about to be written to, closed as every session starts
-    // and opened by a `/write` turn landing (see `keep_up`). It is a local
-    // beside the scope prompt and emphatically not a field on the app, for the
-    // scope prompt's own reason — an `App` that has never heard of it is an
-    // `App` that Esc cannot have changed — and it is a second `ScopePrompt`
-    // rather than a second kind of thing, because it is the same field, the
-    // same editor and the same window with a different question in it.
-    //
-    // Which of the two has the keyboard when both are up is `press_for`'s
-    // decision and is stated there: the scope prompt is asked first, so this one
-    // waits underneath with its path intact.
-    // What has been typed into the composer, and the only copy of it: empty as
-    // every session starts. It lives here, beside the two questions above,
-    // rather than on the app — and that is load-bearing rather than tidy. A
-    // pact that ends with nothing recorded puts the copy of the app taken
-    // before it back over the live one and keeps only the panel (see
-    // `App::restore_from`), so a draft stored on the app would be a draft a run
-    // could swallow half a sentence into. Here, nothing a run does can reach it:
-    // the keystrokes are the only thing that ever writes to it.
-    // Where a brief written from this conversation would go, relative to the
-    // repository root, and the only copy of it: the engine's built-in default
-    // as every session starts. It lives here with the two windows and the draft
-    // for their reason — it is state about this keystroke and the next one
-    // rather than about what warlock is showing, and an `App` that has never
-    // heard of it is an `App` that a restored copy cannot put an old answer
-    // back on.
-    //
-    // Read once, at `/brief`, and held for the life of the mode: `/write` is
-    // handed this string rather than looking anything up, so a document that has
-    // taken twenty turns to converge can never arrive at a window that will not
-    // open. What settles it is `apply_compose`'s `/brief` arm, which is also
-    // where anything that fails to be read has to fail.
-    // Which file the panel's document card is holding, and the only record of
-    // it: `None` until the first `v` of the session that read something. It
-    // lives here rather than on the app for the reason `mouse_captured` does —
-    // the app is handed lines and never a path, because a path on it would be a
-    // path something later had to open (see `App::show_document`) — and it is
-    // read by exactly one keystroke, `e`, which re-reads the card only when the
-    // file it handed to an editor is the file on it.
-    let mut document: Option<PathBuf> = None;
+    let mut app = app;
+    let watched = start_watching(&mut app, &scope, &tree);
+
+    // The terminal, taken last, so everything above that can fail says so on
+    // the ordinary screen. From here to the end of this function the alternate
+    // screen is up, and the guard is what puts it back — on the return below,
+    // on a `?`, and on a panic through the hook installed in `main`.
+    // The conversation's root, taken before `scope` moves into the session.
+    let root = scope.repo_root.clone();
+    let mut session = Session {
+        app,
+        screen: TerminalGuard::enter()?,
+        scope,
+        manifest,
+        // Built once, and cheap to build: an agent is a command line and a
+        // timeout, so no `claude` exists until a key asks for a pass or a turn.
+        pact: Pact::new(),
+        chat: Chat::new(root),
+        confirm: QuitConfirm::default(),
+        prompt: ScopePrompt::default(),
+        document: None,
+        // The terminal has just been asked to report its pointer, and `m` is
+        // the one thing that changes the answer.
+        mouse_captured: true,
+        watched,
+    };
 
     loop {
-        // Measured once a round, and here rather than inside `draw_frame`,
-        // because the round needs it twice: it is what the app is told to
-        // scroll against and what a click landing on this frame is hit-tested
-        // against, and those two have to be the one answer.
-        let size = guard.terminal.size()?;
-        // Told what the terminal is doing with the pointer, here rather than in
-        // there because the flag is this thread's and not the frame's: the
-        // footer names the `m` key by what the next press of it will do, and the
-        // app cannot see a terminal. Every frame rather than at the keystroke,
-        // so a view restored from the copy taken before a pact — which is a copy
-        // of a flag that may have been toggled since — is put right before it is
-        // drawn.
-        app.set_mouse_captured(mouse_captured);
-        // The draft goes in beside the two questions: it is a pane cut off the
-        // bottom of the panel's column, so the panel is drawn and scrolled a few
-        // rows shorter for as long as there is a field on screen. Whether there
-        // is one is `composer_on_screen`'s answer and not this loop's — the
-        // document card takes the whole column back — and it is asked in there,
-        // and again below for the pointer, so the frame and the hit test are one
-        // rule read twice rather than two opinions about the same rows.
-        draw_frame(
-            &mut app,
-            &mut guard,
-            &scope,
-            size,
-            confirm,
-            &prompt,
-            chat.write_prompt(),
-            chat.composer(),
-        )?;
+        // Measured once a round, because the round needs it twice: it is what
+        // the frame is cut by and what a click landing on that frame is
+        // hit-tested against, and those two have to be the one answer.
+        let size = session.size()?;
+        session.draw(size)?;
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
         // sits here, so the wait has to end whether or not anybody presses
@@ -988,614 +913,565 @@ fn run() -> Result<(), Error> {
             // instant anything this key starts is as old as, so a turn and a
             // pass are both clocked from the keystroke that asked for them
             // rather than from the first thing the model got round to saying.
-            // The other three facts a key is read against — a run in flight, a
-            // question being answered, and whether there is a draft for a
-            // keystroke to land in — are read inside [`key_press`], once each,
-            // where the arms that read them are.
             let now = Instant::now();
             match event::read()? {
-                // The keyboard, in one line, because every consequence of a
-                // press lives in [`key_press`]: the four situations a key is
-                // read against are taken in there, and the borrows it needs are
-                // gathered here into the one value it moves ([`Pressing`]).
-                // Whether a run is in flight is what Esc reads two ways — it
-                // cancels a run when there is one and asks about quitting when
-                // there is not — the question on screen is what every key reads
-                // differently while it is up, the composer is what turns the
-                // letters into text, and whether a turn is being answered is
-                // what Ctrl-C reads two ways: it stops the turn when there is
-                // one and leaves when there is not. See [`press_for`], which
-                // owns all four readings.
-                //
                 // `false` is the one thing a press can say that is answered
-                // here, and it says the session is over. Returning is still the
-                // whole of quitting and it still happens on this stack, so
-                // `pact` drops on the way out — cancelling the run and killing
-                // the `claude` it was waiting on — and the guard drops after it
-                // and puts the terminal back.
+                // here, and it says the session is over. Returning is the whole
+                // of quitting and it happens on this stack, so the session
+                // drops on the way out — cancelling any run and killing the
+                // `claude` it was waiting on — and its screen drops with it and
+                // puts the terminal back.
                 Event::Key(key) => {
-                    let mut pressing = Pressing {
-                        app: &mut app,
-                        guard: &mut guard,
-                        scope: &scope,
-                        manifest: &mut manifest,
-                        pact: &mut pact,
-                        chat: &mut chat,
-                        confirm: &mut confirm,
-                        prompt: &mut prompt,
-                        document: &mut document,
-                        mouse_captured: &mut mouse_captured,
-                    };
-                    if !key_press(key, &mut pressing, now)? {
+                    if !session.press(key, now)? {
                         return Ok(());
                     }
                 }
-                // The pointer, answered in the same shape and for the same
-                // reasons, and in one line because both halves of it live in
-                // [`apply_mouse`]: the event, the size this round measured at
-                // the top — the one the hit test has to agree with, because it
-                // is the size the frame above was drawn at — both windows, and
-                // the draft under the panel, whose rows the hit test has to know
-                // are not the panel's. None of what it does reads the terminal
-                // and none of it draws: the round is the redraw, which is why a
-                // pointer swept across the screen costs nothing.
-                Event::Mouse(mouse) => {
-                    apply_mouse(
-                        &mut app,
-                        mouse,
-                        size,
-                        confirm,
-                        &prompt,
-                        chat.write_prompt(),
-                        chat.composer(),
-                    );
-                }
-                // Resizes, focus changes and pasted text: read and dropped. The
-                // frame is measured again at the top of every round, so a
-                // resize needs nothing done about it here, and the other two
-                // mean nothing to a program with nowhere to paste into.
+                // The pointer, at the size the frame above was drawn at. None of
+                // what it does reads the terminal and none of it draws: the
+                // round is the redraw, which is why a pointer swept across the
+                // screen costs nothing.
+                Event::Mouse(mouse) => session.point(mouse, size),
                 _ => {}
             }
         }
 
         // And then everything that happened off this thread: what a run has
-        // said since the last round, and what the disk did while this one was
-        // waiting on a keystroke. See `keep_up`, which reads the clock the
-        // round is measured against — the instant the events being drained now
-        // land on screen, within one `POLL_INTERVAL` of when they were sent.
-        keep_up(
-            &mut pact,
-            &mut chat,
-            &mut app,
-            &mut manifest,
-            &scope,
-            &mut watched,
-        );
+        // said since the last round, what a turn has, and what the disk did
+        // while this one was waiting on a keystroke.
+        session.keep_up();
     }
 }
 
-/// Everything one keystroke is allowed to move: [`run`]'s own locals, borrowed
-/// for the length of one press.
+/// One warlock session: everything on screen, everything in flight, and
+/// everything a keystroke is allowed to move.
 ///
-/// A struct of borrows rather than a long argument list, and built afresh every
-/// round rather than kept: every field here is still a local of the loop above
-/// and stays one — the two prompts especially, because a window that lived on
-/// the [`App`] would be a window a restored copy of the app could put back up
-/// and an Esc could have changed something with — so nothing in here outlives
-/// the keystroke it was gathered for. What it buys is that [`key_press`] can be
-/// a function at all: the arms read as the same list of consequences, with the
-/// loop taken off the front of them.
-struct Pressing<'a> {
+/// The eleven values [`run`] used to keep as locals, owned in one place. They
+/// were locals because they *are* one thing — a session — and the loop proved it
+/// by threading overlapping subsets of them through four different argument
+/// lists, thirty-one parameters in all, plus a struct of borrows built afresh
+/// every round to carry the widest of those subsets. Adding one fact about a
+/// session meant editing four signatures and the struct.
+///
+/// So the four are methods now, and a round is [`Session::draw`],
+/// [`Session::press`] or [`Session::point`], and [`Session::keep_up`]. What a
+/// method needs it reaches for; nothing is handed to it that it already had.
+///
+/// The two prompts are fields here and deliberately *not* fields on the
+/// [`App`]: a window that lived on the app would be a window a restored copy of
+/// the app could put back up, and an Esc could have changed something with. The
+/// app is copied and put back by a run that recorded nothing; a session is not.
+///
+/// It is generic over its three seams and over nothing else. Warlock runs it on
+/// a [`TerminalGuard`], a [`ClaudeAgent`] and a [`ChatAgent`]; a test runs it on
+/// three values that answer out of memory, which is the whole reason a round can
+/// be driven at all.
+struct Session<S: Screen, P: Wired + Agent, C: Converses> {
     /// What is on screen: the tree, the panel, the register and the footer.
-    app: &'a mut App,
-    /// The terminal, for the one key that gives it away and takes it back.
-    guard: &'a mut TerminalGuard,
-    /// The session: the repository root and what warlock was pointed at.
-    scope: &'a Scope,
+    app: App,
+    /// The screen this session is drawn on, given away for `e` and taken back.
+    screen: S,
+    /// The repository root and what warlock was pointed at. Settled by the load
+    /// and never moved afterwards.
+    scope: Scope,
     /// The manifest this thread holds, which the scope prompt reads and writes.
-    manifest: &'a mut Manifest,
+    manifest: Manifest,
     /// The pact key's business: the agent runs are made with, and the run
     /// happening somewhere else when there is one. Never the conversation's
     /// agent, which is inside `chat`.
-    pact: &'a mut Pact,
+    pact: Pact<P>,
     /// The conversation, and the turn being answered when there is one.
-    chat: &'a mut Chat,
+    chat: Chat<C>,
     /// The gate on the way out.
-    confirm: &'a mut QuitConfirm,
-    /// The scope prompt: the window `s` opens.
-    prompt: &'a mut ScopePrompt,
-    /// Which file the panel's document card is holding.
-    document: &'a mut Option<PathBuf>,
-    /// Whether the terminal is reporting its mouse.
-    mouse_captured: &'a mut bool,
-}
-
-/// What one keystroke comes to, with everything it can move at `pressing` and
-/// the instant it arrived at `now`: `true` when the session goes on and `false`
-/// when it is over.
-///
-/// The loop's list of consequences, and it is a list rather than a decision:
-/// what a key *means* is [`press_for`]'s, and this is what warlock does about
-/// the answer. Splitting it out of [`run`] changes nothing about either — the
-/// arms are the arms, in the order they were in — and it keeps the round above
-/// short enough to read: draw, wait, press, drain.
-///
-/// The four situations a key is read against are taken here, once each, and
-/// immediately: whether there is a draft for it to land in, which is the
-/// keyboard being pointed at the composer and is offered to [`press_for`]
-/// rather than looked up there; whether a run is in flight; whether a turn is
-/// being answered; and the instant above. One reading apiece, before anything
-/// is done, so the arms below cannot disagree with the gate about what was
-/// going on when the key was pressed.
-///
-/// The only way out is `false`, and only [`Pressed::Leave`] and the app's old
-/// quit produce it. Leaving is deliberately not done from in here: the run's
-/// handle and the terminal guard are [`run`]'s to drop, in the order it has
-/// always dropped them.
-fn key_press(key: KeyEvent, pressing: &mut Pressing<'_>, now: Instant) -> Result<bool, Error> {
-    // The composer is offered on exactly the condition that lights its border,
-    // which is the keyboard being pointed at it: with the keys anywhere else
-    // this is `None`, there is no draft to type into, and every letter is the
-    // command it has always been.
-    let typing = (pressing.app.focus() == Focus::Composer).then(|| pressing.chat.composer());
-    let running = pressing.pact.running();
-    let asked = pressing.chat.answering();
-    let pressed = press_for(
-        key,
-        *pressing.confirm,
-        pressing.prompt,
-        pressing.chat.write_prompt(),
-        typing,
-        running,
-        asked,
-    );
-
-    match pressed {
-        // Saying the session is over is the whole of quitting, and it is
-        // enough even with a pact in flight: [`run`] returns on this answer and
-        // returning is what does the rest. `pact` drops on the way out, which
-        // cancels the run and kills the `claude` it was waiting on (see
-        // [`Running`]); the guard drops after it and puts the terminal back.
-        // Nothing joins the worker: it is left to be ended by the process,
-        // having written whole documents or none, and the manifest it never got
-        // to rewrite still says what it said before.
-        //
-        // Every way out arrives here: a Yes to the question, Ctrl-C, and `q`
-        // during a run. The second spelling is the app's old quit, which
-        // [`press_for`] no longer produces — naming it beside the first keeps
-        // one road out of this loop rather than two that have to be kept doing
-        // the same thing.
-        Pressed::Leave | Pressed::Act(Action::Quit) => return Ok(false),
-        // The question, opened, moved, or taken down again. Nothing else
-        // happens and nothing else needs to: the app was never touched, so a
-        // No has nothing to put back, and the top of this loop draws whatever
-        // the question now is.
-        Pressed::Confirm(next) => *pressing.confirm = next,
-        // Esc with a run in flight. The handle does both halves at once — it
-        // latches, so the descent stops at the next directory instead of
-        // starting a pass for it, and it kills the `claude` running right now,
-        // so that stop happens in milliseconds rather than at the end of a
-        // five-minute pass.
-        //
-        // The pact is deliberately *not* taken down here. The worker is still
-        // going to hash what it wrote, save the manifest and report, and all
-        // of that arrives at the bottom of this loop like any other outcome;
-        // forgetting about it now would leave the footer's progress line up
-        // for a run nobody was listening to any more.
-        Pressed::Act(Action::CancelPact) => pressing.pact.stop(),
-        // Ctrl-C with a turn being answered, and the one keystroke in warlock
-        // that stops something without leaving. The handle is the turn's own —
-        // the same `Cancel` a run is stopped through — so it kills the
-        // `claude` this turn is waiting on and the worker comes back within
-        // milliseconds.
-        //
-        // The turn is deliberately *not* taken down here, exactly as a
-        // cancelled pact is not: the worker still has one thing to say, and it
-        // says it at the bottom of this loop like any other ending. That is
-        // what puts the cancelled line under whatever work had already arrived
-        // and gives the field the keyboard back — a turn forgotten here would
-        // leave the composer muted for the rest of the session.
-        Pressed::CancelTurn => pressing.chat.stop(),
-        // Nothing but a bit of view state moves here, and deliberately so:
-        // focus decides which border the next frame lights and which pane a
-        // movement key is about, and both of those questions are answered
-        // where they are asked — by the renderer reading `App::focus`, and by
-        // the app's own movement methods, which move the tree's selection or
-        // scroll the panel's window depending on the pane being driven
-        // (WAR-26.02). There is nothing for this arm to gate a second time,
-        // and no message: a key that changes what the *next* key means has
-        // nothing to report.
-        Pressed::Act(Action::ToggleFocus) => pressing.app.toggle_focus(),
-        Pressed::Act(Action::SelectPrevious) => pressing.app.select_previous(),
-        Pressed::Act(Action::SelectNext) => pressing.app.select_next(),
-        // No height is passed: the app was told the viewport's height at the
-        // top of this loop, so a page is whatever the frame just drawn could
-        // show.
-        Pressed::Act(Action::SelectPageUp) => pressing.app.select_page_up(),
-        Pressed::Act(Action::SelectPageDown) => pressing.app.select_page_down(),
-        Pressed::Act(Action::SelectFirst) => pressing.app.select_first(),
-        Pressed::Act(Action::SelectLast) => pressing.app.select_last(),
-        // Nothing else happens here on purpose. What is collapsed is the front
-        // end's view of the tree and never touches disk (§8), so there is no
-        // manifest to write; the tree has not changed, so there is nothing to
-        // re-read. The app moves the selection and the scroll offset back into
-        // range itself, and the next frame — the top of this same loop — draws
-        // the shorter or longer list.
-        Pressed::Act(Action::ToggleCollapsed) => pressing.app.toggle_collapsed(),
-        // Nothing else happens here either, and for the same reasons as
-        // collapsing: which rows are worth looking at is the front end's view
-        // of the tree and is never written down (§5), so there is no manifest
-        // to save, and the tree itself has not changed, so there is nothing to
-        // re-read. The app re-flows its rows and puts the selection and the
-        // scroll offset back in range; the next frame draws whatever is left.
-        Pressed::Act(Action::TogglePactedOnly) => pressing.app.toggle_pacted_only(),
-        // Nothing else here either, for the third time and for the same
-        // reasons as the two arms above: whether the files inside a module are
-        // on screen is the front end's view of the tree and is never written
-        // down (§5), so there is no manifest to save, and the files were read
-        // by the load that built these rows, so there is nothing to re-read.
-        // The app re-flows its rows and keeps the selection and the scroll
-        // offset in range; the next frame draws the longer or shorter list.
-        Pressed::Act(Action::ToggleFiles) => pressing.app.toggle_files(),
-        // The two keystrokes that write anything, and the two that take longer
-        // than a frame — so they are the ones that are not done here. Both go
-        // to a worker thread and both fill the one run `Pact` keeps, which is
-        // what makes them refuse each other; everything they produce arrives at
-        // the bottom of this loop, one directory at a time and finally as an
-        // outcome, and until it does the loop goes round as usual — drawing,
-        // scrolling, filtering.
-        //
-        // Two arms rather than one, because the list of keys is what this
-        // function is for and a key dispatching on a value computed elsewhere
-        // would be a key a reader could not find here. The kind is the app's own
-        // [`Run`], the only thing the two runs differ by all the way down;
-        // everything either side of it, and everything they refuse, is
-        // [`Pact::press`]'s.
-        Pressed::Act(Action::TogglePact) => {
-            pressing.pact.press(
-                Run::Pact,
-                pressing.app,
-                pressing.manifest,
-                pressing.scope,
-                now,
-            );
-        }
-        Pressed::Act(Action::Refresh) => {
-            pressing.pact.press(
-                Run::Refresh,
-                pressing.app,
-                pressing.manifest,
-                pressing.scope,
-                now,
-            );
-        }
-        // The one key that reads a file and the only one that shows anything a
-        // model wrote. It is done here, on this thread, between two frames: a
-        // read capped at a few kilobytes is over inside a frame, so there is
-        // no worker, no channel and no account, and nothing to reload
-        // afterwards because reading a file changes nothing about the tree.
-        //
-        // It needs no answer of its own, for the reason the scope key's arm
-        // needs none: everything this press can refuse it refuses inside
-        // `view_press` — a directory row through `App::message` — and every
-        // way the read itself can fail ends as one line on that same footer
-        // with the panel left as it was. So the loop goes round again after a
-        // failure exactly as it does after a success. Unlike `p`, `r` and `s`
-        // it is not handed the run: a read races nothing, so there is nothing
-        // for a run in flight to refuse. See `viewing::view_press`.
-        //
-        // What comes back is the file that is now on the document card, and it
-        // is kept here because the app is never told: `App::show_document`
-        // takes lines and never a path, so "which file the panel is holding"
-        // is this loop's to know. The one thing that asks for it is the edit
-        // key, which re-reads the card only when the file it just handed to an
-        // editor is the file on it. A press that read nothing — refused, or a
-        // read that failed — leaves the card holding what it held, which is
-        // why what was remembered before is what a `None` falls back to rather
-        // than being cleared.
-        Pressed::Act(Action::ViewFile) => {
-            if let Some(read) = view_press(pressing.app) {
-                *pressing.document = Some(read);
-            }
-        }
-        // The one key that gives the screen away, and the only one whose
-        // answer is measured in minutes of somebody typing rather than in
-        // frames. The loop stops here for the whole of it: the terminal is put
-        // back the way warlock found it, `$EDITOR` is run on the selected file
-        // as a foreground child, the child is waited on, and the terminal is
-        // taken again — every one of those through the guard this loop already
-        // holds, so there is one spelling of teardown and one of setup (see
-        // `TerminalGuard::suspended`). Nothing is drawn behind the editor and
-        // no progress event is drained while it runs, which is the honest
-        // shape of handing the terminal to somebody else.
-        //
-        // `mouse_captured` is handed over because it is this thread's only
-        // record of what `m` last did: resuming without it would switch
-        // reporting back on behind a reader who turned it off.
-        //
-        // It needs no answer of its own, for the reason `v`'s and `s`'s arms
-        // need none: everything this press can refuse it refuses inside
-        // `edit_press` — a directory row in the very words `v` uses, a run in
-        // flight on the progress line, an `$EDITOR` naming nothing on the
-        // footer — and both ways the child itself can go wrong end as one line
-        // on that footer with the loop going round again. The `?` is the
-        // terminal and only the terminal: a screen that could not be taken
-        // back is not news for a footer nobody could read, so it leaves
-        // through the guard like every other terminal failure. See
-        // `editing::edit_press`.
-        //
-        // Two things are read again on the way back, and both are inside
-        // `edit_press`: the tree, so a directory whose file changed goes
-        // yellow without a further keystroke, and the document card — but only
-        // when the file just edited is the one on it, which is what `document`
-        // is kept for. Which card is showing does not move for either.
-        Pressed::Act(Action::EditFile) => {
-            edit_press(
-                pressing.app,
-                pressing.guard,
-                pressing.scope,
-                pressing.document.as_deref(),
-                *pressing.mouse_captured,
-                running,
-            )?;
-        }
-        // The panel's other card, and nothing else: the account if the
-        // document is up, the document if the account is. It is done here, on
-        // this thread, without reading anything — both cards are already in
-        // the app, so a swap is one field moved and the next frame drawing the
-        // other one.
-        //
-        // It needs no answer of its own, for `v`'s reason: the one thing this
-        // press can refuse — a session with no document read yet — it refuses
-        // inside `App::swap_card`, which leaves the panel on the account and
-        // puts a line on the footer naming the key that would make a second
-        // card. A swap that worked says nothing, because the reader can see
-        // it. Unlike `p`, `r` and `s` it is not handed the run: a swap races
-        // nothing, and a run that changed which card is showing would take a
-        // document out of the reader's hands.
-        Pressed::Act(Action::SwapCard) => pressing.app.swap_card(),
-        // The one key that answers to the terminal rather than to the app. The
-        // sequence is written first and the flag moved only if it went out, so
-        // what this thread believes about the terminal is what it last
-        // successfully told it; a write that fails takes the whole loop down
-        // through the guard, which turns capture off on the way past whatever
-        // state it was left in.
-        //
-        // Nothing else happens: no focus moves, no row is selected, nothing is
-        // redrawn here — the top of the loop draws every round, and it is
-        // where the footer picks the new wording up. With capture off the
-        // terminal keeps the pointer to itself, so `Event::Mouse` simply stops
-        // arriving and the mouse handler needs no gate of its own.
-        Pressed::Act(Action::ToggleMouseCapture) => {
-            report_mouse(!*pressing.mouse_captured)?;
-            *pressing.mouse_captured = !*pressing.mouse_captured;
-        }
-        // The third key that writes to disk, and the one that is not a run: it
-        // opens a window holding the scope the selected directory carries now,
-        // read out of the manifest this loop is already holding. Everything it
-        // can refuse it refuses inside `scope_press` — a file row and an
-        // unpacted one through `App::message`, a press during a run through
-        // the progress line — and every one of those comes back as a prompt
-        // that is still closed, so this arm needs no `None` case of its own.
-        // See `scoping::scope_press`.
-        Pressed::Act(Action::OpenScope) => {
-            *pressing.prompt = scope_press(
-                pressing.app,
-                pressing.manifest,
-                &pressing.scope.repo_root,
-                pressing.scope.chrome.sigils(),
-                running,
-            );
-        }
-        // Somebody typing into that window: a character more or less in the
-        // field, the window abandoned, or — on Enter — the manifest written.
-        // The whole of that last one happens here, on this thread, between two
-        // frames: no worker, no channel, no account and no reload, because a
-        // scope is one string written into one entry of a file already in this
-        // thread's hand (see `mod@scoping`). What comes back is the prompt
-        // from here on — down for a submit that was answered, still up over
-        // the text for one the engine refused. See `scoping::scope_edit`.
-        Pressed::Scope(edited) => {
-            *pressing.prompt = scope_edit(
-                pressing.app,
-                pressing.manifest,
-                &pressing.scope.repo_root,
-                pressing.prompt,
-                edited,
-            );
-        }
-        // Somebody typing into the other window: a character more or less in
-        // the path, the window abandoned, or — on Enter — the document
-        // written. The whole of that last one happens here too, on this
-        // thread, between two frames: the bytes are the answer already on the
-        // card and the destination is the line on screen, so there is nothing
-        // to spawn and nothing to wait for (see `mod@writing`). What comes
-        // back is the prompt from here on — down for a write that happened and
-        // for an Esc that wrote nothing, still up over the typed path for one
-        // that was refused. An Esc changes nothing else at all: the reply
-        // stays on the card and the register stays what it was, because the
-        // app was never told the question was asked. See
-        // `writing::write_edit`.
-        Pressed::Write(edited) => pressing
-            .chat
-            .write(pressing.app, pressing.manifest, edited, now),
-        // Somebody typing at the foot of the panel's column: a character more
-        // or less in the draft, the keyboard handed back, or a draft offered
-        // up. What each of those comes to is [`apply_compose`], which is
-        // handed the local above rather than reaching for anything on the app
-        // — what is in the draft is not a fact about the tree.
-        //
-        // The output directory goes in for the same reason and in the same
-        // shape: it is a local of the loop, `/brief` is the one thing that
-        // settles it, and this is where `/brief` is answered — so it goes in
-        // borrowed rather than being fetched from somewhere in there.
-        //
-        // The last of the three is now a worker thread, so the agent and the
-        // turn go in with it, and the instant the key was pressed goes in as
-        // well for the pact key's reason: a turn is as old as the question
-        // that asked it, not as old as the first thing the model got round to
-        // saying.
-        Pressed::Compose(outcome) => pressing.chat.compose(pressing.app, outcome, now),
-        // A key nothing is bound to, or one whose press has already been
-        // answered where it was decided.
-        Pressed::Nothing => {}
-    }
-
-    Ok(true)
-}
-
-/// Tell the app how big the frame it is about to be drawn in is, and draw it.
-///
-/// Told before it is drawn, and every frame rather than on resize: the scroll
-/// offset is only right if it was computed against the height this frame gives
-/// the tree, and [`tree_height`] is the same layout the frame is cut by. A
-/// terminal resized between frames is handled by that alone — the next frame
-/// measures again, and the next frame is at most one [`POLL_INTERVAL`] away.
-/// The panel's window is measured the same way and for the same reason, off the
-/// same size: [`panel_height`] and [`tree_height`] are two answers from the one
-/// layout, so both panes are scrolled by the height this frame is about to give
-/// them.
-///
-/// `size` is the caller's rather than measured here, because the round needs it
-/// again: a click is hit-tested against the size of the frame it landed on, and
-/// measuring twice would be two answers where the hit test needs one.
-///
-/// What the terminal is doing with the pointer is *not* here: it is a flag the
-/// loop keeps about a terminal rather than anything this frame measures, so the
-/// app is told it beside the size, one line above the call.
-///
-/// The instant the frame is drawn at is read here and handed to the renderer:
-/// the panel's newest clock counts up against it, so a frame drawn with no event
-/// waiting still shows a run that is moving. See [`draw`].
-///
-/// The gate on the way out is handed in beside the app because the app has never
-/// heard of it (see [`QuitConfirm`]): closed, it changes nothing about the frame;
-/// open, it is a small window drawn over the middle of it with everything behind
-/// it cleared. The scope prompt goes in beside it for the same reason and is
-/// drawn the same way — by reference, since it carries the text somebody is
-/// typing — and the path a brief is about to be written to goes in beside that,
-/// the same window with the other question in it (see `write_opened`). Both
-/// prompts are handed over on every frame and the renderer draws whichever is
-/// up; which of them has the keyboard while both are is `press_for`'s decision,
-/// and the order they are drawn in agrees with it.
-///
-/// The composer comes in the same way and is the reason the panel's height is
-/// worth a second look: it is a pane cut off the bottom of the panel's column,
-/// so every row it takes is a row the account no longer has, and the height the
-/// app is told to scroll by has to be the reduced one — a panel told the whole
-/// column would scroll by a window that is partly the field's. So the one
-/// measurement goes to [`panel_height`] and to [`draw`] both, and whether there
-/// is a field on this frame at all is [`composer_on_screen`]'s answer, asked
-/// here: the document card takes the column back, and the panel is measured and
-/// drawn as it was before there was a composer to pay for.
-///
-/// The width is not measured against it, because the field takes rows and never
-/// columns: a document is wrapped at the width the panel had and the composer is
-/// drawn at that very width. See [`panel_width`].
-///
-/// The run's header is the same arithmetic at the other end of the panel: while
-/// a run is in flight the frame draws a fixed line inside the top of the panel's
-/// border, and the row it takes is a row the account no longer has. So the app
-/// is told the reduced height here, *before* the frame is drawn, or the window
-/// would scroll by the row the header owns. What the frame will report is asked
-/// of the app once, and [`panel_height`] is handed the same answer the frame
-/// draws from, so the measurement and the drawing cannot disagree.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the whole of what one frame is drawn from, and the point of it is \
-              that the loop draws a frame in one call"
-)]
-fn draw_frame(
-    app: &mut App,
-    guard: &mut TerminalGuard,
-    scope: &Scope,
-    size: Size,
     confirm: QuitConfirm,
-    prompt: &ScopePrompt,
-    path_prompt: &ScopePrompt,
-    composer: &Composer,
-) -> io::Result<()> {
-    let field = composer_on_screen(app, composer);
-    let header = app.run_header();
-    app.set_viewport_height(tree_height(size));
-    app.set_panel_height(panel_height(size, field, header.as_ref()));
-    app.set_panel_width(panel_width(size));
-    guard.terminal.draw(|frame| {
-        draw(
-            frame,
-            app,
-            &scope.chrome,
-            Instant::now(),
-            confirm,
-            prompt,
-            path_prompt,
-            field,
-        );
-    })?;
-    Ok(())
+    /// The scope prompt: the window `s` opens.
+    prompt: ScopePrompt,
+    /// Which file the panel's document card is holding.
+    document: Option<PathBuf>,
+    /// Whether the terminal is reporting its mouse.
+    mouse_captured: bool,
+    /// The filesystem watcher, and what it has been told about the tree.
+    watched: Watched,
 }
 
-/// Keep up with what is happening off this thread: the run's progress, the
-/// turn's, and the disk moving under the tree.
-///
-/// The bottom of every round, whether or not a key was pressed. [`Pact::keep_up`]
-/// is the only place anything the worker says reaches the screen, and it has to
-/// keep up with a thread that is not waiting for it; the scope is handed to it
-/// because the end of a run re-reads the tree.
-///
-/// Whether a run was in flight is read *before* the drain, because the drain is
-/// what ends one: a pact that is `Some` on the way in and `None` on the way out
-/// finished in this round, and its own reload has already read the tree. The
-/// documents it wrote are exactly the sort of thing the watcher reports, so the
-/// events they set off are already sitting in the policy — they are answered by
-/// the reload that just happened rather than by one of their own, and the tree it
-/// read becomes the next round's filter.
-///
-/// Then what everything else did to the disk. Nothing is read again while a pact
-/// is in flight — the trigger keeps until the run's own reload above — and
-/// nothing at all is read when the disk has been still, which is almost every
-/// round.
-///
-/// The turn is drained last and by exactly the same rules: [`apply_turn`] takes
-/// whatever the worker has said since the last frame and returns rather than
-/// waiting, so the frame goes on redrawing while a question is being answered
-/// and a burst of tool calls that arrived between two frames lands in the order
-/// it happened. Last rather than first only because the two are independent —
-/// a turn writes no file, changes no row and reloads nothing, so there is no
-/// order between it and the run for the screen to disagree about. It is where
-/// the muting ends: the drain is what takes `turn` down, however the turn
-/// finished, and the top of the next round hands the field back on the strength
-/// of that alone.
-///
-/// The clock is read once, here, and handed to everything under this: the round
-/// is measured against one instant, which is when the events being drained now
-/// land on screen — within one [`POLL_INTERVAL`] of when they were sent. It is
-/// read at the top rather than per call for the reason the frame reads its own:
-/// two readings a round would be two answers to one question.
-fn keep_up(
-    pact: &mut Pact,
-    chat: &mut Chat,
-    app: &mut App,
-    manifest: &mut Manifest,
-    scope: &Scope,
-    watched: &mut Watched,
-) {
-    let now = Instant::now();
-    // The one round in a run's life the watcher has to hear about, and it says
-    // so itself: a `Reloaded` comes back on the round the run ended and on no
-    // other, carrying the tree that reload read. This loop used to work that
-    // edge out by reading `is_some()` either side of the drain and comparing —
-    // a detector kept by hand over a fact the run already knew. See
-    // [`Reloaded`].
-    if let Some(Reloaded(tree)) = pact.keep_up(app, manifest, scope, now) {
-        watched.caught_up(tree.as_ref(), now);
+impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
+    /// How big the screen is right now.
+    ///
+    /// Measured once a round and handed to the three methods that cut a layout
+    /// by it, so a frame, a click and the app's own idea of its viewport cannot
+    /// disagree about the size they were computed at.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the screen says when it cannot be measured.
+    fn size(&self) -> io::Result<Size> {
+        self.screen.size()
     }
-    watched.round(app, scope, pact.running(), now);
-    // And the conversation's own bottom end. Nothing comes back: a `/write`
-    // turn's answer opens the window that goes over it, and that window is the
-    // conversation's, so it is opened in there rather than here out of two
-    // values this loop would otherwise have to be handed. See [`Chat::keep_up`].
-    chat.keep_up(app, now);
+
+    /// Tell the app how big the frame it is about to be drawn in is, and draw
+    /// it.
+    ///
+    /// Told before it is drawn, and every frame rather than on resize: the
+    /// scroll offset is only right if it was computed against the height this
+    /// frame gives the tree, and [`tree_height`] is the same layout the frame is
+    /// cut by. A terminal resized between frames is handled by that alone — the
+    /// next frame measures again, and the next frame is at most one
+    /// [`POLL_INTERVAL`] away. The panel's window is measured the same way and
+    /// for the same reason, off the same size: [`panel_height`] and
+    /// [`tree_height`] are two answers from the one layout.
+    ///
+    /// The composer and the run's header are the two things that take rows off
+    /// the panel, and both are read *here*, once, and handed to
+    /// [`panel_height`] and to [`draw`] — so the measurement and the drawing
+    /// cannot disagree about how many rows the account has.
+    ///
+    /// `size` is the caller's rather than measured here, because the round needs
+    /// it again: a click is hit-tested against the size of the frame it landed
+    /// on, and measuring twice would be two answers where the hit test needs
+    /// one.
+    ///
+    /// What the terminal is doing with the pointer is told to the app here as
+    /// well. Every frame rather than at the keystroke, so a view restored from
+    /// the copy taken before a pact — a copy of a flag that may have been
+    /// toggled since — is put right before it is drawn.
+    ///
+    /// The instant the frame is drawn at is read here and handed to the
+    /// renderer: the panel's newest clock counts up against it, so a frame drawn
+    /// with no event waiting still shows a run that is moving. See [`draw`].
+    ///
+    /// # Errors
+    ///
+    /// Whatever the screen says when the frame cannot be written.
+    fn draw(&mut self, size: Size) -> io::Result<()> {
+        self.app.set_mouse_captured(self.mouse_captured);
+        let field = composer_on_screen(&self.app, self.chat.composer());
+        let header = self.app.run_header();
+        self.app.set_viewport_height(tree_height(size));
+        self.app
+            .set_panel_height(panel_height(size, field, header.as_ref()));
+        self.app.set_panel_width(panel_width(size));
+
+        let (app, chrome, confirm, prompt) =
+            (&self.app, &self.scope.chrome, self.confirm, &self.prompt);
+        let write = self.chat.write_prompt();
+        self.screen.draw(|frame| {
+            draw(
+                frame,
+                app,
+                chrome,
+                Instant::now(),
+                confirm,
+                prompt,
+                write,
+                field,
+            );
+        })
+    }
+
+    /// What a pointer event at `size` comes to.
+    ///
+    /// A thin arm onto [`apply_mouse`], which stays a function over an app and
+    /// a layout: what a click *means* is decidable with nothing owned, and a
+    /// session is not needed to assert it.
+    fn point(&mut self, mouse: MouseEvent, size: Size) {
+        apply_mouse(
+            &mut self.app,
+            mouse,
+            size,
+            self.confirm,
+            &self.prompt,
+            self.chat.write_prompt(),
+            self.chat.composer(),
+        );
+    }
+
+    /// What one keystroke comes to, with everything it can move at `pressing` and
+    /// the instant it arrived at `now`: `true` when the session goes on and `false`
+    /// when it is over.
+    ///
+    /// The loop's list of consequences, and it is a list rather than a decision:
+    /// what a key *means* is [`press_for`]'s, and this is what warlock does about
+    /// the answer. Splitting it out of [`run`] changes nothing about either — the
+    /// arms are the arms, in the order they were in — and it keeps the round above
+    /// short enough to read: draw, wait, press, drain.
+    ///
+    /// The four situations a key is read against are taken here, once each, and
+    /// immediately: whether there is a draft for it to land in, which is the
+    /// keyboard being pointed at the composer and is offered to [`press_for`]
+    /// rather than looked up there; whether a run is in flight; whether a turn is
+    /// being answered; and the instant above. One reading apiece, before anything
+    /// is done, so the arms below cannot disagree with the gate about what was
+    /// going on when the key was pressed.
+    ///
+    /// The only way out is `false`, and only [`Pressed::Leave`] and the app's old
+    /// quit produce it. Leaving is deliberately not done from in here: the run's
+    /// handle and the terminal guard are [`run`]'s to drop, in the order it has
+    /// always dropped them.
+    fn press(&mut self, key: KeyEvent, now: Instant) -> Result<bool, Error> {
+        // The composer is offered on exactly the condition that lights its border,
+        // which is the keyboard being pointed at it: with the keys anywhere else
+        // this is `None`, there is no draft to type into, and every letter is the
+        // command it has always been.
+        let typing = (self.app.focus() == Focus::Composer).then(|| self.chat.composer());
+        let running = self.pact.running();
+        let asked = self.chat.answering();
+        let pressed = press_for(
+            key,
+            self.confirm,
+            &self.prompt,
+            self.chat.write_prompt(),
+            typing,
+            running,
+            asked,
+        );
+
+        match pressed {
+            // Saying the session is over is the whole of quitting, and it is
+            // enough even with a pact in flight: [`run`] returns on this answer and
+            // returning is what does the rest. `pact` drops on the way out, which
+            // cancels the run and kills the `claude` it was waiting on (see
+            // [`Running`]); the guard drops after it and puts the terminal back.
+            // Nothing joins the worker: it is left to be ended by the process,
+            // having written whole documents or none, and the manifest it never got
+            // to rewrite still says what it said before.
+            //
+            // Every way out arrives here: a Yes to the question, Ctrl-C, and `q`
+            // during a run. The second spelling is the app's old quit, which
+            // [`press_for`] no longer produces — naming it beside the first keeps
+            // one road out of this loop rather than two that have to be kept doing
+            // the same thing.
+            Pressed::Leave | Pressed::Act(Action::Quit) => return Ok(false),
+            // The question, opened, moved, or taken down again. Nothing else
+            // happens and nothing else needs to: the app was never touched, so a
+            // No has nothing to put back, and the top of this loop draws whatever
+            // the question now is.
+            Pressed::Confirm(next) => self.confirm = next,
+            // Esc with a run in flight. The handle does both halves at once — it
+            // latches, so the descent stops at the next directory instead of
+            // starting a pass for it, and it kills the `claude` running right now,
+            // so that stop happens in milliseconds rather than at the end of a
+            // five-minute pass.
+            //
+            // The pact is deliberately *not* taken down here. The worker is still
+            // going to hash what it wrote, save the manifest and report, and all
+            // of that arrives at the bottom of this loop like any other outcome;
+            // forgetting about it now would leave the footer's progress line up
+            // for a run nobody was listening to any more.
+            Pressed::Act(Action::CancelPact) => self.pact.stop(),
+            // Ctrl-C with a turn being answered, and the one keystroke in warlock
+            // that stops something without leaving. The handle is the turn's own —
+            // the same `Cancel` a run is stopped through — so it kills the
+            // `claude` this turn is waiting on and the worker comes back within
+            // milliseconds.
+            //
+            // The turn is deliberately *not* taken down here, exactly as a
+            // cancelled pact is not: the worker still has one thing to say, and it
+            // says it at the bottom of this loop like any other ending. That is
+            // what puts the cancelled line under whatever work had already arrived
+            // and gives the field the keyboard back — a turn forgotten here would
+            // leave the composer muted for the rest of the session.
+            Pressed::CancelTurn => self.chat.stop(),
+            // Nothing but a bit of view state moves here, and deliberately so:
+            // focus decides which border the next frame lights and which pane a
+            // movement key is about, and both of those questions are answered
+            // where they are asked — by the renderer reading `App::focus`, and by
+            // the app's own movement methods, which move the tree's selection or
+            // scroll the panel's window depending on the pane being driven
+            // (WAR-26.02). There is nothing for this arm to gate a second time,
+            // and no message: a key that changes what the *next* key means has
+            // nothing to report.
+            Pressed::Act(Action::ToggleFocus) => self.app.toggle_focus(),
+            Pressed::Act(Action::SelectPrevious) => self.app.select_previous(),
+            Pressed::Act(Action::SelectNext) => self.app.select_next(),
+            // No height is passed: the app was told the viewport's height at the
+            // top of this loop, so a page is whatever the frame just drawn could
+            // show.
+            Pressed::Act(Action::SelectPageUp) => self.app.select_page_up(),
+            Pressed::Act(Action::SelectPageDown) => self.app.select_page_down(),
+            Pressed::Act(Action::SelectFirst) => self.app.select_first(),
+            Pressed::Act(Action::SelectLast) => self.app.select_last(),
+            // Nothing else happens here on purpose. What is collapsed is the front
+            // end's view of the tree and never touches disk (§8), so there is no
+            // manifest to write; the tree has not changed, so there is nothing to
+            // re-read. The app moves the selection and the scroll offset back into
+            // range itself, and the next frame — the top of this same loop — draws
+            // the shorter or longer list.
+            Pressed::Act(Action::ToggleCollapsed) => self.app.toggle_collapsed(),
+            // Nothing else happens here either, and for the same reasons as
+            // collapsing: which rows are worth looking at is the front end's view
+            // of the tree and is never written down (§5), so there is no manifest
+            // to save, and the tree itself has not changed, so there is nothing to
+            // re-read. The app re-flows its rows and puts the selection and the
+            // scroll offset back in range; the next frame draws whatever is left.
+            Pressed::Act(Action::TogglePactedOnly) => self.app.toggle_pacted_only(),
+            // Nothing else here either, for the third time and for the same
+            // reasons as the two arms above: whether the files inside a module are
+            // on screen is the front end's view of the tree and is never written
+            // down (§5), so there is no manifest to save, and the files were read
+            // by the load that built these rows, so there is nothing to re-read.
+            // The app re-flows its rows and keeps the selection and the scroll
+            // offset in range; the next frame draws the longer or shorter list.
+            Pressed::Act(Action::ToggleFiles) => self.app.toggle_files(),
+            // The two keystrokes that write anything, and the two that take longer
+            // than a frame — so they are the ones that are not done here. Both go
+            // to a worker thread and both fill the one run `Pact` keeps, which is
+            // what makes them refuse each other; everything they produce arrives at
+            // the bottom of this loop, one directory at a time and finally as an
+            // outcome, and until it does the loop goes round as usual — drawing,
+            // scrolling, filtering.
+            //
+            // Two arms rather than one, because the list of keys is what this
+            // function is for and a key dispatching on a value computed elsewhere
+            // would be a key a reader could not find here. The kind is the app's own
+            // [`Run`], the only thing the two runs differ by all the way down;
+            // everything either side of it, and everything they refuse, is
+            // [`Pact::press`]'s.
+            Pressed::Act(Action::TogglePact) => {
+                self.pact
+                    .press(Run::Pact, &mut self.app, &self.manifest, &self.scope, now);
+            }
+            Pressed::Act(Action::Refresh) => {
+                self.pact.press(
+                    Run::Refresh,
+                    &mut self.app,
+                    &self.manifest,
+                    &self.scope,
+                    now,
+                );
+            }
+            // The one key that reads a file and the only one that shows anything a
+            // model wrote. It is done here, on this thread, between two frames: a
+            // read capped at a few kilobytes is over inside a frame, so there is
+            // no worker, no channel and no account, and nothing to reload
+            // afterwards because reading a file changes nothing about the tree.
+            //
+            // It needs no answer of its own, for the reason the scope key's arm
+            // needs none: everything this press can refuse it refuses inside
+            // `view_press` — a directory row through `App::message` — and every
+            // way the read itself can fail ends as one line on that same footer
+            // with the panel left as it was. So the loop goes round again after a
+            // failure exactly as it does after a success. Unlike `p`, `r` and `s`
+            // it is not handed the run: a read races nothing, so there is nothing
+            // for a run in flight to refuse. See `viewing::view_press`.
+            //
+            // What comes back is the file that is now on the document card, and it
+            // is kept here because the app is never told: `App::show_document`
+            // takes lines and never a path, so "which file the panel is holding"
+            // is this loop's to know. The one thing that asks for it is the edit
+            // key, which re-reads the card only when the file it just handed to an
+            // editor is the file on it. A press that read nothing — refused, or a
+            // read that failed — leaves the card holding what it held, which is
+            // why what was remembered before is what a `None` falls back to rather
+            // than being cleared.
+            Pressed::Act(Action::ViewFile) => {
+                if let Some(read) = view_press(&mut self.app) {
+                    self.document = Some(read);
+                }
+            }
+            // The one key that gives the screen away, and the only one whose
+            // answer is measured in minutes of somebody typing rather than in
+            // frames. The loop stops here for the whole of it: the terminal is put
+            // back the way warlock found it, `$EDITOR` is run on the selected file
+            // as a foreground child, the child is waited on, and the terminal is
+            // taken again — every one of those through the guard this loop already
+            // holds, so there is one spelling of teardown and one of setup (see
+            // `Screen::suspended`). Nothing is drawn behind the editor and
+            // no progress event is drained while it runs, which is the honest
+            // shape of handing the terminal to somebody else.
+            //
+            // `mouse_captured` is handed over because it is this thread's only
+            // record of what `m` last did: resuming without it would switch
+            // reporting back on behind a reader who turned it off.
+            //
+            // It needs no answer of its own, for the reason `v`'s and `s`'s arms
+            // need none: everything this press can refuse it refuses inside
+            // `edit_press` — a directory row in the very words `v` uses, a run in
+            // flight on the progress line, an `$EDITOR` naming nothing on the
+            // footer — and both ways the child itself can go wrong end as one line
+            // on that footer with the loop going round again. The `?` is the
+            // terminal and only the terminal: a screen that could not be taken
+            // back is not news for a footer nobody could read, so it leaves
+            // through the guard like every other terminal failure. See
+            // `editing::edit_press`.
+            //
+            // Two things are read again on the way back, and both are inside
+            // `edit_press`: the tree, so a directory whose file changed goes
+            // yellow without a further keystroke, and the document card — but only
+            // when the file just edited is the one on it, which is what `document`
+            // is kept for. Which card is showing does not move for either.
+            Pressed::Act(Action::EditFile) => {
+                edit_press(
+                    &mut self.app,
+                    &mut self.screen,
+                    &self.scope,
+                    self.document.as_deref(),
+                    self.mouse_captured,
+                    running,
+                )?;
+            }
+            // The panel's other card, and nothing else: the account if the
+            // document is up, the document if the account is. It is done here, on
+            // this thread, without reading anything — both cards are already in
+            // the app, so a swap is one field moved and the next frame drawing the
+            // other one.
+            //
+            // It needs no answer of its own, for `v`'s reason: the one thing this
+            // press can refuse — a session with no document read yet — it refuses
+            // inside `App::swap_card`, which leaves the panel on the account and
+            // puts a line on the footer naming the key that would make a second
+            // card. A swap that worked says nothing, because the reader can see
+            // it. Unlike `p`, `r` and `s` it is not handed the run: a swap races
+            // nothing, and a run that changed which card is showing would take a
+            // document out of the reader's hands.
+            Pressed::Act(Action::SwapCard) => self.app.swap_card(),
+            // The one key that answers to the terminal rather than to the app. The
+            // sequence is written first and the flag moved only if it went out, so
+            // what this thread believes about the terminal is what it last
+            // successfully told it; a write that fails takes the whole loop down
+            // through the guard, which turns capture off on the way past whatever
+            // state it was left in.
+            //
+            // Nothing else happens: no focus moves, no row is selected, nothing is
+            // redrawn here — the top of the loop draws every round, and it is
+            // where the footer picks the new wording up. With capture off the
+            // terminal keeps the pointer to itself, so `Event::Mouse` simply stops
+            // arriving and the mouse handler needs no gate of its own.
+            Pressed::Act(Action::ToggleMouseCapture) => {
+                self.screen.report_mouse(!self.mouse_captured)?;
+                self.mouse_captured = !self.mouse_captured;
+            }
+            // The third key that writes to disk, and the one that is not a run: it
+            // opens a window holding the scope the selected directory carries now,
+            // read out of the manifest this loop is already holding. Everything it
+            // can refuse it refuses inside `scope_press` — a file row and an
+            // unpacted one through `App::message`, a press during a run through
+            // the progress line — and every one of those comes back as a prompt
+            // that is still closed, so this arm needs no `None` case of its own.
+            // See `scoping::scope_press`.
+            Pressed::Act(Action::OpenScope) => {
+                self.prompt = scope_press(
+                    &mut self.app,
+                    &self.manifest,
+                    &self.scope.repo_root,
+                    self.scope.chrome.sigils(),
+                    running,
+                );
+            }
+            // Somebody typing into that window: a character more or less in the
+            // field, the window abandoned, or — on Enter — the manifest written.
+            // The whole of that last one happens here, on this thread, between two
+            // frames: no worker, no channel, no account and no reload, because a
+            // scope is one string written into one entry of a file already in this
+            // thread's hand (see `mod@scoping`). What comes back is the prompt
+            // from here on — down for a submit that was answered, still up over
+            // the text for one the engine refused. See `scoping::scope_edit`.
+            Pressed::Scope(edited) => {
+                self.prompt = scope_edit(
+                    &mut self.app,
+                    &mut self.manifest,
+                    &self.scope.repo_root,
+                    &self.prompt,
+                    edited,
+                );
+            }
+            // Somebody typing into the other window: a character more or less in
+            // the path, the window abandoned, or — on Enter — the document
+            // written. The whole of that last one happens here too, on this
+            // thread, between two frames: the bytes are the answer already on the
+            // card and the destination is the line on screen, so there is nothing
+            // to spawn and nothing to wait for (see `mod@writing`). What comes
+            // back is the prompt from here on — down for a write that happened and
+            // for an Esc that wrote nothing, still up over the typed path for one
+            // that was refused. An Esc changes nothing else at all: the reply
+            // stays on the card and the register stays what it was, because the
+            // app was never told the question was asked. See
+            // `writing::write_edit`.
+            Pressed::Write(edited) => {
+                self.chat.write(&mut self.app, &self.manifest, edited, now);
+            }
+            // Somebody typing at the foot of the panel's column: a character more
+            // or less in the draft, the keyboard handed back, or a draft offered
+            // up. What each of those comes to is [`apply_compose`], which is
+            // handed the local above rather than reaching for anything on the app
+            // — what is in the draft is not a fact about the tree.
+            //
+            // The output directory goes in for the same reason and in the same
+            // shape: it is a local of the loop, `/brief` is the one thing that
+            // settles it, and this is where `/brief` is answered — so it goes in
+            // borrowed rather than being fetched from somewhere in there.
+            //
+            // The last of the three is now a worker thread, so the agent and the
+            // turn go in with it, and the instant the key was pressed goes in as
+            // well for the pact key's reason: a turn is as old as the question
+            // that asked it, not as old as the first thing the model got round to
+            // saying.
+            Pressed::Compose(outcome) => self.chat.compose(&mut self.app, outcome, now),
+            // A key nothing is bound to, or one whose press has already been
+            // answered where it was decided.
+            Pressed::Nothing => {}
+        }
+
+        Ok(true)
+    }
+
+    /// Keep up with what is happening off this thread: the run's progress, the
+    /// turn's, and the disk moving under the tree.
+    ///
+    /// The bottom of every round, whether or not a key was pressed. [`Pact::keep_up`]
+    /// is the only place anything the worker says reaches the screen, and it has to
+    /// keep up with a thread that is not waiting for it; the scope is handed to it
+    /// because the end of a run re-reads the tree.
+    ///
+    /// Whether a run was in flight is read *before* the drain, because the drain is
+    /// what ends one: a pact that is `Some` on the way in and `None` on the way out
+    /// finished in this round, and its own reload has already read the tree. The
+    /// documents it wrote are exactly the sort of thing the watcher reports, so the
+    /// events they set off are already sitting in the policy — they are answered by
+    /// the reload that just happened rather than by one of their own, and the tree it
+    /// read becomes the next round's filter.
+    ///
+    /// Then what everything else did to the disk. Nothing is read again while a pact
+    /// is in flight — the trigger keeps until the run's own reload above — and
+    /// nothing at all is read when the disk has been still, which is almost every
+    /// round.
+    ///
+    /// The turn is drained last and by exactly the same rules: [`apply_turn`] takes
+    /// whatever the worker has said since the last frame and returns rather than
+    /// waiting, so the frame goes on redrawing while a question is being answered
+    /// and a burst of tool calls that arrived between two frames lands in the order
+    /// it happened. Last rather than first only because the two are independent —
+    /// a turn writes no file, changes no row and reloads nothing, so there is no
+    /// order between it and the run for the screen to disagree about. It is where
+    /// the muting ends: the drain is what takes `turn` down, however the turn
+    /// finished, and the top of the next round hands the field back on the strength
+    /// of that alone.
+    ///
+    /// The clock is read once, here, and handed to everything under this: the round
+    /// is measured against one instant, which is when the events being drained now
+    /// land on screen — within one [`POLL_INTERVAL`] of when they were sent. It is
+    /// read at the top rather than per call for the reason the frame reads its own:
+    /// two readings a round would be two answers to one question.
+    fn keep_up(&mut self) {
+        let now = Instant::now();
+        // The one round in a run's life the watcher has to hear about, and it says
+        // so itself: a `Reloaded` comes back on the round the run ended and on no
+        // other, carrying the tree that reload read. This loop used to work that
+        // edge out by reading `is_some()` either side of the drain and comparing —
+        // a detector kept by hand over a fact the run already knew. See
+        // [`Reloaded`].
+        if let Some(Reloaded(tree)) =
+            self.pact
+                .keep_up(&mut self.app, &mut self.manifest, &self.scope, now)
+        {
+            self.watched.caught_up(tree.as_ref(), now);
+        }
+        self.watched
+            .round(&mut self.app, &self.scope, self.pact.running(), now);
+        // And the conversation's own bottom end. Nothing comes back: a `/write`
+        // turn's answer opens the window that goes over it, and that window is the
+        // conversation's, so it is opened in there rather than here out of two
+        // values this loop would otherwise have to be handed. See [`Chat::keep_up`].
+        self.chat.keep_up(&mut self.app, now);
+    }
 }
 
 /// Do to the app whatever the pointer just asked for.
@@ -1666,31 +1542,28 @@ fn apply_mouse(
     }
 }
 
-/// Ask the terminal to report its mouse, or to stop reporting it.
-///
-/// The whole of what `m` does to a terminal, and the only thing that differs
-/// between its two directions is which sequence is written — so it is one line
-/// at the keystroke rather than an `if` in the middle of the loop. The caller
-/// moves the flag it keeps only after this has returned, which is what keeps
-/// what warlock believes about the terminal down to what it last successfully
-/// told it.
-fn report_mouse(on: bool) -> io::Result<()> {
-    if on {
-        execute!(io::stdout(), EnableMouseCapture)
-    } else {
-        execute!(io::stdout(), DisableMouseCapture)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+    use std::{fs, io};
 
     use clap::error::ErrorKind;
     use clap::{CommandFactory, Parser};
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Size;
+    use ratatui::{Frame, Terminal};
+    use warlock_engine::{Loaded, Manifest, Node, NodeState, Tree, load_tree, repository_root};
+    use warlock_tui::{App, Chrome, QuitConfirm, Row, ScopePrompt, tree_height};
 
-    use super::{Cli, Command, Error, FOR_CLAUDE_MD, ScopeCommand, status_for};
+    use super::{Cli, Command, Error, FOR_CLAUDE_MD, ScopeCommand, Session, status_for};
+    use crate::chatting::Chat;
+    use crate::pacting::Pact;
     use crate::query::spelled;
+    use crate::session::{Scope, Watched};
+    use crate::stubs::{Passing, Saying};
+    use crate::terminal::Screen;
 
     /// What warlock would do, given `args` after the program's own name.
     ///
@@ -2381,5 +2254,367 @@ mod tests {
                 "{args:?}"
             );
         }
+    }
+
+    /// A screen that draws into memory and is never given away.
+    ///
+    /// The second adapter at the [`Screen`] seam, and the whole reason a
+    /// [`Session`] is reachable from a test. Warlock's own is a terminal in raw
+    /// mode on the alternate screen, which a test runner has not got; this one
+    /// is ratatui's `TestBackend`, which every `ui.rs` test already draws
+    /// against, plus a record of the two things a session asks of a terminal
+    /// that are not drawing.
+    #[derive(Debug)]
+    struct FakeScreen {
+        /// Where frames go.
+        terminal: Terminal<TestBackend>,
+        /// The `mouse` of every suspension asked for, in the order it was asked.
+        suspensions: Vec<bool>,
+        /// Every mouse-reporting change asked for, in the order it was asked.
+        reported: Vec<bool>,
+    }
+
+    impl FakeScreen {
+        /// A screen `width` by `height`, with nothing asked of it yet.
+        fn of(width: u16, height: u16) -> Self {
+            Self {
+                terminal: Terminal::new(TestBackend::new(width, height))
+                    .expect("a test backend never fails to start"),
+                suspensions: Vec::new(),
+                reported: Vec::new(),
+            }
+        }
+    }
+
+    impl Screen for FakeScreen {
+        fn size(&self) -> io::Result<Size> {
+            // A `TestBackend` cannot fail, so its error type is `Infallible`
+            // and there is nothing here for warlock to handle.
+            Ok(self.terminal.size().expect("a test backend never fails"))
+        }
+
+        fn draw<F: FnOnce(&mut Frame<'_>)>(&mut self, render: F) -> io::Result<()> {
+            self.terminal
+                .draw(render)
+                .expect("a test backend never fails");
+            Ok(())
+        }
+
+        fn suspended<T, F: FnOnce() -> T>(&mut self, mouse: bool, body: F) -> io::Result<T> {
+            self.suspensions.push(mouse);
+            Ok(body())
+        }
+
+        fn report_mouse(&mut self, on: bool) -> io::Result<()> {
+            self.reported.push(on);
+            Ok(())
+        }
+    }
+
+    /// The session a test drives: an in-memory screen, and both models answering
+    /// out of memory.
+    type Driven = Session<FakeScreen, Passing, Saying>;
+
+    /// A session over `rows`, with nothing pacted, nothing in flight and no
+    /// child process anywhere.
+    ///
+    /// The very value [`run`] builds, with its three seams filled by stand-ins
+    /// instead of a terminal and two `claude`s — which is the point: what these
+    /// tests press is the real key handler over the real session, rather than a
+    /// retyped copy of either.
+    fn session(rows: Vec<Row>) -> Driven {
+        let root = PathBuf::from("/warlock/no/such/repository");
+        let scope = Scope {
+            chrome: Chrome::of(&root, &root),
+            root: root.clone(),
+            repo_root: root.clone(),
+        };
+        // A one-node tree for the watcher to be started over. Nothing is there,
+        // so no watcher is granted and `Watching` says why — which is exactly
+        // the state a session runs in when the platform refuses one, and costs
+        // these tests nothing.
+        let tree = Tree::new(Node::new(&root, None::<PathBuf>, NodeState::Unpacted));
+        let watched = Watched::start(&scope, &tree);
+        Session {
+            app: App::from_rows(rows),
+            screen: FakeScreen::of(80, 24),
+            scope,
+            manifest: Manifest::new(),
+            pact: Pact::with_agent(Passing::answering(DOCUMENT)),
+            chat: Chat::with_agent(root, Saying::answering(ANSWER)),
+            confirm: QuitConfirm::default(),
+            prompt: ScopePrompt::default(),
+            document: None,
+            mouse_captured: true,
+            watched,
+        }
+    }
+
+    /// Press `key` on `driven`, and say whether the session goes on.
+    ///
+    /// The instant is read here because none of the tests below are about a
+    /// clock: what a key *does* is the same at every instant, and the two things
+    /// that are timed — a run's account and a turn's — are driven from their own
+    /// modules against instants those tests hand in.
+    fn pressed(driven: &mut Driven, key: KeyEvent) -> bool {
+        driven
+            .press(key, Instant::now())
+            .expect("no key pressed here writes to a terminal")
+    }
+
+    /// What the stand-in model answers a pass with: long enough that the engine
+    /// keeps it rather than dropping it under `MINIMUM_DOCUMENT_BYTES`.
+    const DOCUMENT: &str = "# crates\n\nWhat this directory is for, said at about the length a \
+                            real document says it at, so that the engine keeps what comes back \
+                            instead of refusing it as too short to be a document. The floor is \
+                            `MINIMUM_DOCUMENT_BYTES`, which is two hundred bytes, and a stand-in \
+                            that answers with less than that is a stand-in whose passes all \
+                            quietly fail.";
+
+    /// What the stand-in model answers a turn with.
+    const ANSWER: &str = "The tree, the manifest and the pact.";
+
+    /// One ordinary keystroke, with no modifier held.
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// One directory row, which is what every refusal below is aimed at.
+    fn directory(path: &str) -> Row {
+        Row::new(0, path, None, NodeState::Unpacted)
+    }
+
+    /// How long a round-driving test waits for a run that is never going to
+    /// end. Only ever reached when something is already wrong, and every wait
+    /// ends the moment the run does.
+    const AT_MOST: Duration = Duration::from_secs(5);
+
+    /// A repository on disk: one crate of two directories, and the `.git/` that
+    /// makes the loader agree it is a repository.
+    ///
+    /// The file inside `.git/` is neither read nor walked — hidden directories
+    /// are skipped — and is written only because a directory is made here by
+    /// writing a file into it.
+    fn a_repository() -> tempfile::TempDir {
+        let scratch = tempfile::tempdir().expect("a temporary directory");
+        for (path, text) in [
+            (".git/HEAD", "ref: refs/heads/main\n"),
+            ("crates/engine/src/lib.rs", "//! Core engine.\n"),
+        ] {
+            let at = scratch.path().join(path);
+            fs::create_dir_all(at.parent().expect("every path here has a parent"))
+                .expect("a scratch directory is writable");
+            fs::write(&at, text).expect("a scratch file is writable");
+        }
+        scratch
+    }
+
+    /// A session over a repository that is really on disk, built the way
+    /// [`run`] builds one — and, like it, with the tree read first.
+    fn session_over(root: &Path) -> Driven {
+        let Loaded { tree, .. } = load_tree(root).expect("a scratch repository loads");
+        let repo_root = repository_root(tree.root_path()).expect("the load found a repository");
+        let scope = Scope {
+            chrome: Chrome::of(&repo_root, tree.root_path()),
+            root: tree.root_path().to_path_buf(),
+            repo_root: repo_root.clone(),
+        };
+        let watched = Watched::start(&scope, &tree);
+        Session {
+            app: App::from_tree(&tree),
+            screen: FakeScreen::of(80, 24),
+            scope,
+            manifest: Manifest::new(),
+            pact: Pact::with_agent(Passing::answering(DOCUMENT)),
+            chat: Chat::with_agent(repo_root, Saying::answering(ANSWER)),
+            confirm: QuitConfirm::default(),
+            prompt: ScopePrompt::default(),
+            document: None,
+            mouse_captured: true,
+            watched,
+        }
+    }
+
+    /// Round after round, until nothing is in flight any more.
+    fn rounds_until_settled(driven: &mut Driven) {
+        let waited = Instant::now();
+        while driven.pact.running() && waited.elapsed() < AT_MOST {
+            let size = driven.size().expect("the fake screen has a size");
+            driven.draw(size).expect("the fake screen draws");
+            driven.keep_up();
+        }
+        assert!(!driven.pact.running(), "the run never finished");
+    }
+
+    #[test]
+    fn a_round_tells_the_app_the_size_the_frame_is_being_cut_at() {
+        let mut driven = session(vec![directory("/repo/crates")]);
+        let size = driven.size().expect("the fake screen has a size");
+
+        driven.draw(size).expect("the fake screen draws");
+
+        assert_eq!(
+            driven.app.viewport_height(),
+            usize::from(tree_height(size)),
+            "the app was told the height this frame gives the tree"
+        );
+    }
+
+    #[test]
+    fn pressing_the_pact_key_descends_the_subtree_and_lands_its_documents() {
+        let repo = a_repository();
+        let mut driven = session_over(repo.path());
+
+        assert!(pressed(&mut driven, key(KeyCode::Char('p'))));
+        assert!(driven.pact.running(), "the press started a run");
+
+        rounds_until_settled(&mut driven);
+
+        assert!(
+            repo.path().join("WARLOCK.md").is_file(),
+            "the root was never documented"
+        );
+        assert!(
+            repo.path().join("crates/engine/src/WARLOCK.md").is_file(),
+            "the descent stopped short of the deepest directory"
+        );
+        assert_eq!(
+            driven.manifest.entries().len(),
+            4,
+            "every directory the walk produced should have been granted"
+        );
+    }
+
+    #[test]
+    fn a_second_press_of_the_pact_key_takes_the_whole_subtree_back_out() {
+        let repo = a_repository();
+        let mut driven = session_over(repo.path());
+        pressed(&mut driven, key(KeyCode::Char('p')));
+        rounds_until_settled(&mut driven);
+
+        pressed(&mut driven, key(KeyCode::Char('p')));
+        rounds_until_settled(&mut driven);
+
+        assert_eq!(
+            driven.manifest.entries().len(),
+            0,
+            "un-pacting left entries behind"
+        );
+        assert!(
+            repo.path().join("WARLOCK.md").is_file(),
+            "un-pacting deleted a document, which it has never done"
+        );
+    }
+
+    #[test]
+    fn the_quit_key_opens_the_question_rather_than_leaving() {
+        let mut driven = session(vec![directory("/repo/crates")]);
+
+        assert!(
+            pressed(&mut driven, key(KeyCode::Char('q'))),
+            "the session goes on"
+        );
+        assert_eq!(
+            driven.confirm,
+            QuitConfirm::open(),
+            "and the question is up with No lit"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_leaves_without_asking() {
+        let mut driven = session(vec![directory("/repo/crates")]);
+
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(!pressed(&mut driven, key), "the session is over");
+        assert_eq!(
+            driven.confirm,
+            QuitConfirm::Closed,
+            "and no question was ever asked"
+        );
+    }
+
+    #[test]
+    fn answering_no_puts_the_question_down_and_stays() {
+        let mut driven = session(vec![directory("/repo/crates")]);
+        pressed(&mut driven, key(KeyCode::Char('q')));
+
+        assert!(
+            pressed(&mut driven, key(KeyCode::Enter)),
+            "the session goes on"
+        );
+        assert_eq!(
+            driven.confirm,
+            QuitConfirm::Closed,
+            "and the question is down"
+        );
+    }
+
+    #[test]
+    fn the_focus_key_moves_the_keyboard_on() {
+        let mut driven = session(vec![directory("/repo/crates")]);
+        let before = driven.app.focus();
+
+        assert!(pressed(&mut driven, key(KeyCode::Tab)));
+        assert_ne!(driven.app.focus(), before, "the focus moved");
+    }
+
+    #[test]
+    fn the_mouse_key_flips_what_the_loop_is_holding() {
+        let mut driven = session(vec![directory("/repo/crates")]);
+
+        assert!(pressed(&mut driven, key(KeyCode::Char('m'))));
+        assert!(!driven.mouse_captured, "reporting was turned off");
+
+        assert!(pressed(&mut driven, key(KeyCode::Char('m'))));
+        assert!(driven.mouse_captured, "and back on again");
+
+        assert_eq!(
+            driven.screen.reported,
+            [false, true],
+            "and the terminal was told each time, through the screen rather \
+             than past it"
+        );
+    }
+
+    #[test]
+    fn an_edit_over_a_directory_never_asks_for_the_screen() {
+        let mut driven = session(vec![directory("/repo/crates")]);
+
+        assert!(pressed(&mut driven, key(KeyCode::Char('e'))));
+        assert!(
+            driven.screen.suspensions.is_empty(),
+            "a row that is not a file is refused before any child is run"
+        );
+        assert!(
+            driven.app.message().is_some(),
+            "and the refusal is said rather than swallowed"
+        );
+    }
+
+    #[test]
+    fn the_scope_prompt_swallows_the_pact_key() {
+        let mut driven = session(vec![directory("/repo/crates")]);
+        driven.prompt = ScopePrompt::open("crates", "");
+
+        assert!(pressed(&mut driven, key(KeyCode::Char('p'))));
+        let field = driven
+            .prompt
+            .field()
+            .expect("the window is still up over the directory it opened on");
+        assert_eq!(field.text(), "p", "the key was typed, not pressed");
+    }
+
+    #[test]
+    fn a_key_the_window_does_not_want_puts_it_down_and_starts_nothing() {
+        let mut driven = session(vec![directory("/repo/crates")]);
+        driven.prompt = ScopePrompt::open("crates", "");
+
+        assert!(pressed(&mut driven, key(KeyCode::Esc)));
+        assert_eq!(
+            driven.prompt,
+            ScopePrompt::Closed,
+            "Esc closes the window rather than quitting warlock"
+        );
     }
 }

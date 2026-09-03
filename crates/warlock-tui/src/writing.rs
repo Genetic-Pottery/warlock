@@ -2010,7 +2010,6 @@ mod writes {
     /// this module is Unix-only. So the whole path runs with no terminal, no
     /// network and no `claude`, over a repository of the test's own that goes
     /// away with the test.
-    #[cfg(unix)]
     mod whole {
 
         use std::thread;
@@ -2018,14 +2017,17 @@ mod writes {
 
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        use warlock_tui::{ChatAgent, Composed, Composer, Line, Mode, ScopePrompt, edit_for};
+        use warlock_tui::{Composed, Composer, Line, Mode, ScopePrompt, edit_for};
 
         use super::super::WRITE_HEADING;
         use super::{
             App, Instant, Node, NodeState, PathBuf, Tree, a_repo, everything_under, fs, notes, now,
             pacts,
         };
+        use warlock_tui::Converses;
+
         use crate::chatting::Chat;
+        use crate::stubs::Saying;
 
         /// How long the rounds below go on before giving up on a turn that is
         /// never going to end. `chatting.rs`'s number and its reason: it is only
@@ -2043,36 +2045,6 @@ mod writes {
         /// a brief written into it.
         const PROPOSED: &str = "docs/warlock-brief-01-scopes-and-sigils.md";
 
-        /// A `claude` that is a shell script: it answers with `document` on the
-        /// one line the seam takes an answer off, and exits.
-        ///
-        /// The result line is the only thing this stand-in says, so the turn has
-        /// no work lines and lands as one answer — which is all this test is
-        /// about. What a turn's *work* looks like on the card is `chatting.rs`'s
-        /// own suite.
-        fn answering_with(document: &str) -> ChatAgent {
-            let result = format!(
-                r#"{{"type":"result","subtype":"success","result":"{}"}}"#,
-                escaped(document)
-            );
-            ChatAgent::new()
-                .with_program("/bin/sh")
-                .with_args(["-c".to_owned(), format!("printf '%s\\n' '{result}'")])
-        }
-
-        /// `document` as a JSON string spells it, so the newlines in it survive
-        /// the one line the stand-in prints.
-        ///
-        /// `printf '%s\n'` does not interpret its argument, so what the shell is
-        /// handed is what `serde_json` reads — and what it reads back out is the
-        /// document byte for byte.
-        fn escaped(document: &str) -> String {
-            document
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-        }
-
         /// The loop's bottom end, round after round, until the turn has ended.
         ///
         /// [`Chat::keep_up`] and nothing else, which is exactly what the event
@@ -2085,7 +2057,7 @@ mod writes {
         /// up — a second spelling of a line the event loop also had, living in a
         /// test. The conversation owns the window now, so the round is the one
         /// call, and what opened is read off the conversation afterwards.
-        fn rounds_until_answered(chat: &mut Chat, app: &mut App, now: Instant) {
+        fn rounds_until_answered<C: Converses>(chat: &mut Chat<C>, app: &mut App, now: Instant) {
             let waited = Instant::now();
             while chat.answering() && waited.elapsed() < AT_MOST {
                 chat.keep_up(app, now);
@@ -2110,7 +2082,7 @@ mod writes {
             // The conversation, rooted in that repository: where a brief goes
             // is its own now, settled at `/brief` and read at `/write` without
             // being looked at again.
-            let mut chat = Chat::with_agent(repo.path(), answering_with(DOCUMENT));
+            let mut chat = Chat::with_agent(repo.path(), Saying::answering(DOCUMENT));
 
             // The reader typing the word and pressing Enter at the foot of the
             // panel, through the very method the loop's composer arm calls.

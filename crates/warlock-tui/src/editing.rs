@@ -3,7 +3,7 @@
 //! One press, one child, one terminal given up and taken back: [`edit_press`]
 //! asks the app which file the selection is on, works out what `$EDITOR` names,
 //! hands both to a foreground child through
-//! [`TerminalGuard::suspended`](crate::terminal::TerminalGuard::suspended), and
+//! [`Screen::suspended`](crate::terminal::Screen::suspended), and
 //! waits. It is [`mod@crate::viewing`]'s other half — that module reads a file
 //! into the panel, this one hands the same file to something that can change it
 //! — and it is section 9's escape hatch given a keystroke: manual edits are not
@@ -113,7 +113,7 @@ use warlock_tui::App;
 
 use crate::error::one_line;
 use crate::session::{Scope, note, reload_tree};
-use crate::terminal::TerminalGuard;
+use crate::terminal::Screen;
 
 /// The one environment variable this key reads.
 ///
@@ -184,7 +184,7 @@ struct Editor {
 /// reload have.
 pub(crate) fn edit_press(
     app: &mut App,
-    guard: &mut TerminalGuard,
+    screen: &mut impl Screen,
     scope: &Scope,
     showing: Option<&Path>,
     mouse: bool,
@@ -202,8 +202,8 @@ pub(crate) fn edit_press(
     // The one call in warlock that hands the screen to somebody else. Everything
     // the child has to say about how it went comes back as a value, because
     // there is deliberately no way to leave the closure with the terminal still
-    // down — see `TerminalGuard::suspended`.
-    if let Some(line) = guard.suspended(mouse, || run_editor(&editor, &path))? {
+    // down — see `Screen::suspended`.
+    if let Some(line) = screen.suspended(mouse, || run_editor(&editor, &path))? {
         app.set_message(line);
     }
     came_back(app, scope, &path, showing);

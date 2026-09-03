@@ -705,7 +705,8 @@ mod tests {
     // retyped: the footer, `warlock unpact` and a refused run say one thing
     // about one boundary, and a test holding its own copy of those words would
     // go on passing while the doors drifted apart.
-    use crate::session::{closed_scope_message, load_manifest};
+    use crate::boundary::closed_scope_message;
+    use crate::session::load_manifest;
     use crate::status_for;
 
     /// A throwaway directory. Every test below builds both its repository and

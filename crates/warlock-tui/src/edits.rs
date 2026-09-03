@@ -159,12 +159,10 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{
-    Manifest, PactEntry, closed_scopes_at_or_below, repository_root, scope_covering,
-    scope_opens_to, unpact_subtree, validate_scope,
-};
+use warlock_engine::{Manifest, PactEntry, repository_root, unpact_subtree, validate_scope};
 use warlock_tui::Sigils;
 
+use crate::boundary::{Reach, Verdict, verdict};
 use crate::config::home_directory;
 use crate::error::Error;
 use crate::query::spelled;
@@ -265,43 +263,29 @@ impl Opened {
         // resolved is nothing held rather than a config that would not read:
         // there is no file in that case, so there is nothing broken to report.
         let sigils = home.map_or(Sigils::Nothing, |home| sigils_under(home, &repo_root));
-        // `ok()` and not `?`: see above — a path with no manifest form is not a
-        // boundary question, and the caller has a better sentence for it.
-        let covering = scope_covering(&target, &repo_root, &manifest)
-            .ok()
-            .flatten();
-        // `Nothing` and `Unknown` are both the empty slice on the way in
-        // (`Sigils::as_slice`), which is what closes every scoped path to a
-        // machine that has never been configured and to one whose config will
-        // not parse.
-        if scope_opens_to(covering, sigils.as_slice()) {
-            return Ok(Self {
-                repo_root,
-                manifest,
-                target,
-                sigils,
+        // The decision is [`verdict`]'s, and this is the shell's half of what to
+        // do about it: an `Error`, which carries the exit status and prints the
+        // very sentence the panel's footer says. The panel renders the same
+        // verdict onto the footer and neither of them works the answer out for
+        // itself. See `boundary.rs`.
+        if let Verdict::Closed { scope } =
+            verdict(&target, &repo_root, &manifest, &sigils, Reach::Here)
+        {
+            return Err(Error::ClosedScope {
+                // Refused paths are spellable by construction: a path with no
+                // manifest form has no coverage, and a path with no coverage did
+                // not reach here. So the `?` is a formality that keeps the
+                // fallible call honest rather than a second refusal.
+                path: spelled(&repo_root, &target)?,
+                scope,
             });
         }
 
-        let Some(scope) = covering else {
-            // Unreachable: `scope_opens_to` answers `true` for every path
-            // nothing covers, so a refusal is always a refusal by a named
-            // scope. Written out rather than unwrapped, because the one thing
-            // this arm must never do is invent a scope to refuse in the name of.
-            return Ok(Self {
-                repo_root,
-                manifest,
-                target,
-                sigils,
-            });
-        };
-        Err(Error::ClosedScope {
-            // Refused paths are spellable by construction: a path with no
-            // manifest form has no coverage, and a path with no coverage did not
-            // reach here. So the `?` is a formality that keeps the fallible call
-            // honest rather than a second refusal.
-            path: spelled(&repo_root, &target)?,
-            scope: scope.to_owned(),
+        Ok(Self {
+            repo_root,
+            manifest,
+            target,
+            sigils,
         })
     }
 
@@ -396,22 +380,17 @@ impl Opened {
         let path = spelled(&self.repo_root, &self.target)?;
         // Before the rebuild, and before anything is said about what the
         // manifest holds: a refusal by a boundary names the scopes in the way
-        // and nothing else about the inside of this repository.
-        let blocking = closed_scopes_at_or_below(
+        // and nothing else about the inside of this repository. The narrower
+        // question was already asked and answered by `Opened::new`, so what
+        // this reach can still turn up is only ever what is underneath.
+        if let Verdict::ClosedBelow { scopes } = verdict(
             &self.target,
             &self.repo_root,
             &self.manifest,
-            self.sigils.as_slice(),
-        )
-        // Unreachable past the line above, which is the same spelling on the
-        // same two arguments: kept as the same rewrapping the engine's other
-        // call gets, so the fallible call stays honest.
-        .map_err(|source| Error::Unspellable { source })?;
-        if !blocking.is_empty() {
-            return Err(Error::ClosedScopeBelow {
-                path,
-                scopes: blocking.into_iter().map(str::to_owned).collect(),
-            });
+            &self.sigils,
+            Reach::HereAndBelow,
+        ) {
+            return Err(Error::ClosedScopeBelow { path, scopes });
         }
 
         let remaining = unpact_subtree(&self.target, &self.repo_root, &self.manifest)
@@ -730,7 +709,8 @@ mod tests {
     // retyped: the footer and the shell refuse the same boundary in the same
     // words, and a test holding a copy of those words is a test that would go on
     // passing while the two doors drifted apart.
-    use crate::session::{closed_scope_message, load_manifest, sigils_under};
+    use crate::boundary::closed_scope_message;
+    use crate::session::{load_manifest, sigils_under};
     use crate::status_for;
 
     /// The grant every entry below carries, so that "the scope write left the

@@ -1201,6 +1201,69 @@ impl fmt::Debug for Activities {
     }
 }
 
+/// One copy of the model per unit of work, answering that unit's say-when and
+/// reporting to that unit's port.
+///
+/// The shape both halves of the seam share. A run and a turn each need an agent
+/// that is *theirs* — cancelling one must never reach into the next, and the
+/// activities one produces must not land on another's card — so neither of them
+/// uses the agent the event loop keeps. They take a copy of it, wired to their
+/// own handle, and let it die with the work.
+///
+/// It is a trait rather than an inherent method because it is the seam: warlock
+/// runs on [`ClaudeAgent`] and [`ChatAgent`], which spawn `claude`, and a test
+/// runs on a value that answers out of memory. Two adapters apiece, so the seam
+/// is a real one.
+///
+/// `Clone + Send + 'static` because the copy is moved onto a worker thread, and
+/// the bound is on the interface rather than on the implementations for the same
+/// reason the rest of it is: a caller has to know it, so it is stated where a
+/// caller reads.
+pub trait Wired: Clone + Send + 'static {
+    /// A copy of this agent that answers to `cancel` and reports to
+    /// `activities`.
+    #[must_use]
+    fn wired(&self, cancel: Cancel, activities: Activities) -> Self;
+}
+
+/// A conversation with a model: one message in, one answer out.
+///
+/// The reading half of the seam, and deliberately not
+/// [`Agent`](warlock_engine::Agent) — for the reason `lib.rs` gives at length: a
+/// request names a directory and carries the files under it, and a typed
+/// sentence names nothing and carries nothing. So a turn is a message rather
+/// than a request, and the port a pact runs through is left to the runs that fit
+/// it.
+///
+/// Three methods, which is everything a conversation needs of a model:
+/// [`Wired::wired`] for the turn's own handle, [`Converses::raised`] for the
+/// register a brief runs in, and [`Converses::turn`] for the question itself.
+pub trait Converses: Wired {
+    /// Ask `message` and wait for the answer.
+    ///
+    /// One turn of the conversation, run on the calling thread. Whether the
+    /// model remembers what was said before it is the implementation's business
+    /// — warlock's own keeps one session for the life of the agent, and a test's
+    /// need not.
+    ///
+    /// # Errors
+    ///
+    /// Whatever stopped the turn short of an answer, in the seam's own
+    /// vocabulary: no model to ask, a non-zero exit, a timeout, or nothing said.
+    /// [`ending_for`](crate::ending_for) is what turns one into the line the
+    /// panel shows.
+    fn turn(&self, message: &str) -> Result<String, AgentError>;
+
+    /// The same conversation, run harder: the model and effort a brief takes.
+    ///
+    /// A copy rather than a change, because the register is a property of the
+    /// turn and not of the conversation: leaving brief mode has to leave the
+    /// agent as it found it, and an agent that was never altered is a cheaper
+    /// guarantee of that than one carefully put back.
+    #[must_use]
+    fn raised(&self, model: &str, effort: &str) -> Self;
+}
+
 /// An [`Agent`] that runs the `claude` CLI as a child process.
 ///
 /// Owns the child, its stdin, its stdout, its stderr, its exit status and its
@@ -2376,6 +2439,28 @@ fn kill_and_reap(child: &Arc<Mutex<Child>>) {
 /// is strictly better here than panicking a second time.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Wired for ClaudeAgent {
+    fn wired(&self, cancel: Cancel, activities: Activities) -> Self {
+        self.clone().with_cancel(cancel).with_activities(activities)
+    }
+}
+
+impl Wired for ChatAgent {
+    fn wired(&self, cancel: Cancel, activities: Activities) -> Self {
+        self.clone().with_cancel(cancel).with_activities(activities)
+    }
+}
+
+impl Converses for ChatAgent {
+    fn turn(&self, message: &str) -> Result<String, AgentError> {
+        Self::turn(self, message)
+    }
+
+    fn raised(&self, model: &str, effort: &str) -> Self {
+        self.at_effort(effort).at_model(model)
+    }
 }
 
 #[cfg(test)]

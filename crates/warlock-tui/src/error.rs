@@ -14,7 +14,7 @@ use warlock_engine::{
     ClaudeMdError, LoadError, LoadProblem, ManifestError, PactError, ScopeRule, SigilError,
 };
 
-use crate::session::{blocking_scopes_message, closed_scope_message};
+use crate::boundary::{blocking_scopes_message, closed_scope_message};
 
 /// Everything that can stop warlock showing a tree, or writing a `CLAUDE.md`.
 ///

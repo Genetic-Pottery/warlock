@@ -36,10 +36,11 @@ use std::time::Instant;
 
 use warlock_engine::{
     Loaded, Manifest, ManifestError, SigilError, Tree, load_sigils, load_tree, manifest_path,
-    repository_root, scope_covering, scope_opens_to,
+    repository_root,
 };
 use warlock_tui::{App, Chrome, Sigils, Watch, WatchPolicy, Watching, reseat_on};
 
+use crate::boundary::{Reach, Verdict, closed_scope_message, verdict};
 use crate::config::home_directory;
 use crate::error::{Error, one_line};
 
@@ -320,86 +321,6 @@ pub(crate) fn start_watching(app: &mut App, scope: &Scope, tree: &Tree) -> Watch
     watched
 }
 
-/// What the footer says when a key is refused over a boundary this machine does
-/// not hold, naming the directory as `label` and the boundary as `scope`.
-///
-/// The shape every other row-level refusal in warlock uses: the fact about the
-/// row, then the thing that would help. What would help here is not a keystroke
-/// — every key that could open this boundary is a key this boundary closes — so
-/// it names `warlock config`, which is the one place a sigil is recorded and the
-/// only road from this line to the work.
-///
-/// It names the scope out loud, and backticked the way `warlock config` and the
-/// header both spell a sigil. A refusal that said only "you may not" would leave
-/// the reader with nothing to ask their lead for; the whole social half of this
-/// design is somebody being told which sigil to go and get.
-///
-/// Shared with the headless writes rather than retyped there. `warlock unpact`
-/// is refused over the same boundary by the same two engine calls, and prints
-/// this sentence through [`Error::ClosedScope`](crate::error::Error) — one rule
-/// refused in two registers, in one wording, so the day this sentence changes it
-/// changes for the keystroke and the shell prompt together. What differs is only
-/// what `label` is: a row's label there, the manifest's spelling of the path
-/// here.
-pub(crate) fn closed_scope_message(label: &str, scope: &str) -> String {
-    format!("{label} is scoped `{scope}` — hold that sigil to work here, with `warlock config`")
-}
-
-/// What an un-pact of `label` is refused with when the subtree under it carries
-/// boundaries this machine does not hold, naming every one of `scopes`.
-///
-/// The second boundary sentence, and the only other one warlock has. Where
-/// [`closed_scope_message`] answers "may this operator act *here*" — coverage,
-/// which walks up — this answers the question an un-pact alone raises: what does
-/// the act **reach**. Dropping an entry drops the scope written on it, so an
-/// un-pact aimed at a parent can take a boundary with it; the answer is to
-/// refuse, argued in full in
-/// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
-///
-/// The same shape as the sentence beside it — the fact, then the two roads out —
-/// because it is the same refusal wearing a different reason. It names the
-/// directory that was aimed at rather than the ones underneath: what a reader
-/// must hold to proceed is the scopes, and they are few by design, while the
-/// paths carrying them are not and `warlock check` is the thing that locates
-/// them. Every distinct blocking scope is named, deduplicated and in the
-/// manifest's own order (see
-/// [`closed_scopes_at_or_below`](warlock_engine::closed_scopes_at_or_below)),
-/// because naming one and stopping would turn a refusal into whack-a-mole where
-/// each sigil obtained reveals the next.
-///
-/// The second road is the one this refusal has and the other does not:
-/// un-pacting the parts you *do* hold gets the work done without anybody's
-/// boundary going, and it is the honest suggestion for the ordinary case, which
-/// is a cursor one row higher than it was meant to be. There is no third road —
-/// no `--force`, no flag, no environment variable — here or anywhere past this.
-///
-/// Shared with the headless write rather than retyped there: `warlock unpact`
-/// refuses the same path on the same grounds and prints this sentence through
-/// [`Error::ClosedScopeBelow`](crate::error::Error), so a `p` on a pacted
-/// subtree and a `warlock unpact` of it give one answer in one wording. What
-/// differs is only what `label` is: a row's label there, the manifest's spelling
-/// of the path here.
-///
-/// An empty `scopes` is not a sentence this function can be asked for: both
-/// callers word a refusal they are already holding the reason for, and nothing
-/// blocking is nothing to refuse.
-pub(crate) fn blocking_scopes_message(label: &str, scopes: &[&str]) -> String {
-    let named: Vec<String> = scopes.iter().map(|scope| format!("`{scope}`")).collect();
-    // Singular for one, because the ordinary refusal is by a single boundary and
-    // a line a person reads should not say "hold those sigils" about one of them.
-    let sigils = if scopes.len() == 1 {
-        "that sigil"
-    } else {
-        "those sigils"
-    };
-
-    format!(
-        "un-pacting {label} would drop pacts scoped {} — hold {sigils} with `warlock config`, \
-         or un-pact the parts you hold",
-        named.join(", ")
-    )
-}
-
 /// The scope closed to this machine over the row `app` has selected, or `None`
 /// when the press may go ahead.
 ///
@@ -458,14 +379,14 @@ pub(crate) fn closed_scope(
         return None;
     }
 
+    // The whole of the decision is [`verdict`]'s, and this is the panel's half
+    // of what to do about it: put the sentence on the footer and hand the scope
+    // back to the key that asked. The shell renders the same verdict as an
+    // `Error` and neither of them works the answer out for itself.
     let path = row.path.clone();
-    // `ok()?` and not a message: a path with no manifest-relative form is the
-    // key's own to explain, and explaining it twice would put this line under
-    // the one that actually says what went wrong.
-    let scope = scope_covering(&path, repo_root, manifest).ok()??.to_owned();
-    if scope_opens_to(Some(&scope), sigils.as_slice()) {
+    let Verdict::Closed { scope } = verdict(&path, repo_root, manifest, sigils, Reach::Here) else {
         return None;
-    }
+    };
 
     let label = app.label_for(&path);
     app.set_message(closed_scope_message(&label, &scope));

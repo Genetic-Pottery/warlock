@@ -38,15 +38,16 @@ use std::{fs, io, thread};
 
 use warlock_engine::{
     Agent, Manifest, NodeState, PactFailure, PactObserver, PactProblem, PactedSubtree, Pacting,
-    Tree, closed_scopes_at_or_below, pact_subtree, refresh_subtree, to_manifest_path,
-    unpact_subtree,
+    Tree, pact_subtree, refresh_subtree, to_manifest_path, unpact_subtree,
 };
 use warlock_tui::{
     Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactToggle, Run, Section, Sigils,
+    Wired,
 };
 
+use crate::boundary::{Reach, Verdict, verdict};
 use crate::error::{Error, one_line};
-use crate::session::{Scope, blocking_scopes_message, closed_scope, reload_tree};
+use crate::session::{Scope, closed_scope, reload_tree};
 
 /// What the footer says when the worker thread stopped without reporting
 /// anything — which, since it reports on every path it takes itself, means it
@@ -102,11 +103,15 @@ const PACT_CANCELLED: &str = "the pact was cancelled; what it finished first is 
 /// at the end, so it stays the loop's and is handed in. A field here would be a
 /// third owner lending it back out through an accessor, which is the openness
 /// this type exists to close rather than to re-spell.
-pub(crate) struct Pact {
+pub(crate) struct Pact<P> {
     /// The agent every pass of every run is made with, built once because it is
     /// a command line and a timeout rather than a connection: nothing is
     /// spawned until a run actually asks for a pass.
-    agent: ClaudeAgent,
+    ///
+    /// The seam rather than the child process: warlock runs on a
+    /// [`ClaudeAgent`], and a test runs on a value that answers out of memory.
+    /// See [`Wired`].
+    agent: P,
     /// The run happening somewhere else, if one is. `None` is the ordinary
     /// state and the state a session starts and ends in.
     run: Option<Running>,
@@ -128,7 +133,7 @@ pub(crate) struct Pact {
 /// which keeps the tree already drawn and is not an error.
 pub(crate) struct Reloaded(pub(crate) Option<Tree>);
 
-impl Pact {
+impl Pact<ClaudeAgent> {
     /// A session with nothing running yet.
     ///
     /// The agent is made here, once, for the reason [`Chat::new`] makes its
@@ -144,10 +149,6 @@ impl Pact {
     /// its reason: a test can drive the very value the loop keeps against a
     /// stand-in program, rather than assembling the pieces underneath it and
     /// proving something about an arrangement the loop never has.
-    pub(crate) fn with_agent(agent: ClaudeAgent) -> Self {
-        Self { agent, run: None }
-    }
-
     /// A session with `run` already in flight, for a test that is about the
     /// draining rather than the starting.
     ///
@@ -161,6 +162,18 @@ impl Pact {
             agent: ClaudeAgent::new(),
             run: Some(run),
         }
+    }
+}
+
+impl<P: Wired + Agent> Pact<P> {
+    /// A session with nothing running yet, over `agent`.
+    ///
+    /// [`Chat::with_agent`](crate::chatting::Chat::with_agent)'s twin and for
+    /// its reason: a test can drive the very value the loop keeps against a
+    /// stand-in, rather than assembling the pieces underneath it and proving
+    /// something about an arrangement the loop never has.
+    pub(crate) fn with_agent(agent: P) -> Self {
+        Self { agent, run: None }
     }
 
     /// Whether a run is happening somewhere else.
@@ -687,11 +700,11 @@ impl PactObserver for Reporting<'_> {
 /// The worker reports on every path it takes itself, so the only way the channel
 /// closes without an outcome is a panic in the worker — which the caller reads
 /// as the run being over ([`Pact::keep_up`]) rather than as a reason to hang.
-pub(crate) fn spawn_pact(
+pub(crate) fn spawn_pact<P: Wired + Agent>(
     manifest: &Manifest,
     repo_root: &Path,
     work: &Work,
-    agent: &ClaudeAgent,
+    agent: &P,
     cancel: Cancel,
 ) -> Receiver<PactEvent> {
     let (events, received) = mpsc::channel();
@@ -703,10 +716,7 @@ pub(crate) fn spawn_pact(
     // The activity port is attached the same way and for the same reason, in the
     // same breath — see `activity_port`. Both are one-per-run, and both die with
     // the copy of the agent this thread owns.
-    let agent = agent
-        .clone()
-        .with_cancel(cancel.clone())
-        .with_activities(activity_port(&events));
+    let agent = agent.wired(cancel.clone(), activity_port(&events));
     thread::spawn(move || run_pact(&manifest, &repo_root, &work, &agent, &cancel, &events));
     received
 }
@@ -724,12 +734,12 @@ pub(crate) fn spawn_pact(
 /// same code and the loop holds the same one value for either. The handle is
 /// made here and never reused — a cancel is final, so the run after a cancelled
 /// one has to start with a handle nobody has said stop to.
-fn start_run(
+fn start_run<P: Wired + Agent>(
     work: Work,
     before: App,
     manifest: &Manifest,
     repo_root: &Path,
-    agent: &ClaudeAgent,
+    agent: &P,
 ) -> Running {
     let cancel = CancelGuard::new();
     Running {
@@ -964,20 +974,20 @@ fn blocked_unpact(app: &mut App, manifest: &Manifest, repo_root: &Path, sigils: 
         return false;
     }
 
+    // The decision is [`verdict`]'s, asked at the reach an un-pact needs; this
+    // is the panel's half of what to do about it. `closed_scope` has already
+    // asked the narrower question by the time this runs — see [`pact_press`] —
+    // so what is left to say here is only ever about what is underneath.
     let path = row.path.clone();
-    // `Nothing` and `Unknown` are both the empty slice (`Sigils::as_slice`),
-    // which is what closes every scope below to a machine that has never been
-    // configured and to one whose config will not parse.
-    let Ok(blocking) = closed_scopes_at_or_below(&path, repo_root, manifest, sigils.as_slice())
-    else {
-        return false;
-    };
-    if blocking.is_empty() {
+    let answer = verdict(&path, repo_root, manifest, sigils, Reach::HereAndBelow);
+    if !matches!(answer, Verdict::ClosedBelow { .. }) {
         return false;
     }
 
     let label = app.label_for(&path);
-    app.set_message(blocking_scopes_message(&label, &blocking));
+    if let Some(line) = answer.message(&label) {
+        app.set_message(line);
+    }
     true
 }
 
@@ -4570,7 +4580,7 @@ mod tests {
 
     /// A run of `work` over `app` that nobody has said anything to yet, and the
     /// end of the channel a test sends its events down.
-    fn running_over(app: &App, work: Work) -> (Sender<PactEvent>, Pact) {
+    fn running_over(app: &App, work: Work) -> (Sender<PactEvent>, Pact<ClaudeAgent>) {
         let (events, received) = mpsc::channel();
         let running = Running {
             events: received,
