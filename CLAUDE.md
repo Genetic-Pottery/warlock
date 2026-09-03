@@ -1,3 +1,10 @@
+## About the repo
+
+Everything in docs/ is from the past even if it was written today.
+This means its not a document of current state or facts about the system.
+Its a general direction about decisions made in the past and iterated on up to the present.
+Ideas can be referenced from here but they should not be viewed as currently corrects or as a source of truth.
+
 <!-- warlock:begin -->
 
 ## Warlock
