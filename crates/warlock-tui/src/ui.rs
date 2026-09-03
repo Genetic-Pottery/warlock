@@ -73,16 +73,17 @@ use ratatui::layout::{Constraint, Layout, Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragraph};
-use warlock_engine::{NodeState, SCOPE_RULES};
+use warlock_engine::{NodeState, scope};
 
 // Renamed on the way in: `Line` here is ratatui's, the thing a row is drawn as,
 // and the account's `Line` is what a row says. Both names are right where they
 // live, and this module is the one place both are in scope.
 use crate::account::{Account, Line as Entry};
-use crate::app::{App, Chrome, Focus, Mode, Row, Run, RunHeader};
+use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
 use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
 use crate::composer::Composer;
 use crate::confirm::{Answer, QuitConfirm};
+use crate::panel::Mode;
 use crate::prompt::{ScopeField, ScopePrompt};
 use crate::wrap::shape;
 
@@ -951,7 +952,7 @@ const PATH_HEADING: &str = "";
 
 /// The dim last line of the path prompt's window: what the two keys do.
 ///
-/// [`SCOPE_RULES`]'s place in the window, and deliberately not the same kind of
+/// [`scope::RULES`](warlock_engine::scope::RULES)'s place in the window, and deliberately not the same kind of
 /// sentence. The scope prompt's line is the engine's, word for word, because
 /// what a scope may say is the engine's to judge; what a path may say is judged
 /// where the file is written, and this line does not attempt it. It says what
@@ -1143,7 +1144,7 @@ pub fn draw(
         draw_scope(frame, screen, field, PATH_HEADING, PATH_RULES);
     }
     if let Some(field) = scope.field() {
-        draw_scope(frame, screen, field, SCOPE_HEADING, SCOPE_RULES);
+        draw_scope(frame, screen, field, SCOPE_HEADING, scope::RULES);
     }
 }
 
@@ -2672,7 +2673,7 @@ fn confirm_size() -> Size {
 ///
 /// Two windows, one function. `heading` goes in front of what the field carries
 /// and `rules` on the last line, so the caller says which prompt this is —
-/// [`SCOPE_HEADING`] and [`SCOPE_RULES`] for the scope, [`PATH_HEADING`] and
+/// [`SCOPE_HEADING`] and [`scope::RULES`](warlock_engine::scope::RULES) for the scope, [`PATH_HEADING`] and
 /// [`PATH_RULES`] for the path a brief is about to be written to. Nothing else
 /// differs: same [`Clear`], same border, same margins, same five lines, same
 /// clamping on a terminal with no room, because a reader who has answered one of
@@ -2741,7 +2742,7 @@ fn scope_lines<'a>(field: &'a ScopeField, heading: &'a str, rules: &'a str) -> V
 /// Measured off the lines the way [`confirm_size`] is, and off the field as well
 /// as off the two sentences handed in, because a path and a broken rule are as
 /// much of the window as the heading is. In practice the rules line is the floor
-/// and the window does not breathe as somebody types: [`SCOPE_RULES`] is wider
+/// and the window does not breathe as somebody types: [`scope::RULES`](warlock_engine::scope::RULES) is wider
 /// than a directory that fits on a tree row and wider than any scope the engine
 /// would accept, so the width only moves for something longer than it. The path
 /// prompt is the one window that does breathe — a proposed path is about as long
@@ -2749,7 +2750,7 @@ fn scope_lines<'a>(field: &'a ScopeField, heading: &'a str, rules: &'a str) -> V
 /// character at a time and no faster than the scope window already moves when a
 /// refusal lands.
 ///
-/// [`SCOPE_RULES`] is the engine's sentence rather than one written here, and
+/// [`scope::RULES`](warlock_engine::scope::RULES) is the engine's sentence rather than one written here, and
 /// that is a rule rather than a convenience: a window that spelled out how long
 /// a scope may be or which characters it may hold would be this crate judging a
 /// scope, and there is one judge — see [`mod@crate::prompt`]. Taking the
@@ -2781,7 +2782,7 @@ mod tests {
     use ratatui::layout::{Position, Rect, Size};
     use ratatui::style::{Color, Modifier};
     use ratatui::widgets::{Paragraph, Widget};
-    use warlock_engine::{NodeState, SCOPE_RULES};
+    use warlock_engine::{NodeState, scope};
 
     use super::{
         Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, BRIEF_THREAD_TITLE,
@@ -2802,12 +2803,13 @@ mod tests {
     };
     use crate::COMPOSER_MAX_ROWS;
     use crate::account::{Line as Entry, Outcome};
-    use crate::app::{App, Chrome, Focus, Mode, Row, Run, Sigils};
+    use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
     use crate::claude::Activity;
     use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
     use crate::composer::Composer;
     use crate::confirm::{Answer, QuitConfirm};
     use crate::fixture;
+    use crate::panel::Mode;
     use crate::prompt::{ScopeField, ScopePrompt};
 
     /// How many rows the window tests work with: comfortably more than fit on
@@ -8460,17 +8462,17 @@ mod tests {
     /// [`window_rect`] for the scope prompt: the window drawn with the engine's
     /// sentence under it.
     fn scope_rect(buffer: &Buffer, field: &ScopeField) -> Rect {
-        window_rect(buffer, field, SCOPE_HEADING, SCOPE_RULES)
+        window_rect(buffer, field, SCOPE_HEADING, scope::RULES)
     }
 
     /// [`window_rows`] for the scope prompt.
     fn scope_rows(buffer: &Buffer, field: &ScopeField) -> Vec<String> {
-        window_rows(buffer, field, SCOPE_HEADING, SCOPE_RULES)
+        window_rows(buffer, field, SCOPE_HEADING, scope::RULES)
     }
 
     /// [`window_cursor`] for the scope prompt.
     fn cursor_cell(buffer: &Buffer, field: &ScopeField) -> Position {
-        window_cursor(buffer, field, SCOPE_HEADING, SCOPE_RULES)
+        window_cursor(buffer, field, SCOPE_HEADING, scope::RULES)
     }
 
     /// [`window_rows`] for the path prompt: the window whose heading rides in
@@ -8509,11 +8511,11 @@ mod tests {
             ScopeField::new("a", ""),
             refused.clone(),
         ] {
-            let Size { width, height } = scope_size(&field, SCOPE_HEADING, SCOPE_RULES);
+            let Size { width, height } = scope_size(&field, SCOPE_HEADING, scope::RULES);
             let widest = (display_width(SCOPE_HEADING) + display_width(field.directory()))
                 .max(display_width(field.text()) + display_width(SCOPE_CURSOR))
                 .max(field.rule().map_or(0, display_width))
-                .max(display_width(SCOPE_RULES));
+                .max(display_width(scope::RULES));
 
             assert_eq!(
                 usize::from(width),
@@ -8530,7 +8532,7 @@ mod tests {
             );
         }
         assert_eq!(
-            scope_size(&ScopeField::new(SCOPED, ""), SCOPE_HEADING, SCOPE_RULES).height,
+            scope_size(&ScopeField::new(SCOPED, ""), SCOPE_HEADING, scope::RULES).height,
             SCOPE_HEIGHT
         );
     }
@@ -8565,7 +8567,7 @@ mod tests {
             .unwrap_or_else(|| panic!("the directory is not on the window: {rows:?}"));
         let rules = rows
             .iter()
-            .position(|row| row.contains(SCOPE_RULES))
+            .position(|row| row.contains(scope::RULES))
             .unwrap_or_else(|| panic!("the rules are not on the window: {rows:?}"));
         // In the order they are read in, with the field between them.
         assert!(heading < rules, "{rows:?}");
@@ -8576,7 +8578,7 @@ mod tests {
         );
         // The rules are the engine's sentence, word for word: nothing in this
         // crate says how long a scope may be or which characters it may hold.
-        assert!(rows[rules].contains(SCOPE_RULES), "{rows:?}");
+        assert!(rows[rules].contains(scope::RULES), "{rows:?}");
         // The field is empty because the directory carries no scope, and the
         // cursor is at the front of it waiting for the first character.
         assert_eq!(
@@ -8653,7 +8655,7 @@ mod tests {
         assert!(rows[line + 1].contains(broken), "{rows:?}");
         // The rules are still there under that: a refusal adds a line, it does
         // not replace the one that was there before anything was typed.
-        assert!(rows[line + 2].contains(SCOPE_RULES), "{rows:?}");
+        assert!(rows[line + 2].contains(scope::RULES), "{rows:?}");
         // And nothing moved: the field is on the same row of the window it was
         // on before the submit was refused.
         let opened = render_scope(
@@ -8750,7 +8752,7 @@ mod tests {
         // in this module draws.
         for (index, row) in rows_text(&closed).iter().enumerate() {
             assert!(!row.contains(SCOPE_HEADING.trim()), "row {index}: {row:?}");
-            assert!(!row.contains(SCOPE_RULES), "row {index}: {row:?}");
+            assert!(!row.contains(scope::RULES), "row {index}: {row:?}");
         }
         assert_eq!(
             rows_text(&closed),
@@ -8852,7 +8854,7 @@ mod tests {
         // path is not a scope, and nothing here says what a scope may be.
         assert!(rows[line + 2].contains(PATH_RULES), "{rows:?}");
         for (index, row) in rows.iter().enumerate() {
-            assert!(!row.contains(SCOPE_RULES), "row {index}: {row:?}");
+            assert!(!row.contains(scope::RULES), "row {index}: {row:?}");
             assert!(!row.contains(SCOPE_HEADING.trim()), "row {index}: {row:?}");
         }
 

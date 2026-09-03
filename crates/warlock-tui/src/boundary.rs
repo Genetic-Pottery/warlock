@@ -19,7 +19,7 @@
 //! A scope covers everything beneath it until a nearer one overrides it, so
 //! whether an operator may act *at* a directory is a question about the scopes
 //! at and **above** it — the engine's
-//! [`scope_covering`](warlock_engine::scope_covering). That is the whole of what
+//! [`scope_covering`]. That is the whole of what
 //! `p`, `r` and `s` need, and the whole of what the shell's cheap writes need.
 //!
 //! An un-pact needs one more, because of what it destroys. Un-pacting drops
@@ -28,7 +28,7 @@
 //! is itself open may still sit above pacts that are not, and dropping those
 //! would erase boundaries this operator was never entitled to move. That is the
 //! engine's
-//! [`closed_scopes_at_or_below`](warlock_engine::closed_scopes_at_or_below), and
+//! [`closed_scopes_at_or_below`], and
 //! it is asked only for [`Reach::HereAndBelow`].
 //!
 //! The two are genuinely different questions rather than one asked twice: the

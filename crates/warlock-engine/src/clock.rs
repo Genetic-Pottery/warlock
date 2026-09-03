@@ -14,7 +14,7 @@
 //! here asks for — in exchange for a supply chain the root manifest's rule
 //! ("prefer std", every dependency comments why it earns its place) would have
 //! to justify. What is actually needed is a total function from
-//! [`SystemTime`](std::time::SystemTime) to twenty ASCII bytes, and the
+//! [`SystemTime`] to twenty ASCII bytes, and the
 //! proleptic Gregorian calendar is closed-form.
 //!
 //! ## What is computed, and what is deliberately not

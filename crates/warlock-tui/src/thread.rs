@@ -100,7 +100,7 @@
 
 use std::time::{Duration, Instant};
 
-use warlock_engine::AgentError;
+use warlock_engine::agent;
 
 use crate::account::{Line, Log, THINKING, WRITING, tool_line};
 use crate::claude::Activity;
@@ -108,8 +108,8 @@ use crate::claude::Activity;
 /// One thing that stopped a turn short of an answer, in the words it ends with.
 ///
 /// Five ways and no sixth that a caller has to word for itself: the four the
-/// model seam fails in ([`AgentError`], mapped by [`ending_for`]), plus the one
-/// warlock does on purpose. [`Ending::Broke`] is the catch — `AgentError` is
+/// model seam fails in ([`agent::Error`](warlock_engine::agent::Error), mapped by [`ending_for`]), plus the one
+/// warlock does on purpose. [`Ending::Broke`] is the catch — `agent::Error` is
 /// `#[non_exhaustive]`, so a variant added over there arrives here as whatever
 /// it says about itself rather than as a panic or a silent nothing.
 ///
@@ -217,18 +217,18 @@ impl Ending {
 /// killed it — so whether a turn was cancelled is a fact the caller holds and
 /// [`Ending::Cancelled`] is theirs to choose.
 #[must_use]
-pub fn ending_for(error: &AgentError) -> Ending {
+pub fn ending_for(error: &agent::Error) -> Ending {
     match error {
-        AgentError::NotFound { program } => Ending::NoModel {
+        agent::Error::NotFound { program } => Ending::NoModel {
             program: program.clone(),
         },
-        AgentError::Failed { code, stderr } => Ending::Failed {
+        agent::Error::Failed { code, stderr } => Ending::Failed {
             code: *code,
             stderr: stderr.clone(),
         },
-        AgentError::TimedOut { after } => Ending::TimedOut { after: *after },
-        AgentError::EmptyOutput => Ending::NothingSaid,
-        // `AgentError` is `#[non_exhaustive]`: `Io` lands here today, and so
+        agent::Error::TimedOut { after } => Ending::TimedOut { after: *after },
+        agent::Error::EmptyOutput => Ending::NothingSaid,
+        // `agent::Error` is `#[non_exhaustive]`: `Io` lands here today, and so
         // does whatever the seam learns to fail with next. Its own `Display` is
         // one line already, which is exactly what a row needs.
         other => Ending::Broke {
@@ -745,7 +745,7 @@ fn one_line(text: &str) -> String {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use warlock_engine::AgentError;
+    use warlock_engine::agent;
 
     use super::{Ending, Thread, Turn, ending_for};
     use crate::account::{Account, Line, Outcome};
@@ -1506,7 +1506,7 @@ mod tests {
     #[test]
     fn the_seams_failures_become_the_panels_endings() {
         assert_eq!(
-            ending_for(&AgentError::NotFound {
+            ending_for(&agent::Error::NotFound {
                 program: "claude".to_owned()
             }),
             Ending::NoModel {
@@ -1514,7 +1514,7 @@ mod tests {
             },
         );
         assert_eq!(
-            ending_for(&AgentError::Failed {
+            ending_for(&agent::Error::Failed {
                 code: Some(1),
                 stderr: "boom".to_owned(),
             }),
@@ -1524,18 +1524,18 @@ mod tests {
             },
         );
         assert_eq!(
-            ending_for(&AgentError::TimedOut {
+            ending_for(&agent::Error::TimedOut {
                 after: Duration::from_secs(30)
             }),
             Ending::TimedOut {
                 after: Duration::from_secs(30)
             },
         );
-        assert_eq!(ending_for(&AgentError::EmptyOutput), Ending::NothingSaid);
+        assert_eq!(ending_for(&agent::Error::EmptyOutput), Ending::NothingSaid);
 
         // Anything the seam grows later arrives as whatever it says about
         // itself, rather than as a panic or a silent nothing.
-        let broken = AgentError::Io {
+        let broken = agent::Error::Io {
             source: std::io::Error::other("broken pipe"),
         };
         assert_eq!(

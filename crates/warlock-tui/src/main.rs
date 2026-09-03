@@ -295,15 +295,15 @@
 //! through [`restore_terminal`], which turns reporting off whichever state the
 //! toggle was left in.
 
+use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
-use std::{env, io};
 
 use clap::{Parser, Subcommand};
 use ratatui::crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use ratatui::layout::Size;
-use warlock_engine::{Agent, Manifest, Written, repository_root, write_claude_md};
+use warlock_engine::{Agent, Manifest, Written, write_claude_md};
 use warlock_tui::{
     App, Composer, Converses, Focus, QuitConfirm, Run, ScopePrompt, Wired, composer_on_screen,
     draw, panel_height, panel_width, tree_height,
@@ -313,6 +313,7 @@ mod boundary;
 mod chatting;
 mod check;
 mod config;
+mod descent;
 mod editing;
 mod edits;
 mod error;
@@ -322,6 +323,7 @@ mod query;
 mod running;
 mod scoping;
 mod session;
+mod standing;
 /// In-memory stand-ins for the two model seams, so a test that is not about the
 /// model does not have to spawn one. Test-only, and private on purpose: warlock
 /// itself talks to `claude`.
@@ -343,6 +345,7 @@ use query::{Listing, list};
 use running::{pact, refresh};
 use scoping::{scope_edit, scope_press};
 use session::{Scope, Watched, load_app, load_manifest, start_watching};
+use standing::{FOR_CLAUDE_MD, Standing};
 use terminal::{Screen, TerminalGuard, install_panic_hook};
 use viewing::view_press;
 
@@ -362,11 +365,6 @@ use viewing::view_press;
 /// a second place the frame is drawn and the keys are handled, for a saving of a
 /// few timer wakeups.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-/// What `warlock init` wants the repository root for, as the tail of
-/// [`Error::NoRepository`]'s sentence. `config`'s own tail is spelled beside
-/// `config`, in its module.
-const FOR_CLAUDE_MD: &str = "write `CLAUDE.md` at";
 
 /// What `warlock init` says when there was no `CLAUDE.md` and now there is one.
 const CREATED: &str = "created";
@@ -784,28 +782,45 @@ const CANCELLED: u8 = 130;
 /// `warlock init`: write the `CLAUDE.md` at the repository root and say which
 /// file was written.
 ///
-/// Three steps and no policy of its own. The working directory says where to
-/// start, [`repository_root`] walks up to the nearest ancestor with a `.git/`
-/// — so running this from any subdirectory writes the one file in the right
-/// place — and the engine does the writing, because the splice, the delimiters
-/// and the text are all its business (see
-/// [`write_claude_md`](warlock_engine::write_claude_md)).
+/// Three steps and no policy of its own. [`Standing`] says where warlock is and
+/// which repository is above it — so running this from any subdirectory writes
+/// the one file in the right place — and the engine does the writing, because
+/// the splice, the delimiters and the text are all its business (see
+/// [`write_claude_md`]).
 ///
 /// Nothing here touches the terminal: what happened is one line on the ordinary
 /// screen, and a failure is an [`Error`] returned to `main`, which prints it in
 /// exactly the same place and shape as a tree that would not load.
+///
+/// # This is the one in-repository write that asks no boundary
+///
+/// Every other write warlock does from the shell — `unpact`, `scope add`,
+/// `scope remove`, `pact`, `refresh` — goes through
+/// [`opened`](crate::edits::opened) and cannot happen over a scope this machine
+/// does not hold. This one writes `CLAUDE.md` at the repository root, which is
+/// exactly where a repository-wide scope sits, and asks nothing.
+///
+/// That is a decision rather than an oversight, and it is worth writing down
+/// because the asymmetry looks like a hole. Three things argue for it. It writes
+/// no pact and no scope, so there is no term of anybody's pact for it to move;
+/// the manifest is what the boundary is read out of, and the ordinary time to
+/// run this is *before* there is one, when nothing covers anything and the gate
+/// would pass every caller anyway; and in a repository that is already
+/// initialised the whole of what it does is re-splice warlock's own block
+/// between its own markers, which is a paragraph about warlock rather than a
+/// claim about the code around it.
+///
+/// The argument on the other side is real and is the reason for this note: a
+/// scoped root says "this part of the repository is theirs", and this writes a
+/// file into it regardless. Gating it is four lines — build an
+/// [`Opened`](crate::edits::Opened) over [`Standing::repo_root`] and let its
+/// constructor refuse — so if the asymmetry ever costs somebody something, the
+/// road is short and this paragraph is what to delete.
 fn init() -> Result<(), Error> {
-    let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
-    // Asked directly rather than through a load: `init` writes one file into a
-    // repository that may never have been pacted, and walking the tree to find
-    // its root would be reading every directory in it to answer a question about
-    // ancestors.
-    let root = repository_root(&working_dir).ok_or(Error::NoRepository {
-        start: working_dir,
-        wanted: FOR_CLAUDE_MD,
-    })?;
+    let standing = Standing::here(FOR_CLAUDE_MD)?;
 
-    let written = write_claude_md(&root).map_err(|source| Error::ClaudeMd { source })?;
+    let written =
+        write_claude_md(standing.repo_root()).map_err(|source| Error::ClaudeMd { source })?;
     // Asked as a question rather than matched arm by arm, because the engine's
     // enum is `#[non_exhaustive]`: there is one thing to distinguish here — a
     // file that did not exist before — and anything it gains later is a file

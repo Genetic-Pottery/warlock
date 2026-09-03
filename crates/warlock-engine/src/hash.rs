@@ -57,7 +57,7 @@ use std::path::{Path, PathBuf};
 use ignore::WalkBuilder;
 
 use crate::ignores;
-use crate::{ManifestError, to_manifest_path};
+use crate::{manifest, to_manifest_path};
 
 /// The directory holding Warlock's own bookkeeping, never part of a hash.
 const MANIFEST_DIR: &str = ".warlock";
@@ -221,7 +221,7 @@ fn length(bytes: usize) -> u64 {
 
 /// Everything that can stop a subtree being hashed.
 ///
-/// Hand-rolled like [`ManifestError`] and [`LoadError`](crate::LoadError):
+/// Hand-rolled like [`manifest::Error`] and [`load::Error`](crate::load::Error):
 /// three variants do not pay for an error-handling dependency, and each one
 /// names the path it happened to so a caller can say which file to go and look
 /// at.
@@ -250,7 +250,7 @@ pub enum Error {
         /// Why it could not be. Boxed because a manifest error carries a
         /// parser error inside it, and every other variant here is a path and
         /// an errno — there is no reason for all of them to pay for that.
-        source: Box<ManifestError>,
+        source: Box<manifest::Error>,
     },
 }
 
@@ -788,7 +788,7 @@ mod tests {
 
         let named = Error::Path {
             path: Path::new("/elsewhere/x").to_path_buf(),
-            source: Box::new(crate::ManifestError::NonUtf8Path {
+            source: Box::new(crate::manifest::Error::NonUtf8Path {
                 path: Path::new("/elsewhere/x").to_path_buf(),
             }),
         };

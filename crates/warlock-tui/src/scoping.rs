@@ -310,9 +310,7 @@ mod tests {
 
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tempfile::TempDir;
-    use warlock_engine::{
-        Manifest, ManifestError, Node, NodeState, PactEntry, Tree, validate_scope,
-    };
+    use warlock_engine::{Manifest, Node, NodeState, PactEntry, Tree, manifest, validate_scope};
     use warlock_tui::{App, Edited, ScopeField, ScopePrompt, Sigils, edit_for};
 
     use super::{scope_edit, scope_submit};
@@ -437,7 +435,7 @@ mod tests {
     fn saved(root: &Path) -> Option<Manifest> {
         match Manifest::load(root) {
             Ok(manifest) => Some(manifest),
-            Err(ManifestError::NotFound { .. }) => None,
+            Err(manifest::Error::NotFound { .. }) => None,
             Err(error) => panic!("the saved manifest could not be read: {error}"),
         }
     }

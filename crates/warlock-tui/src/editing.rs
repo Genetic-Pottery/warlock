@@ -3,7 +3,7 @@
 //! One press, one child, one terminal given up and taken back: [`edit_press`]
 //! asks the app which file the selection is on, works out what `$EDITOR` names,
 //! hands both to a foreground child through
-//! [`Screen::suspended`](crate::terminal::Screen::suspended), and
+//! [`Screen::suspended`], and
 //! waits. It is [`mod@crate::viewing`]'s other half — that module reads a file
 //! into the panel, this one hands the same file to something that can change it
 //! — and it is section 9's escape hatch given a keystroke: manual edits are not
@@ -84,7 +84,7 @@
 //!
 //! Two things moved while the screen was somebody else's, and [`came_back`] is
 //! both of them. The tree is read again through the same
-//! [`reload_tree`](crate::session::reload_tree) a run ends with, because the
+//! [`reload_tree`] a run ends with, because the
 //! whole point of the section above is that a saved `WARLOCK.md` restales its
 //! directory — a row that only went yellow at the reader's next keystroke would
 //! be warlock knowing something and not saying it. And the document card is read

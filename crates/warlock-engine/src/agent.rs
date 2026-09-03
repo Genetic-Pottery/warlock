@@ -62,7 +62,7 @@ const STDERR_EXCERPT: usize = 200;
 /// The engine defines this and never implements it: the implementation is the
 /// binary's, because running a model means running the `claude` CLI and this
 /// crate spawns nothing. One method, because a pact is one question and one
-/// answer — anything a later slice needs to send belongs on [`Request`], where
+/// answer — anything a later slice needs to send belongs on [`agent::Request`](crate::agent::Request), where
 /// adding it breaks nobody.
 ///
 /// `&self` rather than `&mut self` so an implementation can be shared, and the
@@ -70,29 +70,29 @@ const STDERR_EXCERPT: usize = 200;
 /// unrepeatable.
 ///
 /// ```
-/// use warlock_engine::{Agent, AgentError, AgentRequest, AgentResponse};
+/// use warlock_engine::{agent, Agent};
 ///
 /// /// The engine's own tests reach a model exactly like this: they don't.
 /// struct Canned;
 ///
 /// impl Agent for Canned {
-///     fn run(&self, _request: &AgentRequest) -> Result<AgentResponse, AgentError> {
-///         Ok(AgentResponse::new("# engine\n\nCore engine for warlock.\n"))
+///     fn run(&self, _request: &agent::Request) -> Result<agent::Response, agent::Error> {
+///         Ok(agent::Response::new("# engine\n\nCore engine for warlock.\n"))
 ///     }
 /// }
 ///
-/// let request = AgentRequest::new("describe this directory", "crates/warlock-engine");
+/// let request = agent::Request::new("describe this directory", "crates/warlock-engine");
 /// let response = Canned.run(&request)?;
 ///
 /// assert!(response.text().starts_with("# engine"));
-/// # Ok::<(), warlock_engine::AgentError>(())
+/// # Ok::<(), warlock_engine::agent::Error>(())
 /// ```
 pub trait Agent {
     /// Run one pass and return what the model said.
     ///
     /// # Errors
     ///
-    /// [`Error`], in the engine's vocabulary rather than the transport's: the
+    /// [`agent::Error`](crate::agent::Error), in the engine's vocabulary rather than the transport's: the
     /// agent command was not found, it exited non-zero, it wrote nothing, it
     /// did not finish in time, or the attempt failed with some other I/O
     /// error.
@@ -103,16 +103,16 @@ pub trait Agent {
 /// context it is scoped to.
 ///
 /// The context is two lists and one optional document. The directory's own
-/// files ([`File`]) — its whole listing, each either carrying its bytes,
+/// files ([`agent::File`](crate::agent::File)) — its whole listing, each either carrying its bytes,
 /// standing in as a name and a size, or standing in as a name, a size and an
 /// account of what it contains — the `WARLOCK.md` of each immediate child
-/// ([`ChildDocument`]), which is how a directory learns what is underneath it
+/// ([`agent::ChildDocument`](crate::agent::ChildDocument)), which is how a directory learns what is underneath it
 /// without reading a single source file down there, and this directory's *own*
 /// previous `WARLOCK.md` where it already has one.
 ///
 /// # Why the previous document has a slot of its own
 ///
-/// It used to be one of [`Request::files`], listed like any other file, and
+/// It used to be one of [`agent::Request::files`](crate::agent::Request::files), listed like any other file, and
 /// this doc said it deliberately always would be: giving it a slot was said to
 /// bake a refresh workflow into the transport before anything had decided what
 /// a refresh was. Both halves of that have expired. A refresh is decided and
@@ -133,7 +133,7 @@ pub trait Agent {
 /// pass be told to check a carried claim against the files rather than trust
 /// its own predecessor.
 ///
-/// The fields are private and reached through [`Request::new`], the
+/// The fields are private and reached through [`agent::Request::new`](crate::agent::Request::new), the
 /// builder-style `with_*` methods and the accessors. Every widening so far has
 /// been additive for exactly that reason: an existing [`Agent`] implementation
 /// and every existing call site keep compiling.
@@ -162,17 +162,17 @@ impl Request {
     /// no child documents.
     ///
     /// Infallible: nothing is validated here. Whether the directory exists is
-    /// the transport's problem, and it reports back as [`Error::Io`]. Context
-    /// is added afterwards with [`Request::with_files`] and
-    /// [`Request::with_child_documents`], so a caller that has none — a test,
+    /// the transport's problem, and it reports back as [`agent::Error::Io`](crate::agent::Error::Io). Context
+    /// is added afterwards with [`agent::Request::with_files`](crate::agent::Request::with_files) and
+    /// [`agent::Request::with_child_documents`](crate::agent::Request::with_child_documents), so a caller that has none — a test,
     /// or a question about a directory rather than about its contents — says
     /// nothing extra.
     ///
     /// ```
     /// use std::path::Path;
-    /// use warlock_engine::AgentRequest;
+    /// use warlock_engine::agent;
     ///
-    /// let request = AgentRequest::new("summarise this module", "crates/warlock-engine");
+    /// let request = agent::Request::new("summarise this module", "crates/warlock-engine");
     ///
     /// assert_eq!(request.prompt(), "summarise this module");
     /// assert_eq!(request.directory(), Path::new("crates/warlock-engine"));
@@ -198,12 +198,12 @@ impl Request {
     /// because the order files reach a prompt in is the prompt's business.
     ///
     /// ```
-    /// use warlock_engine::{AgentFile, AgentRequest};
+    /// use warlock_engine::{agent};
     ///
-    /// let request = AgentRequest::new("summarise this module", "crates/engine")
-    ///     .with_files([AgentFile::present("src/lib.rs", *b"//! Core engine.\n")])
-    ///     .with_files([AgentFile::omitted("Cargo.lock", 4_200_000)])
-    ///     .with_files([AgentFile::summarised(
+    /// let request = agent::Request::new("summarise this module", "crates/engine")
+    ///     .with_files([agent::File::present("src/lib.rs", *b"//! Core engine.\n")])
+    ///     .with_files([agent::File::omitted("Cargo.lock", 4_200_000)])
+    ///     .with_files([agent::File::summarised(
     ///         "src/schema.rs",
     ///         900_000,
     ///         "Generated request and response types for the public API.",
@@ -231,13 +231,13 @@ impl Request {
     /// The same request with `documents` appended to the child documents.
     ///
     /// Appends rather than replaces, on the same terms as
-    /// [`Request::with_files`].
+    /// [`agent::Request::with_files`](crate::agent::Request::with_files).
     ///
     /// ```
-    /// use warlock_engine::{AgentChildDocument, AgentRequest};
+    /// use warlock_engine::{agent};
     ///
-    /// let request = AgentRequest::new("summarise this module", "crates/engine")
-    ///     .with_child_documents([AgentChildDocument::new("src", "# src\n\nThe code.\n")]);
+    /// let request = agent::Request::new("summarise this module", "crates/engine")
+    ///     .with_child_documents([agent::ChildDocument::new("src", "# src\n\nThe code.\n")]);
     ///
     /// assert_eq!(request.child_documents()[0].directory(), "src");
     /// assert!(request.child_documents()[0].text().starts_with("# src"));
@@ -259,9 +259,9 @@ impl Request {
     /// caller correcting itself rather than adding a second opinion.
     ///
     /// ```
-    /// use warlock_engine::AgentRequest;
+    /// use warlock_engine::agent;
     ///
-    /// let request = AgentRequest::new("describe this module", "crates/engine")
+    /// let request = agent::Request::new("describe this module", "crates/engine")
     ///     .with_previous_document("# engine\n\nWhat an earlier pass concluded.\n");
     ///
     /// assert!(request.previous_document().is_some());
@@ -289,7 +289,7 @@ impl Request {
     /// The files sitting directly in that directory.
     ///
     /// The directory's own `WARLOCK.md` is *not* among them — it is
-    /// [`Request::previous_document`], for the reason given on the type.
+    /// [`agent::Request::previous_document`](crate::agent::Request::previous_document), for the reason given on the type.
     #[must_use]
     pub fn files(&self) -> &[File] {
         &self.files
@@ -317,17 +317,17 @@ impl Request {
 /// UTF-8 would make those unrepresentable rather than merely awkward.
 ///
 /// A file the caller chose not to send is here all the same, as its path and
-/// its size ([`File::omitted`]). That is the whole vocabulary for leaving
+/// its size ([`agent::File::omitted`](crate::agent::File::omitted)). That is the whole vocabulary for leaving
 /// something out: there is no half-sent file, because a truncated source file
 /// invites confident wrong conclusions about the part that never arrived,
 /// while a name and a size is accurate information a model can document
 /// honestly.
 ///
-/// Between the two sits a third state ([`File::summarised`]): a name, a size,
+/// Between the two sits a third state ([`agent::File::summarised`](crate::agent::File::summarised)): a name, a size,
 /// and an account of what the file contains, written by an earlier pass that
 /// did read the whole thing. It is not a shorter version of the file and not
 /// the beginning of it — it is prose *about* the file, which is why it is
-/// reached through [`File::summary`] and never through [`File::bytes`].
+/// reached through [`agent::File::summary`](crate::agent::File::summary) and never through [`File::bytes`].
 /// Truncation stays forbidden and omit-and-list stays the floor: a summary is
 /// something better than a bare name and a size, not something less than the
 /// whole file.
@@ -341,11 +341,11 @@ pub struct File {
     content: Content,
 }
 
-/// What a [`File`] has to say about its contents: all of them, how many there
+/// What a [`agent::File`](crate::agent::File) has to say about its contents: all of them, how many there
 /// were, or what they amount to.
 ///
-/// Private, and reached through [`File::bytes`], [`File::size`] and
-/// [`File::summary`], so "omitted" and "summarised" stay bits of the public
+/// Private, and reached through [`agent::File::bytes`], [`File::size`] and
+/// [`agent::File::summary`](crate::agent::File::summary), so "omitted" and "summarised" stay bits of the public
 /// surface rather than variants callers match on and grow special cases
 /// around.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -399,13 +399,13 @@ impl File {
     ///
     /// The summary is prose about the file, not any part of the file. Nothing
     /// reading it back may present it as the file's text — which is why it
-    /// comes out of [`File::summary`] and [`File::bytes`] still answers
+    /// comes out of [`agent::File::summary`](crate::agent::File::summary) and [`File::bytes`] still answers
     /// `None`.
     ///
     /// ```
-    /// use warlock_engine::AgentFile;
+    /// use warlock_engine::agent;
     ///
-    /// let file = AgentFile::summarised(
+    /// let file = agent::File::summarised(
     ///     "vendor/schema.json",
     ///     2_400_000,
     ///     "A JSON Schema for the public API: 180 object definitions, no code.",
@@ -476,7 +476,7 @@ impl File {
     ///
     /// A summarised file is *not* an omitted one and answers `false`: nothing
     /// was left out of it, because a pass read the whole thing and what came
-    /// back is on [`File::summary`]. Only a file nobody has anything to say
+    /// back is on [`agent::File::summary`](crate::agent::File::summary). Only a file nobody has anything to say
     /// about — a name and a size — is omitted.
     #[must_use]
     pub fn is_omitted(&self) -> bool {
@@ -492,8 +492,8 @@ impl File {
 /// children ever appears — a grandchild is already described by the child's
 /// document.
 ///
-/// Text rather than bytes, unlike [`File`]: this is Warlock's own document,
-/// the same string an [`Agent`] handed back as a [`Response`] when the child
+/// Text rather than bytes, unlike [`agent::File`](crate::agent::File): this is Warlock's own document,
+/// the same string an [`Agent`] handed back as a [`agent::Response`](crate::agent::Response) when the child
 /// was pacted, not an arbitrary file that happens to sit in a directory.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChildDocument {
@@ -563,11 +563,11 @@ impl Response {
 
 /// Everything that can stop a model pass producing a document.
 ///
-/// Hand-rolled like [`ManifestError`](crate::ManifestError) and
-/// [`HashError`](crate::HashError), for the same reason: a handful of variants
+/// Hand-rolled like [`manifest::Error`](crate::manifest::Error) and
+/// [`hash::Error`](crate::hash::Error), for the same reason: a handful of variants
 /// do not pay for an error-handling dependency. Every variant's
 /// [`Display`](fmt::Display) is a single line, because these are read in a
-/// one-line footer as often as in a log — which is why [`Error::Failed`]
+/// one-line footer as often as in a log — which is why [`agent::Error::Failed`](crate::agent::Error::Failed)
 /// flattens and excerpts the stderr it carries instead of printing it whole.
 ///
 /// `#[non_exhaustive]`: this is the list of failures the transport reports
@@ -594,7 +594,7 @@ pub enum Error {
         stderr: String,
     },
     /// The pass exited cleanly and wrote nothing to stdout, so there is no
-    /// document. Distinct from [`Error::Failed`] because nothing failed:
+    /// document. Distinct from [`agent::Error::Failed`](crate::agent::Error::Failed) because nothing failed:
     /// there is simply no answer to write.
     EmptyOutput,
     /// The pass did not finish inside the time it was given and was stopped.

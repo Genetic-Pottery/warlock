@@ -35,14 +35,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::{
-    Loaded, Manifest, ManifestError, SigilError, Tree, load_sigils, load_tree, manifest_path,
-    repository_root,
+    Loaded, Manifest, Tree, load_sigils, load_tree, manifest_path, repository_root, sigils,
 };
 use warlock_tui::{App, Chrome, Sigils, Watch, WatchPolicy, Watching, reseat_on};
 
 use crate::boundary::{Reach, Verdict, closed_scope_message, verdict};
-use crate::config::home_directory;
 use crate::error::{Error, one_line};
+use crate::standing::Standing;
 
 /// What the footer says when the reload after a run could not read the tree,
 /// ahead of the load's own reason for it.
@@ -332,7 +331,7 @@ pub(crate) fn start_watching(app: &mut App, scope: &Scope, tree: &Tree) -> Watch
 ///
 /// # It asks "here", and an un-pact asks a second question elsewhere
 ///
-/// [`scope_covering`] walks *up*, so what this answers is whether the operator
+/// [`scope_covering`](warlock_engine::scope_covering) walks *up*, so what this answers is whether the operator
 /// may act at the selected row — never what the act would reach below it.
 /// Un-pacting reaches the whole subtree and takes the scopes on it, so it is
 /// refused by a second, downward question, asked in `pacting.rs` on the un-pact
@@ -354,7 +353,7 @@ pub(crate) fn start_watching(app: &mut App, scope: &Scope, tree: &Tree) -> Watch
 ///
 /// # A file row is not this function's business
 ///
-/// Coverage would happily answer for a file — [`scope_covering`] walks up from
+/// Coverage would happily answer for a file — [`scope_covering`](warlock_engine::scope_covering) walks up from
 /// whatever it is handed — but `p`, `r` and `s` all refuse a file row on better
 /// grounds than this, and those refusals name the row for what it is. So a file
 /// is passed through as open and the key's own answer stands: the boundary has
@@ -403,7 +402,7 @@ pub(crate) fn closed_scope(
 /// file opened ten times a second to answer a question that cannot have changed.
 ///
 /// The home directory is resolved here and handed down as a path — see
-/// [`home_directory`], the single point in warlock where the environment becomes
+/// [`Standing::home`], the single point in warlock where the environment becomes
 /// one — which is what lets [`sigils_under`] be tested against a temporary
 /// directory rather than the developer's own.
 ///
@@ -412,7 +411,7 @@ pub(crate) fn closed_scope(
 /// by, so [`Sigils::Unknown`] would be claiming that something on disk is broken
 /// when nothing on disk was ever looked at.
 fn sigils_held(repo_root: &Path) -> Sigils {
-    home_directory().map_or(Sigils::Nothing, |home| sigils_under(&home, repo_root))
+    Standing::home().map_or(Sigils::Nothing, |home| sigils_under(&home, repo_root))
 }
 
 /// What is held for `repo_root` under `home`, as one of the header's three
@@ -435,28 +434,23 @@ fn sigils_held(repo_root: &Path) -> Sigils {
 /// reading of these three cases somewhere else would be a second answer waiting
 /// to disagree with the header. It takes `home` rather than looking one up for
 /// the reason [`sigils_held`] resolves one and hands it down — see
-/// [`home_directory`], the single point where the environment becomes a home
+/// [`Standing::home`], the single point where the environment becomes a home
 /// path, which is what keeps every test off the developer's own.
 pub(crate) fn sigils_under(home: &Path, repo_root: &Path) -> Sigils {
     match load_sigils(home, repo_root) {
         Ok(sigils) => Sigils::held(sigils),
-        Err(SigilError::NotFound { .. }) => Sigils::Nothing,
+        Err(sigils::Error::NotFound { .. }) => Sigils::Nothing,
         Err(_) => Sigils::Unknown,
     }
 }
 
 /// The repository's manifest, or an empty one if it has never pacted anything.
 ///
-/// The same reading of a missing file the loader takes: nothing on disk and
-/// nothing pacted are the same thing to draw, and the difference only matters
-/// to code that would refuse to create the file, which this is not — pressing
-/// `p` in a repository with no `.warlock/` is how the first manifest gets
-/// written.
+/// [`Standing::manifest`]'s reading, reached from a bare root: the loop holds
+/// two paths rather than a [`Standing`], so this is the one line that stands the
+/// front end where the subcommands already stand.
 pub(crate) fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
-    match Manifest::load(repo_root) {
-        Err(ManifestError::NotFound { .. }) => Ok(Manifest::new()),
-        other => other.map_err(|source| Error::Manifest { source }),
-    }
+    Standing::at(repo_root.to_path_buf(), repo_root.to_path_buf()).manifest()
 }
 
 /// The app state for the directory warlock was invoked from, the [`Scope`] it

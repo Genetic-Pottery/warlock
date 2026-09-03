@@ -65,7 +65,7 @@
 //! cost a load nothing.
 //!
 //! Hashing can fail — a file that cannot be read is deliberately fatal to a
-//! digest rather than skipped, see [`hash`](crate::hash) — and one such file is
+//! digest rather than skipped, see [`hash`] — and one such file is
 //! one node's problem, not the tree's. So a node whose hash failed is coloured
 //! [`NodeState::PactedStale`] (its content is unknown, and unknown is stale),
 //! the failure is recorded in [`Loaded::problems`] with the node it happened at,
@@ -91,8 +91,8 @@ use std::path::{Component, Path, PathBuf};
 use ignore::WalkBuilder;
 
 use crate::{
-    HashError, Manifest, ManifestError, Node, NodeState, ScopeRule, Tree, decide_state, ignores,
-    subtree_hash, to_manifest_path, validate_scope,
+    Manifest, Node, NodeState, Tree, decide_state, hash, ignores, manifest, scope, subtree_hash,
+    to_manifest_path, validate_scope,
 };
 
 /// The directory whose presence marks a repository root. Git's own, read as a
@@ -175,7 +175,7 @@ pub fn load_tree(working_dir: impl AsRef<Path>) -> Result<Loaded, Error> {
     // node is unpacted, which is exactly an empty manifest. A corrupt one is a
     // different fact and is not swallowed here.
     let manifest = match Manifest::load(&repo_root) {
-        Err(ManifestError::NotFound { .. }) => Manifest::new(),
+        Err(manifest::Error::NotFound { .. }) => Manifest::new(),
         other => other.map_err(|source| Error::Manifest { source })?,
     };
 
@@ -232,7 +232,7 @@ pub struct Problem {
 
 /// Why a node is in [`Loaded::problems`].
 ///
-/// An enum rather than a bare [`HashError`], because the two things a load can
+/// An enum rather than a bare [`hash::Error`], because the two things a load can
 /// have to report about a node are not the same kind of failure: one is a
 /// digest that could not be taken, the other a label that is not one. Each
 /// keeps its own wording, and neither is dressed up as the other.
@@ -242,7 +242,7 @@ pub enum ProblemCause {
     /// The node's subtree could not be hashed, so it is coloured
     /// [`NodeState::PactedStale`]: content that cannot be read is content that
     /// cannot be vouched for.
-    Hash(HashError),
+    Hash(hash::Error),
     /// The node's manifest entry carries a string that is not a scope. The node
     /// keeps its state, its document, its files and its children, and reads as
     /// unscoped — [`Node::scope`] is `None` — for as long as the string is
@@ -253,7 +253,7 @@ pub enum ProblemCause {
         /// The string as the manifest holds it, unfolded and untrimmed.
         scope: String,
         /// The one rule it broke.
-        rule: ScopeRule,
+        rule: scope::Rule,
     },
 }
 
@@ -613,7 +613,7 @@ fn absolute(path: &Path) -> Result<PathBuf, Error> {
 
 /// Everything that can stop a directory becoming a [`Tree`].
 ///
-/// Hand-rolled for the same reason as [`ManifestError`]: four variants do not
+/// Hand-rolled for the same reason as [`manifest::Error`]: four variants do not
 /// pay for an error-handling dependency, and these are the sentences a front
 /// end shows a user.
 #[derive(Debug)]
@@ -637,7 +637,7 @@ pub enum Error {
     /// manifest is not an error: it loads as an empty one.
     Manifest {
         /// What reading the manifest said.
-        source: ManifestError,
+        source: manifest::Error,
     },
     /// The directory tree could not be walked.
     Walk {
@@ -681,7 +681,7 @@ mod tests {
 
     use super::{Error, Loaded, ProblemCause, load_tree, repository_root};
     use crate::{
-        HashError, Manifest, NodeState, PactEntry, StateCounts, Tree, manifest_path, subtree_hash,
+        Manifest, NodeState, PactEntry, StateCounts, Tree, hash, manifest_path, subtree_hash,
         validate_scope,
     };
 
@@ -1436,7 +1436,7 @@ mod tests {
         assert!(
             matches!(
                 problems[0].cause,
-                ProblemCause::Hash(HashError::Read { .. })
+                ProblemCause::Hash(hash::Error::Read { .. })
             ),
             "{:?}",
             problems[0],

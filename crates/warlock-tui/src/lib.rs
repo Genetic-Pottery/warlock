@@ -171,6 +171,7 @@ mod confirm;
 /// real tree comes from the engine's loader.
 #[cfg(test)]
 mod fixture;
+mod panel;
 mod prompt;
 mod submission;
 mod template;
@@ -213,10 +214,6 @@ pub use app::Chrome;
 /// panel or the composer: cycled by the focus key, or set outright by a click
 /// naming a pane.
 pub use app::Focus;
-/// Which register the conversation is in — questions about the repository, or a
-/// conversation converging on a document — entered and left from the composer,
-/// and said on the panel's border title and nowhere else.
-pub use app::Mode;
 /// What a pact toggle changed, for whoever has to write it to the manifest.
 pub use app::PactToggle;
 /// One line of the flattened tree.
@@ -312,6 +309,10 @@ pub use confirm::Answered;
 pub use confirm::QuitConfirm;
 /// What one key does to the quit confirmation, given the answer it has lit.
 pub use confirm::answer_for;
+/// Which register the conversation is in — questions about the repository, or a
+/// conversation converging on a document — entered and left from the composer,
+/// and said on the panel's border title and nowhere else.
+pub use panel::Mode;
 /// What a keystroke comes to while the scope prompt is up: the field stays with
 /// one character more or less, closes on Esc, or is submitted on Enter.
 pub use prompt::Edited;

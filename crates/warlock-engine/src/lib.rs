@@ -15,45 +15,40 @@
 //! its output and its timeout. So the process lives on the far side of the
 //! seam, and these tests need no `claude`, no network and no terminal.
 
-mod agent;
-mod briefs;
-mod claude_md;
-mod clock;
-mod decide;
-mod hash;
+pub mod agent;
+pub mod briefs;
+pub mod claude_md;
+pub mod clock;
+pub mod decide;
+pub mod fitting;
+pub mod hash;
 mod ignores;
-mod load;
-mod manifest;
-mod pact;
-mod scope;
-mod sigils;
-mod state;
-mod tree;
+pub mod load;
+pub mod manifest;
+pub mod pact;
+pub mod scope;
+pub mod sigils;
+pub mod state;
+pub mod tree;
 
 /// One pass of a model over one directory: the port the engine asks through
 /// and the binary implements with a subprocess.
 pub use agent::Agent;
 /// One immediate child directory's `WARLOCK.md`, carried in its parent's
 /// request so a pass learns what is below it without reading down there.
-pub use agent::ChildDocument as AgentChildDocument;
 /// Everything that can stop a model pass producing a document, in the engine's
 /// vocabulary rather than the transport's.
-pub use agent::Error as AgentError;
 /// One file of the directory a model pass is about: its relative path, and its
 /// bytes — or, for a file left out, its size in place of them.
-pub use agent::File as AgentFile;
 /// What one model pass needs in order to run: the prompt, the directory to run
 /// it in, that directory's files, and its children's documents.
-pub use agent::Request as AgentRequest;
 /// What one model pass produced: the text the model wrote, unparsed.
-pub use agent::Response as AgentResponse;
 /// The directory briefs go in when a repository has not said otherwise,
 /// relative to its root: spelled once here, so nothing has to hard-code it.
 pub use briefs::DEFAULT_BRIEF_DIRECTORY;
 /// Everything that can stop the brief directory being read, each one naming the
 /// file. A missing file is deliberately not in here: an optional setting that
 /// was never set is the default, not a fault.
-pub use briefs::Error as BriefsError;
 /// Where a repository's brief settings live under its root:
 /// `.warlock/briefs.toml`, beside the manifest. A join; nothing here searches.
 pub use briefs::briefs_path;
@@ -65,7 +60,6 @@ pub use briefs::briefs_path;
 pub use briefs::load_briefs;
 /// Everything that can stop a `CLAUDE.md` being written, each one naming the
 /// file. A missing file is not in here: that is the case where one is created.
-pub use claude_md::Error as ClaudeMdError;
 /// What writing a `CLAUDE.md` did — created a file, or brought warlock's
 /// section in one that was already there up to date — and which file it was.
 pub use claude_md::Written;
@@ -91,27 +85,35 @@ pub use clock::now_rfc3339;
 /// directory at a time, to decide stale-or-skip: fresh directories are passed
 /// over with their entries untouched, and everything else is described again.
 pub use decide::decide_state;
+/// Why one file's contents are not in a request: too large by itself, left by
+/// the whole-request cap with no room for even an account of it, unreadable, or
+/// — for a file too large to send that summarising did not rescue — not text at
+/// all, past the ceiling on how many model passes one file is worth, or left
+/// without a usable account by the passes that ran. Every one of them leaves
+/// the same thing in the request, a name and a size, and none of them fails a
+/// pact.
+pub use fitting::Omission;
+/// The most bytes one file may carry before it is listed by name and size
+/// instead.
+pub use fitting::PER_FILE_BYTE_CAP;
+/// One file the byte caps left out of a request, and why. Non-fatal by
+/// definition: the request that produced it is still a whole request.
 /// Everything that can stop a subtree being hashed.
-pub use hash::Error as HashError;
 /// The hash of everything at and below a directory.
 pub use hash::subtree_hash;
 /// Everything that can stop a directory becoming a tree.
-pub use load::Error as LoadError;
 /// What a load produced: the coloured tree, plus its non-fatal problems.
 pub use load::Loaded;
 /// One node a load could not colour properly, and why. Non-fatal by
 /// definition: the load that produced it finished.
-pub use load::Problem as LoadProblem;
 /// Why a node is in a load's problems: a subtree that could not be hashed, or a
 /// manifest entry carrying a string that is not a scope.
-pub use load::ProblemCause as LoadProblemCause;
 /// Build a tree from a directory on disk, coloured by the manifest above it.
 pub use load::load_tree;
 /// The nearest ancestor of a directory that holds a `.git/` directory: the
 /// repository root, under which the manifest lives at `.warlock/pacts.toml`.
 pub use load::repository_root;
 /// Everything that can go wrong reading, writing or building a manifest.
-pub use manifest::Error as ManifestError;
 /// The record of which modules are pacted: one `.warlock/pacts.toml` per
 /// repository.
 pub use manifest::Manifest;
@@ -129,14 +131,9 @@ pub use manifest::manifest_path;
 pub use manifest::to_manifest_path;
 /// Everything that can stop a directory getting a document, each one naming the
 /// directory. Neither byte cap is in here: an over-budget file is a
-/// [`PactProblem`], never a failure.
-pub use pact::Error as PactError;
+/// [`fitting::Problem`], never a failure.
 /// One directory a subtree pact did not finish with: no document, no manifest
 /// entry, or no hash to grant it against. Never fatal to the pact around it.
-pub use pact::Failure as PactFailure;
-/// What building a request produced: the request itself, plus the files its
-/// byte caps left out.
-pub use pact::Gathered;
 /// The fewest bytes an answer may come to, trimmed, and still be written as a
 /// document. A length is the only measure taken: nothing anywhere reads what
 /// the text says.
@@ -145,34 +142,15 @@ pub use pact::MINIMUM_DOCUMENT_BYTES;
 /// front end draws progress from and cancels through, asked once per directory
 /// and never bound to a thread. It is also told, without being asked anything,
 /// about each model pass spent describing a file too big to send.
-pub use pact::Observer as PactObserver;
-/// Why one file's contents are not in a request: too large by itself, left by
-/// the whole-request cap with no room for even an account of it, unreadable, or
-/// — for a file too large to send that summarising did not rescue — not text at
-/// all, past the ceiling on how many model passes one file is worth, or left
-/// without a usable account by the passes that ran. Every one of them leaves
-/// the same thing in the request, a name and a size, and none of them fails a
-/// pact.
-pub use pact::Omission;
-/// The most bytes one file may carry before it is listed by name and size
-/// instead.
-pub use pact::PER_FILE_BYTE_CAP;
 /// What a pact produced: the `WARLOCK.md` it wrote, plus the files its byte
 /// caps left out of the request behind it.
 pub use pact::Pacted;
 /// What a subtree pact produced: the manifest to save, the directories that
 /// failed, and the files its byte caps left out.
 pub use pact::PactedSubtree;
-/// What a [`PactObserver`] answers about the directory it was just offered:
+/// What a [`pact::Observer`] answers about the directory it was just offered:
 /// pact it, or stop the pact before it.
 pub use pact::Pacting;
-/// One file the byte caps left out of a request, and why. Non-fatal by
-/// definition: the request that produced it is still a whole request.
-pub use pact::Problem as PactProblem;
-/// The most bytes one whole request may carry before its largest files are
-/// summarised rather than sent, and listed by name and size only where even a
-/// summary of them will not fit.
-pub use pact::REQUEST_BYTE_CAP;
 /// Why a model pass produced no document: the agent failed, or the answer was
 /// too short to be one. The whole rejection policy, in two variants.
 pub use pact::Refusal;
@@ -181,7 +159,7 @@ pub use pact::Refusal;
 /// neither is fatal. The per-file cap is not in here: a file cut at the cap is
 /// a [`Viewed`], not a failure.
 pub use pact::Unviewable;
-/// The [`PactObserver`] for a caller with nothing to show and nothing to
+/// The [`pact::Observer`] for a caller with nothing to show and nothing to
 /// cancel: every directory is pacted and nothing is reported.
 pub use pact::Unwatched;
 /// What reading a file to look at produced: its text, cut at the same per-file
@@ -199,9 +177,6 @@ pub use pact::Viewed;
 /// refuses reads as no scope here as everywhere. It reports and refuses
 /// nothing.
 pub use pact::closed_scopes_at_or_below;
-/// Build the request for one model pass over one directory: its own files, its
-/// children's documents, and what the byte caps left out.
-pub use pact::gather_request;
 /// Pact one directory: gather it, describe the files too big to send, run one
 /// model pass over it, and write what came back verbatim to its `WARLOCK.md`.
 /// Describing a file is passes of its own, and no way it can fail is fatal.
@@ -210,7 +185,7 @@ pub use pact::pact_directory;
 /// Pact a directory and everything below it: write every document first,
 /// children before parents, then hash each directory and grant it what it
 /// earned. Returns the manifest to save and saves nothing itself. Each directory
-/// is announced to a [`PactObserver`] first, which may stop the pact there.
+/// is announced to a [`pact::Observer`] first, which may stop the pact there.
 pub use pact::pact_subtree;
 /// Refresh a directory and everything below it: describe every directory that
 /// has gone stale, exactly as a pact would, and pass over every directory that
@@ -229,10 +204,8 @@ pub use pact::view_file;
 /// The rules a scope keeps, as one line for a prompt to show before anything is
 /// typed: the length and the character class, worded here so that nothing that
 /// asks for a scope has to describe one for itself.
-pub use scope::RULES as SCOPE_RULES;
 /// The one rule a string broke on its way to not being a scope, renderable as
 /// a single line for a prompt to refuse with or a load to report.
-pub use scope::Rule as ScopeRule;
 /// The scope covering a path: the one on the nearest pacted directory at or
 /// above it that carries a valid scope, and at most one — nearest wins, so an
 /// inner scope replaces an outer one outright and the outer one is a *default*
@@ -265,10 +238,9 @@ pub use scope::validate_sigil;
 /// each one naming the file. A missing file is in here, as
 /// [`Manifest::load`]'s is: absent and empty are different facts and neither is
 /// invented for the caller.
-pub use sigils::Error as SigilError;
 /// The sigils held for a repository on this machine, read from under a home
 /// directory the caller supplies. Stored strings, unvalidated: a missing file
-/// is [`SigilError::NotFound`] rather than an empty set, and a file that cannot
+/// is [`sigils::Error::NotFound`] rather than an empty set, and a file that cannot
 /// be read or parsed is a named error rather than either.
 pub use sigils::load_sigils;
 /// The directory name one repository's machine-local config sits in: the

@@ -69,7 +69,7 @@
 //! times a second and a panel to keep the history in; on a pipe they would be
 //! tens of lines per directory competing with the two that say where the run has
 //! got to. The default bodies on
-//! [`Observer`](warlock_engine::PactObserver) are what makes not writing them
+//! [`Observer`](warlock_engine::pact::Observer) are what makes not writing them
 //! the same thing as saying nothing.
 //!
 //! # Failures are named on stderr, one line each, and then counted
@@ -177,58 +177,16 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use warlock_engine::{
-    Agent, PactFailure, PactObserver, PactedSubtree, Pacting, pact_subtree, refresh_subtree,
-    to_manifest_path,
-};
+use warlock_engine::{Agent, PactedSubtree, Pacting, pact, to_manifest_path};
 use warlock_tui::{Cancel, ClaudeAgent};
 
 use crate::CANCELLED;
+use crate::descent::{Descent, carry_on, descend};
 use crate::edits::{Opened, opened};
 use crate::error::{Error, one_line};
 
-/// What a pact wants a repository root for, as the tail of
-/// [`Error::NoRepository`]'s sentence. Every other subcommand's tail is spelled
-/// beside it, each where its subcommand is written.
-const FOR_PACT: &str = "pact anything under";
-
-/// What a refresh wants one for, in the same shape.
-const FOR_REFRESH: &str = "refresh anything under";
-
 /// Which of the two descents this is.
 ///
-/// The whole of the difference between `warlock pact` and `warlock refresh`,
-/// and it is two lines wide: which engine entry point [`ran`] calls, and what
-/// the sentence about a missing `.git` says the root was wanted for. Everything
-/// else — the gate, the agent, the observer, the save, the status — is one road
-/// travelled twice, which is exactly the shape [`Work`](crate::pacting::Work)
-/// gives the same pair of keys inside the TUI.
-///
-/// A carried value rather than two copies of the function, because the two
-/// commands must not be able to drift into asking the boundary in a different
-/// order or saving a different number of times. A [`Copy`] enum, because it is a
-/// tag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Descent {
-    /// `warlock pact`: describe every directory of the subtree, whatever state
-    /// it was in.
-    Pact,
-    /// `warlock refresh`: describe the ones the engine finds stale, and leave
-    /// the fresh ones exactly as they are — grant, document and all.
-    Refresh,
-}
-
-impl Descent {
-    /// What this descent wanted a repository root for, as the tail of the
-    /// sentence a missing `.git` is refused with.
-    const fn wanted(self) -> &'static str {
-        match self {
-            Self::Pact => FOR_PACT,
-            Self::Refresh => FOR_REFRESH,
-        }
-    }
-}
-
 /// The engine's progress port, writing lines.
 ///
 /// The headless counterpart of [`Reporting`](crate::pacting), and a much smaller
@@ -273,7 +231,7 @@ struct Progress<W: Write> {
     /// [`PactedSubtree`] carries the failures but not the size of the run they
     /// happened in, and "3 failed" without "of 100" is the illegible half of
     /// the report. The engine's own denominator, unaltered, and it does not
-    /// move for the length of a run — see [`PactObserver::starting`], which is
+    /// move for the length of a run — see [`pact::Observer::starting`], which is
     /// handed `directories.len()` every time — so reading it after the descent
     /// is reading the number every progress line was counting against.
     ///
@@ -309,7 +267,7 @@ impl<W: Write> Progress<W> {
     }
 }
 
-impl<W: Write> PactObserver for Progress<W> {
+impl<W: Write> pact::Observer for Progress<W> {
     /// Say which directory is being entered and where it sits in the run, and
     /// let it go ahead — unless somebody has pressed Ctrl-C, in which case say
     /// nothing and end the descent here.
@@ -329,7 +287,7 @@ impl<W: Write> PactObserver for Progress<W> {
     /// where it means something: it counts the directories offered, and the one
     /// being offered is the one it is about.
     fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
-        if self.cancel.is_cancelled() {
+        if carry_on(&self.cancel) == Pacting::Stop {
             return Pacting::Stop;
         }
         // Remembered as well as printed, and remembered every time rather than
@@ -447,7 +405,7 @@ impl Report {
 /// a promise about the report rather than a filter that fires: `failed` counts
 /// directories, `total` counts directories, and the two have to be countable
 /// against each other.
-fn report(root: &Path, failures: &[PactFailure], total: usize) -> Option<Report> {
+fn report(root: &Path, failures: &[pact::Failure], total: usize) -> Option<Report> {
     let mut named_already: Vec<String> = Vec::new();
     let mut lines: Vec<String> = Vec::new();
     for failure in failures {
@@ -503,25 +461,16 @@ fn ran(
     opened: &Opened,
     descent: Descent,
     agent: &dyn Agent,
-    observer: &mut dyn PactObserver,
+    observer: &mut dyn pact::Observer,
 ) -> Result<PactedSubtree, Error> {
-    let (target, repo_root, manifest) = (opened.target(), opened.repo_root(), opened.manifest());
-    let subtree = match descent {
-        // Every directory in the subtree, whatever state it was in.
-        Descent::Pact => pact_subtree(target, repo_root, manifest, agent, observer),
-        // Only the stale ones, and which those are is the engine's judgement
-        // from the same manifest handed in here: it keeps the grant of
-        // everything it skipped, so a fresh directory costs no pass and loses
-        // nothing.
-        Descent::Refresh => refresh_subtree(target, repo_root, manifest, agent, observer),
-    }
-    .map_err(|source| Error::Pact { source })?;
-
-    subtree
-        .manifest
-        .save(repo_root)
-        .map_err(|source| Error::Manifest { source })?;
-    Ok(subtree)
+    descend(
+        descent,
+        opened.target(),
+        opened.repo_root(),
+        opened.manifest(),
+        agent,
+        observer,
+    )
 }
 
 /// Listen for Ctrl-C for the rest of the process, and hand back the say-when it
@@ -601,7 +550,7 @@ fn listening() -> Result<Cancel, Error> {
 /// [`Error::Cancelled`] for a run somebody stopped, and [`Error::Failures`] for
 /// a run some of whose directories failed. Both are runs that happened, with the
 /// manifest already saved.
-fn ending<W: Write>(cancelled: bool, report: Option<Report>, err: &mut W) -> Result<(), Error> {
+fn ending<W: Write>(cancelled: bool, report: Option<&Report>, err: &mut W) -> Result<(), Error> {
     if cancelled {
         return Err(Error::Cancelled);
     }
@@ -650,15 +599,99 @@ fn started(descent: Descent, path: &Path) -> Result<(), Error> {
     let opened = opened(descent.wanted(), path)?;
     let cancel = listening()?;
     let agent = ClaudeAgent::new().with_cancel(cancel.clone());
-    let mut progress = Progress::new(
-        opened.repo_root().to_path_buf(),
+
+    descended(
+        &opened,
+        descent,
+        &agent,
+        &cancel,
         io::stdout(),
-        cancel.clone(),
-    );
-    let subtree = ran(&opened, descent, &agent, &mut progress)?;
+        &mut io::stderr(),
+    )?
+    .outcome
+}
+
+/// What a descent produced, and what it came to.
+///
+/// The observer is handed back still holding what it wrote and the denominator
+/// it counted against, because a caller that gave it a `Vec<u8>` wants both. On
+/// the real road the writer is stdout and nobody reads either again.
+///
+/// No `Debug`, because [`Progress`] has none: a writer is not a value to print.
+///
+/// `dead_code` is allowed because the fields are the point: [`started`] reads
+/// only `outcome` — the run is over and stdout already has the lines — while the
+/// suite reads all four off the same value. Dropping the three would make the
+/// composition untestable again, which is the thing this type exists to fix.
+#[allow(dead_code, reason = "read by the tests that drive this composition")]
+struct Descended<W: Write> {
+    /// The subtree the engine handed back, already saved by [`ran`].
+    subtree: PactedSubtree,
+    /// The observer, with its lines and its total still in it.
+    progress: Progress<W>,
+    /// What failed, counted against the run's own denominator, or `None` for a
+    /// run with nothing wrong with it. Kept rather than consumed by [`ending`]
+    /// because it is a product of the descent in its own right: it is what a
+    /// reader is shown, and the one place the count and the lines agree.
+    report: Option<Report>,
+    /// What the run came to once its failures and its cancel were read:
+    /// [`ending`]'s answer, which is `Ok` for a clean run, [`Error::Cancelled`]
+    /// for an interrupted one and [`Error::Failures`] for one that finished
+    /// imperfectly.
+    outcome: Result<(), Error>,
+}
+
+/// The whole of a run past the environment: observe it, descend it, count what
+/// failed, and say how it ended.
+///
+/// This is the composition, and it is one function rather than four lines in
+/// [`started`] because the order is the load-bearing part and every fact in it
+/// used to be asserted by a test that re-assembled the same four calls by hand.
+/// Four things have to be true together, and are true here:
+///
+/// * **The observer and the agent answer to one [`Cancel`].** The handle handed
+///   in is cloned into [`Progress`], and the caller has already given the same
+///   one to the agent — so a single Ctrl-C kills the pass in flight *and* stops
+///   the descent at the next directory, rather than doing one and not the other.
+/// * **The manifest is saved before anything has an opinion.** That happens
+///   inside [`ran`], which is what makes [`Error::Failures`] "completed with
+///   failures" rather than a failure, and what makes a cancel a run that
+///   recorded what it finished.
+/// * **The denominator is read after the descent.** [`Progress::total`] is `0`
+///   until the engine states the run's size, so the report has to count against
+///   it afterwards; counting before would report every failure out of nothing.
+/// * **[`ending`] is last.** A manifest that would not save leaves through the
+///   `?` above as [`Error::Manifest`] and a 1 — failures or cancel or neither —
+///   because a run whose record never reached the disk is the bigger news.
+///
+/// # Errors
+///
+/// Only the two ways a run fails as a whole, both from [`ran`]:
+/// [`Error::Pact`] for a subtree that cannot be walked, before any pass is
+/// spent, and [`Error::Manifest`] for one that will not save, after every
+/// document is already on disk. How an otherwise-complete run *ended* is
+/// [`Descended::outcome`] and not an error here, because there is a descent to
+/// report about either way.
+fn descended<O: Write, E: Write>(
+    opened: &Opened,
+    descent: Descent,
+    agent: &dyn Agent,
+    cancel: &Cancel,
+    out: O,
+    err: &mut E,
+) -> Result<Descended<O>, Error> {
+    let mut progress = Progress::new(opened.repo_root().to_path_buf(), out, cancel.clone());
+    let subtree = ran(opened, descent, agent, &mut progress)?;
 
     let report = report(opened.repo_root(), &subtree.failures, progress.total());
-    ending(cancel.is_cancelled(), report, &mut io::stderr())
+    let outcome = ending(cancel.is_cancelled(), report.as_ref(), err);
+
+    Ok(Descended {
+        subtree,
+        progress,
+        report,
+        outcome,
+    })
 }
 
 /// `warlock pact <path>`: describe every directory at or below that one, and
@@ -692,21 +725,20 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use warlock_engine::{
-        Agent, AgentError, AgentRequest, AgentResponse, Manifest, PactEntry, PactedSubtree,
-        manifest_path, save_sigils,
+        Agent, Manifest, PactEntry, PactedSubtree, agent, manifest_path, save_sigils,
     };
 
     use warlock_tui::Cancel;
 
-    use super::{Descent, Progress, Report, ending, ran, report};
+    use super::{Descent, Report, descended};
     use crate::edits::Opened;
     use crate::error::Error;
+    use crate::session::load_manifest;
     // The sentence itself, asked of the one function that writes it rather than
     // retyped: the footer, `warlock unpact` and a refused run say one thing
     // about one boundary, and a test holding its own copy of those words would
     // go on passing while the doors drifted apart.
     use crate::boundary::closed_scope_message;
-    use crate::session::load_manifest;
     use crate::status_for;
 
     /// A throwaway directory. Every test below builds both its repository and
@@ -788,7 +820,7 @@ mod tests {
     /// during a pass and this is the only thing here that is inside one.
     ///
     /// The refusal it can be given is
-    /// [`AgentError::NotFound`](warlock_engine::AgentError), which is not an
+    /// [`agent::Error::NotFound`](warlock_engine::agent::Error::NotFound), which is not an
     /// arbitrary choice of failure: it is what every directory of every run gets
     /// on a machine with no `claude` on `PATH`, which is the case the failure
     /// report is shaped around.
@@ -851,7 +883,7 @@ mod tests {
     }
 
     impl Agent for Canned {
-        fn run(&self, request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+        fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
             let directory = request.directory().to_path_buf();
             self.seen
                 .borrow_mut()
@@ -867,11 +899,11 @@ mod tests {
                 cancel.cancel();
             }
             if self.refused.contains(&named(&self.root, &directory)) {
-                return Err(AgentError::NotFound {
+                return Err(agent::Error::NotFound {
                     program: CLAUDE.to_owned(),
                 });
             }
-            Ok(AgentResponse::new(document()))
+            Ok(agent::Response::new(document()))
         }
     }
 
@@ -891,51 +923,38 @@ mod tests {
     /// printed.
     #[derive(Debug)]
     struct Run {
-        /// The root the run was over, so what came of it can be asked about
-        /// without the test handing the path in twice.
-        root: PathBuf,
         /// The subtree the engine handed back, saved.
         subtree: PactedSubtree,
         /// The model, with every pass it was given still in it.
         agent: Canned,
-        /// The lines that would have gone to stdout, in order and without their
-        /// newlines.
+        /// The lines that went to stdout, in order and without their newlines.
         lines: Vec<String>,
-        /// How many directories the run offered, as the observer was told —
-        /// [`Progress::total`], which is what the report counts against.
-        total: usize,
-        /// Whether anybody had said stop by the time the descent was over,
-        /// which is what [`started`](super::started) reads off the run's
-        /// [`Cancel`] and hands to [`ending`](super::ending).
-        cancelled: bool,
+        /// The lines that went to stderr, in order and without their newlines:
+        /// whatever [`ending`](super::ending) wrote while the composition ran.
+        err: Vec<String>,
+        /// What failed and how it was counted, as the composition worked it out.
+        report: Option<Report>,
+        /// What the run came to, as the subcommand would hand it to `main`.
+        outcome: Result<(), Error>,
     }
 
     impl Run {
-        /// What this run's failures came to, asked of the production function
-        /// with the production observer's own denominator.
-        fn report(&self) -> Option<Report> {
-            report(&self.root, &self.subtree.failures, self.total)
-        }
-
-        /// How this run ended and what it wrote to stderr getting there, asked
-        /// of the production function.
+        /// How this run ended, and what it wrote to stderr getting there.
         ///
-        /// [`ending`](super::ending) with this run's cancel and this run's
-        /// report: the last two lines of [`started`](super::started), which is
-        /// the one function in this module a test cannot call — it reads the
-        /// working directory and spawns `claude`.
-        fn ended(&self) -> (Result<(), Error>, Vec<String>) {
-            let mut written = Vec::new();
-            let outcome = ending(self.cancelled, self.report(), &mut written);
-            let lines = String::from_utf8(written)
-                .expect("the lines warlock writes are its own text")
-                .lines()
-                .map(str::to_owned)
-                .collect();
-            (outcome, lines)
+        /// Both read off the one composition rather than worked out again here:
+        /// [`descended`](super::descended) counted the failures against its own
+        /// denominator and called [`ending`](super::ending) itself, so what this
+        /// hands back is what the subcommand hands `main`.
+        fn ended(&self) -> (&Result<(), Error>, Vec<String>) {
+            (&self.outcome, self.err.clone())
         }
 
-        /// The stderr this run would have produced in full: whatever
+        /// What this run's failures came to, as the composition counted them.
+        const fn report(&self) -> Option<&Report> {
+            self.report.as_ref()
+        }
+
+        /// The stderr this run produced in full: whatever
         /// [`ending`](super::ending) wrote, and then the one line `main` prints
         /// for what it came to, without their newlines.
         fn stderr(&self) -> Vec<String> {
@@ -1003,9 +1022,18 @@ mod tests {
     /// The run itself, whatever the model was told to do and whoever holds the
     /// say-when.
     ///
-    /// The production road exactly: the boundary through [`Opened::new`], the
-    /// descent through [`ran`] with `cancel` in the observer, in that order and
-    /// with no way to reach the second without the first.
+    /// The production road exactly: the boundary through [`Opened::new`], then
+    /// [`descended`](super::descended) — the same call
+    /// [`started`](super::started) makes, with the same arguments in the same
+    /// order. This used to re-assemble that composition by hand, which meant
+    /// the suite proved that *a* correct order worked rather than that the
+    /// subcommand used it; the four ordering facts are asserted against the
+    /// real function now.
+    ///
+    /// What `started` still has that this does not is the environment and
+    /// nothing else: the working directory, the real home, a real
+    /// [`ClaudeAgent`](warlock_tui::ClaudeAgent), the signal handler, and
+    /// stdout and stderr in place of these two `Vec<u8>`s.
     fn driven(
         repo_root: &Path,
         home: &Path,
@@ -1021,22 +1049,28 @@ mod tests {
             manifest,
             repo_root.join(path),
         )?;
-        let mut progress = Progress::new(repo_root.to_path_buf(), Vec::new(), cancel.clone());
-        let subtree = ran(&opened, descent, &agent, &mut progress)?;
-        let total = progress.total();
-        let lines = String::from_utf8(progress.out)
+        // The production composition, not a second one assembled here: whatever
+        // order `descended` puts these in is the order under test.
+        let mut err = Vec::new();
+        let done = descended(&opened, descent, &agent, cancel, Vec::new(), &mut err)?;
+
+        Ok(Run {
+            subtree: done.subtree,
+            agent,
+            lines: written(done.progress.out),
+            err: written(err),
+            report: done.report,
+            outcome: done.outcome,
+        })
+    }
+
+    /// The lines a writer took, in order and without their newlines.
+    fn written(bytes: Vec<u8>) -> Vec<String> {
+        String::from_utf8(bytes)
             .expect("the lines warlock writes are its own text")
             .lines()
             .map(str::to_owned)
-            .collect();
-        Ok(Run {
-            root: repo_root.to_path_buf(),
-            subtree,
-            agent,
-            lines,
-            total,
-            cancelled: cancel.is_cancelled(),
-        })
+            .collect()
     }
 
     /// The modules the manifest on disk holds, in its own order.
@@ -1386,13 +1420,16 @@ mod tests {
         // And the ending: one line, and the status a shell already reads as
         // interrupted.
         let (outcome, lines) = run.ended();
-        let error = outcome.expect_err("a cancelled run is not a run that worked");
+        let error = outcome
+            .as_ref()
+            .expect_err("a cancelled run is not a run that worked");
         assert!(
             matches!(error, Error::Cancelled),
             "the cancel was reported as something else: {error:?}"
         );
         assert!(lines.is_empty(), "a cancel named directories: {lines:?}");
-        assert_eq!(status_for(&Err(error)), 130);
+        // The very value the subcommand hands `main`, not a rebuilt one.
+        assert_eq!(status_for(outcome), 130);
         assert_eq!(
             run.stderr(),
             ["warlock: the run was cancelled; what it finished first is recorded"]

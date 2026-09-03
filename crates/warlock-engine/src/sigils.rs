@@ -186,11 +186,11 @@ fn project_dir(home: &Path, root: &Path) -> PathBuf {
 /// today, and both are one line to write:
 ///
 /// ```
-/// use warlock_engine::{SigilError, load_sigils};
+/// use warlock_engine::{sigils, load_sigils};
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
 /// let held = match load_sigils(home.path(), root.path()) {
-///     Err(SigilError::NotFound { .. }) => Vec::new(),
+///     Err(sigils::Error::NotFound { .. }) => Vec::new(),
 ///     other => other?,
 /// };
 ///
@@ -332,8 +332,8 @@ struct Config {
 
 /// Everything that can stop the machine-local sigils being read or written.
 ///
-/// Hand-rolled like [`ManifestError`](crate::ManifestError) and
-/// [`HashError`](crate::HashError): four variants do not pay for an
+/// Hand-rolled like [`manifest::Error`](crate::manifest::Error) and
+/// [`hash::Error`](crate::hash::Error): four variants do not pay for an
 /// error-handling dependency, and each one names the path it happened to, so a
 /// caller has one line to print and a file to go and look at.
 #[derive(Debug)]

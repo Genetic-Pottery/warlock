@@ -56,22 +56,17 @@
 //! function's own doc: such a path is not unscoped, it is a path this manifest
 //! has nothing whatever to say about.
 
-use std::env;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use warlock_engine::{Manifest, repository_root, scope_covering, scope_opens_to, sigils_path};
+use warlock_engine::{Manifest, scope_covering, scope_opens_to, sigils_path};
 use warlock_tui::Sigils;
 
-use crate::config::home_directory;
 use crate::error::Error;
-use crate::query::{envelope, print_object, spelled};
-use crate::session::{load_manifest, sigils_under};
-
-/// What a check wants a repository root for, as the tail of
-/// [`Error::NoRepository`]'s sentence. The other subcommands' tails are spelled
-/// beside them, each where its subcommand is written.
-const FOR_CHECK: &str = "answer about the boundary over";
+use crate::query::{envelope, spelled, write_object};
+use crate::session::sigils_under;
+use crate::standing::{FOR_CHECK, Standing};
 
 /// The word this subcommand names itself with in its object, and the word a
 /// reader typed to get it.
@@ -148,36 +143,48 @@ struct Checked {
 /// prints a partial answer first. A config that will not read is deliberately
 /// not among them: it is a state of the answer, not a failure to reach one.
 pub(crate) fn check(path: PathBuf, json: bool) -> Result<(), Error> {
-    let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
-    // Asked directly rather than through a load, as `init` and `config` ask:
-    // this reads a manifest and a config, and walking the tree would be reading
-    // every directory in the repository to answer a question about ancestors.
-    let repo_root = repository_root(&working_dir).ok_or(Error::NoRepository {
-        start: working_dir.clone(),
-        wanted: FOR_CHECK,
-    })?;
+    checked_onto(&Standing::here(FOR_CHECK)?, path, json, &mut io::stdout())
+}
+
+/// The verdict itself, onto `out`: the whole of [`check`] past the environment.
+///
+/// Split from [`check`] so that the order — manifest, then home, then the
+/// answer, then one line — is something a test can run against a temporary
+/// repository and a temporary home rather than something the prose above has to
+/// be believed about. It is also where the two readings that are easy to get
+/// backwards live: a **missing** manifest is an empty one and answers "nothing
+/// covers this", while a manifest that will not **parse** is a failure; and a
+/// home that will not resolve is nothing held, which is a state of the answer
+/// and not a failure to reach one.
+///
+/// # Errors
+///
+/// Everything [`check`] names, unchanged.
+fn checked_onto<W: Write>(
+    standing: &Standing,
+    path: PathBuf,
+    json: bool,
+    out: &mut W,
+) -> Result<(), Error> {
     // A missing manifest is an empty one and not a failure: a repository that
     // has never pacted anything has never scoped anything either, and "nothing
     // covers this path" is the answer rather than the absence of one.
-    let manifest = load_manifest(&repo_root)?;
-    // The one place the environment becomes a home path, and the reason it is
-    // resolved here: everything below takes it as a parameter, so the tests run
-    // against a temporary home rather than the developer's own. A home that
-    // cannot be resolved is `None` and reads as nothing held — see the module
-    // docs for why it is not `Unknown`.
-    let home = home_directory().ok();
+    let manifest = standing.manifest()?;
+    // A home that cannot be resolved is `None` and reads as nothing held — see
+    // the module docs for why it is not `Unknown`.
+    let home = Standing::home().ok();
 
     let checked = checked(
-        &repo_root,
+        standing.repo_root(),
         home.as_deref(),
         &manifest,
-        &working_dir.join(path),
+        &standing.target(path),
     )?;
 
     if json {
-        print_object(&object(&checked));
+        write_object(out, &object(&checked));
     } else {
-        println!("{}", prose(&checked));
+        drop(writeln!(out, "{}", prose(&checked)));
     }
     Ok(())
 }
@@ -347,14 +354,111 @@ fn sigils_value(sigils: &Sigils) -> Value {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use warlock_engine::{Manifest, PactEntry, save_sigils, sigils_path};
     use warlock_tui::Sigils;
 
-    use super::{Checked, checked, object, prose};
+    use super::{Checked, checked, checked_onto, object, prose};
     use crate::error::Error;
+    use crate::standing::Standing;
     use crate::status_for;
+
+    /// A `Standing` in `repo`, which is both the working directory and the
+    /// root: `warlock check` run from the top of a checkout.
+    fn standing_in(repo: &Path) -> Standing {
+        Standing::at(repo.to_path_buf(), repo.to_path_buf())
+    }
+
+    /// What `checked_onto` wrote, without the trailing newline.
+    fn said(repo: &Path, path: &str, json: bool) -> String {
+        let mut out = Vec::new();
+        checked_onto(&standing_in(repo), PathBuf::from(path), json, &mut out)
+            .expect("a check inside a repository answers");
+        String::from_utf8(out).expect("warlock writes its own text")
+    }
+
+    #[test]
+    fn the_composition_answers_about_a_path_the_manifest_has_never_heard_of() {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+
+        let line = said(repo.path(), "src", false);
+
+        assert!(
+            line.contains("nothing scopes `src`"),
+            "a repository that never pacted anything covers nothing: {line}"
+        );
+        assert!(
+            line.contains("open to anyone"),
+            "an unscoped path is open, and the answer should say so: {line}"
+        );
+        assert!(line.ends_with('\n'), "the answer is terminated: {line:?}");
+    }
+
+    #[test]
+    fn the_composition_reads_the_scope_the_manifest_holds() {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        Manifest::with_entries([PactEntry::new(".", "src", "src/WARLOCK.md")
+            .expect("a relative module path is inside the root")
+            .with_scope("data-plane")])
+        .save(repo.path())
+        .expect("a manifest that saves");
+
+        let line = said(repo.path(), "src", false);
+
+        assert!(
+            line.contains("data-plane"),
+            "the scope on disk is not in the answer: {line}"
+        );
+    }
+
+    #[test]
+    fn a_missing_manifest_answers_and_an_unparsable_one_refuses() {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        // Missing: an answer, not a failure.
+        let mut out = Vec::new();
+        checked_onto(
+            &standing_in(repo.path()),
+            PathBuf::from("src"),
+            false,
+            &mut out,
+        )
+        .expect("a repository with no manifest still answers");
+
+        // There and broken: a failure, and not one word printed first.
+        let warlock = repo.path().join(".warlock");
+        fs::create_dir_all(&warlock).expect("the bookkeeping directory");
+        fs::write(warlock.join("pacts.toml"), "not toml {{{").expect("a broken manifest");
+
+        let mut out = Vec::new();
+        let error = checked_onto(
+            &standing_in(repo.path()),
+            PathBuf::from("src"),
+            false,
+            &mut out,
+        )
+        .expect_err("a manifest that will not parse is a failure");
+
+        assert!(matches!(error, Error::Manifest { .. }), "{error:?}");
+        assert!(
+            out.is_empty(),
+            "a partial answer was printed before the refusal: {out:?}"
+        );
+        assert_eq!(status_for(&Err(error)), 1);
+    }
+
+    #[test]
+    fn the_json_answer_is_one_line_and_names_the_command() {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+
+        let line = said(repo.path(), "src", true);
+
+        assert_eq!(line.lines().count(), 1, "not one line: {line:?}");
+        assert!(
+            line.contains("\"command\":\"check\""),
+            "the envelope does not name the command: {line}"
+        );
+    }
 
     /// The repository every check here is asked about. A path rather than a
     /// directory on disk, deliberately: coverage is a walk up the manifest's

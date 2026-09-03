@@ -37,8 +37,7 @@ use std::time::Instant;
 use std::{fs, io, thread};
 
 use warlock_engine::{
-    Agent, Manifest, NodeState, PactFailure, PactObserver, PactProblem, PactedSubtree, Pacting,
-    Tree, pact_subtree, refresh_subtree, to_manifest_path, unpact_subtree,
+    Agent, Manifest, NodeState, PactedSubtree, Pacting, Tree, fitting, pact, to_manifest_path,
 };
 use warlock_tui::{
     Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactToggle, Run, Section, Sigils,
@@ -46,7 +45,8 @@ use warlock_tui::{
 };
 
 use crate::boundary::{Reach, Verdict, verdict};
-use crate::error::{Error, one_line};
+use crate::descent::{Descent, carry_on, descend};
+use crate::error::one_line;
 use crate::session::{Scope, closed_scope, reload_tree};
 
 /// What the footer says when the worker thread stopped without reporting
@@ -356,8 +356,8 @@ pub(crate) struct Running {
 /// same channel reporting through the same observer into the same account,
 /// stoppable by the same handle and ending in the same single save and the same
 /// reload; the whole of the difference is which engine entry point
-/// [`apply_toggle`] calls — [`pact_subtree`] describes every directory of the
-/// subtree, [`refresh_subtree`] only the stale ones — and which verb the
+/// [`apply_toggle`] calls — [`pact_subtree`](warlock_engine::pact_subtree) describes every directory of the
+/// subtree, [`refresh_subtree`](warlock_engine::refresh_subtree) only the stale ones — and which verb the
 /// footer's progress line is worded with.
 ///
 /// A refresh carries a bare directory where a pact carries a [`PactToggle`],
@@ -379,6 +379,21 @@ impl Work {
         match self {
             Self::Pact(toggle) => &toggle.path,
             Self::Refresh(directory) => directory,
+        }
+    }
+
+    /// Which run over a subtree this press means, for
+    /// [`descend`].
+    ///
+    /// The pact key goes two ways and this is where the app's
+    /// [`PactToggle::pacted`] becomes the engine's third entry point: a press on
+    /// a pacted row is an un-pact. The refresh key has only one direction —
+    /// there is no such thing as an un-refresh.
+    pub(crate) const fn descent(&self) -> Descent {
+        match self {
+            Self::Pact(toggle) if toggle.pacted => Descent::Pact,
+            Self::Pact(_) => Descent::Unpact,
+            Self::Refresh(_) => Descent::Refresh,
         }
     }
 
@@ -519,7 +534,7 @@ pub(crate) enum PactEvent {
     /// `parts` counts *passes*, not chunks — a file read in three chunks is
     /// announced four times, the last of them the reduce over them — because
     /// that is the fraction of the wait a reader can do something with. See
-    /// [`PactObserver::summarising`], whose numbers these are, unaltered.
+    /// [`pact::Observer::summarising`], whose numbers these are, unaltered.
     Summarising {
         /// The file being summarised, as an absolute path; the footer spells it
         /// relative to the tree on screen, as it does a directory.
@@ -542,7 +557,7 @@ pub(crate) enum PactEvent {
     /// [`Starting`](PactEvent::Starting) before it already named the one whose
     /// request this is. It is deliberately not folded into that `Starting`
     /// either, because neither number is true when `Starting` is sent — see
-    /// [`PactObserver::requesting`], whose numbers these are, unaltered.
+    /// [`pact::Observer::requesting`], whose numbers these are, unaltered.
     Requesting {
         /// How many files the request carries.
         files: usize,
@@ -552,7 +567,7 @@ pub(crate) enum PactEvent {
     },
     /// `directory` and everything under it is documented: its pass delivered,
     /// and no pass below it failed. The engine's own word, sent the moment it
-    /// becomes true — see [`PactObserver::documented`] — and the one event that
+    /// becomes true — see [`pact::Observer::documented`] — and the one event that
     /// recolours rows while a run is still going: a finished directory turns
     /// green there and then instead of staying yellow until the whole batch is
     /// over.
@@ -625,9 +640,9 @@ struct Reporting<'a> {
     cancel: &'a Cancel,
 }
 
-impl PactObserver for Reporting<'_> {
+impl pact::Observer for Reporting<'_> {
     fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
-        if self.cancel.is_cancelled() {
+        if carry_on(self.cancel) == Pacting::Stop {
             return Pacting::Stop;
         }
         let _ = self.events.send(PactEvent::Starting {
@@ -1505,7 +1520,7 @@ pub(crate) struct Toggled {
 
 /// Why one directory's pass produced no document.
 ///
-/// A [`PactFailure`] flattened to the two things the panel needs: which
+/// A [`pact::Failure`] flattened to the two things the panel needs: which
 /// directory it is about, which the engine's failures already name, and the
 /// sentence the failure worded itself as. Flattened at the point the failures
 /// are in hand rather than carried whole, so that what travels back to the event
@@ -1520,8 +1535,8 @@ struct Refusal {
     reason: String,
 }
 
-impl From<&PactFailure> for Refusal {
-    fn from(failure: &PactFailure) -> Self {
+impl From<&pact::Failure> for Refusal {
+    fn from(failure: &pact::Failure) -> Self {
         Self {
             directory: failure.directory().to_path_buf(),
             // Flattened for the same reason every other line here is: a failure
@@ -1535,8 +1550,8 @@ impl From<&PactFailure> for Refusal {
 /// Carry `work` out — pact the subtree, refresh its stale parts, or take it out
 /// of the manifest — and write the result to disk.
 ///
-/// Every half is the engine's ([`pact_subtree`], [`refresh_subtree`],
-/// [`unpact_subtree`]); what this function owns is the order the front end needs
+/// Every half is the engine's ([`pact_subtree`](warlock_engine::pact_subtree), [`refresh_subtree`](warlock_engine::refresh_subtree),
+/// [`unpact_subtree`](warlock_engine::unpact_subtree)); what this function owns is the order the front end needs
 /// them in and the single [`Manifest::save`] at the end of it. Once, at the end,
 /// is the whole point: a save per directory would leave `.warlock/pacts.toml`
 /// recording a pact that was still running, and one that died half way through
@@ -1544,8 +1559,8 @@ impl From<&PactFailure> for Refusal {
 /// that reason, and so belongs under the same one write as everything else here.
 ///
 /// This is the one place the two runs part company, and they part in a single
-/// `match` arm: [`refresh_subtree`] takes [`pact_subtree`]'s arguments and hands
-/// back [`pact_subtree`]'s [`PactedSubtree`], so what the front end makes of it
+/// `match` arm: [`refresh_subtree`](warlock_engine::refresh_subtree) takes [`pact_subtree`](warlock_engine::pact_subtree)'s arguments and hands
+/// back [`pact_subtree`](warlock_engine::pact_subtree)'s [`PactedSubtree`], so what the front end makes of it
 /// is the same in both cases — see [`described`].
 ///
 /// The agent is passed in as the engine's port rather than reached for here, so
@@ -1572,40 +1587,32 @@ fn apply_toggle(
     repo_root: &Path,
     work: &Work,
     agent: &dyn Agent,
-    observer: &mut dyn PactObserver,
+    observer: &mut dyn pact::Observer,
 ) -> Result<Toggled, String> {
-    let toggled = match work {
-        // Un-pacting is pure manifest editing — no walk, no pass, no hash, and
-        // every `WARLOCK.md` left where it is — so the only thing it can refuse
-        // is a path the manifest has no spelling for. The app has already said
-        // what un-pacting leaves behind, and nothing here talks over it.
+    // The descent and the one save are [`descend`]'s, shared with the shell's
+    // `warlock pact` and `warlock refresh` — see [`mod@crate::descent`]. What is
+    // left here is the panel's half: an un-pact grants nothing and has nothing
+    // to report, and the other two are read for a footer line and a refusal per
+    // directory.
+    let subtree = descend(
+        work.descent(),
+        work.path(),
+        repo_root,
+        manifest,
+        agent,
+        observer,
+    )
+    .map_err(|error| one_line(&error.to_string()))?;
+
+    Ok(match work {
         Work::Pact(toggle) if !toggle.pacted => Toggled {
-            manifest: unpact_subtree(&toggle.path, repo_root, manifest)
-                .map_err(|source| Error::Manifest { source }.to_string())?,
+            manifest: subtree.manifest,
             granted: false,
             message: None,
             refusals: Vec::new(),
         },
-        // Every directory in the subtree, whatever state it was in.
-        Work::Pact(toggle) => described(
-            pact_subtree(&toggle.path, repo_root, manifest, agent, observer)
-                .map_err(|source| one_line(&source.to_string()))?,
-        ),
-        // Only the stale ones, and which those are is the engine's judgement:
-        // it decides staleness from the same manifest handed in here, keeps the
-        // grant of everything it skipped, and — like the pact above — saves
-        // nothing, leaving the one write below.
-        Work::Refresh(directory) => described(
-            refresh_subtree(directory, repo_root, manifest, agent, observer)
-                .map_err(|source| one_line(&source.to_string()))?,
-        ),
-    };
-
-    toggled
-        .manifest
-        .save(repo_root)
-        .map_err(|source| Error::Manifest { source }.to_string())?;
-    Ok(toggled)
+        Work::Pact(_) | Work::Refresh(_) => described(subtree),
+    })
 }
 
 /// What a run that described directories came to, whichever run described them.
@@ -1648,7 +1655,7 @@ fn described(subtree: PactedSubtree) -> Toggled {
 /// no document is worse news than a file left out of a request that worked —
 /// and the count covers both piles, which is why it does not claim the rest are
 /// "like it".
-fn pact_message(failures: &[PactFailure], problems: &[PactProblem]) -> Option<String> {
+fn pact_message(failures: &[pact::Failure], problems: &[fitting::Problem]) -> Option<String> {
     let (first, rest) = match (failures.split_first(), problems.split_first()) {
         (Some((first, others)), _) => (first.to_string(), others.len() + problems.len()),
         (None, Some((first, others))) => (first.to_string(), others.len()),
@@ -1689,9 +1696,8 @@ mod tests {
     use std::{env, fs, process};
 
     use warlock_engine::{
-        Agent, AgentError, AgentFile, AgentRequest, AgentResponse, Loaded, Manifest, Node,
-        NodeState, PER_FILE_BYTE_CAP, PactEntry, Tree, Unwatched, decide_state, load_tree,
-        repository_root, subtree_hash,
+        Agent, Loaded, Manifest, Node, NodeState, PER_FILE_BYTE_CAP, PactEntry, Tree, Unwatched,
+        agent, decide_state, load_tree, repository_root, subtree_hash,
     };
     use warlock_tui::{
         Account, Activities, Activity, App, Chrome, ClaudeAgent, Line, Mode, PactToggle, Run,
@@ -1768,7 +1774,7 @@ mod tests {
         /// what a run asks a model for is the thing one of the tests below
         /// holds two runs up against — see
         /// [`Canned::requests`].
-        seen: RefCell<Vec<(AgentRequest, bool)>>,
+        seen: RefCell<Vec<(agent::Request, bool)>>,
     }
 
     impl Canned {
@@ -1824,7 +1830,7 @@ mod tests {
         /// What the engine decided to send: the prompt, the files with their
         /// bytes, the children's documents, in the engine's own order. Two
         /// runs over the same directory are the same run when these are equal.
-        fn requests(&self) -> Vec<AgentRequest> {
+        fn requests(&self) -> Vec<agent::Request> {
             self.seen
                 .borrow()
                 .iter()
@@ -1848,7 +1854,7 @@ mod tests {
     }
 
     impl Agent for Canned {
-        fn run(&self, request: &AgentRequest) -> Result<AgentResponse, AgentError> {
+        fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
             let relative = self.relative(request.directory());
             self.seen
                 .borrow_mut()
@@ -1873,9 +1879,9 @@ mod tests {
                 // way to fail one directory of a pact for real, rather than
                 // by reaching into the engine's error types, which are
                 // `#[non_exhaustive]` and cannot be built from here.
-                return Ok(AgentResponse::new("no."));
+                return Ok(agent::Response::new("no."));
             }
-            Ok(AgentResponse::new(document()))
+            Ok(agent::Response::new(document()))
         }
     }
 
@@ -5996,7 +6002,7 @@ mod tests {
     /// body over that work, and the fake agent in the middle writes down what
     /// the engine asked it for. Nothing about the run is short-circuited, so a
     /// conversation that reached the engine would reach it here.
-    fn requests_of_a_run(scratch: &Scratch, talked_first: bool) -> Vec<AgentRequest> {
+    fn requests_of_a_run(scratch: &Scratch, talked_first: bool) -> Vec<agent::Request> {
         let (mut app, scope) = load(scratch);
         let mut manifest = Manifest::new();
         let base = Instant::now();
@@ -6098,7 +6104,7 @@ mod tests {
                     !request
                         .files()
                         .iter()
-                        .filter_map(AgentFile::bytes)
+                        .filter_map(agent::File::bytes)
                         .any(|bytes| bytes.windows(text.len()).any(|run| run == text.as_bytes())),
                     "a file sent for {} carries the conversation",
                     request.directory().display()

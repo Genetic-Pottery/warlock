@@ -54,7 +54,7 @@
 //!
 //! # Nothing here decides what a boundary means
 //!
-//! [`scope_covering`] and [`scope_opens_to`], called once each and neither
+//! [`scope_covering`](warlock_engine::scope_covering) and [`scope_opens_to`](warlock_engine::scope_opens_to), called once each and neither
 //! re-implemented. Nearest-scope-wins, an invalid scope read as no scope, an
 //! unscoped path open to anyone, and a machine holding nothing opening nothing
 //! that is scoped are all decided in `crates/warlock-engine/src/scope.rs` and
@@ -156,37 +156,24 @@
 //! case where `warlock unpact` would have exited 0 having provably not written
 //! the thing it says it wrote.
 
-use std::env;
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{Manifest, PactEntry, repository_root, unpact_subtree, validate_scope};
+use warlock_engine::{Manifest, PactEntry, unpact_subtree, validate_scope};
 use warlock_tui::Sigils;
 
 use crate::boundary::{Reach, Verdict, verdict};
-use crate::config::home_directory;
 use crate::error::Error;
 use crate::query::spelled;
 use crate::scoping::with_scope_on;
-use crate::session::{load_manifest, sigils_under};
-
-/// What an un-pact wants a repository root for, as the tail of
-/// [`Error::NoRepository`]'s sentence. The other subcommands' tails are spelled
-/// beside them, each where its subcommand is written.
-const FOR_UNPACT: &str = "un-pact anything under";
-
-/// What `warlock scope add` wants one for, in the same shape.
-const FOR_SCOPE_ADD: &str = "write a scope in";
-
-/// And `warlock scope remove`, which is the same fact about `.git` with the
-/// other consequence on the end of it.
-const FOR_SCOPE_REMOVE: &str = "clear a scope in";
+use crate::session::sigils_under;
+use crate::standing::{FOR_SCOPE_ADD, FOR_SCOPE_REMOVE, FOR_UNPACT, Standing};
 
 /// A repository a headless write may go ahead in, with the boundary already
 /// asked.
 ///
 /// The type is the gate. Its fields are private to this module and its only
-/// constructor is [`Opened::new`], which asks [`scope_covering`] and
-/// [`scope_opens_to`] before it hands one back — so possessing an `Opened` is
+/// constructor is [`Opened::new`], which asks [`scope_covering`](warlock_engine::scope_covering) and
+/// [`scope_opens_to`](warlock_engine::scope_opens_to) before it hands one back — so possessing an `Opened` is
 /// proof that this machine's sigils open the scope covering the path inside it,
 /// and no write in this module can be reached without one. A later subcommand
 /// that wants to edit the manifest from a shell asks for one of these and
@@ -315,7 +302,7 @@ impl Opened {
     /// went.
     ///
     /// The whole of `warlock unpact` past the boundary, and it is three engine
-    /// calls: [`closed_scopes_at_or_below`] for the boundaries the act would
+    /// calls: [`closed_scopes_at_or_below`](warlock_engine::closed_scopes_at_or_below) for the boundaries the act would
     /// take with it, [`unpact_subtree`] for the manifest that should be there
     /// now, and [`Manifest::save`] to put it there. Nothing else — no walk, no
     /// hash, no pass, no reload, and not a single `WARLOCK.md` touched. The
@@ -336,7 +323,7 @@ impl Opened {
     /// The question is asked here and not in [`Opened::new`], because `new` is
     /// also `warlock scope add`'s gate and `warlock scope remove`'s, and those
     /// two write one line onto one entry and erase no boundary at all. It is
-    /// asked of [`closed_scopes_at_or_below`] rather than worked out from the
+    /// asked of [`closed_scopes_at_or_below`](warlock_engine::closed_scopes_at_or_below) rather than worked out from the
     /// dropped entries below, because the [`p`](crate::pacting) key asks the
     /// same engine function over the same manifest: one answer, so the two doors
     /// cannot drift into refusing where the other permits.
@@ -354,7 +341,7 @@ impl Opened {
     /// this file holding an opinion about it.
     ///
     /// A dropped entry's scope is named exactly as it is written down, including
-    /// one [`validate_scope`](warlock_engine::validate_scope) would refuse.
+    /// one [`validate_scope`] would refuse.
     /// Coverage ignores such a scope, so it never closed this boundary — but it
     /// is a word somebody wrote in the file, and a line that silently omitted it
     /// would be warlock deciding on a reader's behalf that what they wrote did
@@ -545,20 +532,17 @@ impl Opened {
 /// the answer — nothing held, so nothing scoped is open — rather than a failure
 /// to reach one.
 pub(crate) fn opened(wanted: &'static str, path: &Path) -> Result<Opened, Error> {
-    let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
-    // Asked directly rather than through a load, as `init`, `config` and the
-    // three questions ask: this edits one file, and walking the tree to find its
-    // root would be reading every directory in the repository to answer a
-    // question about ancestors.
-    let repo_root = repository_root(&working_dir).ok_or(Error::NoRepository {
-        start: working_dir.clone(),
-        wanted,
-    })?;
-    let manifest = load_manifest(&repo_root)?;
-    let home = home_directory().ok();
-    let target = working_dir.join(path);
+    let standing = Standing::here(wanted)?;
+    let manifest = standing.manifest()?;
+    let home = Standing::home().ok();
+    let target = standing.target(path);
 
-    Opened::new(repo_root, home.as_deref(), manifest, target)
+    Opened::new(
+        standing.repo_root().to_path_buf(),
+        home.as_deref(),
+        manifest,
+        target,
+    )
 }
 
 /// `warlock unpact <path>`: drop that directory's pact and every pact below it,

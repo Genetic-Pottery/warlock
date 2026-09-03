@@ -88,7 +88,7 @@ use crate::{NodeState, PactEntry};
 /// let granted = entry.with_grant("abc123", "2026-08-19T07:32:00Z");
 /// assert_eq!(decide_state(Some(&granted), "def456"), NodeState::PactedStale);
 /// assert_eq!(decide_state(Some(&granted), "abc123"), NodeState::PactedFresh);
-/// # Ok::<(), warlock_engine::ManifestError>(())
+/// # Ok::<(), warlock_engine::manifest::Error>(())
 /// ```
 ///
 /// [`PactedStale`]: NodeState::PactedStale

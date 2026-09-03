@@ -75,7 +75,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Instant;
 
-use warlock_engine::{BriefsError, DEFAULT_BRIEF_DIRECTORY, Manifest, load_briefs};
+use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, Manifest, briefs, load_briefs};
 use warlock_tui::{
     Activities, Activity, App, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, ChatAgent,
     Composed, Composer, Converses, Edited, Ending, Focus, Mode, ScopePrompt, Submitted,
@@ -203,7 +203,7 @@ fn brief_asking(root: &Path) -> Result<String, TemplateError> {
 ///
 /// [`unreadable_template`]'s twin, in its wording and its shape, because the two
 /// are the same refusal about the two files `/brief` reads: the loader's own
-/// sentence — which names the file and quotes the parser (see [`BriefsError`]) —
+/// sentence — which names the file and quotes the parser (see [`briefs::Error`]) —
 /// and what it cost, on one unclocked line where a refusal goes.
 ///
 /// Flattened with [`one_line`] where that one is not, and only because the
@@ -217,7 +217,7 @@ fn brief_asking(root: &Path) -> Result<String, TemplateError> {
 /// `docs/` instead — a misspelled key is a line to go and fix rather than a
 /// silent write somewhere nobody asked for. Nothing else about the session
 /// moves: no mode, no turn, and the card is what it was with one line added.
-fn unreadable_briefs(error: &BriefsError) -> String {
+fn unreadable_briefs(error: &briefs::Error) -> String {
     format!(
         "{} — /brief did nothing, so fix or remove the file and type it again",
         one_line(&error.to_string())
@@ -765,7 +765,7 @@ impl<C: Converses> Chat<C> {
     /// The window is this value's, so what a key does to it is settled here and
     /// the loop keeps no copy to put back. The manifest is still handed in: the
     /// scope key writes it and a run saves it, so it is the loop's and this only
-    /// reads it. See [`write_edit`](crate::writing::write_edit), which is the
+    /// reads it. See [`write_edit`], which is the
     /// arithmetic and the write itself.
     pub(crate) fn write(
         &mut self,

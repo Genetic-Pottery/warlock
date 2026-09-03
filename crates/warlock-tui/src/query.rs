@@ -31,7 +31,7 @@
 //! directory, so `warlock stale` answers about the repository from wherever it
 //! is typed.
 //!
-//! [`to_manifest_path`] is what does that spelling, so `.` is what the
+//! [`to_manifest_path`](warlock_engine::to_manifest_path) is what does that spelling, so `.` is what the
 //! repository root itself prints as — a real answer, since the root can be a
 //! pacted module like any other, and never the empty line a naive
 //! `strip_prefix` would produce.
@@ -59,18 +59,14 @@
 //! verdict out of an unreadable file. The exit contract says an unreadable path
 //! is a 1, so it is one here rather than a line a script would act on.
 
-use std::env;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
-use warlock_engine::{Loaded, NodeState, Tree, load_tree, repository_root, to_manifest_path};
+use warlock_engine::{Loaded, NodeState, Tree, load_tree};
 
 use crate::error::Error;
-
-/// What a listing wants a repository root for, as the tail of
-/// [`Error::NoRepository`]'s sentence. `init`'s own tail is spelled beside
-/// `init` in `main.rs`, and `config`'s beside `config`.
-const FOR_LISTING: &str = "list the directories under";
+use crate::standing::{FOR_LISTING, Standing};
 
 /// The one field every `--json` object carries, naming the question it answers.
 ///
@@ -173,17 +169,41 @@ const fn state_word(state: NodeState) -> &'static str {
 /// repository-relative form. Every one of them is one line on stderr and an
 /// exit status of 1, and none of them prints a partial answer first.
 pub(crate) fn list(listing: Listing, path: Option<PathBuf>, json: bool) -> Result<(), Error> {
-    let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
-    // Asked directly rather than taken from the load below, and asked *first*,
-    // because it is what "path omitted" means: `load_tree` finds the repository
-    // root above whatever it is handed, which for `warlock stale crates` would
-    // be the same root by a longer road and for `warlock stale` would be no
-    // question at all — there would be nothing to root the tree at yet.
-    let repo_root = repository_root(&working_dir).ok_or(Error::NoRepository {
-        start: working_dir.clone(),
-        wanted: FOR_LISTING,
-    })?;
-    let root = path.map_or_else(|| repo_root.clone(), |path| working_dir.join(path));
+    // Stood up *first*, before the load below, because it is what "path omitted"
+    // means: `load_tree` finds the repository root above whatever it is handed,
+    // which for `warlock stale crates` would be the same root by a longer road
+    // and for `warlock stale` would be no question at all — there would be
+    // nothing to root the tree at yet.
+    listed_onto(
+        &Standing::here(FOR_LISTING)?,
+        listing,
+        path,
+        json,
+        &mut io::stdout(),
+    )
+}
+
+/// The listing itself, onto `out`: the whole of [`list`] past the environment.
+///
+/// Split from [`list`] so the order is something a test can run rather than
+/// something the prose above has to be believed about. Three facts live here:
+/// an omitted path means the repository root and not the working directory, the
+/// load's problems are refused *before* a single row is printed, and every row
+/// is spelled against the root rather than against wherever the reader happened
+/// to be standing.
+///
+/// # Errors
+///
+/// Everything [`list`] names, unchanged.
+fn listed_onto<W: Write>(
+    standing: &Standing,
+    listing: Listing,
+    path: Option<PathBuf>,
+    json: bool,
+    out: &mut W,
+) -> Result<(), Error> {
+    let repo_root = standing.repo_root();
+    let root = path.map_or_else(|| repo_root.to_path_buf(), |path| standing.target(path));
 
     let Loaded { tree, problems } = load_tree(&root).map_err(|source| Error::Load { source })?;
     // Refused rather than reported around, as the startup load refuses them:
@@ -194,12 +214,12 @@ pub(crate) fn list(listing: Listing, path: Option<PathBuf>, json: bool) -> Resul
         return Err(error);
     }
 
-    let directories = listed(&tree, &repo_root, listing.wanted())?;
+    let directories = listed(&tree, repo_root, listing.wanted())?;
     if json {
-        print_object(&object(listing, &directories));
+        write_object(out, &object(listing, &directories));
     } else {
         for directory in &directories {
-            println!("{}", directory.path);
+            drop(writeln!(out, "{}", directory.path));
         }
     }
     Ok(())
@@ -246,7 +266,7 @@ fn listed(tree: &Tree, repo_root: &Path, wanted: NodeState) -> Result<Vec<Listed
 /// the same line, so the three subcommands name one directory one way and
 /// refuse an unspellable one on the same grounds.
 pub(crate) fn spelled(repo_root: &Path, path: &Path) -> Result<String, Error> {
-    to_manifest_path(repo_root, path).map_err(|source| Error::Unspellable { source })
+    Standing::at(repo_root.to_path_buf(), repo_root.to_path_buf()).spelled(path)
 }
 
 /// The object `--json` prints for a listing: the command it answers, and the
@@ -290,7 +310,7 @@ pub(crate) fn envelope(
     Value::Object(object)
 }
 
-/// Print `object` as the one line of JSON it is.
+/// Write `object` as the one line of JSON it is.
 ///
 /// Compact and on a single line, which is what a pipe into `jq` wants and what
 /// makes "exactly one object" visible from the shape of the output rather than
@@ -299,19 +319,95 @@ pub(crate) fn envelope(
 ///
 /// Shared with `warlock check` for the reason [`envelope`] is: every `--json`
 /// answer warlock prints is one line printed one way.
-pub(crate) fn print_object(object: &Value) {
-    println!("{object}");
+///
+/// Takes the writer rather than reaching for stdout, so that the composition
+/// above it — resolve, answer, print — is one a test can run and read back.
+/// A write that fails is ignored for [`Progress::say`](crate::running)'s reason:
+/// a closed pipe is the ordinary end of `warlock stale | head`, and there is
+/// nothing useful to say about it on the same broken stream.
+pub(crate) fn write_object<W: Write>(out: &mut W, object: &Value) {
+    drop(writeln!(out, "{object}"));
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    use warlock_engine::{Node, NodeState, Tree};
+    use warlock_engine::{Manifest, Node, NodeState, PactEntry, Tree};
 
-    use super::{Listed, Listing, listed, object, state_word};
+    use super::{Listed, Listing, listed, listed_onto, object, state_word};
     use crate::error::Error;
+    use crate::standing::Standing;
     use crate::status_for;
+
+    /// What `listed_onto` wrote for a real repository on disk, by line.
+    fn listing_of(repo: &Path, listing: Listing, path: Option<&str>, json: bool) -> Vec<String> {
+        let standing = Standing::at(repo.to_path_buf(), repo.to_path_buf());
+        let mut out = Vec::new();
+        listed_onto(&standing, listing, path.map(PathBuf::from), json, &mut out)
+            .expect("a listing inside a repository answers");
+        String::from_utf8(out)
+            .expect("warlock writes its own text")
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// A checkout with a `.git/` and one ordinary source directory in it, and
+    /// nothing ever pacted.
+    fn a_checkout() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("a repository marker");
+        std::fs::create_dir_all(repo.path().join("src")).expect("a source directory");
+        std::fs::write(repo.path().join("src/lib.rs"), "//! a module\n").expect("a source file");
+        repo
+    }
+
+    #[test]
+    fn the_composition_lists_nothing_fresh_in_a_repository_that_never_pacted() {
+        let repo = a_checkout();
+
+        assert!(
+            listing_of(repo.path(), Listing::Fresh, None, false).is_empty(),
+            "nothing was ever granted, so nothing is fresh"
+        );
+    }
+
+    #[test]
+    fn an_omitted_path_means_the_root_and_a_given_one_means_that_directory() {
+        let repo = a_checkout();
+        // Pacted but never granted, which is what stale means: unpacted is a
+        // state of its own and is in neither listing.
+        Manifest::with_entries([
+            PactEntry::new(".", ".", "WARLOCK.md").expect("the root is inside itself"),
+            PactEntry::new(".", "src", "src/WARLOCK.md").expect("`src` is inside the root"),
+        ])
+        .save(repo.path())
+        .expect("a manifest that saves");
+
+        let whole = listing_of(repo.path(), Listing::Stale, None, false);
+        let inner = listing_of(repo.path(), Listing::Stale, Some("src"), false);
+
+        // The root's listing reaches `src`, and `src`'s does not reach back up.
+        assert!(whole.contains(&".".to_owned()), "{whole:?}");
+        assert!(whole.contains(&"src".to_owned()), "{whole:?}");
+        assert!(!inner.contains(&".".to_owned()), "{inner:?}");
+        assert!(inner.contains(&"src".to_owned()), "{inner:?}");
+    }
+
+    #[test]
+    fn the_json_listing_is_one_line_whatever_it_found() {
+        let repo = a_checkout();
+
+        let lines = listing_of(repo.path(), Listing::Fresh, None, true);
+
+        assert_eq!(lines.len(), 1, "not one object: {lines:?}");
+        assert!(
+            lines[0].contains("\"directories\":[]"),
+            "an empty answer is an empty array and never an absent one: {}",
+            lines[0]
+        );
+    }
 
     /// The repository root every tree here is spelled against.
     const REPO: &str = "/repo";

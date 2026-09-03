@@ -14,7 +14,7 @@
 //! person on one machine holds, and it is never written inside a repository.
 //! This subcommand is the only way to record the second, and it records it at
 //! `<home>/.warlock/<project>/config.toml` — see
-//! [`sigils_path`](warlock_engine::sigils_path). Nothing here writes, or offers
+//! [`sigils_path`]. Nothing here writes, or offers
 //! to write, any file inside the repository, and nothing here matches a sigil
 //! against a scope: what ships is the record and the vocabulary.
 //!
@@ -50,28 +50,14 @@
 //! what keeps one vocabulary for a boundary typed at this prompt and a boundary
 //! read out of a manifest.
 
-use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
-use std::{env, fmt};
+use std::fmt;
+use std::io::{self, Write};
+use std::path::Path;
 
-use warlock_engine::{
-    SigilError, load_sigils, repository_root, save_sigils, sigils_path, validate_sigil,
-};
+use warlock_engine::{load_sigils, save_sigils, sigils, sigils_path, validate_sigil};
 
 use crate::error::{Error, one_line};
-
-/// What this subcommand wants a repository root for, as the tail of
-/// [`Error::NoRepository`]'s sentence. `init`'s own tail is spelled beside
-/// `init`, in `main.rs`.
-const FOR_SIGILS: &str = "hold sigils for";
-
-/// The environment variable a home directory is read from, and the one it falls
-/// back to on Windows. Two names and no third: this is a lookup, not a search,
-/// and a machine with neither set is told so rather than guessed at.
-const HOME: &str = "HOME";
-
-/// The Windows spelling of [`HOME`], consulted only when `HOME` says nothing.
-const USERPROFILE: &str = "USERPROFILE";
+use crate::standing::{FOR_SIGILS, Standing};
 
 /// The cursor's own line. Named for what is expected of it and for the one
 /// thing a reader has to get right about the syntax — several sigils are
@@ -85,7 +71,7 @@ const NOTHING: &str = "nothing";
 /// The rules a sigil follows, in the one sentence they are printed as.
 ///
 /// Written out rather than derived from
-/// [`validate_sigil`](warlock_engine::validate_sigil), which judges strings and
+/// [`validate_sigil`], which judges strings and
 /// has nothing to say about itself. That makes this a second statement of the
 /// same rules, and it is the honest place for one: it is what a person reads
 /// before typing, and the alternative is a prompt that says nothing and refuses
@@ -99,7 +85,7 @@ const RULES: &str = "a sigil is 1 to 24 characters of lowercase letters, digits,
 ///
 /// The steps are the ones the module doc describes, in that order and with the
 /// read in the middle of them: the working directory says where to start,
-/// [`repository_root`] walks up to the nearest ancestor with a `.git/` — so
+/// [`repository_root`](warlock_engine::repository_root) walks up to the nearest ancestor with a `.git/` — so
 /// running this from any subdirectory configures the one checkout — the home
 /// directory says where the file goes, and what is already held is printed
 /// before a cursor ever appears.
@@ -117,41 +103,71 @@ const RULES: &str = "a sigil is 1 to 24 characters of lowercase letters, digits,
 /// [`Error::Sigil`] if something on it is not a sigil, in which case nothing is
 /// written; and [`Error::Sigils`] if the file itself will not write.
 pub(crate) fn configure() -> Result<(), Error> {
-    let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
-    // Asked directly rather than through a load, exactly as `init` asks: this
-    // resolves a checkout in order to name a file under the home directory, and
-    // walking the tree would be reading every directory in the repository to
-    // answer a question about ancestors.
-    let root = repository_root(&working_dir).ok_or(Error::NoRepository {
-        start: working_dir,
-        wanted: FOR_SIGILS,
-    })?;
-    let home = home_directory()?;
-    let path = sigils_path(&home, &root);
+    let standing = Standing::here(FOR_SIGILS)?;
+    // The one subcommand that takes the error rather than `.ok()`: a home is the
+    // thing it was asked to write under, so not having one is a failure and not
+    // an answer of "nothing held".
+    let home = Standing::home()?;
 
-    print!("{}", preamble(&root, &path, &held_for(&home, &root)));
+    prompted(&standing, &home, read_line, &mut io::stdout())
+}
+
+/// The prompt itself: say what is held, read one line, and write what it says.
+///
+/// Split from [`configure`] so the order is something a test can run. `ask` is
+/// where the line comes from — [`read_line`] on the real road, a canned answer
+/// under test — and `out` is where every word of it goes, so that a suite can
+/// assert what a reader would have seen rather than only what ended up on disk.
+///
+/// The order is the part worth pinning. The preamble is written and **flushed**
+/// before anything is read, because the prompt has no newline of its own and
+/// would otherwise sit in the terminal's buffer behind a cursor waiting on a
+/// person; EOF is answered before anything is parsed, so a Ctrl-D leaves a
+/// missing file missing and an existing one unopened; and the confirmation names
+/// the file only after [`hold`] has actually written it.
+///
+/// # Errors
+///
+/// [`Error::Prompt`] if the line cannot be read, [`Error::Sigil`] if something
+/// on it is not a sigil — in which case nothing is written — and
+/// [`Error::Sigils`] if the file itself will not write.
+fn prompted<W: Write>(
+    standing: &Standing,
+    home: &Path,
+    ask: impl FnOnce() -> Result<Option<String>, Error>,
+    out: &mut W,
+) -> Result<(), Error> {
+    let root = standing.repo_root();
+    let path = sigils_path(home, root);
+
+    drop(write!(
+        out,
+        "{}",
+        preamble(root, &path, &held_for(home, root))
+    ));
     // Best effort, and the only thing that could be done about it: the prompt
     // has no newline of its own, so it sits in the terminal's buffer until this
     // pushes it out. A stdout that will not flush has nothing useful to say
     // about itself, and the read below reports anything that really goes wrong.
-    drop(io::stdout().flush());
+    drop(out.flush());
 
-    let Some(line) = read_line()? else {
+    let Some(line) = ask()? else {
         // EOF, which is Ctrl-D at a terminal and an empty pipe everywhere else.
         // Nothing is parsed and nothing is written: a missing file stays missing
         // and an existing one is not opened. The newline is because the prompt
         // above has none and the cursor is still sitting on it.
-        println!("\nwarlock: nothing changed");
+        drop(writeln!(out, "\nwarlock: nothing changed"));
         return Ok(());
     };
 
-    let sigils = hold(&home, &root, &line)?;
-    println!(
+    let sigils = hold(home, root, &line)?;
+    drop(writeln!(
+        out,
         "warlock: holding {} for `{}`, written to `{}`",
         holding(&sigils),
         root.display(),
         path.display()
-    );
+    ));
     Ok(())
 }
 
@@ -184,7 +200,7 @@ enum Held {
 fn held_for(home: &Path, root: &Path) -> Held {
     match load_sigils(home, root) {
         Ok(sigils) => Held::Sigils(sigils),
-        Err(SigilError::NotFound { .. }) => Held::Sigils(Vec::new()),
+        Err(sigils::Error::NotFound { .. }) => Held::Sigils(Vec::new()),
         Err(error) => Held::Unreadable(one_line(&error.to_string())),
     }
 }
@@ -308,7 +324,7 @@ fn sigils_in(line: &str) -> Result<Vec<String>, Error> {
 /// Nothing is written unless the whole line is sigils, because [`sigils_in`]
 /// runs first and returns before the save is reached. The save itself is
 /// write-and-rename inside the home directory (see
-/// [`save_sigils`](warlock_engine::save_sigils)): the set is replaced rather
+/// [`save_sigils`]): the set is replaced rather
 /// than added to, and no file inside the repository is touched.
 ///
 /// # Errors
@@ -340,46 +356,103 @@ fn read_line() -> Result<Option<String>, Error> {
     }
 }
 
-/// This machine's home directory, from [`HOME`] or, failing that,
-/// [`USERPROFILE`].
-///
-/// The only place in warlock that reads either variable: the engine takes a home
-/// as a parameter all the way through, which is what keeps its tests off the
-/// developer's real one, so this is the single point where a process's
-/// environment becomes a path. It is shared with the TUI's own read of the
-/// config — [`sigils_held`](crate::session::sigils_held), which states what is
-/// held on the header — rather than copied there, so the two answer "where is
-/// home" the same way or not at all.
-///
-/// Read as an `OsString`, since a home directory is a path rather than text and
-/// need not be UTF-8, and an empty value is treated as unset — an exported but
-/// empty `HOME` would otherwise resolve the config to `/.warlock/...`.
-///
-/// # Errors
-///
-/// [`Error::NoHome`] if neither is set to anything.
-pub(crate) fn home_directory() -> Result<PathBuf, Error> {
-    [HOME, USERPROFILE]
-        .into_iter()
-        .find_map(|variable| env::var_os(variable).filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
-        .ok_or(Error::NoHome)
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use warlock_engine::{ScopeRule, load_sigils, sigils_path};
+    use warlock_engine::{load_sigils, scope, sigils_path};
 
-    use super::{Held, NOTHING, PROMPT, held_for, hold, holding, preamble, sigils_in};
+    use super::{Held, NOTHING, PROMPT, held_for, hold, holding, preamble, prompted, sigils_in};
     use crate::error::Error;
+    use crate::standing::Standing;
 
     /// A throwaway directory. Every test that writes anything builds both its
     /// home *and* its repository root out of these, so nothing here reads or
     /// writes the developer's real home.
     fn a_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("a temporary directory")
+    }
+
+    /// `warlock config` in `repo`, under `home`, answered with `line`.
+    ///
+    /// The production composition, with the two things a person supplies handed
+    /// in instead: the answer and somewhere to print. `None` is EOF, which is
+    /// Ctrl-D at a terminal.
+    fn prompt_with(repo: &Path, home: &Path, line: Option<&str>) -> (Result<(), Error>, String) {
+        let standing = Standing::at(repo.to_path_buf(), repo.to_path_buf());
+        let answer = line.map(str::to_owned);
+        let mut out = Vec::new();
+        let outcome = prompted(&standing, home, || Ok(answer), &mut out);
+        (
+            outcome,
+            String::from_utf8(out).expect("warlock writes its own text"),
+        )
+    }
+
+    #[test]
+    fn the_composition_says_what_is_held_before_it_reads_anything() {
+        let (home, repo) = (a_dir(), a_dir());
+
+        let (outcome, said) = prompt_with(repo.path(), home.path(), None);
+
+        outcome.expect("an EOF is not a failure");
+        assert!(
+            said.contains(PROMPT),
+            "the cursor's own line never got out: {said}"
+        );
+        assert!(
+            said.contains(NOTHING),
+            "a machine that has recorded nothing should be told so: {said}"
+        );
+    }
+
+    #[test]
+    fn an_end_of_file_writes_nothing_and_says_so() {
+        let (home, repo) = (a_dir(), a_dir());
+
+        let (outcome, said) = prompt_with(repo.path(), home.path(), None);
+
+        outcome.expect("an EOF is not a failure");
+        assert!(said.ends_with("warlock: nothing changed\n"), "{said:?}");
+        assert!(
+            !sigils_path(home.path(), repo.path()).exists(),
+            "a missing config was created by a prompt nobody answered"
+        );
+    }
+
+    #[test]
+    fn a_line_of_sigils_is_written_and_the_file_is_named_back() {
+        let (home, repo) = (a_dir(), a_dir());
+
+        let (outcome, said) = prompt_with(repo.path(), home.path(), Some("data-plane web\n"));
+
+        outcome.expect("two sigils are a line this accepts");
+        let path = sigils_path(home.path(), repo.path());
+        assert_eq!(
+            load_sigils(home.path(), repo.path()).expect("the config just written loads"),
+            ["data-plane", "web"],
+            "what went to disk is not what was typed"
+        );
+        assert!(
+            said.contains(&path.display().to_string()),
+            "the confirmation does not name the file it wrote: {said}"
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_not_sigils_writes_nothing_at_all() {
+        let (home, repo) = (a_dir(), a_dir());
+
+        // Begins with `-`, which no sigil may. Not an uppercase word: those are
+        // folded to ASCII lowercase before they are judged, so `WEB` is `web`.
+        let (outcome, _) = prompt_with(repo.path(), home.path(), Some("-nope\n"));
+
+        let error = outcome.expect_err("a line of nonsense is refused");
+        assert!(matches!(error, Error::Sigil { .. }), "{error:?}");
+        assert!(
+            !sigils_path(home.path(), repo.path()).exists(),
+            "a refused line still wrote a file"
+        );
     }
 
     /// The sigils `line` asks for, for the lines that are all sigils.
@@ -446,7 +519,7 @@ mod tests {
         match sigils_in("billing data plane!\n") {
             Err(Error::Sigil { entered, rule }) => {
                 assert_eq!(entered, "plane!", "the word as it was typed");
-                assert_eq!(rule, ScopeRule::Character { character: '!' });
+                assert_eq!(rule, scope::Rule::Character { character: '!' });
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
@@ -455,7 +528,7 @@ mod tests {
         match sigils_in("1data billing\n") {
             Err(Error::Sigil { entered, rule }) => {
                 assert_eq!(entered, "1data");
-                assert_eq!(rule, ScopeRule::Beginning { character: '1' });
+                assert_eq!(rule, scope::Rule::Beginning { character: '1' });
             }
             other => panic!("expected a refusal, got {other:?}"),
         }

@@ -54,7 +54,7 @@ pub const DEFAULT_BRIEF_DIRECTORY: &str = "docs";
 /// Where the brief settings live under `root`: `<root>/.warlock/briefs.toml`.
 ///
 /// `root` is the parent of `.warlock/`, i.e. the repository root, exactly as
-/// for [`manifest_path`](crate::manifest_path). There is no search: this is a
+/// for [`manifest_path`]. There is no search: this is a
 /// join, and the caller is the one that knows the root.
 ///
 /// ```
@@ -179,8 +179,8 @@ fn default_directory() -> String {
 
 /// Everything that can stop the brief directory being read.
 ///
-/// Hand-rolled like [`ManifestError`](crate::ManifestError) and
-/// [`SigilError`](crate::SigilError): four variants do not pay for an
+/// Hand-rolled like [`manifest::Error`](crate::manifest::Error) and
+/// [`sigils::Error`](crate::sigils::Error): four variants do not pay for an
 /// error-handling dependency, and each one names the file it happened to, so a
 /// caller has one line to say and a file to go and look at.
 ///

@@ -47,7 +47,7 @@
 use std::fmt;
 use std::path::Path;
 
-use crate::manifest::{Error as ManifestError, Manifest, PactEntry, ROOT_MODULE, to_manifest_path};
+use crate::manifest::{self, Manifest, PactEntry, ROOT_MODULE, to_manifest_path};
 
 /// The most characters a scope may hold.
 ///
@@ -283,12 +283,12 @@ pub fn validate_sigil(sigil: &str) -> Result<(), Rule> {
 /// assert_eq!(scope_covering("crates/engine-tools/src", ".", &manifest)?, Some("platform"));
 /// // Nothing at or above it carries a scope.
 /// assert_eq!(scope_covering("docs/adr", ".", &manifest)?, None);
-/// # Ok::<(), warlock_engine::ManifestError>(())
+/// # Ok::<(), warlock_engine::manifest::Error>(())
 /// ```
 ///
 /// # Errors
 ///
-/// [`ManifestError::PathOutsideRoot`] or [`ManifestError::NonUtf8Path`] if
+/// [`manifest::Error::PathOutsideRoot`] or [`manifest::Error::NonUtf8Path`] if
 /// `path` has no manifest-relative form, i.e. it does not sit under `root` or
 /// cannot be spelled as text. Such a path is not unscoped — it is a path this
 /// manifest has nothing to say about at all, and saying so beats answering
@@ -297,7 +297,7 @@ pub fn scope_covering(
     path: impl AsRef<Path>,
     root: impl AsRef<Path>,
     manifest: &Manifest,
-) -> Result<Option<&str>, ManifestError> {
+) -> Result<Option<&str>, manifest::Error> {
     let stored = to_manifest_path(root, path)?;
     Ok(at_or_above(&stored).find_map(|module| valid_scope_on(manifest, module)))
 }

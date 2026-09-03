@@ -146,7 +146,7 @@ impl Manifest {
     /// assert!(toml.contains("[[pact]]"));
     /// // Never judged, so the grant keys are simply not there.
     /// assert!(!toml.contains("granted_hash"));
-    /// # Ok::<(), warlock_engine::ManifestError>(())
+    /// # Ok::<(), warlock_engine::manifest::Error>(())
     /// ```
     ///
     /// # Errors
@@ -276,11 +276,11 @@ impl Manifest {
     /// caller happy to treat the first as the second writes:
     ///
     /// ```
-    /// use warlock_engine::{Manifest, ManifestError};
+    /// use warlock_engine::{manifest, Manifest};
     ///
     /// let root = tempfile::tempdir()?;
     /// let manifest = match Manifest::load(root.path()) {
-    ///     Err(ManifestError::NotFound { .. }) => Manifest::new(),
+    ///     Err(manifest::Error::NotFound { .. }) => Manifest::new(),
     ///     other => other?,
     /// };
     ///
@@ -376,7 +376,7 @@ impl PactEntry {
     /// assert_eq!(under_a.module(), "crates/engine");
     /// assert_eq!(under_a, under_b);
     /// assert_eq!(under_a.granted_hash(), None);
-    /// # Ok::<(), warlock_engine::ManifestError>(())
+    /// # Ok::<(), warlock_engine::manifest::Error>(())
     /// ```
     ///
     /// # Errors
@@ -445,7 +445,7 @@ impl PactEntry {
     /// assert_eq!(entry.granted_hash(), Some("d0f5a1"));
     /// assert_eq!(entry.clone().without_scope().scope(), None);
     /// assert_eq!(entry.without_scope().granted_hash(), Some("d0f5a1"));
-    /// # Ok::<(), warlock_engine::ManifestError>(())
+    /// # Ok::<(), warlock_engine::manifest::Error>(())
     /// ```
     #[must_use]
     pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
@@ -590,7 +590,7 @@ impl PactEntry {
 /// assert_eq!(to_manifest_path("/repo", Path::new("/repo").join("docs").join("adr"))?, "docs/adr");
 /// assert_eq!(to_manifest_path("/repo", "./docs/adr")?, "docs/adr");
 /// assert_eq!(to_manifest_path("/repo", "/repo")?, ".");
-/// # Ok::<(), warlock_engine::ManifestError>(())
+/// # Ok::<(), warlock_engine::manifest::Error>(())
 /// ```
 ///
 /// # Errors

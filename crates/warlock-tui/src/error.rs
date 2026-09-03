@@ -10,9 +10,7 @@
 use std::path::PathBuf;
 use std::{fmt, io};
 
-use warlock_engine::{
-    ClaudeMdError, LoadError, LoadProblem, ManifestError, PactError, ScopeRule, SigilError,
-};
+use warlock_engine::{claude_md, load, manifest, pact, scope, sigils};
 
 use crate::boundary::{blocking_scopes_message, closed_scope_message};
 
@@ -58,11 +56,11 @@ pub(crate) enum Error {
     /// The engine refused to load a tree for the working directory.
     Load {
         /// Which of the load's fatal cases it was.
-        source: LoadError,
+        source: load::Error,
     },
     /// The load finished, but could not colour every node it was asked to.
     ///
-    /// Kept as finished text rather than as the [`LoadProblem`]s themselves:
+    /// Kept as finished text rather than as the [`load::Problem`]s themselves:
     /// what this variant needs to carry is one line, and formatting it at the
     /// point the problems are still in hand keeps [`fmt::Display`] free of the
     /// question of how many of them to mention.
@@ -81,7 +79,7 @@ pub(crate) enum Error {
     /// line goes to stderr, and the exit status says it did not work.
     Manifest {
         /// Which of the manifest's cases it was, with the path it names.
-        source: ManifestError,
+        source: manifest::Error,
     },
     /// A path a query was pointed at, or a directory it would have listed, has
     /// no form the manifest could spell: it is outside the repository root, or
@@ -101,11 +99,11 @@ pub(crate) enum Error {
     /// would tell a script it is open to anyone.
     ///
     /// Kept apart from [`Error::Manifest`] even though both carry the engine's
-    /// [`ManifestError`]: that one is a file that would not read or write, and
+    /// [`manifest::Error`]: that one is a file that would not read or write, and
     /// this one never opens a file at all.
     Unspellable {
         /// Which of the engine's two path cases it was, naming the path.
-        source: ManifestError,
+        source: manifest::Error,
     },
     /// A headless write was pointed at a path inside a boundary this machine's
     /// sigils do not open.
@@ -169,7 +167,7 @@ pub(crate) enum Error {
     },
     /// `warlock scope add` was handed something that is not a scope.
     ///
-    /// The engine's own [`ScopeRule`] and nothing wrapped around it: the
+    /// The engine's own [`scope::Rule`] and nothing wrapped around it: the
     /// sentence a rule renders as is already the whole answer — what a scope may
     /// hold, and what this one held instead — and a preamble of warlock's own
     /// would be a second voice saying the same thing less precisely. It is the
@@ -182,7 +180,7 @@ pub(crate) enum Error {
     /// trimming, repairing or splitting anywhere on this road.
     Scope {
         /// The one rule it broke, in the engine's words.
-        rule: ScopeRule,
+        rule: scope::Rule,
     },
     /// A headless scope write was pointed at a directory the manifest has no
     /// entry for.
@@ -222,7 +220,7 @@ pub(crate) enum Error {
     /// nothing warlock could add to that.
     Pact {
         /// Which of the engine's cases it was, with the directory it names.
-        source: PactError,
+        source: pact::Error,
     },
     /// A headless `warlock pact` or `warlock refresh` finished with some of its
     /// directories failed.
@@ -320,7 +318,7 @@ pub(crate) enum Error {
     /// renames over — so the file named is either untouched or whole.
     ClaudeMd {
         /// Which of the writer's cases it was, with the path it names.
-        source: ClaudeMdError,
+        source: claude_md::Error,
     },
     /// `warlock config` could not work out where this machine's home directory
     /// is, so it does not know where the sigils would be kept.
@@ -348,7 +346,7 @@ pub(crate) enum Error {
         /// The offending string, exactly as it was entered.
         entered: String,
         /// The one rule it broke, in the engine's words.
-        rule: ScopeRule,
+        rule: scope::Rule,
     },
     /// The machine-local sigil config could not be read or written.
     ///
@@ -357,7 +355,7 @@ pub(crate) enum Error {
     /// the file named is under the home directory.
     Sigils {
         /// Which of the engine's cases it was, with the path it names.
-        source: SigilError,
+        source: sigils::Error,
     },
     /// The terminal could not be set up, drawn to, or read from.
     Terminal {
@@ -374,7 +372,7 @@ impl Error {
     /// whole directory of them, and a message per file would scroll the useful
     /// one off the screen; the count says how much was left out, and the named
     /// file is enough to go and look at.
-    pub(crate) fn from_problems(problems: &[LoadProblem]) -> Option<Self> {
+    pub(crate) fn from_problems(problems: &[load::Problem]) -> Option<Self> {
         let first = problems.first()?;
         Some(Self::Problems {
             first: one_line(&first.to_string()),
@@ -590,18 +588,16 @@ impl From<io::Error> for Error {
 mod tests {
     use std::path::PathBuf;
 
-    use warlock_engine::{ClaudeMdError, ManifestError, ScopeRule, SigilError};
+    use warlock_engine::{claude_md, manifest, scope, sigils};
 
     use super::{Error, one_line};
-
-    /// What `warlock init` wants a repository root for, as `main` spells it.
-    const FOR_CLAUDE_MD: &str = "write `CLAUDE.md` at";
-
-    /// What `warlock config` wants one for, as `config` spells it.
-    const FOR_SIGILS: &str = "hold sigils for";
+    // The tails themselves, not copies of them: these used to be re-typed here
+    // as literals, so rewording either original left this suite passing on a
+    // sentence nothing said any more.
+    use crate::standing::{FOR_CLAUDE_MD, FOR_SIGILS};
 
     /// The problem text the engine hands over, standing in for a
-    /// [`LoadProblem`](warlock_engine::LoadProblem) — which cannot be built
+    /// [`load::Problem`](warlock_engine::load::Problem) — which cannot be built
     /// outside the engine, because the hash error inside it is
     /// `#[non_exhaustive]`. What is under test here is the wrapping, not the
     /// engine's wording.
@@ -670,7 +666,7 @@ mod tests {
                 rest: 2,
             },
             Error::Manifest {
-                source: ManifestError::Io {
+                source: manifest::Error::Io {
                     path: PathBuf::from("/repo/.warlock/pacts.toml"),
                     source: std::io::Error::other("boom"),
                 },
@@ -680,13 +676,13 @@ mod tests {
                 wanted: FOR_CLAUDE_MD,
             },
             Error::Unspellable {
-                source: ManifestError::PathOutsideRoot {
+                source: manifest::Error::PathOutsideRoot {
                     root: PathBuf::from("/repo"),
                     path: PathBuf::from("/elsewhere"),
                 },
             },
             Error::Unspellable {
-                source: ManifestError::NonUtf8Path {
+                source: manifest::Error::NonUtf8Path {
                     path: PathBuf::from("/repo/odd"),
                 },
             },
@@ -695,13 +691,13 @@ mod tests {
                 wanted: FOR_SIGILS,
             },
             Error::ClaudeMd {
-                source: ClaudeMdError::Write {
+                source: claude_md::Error::Write {
                     path: PathBuf::from("/repo/CLAUDE.md"),
                     source: std::io::Error::other("boom"),
                 },
             },
             Error::ClaudeMd {
-                source: ClaudeMdError::NotText {
+                source: claude_md::Error::NotText {
                     path: PathBuf::from("/repo/CLAUDE.md"),
                 },
             },
@@ -711,15 +707,15 @@ mod tests {
             },
             Error::Sigil {
                 entered: "Data Plane!".to_owned(),
-                rule: ScopeRule::Character { character: '!' },
+                rule: scope::Rule::Character { character: '!' },
             },
             Error::Sigils {
-                source: SigilError::NotFound {
+                source: sigils::Error::NotFound {
                     path: PathBuf::from("/home/someone/.warlock/repo-abc/config.toml"),
                 },
             },
             Error::Sigils {
-                source: SigilError::Io {
+                source: sigils::Error::Io {
                     path: PathBuf::from("/home/someone/.warlock/repo-abc/config.toml"),
                     source: std::io::Error::other("boom"),
                 },
@@ -729,7 +725,7 @@ mod tests {
                 scope: "data-plane".to_owned(),
             },
             Error::Scope {
-                rule: ScopeRule::Empty,
+                rule: scope::Rule::Empty,
             },
             Error::NoPact {
                 module: "crates/engine".to_owned(),
@@ -758,7 +754,7 @@ mod tests {
     #[test]
     fn a_manifest_that_cannot_be_saved_says_so_in_the_engines_words() {
         let error = Error::Manifest {
-            source: ManifestError::Io {
+            source: manifest::Error::Io {
                 path: PathBuf::from("/repo/.warlock/pacts.toml"),
                 source: std::io::Error::other("permission denied"),
             },
@@ -775,7 +771,7 @@ mod tests {
         // What `warlock stale /elsewhere` prints. The engine's sentence is
         // already the whole fact, so nothing is wrapped around it.
         let error = Error::Unspellable {
-            source: ManifestError::PathOutsideRoot {
+            source: manifest::Error::PathOutsideRoot {
                 root: PathBuf::from("/repo"),
                 path: PathBuf::from("/elsewhere"),
             },
@@ -821,7 +817,7 @@ mod tests {
     fn a_string_that_is_not_a_sigil_names_itself_and_the_rule_it_broke() {
         let error = Error::Sigil {
             entered: "Data-Plane!".to_owned(),
-            rule: ScopeRule::Character { character: '!' },
+            rule: scope::Rule::Character { character: '!' },
         };
 
         assert_eq!(
@@ -845,7 +841,7 @@ mod tests {
         );
         assert_eq!(
             Error::Scope {
-                rule: ScopeRule::Empty
+                rule: scope::Rule::Empty
             }
             .to_string(),
             "a scope cannot be empty"
@@ -878,7 +874,7 @@ mod tests {
     #[test]
     fn a_sigil_config_that_cannot_be_read_says_so_in_the_engines_words() {
         let error = Error::Sigils {
-            source: SigilError::Io {
+            source: sigils::Error::Io {
                 path: PathBuf::from("/home/someone/.warlock/repo-abc/config.toml"),
                 source: std::io::Error::other("permission denied"),
             },
@@ -894,7 +890,7 @@ mod tests {
     #[test]
     fn a_claude_md_that_cannot_be_written_says_so_in_the_engines_words() {
         let error = Error::ClaudeMd {
-            source: ClaudeMdError::Write {
+            source: claude_md::Error::Write {
                 path: PathBuf::from("/repo/CLAUDE.md"),
                 source: std::io::Error::other("permission denied"),
             },

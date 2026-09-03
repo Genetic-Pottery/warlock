@@ -29,7 +29,7 @@
 //! `chatting.rs`, because that is where the fact is real; a second record of it
 //! here would be a copy for the two to disagree over.
 
-use warlock_engine::{Agent, AgentError, AgentRequest, AgentResponse};
+use warlock_engine::{Agent, agent};
 use warlock_tui::{Activities, Cancel, Converses, Wired};
 
 /// An agent that answers every pass with the same document, out of memory.
@@ -58,8 +58,8 @@ impl Passing {
 }
 
 impl Agent for Passing {
-    fn run(&self, _request: &AgentRequest) -> Result<AgentResponse, AgentError> {
-        Ok(AgentResponse::new(self.document.clone()))
+    fn run(&self, _request: &agent::Request) -> Result<agent::Response, agent::Error> {
+        Ok(agent::Response::new(self.document.clone()))
     }
 }
 
@@ -101,7 +101,7 @@ impl Wired for Saying {
 }
 
 impl Converses for Saying {
-    fn turn(&self, _message: &str) -> Result<String, AgentError> {
+    fn turn(&self, _message: &str) -> Result<String, agent::Error> {
         Ok(self.answer.clone())
     }
 
