@@ -334,11 +334,18 @@ const SUMMARY_EXTENSION: &str = "md";
 /// either one's meaning a change to the other's. Nothing in
 /// [`hash`](crate::hash) is touched by anything here.
 ///
-/// The `v1` is where a future change to what an entry means announces itself.
+/// The version is where a change to what an entry means announces itself.
 /// Bumping it makes every existing entry unreachable, which costs a fresh
 /// summarising pass per file and cannot produce a wrong answer: an entry that
 /// is never looked for is a cache miss, and a miss is the ordinary path.
-const SUMMARY_KEY_CONTEXT: &str = "warlock summary cache key v1 2026-08-26";
+///
+/// Moved to `v2` when [`MAP_PROMPT`] and [`REDUCE_PROMPT`] began requiring the
+/// exact spelling and visibility of every name a file declares. A `v1` entry is
+/// prose that may not carry a single name, and a document written from one
+/// invented its API surface plausibly and wrongly — which is the whole reason
+/// those prompts changed. Reusing them would have kept exactly the summaries
+/// the change exists to replace.
+const SUMMARY_KEY_CONTEXT: &str = "warlock summary cache key v2 2026-09-03";
 
 /// How deep the walk goes: the directory itself (0), its own files and its
 /// immediate children (1), and the files directly inside those children (2),
@@ -375,39 +382,83 @@ const WALK_DEPTH: usize = 2;
 /// 1 MiB the source goes to the pass that describes it.
 pub const PER_FILE_BYTE_CAP: u64 = 1024 * 1024;
 
-/// Bytes of source text per token, for turning a context window into a budget
-/// this module can actually count against.
+/// Bytes of source text per token, as a fraction, for turning a context window
+/// into a budget this module can count against.
 ///
-/// Deliberately **low**. Source tokenises denser than prose — punctuation,
-/// short identifiers, indentation — and real Rust in this workspace runs around
-/// 3.5 bytes to the token. Three means the estimate comes out roughly 15% over
-/// the true token count, and over is the safe direction: a request that turns
-/// out smaller than budgeted wastes a little window, while one that turns out
-/// larger is handed to a model that cannot read it, and something downstream
-/// drops the difference with none of the care taken here.
-const BYTES_PER_TOKEN: u64 = 3;
+/// **Measured, not guessed.** Two files of different sizes were sent through
+/// the same model and the difference in reported input tokens divided by the
+/// difference in bytes, so the model's own fixed overhead cancels out:
+///
+/// | content | bytes per token |
+/// |---|---|
+/// | Rust (`scope.rs`) | 2.62 |
+/// | TypeScript (a real service) | 2.60 |
+///
+/// Code lands near 2.6 whatever the language — punctuation, short identifiers
+/// and indentation all tokenise poorly — so one number serves and 2.5 is that
+/// number with a little margin under it.
+///
+/// **The margin points one way on purpose.** Estimating too *few* bytes per
+/// token budgets a smaller request than the window could hold, which wastes a
+/// little context. Estimating too many hands the model a request it cannot
+/// read, and something downstream drops the difference with none of the care
+/// taken here — the exact failure this whole budget exists to prevent. This
+/// constant was 3, which is 15% the wrong side of the measurement, and the
+/// measurement is why it is not any more.
+const BYTES_PER_TOKEN_NUMERATOR: u64 = 5;
+
+/// The denominator of [`BYTES_PER_TOKEN_NUMERATOR`]: together, 2.5 bytes to the
+/// token. A fraction rather than a rounded integer because the nearest whole
+/// numbers are 2 (a third of the window thrown away) and 3 (over the measured
+/// figure, in the direction that breaks things).
+const BYTES_PER_TOKEN_DENOMINATOR: u64 = 2;
 
 /// Tokens of the window kept back from the file budget.
 ///
-/// A request is not only its files. The prompt, the guard line, the labels
-/// around each file, the children's documents and the directory's own previous
-/// document are all in the window too — and so is the answer, which for a
-/// document covering thirty files is not small. This is the room all of that
-/// is given, before a single source byte is counted.
+/// A request is not only the bytes this module counts. Measured on the same
+/// runs that produced [`BYTES_PER_TOKEN_NUMERATOR`], what else is in the
+/// window:
+///
+/// * **~16,700 tokens** of the agent's own standing overhead — its system
+///   prompt and tool definitions — present before a byte of this request is.
+///   That is the item most easily forgotten, because nothing in this crate
+///   produces it and nothing here can see it.
+/// * **~1,400 tokens** of [`PROMPT`](crate::pact) and the labels [`fit`] wraps each
+///   file in.
+/// * **The answer**, which for a document covering thirty-odd files runs to
+///   6,000 tokens and should be allowed twice that.
+///
+/// Forty thousand covers those with roughly ten thousand to spare. The
+/// children's documents and the previous document are *not* in this number:
+/// they are inside the budget, counted by [`carried_bytes`] like any other
+/// bytes the request carries.
 const RESERVED_TOKENS: u64 = 40_000;
 
 /// What an account of one file is reckoned to cost, when the cost has to be
 /// guessed before any pass has written one.
 ///
 /// Used by [`trim_to_budget`] alone, and only to keep back room for the
-/// accounts [`lift_from_the_cliff`] is about to buy. Eight kibibytes: the 41
-/// accounts this repository has paid for run from 3.2KB to 21KB with a median
-/// of 6.6KB, so this sits a little above the middle — the direction that leaves
-/// a lift with room to spare rather than a file stranded as a bare name.
+/// accounts [`lift_from_the_cliff`] is about to buy. Eight kibibytes, against
+/// the 52 accounts this repository has paid for:
 ///
-/// An estimate is enough because nothing is decided by it. Guess high and a
+/// | min | p25 | median | mean | p75 | p90 | max |
+/// |---|---|---|---|---|---|---|
+/// | 3.2KB | 5.4KB | 6.2KB | 7.6KB | 9.3KB | 11.5KB | 21.3KB |
+///
+/// Just above the mean, which is the direction that leaves a lift with room to
+/// spare rather than a file stranded as a bare name.
+///
+/// An estimate is enough because nothing is decided by it: it only sets how
+/// much room is kept back, and [`lift_from_the_cliff`] still measures each
+/// account against the real budget before committing to it. Guess high and a
 /// little of the budget goes unspent; guess low and a file or two stays a name
-/// that could have been described. Neither is a wrong answer, only a worse one.
+/// that could have been described.
+///
+/// **Owed a re-measurement.** Those 52 were written under the `v1` summary
+/// prompts. `v2` asks for the exact spelling and visibility of every name a
+/// file declares, which is more to say and will very likely run longer — so
+/// this number is measured against summaries that no longer exist. It errs
+/// high today and may not once the cache refills.
 const ESTIMATED_ACCOUNT_BYTES: u64 = 8 * 1024;
 
 /// The smallest budget any window may produce, however little is left after
@@ -453,7 +504,8 @@ const MINIMUM_REQUEST_BYTES: u64 = 64 * 1024;
 pub(crate) const fn request_byte_cap(context_tokens: u64) -> u64 {
     let budget = context_tokens
         .saturating_sub(RESERVED_TOKENS)
-        .saturating_mul(BYTES_PER_TOKEN);
+        .saturating_mul(BYTES_PER_TOKEN_NUMERATOR)
+        / BYTES_PER_TOKEN_DENOMINATOR;
     if budget < MINIMUM_REQUEST_BYTES {
         MINIMUM_REQUEST_BYTES
     } else {
@@ -582,6 +634,16 @@ would need to know about this part of it. Nobody sees these bytes again — only
 what you write — so leave out nothing that matters and invent nothing that is \
 not here.
 
+Names are the part of this that must not be paraphrased. Where the text \
+declares something a reader could later refer to — a function, type, constant, \
+class, method, field, export — give its name exactly as spelled, and say \
+whether the language marks it public or private. The exact spelling is worth \
+more than a description of it: `overwrite_run_fields` tells a reader where to \
+look and a method that overwrites the run's fields does not. Never invent a \
+name, never tidy one, and never report something as public, exported or \
+re-exported unless the text in front of you shows that it is. If the part does \
+not say, say nothing about it rather than completing the pattern.
+
 Write about the contents and nothing else. Do not name the file, do not \
 describe it by its name or its file type, and do not guess at the parts you \
 were not given.
@@ -624,6 +686,13 @@ single file. They are prose about the file, not the file's own text: never \
 quote them as if they were. Together they cover the whole file. Write one \
 account of what its CONTENTS are: what the file holds, how it is organised, \
 and what a reader has to know about it, using only what the parts report.
+
+Carry every name the parts reported into your answer, spelled exactly as they \
+spelled it, with whatever each part said about its visibility. Those names are \
+the only handle anyone downstream has on this file, and one dropped here is \
+one nobody can look up. Do not promote a name to public, exported or \
+re-exported because it seems central; if no part said so, your answer does not \
+either.
 
 Write about the contents and nothing else. Do not name the file, do not \
 describe it by its name or its file type, and do not add anything no part \
@@ -2322,11 +2391,12 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        BYTES_PER_TOKEN, CHUNK_BYTE_CAP, CHUNK_COUNT_CEILING, ESTIMATED_ACCOUNT_BYTES, Gathered,
-        MAP_PROMPT, MINIMUM_REQUEST_BYTES, MINIMUM_SUMMARY_BYTES, Omission, PER_FILE_BYTE_CAP,
-        Problem, REDUCE_PROMPT, REQUEST_BYTE_CAP, RESERVED_TOKENS, byte_count, cache_summary,
-        cached_summary, carried_bytes, chunk_utf8, gather_request, request_byte_cap,
-        summarise_file, summary_dir, summary_file_name, summary_key,
+        BYTES_PER_TOKEN_DENOMINATOR, BYTES_PER_TOKEN_NUMERATOR, CHUNK_BYTE_CAP,
+        CHUNK_COUNT_CEILING, ESTIMATED_ACCOUNT_BYTES, Gathered, MAP_PROMPT, MINIMUM_REQUEST_BYTES,
+        MINIMUM_SUMMARY_BYTES, Omission, PER_FILE_BYTE_CAP, Problem, REDUCE_PROMPT,
+        REQUEST_BYTE_CAP, RESERVED_TOKENS, byte_count, cache_summary, cached_summary,
+        carried_bytes, chunk_utf8, gather_request, request_byte_cap, summarise_file, summary_dir,
+        summary_file_name, summary_key,
     };
     use crate::pact::{DOCUMENT_FILE, MINIMUM_DOCUMENT_BYTES, Unwatched};
     use crate::{Agent, agent};
@@ -2517,7 +2587,7 @@ mod tests {
             "a bigger window buys a bigger request: {small} vs {large}"
         );
         assert!(
-            small < 200_000 * BYTES_PER_TOKEN,
+            small < 200_000 * BYTES_PER_TOKEN_NUMERATOR / BYTES_PER_TOKEN_DENOMINATOR,
             "and the prompt, the children's documents and the answer are kept back"
         );
     }
@@ -2633,6 +2703,39 @@ mod tests {
             "every cliffed file has room left for an account of it: {} spare for \
              {cliffed} files",
             cap - carried,
+        );
+    }
+
+    #[test]
+    fn the_budget_fits_the_window_at_the_measured_density_of_real_code() {
+        // The arithmetic nobody did the first time, written down so a future
+        // tightening of these constants has to argue with a measurement.
+        //
+        // Measured by sending two files of different sizes through the model
+        // and dividing the difference in reported input tokens by the
+        // difference in bytes: Rust 2.62 bytes per token, TypeScript 2.60. Also
+        // measured, and the item most easily forgotten: about 16,700 tokens of
+        // the agent's own system prompt and tool definitions sit in the window
+        // before this request contributes anything.
+        const MEASURED_BYTES_PER_TOKEN: u64 = 26; // tenths, the denser of the two
+        const AGENT_OVERHEAD_TOKENS: u64 = 16_700;
+        const WINDOW: u64 = 200_000;
+
+        let cap = request_byte_cap(WINDOW);
+        let content_tokens = cap * 10 / MEASURED_BYTES_PER_TOKEN;
+        let used = content_tokens + AGENT_OVERHEAD_TOKENS;
+
+        assert!(
+            used < WINDOW,
+            "a full request has to fit the window it is read in: {cap} bytes is \
+             {content_tokens} tokens of code, plus {AGENT_OVERHEAD_TOKENS} of \
+             agent overhead, against a {WINDOW}-token window",
+        );
+        // And enough left for the answer, which is the other thing in there.
+        assert!(
+            WINDOW - used >= 12_000,
+            "only {} tokens left for the document itself",
+            WINDOW - used,
         );
     }
 

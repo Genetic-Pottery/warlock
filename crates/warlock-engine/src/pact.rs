@@ -395,6 +395,17 @@ by an earlier pass that read the whole of it. Trust it as a description of \
 what that file contains, and never quote it as the file's own text — it is \
 prose about the file, not any part of it.
 
+An entry written from a summary says what the summary says and stops. The \
+temptation is to round it out into the entry a file sent whole would have got, \
+and what gets invented in the rounding is always the same kind of thing: what \
+the file exports, what in it is public, what it re-exports, the shape of a \
+signature, which module some helper lives in. Those are the facts a reader is \
+most likely to act on and the ones prose about a file is least likely to have \
+got right, so state them only where the summary states them, in the spelling \
+it uses. Where it does not, say what the file is for and leave the rest to the \
+reader you have just told which file to open. An entry that is visibly shorter \
+because less was known about the file is doing this correctly.
+
 Some files may appear with lines removed, marked as having had their test \
 bodies elided. Every line still there is the file's own, in its own order, and \
 may be relied on and quoted exactly like a file sent whole; each marker stands \

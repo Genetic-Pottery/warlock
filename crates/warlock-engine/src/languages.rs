@@ -190,10 +190,20 @@ static TABLE: &[Language] = &[
         blocks: &[],
         declarations: &["func ", "type ", "//"],
     },
-    // TypeScript and JavaScript, in their four extensions and both of the two
-    // naming conventions every runner in that ecosystem accepts.
+    // TypeScript and JavaScript. The ESM/CJS extensions are here because a real
+    // repository turned out to keep its only browser spec in a `.spec.mjs` — an
+    // extension no row claimed, so the file was sent whole and 641 of its
+    // neighbours with it.
+    //
+    // Known limitation, deliberately not fixed here: a test file recognised
+    // only by the directory holding it (`__tests__/thing.ts`, the Jest
+    // convention) is not matched, because the table asks about names and this
+    // is a question about paths. Adding a directory rule with no repository
+    // here to check it against would be exactly the untested mechanism the
+    // module docs argue against; the cost of missing it is a file sent whole,
+    // which is the safe direction.
     Language {
-        extensions: &["ts", "tsx", "js", "jsx", "mts", "cts"],
+        extensions: &["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"],
         test_suffixes: &[
             ".test.ts",
             ".test.tsx",
@@ -203,6 +213,10 @@ static TABLE: &[Language] = &[
             ".spec.tsx",
             ".spec.js",
             ".spec.jsx",
+            ".test.mjs",
+            ".spec.mjs",
+            ".test.cjs",
+            ".spec.cjs",
         ],
         test_prefixes: &[],
         blocks: &[],
