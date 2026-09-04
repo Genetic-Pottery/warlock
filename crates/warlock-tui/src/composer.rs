@@ -95,6 +95,7 @@
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::ui::display_width;
 use crate::wrap::folded;
 
 /// The most rows the composer is ever drawn in, however long the draft gets.
@@ -332,11 +333,147 @@ impl Composer {
     /// and every byte typed has a cell of its own on screen. The row that keeps
     /// its break character is a column wider than `width`, which the drawing
     /// truncates at the pane edge.
+    ///
+    /// The rows of [`Composer::placed_rows`] without the offsets they start at,
+    /// so there is one account of what the draft breaks into and the maps below
+    /// cannot come to break it somewhere else.
     fn rows(&self, width: u16) -> Vec<String> {
-        self.draft
-            .split('\n')
-            .flat_map(|line| folded(line, usize::from(width)))
+        self.placed_rows(width)
+            .into_iter()
+            .map(|(_, row)| row)
             .collect()
+    }
+
+    /// Every row the draft draws as at `width`, each with the byte offset of the
+    /// draft its first character is at.
+    ///
+    /// What the two maps are built on, and the only place the arithmetic between
+    /// bytes and rows is done. It works because [`folded`] keeps every byte: the
+    /// rows of one line join back up to that line, so a row's offset is the row
+    /// before it plus that row's length. The only bytes not on any row are the
+    /// `\n`s [`str::split`] took out — one between the last row of a line and
+    /// the first row of the next — which is what the extra byte at the end of
+    /// each line is.
+    ///
+    /// Never empty, because [`folded`] never comes back empty and a draft always
+    /// has at least one line: there is always a row for the cursor to be on.
+    fn placed_rows(&self, width: u16) -> Vec<(usize, String)> {
+        let mut placed = Vec::new();
+        let mut offset = 0;
+        for line in self.draft.split('\n') {
+            for row in folded(line, usize::from(width)) {
+                let start = offset;
+                offset += row.len();
+                placed.push((start, row));
+            }
+            // The `\n` that `split` took out from between this line and the
+            // next. Past the end of the draft after the last line, where the
+            // loop has stopped and nothing reads it.
+            offset += 1;
+        }
+
+        placed
+    }
+
+    /// Where the byte `offset` is drawn at `width`: the row of
+    /// [`Composer::rows`] it is on, and the column of that row it is at.
+    ///
+    /// Columns are cells rather than characters — [`display_width`] of the row
+    /// up to the offset — so a wide character is two columns along and a row of
+    /// CJK is twice as far across as it is long. The inverse is
+    /// [`Composer::offset_at`], and every offset the draft has round-trips
+    /// through the pair.
+    ///
+    /// # The row-break rule
+    ///
+    /// A soft wrap is one offset with two places it could be drawn: the cell
+    /// after the last character of the row above, and column zero of the row
+    /// below. It is always the lower one. So an offset at a row break resolves
+    /// to `(row + 1, 0)` and never to a cell past the end of the row above —
+    /// which is what makes the row a cursor is on the row its next character
+    /// would be drawn on, and stops End on a wrapped row parking the cursor in
+    /// a cell the next keystroke would not appear in.
+    ///
+    /// This map keeps the rule by taking the *last* row starting at or before
+    /// the offset, and [`Composer::offset_at`] keeps the same one: the cell past
+    /// the end of a soft-wrapped row is the one (row, column) pair this map
+    /// never comes back with, and asking the inverse for it gives the break
+    /// offset, which is that same lower place.
+    ///
+    /// A newline is not a row break in this sense. Its own byte lies between the
+    /// two rows, so the cell after the last character of the row above is the
+    /// offset of the `\n` itself and belongs to that upper row — which is where
+    /// a cursor before a newline should be, and where End on such a row puts it.
+    ///
+    /// A character that draws in no cells of its own — a combining accent — puts
+    /// two offsets in one column, and this module has no grapheme segmentation
+    /// to join it to the character it sits on. The pair still answers, and the
+    /// inverse answers such a column with the offset after the whole run, so the
+    /// offset *inside* it is the one offset that does not come back from a
+    /// round trip.
+    ///
+    /// # Panics
+    ///
+    /// If `offset` is past the end of the draft or is not on a `char` boundary,
+    /// which is the same thing [`Composer::at`] refuses: the cursor holds that
+    /// invariant by construction, so an offset without it is a caller's mistake
+    /// rather than a place on the screen.
+    ///
+    /// `dead_code` is allowed because the caller is the next thing built on
+    /// this: Home, End, Up and Down are the keys that ask a byte offset where it
+    /// is on screen, and the map is worth its own tests before a key depends on
+    /// it. The suite below drives both maps.
+    #[allow(dead_code, reason = "the movement keys are what will ask this")]
+    fn place(&self, offset: usize, width: u16) -> (usize, usize) {
+        let placed = self.placed_rows(width);
+        let (row, start, text) = placed
+            .iter()
+            .enumerate()
+            .rfind(|(_, (start, _))| *start <= offset)
+            .map(|(row, (start, text))| (row, *start, text.as_str()))
+            .expect("the first row starts at zero, so a row starts at or before every offset");
+
+        (row, display_width(&text[..offset - start]))
+    }
+
+    /// Which byte offset of the draft is drawn at `column` of `row` at `width`:
+    /// the inverse of [`Composer::place`], and it keeps that map's row-break
+    /// rule.
+    ///
+    /// Total, so that a caller stepping rows never has to check its arithmetic
+    /// twice: a `row` past the last row is answered by the last row, and a
+    /// `column` past the end of a row is answered by the offset at the end of
+    /// that row — which is where End lands, and on a soft-wrapped row is the
+    /// break offset. A column that falls *inside* a wide character is that
+    /// character's own offset, since the cells it draws in are its.
+    ///
+    /// Always a `char` boundary of the draft, and never past its end.
+    ///
+    /// `dead_code` for the same reason [`Composer::place`] is: Up and Down move
+    /// by display row, so this is the half of the pair they land with.
+    #[allow(dead_code, reason = "the movement keys are what will ask this")]
+    fn offset_at(&self, row: usize, column: usize, width: u16) -> usize {
+        let placed = self.placed_rows(width);
+        let row = row.min(placed.len().saturating_sub(1));
+        let (start, text) = placed
+            .get(row)
+            .expect("a draft always has at least one row to sit a cursor on");
+
+        let mut offset = *start;
+        let mut taken = 0;
+        for (index, character) in text.char_indices() {
+            let next = index + character.len_utf8();
+            let cells = display_width(&text[index..next]);
+            if taken + cells > column {
+                // The target column is one of this character's own cells, so
+                // the offset is the one in front of it.
+                break;
+            }
+            taken += cells;
+            offset = start + next;
+        }
+
+        offset
     }
 }
 
@@ -1312,6 +1449,127 @@ mod tests {
                     "{draft:?} at {width} came back {height}"
                 );
                 assert_eq!(usize::from(height), composer(draft).window(width).len());
+            }
+        }
+    }
+
+    /// The drafts the two maps are driven over: a draft with a newline in it, a
+    /// draft long enough to soft-wrap at every width tested, drafts of
+    /// multi-byte characters wide and narrow, and the two edges — nothing at
+    /// all, and a draft ending in a newline.
+    ///
+    /// The accent is precomposed (`U+00E9`) rather than an `e` and a combining
+    /// mark: a combining mark draws in no cells of its own, so it would put two
+    /// offsets in one column, and joining it to the character it sits on would
+    /// need grapheme segmentation this module deliberately does not have — see
+    /// [`Composer::place`].
+    const DRAFTS: [&str; 7] = [
+        "one\ntwo",
+        "It walks the tree and writes what it finds.",
+        "It walks the tree\nand writes what it finds.",
+        "日本語のテキスト",
+        "caf\u{e9} au lait",
+        "",
+        "one\n",
+    ];
+
+    #[test]
+    fn every_offset_is_drawn_somewhere_and_comes_back_from_there() {
+        for draft in DRAFTS {
+            let composer = composer(draft);
+            for width in [0, 1, 4, 40] {
+                for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+                    let (row, column) = composer.place(offset, width);
+
+                    assert_eq!(
+                        composer.offset_at(row, column, width),
+                        offset,
+                        "{draft:?} at width {width}: offset {offset} is drawn at row {row}, \
+                         column {column}, and that cell came back somewhere else"
+                    );
+                    assert!(
+                        row < composer.rows(width).len(),
+                        "{draft:?} at width {width}: offset {offset} is on row {row}, and there \
+                         are {} rows",
+                        composer.rows(width).len()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_offset_at_a_row_break_is_column_zero_of_the_row_below() {
+        // The rule stated on `Composer::place`, asserted rather than left to the
+        // round trip: the round trip would pass just as well with the offset
+        // drawn at the end of the row above.
+        let wrapped = composer("one two");
+        assert_eq!(wrapped.window(4), ["one ", "two"]);
+
+        // Offset 4 is both the cell after "one " and column zero of "two", and
+        // it is the lower one.
+        assert_eq!(wrapped.place(4, 4), (1, 0));
+        assert_eq!(wrapped.place(3, 4), (0, 3));
+        // The inverse keeps the same rule from the other side: the cell past the
+        // end of the row above is the pair `place` never comes back with, and
+        // asking for it gives the break offset — the lower place again.
+        assert_eq!(wrapped.offset_at(0, 4, 4), 4);
+        assert_eq!(wrapped.offset_at(0, 40, 4), 4);
+
+        // A newline is not a row break: its own byte lies between the rows, so
+        // the cell after "one" is the offset of the `\n` and belongs to the row
+        // above, which is where a cursor before a newline sits.
+        let lined = composer("one\ntwo");
+        assert_eq!(lined.place(3, 40), (0, 3));
+        assert_eq!(lined.offset_at(0, 3, 40), 3);
+        assert_eq!(lined.place(4, 40), (1, 0));
+    }
+
+    #[test]
+    fn a_wide_character_is_the_cells_it_draws_in_and_not_one_column() {
+        // Counting characters would put the end of this draft at column 3.
+        let cjk = composer("日本語");
+        assert_eq!(cjk.draft().chars().count(), 3);
+        assert_eq!(cjk.draft().len(), 9);
+
+        assert_eq!(cjk.place(0, 40), (0, 0));
+        assert_eq!(cjk.place(3, 40), (0, 2));
+        assert_eq!(cjk.place(6, 40), (0, 4));
+        assert_eq!(cjk.place(9, 40), (0, 6));
+
+        // A column inside a wide character is that character's own offset: the
+        // two cells it draws in are both its.
+        assert_eq!(cjk.offset_at(0, 1, 40), 0);
+        assert_eq!(cjk.offset_at(0, 2, 40), 3);
+        assert_eq!(cjk.offset_at(0, 3, 40), 3);
+
+        // And the columns are still cells where narrow and wide are mixed.
+        let mixed = composer("a日b");
+        assert_eq!(mixed.place(1, 40), (0, 1));
+        assert_eq!(mixed.place(4, 40), (0, 3));
+        assert_eq!(mixed.offset_at(0, 3, 40), 4);
+    }
+
+    #[test]
+    fn no_row_and_no_column_at_any_width_lands_inside_a_character() {
+        // The inverse is total — a row past the last row is the last row, and a
+        // column past the end of a row is the end of that row — and nothing it
+        // answers with ever cuts a character in half.
+        for draft in DRAFTS {
+            let composer = composer(draft);
+            for width in 0..12 {
+                let rows = composer.rows(width).len();
+                for row in 0..rows + 2 {
+                    for column in 0..12 {
+                        let offset = composer.offset_at(row, column, width);
+
+                        assert!(
+                            offset <= draft.len() && draft.is_char_boundary(offset),
+                            "{draft:?} at width {width}: row {row}, column {column} came back \
+                             with offset {offset}"
+                        );
+                    }
+                }
             }
         }
     }
