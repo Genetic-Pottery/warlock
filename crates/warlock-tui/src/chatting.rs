@@ -360,6 +360,23 @@ impl<C: Converses> Chat<C> {
         &self.composer
     }
 
+    /// Tell the field how many columns the next frame is drawing it in.
+    ///
+    /// The one thing the loop writes to the field outside a keystroke, and it is
+    /// [`Composer::set_width`]'s reason rather than this module's: Home, End, Up
+    /// and Down move by display row, and a row is only a row once something has
+    /// said how wide the field is. Handed over once a round from the draw, off
+    /// the same measurement the frame is cut by, so the rows the keys step are
+    /// the rows on the screen.
+    ///
+    /// Nothing about the draft, the cursor or the muting moves here. It is told
+    /// every round rather than at a resize, for the reason the muting is: a
+    /// width that had to be re-sent by whoever noticed the terminal change shape
+    /// would be a width somebody could forget to send.
+    pub(crate) const fn set_composer_width(&mut self, width: u16) {
+        self.composer.set_width(width);
+    }
+
     /// The write window, for the same two readers and on the same terms.
     pub(crate) const fn write_prompt(&self) -> &ScopePrompt {
         &self.prompt
