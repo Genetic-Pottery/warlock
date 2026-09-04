@@ -11,26 +11,28 @@
 //!
 //! ## A buffer, an insertion point, and deliberately nothing more
 //!
-//! Printable characters append, Backspace takes the last character back,
-//! Alt+Enter starts a new line, Enter offers the draft up and Esc hands the
+//! A printable character goes in where the insertion point is, Alt+Enter puts a
+//! newline in the same place, Backspace takes back the character before it and
+//! Delete the one after it, Enter offers the whole draft up and Esc hands the
 //! keyboard back. That is the entire editor. There is no history, no selection
 //! and no completion.
 //!
-//! There is an insertion point, though: [`Composer::cursor`], a byte offset into
-//! the draft, and the six keys that move it. Left and Right step a character,
-//! Home and End go to the ends of the display row, and Up and Down step the rows
-//! as they are drawn — so a wrapped paragraph is walked visually rather than by
-//! line. None of the six changes a byte, and Delete, Insert and `BackTab` go on
-//! doing nothing at all, exactly as [`edit_for`](crate::edit_for) has it,
-//! because every key a mover claims is a key that cannot be one of the
-//! characters being typed.
+//! The insertion point is [`Composer::cursor`], a byte offset into the draft,
+//! and six keys move it. Left and Right step a character, Home and End go to the
+//! ends of the display row, and Up and Down step the rows as they are drawn — so
+//! a wrapped paragraph is walked visually rather than by line. None of the six
+//! changes a byte; every key that does change one changes it where those six
+//! left the cursor, which is the whole of what moving it is for. Insert and
+//! `BackTab` go on doing nothing at all, exactly as
+//! [`edit_for`](crate::edit_for) has it, because every key a mover or an editor
+//! claims is a key that cannot be one of the characters being typed.
 //!
-//! What has *not* arrived yet is editing at that insertion point: a character
-//! typed, Alt+Enter, Backspace and a paste all still land at the end of the
-//! draft and snap the cursor there with them, so there is one insertion rule in
-//! the build at a time rather than two disagreeing ones. The drawing has not
-//! caught up either — the caret is still drawn after the last character — which
-//! is why nothing here has to be true of the screen yet.
+//! Both edges are `char` edges and never byte edges: a character goes in whole
+//! and comes out whole, so a draft with an accent or an emoji in it stays a
+//! `String` and the cursor stays somewhere the draft actually has. What has
+//! *not* caught up is the drawing — the caret is still a cell after the last
+//! character rather than at the cursor — which is why nothing here has to be
+//! true of the screen yet.
 //!
 //! Because four of those six are row-wise, the value carries the width it was
 //! last drawn at ([`Composer::set_width`]), told to it once a round the way its
@@ -39,16 +41,16 @@
 //!
 //! A paste is the fourth road in, and it is deliberately the narrowest.
 //! [`paste_for`] takes a block of text the terminal handed over whole and puts
-//! it in the draft where typing goes — at the end, which is where every change
-//! to the draft lands this slice — and what comes back is a [`Pasted`], which
-//! has one variant and cannot say "submit" or "leave" however many newlines the
+//! it at the end of the draft, and what comes back is a [`Pasted`], which has
+//! one variant and cannot say "submit" or "leave" however many newlines the
 //! block carries. That is the whole of why it is a second function rather than
 //! another arm of [`compose_for`]: a pasted `\n` is a character of somebody's
 //! paragraph, and without bracketed paste it arrives as `KeyCode::Enter` and
-//! sends the first line as a question nobody finished asking. A paste is under
-//! the same insertion rule as a keystroke — it appends, exactly as typing the
-//! same characters one at a time would, and the cursor snaps to the end behind
-//! it wherever it was before.
+//! sends the first line as a question nobody finished asking. Appending is the
+//! one place a paste and a keystroke now disagree: a keystroke goes in at the
+//! cursor and a paste goes on the end, snapping the cursor there behind it
+//! wherever it was before. Pasting *at* the cursor is a slice of its own, and
+//! [`paste_for`] is left exactly as it was until it lands.
 //!
 //! Enter and Alt+Enter are the pair, and Shift+Enter is deliberately not a third
 //! keystroke: terminals disagree about whether they report it at all, so binding
@@ -67,10 +69,11 @@
 //! done before the frame is cut, so it lives here rather than in the drawing:
 //! [`Composer::height`] is the number the layout asks for, and
 //! [`Composer::window`] is the tail of rows that number has room for. The tail
-//! rather than the head, because the end of the draft is where typing lands — a
-//! window that followed the top of the draft would scroll the thing being typed
-//! off the bottom of itself. A window that follows the *cursor* is the drawing
-//! slice's, and is deliberately not here yet.
+//! rather than the head, because the end of the draft is where a draft being
+//! written grows — a window that followed the top would scroll what is being
+//! added off the bottom of itself. A window that follows the *cursor*, which is
+//! what a draft being edited in the middle wants, is the drawing slice's and is
+//! deliberately not here yet.
 //!
 //! Rows are counted with [`folded`](crate::wrap::folded), which breaks where the
 //! panel's own wrapper breaks, so a row counted here is a row the frame agrees
@@ -146,9 +149,11 @@ const CHORD: KeyModifiers = KeyModifiers::CONTROL
 /// One string, one offset, one width and one flag. No scroll offset, because the
 /// window is always the tail (see [`Composer::window`]).
 ///
-/// The offset is [`Composer::cursor`], and it is a byte index into the draft
-/// rather than a row and a column, so that it goes on meaning the same place
-/// when the terminal is resized and the draft re-flows underneath it. It is
+/// The offset is [`Composer::cursor`], and it is where the editing keys act:
+/// what is typed goes in there, Backspace takes the character before it and
+/// Delete the character after it. It is a byte index into the draft rather than
+/// a row and a column, so that it goes on meaning the same place when the
+/// terminal is resized and the draft re-flows underneath it. It is
 /// always on a `char` boundary and never past the end of the draft: every value
 /// built in this module holds that by construction, and the one way to set it
 /// from outside — [`Composer::at`] — panics rather than clamp.
@@ -180,9 +185,10 @@ pub struct Composer {
     /// What has been typed. Newlines are in it as `\n`.
     draft: String,
     /// Where the next character goes: a byte offset into `draft`, on a `char`
-    /// boundary, at most `draft.len()`. While nothing edits anywhere but the
-    /// end it is `draft.len()` after every keystroke and every paste that
-    /// changes the draft.
+    /// boundary, at most `draft.len()`. Every key that edits edits here and
+    /// leaves it here — after what was typed, or where what was deleted began —
+    /// so it is `draft.len()` only when that is where somebody left it. A paste
+    /// is the exception and snaps it to the end (see [`paste_for`]).
     cursor: usize,
     /// How many columns the field was last drawn in, as last set by
     /// [`Composer::set_width`]. Zero until somebody draws, which is a column
@@ -338,11 +344,16 @@ impl Composer {
         self.muted
     }
 
-    /// What has been typed so far, newlines included.
+    /// What has been typed so far, newlines included, in the order it is drawn
+    /// in rather than the order it was typed in — characters go in at
+    /// [`Composer::cursor`], so a reader who moved back can have written the
+    /// middle of this last.
     ///
     /// What a submit hands on, and the only text there is: [`Composed::Submit`]
     /// carries none of its own, so there is no way for a submission to disagree
-    /// with the composer it came from.
+    /// with the composer it came from. The whole of it goes, wherever the cursor
+    /// happens to be sitting — the insertion point says where the next character
+    /// would land and nothing more.
     #[must_use]
     pub fn draft(&self) -> &str {
         &self.draft
@@ -379,10 +390,11 @@ impl Composer {
     /// order, top row first.
     ///
     /// The *tail* of the draft's rows rather than the head, which is the whole
-    /// of the scrolling this field does: typing lands at the end of the draft,
-    /// so a window ending at the last row is a window the next character always
-    /// appears in. A window that follows [`Composer::cursor`] instead is the
-    /// drawing slice's and is not here yet. Every row when the draft is inside
+    /// of the scrolling this field does: a draft being written grows at its end,
+    /// so a window ending at the last row is a window the writing appears in. A
+    /// window that follows [`Composer::cursor`] instead — which is what a draft
+    /// being edited in the middle of wants — is the drawing slice's and is not
+    /// here yet. Every row when the draft is inside
     /// the cap, which is the ordinary case and is why nothing has to be reset
     /// when a long draft is backspaced short again.
     #[must_use]
@@ -560,8 +572,8 @@ impl Composer {
 pub enum Composed {
     /// Still being typed into: the composer keeps the keyboard, holding `.0`,
     /// which is either the draft as it was or the draft with one character more
-    /// or less — and, when the key was one of the six that move the cursor, the
-    /// draft exactly as it was at a different [`Composer::cursor`].
+    /// or less at [`Composer::cursor`] — and, when the key was one of the six
+    /// that move the cursor, the draft exactly as it was at a different offset.
     Typing(Composer),
     /// The keyboard is handed back: focus moves off the composer and the draft
     /// is left exactly as it is. Esc here is not an abandonment — nothing is
@@ -584,15 +596,21 @@ pub enum Composed {
 /// `action_for`, and the same shape: a key and a situation in, one intention
 /// out, no terminal and no [`App`](crate::App).
 ///
-/// Five things a key can be. A printable character appends — and *only* appends,
-/// since editing at the cursor is not built yet. Backspace takes the last
-/// character back, by character rather than by byte, so a draft with an accent
-/// or an emoji in it is still deletable one keypress at a time; on an empty
-/// draft it does nothing rather than handing the keyboard back, because a
-/// Backspace one press past the start is a typo and not a departure. Alt+Enter
-/// puts a newline in. Enter offers up a draft that has something in it, and does
-/// nothing at all to one that is empty or nothing but whitespace. Esc hands the
-/// keyboard back and leaves the draft where it is.
+/// Six things a key can be. A printable character goes in at
+/// [`Composer::cursor`] and leaves the cursor immediately after itself, so
+/// typing runs on from wherever the reader put the insertion point. Alt+Enter
+/// puts a newline in the same way and in the same place, which is why a
+/// multi-line draft can be broken open in the middle rather than only grown at
+/// the end. Backspace takes back the character before the cursor and Delete the
+/// one after it, by character rather than by byte, so a draft with an accent or
+/// an emoji in it is edited one keypress at a time and stays valid text; where
+/// there is no character on that side — Backspace at the start of the draft,
+/// Delete at the end — nothing changes, and Backspace in particular does not
+/// hand the keyboard back, because one press past the start is a typo and not a
+/// departure. Enter offers up the whole draft when it has something in it,
+/// wherever the cursor sits in it, and does nothing at all to a draft that is
+/// empty or nothing but whitespace. Esc hands the keyboard back and leaves both
+/// the draft and the cursor where they are.
 ///
 /// # The six keys that move the cursor
 ///
@@ -629,11 +647,11 @@ pub enum Composed {
 ///
 /// Every other key leaves the composer exactly as it was, the tree's own
 /// bindings included — while this has the keyboard, `j`, `k`, `g`, `G`, `f`,
-/// `p`, `r`, `s`, `v` and `e` are letters somebody is typing, and Delete, Insert,
+/// `p`, `r`, `s`, `v` and `e` are letters somebody is typing, and Insert,
 /// `BackTab` and the page keys are nothing at all, because the loop consults
-/// this instead of the app rather than as well as it. No movement key can submit
-/// or leave: Enter is the one key that offers the draft up and Esc the one that
-/// hands the keyboard back.
+/// this instead of the app rather than as well as it. No movement or editing key
+/// can submit or leave: Enter is the one key that offers the draft up and Esc
+/// the one that hands the keyboard back.
 ///
 /// Only presses count, exactly as `action_for` and [`edit_for`](crate::edit_for)
 /// have it. Crossterm reports releases and auto-repeats on some platforms and
@@ -827,11 +845,12 @@ pub enum Pasted {
 /// [`compose_for`]'s counterpart for the other way text arrives, and the same
 /// shape: what came in and the situation go in, one intention comes out, no
 /// terminal and no [`App`](crate::App). The block is appended — at the end of
-/// the draft, where typing goes and where every change to the draft lands this
-/// slice — byte for byte, newlines and all, so a paragraph pasted in is the
-/// paragraph that was copied and every line of it is still there to be read
-/// before Enter is pressed. Pasting text with no newline in it leaves the same
-/// draft behind as typing those characters one at a time would.
+/// the draft, and not at [`Composer::cursor`] where a keystroke goes — byte for
+/// byte, newlines and all, so a paragraph pasted in is the paragraph that was
+/// copied and every line of it is still there to be read before Enter is
+/// pressed. Pasting text with no newline into a draft nobody has moved the
+/// cursor back into leaves the same draft behind as typing those characters one
+/// at a time would.
 ///
 /// A muted field takes nothing: the draft comes back the string it was and the
 /// flag comes back up. That is the one rule [`compose_for`] leaves to the gate
@@ -843,11 +862,11 @@ pub enum Pasted {
 ///
 /// Nothing else moves. No turn starts, no focus changes, and an empty paste is
 /// a paste that changes nothing rather than an error anybody has to hear about.
-/// The cursor ends up at the end of the draft the paste left behind — the same
-/// place typing those characters would have left it, and it goes there even from
-/// a cursor somebody had moved into the middle of the draft. Pasting *at* the
-/// cursor arrives with editing at the cursor, so that there is one insertion
-/// rule in the build at a time rather than two that disagree.
+/// The cursor ends up at the end of the draft the paste left behind, and it goes
+/// there even from a cursor somebody had moved into the middle of the draft.
+/// That is the one place a paste and a keystroke disagree now that typing goes
+/// in at the insertion point: pasting *at* the cursor is a slice of its own, and
+/// this function is deliberately left as it was until it lands.
 #[must_use]
 pub fn paste_for(text: &str, composer: &Composer) -> Pasted {
     if composer.muted {
