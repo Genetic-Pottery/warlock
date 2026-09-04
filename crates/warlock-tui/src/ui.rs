@@ -81,7 +81,7 @@ use warlock_engine::{NodeState, scope};
 use crate::account::{Account, Line as Entry};
 use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
 use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
-use crate::composer::{COMPOSER_MAX_ROWS, Composer};
+use crate::composer::Composer;
 use crate::confirm::{Answer, QuitConfirm};
 use crate::panel::Mode;
 use crate::prompt::{ScopeField, ScopePrompt};
@@ -1900,9 +1900,9 @@ fn mark_area(inner: Rect) -> Option<Rect> {
     })
 }
 
-/// Draw the composer: the tail of the draft, one row per row it wraps to, inside
-/// a border lit exactly when the field is `live` — the keys pointed at it and it
-/// taking them.
+/// Draw the composer: the rows of the draft the cursor is among, one row per row
+/// it wraps to, inside a border lit exactly when the field is `live` — the keys
+/// pointed at it and it taking them.
 ///
 /// [`pane_block`] and no other border, so the field is lit and dimmed by the
 /// rule the two panes above it already follow — three places the keys can be and
@@ -1917,20 +1917,32 @@ fn mark_area(inner: Rect) -> Option<Rect> {
 /// box, because a line of prose explaining a dim border would be warlock talking
 /// about itself over the answer somebody is waiting for.
 ///
-/// The rows are [`Composer::window`]'s: the *tail* of the draft, so the row the
-/// cursor is on is the last row drawn and a draft past
-/// [`COMPOSER_MAX_ROWS`](crate::COMPOSER_MAX_ROWS) scrolls within the field
-/// rather than growing it. They are cut to the rows the border actually left, in
-/// case a short terminal squeezed the box below what the draft asked for — from
-/// the bottom again, and for the same reason.
+/// The rows and the caret's cell among them are [`Composer::window`]'s, asked
+/// for at the rows the border actually left rather than at
+/// [`COMPOSER_MAX_ROWS`](crate::COMPOSER_MAX_ROWS): a draft past what the field
+/// has room for scrolls within it, following the cursor, so there is one cut and
+/// it is made where the arithmetic lives. Nothing is re-cut here — a second
+/// opinion about which rows are on screen would be a caret counted against rows
+/// that are not the ones drawn.
 ///
-/// The caret is a reversed [`COMPOSER_CURSOR`] after the last character, drawn
-/// only while the field is live: it says where the next character lands, and
-/// while the keys are somewhere else — or the field is not hearing them —
-/// nothing is landing. It is dropped rather than wrapped when the last row
-/// fills the width — a caret is not text, and a row of its own for a cursor
-/// would take a row off the draft and move everything above it while somebody
-/// is typing.
+/// The caret is drawn *in the buffer*, by splitting the row it is on into what
+/// comes before its column, the character drawn in that column styled
+/// [`Modifier::REVERSED`], and what comes after. A reversed cell rather than the
+/// terminal's own cursor for [`SCOPE_CURSOR`]'s reasons — blink and shape are
+/// not warlock's to control, a reversed cell looks the same everywhere, and a
+/// test can find it — and columns are [`display_width`]'s, so a caret on a row
+/// of wide characters lands in the cell its character draws in.
+///
+/// Where the cursor is past the last character of its row — the end of the
+/// draft, or the end of a line with a newline after it — there is no character
+/// to reverse, and the caret is a reversed [`COMPOSER_CURSOR`] appended to the
+/// row instead. That is dropped rather than wrapped when the row already fills
+/// the width: a caret is not text, and a row of its own for a cursor would take
+/// a row off the draft and move everything above it while somebody is typing.
+///
+/// Either way it is drawn only while the field is live: the caret says where the
+/// next character lands, and while the keys are somewhere else — or the field is
+/// not hearing them — nothing is landing.
 ///
 /// No colour and no prompt glyph. The panel above spends none, the draft is the
 /// reader's own words, and a `>` in front of them would be a column off every
@@ -1939,29 +1951,73 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, live: b
     let inner = pane_inner(area);
     frame.render_widget(pane_block(live), area);
 
-    // The height asked for is the cap rather than `inner.height`, and the cut
-    // below is still here, so this draws exactly what it drew before the window
-    // learned to follow the cursor. Passing the rows the border actually left
-    // and drawing the caret this window comes back with is the next slice.
-    let rows = composer.window(inner.width, COMPOSER_MAX_ROWS).rows;
-    let from = rows.len().saturating_sub(usize::from(inner.height));
-    let rows = &rows[from..];
-    let room = rows
-        .last()
-        .is_some_and(|row| u16::try_from(display_width(row)).unwrap_or(u16::MAX) < inner.width);
+    let window = composer.window(inner.width, inner.height);
+    let mut lines: Vec<Line<'static>> = window
+        .rows
+        .iter()
+        .map(|row| Line::raw(row.clone()))
+        .collect();
 
-    let mut lines: Vec<Line<'static>> = rows.iter().map(|row| Line::raw(row.clone())).collect();
-    if live
-        && room
-        && let Some(last) = lines.last_mut()
-    {
-        last.push_span(Span::styled(
-            COMPOSER_CURSOR,
-            Style::new().add_modifier(Modifier::REVERSED),
-        ));
+    // A height of zero leaves no rows and so no row to put a caret on, which is
+    // `get_mut`'s answer rather than a check of its own.
+    if live && let Some(line) = lines.get_mut(window.row) {
+        let row = window.rows[window.row].as_str();
+        let (before, at, after) = split_at_column(row, window.column);
+        // Past the last character of the row, so the caret is a blank of its
+        // own — and only if the row has a column left to spend on it. The row a
+        // fold kept its break character on is a column wider than the field,
+        // and the drawing truncates it at the pane edge.
+        let room = u16::try_from(display_width(row)).unwrap_or(u16::MAX) < inner.width;
+        let caret = if at.is_empty() {
+            room.then_some(COMPOSER_CURSOR)
+        } else {
+            Some(at)
+        };
+
+        if let Some(caret) = caret {
+            *line = Line::from(vec![
+                Span::raw(before.to_owned()),
+                Span::styled(
+                    caret.to_owned(),
+                    Style::new().add_modifier(Modifier::REVERSED),
+                ),
+                Span::raw(after.to_owned()),
+            ]);
+        }
     }
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// `row` cut at `column`: what is drawn before that cell, the character drawn in
+/// it, and what is drawn after — the three spans the caret's row is drawn as.
+///
+/// Columns rather than characters, measured with [`display_width`], because
+/// `column` is a cell of the screen: it comes from
+/// [`ComposerWindow`](crate::ComposerWindow), which measures the row up to the
+/// cursor the same way, so walking the row by cells lands on exactly the
+/// character that map pointed at, wide or narrow.
+///
+/// The middle piece is empty when `column` is past the last character of the
+/// row — the end of the draft, and the end of a line a newline follows — which
+/// is the one case with no character to reverse, and the caller draws a blank
+/// there instead. It is never a partial character: the row is split on `char`
+/// boundaries either side.
+fn split_at_column(row: &str, column: usize) -> (&str, &str, &str) {
+    let mut at = row.len();
+    let mut taken = 0;
+    for (index, character) in row.char_indices() {
+        if taken >= column {
+            at = index;
+            break;
+        }
+        taken += display_width(&row[index..index + character.len_utf8()]);
+    }
+
+    let (before, rest) = row.split_at(at);
+    let (at, after) = rest.split_at(rest.chars().next().map_or(0, char::len_utf8));
+
+    (before, at, after)
 }
 
 /// What the bottom edge of a scrolled-back panel says: how many lines are below
