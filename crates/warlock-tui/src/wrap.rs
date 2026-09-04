@@ -30,10 +30,19 @@
 //! [`truncated`](crate::ui) counts them and the way the backend will lay the row
 //! out, so a row that fits here fits there.
 //!
-//! [`folded`] is that same rule for a caller that cannot afford the space:
-//! the same breaks, with the character broken at kept on the upper row, so its
-//! rows join back up to the text byte for byte. Nothing in this module's
-//! account of the panel changes — the panel draws [`wrapped`]'s rows.
+//! [`folded`] is the rule for a caller that cannot afford to lose a byte: it
+//! fills each row to the width and cuts there, so its rows join back up to the
+//! text byte for byte. Nothing in this module's account of the panel changes —
+//! the panel draws [`wrapped`]'s rows.
+//!
+//! What [`folded`] does not do is break at words, and that is the difference
+//! rather than an oversight. A row of the panel is read; a row of a field is
+//! cells a caret sits in, and a word break leaves the end of one standing for no
+//! offset at all — `test` alone on a row with the whole width beside it
+//! belonging to nothing, and the run of `h`s after it re-flowing the draft from
+//! the top the moment it outgrows the row it had to itself. Filling has no such
+//! step in it: what is typed goes in the next cell along, every time. Reading
+//! wants the word whole; typing wants the row full.
 //!
 //! Continuation rows carry no marker and no ellipsis — a row of a wrapped
 //! document line is the file's own text and nothing else, exactly as an
@@ -233,21 +242,23 @@ pub(crate) fn wrapped(text: &str, width: usize) -> Vec<String> {
 
 /// `text` in as many rows of `width` columns as it takes, keeping every byte.
 ///
-/// The breaks [`wrapped`] makes, at the places it makes them — the same
-/// [`break_at`] rule, a word break where a space fits inside the width and a
-/// mid-word break where none does — with the one difference that pays for the
-/// name: the character broken at goes with the row above it rather than being
-/// trimmed off both sides of the cut. So the rows concatenate back to `text`
-/// byte for byte, which is what a caller that counts an offset through them
-/// needs. A space the reader typed has a cell of its own to put a cursor in, and
-/// a byte that vanished at a word break would be a cell that is not there to
-/// aim at.
+/// Every row is filled: the cut is the width itself ([`filled`]), wherever in a
+/// word that lands, and no byte is trimmed off either side of it. So the rows
+/// concatenate back to `text` byte for byte, which is what a caller that counts
+/// an offset through them needs — a space the reader typed has a cell of its own
+/// to put a cursor in, and a byte that vanished at a word break would be a cell
+/// that is not there to aim at.
 ///
-/// The price is deliberate, and it is one column: a row that kept the space it
-/// broke at is a column wider than the `width` it was wrapped at. That is a
-/// trade nothing on the panel makes — [`wrapped`] is what the panel draws, and
-/// it still guarantees no row over the edge — and it is safe here because the
-/// field this is for is drawn by a renderer that truncates at the pane edge.
+/// It does not break at words, and that is the difference from [`wrapped`]
+/// rather than an omission. The rows of a field are cells a caret sits in, and a
+/// word break leaves the end of a row standing for no offset at all: a draft of
+/// `test` and then a run of `h`s puts `test` alone on a row with the whole width
+/// beside it belonging to nothing, and one more `h` — the one that outgrows the
+/// row the run had to itself — re-flows the draft from the top and takes the
+/// cursor with it. Filling has no such step in it: what is typed goes in the
+/// next cell along, every time, and a row breaks only where the field ends.
+/// Prose pays for that in words cut in half, which is a field being a field. The
+/// panel is read rather than typed into and still breaks at spaces.
 ///
 /// A `width` of zero is a field nobody has measured yet and is not a width to
 /// break at: the text comes back as the one row it went in as. A text with
@@ -266,7 +277,7 @@ pub(crate) fn folded(text: &str, width: usize) -> Vec<String> {
             return rows;
         }
 
-        let end = kept(rest, width);
+        let end = filled(rest, width);
         rows.push(rest[..end].to_owned());
         rest = &rest[end..];
         if rest.is_empty() {
@@ -277,24 +288,33 @@ pub(crate) fn folded(text: &str, width: usize) -> Vec<String> {
     }
 }
 
-/// Where to cut `text` so the row before the cut fits in `width` columns and the
-/// character broken at stays on it.
+/// Where to cut `text` so the row before the cut is as much of it as `width`
+/// columns hold.
 ///
-/// [`break_at`]'s cut, plus the whitespace character that follows it where there
-/// is one: the space between two words is on one side of the cut or the other,
-/// and here it is the upper row's, so nothing is dropped.
+/// [`folded`]'s whole rule, and there is nothing in it about words: as many
+/// characters as fit, cut on a `char` boundary so no character is halved and
+/// none is dropped. What is on either side of the cut is whatever the reader
+/// typed there.
 ///
 /// Never zero for a text with anything in it, which is where [`folded`]'s loop
 /// gets its promise of making progress: it has no `trim_start` to fall back on,
-/// so the cut alone has to advance it, and the first character's own length is
-/// the floor under `break_at`'s answer.
-fn kept(text: &str, width: usize) -> usize {
-    let end = break_at(text, width).max(first_character(text));
-    let broken = text[end..]
-        .chars()
-        .next()
-        .filter(|character| character.is_whitespace());
-    end + broken.map_or(0, char::len_utf8)
+/// so the cut alone has to advance it. A character wider than the whole field
+/// overhangs its row rather than stopping the fold, exactly as one wider than
+/// the panel overhangs in [`break_at`].
+fn filled(text: &str, width: usize) -> usize {
+    let mut taken = 0;
+    let mut fits = 0;
+    for (index, character) in text.char_indices() {
+        let next = index + character.len_utf8();
+        let columns = display_width(&text[index..next]);
+        if taken + columns > width {
+            break;
+        }
+        taken += columns;
+        fits = next;
+    }
+
+    fits.max(first_character(text))
 }
 
 /// Where to cut `text` so the row before the cut fits in `width` columns.
@@ -358,7 +378,7 @@ fn first_character(text: &str) -> usize {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Line, folded, rows, shape, wrapped};
+    use super::{Line, first_character, folded, rows, shape, wrapped};
     use crate::ui::display_width;
 
     /// A width every line below is too long for, and narrow enough that the
@@ -702,35 +722,68 @@ mod tests {
         }
     }
 
-    /// The same places `wrapped` breaks, with the space moved rather than
-    /// dropped: strip the whitespace off either end of both answers and they are
-    /// the same rows. Texts with two spaces in a row are not asked about here —
-    /// `wrapped` swallows the run, and keeping it is the point of `folded`.
+    /// The field fills where the panel breaks at words, whatever is in the draft
+    /// and whatever the width: the two answers are the same text, cut in
+    /// different places. Every row of the field is as full as the width allows,
+    /// which is the property the panel's rows do not have and a caret needs.
     #[test]
-    fn folded_breaks_where_the_panels_wrapper_breaks() {
+    fn the_field_fills_every_row_where_the_panel_breaks_at_words() {
         for draft in [
             "It walks the tree and writes what it finds.",
             "crates/warlock-engine/src/pact.rs",
             "日本語 and more",
         ] {
             for width in 1..40 {
-                let trimmed: Vec<String> = folded(draft, width)
-                    .iter()
-                    .map(|row| row.trim().to_owned())
-                    .collect();
-
-                assert_eq!(trimmed, wrapped(draft, width), "{draft:?} at {width}");
+                let rows = folded(draft, width);
+                for (row, next) in rows.iter().zip(rows.iter().skip(1)) {
+                    // The first character of the row below did not fit on this
+                    // one: that is what a filled row means, and a row of a word
+                    // break would leave room for it.
+                    let character = display_width(&next[..first_character(next)]);
+                    assert!(
+                        display_width(row) + character > width,
+                        "{draft:?} at {width}: {row:?} had room for {next:?}",
+                    );
+                }
             }
         }
     }
 
+    /// The draft that put the rule here, a word and then a run of `h`s, at the
+    /// two lengths that matter: one that fits a row of its own and one that does
+    /// not. The panel pushes the run down in the first case and only there,
+    /// which is the step the field must not have — the field fills both, so the
+    /// row the run outgrows is the row it goes on filling.
+    #[test]
+    fn a_run_of_one_word_fills_the_row_rather_than_being_pushed_down() {
+        let inside = format!("test {}", "h".repeat(10));
+        let past = format!("test {}", "h".repeat(30));
+
+        // The panel: a row of its own while the run fits one, mid-word after.
+        assert_eq!(wrapped(&inside, 12), ["test", "hhhhhhhhhh"]);
+        assert_eq!(
+            wrapped(&past, 12),
+            ["test", "hhhhhhhhhhhh", "hhhhhhhhhhhh", "hhhhhh"],
+        );
+
+        // The field: the same row, filled, either side of the length that made
+        // the panel change its mind.
+        assert_eq!(folded(&inside, 12), ["test hhhhhhh", "hhh"]);
+        assert_eq!(
+            folded(&past, 12),
+            ["test hhhhhhh", "hhhhhhhhhhhh", "hhhhhhhhhhh"],
+        );
+        // Nothing was dropped to make room: the rows are the draft again.
+        assert_eq!(folded(&past, 12).concat(), past);
+    }
+
     /// Columns, not characters: eight characters of `日本語 and` would fit a
     /// width of eight if they were counted one apiece, but they draw in eleven
-    /// cells, so the break comes after the three that fit — and the space they
-    /// were broken at comes with them.
+    /// cells, so the row is the three that draw in six, the space, and the one
+    /// letter the last column has room for.
     #[test]
     fn folded_counts_the_columns_a_character_draws_in() {
-        assert_eq!(folded("日本語 and more", 8), ["日本語 ", "and more"]);
+        assert_eq!(folded("日本語 and more", 8), ["日本語 a", "nd more"]);
     }
 
     /// A field nobody has measured yet wraps nothing, and a draft with nothing
@@ -765,16 +818,27 @@ mod tests {
         }
     }
 
-    /// The deliberate price of keeping the break character: the row that kept it
-    /// is a column wider than the width it was wrapped at. Nothing the panel
-    /// draws does this — `wrapped` is what the panel draws — and the field this
-    /// is for is truncated at the pane edge by the renderer.
+    /// A filled row is a row that fits: the cut is the width itself, so no row of
+    /// a folded draft is ever wider than the field it was folded to — including
+    /// the rows that end in the space between two words, which is a cell of the
+    /// draft like any other rather than something to hang over the edge.
     #[test]
-    fn a_row_that_kept_its_break_character_overhangs_by_a_column() {
-        let rows = folded("and writes what it finds.", 18);
+    fn no_row_of_a_folded_draft_is_wider_than_the_field() {
+        assert_eq!(
+            folded("and writes what it finds.", 18),
+            ["and writes what it", " finds."],
+        );
 
-        assert_eq!(rows, ["and writes what it ", "finds."]);
-        assert_eq!(display_width(&rows[0]), 19);
+        for draft in DRAFTS {
+            for width in 1..30 {
+                for row in folded(draft, width) {
+                    assert!(
+                        display_width(&row) <= width || row.chars().count() == 1,
+                        "row {row:?} is wider than {width}",
+                    );
+                }
+            }
+        }
     }
 
     /// A run of spaces is kept whole, wherever the breaks fall in it: this is
@@ -782,7 +846,7 @@ mod tests {
     /// would put the cursor a cell out for the rest of the line.
     #[test]
     fn folded_keeps_a_run_of_spaces_that_the_panels_wrapper_swallows() {
-        assert_eq!(folded("a  b", 2), ["a  ", "b"]);
+        assert_eq!(folded("a  b", 2), ["a ", " b"]);
         assert_eq!(wrapped("a  b", 2), ["a", "b"]);
     }
 
@@ -791,7 +855,7 @@ mod tests {
     /// on, the cut is the only thing moving it along.
     #[test]
     fn folded_at_a_width_of_one_still_gets_to_the_end_of_the_draft() {
-        assert_eq!(folded("ab cd", 1), ["a", "b ", "c", "d"]);
+        assert_eq!(folded("ab cd", 1), ["a", "b", " ", "c", "d"]);
         assert_eq!(folded("日本語", 1), ["日", "本", "語"]);
     }
 }

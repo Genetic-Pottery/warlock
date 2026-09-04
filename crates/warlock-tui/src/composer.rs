@@ -2289,23 +2289,45 @@ mod tests {
     }
 
     #[test]
-    fn a_wrap_is_one_row_more_and_the_rows_are_the_words_in_order() {
+    fn a_wrap_is_one_row_more_and_the_rows_are_the_draft_in_order() {
         let rows = window_rows(&composer("It walks the tree and writes what it finds."), 18);
 
-        // The space each row broke at is kept, on the row above the break: the
-        // draft is text somebody is still typing, so every space typed has a
-        // cell of its own, and the rows join back up to the draft byte for
-        // byte. The row that kept one overhangs the width by that column, and
-        // the drawing truncates at the pane edge.
+        // Every row is filled to the width and cut there, wherever in a word or
+        // a space that lands: the draft is text somebody is still typing, so
+        // every character typed has a cell of its own to put the cursor in and
+        // the rows join back up to the draft byte for byte.
         assert_eq!(
             rows,
-            ["It walks the tree ", "and writes what it ", "finds."]
+            ["It walks the tree ", "and writes what it", " finds."]
         );
         assert_eq!(rows.concat(), "It walks the tree and writes what it finds.");
         assert_eq!(
             composer("It walks the tree and writes what it finds.").height(18),
             3
         );
+    }
+
+    #[test]
+    fn a_run_with_nowhere_to_break_in_it_fills_the_row_it_started_on() {
+        // A word, a space, and then a run with nowhere to break in it, at the
+        // two lengths that matter: one that would fit a row of its own and one
+        // past that. A field that broke at the space would leave `test ` sitting
+        // alone with the rest of the row standing for no offset at all, and the
+        // run would jump the draft a row at the keystroke that outgrew it. Here
+        // the row goes on filling, and the character typed lands in the next
+        // cell along whichever length the run is.
+        let inside = format!("test {}", "h".repeat(10));
+        let past = format!("test {}", "h".repeat(30));
+
+        assert_eq!(window_rows(&composer(&inside), 12), ["test hhhhhhh", "hhh"]);
+        assert_eq!(
+            window_rows(&composer(&past), 12),
+            ["test hhhhhhh", "hhhhhhhhhhhh", "hhhhhhhhhhh"],
+        );
+        // Every byte of the draft is still in a row to put the cursor in.
+        assert_eq!(window_rows(&composer(&past), 12).concat(), past);
+        assert_eq!(composer(&inside).height(12), 2);
+        assert_eq!(composer(&past).height(12), 3);
     }
 
     #[test]
