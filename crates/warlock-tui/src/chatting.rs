@@ -3420,5 +3420,39 @@ mod tests {
                 );
             }
         }
+
+        #[test]
+        fn the_field_a_submit_leaves_behind_is_empty_with_its_cursor_at_zero() {
+            // The field is replaced outright rather than emptied in place, and
+            // this is the half of that which is not the draft: an insertion
+            // point left where it was in the message that has just gone would
+            // be an offset into a string that no longer exists, and the next
+            // character typed would go in at it. Submitted from the middle of
+            // the draft, because that is the only cursor a submit can leave
+            // behind that zero is not already true of.
+            let now = Instant::now();
+            let mut app = App::default();
+            let mut chat = conversation();
+
+            chat.compose(
+                &mut app,
+                Composed::Typing(Composer::new("why nine passes?").at(4)),
+                now,
+            );
+            assert_eq!(chat.composer().cursor(), 4, "the field took no cursor");
+
+            chat.compose(&mut app, Composed::Submit, now);
+
+            assert!(chat.answering(), "the draft was never asked");
+            assert!(
+                chat.composer().draft().is_empty(),
+                "the draft outlived the submit"
+            );
+            assert_eq!(
+                chat.composer().cursor(),
+                0,
+                "the cursor outlived the draft it pointed into"
+            );
+        }
     }
 }

@@ -11,26 +11,28 @@
 //!
 //! ## A buffer, an insertion point, and deliberately nothing more
 //!
-//! Printable characters append, Backspace takes the last character back,
-//! Alt+Enter starts a new line, Enter offers the draft up and Esc hands the
+//! A printable character goes in where the insertion point is, Alt+Enter puts a
+//! newline in the same place, Backspace takes back the character before it and
+//! Delete the one after it, Enter offers the whole draft up and Esc hands the
 //! keyboard back. That is the entire editor. There is no history, no selection
 //! and no completion.
 //!
-//! There is an insertion point, though: [`Composer::cursor`], a byte offset into
-//! the draft, and the six keys that move it. Left and Right step a character,
-//! Home and End go to the ends of the display row, and Up and Down step the rows
-//! as they are drawn — so a wrapped paragraph is walked visually rather than by
-//! line. None of the six changes a byte, and Delete, Insert and `BackTab` go on
-//! doing nothing at all, exactly as [`edit_for`](crate::edit_for) has it,
-//! because every key a mover claims is a key that cannot be one of the
-//! characters being typed.
+//! The insertion point is [`Composer::cursor`], a byte offset into the draft,
+//! and six keys move it. Left and Right step a character, Home and End go to the
+//! ends of the display row, and Up and Down step the rows as they are drawn — so
+//! a wrapped paragraph is walked visually rather than by line. None of the six
+//! changes a byte; every key that does change one changes it where those six
+//! left the cursor, which is the whole of what moving it is for. Insert and
+//! `BackTab` go on doing nothing at all, exactly as
+//! [`edit_for`](crate::edit_for) has it, because every key a mover or an editor
+//! claims is a key that cannot be one of the characters being typed.
 //!
-//! What has *not* arrived yet is editing at that insertion point: a character
-//! typed, Alt+Enter, Backspace and a paste all still land at the end of the
-//! draft and snap the cursor there with them, so there is one insertion rule in
-//! the build at a time rather than two disagreeing ones. The drawing has not
-//! caught up either — the caret is still drawn after the last character — which
-//! is why nothing here has to be true of the screen yet.
+//! Both edges are `char` edges and never byte edges: a character goes in whole
+//! and comes out whole, so a draft with an accent or an emoji in it stays a
+//! `String` and the cursor stays somewhere the draft actually has. What has
+//! *not* caught up is the drawing — the caret is still a cell after the last
+//! character rather than at the cursor — which is why nothing here has to be
+//! true of the screen yet.
 //!
 //! Because four of those six are row-wise, the value carries the width it was
 //! last drawn at ([`Composer::set_width`]), told to it once a round the way its
@@ -39,16 +41,16 @@
 //!
 //! A paste is the fourth road in, and it is deliberately the narrowest.
 //! [`paste_for`] takes a block of text the terminal handed over whole and puts
-//! it in the draft where typing goes — at the end, which is where every change
-//! to the draft lands this slice — and what comes back is a [`Pasted`], which
-//! has one variant and cannot say "submit" or "leave" however many newlines the
+//! it at the end of the draft, and what comes back is a [`Pasted`], which has
+//! one variant and cannot say "submit" or "leave" however many newlines the
 //! block carries. That is the whole of why it is a second function rather than
 //! another arm of [`compose_for`]: a pasted `\n` is a character of somebody's
 //! paragraph, and without bracketed paste it arrives as `KeyCode::Enter` and
-//! sends the first line as a question nobody finished asking. A paste is under
-//! the same insertion rule as a keystroke — it appends, exactly as typing the
-//! same characters one at a time would, and the cursor snaps to the end behind
-//! it wherever it was before.
+//! sends the first line as a question nobody finished asking. Appending is the
+//! one place a paste and a keystroke now disagree: a keystroke goes in at the
+//! cursor and a paste goes on the end, snapping the cursor there behind it
+//! wherever it was before. Pasting *at* the cursor is a slice of its own, and
+//! [`paste_for`] is left exactly as it was until it lands.
 //!
 //! Enter and Alt+Enter are the pair, and Shift+Enter is deliberately not a third
 //! keystroke: terminals disagree about whether they report it at all, so binding
@@ -67,10 +69,11 @@
 //! done before the frame is cut, so it lives here rather than in the drawing:
 //! [`Composer::height`] is the number the layout asks for, and
 //! [`Composer::window`] is the tail of rows that number has room for. The tail
-//! rather than the head, because the end of the draft is where typing lands — a
-//! window that followed the top of the draft would scroll the thing being typed
-//! off the bottom of itself. A window that follows the *cursor* is the drawing
-//! slice's, and is deliberately not here yet.
+//! rather than the head, because the end of the draft is where a draft being
+//! written grows — a window that followed the top would scroll what is being
+//! added off the bottom of itself. A window that follows the *cursor*, which is
+//! what a draft being edited in the middle wants, is the drawing slice's and is
+//! deliberately not here yet.
 //!
 //! Rows are counted with [`folded`](crate::wrap::folded), which breaks where the
 //! panel's own wrapper breaks, so a row counted here is a row the frame agrees
@@ -146,9 +149,11 @@ const CHORD: KeyModifiers = KeyModifiers::CONTROL
 /// One string, one offset, one width and one flag. No scroll offset, because the
 /// window is always the tail (see [`Composer::window`]).
 ///
-/// The offset is [`Composer::cursor`], and it is a byte index into the draft
-/// rather than a row and a column, so that it goes on meaning the same place
-/// when the terminal is resized and the draft re-flows underneath it. It is
+/// The offset is [`Composer::cursor`], and it is where the editing keys act:
+/// what is typed goes in there, Backspace takes the character before it and
+/// Delete the character after it. It is a byte index into the draft rather than
+/// a row and a column, so that it goes on meaning the same place when the
+/// terminal is resized and the draft re-flows underneath it. It is
 /// always on a `char` boundary and never past the end of the draft: every value
 /// built in this module holds that by construction, and the one way to set it
 /// from outside — [`Composer::at`] — panics rather than clamp.
@@ -180,9 +185,10 @@ pub struct Composer {
     /// What has been typed. Newlines are in it as `\n`.
     draft: String,
     /// Where the next character goes: a byte offset into `draft`, on a `char`
-    /// boundary, at most `draft.len()`. While nothing edits anywhere but the
-    /// end it is `draft.len()` after every keystroke and every paste that
-    /// changes the draft.
+    /// boundary, at most `draft.len()`. Every key that edits edits here and
+    /// leaves it here — after what was typed, or where what was deleted began —
+    /// so it is `draft.len()` only when that is where somebody left it. A paste
+    /// is the exception and snaps it to the end (see [`paste_for`]).
     cursor: usize,
     /// How many columns the field was last drawn in, as last set by
     /// [`Composer::set_width`]. Zero until somebody draws, which is a column
@@ -338,11 +344,16 @@ impl Composer {
         self.muted
     }
 
-    /// What has been typed so far, newlines included.
+    /// What has been typed so far, newlines included, in the order it is drawn
+    /// in rather than the order it was typed in — characters go in at
+    /// [`Composer::cursor`], so a reader who moved back can have written the
+    /// middle of this last.
     ///
     /// What a submit hands on, and the only text there is: [`Composed::Submit`]
     /// carries none of its own, so there is no way for a submission to disagree
-    /// with the composer it came from.
+    /// with the composer it came from. The whole of it goes, wherever the cursor
+    /// happens to be sitting — the insertion point says where the next character
+    /// would land and nothing more.
     #[must_use]
     pub fn draft(&self) -> &str {
         &self.draft
@@ -379,10 +390,11 @@ impl Composer {
     /// order, top row first.
     ///
     /// The *tail* of the draft's rows rather than the head, which is the whole
-    /// of the scrolling this field does: typing lands at the end of the draft,
-    /// so a window ending at the last row is a window the next character always
-    /// appears in. A window that follows [`Composer::cursor`] instead is the
-    /// drawing slice's and is not here yet. Every row when the draft is inside
+    /// of the scrolling this field does: a draft being written grows at its end,
+    /// so a window ending at the last row is a window the writing appears in. A
+    /// window that follows [`Composer::cursor`] instead — which is what a draft
+    /// being edited in the middle of wants — is the drawing slice's and is not
+    /// here yet. Every row when the draft is inside
     /// the cap, which is the ordinary case and is why nothing has to be reset
     /// when a long draft is backspaced short again.
     #[must_use]
@@ -560,8 +572,8 @@ impl Composer {
 pub enum Composed {
     /// Still being typed into: the composer keeps the keyboard, holding `.0`,
     /// which is either the draft as it was or the draft with one character more
-    /// or less — and, when the key was one of the six that move the cursor, the
-    /// draft exactly as it was at a different [`Composer::cursor`].
+    /// or less at [`Composer::cursor`] — and, when the key was one of the six
+    /// that move the cursor, the draft exactly as it was at a different offset.
     Typing(Composer),
     /// The keyboard is handed back: focus moves off the composer and the draft
     /// is left exactly as it is. Esc here is not an abandonment — nothing is
@@ -584,15 +596,21 @@ pub enum Composed {
 /// `action_for`, and the same shape: a key and a situation in, one intention
 /// out, no terminal and no [`App`](crate::App).
 ///
-/// Five things a key can be. A printable character appends — and *only* appends,
-/// since editing at the cursor is not built yet. Backspace takes the last
-/// character back, by character rather than by byte, so a draft with an accent
-/// or an emoji in it is still deletable one keypress at a time; on an empty
-/// draft it does nothing rather than handing the keyboard back, because a
-/// Backspace one press past the start is a typo and not a departure. Alt+Enter
-/// puts a newline in. Enter offers up a draft that has something in it, and does
-/// nothing at all to one that is empty or nothing but whitespace. Esc hands the
-/// keyboard back and leaves the draft where it is.
+/// Six things a key can be. A printable character goes in at
+/// [`Composer::cursor`] and leaves the cursor immediately after itself, so
+/// typing runs on from wherever the reader put the insertion point. Alt+Enter
+/// puts a newline in the same way and in the same place, which is why a
+/// multi-line draft can be broken open in the middle rather than only grown at
+/// the end. Backspace takes back the character before the cursor and Delete the
+/// one after it, by character rather than by byte, so a draft with an accent or
+/// an emoji in it is edited one keypress at a time and stays valid text; where
+/// there is no character on that side — Backspace at the start of the draft,
+/// Delete at the end — nothing changes, and Backspace in particular does not
+/// hand the keyboard back, because one press past the start is a typo and not a
+/// departure. Enter offers up the whole draft when it has something in it,
+/// wherever the cursor sits in it, and does nothing at all to a draft that is
+/// empty or nothing but whitespace. Esc hands the keyboard back and leaves both
+/// the draft and the cursor where they are.
 ///
 /// # The six keys that move the cursor
 ///
@@ -629,11 +647,11 @@ pub enum Composed {
 ///
 /// Every other key leaves the composer exactly as it was, the tree's own
 /// bindings included — while this has the keyboard, `j`, `k`, `g`, `G`, `f`,
-/// `p`, `r`, `s`, `v` and `e` are letters somebody is typing, and Delete, Insert,
+/// `p`, `r`, `s`, `v` and `e` are letters somebody is typing, and Insert,
 /// `BackTab` and the page keys are nothing at all, because the loop consults
-/// this instead of the app rather than as well as it. No movement key can submit
-/// or leave: Enter is the one key that offers the draft up and Esc the one that
-/// hands the keyboard back.
+/// this instead of the app rather than as well as it. No movement or editing key
+/// can submit or leave: Enter is the one key that offers the draft up and Esc
+/// the one that hands the keyboard back.
 ///
 /// Only presses count, exactly as `action_for` and [`edit_for`](crate::edit_for)
 /// have it. Crossterm reports releases and auto-repeats on some platforms and
@@ -648,16 +666,51 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
     // The incoming cursor comes through untouched, along with the draft and the
     // flag: a key that changes nothing moves nothing.
     let unchanged = || Composed::Typing(composer.clone());
-    // Muted or not comes through with the draft, and so does the width: this
-    // function is not where a turn starts or ends, and it is not a redraw. The
-    // cursor does not come through — a draft that changed here changed at its
-    // end, so the insertion point snaps there. Built literally rather than
-    // through `Composer::at`, since `draft.len()` is a boundary by
-    // construction.
-    let typed = |draft: String| {
+    // A character put in where the cursor is — the one way anything is typed
+    // into this field, Alt+Enter's `\n` included, so that a newline goes in
+    // wherever every other character does. Muted or not comes through with the
+    // width: this function is not where a turn starts or ends, and it is not a
+    // redraw. The cursor lands immediately after what was inserted, which is
+    // where somebody who has just typed it is.
+    //
+    // Built literally rather than through `Composer::at`, and it holds that
+    // constructor's invariant by construction: `composer.cursor` is a boundary
+    // of the draft, so the two halves it splits into are whole strings, and the
+    // offset after a whole character of the new draft is a boundary of it.
+    let inserted = |character: char| {
+        let cursor = composer.cursor;
+        let mut draft = String::with_capacity(composer.draft.len() + character.len_utf8());
+        draft.push_str(&composer.draft[..cursor]);
+        draft.push(character);
+        draft.push_str(&composer.draft[cursor..]);
+
         Composed::Typing(Composer {
-            cursor: draft.len(),
+            cursor: cursor + character.len_utf8(),
             draft,
+            width: composer.width,
+            muted: composer.muted,
+        })
+    };
+    // A character taken back out, given the whole `char` it occupies: the one
+    // way anything is deleted here, Backspace's and Delete's alike, since which
+    // character goes is the only thing those two disagree about. The cursor
+    // lands where the character began, which for Backspace is one character
+    // back and for Delete is exactly where it already was — the insertion point
+    // does not move when what was in front of it goes.
+    //
+    // Built literally rather than through `Composer::at`, and it holds that
+    // constructor's invariant by construction: `start` and `end` are the two
+    // ends of a whole character of the draft, so both are boundaries, the two
+    // halves either side of it are whole strings, and `start` is a boundary of
+    // what they join into.
+    let removed = |start: usize, end: usize| {
+        let mut draft = String::with_capacity(composer.draft.len() - (end - start));
+        draft.push_str(&composer.draft[..start]);
+        draft.push_str(&composer.draft[end..]);
+
+        Composed::Typing(Composer {
+            draft,
+            cursor: start,
             width: composer.width,
             muted: composer.muted,
         })
@@ -684,11 +737,7 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
     match key.code {
         // Before the plain Enter below it, which is the point of the pair: the
         // modifier is what tells a new line from a submission.
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-            let mut draft = composer.draft.clone();
-            draft.push('\n');
-            typed(draft)
-        }
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => inserted('\n'),
         // Shift+Enter arrives here too, and means Enter: it is not a keystroke
         // of its own, because half the terminals in use never report it.
         KeyCode::Enter => {
@@ -699,16 +748,24 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
             }
         }
         KeyCode::Esc => Composed::Leave,
-        KeyCode::Backspace => {
-            let mut draft = composer.draft.clone();
-            // `pop` takes a whole character, not a byte: half a character left
-            // in the buffer would not be a `String` at all.
-            if draft.pop().is_some() {
-                typed(draft)
-            } else {
-                unchanged()
-            }
-        }
+        // The pair that delete, either side of the insertion point. Both take a
+        // whole `char` and never a byte — half a character left in the buffer
+        // would not be a `String` at all — and both leave the draft alone when
+        // there is no character on their side of the cursor. Backspace at
+        // offset zero in particular is still `Typing`: one press past the start
+        // is a typo, and Esc is the only key that hands the keyboard back.
+        KeyCode::Backspace => composer.draft[..composer.cursor]
+            .chars()
+            .next_back()
+            .map_or_else(unchanged, |character| {
+                removed(composer.cursor - character.len_utf8(), composer.cursor)
+            }),
+        KeyCode::Delete => composer.draft[composer.cursor..]
+            .chars()
+            .next()
+            .map_or_else(unchanged, |character| {
+                removed(composer.cursor, composer.cursor + character.len_utf8())
+            }),
         // The six that move the cursor and change no byte. Left and Right by
         // `char`: the offset before the one the cursor is at, and the offset
         // after it, or the end they are already at.
@@ -757,9 +814,7 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
         // and control characters are not text however they arrived — Ctrl-C
         // among them, which the loop above has already had its chance at.
         KeyCode::Char(character) if !key.modifiers.intersects(CHORD) && !character.is_control() => {
-            let mut draft = composer.draft.clone();
-            draft.push(character);
-            typed(draft)
+            inserted(character)
         }
         _ => unchanged(),
     }
@@ -790,11 +845,12 @@ pub enum Pasted {
 /// [`compose_for`]'s counterpart for the other way text arrives, and the same
 /// shape: what came in and the situation go in, one intention comes out, no
 /// terminal and no [`App`](crate::App). The block is appended — at the end of
-/// the draft, where typing goes and where every change to the draft lands this
-/// slice — byte for byte, newlines and all, so a paragraph pasted in is the
-/// paragraph that was copied and every line of it is still there to be read
-/// before Enter is pressed. Pasting text with no newline in it leaves the same
-/// draft behind as typing those characters one at a time would.
+/// the draft, and not at [`Composer::cursor`] where a keystroke goes — byte for
+/// byte, newlines and all, so a paragraph pasted in is the paragraph that was
+/// copied and every line of it is still there to be read before Enter is
+/// pressed. Pasting text with no newline into a draft nobody has moved the
+/// cursor back into leaves the same draft behind as typing those characters one
+/// at a time would.
 ///
 /// A muted field takes nothing: the draft comes back the string it was and the
 /// flag comes back up. That is the one rule [`compose_for`] leaves to the gate
@@ -806,11 +862,11 @@ pub enum Pasted {
 ///
 /// Nothing else moves. No turn starts, no focus changes, and an empty paste is
 /// a paste that changes nothing rather than an error anybody has to hear about.
-/// The cursor ends up at the end of the draft the paste left behind — the same
-/// place typing those characters would have left it, and it goes there even from
-/// a cursor somebody had moved into the middle of the draft. Pasting *at* the
-/// cursor arrives with editing at the cursor, so that there is one insertion
-/// rule in the build at a time rather than two that disagree.
+/// The cursor ends up at the end of the draft the paste left behind, and it goes
+/// there even from a cursor somebody had moved into the middle of the draft.
+/// That is the one place a paste and a keystroke disagree now that typing goes
+/// in at the insertion point: pasting *at* the cursor is a slice of its own, and
+/// this function is deliberately left as it was until it lands.
 #[must_use]
 pub fn paste_for(text: &str, composer: &Composer) -> Pasted {
     if composer.muted {
@@ -1016,36 +1072,24 @@ mod tests {
         let _ = composer("wéb").at(2);
     }
 
-    /// A draft that changed changed at its end, so the cursor snaps there.
-    ///
-    /// Transient, and deliberately one named test so that it is one thing to
-    /// delete: the editing slice — slice 4 — moves typing, Alt+Enter, Backspace,
-    /// Delete and paste onto the cursor, and **this test is expected to be
-    /// deleted with them**. Until then the end is the only insertion point the
-    /// field has, so a draft that changed anywhere changed there — and since
-    /// the cursor is part of the value, a changed draft carrying a stale offset
-    /// would break the whole-value `Composer::new(...)` comparisons the rest of
-    /// the crate is written with.
     #[test]
-    fn every_key_that_changes_the_draft_leaves_the_cursor_at_the_end() {
+    fn a_paste_still_lands_at_the_end_however_far_the_cursor_has_moved() {
+        // Typing is at the cursor now; a paste deliberately is not yet. It goes
+        // in at the end of the draft and takes the cursor with it, so there is
+        // one insertion rule for blocks in the build at a time rather than two
+        // that disagree — and, since the cursor is part of the value, a pasted
+        // draft carrying a stale offset would be a value nothing else in the
+        // crate compares equal to.
         let from = composer("one\ntwo").at(2);
+        let next = pasted("and\nmore", &from);
 
-        for (what, next) in [
-            (
-                "a printable character",
-                after(press(KeyCode::Char('x')), &from),
-            ),
-            ("Alt+Enter", after(alt_enter(), &from)),
-            ("Backspace", after(press(KeyCode::Backspace), &from)),
-            ("a paste", pasted("and\nmore", &from)),
-        ] {
-            assert_eq!(
-                next.cursor(),
-                next.draft().len(),
-                "{what} should have left the cursor at the end of {:?}",
-                next.draft()
-            );
-        }
+        assert_eq!(next.draft(), "one\ntwoand\nmore");
+        assert_eq!(
+            next.cursor(),
+            next.draft().len(),
+            "a paste should have left the cursor at the end of {:?}",
+            next.draft()
+        );
     }
 
     #[test]
@@ -1055,7 +1099,7 @@ mod tests {
         // insertion point.
         let before = composer("one\ntwo").at(2);
 
-        for code in [KeyCode::Delete, KeyCode::Insert, KeyCode::BackTab] {
+        for code in [KeyCode::Insert, KeyCode::BackTab] {
             assert_eq!(
                 compose_for(press(code), &before),
                 Composed::Typing(before.clone()),
@@ -1143,7 +1187,98 @@ mod tests {
     }
 
     #[test]
+    fn a_character_goes_in_where_the_cursor_is_and_the_cursor_follows_it() {
+        // The three places there are: in front of everything, in the middle of
+        // it, and at the end where `Composer::new` puts the cursor and where
+        // every test written before there was a cursor types from. Whole-value
+        // comparisons, because the draft and the offset have to agree — a
+        // character typed at offset 3 that left the cursor at the end would put
+        // the next one somewhere nobody asked for.
+        let before = composer("web").at(0);
+        assert_eq!(
+            after(press(KeyCode::Char('x')), &before),
+            composer("xweb").at(1)
+        );
+
+        let before = composer("web").at(1);
+        assert_eq!(
+            after(press(KeyCode::Char('x')), &before),
+            composer("wxeb").at(2)
+        );
+
+        let before = composer("web");
+        assert_eq!(after(press(KeyCode::Char('x')), &before), composer("webx"));
+    }
+
+    #[test]
+    fn typing_from_the_middle_goes_on_from_where_the_last_character_landed() {
+        // The cursor is left after what was typed, so a word typed into the
+        // middle of a draft comes out as that word rather than backwards.
+        let mut current = composer("read engine").at(5);
+        for character in "the ".chars() {
+            current = after(press(KeyCode::Char(character)), &current);
+        }
+
+        assert_eq!(current, composer("read the engine").at(9));
+    }
+
+    #[test]
+    fn a_character_typed_into_a_multi_byte_draft_goes_in_whole() {
+        // From every boundary of a draft with an accent in it and of one with
+        // an emoji in it: an insertion done by byte rather than by `char` would
+        // split one of them, and the offset it left behind would be inside a
+        // character rather than in front of one.
+        for draft in ["wéb", "web 🜁 fire"] {
+            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+                let next = after(press(KeyCode::Char('x')), &composer(draft).at(offset));
+
+                assert_eq!(
+                    next.draft(),
+                    format!("{}x{}", &draft[..offset], &draft[offset..]),
+                    "typing at offset {offset} of {draft:?} should splice the character in"
+                );
+                assert!(
+                    std::str::from_utf8(next.draft().as_bytes()).is_ok(),
+                    "typing at offset {offset} of {draft:?} left a draft that is not UTF-8"
+                );
+                assert_eq!(
+                    next.draft().chars().count(),
+                    draft.chars().count() + 1,
+                    "typing at offset {offset} of {draft:?} should add one character"
+                );
+                assert!(
+                    next.draft().is_char_boundary(next.cursor()),
+                    "typing at offset {offset} of {draft:?} left the cursor inside a character"
+                );
+                assert_eq!(
+                    next.cursor(),
+                    offset + 1,
+                    "the cursor should be after the `x` typed at offset {offset} of {draft:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_multi_byte_character_typed_moves_the_cursor_its_own_width() {
+        // The step is the character's own bytes, not one: `é` is two of them
+        // and `🜁` is four, and the cursor after each is where the next one
+        // goes.
+        assert_eq!(
+            after(press(KeyCode::Char('é')), &composer("wb").at(1)),
+            composer("wéb").at(3)
+        );
+        assert_eq!(
+            after(press(KeyCode::Char('🜁')), &composer("ab").at(1)),
+            composer("a🜁b").at(5)
+        );
+    }
+
+    #[test]
     fn backspace_takes_back_one_character_at_a_time() {
+        // Whole values, because the offset has to follow the character out: a
+        // Backspace that took the right byte and left the cursor where it was
+        // would put the next keystroke a character too far along.
         assert_eq!(
             after(press(KeyCode::Backspace), &composer("web")),
             composer("we")
@@ -1151,6 +1286,17 @@ mod tests {
         assert_eq!(
             after(press(KeyCode::Backspace), &composer("w")),
             composer("")
+        );
+        // And from the middle, which is the whole point of there being a
+        // cursor: what goes is the character in front of it, not the last one
+        // typed, and the cursor lands where that character began.
+        assert_eq!(
+            after(press(KeyCode::Backspace), &composer("web").at(1)),
+            composer("eb").at(0)
+        );
+        assert_eq!(
+            after(press(KeyCode::Backspace), &composer("web").at(2)),
+            composer("wb").at(1)
         );
     }
 
@@ -1166,13 +1312,54 @@ mod tests {
             after(press(KeyCode::Backspace), &composer("wé")),
             composer("w")
         );
+
+        // From every boundary of a draft with an accent in it and of one with
+        // an emoji in it, since a deletion done by byte would split one of them
+        // at some offsets and not at others.
+        for draft in ["wéb", "web 🜁 fire"] {
+            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+                let next = after(press(KeyCode::Backspace), &composer(draft).at(offset));
+                let gone = draft[..offset].chars().next_back();
+                let start = offset - gone.map_or(0, char::len_utf8);
+
+                assert_eq!(
+                    next.draft(),
+                    format!("{}{}", &draft[..start], &draft[offset..]),
+                    "Backspace at offset {offset} of {draft:?} should take the whole character before it"
+                );
+                assert!(
+                    std::str::from_utf8(next.draft().as_bytes()).is_ok(),
+                    "Backspace at offset {offset} of {draft:?} left a draft that is not UTF-8"
+                );
+                assert_eq!(
+                    next.draft().chars().count(),
+                    draft.chars().count() - usize::from(gone.is_some()),
+                    "Backspace at offset {offset} of {draft:?} should take one character or none"
+                );
+                assert!(
+                    next.draft().is_char_boundary(next.cursor()),
+                    "Backspace at offset {offset} of {draft:?} left the cursor inside a character"
+                );
+                assert_eq!(
+                    next.cursor(),
+                    start,
+                    "the cursor should be where the character taken at offset {offset} of {draft:?} began"
+                );
+            }
+        }
     }
 
     #[test]
     fn backspace_takes_a_newline_back_like_any_other_character() {
+        // One character, and the two lines it was between join up — from the
+        // end of the draft and from the middle of it alike.
         assert_eq!(
             after(press(KeyCode::Backspace), &composer("one\n")),
             composer("one")
+        );
+        assert_eq!(
+            after(press(KeyCode::Backspace), &composer("one\ntwo").at(4)),
+            composer("onetwo").at(3)
         );
     }
 
@@ -1186,6 +1373,87 @@ mod tests {
             compose_for(press(KeyCode::Backspace), &empty),
             Composed::Typing(empty.clone())
         );
+
+        // And at the front of a draft that does have something in it, which is
+        // the same press with somewhere for the cursor to have come from: the
+        // draft is untouched and the keyboard stays here.
+        let front = composer("web").at(0);
+
+        assert_eq!(
+            compose_for(press(KeyCode::Backspace), &front),
+            Composed::Typing(front.clone())
+        );
+    }
+
+    #[test]
+    fn delete_takes_the_character_after_the_cursor_and_leaves_the_cursor_be() {
+        // Backspace's mirror: the character in front goes, and the insertion
+        // point does not move, because what was behind it has not shifted.
+        assert_eq!(
+            after(press(KeyCode::Delete), &composer("web").at(0)),
+            composer("eb").at(0)
+        );
+        assert_eq!(
+            after(press(KeyCode::Delete), &composer("web").at(1)),
+            composer("wb").at(1)
+        );
+        // A newline is one character to Delete too, so the line below joins on.
+        assert_eq!(
+            after(press(KeyCode::Delete), &composer("one\ntwo").at(3)),
+            composer("onetwo").at(3)
+        );
+    }
+
+    #[test]
+    fn delete_at_the_end_of_the_draft_changes_nothing() {
+        // There is no character in front of the cursor to take, so the press is
+        // a keystroke and not a mistake: nothing moves, and nothing leaves.
+        for draft in ["", "web", "one\ntwo"] {
+            let before = composer(draft);
+
+            assert_eq!(
+                compose_for(press(KeyCode::Delete), &before),
+                Composed::Typing(before.clone()),
+                "Delete at the end of {draft:?} should have changed nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_takes_a_character_and_not_a_byte() {
+        // The same sweep Backspace gets, from the other side of the cursor: an
+        // accent and an emoji, from every boundary there is.
+        for draft in ["wéb", "web 🜁 fire"] {
+            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+                let next = after(press(KeyCode::Delete), &composer(draft).at(offset));
+                let gone = draft[offset..].chars().next();
+                let end = offset + gone.map_or(0, char::len_utf8);
+
+                assert_eq!(
+                    next.draft(),
+                    format!("{}{}", &draft[..offset], &draft[end..]),
+                    "Delete at offset {offset} of {draft:?} should take the whole character after it"
+                );
+                assert!(
+                    std::str::from_utf8(next.draft().as_bytes()).is_ok(),
+                    "Delete at offset {offset} of {draft:?} left a draft that is not UTF-8"
+                );
+                assert_eq!(
+                    next.draft().chars().count(),
+                    draft.chars().count() - usize::from(gone.is_some()),
+                    "Delete at offset {offset} of {draft:?} should take one character or none"
+                );
+                assert!(
+                    next.draft().is_char_boundary(next.cursor()),
+                    "Delete at offset {offset} of {draft:?} left the cursor inside a character"
+                );
+                assert_eq!(
+                    next.cursor(),
+                    offset,
+                    "Delete at offset {offset} of {draft:?} should have left the cursor there"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1197,6 +1465,33 @@ mod tests {
             after(press(KeyCode::Char('x')), &current),
             composer("first\nx")
         );
+    }
+
+    #[test]
+    fn alt_enter_puts_its_newline_in_where_the_cursor_is() {
+        // A newline is a character like any other, so it goes in at the
+        // insertion point rather than at the end: Alt+Enter in the middle of a
+        // line breaks that line in two, which is what somebody pressing it
+        // there is asking for.
+        assert_eq!(alt_enter().modifiers, KeyModifiers::ALT);
+        assert_eq!(
+            after(alt_enter(), &composer("onetwo").at(3)),
+            composer("one\ntwo").at(4)
+        );
+        assert_eq!(
+            after(alt_enter(), &composer("two").at(0)),
+            composer("\ntwo").at(1)
+        );
+        // And in a multi-byte draft it is still one byte in front of a whole
+        // character rather than inside one.
+        let next = after(alt_enter(), &composer("wéb").at(1));
+        assert_eq!(next, composer("w\néb").at(2));
+        assert!(next.draft().is_char_boundary(next.cursor()));
+        // And it still submits nothing from anywhere, at the drafts Enter
+        // itself would refuse: `after` panics on anything but `Typing`.
+        for (draft, offset) in [("", 0), ("  ", 1), ("one\ntwo", 2)] {
+            let _ = after(alt_enter(), &composer(draft).at(offset));
+        }
     }
 
     #[test]
@@ -1222,30 +1517,63 @@ mod tests {
     }
 
     #[test]
+    fn enter_submits_the_whole_draft_from_wherever_the_cursor_is() {
+        // The insertion point says where the next character goes and nothing
+        // else: Enter offers up everything that has been typed, so a reader who
+        // has gone back to fix the first line does not send that line alone.
+        // Every offset of a draft with two newlines in it, the two ends
+        // included.
+        let draft = "one\ntwo\nsix";
+
+        for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+            assert_eq!(
+                compose_for(press(KeyCode::Enter), &composer(draft).at(offset)),
+                Composed::Submit,
+                "Enter at offset {offset} of {draft:?} should submit the lot"
+            );
+        }
+    }
+
+    #[test]
     fn enter_on_an_empty_or_blank_draft_does_nothing_at_all() {
         // Not a refusal with a complaint on the footer: a submission with
         // nothing in it is a keystroke, not a mistake, so it leaves the draft
-        // exactly as it was and says nothing.
+        // exactly as it was and says nothing. From every offset, because
+        // whether there is anything here is a question about the buffer and
+        // never about where in it the cursor is sitting.
         for draft in ["", " ", "   \t  ", "\n", " \n \n "] {
-            let before = composer(draft);
+            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+                let before = composer(draft).at(offset);
 
-            assert_eq!(
-                compose_for(press(KeyCode::Enter), &before),
-                Composed::Typing(before.clone()),
-                "Enter should have done nothing to {draft:?}"
-            );
-            assert!(!before.is_submittable());
+                assert_eq!(
+                    compose_for(press(KeyCode::Enter), &before),
+                    Composed::Typing(before.clone()),
+                    "Enter at offset {offset} should have done nothing to {draft:?}"
+                );
+                assert!(!before.is_submittable());
+            }
         }
     }
 
     #[test]
     fn esc_hands_the_keyboard_back_from_any_draft() {
+        // And takes nothing with it: `Composed::Leave` carries no composer, so
+        // the field the caller is holding is the field it was holding — same
+        // characters, same insertion point — which is what makes Esc a change
+        // of focus rather than an abandonment. Asserted from the middle of the
+        // draft as well as its ends.
         for draft in ["", "half a question", "one\ntwo"] {
-            assert_eq!(
-                compose_for(press(KeyCode::Esc), &composer(draft)),
-                Composed::Leave,
-                "Esc should leave from {draft:?}"
-            );
+            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+                let before = composer(draft).at(offset);
+
+                assert_eq!(
+                    compose_for(press(KeyCode::Esc), &before),
+                    Composed::Leave,
+                    "Esc should leave from offset {offset} of {draft:?}"
+                );
+                assert_eq!(before.draft(), draft, "Esc took a character with it");
+                assert_eq!(before.cursor(), offset, "Esc moved the cursor on its way");
+            }
         }
     }
 
@@ -1305,8 +1633,10 @@ mod tests {
     #[test]
     fn a_chord_or_a_control_character_is_not_text() {
         // Every modifier that makes a character a command rather than a letter,
-        // plus a control character arriving as itself.
-        let before = composer("web");
+        // plus a control character arriving as itself. From a cursor somebody
+        // has moved back into the draft, since a chord mistaken for text would
+        // now put its letter *there* rather than harmlessly at the end.
+        let before = composer("web").at(1);
 
         for modifiers in [
             KeyModifiers::CONTROL,
@@ -1345,6 +1675,11 @@ mod tests {
 
         assert_eq!(compose_for(shift_enter, &composer("why")), Composed::Submit);
         assert_eq!(
+            compose_for(shift_enter, &composer("why").at(1)),
+            Composed::Submit,
+            "and it submits the whole draft from the middle, as Enter does"
+        );
+        assert_eq!(
             compose_for(shift_enter, &composer("")),
             Composed::Typing(composer("")),
             "and on an empty draft it means what Enter means there too"
@@ -1355,14 +1690,17 @@ mod tests {
     fn releases_and_repeats_change_nothing() {
         // The same rule `action_for` and `edit_for` keep: acting on a release
         // would type the release of the very key that moved the focus here. The
-        // movers are in the list on a value each of them would move from, so
-        // "nothing happened" is a rule about the kind of the event rather than
-        // about a draft that had nowhere to go.
+        // movers and the two deleting keys are in the list on a value every one
+        // of them would change, so "nothing happened" is a rule about the kind
+        // of the event rather than about a draft that had nowhere to go — and
+        // because the whole value is compared, neither a byte nor the offset
+        // moved.
         let before = drawn("one\ntwo\nsix", 40).at(5);
 
         for code in [
             KeyCode::Char('s'),
             KeyCode::Backspace,
+            KeyCode::Delete,
             KeyCode::Enter,
             KeyCode::Esc,
         ]
@@ -1392,9 +1730,10 @@ mod tests {
     fn the_movers_move_and_the_editing_keys_this_field_does_not_have_do_nothing() {
         // The two halves of what the non-character keys come to, said together
         // because they used to be one thing: the six movers each put the cursor
-        // somewhere else and leave every byte where it was, and Delete, Insert
-        // and BackTab go on doing nothing at all — no selection, no history and
-        // no editing away from the end of the draft.
+        // somewhere else and leave every byte where it was, and Insert and
+        // BackTab go on doing nothing at all — no selection and no history.
+        // Delete is an editing key this field does have, and has its own
+        // assertions above.
         //
         // Three rows, and the cursor starting on the middle one, so that every
         // one of the six has somewhere to go: at either end two of them would
@@ -1416,11 +1755,13 @@ mod tests {
             );
         }
 
-        for code in [KeyCode::Delete, KeyCode::Insert, KeyCode::BackTab] {
+        // The whole value, so what is asserted is that neither the draft nor
+        // the cursor moved: a key that is nothing at all is nothing to both.
+        for code in [KeyCode::Insert, KeyCode::BackTab] {
             assert_eq!(
                 compose_for(press(code), &before),
                 Composed::Typing(before.clone()),
-                "{code:?} is not an editing key this field has"
+                "{code:?} is not an editing key this field has, and should change neither draft nor cursor"
             );
         }
     }
