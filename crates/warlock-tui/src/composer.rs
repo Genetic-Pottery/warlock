@@ -1498,30 +1498,63 @@ mod tests {
     }
 
     #[test]
+    fn enter_submits_the_whole_draft_from_wherever_the_cursor_is() {
+        // The insertion point says where the next character goes and nothing
+        // else: Enter offers up everything that has been typed, so a reader who
+        // has gone back to fix the first line does not send that line alone.
+        // Every offset of a draft with two newlines in it, the two ends
+        // included.
+        let draft = "one\ntwo\nsix";
+
+        for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+            assert_eq!(
+                compose_for(press(KeyCode::Enter), &composer(draft).at(offset)),
+                Composed::Submit,
+                "Enter at offset {offset} of {draft:?} should submit the lot"
+            );
+        }
+    }
+
+    #[test]
     fn enter_on_an_empty_or_blank_draft_does_nothing_at_all() {
         // Not a refusal with a complaint on the footer: a submission with
         // nothing in it is a keystroke, not a mistake, so it leaves the draft
-        // exactly as it was and says nothing.
+        // exactly as it was and says nothing. From every offset, because
+        // whether there is anything here is a question about the buffer and
+        // never about where in it the cursor is sitting.
         for draft in ["", " ", "   \t  ", "\n", " \n \n "] {
-            let before = composer(draft);
+            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+                let before = composer(draft).at(offset);
 
-            assert_eq!(
-                compose_for(press(KeyCode::Enter), &before),
-                Composed::Typing(before.clone()),
-                "Enter should have done nothing to {draft:?}"
-            );
-            assert!(!before.is_submittable());
+                assert_eq!(
+                    compose_for(press(KeyCode::Enter), &before),
+                    Composed::Typing(before.clone()),
+                    "Enter at offset {offset} should have done nothing to {draft:?}"
+                );
+                assert!(!before.is_submittable());
+            }
         }
     }
 
     #[test]
     fn esc_hands_the_keyboard_back_from_any_draft() {
+        // And takes nothing with it: `Composed::Leave` carries no composer, so
+        // the field the caller is holding is the field it was holding — same
+        // characters, same insertion point — which is what makes Esc a change
+        // of focus rather than an abandonment. Asserted from the middle of the
+        // draft as well as its ends.
         for draft in ["", "half a question", "one\ntwo"] {
-            assert_eq!(
-                compose_for(press(KeyCode::Esc), &composer(draft)),
-                Composed::Leave,
-                "Esc should leave from {draft:?}"
-            );
+            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+                let before = composer(draft).at(offset);
+
+                assert_eq!(
+                    compose_for(press(KeyCode::Esc), &before),
+                    Composed::Leave,
+                    "Esc should leave from offset {offset} of {draft:?}"
+                );
+                assert_eq!(before.draft(), draft, "Esc took a character with it");
+                assert_eq!(before.cursor(), offset, "Esc moved the cursor on its way");
+            }
         }
     }
 
@@ -1581,8 +1614,10 @@ mod tests {
     #[test]
     fn a_chord_or_a_control_character_is_not_text() {
         // Every modifier that makes a character a command rather than a letter,
-        // plus a control character arriving as itself.
-        let before = composer("web");
+        // plus a control character arriving as itself. From a cursor somebody
+        // has moved back into the draft, since a chord mistaken for text would
+        // now put its letter *there* rather than harmlessly at the end.
+        let before = composer("web").at(1);
 
         for modifiers in [
             KeyModifiers::CONTROL,
@@ -1621,6 +1656,11 @@ mod tests {
 
         assert_eq!(compose_for(shift_enter, &composer("why")), Composed::Submit);
         assert_eq!(
+            compose_for(shift_enter, &composer("why").at(1)),
+            Composed::Submit,
+            "and it submits the whole draft from the middle, as Enter does"
+        );
+        assert_eq!(
             compose_for(shift_enter, &composer("")),
             Composed::Typing(composer("")),
             "and on an empty draft it means what Enter means there too"
@@ -1631,14 +1671,17 @@ mod tests {
     fn releases_and_repeats_change_nothing() {
         // The same rule `action_for` and `edit_for` keep: acting on a release
         // would type the release of the very key that moved the focus here. The
-        // movers are in the list on a value each of them would move from, so
-        // "nothing happened" is a rule about the kind of the event rather than
-        // about a draft that had nowhere to go.
+        // movers and the two deleting keys are in the list on a value every one
+        // of them would change, so "nothing happened" is a rule about the kind
+        // of the event rather than about a draft that had nowhere to go — and
+        // because the whole value is compared, neither a byte nor the offset
+        // moved.
         let before = drawn("one\ntwo\nsix", 40).at(5);
 
         for code in [
             KeyCode::Char('s'),
             KeyCode::Backspace,
+            KeyCode::Delete,
             KeyCode::Enter,
             KeyCode::Esc,
         ]
@@ -1693,11 +1736,13 @@ mod tests {
             );
         }
 
+        // The whole value, so what is asserted is that neither the draft nor
+        // the cursor moved: a key that is nothing at all is nothing to both.
         for code in [KeyCode::Insert, KeyCode::BackTab] {
             assert_eq!(
                 compose_for(press(code), &before),
                 Composed::Typing(before.clone()),
-                "{code:?} is not an editing key this field has"
+                "{code:?} is not an editing key this field has, and should change neither draft nor cursor"
             );
         }
     }
