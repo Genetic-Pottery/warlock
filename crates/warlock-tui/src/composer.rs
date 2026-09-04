@@ -39,15 +39,16 @@
 //!
 //! A paste is the fourth road in, and it is deliberately the narrowest.
 //! [`paste_for`] takes a block of text the terminal handed over whole and puts
-//! it in the draft where typing goes — at the end, since that is the only place
-//! this field has — and what comes back is a [`Pasted`], which has one variant
-//! and cannot say "submit" or "leave" however many newlines the block carries.
-//! That is the whole of why it is a second function rather than another arm of
-//! [`compose_for`]: a pasted `\n` is a character of somebody's paragraph, and
-//! without bracketed paste it arrives as `KeyCode::Enter` and sends the first
-//! line as a question nobody finished asking. Nothing about the insertion point
-//! moves here either — a paste appends, exactly as typing the same characters
-//! one at a time would, and there is still no cursor to put anywhere else.
+//! it in the draft where typing goes — at the end, which is where every change
+//! to the draft lands this slice — and what comes back is a [`Pasted`], which
+//! has one variant and cannot say "submit" or "leave" however many newlines the
+//! block carries. That is the whole of why it is a second function rather than
+//! another arm of [`compose_for`]: a pasted `\n` is a character of somebody's
+//! paragraph, and without bracketed paste it arrives as `KeyCode::Enter` and
+//! sends the first line as a question nobody finished asking. A paste is under
+//! the same insertion rule as a keystroke — it appends, exactly as typing the
+//! same characters one at a time would, and the cursor snaps to the end behind
+//! it wherever it was before.
 //!
 //! Enter and Alt+Enter are the pair, and Shift+Enter is deliberately not a third
 //! keystroke: terminals disagree about whether they report it at all, so binding
@@ -559,7 +560,8 @@ impl Composer {
 pub enum Composed {
     /// Still being typed into: the composer keeps the keyboard, holding `.0`,
     /// which is either the draft as it was or the draft with one character more
-    /// or less.
+    /// or less — and, when the key was one of the six that move the cursor, the
+    /// draft exactly as it was at a different [`Composer::cursor`].
     Typing(Composer),
     /// The keyboard is handed back: focus moves off the composer and the draft
     /// is left exactly as it is. Esc here is not an abandonment — nothing is
@@ -787,9 +789,9 @@ pub enum Pasted {
 ///
 /// [`compose_for`]'s counterpart for the other way text arrives, and the same
 /// shape: what came in and the situation go in, one intention comes out, no
-/// terminal and no [`App`](crate::App). The block is inserted at the insertion
-/// point — the end of the draft, where typing goes and the only place this field
-/// has — byte for byte, newlines and all, so a paragraph pasted in is the
+/// terminal and no [`App`](crate::App). The block is appended — at the end of
+/// the draft, where typing goes and where every change to the draft lands this
+/// slice — byte for byte, newlines and all, so a paragraph pasted in is the
 /// paragraph that was copied and every line of it is still there to be read
 /// before Enter is pressed. Pasting text with no newline in it leaves the same
 /// draft behind as typing those characters one at a time would.
@@ -805,8 +807,10 @@ pub enum Pasted {
 /// Nothing else moves. No turn starts, no focus changes, and an empty paste is
 /// a paste that changes nothing rather than an error anybody has to hear about.
 /// The cursor ends up at the end of the draft the paste left behind — the same
-/// place typing those characters would have left it, and for as long as the end
-/// is the only insertion point this field has, the same place it started.
+/// place typing those characters would have left it, and it goes there even from
+/// a cursor somebody had moved into the middle of the draft. Pasting *at* the
+/// cursor arrives with editing at the cursor, so that there is one insertion
+/// rule in the build at a time rather than two that disagree.
 #[must_use]
 pub fn paste_for(text: &str, composer: &Composer) -> Pasted {
     if composer.muted {
@@ -1814,9 +1818,11 @@ mod tests {
     }
 
     #[test]
-    fn the_window_is_the_tail_so_the_cursor_line_is_always_in_it() {
-        // The cursor is after the last character, so its row is the last row:
-        // a window that ends there is a window it is in.
+    fn the_window_is_the_tail_so_the_row_typing_lands_on_is_always_in_it() {
+        // Typing lands at the end of the draft, so the row it appears on is the
+        // last row: a window that ends there is a window it is in. A window
+        // that follows the cursor wherever the movers left it is the drawing
+        // slice's, and is not what this asserts.
         let draft = (1..=20)
             .map(|line| format!("line {line}"))
             .collect::<Vec<_>>()
@@ -1832,7 +1838,7 @@ mod tests {
         assert_eq!(
             window.last().map(String::as_str),
             Some(""),
-            "the last row is the one the cursor is on"
+            "the last row is the one the next character typed would appear on"
         );
     }
 
