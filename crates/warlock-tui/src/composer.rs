@@ -1,5 +1,5 @@
 //! The composer: the several-line draft at the foot of the panel's column, and
-//! the one pure function saying what a key does to it.
+//! the two pure functions saying what a key and what a paste do to it.
 //!
 //! Every warlock command is a single letter — `p` pacts, `r` refreshes, `s`
 //! scopes, `v` views — so the moment a field is on screen and holding the
@@ -21,6 +21,18 @@
 //! leave the draft byte-for-byte as it was, exactly as
 //! [`edit_for`](crate::edit_for) has it, because every key a mover claims is a
 //! key that cannot be one of the characters being typed.
+//!
+//! A paste is the fourth road in, and it is deliberately the narrowest.
+//! [`paste_for`] takes a block of text the terminal handed over whole and puts
+//! it in the draft where typing goes — at the end, since that is the only place
+//! this field has — and what comes back is a [`Pasted`], which has one variant
+//! and cannot say "submit" or "leave" however many newlines the block carries.
+//! That is the whole of why it is a second function rather than another arm of
+//! [`compose_for`]: a pasted `\n` is a character of somebody's paragraph, and
+//! without bracketed paste it arrives as `KeyCode::Enter` and sends the first
+//! line as a question nobody finished asking. Nothing about the insertion point
+//! moves here either — a paste appends, exactly as typing the same characters
+//! one at a time would, and there is still no cursor to put anywhere else.
 //!
 //! Enter and Alt+Enter are the pair, and Shift+Enter is deliberately not a third
 //! keystroke: terminals disagree about whether they report it at all, so binding
@@ -62,19 +74,24 @@
 //! carrying Ctrl is not text somebody typed; if it were, the one keystroke every
 //! reader trusts to get them out would put a `c` in the draft.
 //!
-//! Muting, too. A field is muted for as long as the answer to the last question
-//! is on its way, and for no other reason — one question at a time. That is
-//! somewhere else: the loop owns the turn, so it owns the flag
-//! ([`Composer::set_muted`]), and the keyboard's gate is what declines to ask
-//! this function anything while the flag is up. So [`compose_for`] behaves
+//! Muting, too — as a fact. A field is muted for as long as the answer to the
+//! last question is on its way, and for no other reason — one question at a
+//! time. Setting it is somewhere else: the loop owns the turn, so it owns the
+//! flag ([`Composer::set_muted`]), and the keyboard's gate is what declines to
+//! ask [`compose_for`] anything while the flag is up. So [`compose_for`] behaves
 //! identically either way and simply carries the flag through, which is what
 //! keeps "what a key does to a draft" one set of rules rather than two.
+//! [`paste_for`] carries the flag through in exactly the same way and adds one
+//! thing the keys do not need: a muted field takes no paste, because a block of
+//! bytes the terminal delivered while an answer is in flight is not something
+//! anybody typed at this field, and it is one arrival rather than a key at a
+//! time — a gate missed at a call site would land the lot.
 //!
 //! Where the draft is kept between keystrokes, which pane has the focus, and
 //! what a submitted draft is *for* are all somebody else's business. Nothing
 //! here reads a terminal, draws anything, or takes an [`App`](crate::App): a key
-//! event and the current draft go in, and one of three consequences comes out,
-//! so every rule below is one assertion with nothing attached to stdout.
+//! event or a pasted block goes in with the current draft, one consequence comes
+//! out, and every rule below is one assertion with nothing attached to stdout.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -262,11 +279,16 @@ impl Composer {
 /// Named apart from the keys that produce it for the reason [`Edited`](crate::Edited)
 /// is: it keeps [`compose_for`] a pure function of a key event and leaves the
 /// loop above reading as a list of consequences. Three variants is the whole of
-/// what can happen to a draft — it goes on being typed into, the keyboard is
-/// handed back, or the draft is offered up — and there is deliberately no
-/// variant for "the key meant nothing", because a key that means nothing here
-/// leaves the composer exactly where it was, which is [`Composed::Typing`] with
-/// the same draft in it.
+/// what can happen to a draft *at a keystroke* — it goes on being typed into,
+/// the keyboard is handed back, or the draft is offered up — and there is
+/// deliberately no variant for "the key meant nothing", because a key that means
+/// nothing here leaves the composer exactly where it was, which is
+/// [`Composed::Typing`] with the same draft in it.
+///
+/// A paste is the fourth thing that can reach the draft and it does not come
+/// through here: it has [`Pasted`] of its own, which can only say the first of
+/// these three, so a block of text can never start a turn or hand the keyboard
+/// back whatever is in it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Composed {
     /// Still being typed into: the composer keeps the keyboard, holding `.0`,
@@ -370,11 +392,70 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
     }
 }
 
+/// What a pasted block comes to at the composer: the one thing it can be.
+///
+/// A type rather than a third [`Composed`] variant, and one variant rather than
+/// three, because the promise being kept is a negative one — a paste cannot
+/// submit and cannot hand the keyboard back, however many newlines are in it —
+/// and a negative promise held by the return type is one nobody at a call site
+/// can forget. Pasting a three-line block used to send line one as a question
+/// and lose the other two behind the mute that turn put up; there is now no
+/// value [`paste_for`] could return that would say "send".
+///
+/// It reads as a `match` with a single arm, or as a `let`, since one variant is
+/// an irrefutable pattern.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Pasted {
+    /// Still being typed into: the composer keeps the keyboard, holding `.0`,
+    /// which is the draft with the pasted text in it, or the draft exactly as it
+    /// was if the field was muted or the paste was empty.
+    Typing(Composer),
+}
+
+/// What pasting `text` does to a composer holding `composer`.
+///
+/// [`compose_for`]'s counterpart for the other way text arrives, and the same
+/// shape: what came in and the situation go in, one intention comes out, no
+/// terminal and no [`App`](crate::App). The block is inserted at the insertion
+/// point — the end of the draft, where typing goes and the only place this field
+/// has — byte for byte, newlines and all, so a paragraph pasted in is the
+/// paragraph that was copied and every line of it is still there to be read
+/// before Enter is pressed. Pasting text with no newline in it leaves the same
+/// draft behind as typing those characters one at a time would.
+///
+/// A muted field takes nothing: the draft comes back the string it was and the
+/// flag comes back up. That is the one rule [`compose_for`] leaves to the gate
+/// above it and this does not, because a paste is one arrival carrying however
+/// much was copied rather than a key somebody can stop pressing, and because
+/// bytes the terminal delivered while an answer is in flight are not somebody
+/// typing at this field. Muting itself is still set nowhere near here — one
+/// question at a time is the loop's fact, and it stays the loop's fact.
+///
+/// Nothing else moves. No turn starts, no focus changes, no cursor exists to
+/// place, and an empty paste is a paste that changes nothing rather than an
+/// error anybody has to hear about.
+#[must_use]
+pub fn paste_for(text: &str, composer: &Composer) -> Pasted {
+    if composer.muted {
+        return Pasted::Typing(composer.clone());
+    }
+
+    let mut draft = composer.draft.clone();
+    draft.push_str(text);
+
+    // Muted or not comes through with the draft, exactly as a keystroke has it:
+    // this function is not where a turn starts or ends.
+    Pasted::Typing(Composer {
+        draft,
+        muted: composer.muted,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
-    use super::{COMPOSER_MAX_ROWS, Composed, Composer, compose_for};
+    use super::{COMPOSER_MAX_ROWS, Composed, Composer, Pasted, compose_for, paste_for};
 
     /// A plain press of `code`, as crossterm reports one with no modifiers.
     fn press(code: KeyCode) -> KeyEvent {
@@ -398,6 +479,15 @@ mod tests {
             Composed::Typing(next) => next,
             other => panic!("{key:?} should have kept the keyboard, and gave {other:?}"),
         }
+    }
+
+    /// The composer a paste of `text` leaves behind. One arm, because
+    /// [`Pasted`] has one variant — which is the rule being kept rather than a
+    /// convenience.
+    fn pasted(text: &str, composer: &Composer) -> Composer {
+        let Pasted::Typing(next) = paste_for(text, composer);
+
+        next
     }
 
     /// Every key the tree answers to, plus a character bound to nothing
@@ -781,6 +871,102 @@ mod tests {
                 "{code:?} should leave the draft byte for byte"
             );
         }
+    }
+
+    #[test]
+    fn a_pasted_block_keeps_every_line_and_sends_nothing() {
+        // The bug this exists for: a three-line block used to send line one as
+        // a question and lose the rest behind the mute that turn put up. Every
+        // line is in the draft, separated by the `\n` that was copied, and
+        // nothing is submitted — which the return type sees to, since
+        // `Pasted::Typing` is the only value there is.
+        let block = "first line\nsecond line\nthird line";
+
+        assert_eq!(pasted(block, &composer("")).draft(), block);
+        assert_eq!(
+            pasted(block, &composer("")).draft().lines().count(),
+            3,
+            "every line of the block should still be there"
+        );
+        assert_eq!(
+            pasted(block, &composer("why: ")).draft(),
+            "why: first line\nsecond line\nthird line",
+            "a paste goes in at the end, where typing goes"
+        );
+        assert_eq!(
+            pasted("one\ntwo\n", &composer("")).draft(),
+            "one\ntwo\n",
+            "a trailing newline is a byte of the block like any other"
+        );
+    }
+
+    #[test]
+    fn a_paste_with_no_newline_appends_exactly_as_typing_it_would() {
+        // The insertion point is the same insertion point: whatever route the
+        // characters came in by, the draft afterwards is the same draft.
+        let text = "why nine passes?";
+        let before = composer("ask: ");
+
+        let mut typed = before.clone();
+        for character in text.chars() {
+            typed = after(press(KeyCode::Char(character)), &typed);
+        }
+
+        assert_eq!(pasted(text, &before).draft(), typed.draft());
+        assert_eq!(pasted(text, &before), typed);
+    }
+
+    #[test]
+    fn a_muted_field_takes_no_paste_and_stays_muted() {
+        // One question at a time: while the answer to the last one is on its
+        // way the field takes nothing, and a paste is one arrival carrying
+        // however much was copied rather than a key somebody can stop pressing.
+        let mut before = composer("half a question");
+        before.set_muted(true);
+
+        let next = pasted("\nand the rest of it", &before);
+
+        assert_eq!(next.draft(), "half a question");
+        assert!(next.is_muted(), "a paste unmuted the field");
+        assert_eq!(next, before);
+    }
+
+    #[test]
+    fn a_paste_carries_a_live_field_through_live() {
+        // The other half of the flag's rule: this is not where a turn starts or
+        // ends either, so a field that arrived live goes back live.
+        let next = pasted("one\ntwo", &composer(""));
+
+        assert!(!next.is_muted());
+    }
+
+    #[test]
+    fn an_empty_paste_changes_nothing() {
+        // A terminal that reports a paste of nothing is not a mistake anybody
+        // has to hear about.
+        let before = composer("one\ntwo");
+
+        assert_eq!(pasted("", &before), before);
+    }
+
+    #[test]
+    fn a_tall_paste_grows_the_field_to_the_cap_and_windows_to_the_tail() {
+        // Nothing about the field's own scrolling changes: the height stops at
+        // the cap and the window is the last rows, so the end of what was
+        // pasted — where the next character will go — is what is on screen.
+        let block = (1..=20)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let next = pasted(&block, &composer(""));
+
+        assert_eq!(next.height(40), COMPOSER_MAX_ROWS);
+        assert_eq!(
+            next.window(40),
+            [
+                "line 15", "line 16", "line 17", "line 18", "line 19", "line 20"
+            ]
+        );
     }
 
     #[test]
