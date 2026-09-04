@@ -823,7 +823,10 @@ mod tests {
         // cell of its own, and the rows join back up to the draft byte for
         // byte. The row that kept one overhangs the width by that column, and
         // the drawing truncates at the pane edge.
-        assert_eq!(rows, ["It walks the tree ", "and writes what it ", "finds."]);
+        assert_eq!(
+            rows,
+            ["It walks the tree ", "and writes what it ", "finds."]
+        );
         assert_eq!(rows.concat(), "It walks the tree and writes what it finds.");
         assert_eq!(
             composer("It walks the tree and writes what it finds.").height(18),
