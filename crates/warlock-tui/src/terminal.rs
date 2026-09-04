@@ -1,8 +1,9 @@
 //! The terminal's lifecycle: taken whole, given back whole, on every way out.
 //!
 //! The one rule this module keeps is the binary's founding one — raw mode, the
-//! alternate screen and mouse reporting are restored on a normal quit, on an
-//! error returned up to `main`, and on a panic. [`TerminalGuard`] covers the
+//! alternate screen, bracketed paste and mouse reporting are restored on a
+//! normal quit, on an error returned up to `main`, and on a panic.
+//! [`TerminalGuard`] covers the
 //! first two by ownership, [`install_panic_hook`] covers the third, and both
 //! run through the same [`restore_terminal`], so there is exactly one spelling
 //! of what "put it back" means.
@@ -22,7 +23,9 @@ use std::panic;
 
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::Show;
-use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use ratatui::crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -98,8 +101,8 @@ pub(crate) trait Screen {
     fn report_mouse(&mut self, on: bool) -> io::Result<()>;
 }
 
-/// A terminal in raw mode on the alternate screen, reporting its mouse,
-/// restored when dropped.
+/// A terminal in raw mode on the alternate screen, reporting its mouse and
+/// bracketing its pastes, restored when dropped.
 ///
 /// Setup and teardown are paired by ownership rather than by remembering to
 /// call a teardown function on each of the several ways out of the event loop.
@@ -123,8 +126,8 @@ pub(crate) struct TerminalGuard {
 }
 
 impl TerminalGuard {
-    /// Enter raw mode and the alternate screen, and ask the terminal to report
-    /// its mouse.
+    /// Enter raw mode and the alternate screen, ask the terminal to bracket its
+    /// pastes, and ask it to report its mouse.
     ///
     /// On failure part-way through, the guard never exists and so never drops,
     /// which is why this undoes its own work before returning the error: every
@@ -224,22 +227,27 @@ impl Screen for TerminalGuard {
     }
 }
 
-/// Take the terminal: raw mode, the alternate screen, and the pointer reported
-/// if `mouse` says it should be.
+/// Take the terminal: raw mode, the alternate screen, bracketed paste, and the
+/// pointer reported if `mouse` says it should be.
 ///
 /// The one spelling of setup, as [`restore_terminal`] is the one spelling of
 /// teardown, and for the same reason: a session that is taken one way and
 /// resumed another is a session where `m` silently un-presses itself, or where
 /// the second alternate screen is not the first one's twin.
 ///
-/// Reporting is asked for in a statement of its own rather than in the same
-/// [`execute!`] as the screen, because it is now conditional. Nothing is lost by
-/// that: both callers undo the whole of a part-done setup with
-/// [`restore_terminal`], every step of which is attempted whether or not it was
-/// ever needed.
+/// Bracketed paste is unconditional, so it is asked for in the same
+/// [`execute!`] as the screen: a terminal that supports it then delivers a
+/// pasted block as one event instead of as a stream of keys whose first newline
+/// reads as Enter, and a terminal that does not ignores the sequence. Nothing
+/// here detects which kind it is.
+///
+/// Reporting is asked for in a statement of its own rather than in that same
+/// [`execute!`], because it is conditional. Nothing is lost by that: both
+/// callers undo the whole of a part-done setup with [`restore_terminal`], every
+/// step of which is attempted whether or not it was ever needed.
 fn take_terminal(mouse: bool) -> io::Result<()> {
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
     if mouse {
         execute!(io::stdout(), EnableMouseCapture)?;
     }
@@ -262,15 +270,18 @@ impl Drop for TerminalGuard {
 fn restore_terminal() {
     let _ = disable_raw_mode();
     // The setup's steps undone in the order they were done in reverse: mouse
-    // reporting off before the screen it was turned on for goes away, and the
-    // cursor shown last. Drawing a frame hides the cursor, so leaving without
-    // showing it again hands back a shell with an invisible caret; leaving
-    // without turning capture off hands back one that prints escape sequences
-    // whenever the pointer crosses it, which the reader has no way to guess the
-    // cause of and `reset` as their only cure.
+    // reporting off, then paste bracketing, both before the screen they were
+    // turned on for goes away, and the cursor shown last. Drawing a frame hides
+    // the cursor, so leaving without showing it again hands back a shell with an
+    // invisible caret; leaving without turning capture off hands back one that
+    // prints escape sequences whenever the pointer crosses it, and leaving
+    // without turning bracketing off hands back one that wraps every paste into
+    // a shell that never asked for it — each of which the reader has no way to
+    // guess the cause of and `reset` as their only cure.
     let _ = execute!(
         io::stdout(),
         DisableMouseCapture,
+        DisableBracketedPaste,
         LeaveAlternateScreen,
         Show
     );
