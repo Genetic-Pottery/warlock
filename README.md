@@ -45,7 +45,7 @@ to specified location.
 
 [Not yet implemented]
 1) A change document will be taken and turned into an epic / project in ticketing systems
-2) Later an epic / project can be pulled and turned into tickets. Along the way warlock will warn if a drafted ticket crosses a boundry you do not have access to bu tnot hard fail
+2) Later an epic / project can be pulled and turned into tickets. Along the way warlock will warn if a drafted ticket crosses a boundry you do not have access to but will not hard fail
 3) Finally tickets can be pulled and worked on if you have access to the directory the code change will happen in. At this phase warlock will hard fail if you do not have access.
 
 ## What it promises
