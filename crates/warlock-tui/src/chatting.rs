@@ -78,7 +78,7 @@ use std::time::Instant;
 use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, Manifest, briefs, load_briefs};
 use warlock_tui::{
     Activities, Activity, App, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, ChatAgent,
-    Composed, Composer, Converses, Edited, Ending, Focus, Mode, ScopePrompt, Submitted,
+    Composed, Composer, Converses, Edited, Ending, Focus, Mode, Pasted, ScopePrompt, Submitted,
     TemplateError, WRITE_INSTRUCTION, brief_instruction, brief_template, ending_for, submitted_for,
 };
 
@@ -736,6 +736,23 @@ impl<C: Converses> Chat<C> {
                 }
             }
         }
+    }
+
+    /// Keep what a paste came to.
+    ///
+    /// [`Chat::compose`]'s one-armed counterpart, and it is one arm because
+    /// [`Pasted`] has one variant: pasted text can only leave a draft behind, so
+    /// there is no submit road to reach from here and no focus to hand back. The
+    /// value went in at [`paste_for`](warlock_tui::paste_for), which is where
+    /// what the draft becomes is decided — including a muted field taking
+    /// nothing — and this only writes the answer down.
+    ///
+    /// Nothing about muting happens here, in keeping with the rest of this
+    /// module: the flag arrives on the composer that comes in, and
+    /// [`Chat::settle_field`] is still the only thing that sets it.
+    pub(crate) fn paste(&mut self, outcome: Pasted) {
+        let Pasted::Typing(next) = outcome;
+        self.composer = next;
     }
 
     /// Nothing comes back, and that is the point of where the window now lives.

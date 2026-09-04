@@ -306,7 +306,7 @@ use ratatui::layout::Size;
 use warlock_engine::{Agent, Manifest, Written, write_claude_md};
 use warlock_tui::{
     App, Composer, Converses, Focus, QuitConfirm, Run, ScopePrompt, Wired, composer_on_screen,
-    draw, panel_height, panel_width, tree_height,
+    draw, panel_height, panel_width, paste_for, tree_height,
 };
 
 mod boundary;
@@ -946,6 +946,14 @@ fn run() -> Result<(), Error> {
                 // round is the redraw, which is why a pointer swept across the
                 // screen costs nothing.
                 Event::Mouse(mouse) => session.point(mouse, size),
+                // A block of text the terminal handed over whole, because
+                // bracketed paste is on (see `take_terminal`). Nothing is
+                // returned and nothing can be: a paste never ends the session
+                // and never starts a turn, whatever newlines are in it, so
+                // there is no answer for this arm to act on. On a terminal
+                // without bracketed paste this never arrives and the same
+                // bytes come through the arm above, one key at a time.
+                Event::Paste(text) => session.paste(&text),
                 _ => {}
             }
         }
@@ -1428,6 +1436,40 @@ impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
         Ok(true)
     }
 
+    /// What one pasted block comes to.
+    ///
+    /// [`Session::press`]'s much shorter neighbour, and deliberately the same
+    /// shape at the top: the composer is offered on exactly the condition that
+    /// lights its border, which is the keyboard being pointed at it. With the
+    /// focus anywhere else there is no draft for the text to land in and a paste
+    /// does nothing at all — it is not a command, so unlike a keystroke there is
+    /// nothing else for it to mean.
+    ///
+    /// The second gate is the muting, and it is checked here as well as inside
+    /// [`paste_for`] because this is where the reader's other gates are: bytes
+    /// the terminal delivered while a question is being answered are not
+    /// somebody typing at this field. Nothing here sets or clears the flag —
+    /// `Chat::settle_field` stays the one place — and nothing here can start a
+    /// turn: [`Pasted`](warlock_tui::Pasted) has one variant, so there is no
+    /// value this path could produce that reaches `Chat::compose`'s submit road,
+    /// and no answer to give [`run`] because a paste never ends the session.
+    ///
+    /// There is no clock and no [`Result`] for the same reason: nothing here is
+    /// timed, nothing here is spawned, and nothing here reads or writes a
+    /// terminal. The next round redraws the field with the block in it.
+    fn paste(&mut self, text: &str) {
+        let Some(typing) = (self.app.focus() == Focus::Composer).then(|| self.chat.composer())
+        else {
+            return;
+        };
+        if typing.is_muted() {
+            return;
+        }
+
+        let pasted = paste_for(text, typing);
+        self.chat.paste(pasted);
+    }
+
     /// Keep up with what is happening off this thread: the run's progress, the
     /// turn's, and the disk moving under the tree.
     ///
@@ -1570,7 +1612,7 @@ mod tests {
     use ratatui::layout::Size;
     use ratatui::{Frame, Terminal};
     use warlock_engine::{Loaded, Manifest, Node, NodeState, Tree, load_tree, repository_root};
-    use warlock_tui::{App, Chrome, QuitConfirm, Row, ScopePrompt, tree_height};
+    use warlock_tui::{App, Chrome, Focus, QuitConfirm, Row, ScopePrompt, tree_height};
 
     use super::{Cli, Command, Error, FOR_CLAUDE_MD, ScopeCommand, Session, status_for};
     use crate::chatting::Chat;
@@ -2631,5 +2673,114 @@ mod tests {
             ScopePrompt::Closed,
             "Esc closes the window rather than quitting warlock"
         );
+    }
+
+    /// The gates on the paste road, over the session that really has them.
+    ///
+    /// These are here rather than beside [`paste_for`]'s own tests because the
+    /// two gates are the session's: `press_for` is never handed a paste, so
+    /// neither its focus gate nor its mute gate has ever seen one, and the
+    /// thing that decides whether a pasted block reaches the field at all is
+    /// [`Session::paste`]. Driving the real session is what makes "nothing else
+    /// moved" assertable — the tree's selection, the register and the footer are
+    /// all reachable from here and none of them is reachable from a composer.
+    mod pasting {
+        use super::{Focus, Instant, directory, session};
+        use crate::chatting::Asked;
+
+        #[test]
+        fn a_paste_with_the_keyboard_off_the_composer_changes_nothing_anywhere() {
+            let mut driven = session(vec![directory("/repo/crates"), directory("/repo/docs")]);
+            // Where a session opens: the keys are commands and there is no
+            // draft for anything to land in.
+            assert_ne!(
+                driven.app.focus(),
+                Focus::Composer,
+                "this test is about the keyboard being somewhere else"
+            );
+            let selected = driven.app.selected();
+            let mode = driven.app.mode();
+
+            driven.paste("crates\ndocs\n");
+
+            assert_eq!(
+                driven.chat.composer().draft(),
+                "",
+                "a paste aimed at nothing was typed into the field anyway"
+            );
+            assert_eq!(
+                driven.app.selected(),
+                selected,
+                "the pasted lines moved the tree's selection"
+            );
+            assert_eq!(driven.app.mode(), mode, "the pasted lines changed register");
+            assert!(
+                driven.app.message().is_none(),
+                "a paste nobody can act on said something on the footer"
+            );
+            assert!(!driven.chat.answering(), "a paste started a turn");
+        }
+
+        #[test]
+        fn a_paste_at_a_muted_field_leaves_the_draft_byte_for_byte() {
+            let mut driven = session(vec![directory("/repo/crates")]);
+            driven.app.set_focus(Focus::Composer);
+            driven.paste("half a question");
+
+            // A question put out without going past the field, which is what
+            // leaves a draft standing under the muting: a submit would have
+            // emptied it on the way through, and `Chat::settle_field` — still
+            // the one thing that sets the flag — is what `say` calls.
+            driven.chat.say(
+                &mut driven.app,
+                "what is a pact?",
+                "what is a pact?",
+                Asked::Answer,
+                Instant::now(),
+            );
+            assert!(
+                driven.chat.composer().is_muted(),
+                "a question is out and the field still types"
+            );
+
+            driven.paste("\nand the rest of it");
+
+            assert_eq!(
+                driven.chat.composer().draft(),
+                "half a question",
+                "the muted field took a paste"
+            );
+            assert!(
+                driven.chat.composer().is_muted(),
+                "a paste handed the keyboard back mid-turn"
+            );
+        }
+
+        #[test]
+        fn a_multi_line_paste_lands_whole_and_asks_nothing() {
+            let mut driven = session(vec![directory("/repo/crates")]);
+            driven.app.set_focus(Focus::Composer);
+
+            // The block that used to send line one and lose the other two.
+            driven.paste("what is a pact?\nand what is a scope?\nand a sigil?");
+
+            assert_eq!(
+                driven.chat.composer().draft(),
+                "what is a pact?\nand what is a scope?\nand a sigil?",
+                "the pasted lines did not all reach the draft"
+            );
+            assert!(
+                !driven.chat.answering(),
+                "a newline in a paste started a turn"
+            );
+            assert!(
+                driven.app.thread().is_none(),
+                "a paste sent something: there is a conversation and nobody asked for one"
+            );
+            assert!(
+                !driven.chat.composer().is_muted(),
+                "a paste muted the field"
+            );
+        }
     }
 }
