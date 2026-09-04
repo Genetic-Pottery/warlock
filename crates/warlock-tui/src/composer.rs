@@ -673,6 +673,30 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
             muted: composer.muted,
         })
     };
+    // A character taken back out, given the whole `char` it occupies: the one
+    // way anything is deleted here, Backspace's and Delete's alike, since which
+    // character goes is the only thing those two disagree about. The cursor
+    // lands where the character began, which for Backspace is one character
+    // back and for Delete is exactly where it already was — the insertion point
+    // does not move when what was in front of it goes.
+    //
+    // Built literally rather than through `Composer::at`, and it holds that
+    // constructor's invariant by construction: `start` and `end` are the two
+    // ends of a whole character of the draft, so both are boundaries, the two
+    // halves either side of it are whole strings, and `start` is a boundary of
+    // what they join into.
+    let removed = |start: usize, end: usize| {
+        let mut draft = String::with_capacity(composer.draft.len() - (end - start));
+        draft.push_str(&composer.draft[..start]);
+        draft.push_str(&composer.draft[end..]);
+
+        Composed::Typing(Composer {
+            draft,
+            cursor: start,
+            width: composer.width,
+            muted: composer.muted,
+        })
+    };
     // The other way round for the movement keys: the draft, the width and the
     // flag come through and only the offset is new. Every offset handed to this
     // comes off `char_indices`, `Composer::place` or `Composer::offset_at`, all
@@ -706,26 +730,24 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
             }
         }
         KeyCode::Esc => Composed::Leave,
-        KeyCode::Backspace => {
-            let mut draft = composer.draft.clone();
-            // `pop` takes a whole character, not a byte: half a character left
-            // in the buffer would not be a `String` at all.
-            if draft.pop().is_some() {
-                // Still the end of the draft, and the cursor still snaps there:
-                // taking a character back *at* the insertion point is the next
-                // slice, so there is one deletion rule in the build at a time.
-                // `draft.len()` is a boundary by construction, as it was when
-                // typing landed here too.
-                Composed::Typing(Composer {
-                    cursor: draft.len(),
-                    draft,
-                    width: composer.width,
-                    muted: composer.muted,
-                })
-            } else {
-                unchanged()
-            }
-        }
+        // The pair that delete, either side of the insertion point. Both take a
+        // whole `char` and never a byte — half a character left in the buffer
+        // would not be a `String` at all — and both leave the draft alone when
+        // there is no character on their side of the cursor. Backspace at
+        // offset zero in particular is still `Typing`: one press past the start
+        // is a typo, and Esc is the only key that hands the keyboard back.
+        KeyCode::Backspace => composer.draft[..composer.cursor]
+            .chars()
+            .next_back()
+            .map_or_else(unchanged, |character| {
+                removed(composer.cursor - character.len_utf8(), composer.cursor)
+            }),
+        KeyCode::Delete => composer.draft[composer.cursor..]
+            .chars()
+            .next()
+            .map_or_else(unchanged, |character| {
+                removed(composer.cursor, composer.cursor + character.len_utf8())
+            }),
         // The six that move the cursor and change no byte. Left and Right by
         // `char`: the offset before the one the cursor is at, and the offset
         // after it, or the end they are already at.
@@ -1058,7 +1080,7 @@ mod tests {
         // insertion point.
         let before = composer("one\ntwo").at(2);
 
-        for code in [KeyCode::Delete, KeyCode::Insert, KeyCode::BackTab] {
+        for code in [KeyCode::Insert, KeyCode::BackTab] {
             assert_eq!(
                 compose_for(press(code), &before),
                 Composed::Typing(before.clone()),
@@ -1235,6 +1257,9 @@ mod tests {
 
     #[test]
     fn backspace_takes_back_one_character_at_a_time() {
+        // Whole values, because the offset has to follow the character out: a
+        // Backspace that took the right byte and left the cursor where it was
+        // would put the next keystroke a character too far along.
         assert_eq!(
             after(press(KeyCode::Backspace), &composer("web")),
             composer("we")
@@ -1242,6 +1267,17 @@ mod tests {
         assert_eq!(
             after(press(KeyCode::Backspace), &composer("w")),
             composer("")
+        );
+        // And from the middle, which is the whole point of there being a
+        // cursor: what goes is the character in front of it, not the last one
+        // typed, and the cursor lands where that character began.
+        assert_eq!(
+            after(press(KeyCode::Backspace), &composer("web").at(1)),
+            composer("eb").at(0)
+        );
+        assert_eq!(
+            after(press(KeyCode::Backspace), &composer("web").at(2)),
+            composer("wb").at(1)
         );
     }
 
@@ -1257,13 +1293,54 @@ mod tests {
             after(press(KeyCode::Backspace), &composer("wé")),
             composer("w")
         );
+
+        // From every boundary of a draft with an accent in it and of one with
+        // an emoji in it, since a deletion done by byte would split one of them
+        // at some offsets and not at others.
+        for draft in ["wéb", "web 🜁 fire"] {
+            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+                let next = after(press(KeyCode::Backspace), &composer(draft).at(offset));
+                let gone = draft[..offset].chars().next_back();
+                let start = offset - gone.map_or(0, char::len_utf8);
+
+                assert_eq!(
+                    next.draft(),
+                    format!("{}{}", &draft[..start], &draft[offset..]),
+                    "Backspace at offset {offset} of {draft:?} should take the whole character before it"
+                );
+                assert!(
+                    std::str::from_utf8(next.draft().as_bytes()).is_ok(),
+                    "Backspace at offset {offset} of {draft:?} left a draft that is not UTF-8"
+                );
+                assert_eq!(
+                    next.draft().chars().count(),
+                    draft.chars().count() - usize::from(gone.is_some()),
+                    "Backspace at offset {offset} of {draft:?} should take one character or none"
+                );
+                assert!(
+                    next.draft().is_char_boundary(next.cursor()),
+                    "Backspace at offset {offset} of {draft:?} left the cursor inside a character"
+                );
+                assert_eq!(
+                    next.cursor(),
+                    start,
+                    "the cursor should be where the character taken at offset {offset} of {draft:?} began"
+                );
+            }
+        }
     }
 
     #[test]
     fn backspace_takes_a_newline_back_like_any_other_character() {
+        // One character, and the two lines it was between join up — from the
+        // end of the draft and from the middle of it alike.
         assert_eq!(
             after(press(KeyCode::Backspace), &composer("one\n")),
             composer("one")
+        );
+        assert_eq!(
+            after(press(KeyCode::Backspace), &composer("one\ntwo").at(4)),
+            composer("onetwo").at(3)
         );
     }
 
@@ -1277,6 +1354,87 @@ mod tests {
             compose_for(press(KeyCode::Backspace), &empty),
             Composed::Typing(empty.clone())
         );
+
+        // And at the front of a draft that does have something in it, which is
+        // the same press with somewhere for the cursor to have come from: the
+        // draft is untouched and the keyboard stays here.
+        let front = composer("web").at(0);
+
+        assert_eq!(
+            compose_for(press(KeyCode::Backspace), &front),
+            Composed::Typing(front.clone())
+        );
+    }
+
+    #[test]
+    fn delete_takes_the_character_after_the_cursor_and_leaves_the_cursor_be() {
+        // Backspace's mirror: the character in front goes, and the insertion
+        // point does not move, because what was behind it has not shifted.
+        assert_eq!(
+            after(press(KeyCode::Delete), &composer("web").at(0)),
+            composer("eb").at(0)
+        );
+        assert_eq!(
+            after(press(KeyCode::Delete), &composer("web").at(1)),
+            composer("wb").at(1)
+        );
+        // A newline is one character to Delete too, so the line below joins on.
+        assert_eq!(
+            after(press(KeyCode::Delete), &composer("one\ntwo").at(3)),
+            composer("onetwo").at(3)
+        );
+    }
+
+    #[test]
+    fn delete_at_the_end_of_the_draft_changes_nothing() {
+        // There is no character in front of the cursor to take, so the press is
+        // a keystroke and not a mistake: nothing moves, and nothing leaves.
+        for draft in ["", "web", "one\ntwo"] {
+            let before = composer(draft);
+
+            assert_eq!(
+                compose_for(press(KeyCode::Delete), &before),
+                Composed::Typing(before.clone()),
+                "Delete at the end of {draft:?} should have changed nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_takes_a_character_and_not_a_byte() {
+        // The same sweep Backspace gets, from the other side of the cursor: an
+        // accent and an emoji, from every boundary there is.
+        for draft in ["wéb", "web 🜁 fire"] {
+            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+                let next = after(press(KeyCode::Delete), &composer(draft).at(offset));
+                let gone = draft[offset..].chars().next();
+                let end = offset + gone.map_or(0, char::len_utf8);
+
+                assert_eq!(
+                    next.draft(),
+                    format!("{}{}", &draft[..offset], &draft[end..]),
+                    "Delete at offset {offset} of {draft:?} should take the whole character after it"
+                );
+                assert!(
+                    std::str::from_utf8(next.draft().as_bytes()).is_ok(),
+                    "Delete at offset {offset} of {draft:?} left a draft that is not UTF-8"
+                );
+                assert_eq!(
+                    next.draft().chars().count(),
+                    draft.chars().count() - usize::from(gone.is_some()),
+                    "Delete at offset {offset} of {draft:?} should take one character or none"
+                );
+                assert!(
+                    next.draft().is_char_boundary(next.cursor()),
+                    "Delete at offset {offset} of {draft:?} left the cursor inside a character"
+                );
+                assert_eq!(
+                    next.cursor(),
+                    offset,
+                    "Delete at offset {offset} of {draft:?} should have left the cursor there"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1510,9 +1668,10 @@ mod tests {
     fn the_movers_move_and_the_editing_keys_this_field_does_not_have_do_nothing() {
         // The two halves of what the non-character keys come to, said together
         // because they used to be one thing: the six movers each put the cursor
-        // somewhere else and leave every byte where it was, and Delete, Insert
-        // and BackTab go on doing nothing at all — no selection, no history and
-        // no editing away from the end of the draft.
+        // somewhere else and leave every byte where it was, and Insert and
+        // BackTab go on doing nothing at all — no selection and no history.
+        // Delete is an editing key this field does have, and has its own
+        // assertions above.
         //
         // Three rows, and the cursor starting on the middle one, so that every
         // one of the six has somewhere to go: at either end two of them would
@@ -1534,7 +1693,7 @@ mod tests {
             );
         }
 
-        for code in [KeyCode::Delete, KeyCode::Insert, KeyCode::BackTab] {
+        for code in [KeyCode::Insert, KeyCode::BackTab] {
             assert_eq!(
                 compose_for(press(code), &before),
                 Composed::Typing(before.clone()),
