@@ -43,9 +43,15 @@
 //! followed the top of the draft would scroll the thing being typed off the
 //! bottom of itself.
 //!
-//! Rows are counted with [`wrapped`](crate::wrap), the same wrapper the panel
-//! breaks a document's lines with, so a row that fits here fits when it is
-//! drawn and the composer never asks for a height the frame then disagrees with.
+//! Rows are counted with [`folded`](crate::wrap::folded), which breaks where the
+//! panel's own wrapper breaks, so a row counted here is a row the frame agrees
+//! with and the composer never asks for a height the drawing then disagrees
+//! with. It is the byte-preserving wrapper rather than
+//! [`wrapped`](crate::wrap::wrapped) because a draft is text somebody is still
+//! typing: the space a row broke at stays on that row, so the rows join back up
+//! to the draft byte for byte and nothing typed goes missing between the buffer
+//! and the screen. The row keeping its break character is one column wider than
+//! the width, and the drawing truncates at the pane edge.
 //!
 //! ## What this deliberately does not answer
 //!
@@ -72,7 +78,7 @@
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::wrap::wrapped;
+use crate::wrap::folded;
 
 /// The most rows the composer is ever drawn in, however long the draft gets.
 ///
@@ -232,14 +238,21 @@ impl Composer {
     /// Every row the draft draws as at `width`, however many that is.
     ///
     /// Each line of the draft — the pieces between its newlines — broken by
-    /// [`wrapped`], which never comes back empty, so a draft of nothing is one
+    /// [`folded`], which never comes back empty, so a draft of nothing is one
     /// blank row and a draft ending in a newline has a blank row under it for
     /// the cursor to sit on. A `width` of zero is a column nobody has measured
     /// and wraps nothing, exactly as it does for a document.
+    ///
+    /// [`folded`] rather than [`wrapped`](crate::wrap::wrapped) because a space
+    /// the reader typed is a character of the draft: the space a row breaks at
+    /// stays on that row, so the rows join back up to the draft byte for byte
+    /// and every byte typed has a cell of its own on screen. The row that keeps
+    /// its break character is a column wider than `width`, which the drawing
+    /// truncates at the pane edge.
     fn rows(&self, width: u16) -> Vec<String> {
         self.draft
             .split('\n')
-            .flat_map(|line| wrapped(line, usize::from(width)))
+            .flat_map(|line| folded(line, usize::from(width)))
             .collect()
     }
 }
@@ -805,7 +818,16 @@ mod tests {
     fn a_wrap_is_one_row_more_and_the_rows_are_the_words_in_order() {
         let rows = composer("It walks the tree and writes what it finds.").window(18);
 
-        assert_eq!(rows, ["It walks the tree", "and writes what it", "finds."]);
+        // The space each row broke at is kept, on the row above the break: the
+        // draft is text somebody is still typing, so every space typed has a
+        // cell of its own, and the rows join back up to the draft byte for
+        // byte. The row that kept one overhangs the width by that column, and
+        // the drawing truncates at the pane edge.
+        assert_eq!(
+            rows,
+            ["It walks the tree ", "and writes what it ", "finds."]
+        );
+        assert_eq!(rows.concat(), "It walks the tree and writes what it finds.");
         assert_eq!(
             composer("It walks the tree and writes what it finds.").height(18),
             3

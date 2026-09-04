@@ -30,6 +30,11 @@
 //! [`truncated`](crate::ui) counts them and the way the backend will lay the row
 //! out, so a row that fits here fits there.
 //!
+//! [`folded`] is that same rule for a caller that cannot afford the space:
+//! the same breaks, with the character broken at kept on the upper row, so its
+//! rows join back up to the text byte for byte. Nothing in this module's
+//! account of the panel changes — the panel draws [`wrapped`]'s rows.
+//!
 //! Continuation rows carry no marker and no ellipsis — a row of a wrapped
 //! document line is the file's own text and nothing else, exactly as an
 //! unwrapped one is. What they do carry is the blank width of whatever the
@@ -226,6 +231,72 @@ pub(crate) fn wrapped(text: &str, width: usize) -> Vec<String> {
     }
 }
 
+/// `text` in as many rows of `width` columns as it takes, keeping every byte.
+///
+/// The breaks [`wrapped`] makes, at the places it makes them — the same
+/// [`break_at`] rule, a word break where a space fits inside the width and a
+/// mid-word break where none does — with the one difference that pays for the
+/// name: the character broken at goes with the row above it rather than being
+/// trimmed off both sides of the cut. So the rows concatenate back to `text`
+/// byte for byte, which is what a caller that counts an offset through them
+/// needs. A space the reader typed has a cell of its own to put a cursor in, and
+/// a byte that vanished at a word break would be a cell that is not there to
+/// aim at.
+///
+/// The price is deliberate, and it is one column: a row that kept the space it
+/// broke at is a column wider than the `width` it was wrapped at. That is a
+/// trade nothing on the panel makes — [`wrapped`] is what the panel draws, and
+/// it still guarantees no row over the edge — and it is safe here because the
+/// field this is for is drawn by a renderer that truncates at the pane edge.
+///
+/// A `width` of zero is a field nobody has measured yet and is not a width to
+/// break at: the text comes back as the one row it went in as. A text with
+/// nothing in it is one empty row, as it is in [`wrapped`], so a caller always
+/// has a row to sit a cursor on.
+pub(crate) fn folded(text: &str, width: usize) -> Vec<String> {
+    if width == 0 || display_width(text) <= width {
+        return vec![text.to_owned()];
+    }
+
+    let mut rows = Vec::new();
+    let mut rest = text;
+    loop {
+        if display_width(rest) <= width {
+            rows.push(rest.to_owned());
+            return rows;
+        }
+
+        let end = kept(rest, width);
+        rows.push(rest[..end].to_owned());
+        rest = &rest[end..];
+        if rest.is_empty() {
+            // A text that came out even. Falling through would put a blank row
+            // under it, which is a row the text does not have.
+            return rows;
+        }
+    }
+}
+
+/// Where to cut `text` so the row before the cut fits in `width` columns and the
+/// character broken at stays on it.
+///
+/// [`break_at`]'s cut, plus the whitespace character that follows it where there
+/// is one: the space between two words is on one side of the cut or the other,
+/// and here it is the upper row's, so nothing is dropped.
+///
+/// Never zero for a text with anything in it, which is where [`folded`]'s loop
+/// gets its promise of making progress: it has no `trim_start` to fall back on,
+/// so the cut alone has to advance it, and the first character's own length is
+/// the floor under `break_at`'s answer.
+fn kept(text: &str, width: usize) -> usize {
+    let end = break_at(text, width).max(first_character(text));
+    let broken = text[end..]
+        .chars()
+        .next()
+        .filter(|character| character.is_whitespace());
+    end + broken.map_or(0, char::len_utf8)
+}
+
 /// Where to cut `text` so the row before the cut fits in `width` columns.
 ///
 /// Three answers in order of preference: the width itself, when the character
@@ -287,12 +358,24 @@ fn first_character(text: &str) -> usize {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Line, rows, shape, wrapped};
+    use super::{Line, folded, rows, shape, wrapped};
     use crate::ui::display_width;
 
     /// A width every line below is too long for, and narrow enough that the
     /// clock column is a visible share of it.
     const NARROW: usize = 18;
+
+    /// Everything a byte-keeping wrapper has to survive: several words, a path
+    /// with nowhere to break in it, whitespace at each end, two spaces in a row,
+    /// and characters two columns wide.
+    const DRAFTS: [&str; 6] = [
+        "It walks the tree and writes what it finds.",
+        "crates/warlock-engine/src/pact.rs",
+        "  leading and trailing  ",
+        "two  spaces  between  words",
+        "日本語 and more",
+        "日本語のテキストはここにあります",
+    ];
 
     #[test]
     fn a_line_that_fits_is_the_line_it_was() {
@@ -600,5 +683,115 @@ mod tests {
 
         assert_eq!(rows[0], "    indent");
         assert_eq!(rows.concat().replace(' ', ""), "indentedtexthere");
+    }
+
+    /// The whole of the reason `folded` exists: whatever the width and whatever
+    /// is in the text, the rows are the text again, byte for byte. A caller
+    /// counting an offset through them counts every byte the reader typed,
+    /// including the spaces the rows were broken at.
+    #[test]
+    fn folded_rows_join_back_up_to_the_text_byte_for_byte() {
+        for draft in DRAFTS {
+            for width in 0..40 {
+                assert_eq!(
+                    folded(draft, width).concat(),
+                    draft,
+                    "{draft:?} folded at {width}",
+                );
+            }
+        }
+    }
+
+    /// The same places `wrapped` breaks, with the space moved rather than
+    /// dropped: strip the whitespace off either end of both answers and they are
+    /// the same rows. Texts with two spaces in a row are not asked about here —
+    /// `wrapped` swallows the run, and keeping it is the point of `folded`.
+    #[test]
+    fn folded_breaks_where_the_panels_wrapper_breaks() {
+        for draft in [
+            "It walks the tree and writes what it finds.",
+            "crates/warlock-engine/src/pact.rs",
+            "日本語 and more",
+        ] {
+            for width in 1..40 {
+                let trimmed: Vec<String> = folded(draft, width)
+                    .iter()
+                    .map(|row| row.trim().to_owned())
+                    .collect();
+
+                assert_eq!(trimmed, wrapped(draft, width), "{draft:?} at {width}");
+            }
+        }
+    }
+
+    /// Columns, not characters: eight characters of `日本語 and` would fit a
+    /// width of eight if they were counted one apiece, but they draw in eleven
+    /// cells, so the break comes after the three that fit — and the space they
+    /// were broken at comes with them.
+    #[test]
+    fn folded_counts_the_columns_a_character_draws_in() {
+        assert_eq!(folded("日本語 and more", 8), ["日本語 ", "and more"]);
+    }
+
+    /// A field nobody has measured yet wraps nothing, and a draft with nothing
+    /// in it is still one row — there has to be a row for the cursor to sit on.
+    #[test]
+    fn folded_at_a_width_of_zero_is_the_row_it_went_in_as() {
+        let long = "It walks the tree and writes what it finds.";
+
+        assert_eq!(folded(long, 0), [long]);
+        assert_eq!(folded("", 0), [""]);
+        assert_eq!(folded("", 20), [""]);
+    }
+
+    /// No row holds half a character, at any width: the narrow widths are where
+    /// a wrapper slicing by bytes would panic, and the rows still add back up to
+    /// the text.
+    #[test]
+    fn folded_splits_only_on_character_boundaries() {
+        for draft in DRAFTS {
+            for width in 1..30 {
+                let mut offset = 0;
+                for row in folded(draft, width) {
+                    assert!(
+                        draft.is_char_boundary(offset),
+                        "{draft:?} at {width} split inside a character at {offset}",
+                    );
+                    assert_eq!(draft[offset..offset + row.len()], *row);
+                    offset += row.len();
+                }
+                assert_eq!(offset, draft.len(), "{draft:?} at {width}");
+            }
+        }
+    }
+
+    /// The deliberate price of keeping the break character: the row that kept it
+    /// is a column wider than the width it was wrapped at. Nothing the panel
+    /// draws does this — `wrapped` is what the panel draws — and the field this
+    /// is for is truncated at the pane edge by the renderer.
+    #[test]
+    fn a_row_that_kept_its_break_character_overhangs_by_a_column() {
+        let rows = folded("and writes what it finds.", 18);
+
+        assert_eq!(rows, ["and writes what it ", "finds."]);
+        assert_eq!(display_width(&rows[0]), 19);
+    }
+
+    /// A run of spaces is kept whole, wherever the breaks fall in it: this is
+    /// the case `wrapped` throws away, and a draft that lost one of two spaces
+    /// would put the cursor a cell out for the rest of the line.
+    #[test]
+    fn folded_keeps_a_run_of_spaces_that_the_panels_wrapper_swallows() {
+        assert_eq!(folded("a  b", 2), ["a  ", "b"]);
+        assert_eq!(wrapped("a  b", 2), ["a", "b"]);
+    }
+
+    /// The degenerate width, which the loop has to terminate at rather than
+    /// breaking off empty rows for ever — and with no `trim_start` to fall back
+    /// on, the cut is the only thing moving it along.
+    #[test]
+    fn folded_at_a_width_of_one_still_gets_to_the_end_of_the_draft() {
+        assert_eq!(folded("ab cd", 1), ["a", "b ", "c", "d"]);
+        assert_eq!(folded("日本語", 1), ["日", "本", "語"]);
     }
 }
