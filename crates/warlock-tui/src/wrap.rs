@@ -253,10 +253,6 @@ pub(crate) fn wrapped(text: &str, width: usize) -> Vec<String> {
 /// break at: the text comes back as the one row it went in as. A text with
 /// nothing in it is one empty row, as it is in [`wrapped`], so a caller always
 /// has a row to sit a cursor on.
-// Nothing outside the tests calls this yet: the composer moves onto it in the
-// slice that gives it a cursor, since a wrapper that loses bytes cannot carry
-// one.
-#[allow(dead_code, reason = "the composer moves onto this in the cursor slice")]
 pub(crate) fn folded(text: &str, width: usize) -> Vec<String> {
     if width == 0 || display_width(text) <= width {
         return vec![text.to_owned()];
