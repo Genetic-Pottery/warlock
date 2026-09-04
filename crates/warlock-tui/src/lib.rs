@@ -295,8 +295,16 @@ pub use composer::Composed;
 /// column, with the cursor always at the end, and how many rows they need at a
 /// given width.
 pub use composer::Composer;
+/// What a pasted block comes to at the composer, and the only thing it can come
+/// to: the draft goes on being typed into. There is no submit and no leave to
+/// return, so a paste can never start a turn however many newlines it carries.
+pub use composer::Pasted;
 /// What one key does to the composer, given the draft it is holding.
 pub use composer::compose_for;
+/// What a block of pasted text does to the composer: it goes in at the end of
+/// the draft byte for byte, newlines and all, and a muted field takes none of
+/// it.
+pub use composer::paste_for;
 /// One of the two answers the quit confirmation offers: Yes, drawn on the left,
 /// and No, drawn on the right and lit when the question opens.
 pub use confirm::Answer;
