@@ -648,15 +648,26 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
     // The incoming cursor comes through untouched, along with the draft and the
     // flag: a key that changes nothing moves nothing.
     let unchanged = || Composed::Typing(composer.clone());
-    // Muted or not comes through with the draft, and so does the width: this
-    // function is not where a turn starts or ends, and it is not a redraw. The
-    // cursor does not come through — a draft that changed here changed at its
-    // end, so the insertion point snaps there. Built literally rather than
-    // through `Composer::at`, since `draft.len()` is a boundary by
-    // construction.
-    let typed = |draft: String| {
+    // A character put in where the cursor is — the one way anything is typed
+    // into this field, Alt+Enter's `\n` included, so that a newline goes in
+    // wherever every other character does. Muted or not comes through with the
+    // width: this function is not where a turn starts or ends, and it is not a
+    // redraw. The cursor lands immediately after what was inserted, which is
+    // where somebody who has just typed it is.
+    //
+    // Built literally rather than through `Composer::at`, and it holds that
+    // constructor's invariant by construction: `composer.cursor` is a boundary
+    // of the draft, so the two halves it splits into are whole strings, and the
+    // offset after a whole character of the new draft is a boundary of it.
+    let inserted = |character: char| {
+        let cursor = composer.cursor;
+        let mut draft = String::with_capacity(composer.draft.len() + character.len_utf8());
+        draft.push_str(&composer.draft[..cursor]);
+        draft.push(character);
+        draft.push_str(&composer.draft[cursor..]);
+
         Composed::Typing(Composer {
-            cursor: draft.len(),
+            cursor: cursor + character.len_utf8(),
             draft,
             width: composer.width,
             muted: composer.muted,
@@ -684,11 +695,7 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
     match key.code {
         // Before the plain Enter below it, which is the point of the pair: the
         // modifier is what tells a new line from a submission.
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-            let mut draft = composer.draft.clone();
-            draft.push('\n');
-            typed(draft)
-        }
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => inserted('\n'),
         // Shift+Enter arrives here too, and means Enter: it is not a keystroke
         // of its own, because half the terminals in use never report it.
         KeyCode::Enter => {
@@ -704,7 +711,17 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
             // `pop` takes a whole character, not a byte: half a character left
             // in the buffer would not be a `String` at all.
             if draft.pop().is_some() {
-                typed(draft)
+                // Still the end of the draft, and the cursor still snaps there:
+                // taking a character back *at* the insertion point is the next
+                // slice, so there is one deletion rule in the build at a time.
+                // `draft.len()` is a boundary by construction, as it was when
+                // typing landed here too.
+                Composed::Typing(Composer {
+                    cursor: draft.len(),
+                    draft,
+                    width: composer.width,
+                    muted: composer.muted,
+                })
             } else {
                 unchanged()
             }
@@ -757,9 +774,7 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
         // and control characters are not text however they arrived — Ctrl-C
         // among them, which the loop above has already had its chance at.
         KeyCode::Char(character) if !key.modifiers.intersects(CHORD) && !character.is_control() => {
-            let mut draft = composer.draft.clone();
-            draft.push(character);
-            typed(draft)
+            inserted(character)
         }
         _ => unchanged(),
     }
@@ -1016,36 +1031,24 @@ mod tests {
         let _ = composer("wéb").at(2);
     }
 
-    /// A draft that changed changed at its end, so the cursor snaps there.
-    ///
-    /// Transient, and deliberately one named test so that it is one thing to
-    /// delete: the editing slice — slice 4 — moves typing, Alt+Enter, Backspace,
-    /// Delete and paste onto the cursor, and **this test is expected to be
-    /// deleted with them**. Until then the end is the only insertion point the
-    /// field has, so a draft that changed anywhere changed there — and since
-    /// the cursor is part of the value, a changed draft carrying a stale offset
-    /// would break the whole-value `Composer::new(...)` comparisons the rest of
-    /// the crate is written with.
     #[test]
-    fn every_key_that_changes_the_draft_leaves_the_cursor_at_the_end() {
+    fn a_paste_still_lands_at_the_end_however_far_the_cursor_has_moved() {
+        // Typing is at the cursor now; a paste deliberately is not yet. It goes
+        // in at the end of the draft and takes the cursor with it, so there is
+        // one insertion rule for blocks in the build at a time rather than two
+        // that disagree — and, since the cursor is part of the value, a pasted
+        // draft carrying a stale offset would be a value nothing else in the
+        // crate compares equal to.
         let from = composer("one\ntwo").at(2);
+        let next = pasted("and\nmore", &from);
 
-        for (what, next) in [
-            (
-                "a printable character",
-                after(press(KeyCode::Char('x')), &from),
-            ),
-            ("Alt+Enter", after(alt_enter(), &from)),
-            ("Backspace", after(press(KeyCode::Backspace), &from)),
-            ("a paste", pasted("and\nmore", &from)),
-        ] {
-            assert_eq!(
-                next.cursor(),
-                next.draft().len(),
-                "{what} should have left the cursor at the end of {:?}",
-                next.draft()
-            );
-        }
+        assert_eq!(next.draft(), "one\ntwoand\nmore");
+        assert_eq!(
+            next.cursor(),
+            next.draft().len(),
+            "a paste should have left the cursor at the end of {:?}",
+            next.draft()
+        );
     }
 
     #[test]
@@ -1143,6 +1146,94 @@ mod tests {
     }
 
     #[test]
+    fn a_character_goes_in_where_the_cursor_is_and_the_cursor_follows_it() {
+        // The three places there are: in front of everything, in the middle of
+        // it, and at the end where `Composer::new` puts the cursor and where
+        // every test written before there was a cursor types from. Whole-value
+        // comparisons, because the draft and the offset have to agree — a
+        // character typed at offset 3 that left the cursor at the end would put
+        // the next one somewhere nobody asked for.
+        let before = composer("web").at(0);
+        assert_eq!(
+            after(press(KeyCode::Char('x')), &before),
+            composer("xweb").at(1)
+        );
+
+        let before = composer("web").at(1);
+        assert_eq!(
+            after(press(KeyCode::Char('x')), &before),
+            composer("wxeb").at(2)
+        );
+
+        let before = composer("web");
+        assert_eq!(after(press(KeyCode::Char('x')), &before), composer("webx"));
+    }
+
+    #[test]
+    fn typing_from_the_middle_goes_on_from_where_the_last_character_landed() {
+        // The cursor is left after what was typed, so a word typed into the
+        // middle of a draft comes out as that word rather than backwards.
+        let mut current = composer("read engine").at(5);
+        for character in "the ".chars() {
+            current = after(press(KeyCode::Char(character)), &current);
+        }
+
+        assert_eq!(current, composer("read the engine").at(9));
+    }
+
+    #[test]
+    fn a_character_typed_into_a_multi_byte_draft_goes_in_whole() {
+        // From every boundary of a draft with an accent in it and of one with
+        // an emoji in it: an insertion done by byte rather than by `char` would
+        // split one of them, and the offset it left behind would be inside a
+        // character rather than in front of one.
+        for draft in ["wéb", "web 🜁 fire"] {
+            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+                let next = after(press(KeyCode::Char('x')), &composer(draft).at(offset));
+
+                assert_eq!(
+                    next.draft(),
+                    format!("{}x{}", &draft[..offset], &draft[offset..]),
+                    "typing at offset {offset} of {draft:?} should splice the character in"
+                );
+                assert!(
+                    std::str::from_utf8(next.draft().as_bytes()).is_ok(),
+                    "typing at offset {offset} of {draft:?} left a draft that is not UTF-8"
+                );
+                assert_eq!(
+                    next.draft().chars().count(),
+                    draft.chars().count() + 1,
+                    "typing at offset {offset} of {draft:?} should add one character"
+                );
+                assert!(
+                    next.draft().is_char_boundary(next.cursor()),
+                    "typing at offset {offset} of {draft:?} left the cursor inside a character"
+                );
+                assert_eq!(
+                    next.cursor(),
+                    offset + 1,
+                    "the cursor should be after the `x` typed at offset {offset} of {draft:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_multi_byte_character_typed_moves_the_cursor_its_own_width() {
+        // The step is the character's own bytes, not one: `é` is two of them
+        // and `🜁` is four, and the cursor after each is where the next one
+        // goes.
+        assert_eq!(
+            after(press(KeyCode::Char('é')), &composer("wb").at(1)),
+            composer("wéb").at(3)
+        );
+        assert_eq!(
+            after(press(KeyCode::Char('🜁')), &composer("ab").at(1)),
+            composer("a🜁b").at(5)
+        );
+    }
+
+    #[test]
     fn backspace_takes_back_one_character_at_a_time() {
         assert_eq!(
             after(press(KeyCode::Backspace), &composer("web")),
@@ -1197,6 +1288,33 @@ mod tests {
             after(press(KeyCode::Char('x')), &current),
             composer("first\nx")
         );
+    }
+
+    #[test]
+    fn alt_enter_puts_its_newline_in_where_the_cursor_is() {
+        // A newline is a character like any other, so it goes in at the
+        // insertion point rather than at the end: Alt+Enter in the middle of a
+        // line breaks that line in two, which is what somebody pressing it
+        // there is asking for.
+        assert_eq!(alt_enter().modifiers, KeyModifiers::ALT);
+        assert_eq!(
+            after(alt_enter(), &composer("onetwo").at(3)),
+            composer("one\ntwo").at(4)
+        );
+        assert_eq!(
+            after(alt_enter(), &composer("two").at(0)),
+            composer("\ntwo").at(1)
+        );
+        // And in a multi-byte draft it is still one byte in front of a whole
+        // character rather than inside one.
+        let next = after(alt_enter(), &composer("wéb").at(1));
+        assert_eq!(next, composer("w\néb").at(2));
+        assert!(next.draft().is_char_boundary(next.cursor()));
+        // And it still submits nothing from anywhere, at the drafts Enter
+        // itself would refuse: `after` panics on anything but `Typing`.
+        for (draft, offset) in [("", 0), ("  ", 1), ("one\ntwo", 2)] {
+            let _ = after(alt_enter(), &composer(draft).at(offset));
+        }
     }
 
     #[test]
