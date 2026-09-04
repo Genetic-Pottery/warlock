@@ -122,14 +122,21 @@ const CHORD: KeyModifiers = KeyModifiers::CONTROL
     .union(KeyModifiers::HYPER)
     .union(KeyModifiers::META);
 
-/// What has been typed into the composer, with the cursor after its last
-/// character.
+/// What has been typed into the composer, and where the insertion point is in
+/// it.
 ///
-/// One string and one flag. There is no cursor field because nothing can
-/// move a cursor, no scroll offset because the window is always the tail (see
-/// [`Composer::window`]), and no width because the width belongs to the frame
-/// and is handed in by whoever is drawing — so a composer can be driven through
-/// every width a terminal has in one test without a terminal.
+/// One string, one offset and one flag. No scroll offset, because the window is
+/// always the tail (see [`Composer::window`]), and no width, because the width
+/// belongs to the frame and is handed in by whoever is drawing — so a composer
+/// can be driven through every width a terminal has in one test without a
+/// terminal.
+///
+/// The offset is [`Composer::cursor`], and it is a byte index into the draft
+/// rather than a row and a column, so that it goes on meaning the same place
+/// when the terminal is resized and the draft re-flows underneath it. It is
+/// always on a `char` boundary and never past the end of the draft: every value
+/// built in this module holds that by construction, and the one way to set it
+/// from outside — [`Composer::at`] — panics rather than clamp.
 ///
 /// The flag is [`Composer::is_muted`], and it is a fact about the session rather
 /// than about the draft: one question at a time, so while an answer is on its
@@ -137,11 +144,19 @@ const CHORD: KeyModifiers = KeyModifiers::CONTROL
 /// carried here rather than worked out where it is read — the loop knows whether
 /// a turn is in flight, and it tells the field once a round, exactly as it tells
 /// the app what the terminal is doing with the pointer.
+///
+/// The offset takes part in `PartialEq` and `Hash` along with the draft, so two
+/// composers holding the same characters at different insertion points are two
+/// different values.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Composer {
-    /// What has been typed. Newlines are in it as `\n`; the cursor sits after
-    /// its last character, always.
+    /// What has been typed. Newlines are in it as `\n`.
     draft: String,
+    /// Where the next character goes: a byte offset into `draft`, on a `char`
+    /// boundary, at most `draft.len()`. While nothing edits anywhere but the
+    /// end it is `draft.len()` after every keystroke and every paste that
+    /// changes the draft.
+    cursor: usize,
     /// Whether the field is taking keys at all. `false` for the whole of a
     /// session that never asks anything and never runs a pact; `true` only for
     /// as long as a turn is being answered, or a run writing documents,
@@ -150,19 +165,70 @@ pub struct Composer {
 }
 
 impl Composer {
-    /// A composer holding `draft`, live.
+    /// A composer holding `draft`, live, with the cursor at the end of it.
     ///
-    /// [`Composer::default`] is the empty one a session starts on. This is for
-    /// putting a composer back where it was — and for tests, which is most of
-    /// what a value this small wants a constructor for. Muting is not a
-    /// constructor's business: it is set and unset as turns and runs come and
-    /// go, by [`Composer::set_muted`].
+    /// [`Composer::default`] is the empty one a session starts on — empty draft,
+    /// cursor at zero. This is for putting a composer back where it was — and
+    /// for tests, which is most of what a value this small wants a constructor
+    /// for. The end rather than the start because the end is where somebody who
+    /// has just typed `draft` would be, so every whole-value comparison written
+    /// against a draft alone goes on saying what it said. Somewhere else in the
+    /// draft is [`Composer::at`]. Muting is not a constructor's business: it is
+    /// set and unset as turns and runs come and go, by [`Composer::set_muted`].
     #[must_use]
     pub fn new(draft: impl Into<String>) -> Self {
+        let draft = draft.into();
+        let cursor = draft.len();
+
         Self {
-            draft: draft.into(),
+            draft,
+            cursor,
             muted: false,
         }
+    }
+
+    /// The same composer with the cursor at `offset` instead.
+    ///
+    /// A consuming builder, so `Composer::new("hello").at(3)` is one expression
+    /// and there is no half-built composer to leave lying around:
+    /// `Composer::new` puts the cursor where typing would have left it, and this
+    /// is how a test says somewhere else.
+    ///
+    /// # Panics
+    ///
+    /// If `offset` is past the end of the draft, or falls inside a character
+    /// rather than on a `char` boundary. A panic rather than a clamp, because
+    /// there is no production path here — the values this module builds itself
+    /// hold the invariant by construction and do not come through here — so
+    /// every caller is a test, and a test asking for an offset the draft does
+    /// not have is a wrong expectation that should be loud rather than quietly
+    /// answered with the nearest offset that does exist.
+    #[must_use]
+    pub fn at(mut self, offset: usize) -> Self {
+        assert!(
+            offset <= self.draft.len(),
+            "cursor offset {offset} is past the end of {:?}",
+            self.draft
+        );
+        assert!(
+            self.draft.is_char_boundary(offset),
+            "cursor offset {offset} is inside a character of {:?}",
+            self.draft
+        );
+        self.cursor = offset;
+
+        self
+    }
+
+    /// Where the insertion point is: a byte offset into [`Composer::draft`], on
+    /// a `char` boundary, at most the draft's length.
+    ///
+    /// A byte offset rather than a row and a column so that it survives a
+    /// resize: the rows the draft draws as depend on the width the frame hands
+    /// in, and this does not.
+    #[must_use]
+    pub const fn cursor(&self) -> usize {
+        self.cursor
     }
 
     /// Say whether the field is taking keys.
@@ -342,11 +408,18 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
         return Composed::Typing(composer.clone());
     }
 
+    // The incoming cursor comes through untouched, along with the draft and the
+    // flag: a key that changes nothing moves nothing.
     let unchanged = || Composed::Typing(composer.clone());
     // Muted or not comes through with the draft: this function is not where a
-    // turn starts or ends, so a field that arrived muted goes back muted.
-    let typed = |draft| {
+    // turn starts or ends, so a field that arrived muted goes back muted. The
+    // cursor does not come through — a draft that changed here changed at its
+    // end, so the insertion point snaps there. Built literally rather than
+    // through `Composer::at`, since `draft.len()` is a boundary by
+    // construction.
+    let typed = |draft: String| {
         Composed::Typing(Composer {
+            cursor: draft.len(),
             draft,
             muted: composer.muted,
         })
@@ -431,9 +504,11 @@ pub enum Pasted {
 /// typing at this field. Muting itself is still set nowhere near here — one
 /// question at a time is the loop's fact, and it stays the loop's fact.
 ///
-/// Nothing else moves. No turn starts, no focus changes, no cursor exists to
-/// place, and an empty paste is a paste that changes nothing rather than an
-/// error anybody has to hear about.
+/// Nothing else moves. No turn starts, no focus changes, and an empty paste is
+/// a paste that changes nothing rather than an error anybody has to hear about.
+/// The cursor ends up at the end of the draft the paste left behind — the same
+/// place typing those characters would have left it, and for as long as the end
+/// is the only insertion point this field has, the same place it started.
 #[must_use]
 pub fn paste_for(text: &str, composer: &Composer) -> Pasted {
     if composer.muted {
@@ -444,8 +519,11 @@ pub fn paste_for(text: &str, composer: &Composer) -> Pasted {
     draft.push_str(text);
 
     // Muted or not comes through with the draft, exactly as a keystroke has it:
-    // this function is not where a turn starts or ends.
+    // this function is not where a turn starts or ends. The cursor snaps to the
+    // end of what the paste left behind, exactly as typing the same characters
+    // would leave it.
     Pasted::Typing(Composer {
+        cursor: draft.len(),
         draft,
         muted: composer.muted,
     })
@@ -530,6 +608,119 @@ mod tests {
         assert_eq!(fresh.draft(), "");
         assert!(!fresh.is_submittable());
         assert_eq!(fresh, composer(""));
+    }
+
+    #[test]
+    fn a_new_composer_has_its_cursor_at_the_end_of_the_draft() {
+        // Where somebody who has just typed the draft would be, which is what
+        // keeps every whole-value comparison written against a draft alone
+        // saying what it said before there was a cursor at all.
+        assert_eq!(Composer::default().cursor(), 0);
+        assert_eq!(composer("").cursor(), 0);
+        assert_eq!(composer("web").cursor(), 3);
+        assert_eq!(composer("one\ntwo").cursor(), 7);
+        // Bytes, not characters: `é` is two of them.
+        assert_eq!(composer("wéb").cursor(), 4);
+    }
+
+    #[test]
+    fn at_puts_the_cursor_where_it_is_asked_to() {
+        assert_eq!(composer("hello").at(3).cursor(), 3);
+        assert_eq!(composer("hello").at(0).cursor(), 0);
+        assert_eq!(
+            composer("hello").at(5),
+            composer("hello"),
+            "the end is where `new` already put it"
+        );
+        // Every boundary of a multi-byte draft, and only the boundaries: `é`
+        // occupies bytes 1 and 2, so 2 is not one of them.
+        let draft = "wéb";
+        for offset in [0, 1, 3, 4] {
+            assert_eq!(composer(draft).at(offset).cursor(), offset);
+        }
+    }
+
+    #[test]
+    fn the_cursor_is_part_of_the_value() {
+        // Two composers holding the same characters at different insertion
+        // points are two different values — which is why every draft-changing
+        // arm has to land the cursor in the same place.
+        assert_ne!(composer("hello").at(3), composer("hello"));
+        assert_eq!(composer("hello").at(3), composer("hello").at(3));
+    }
+
+    #[test]
+    #[should_panic(expected = "cursor offset 6 is past the end of \"hello\"")]
+    fn at_past_the_end_of_the_draft_panics_rather_than_clamping() {
+        // A test asking for an offset the draft does not have is a wrong
+        // expectation, and the one slice whose job is offset arithmetic is the
+        // slice where that should be loud.
+        let _ = composer("hello").at(6);
+    }
+
+    #[test]
+    #[should_panic(expected = "cursor offset 2 is inside a character of \"wéb\"")]
+    fn at_inside_a_character_panics_rather_than_clamping() {
+        // `é` is bytes 1 and 2, so 2 is halfway through it: an offset there is
+        // not a place in this draft at all.
+        let _ = composer("wéb").at(2);
+    }
+
+    /// A draft that changed changed at its end, so the cursor snaps there.
+    ///
+    /// Transient, and deliberately one named test so that it is one thing to
+    /// delete: the editing slice — slice 4 — moves typing, Alt+Enter, Backspace,
+    /// Delete and paste onto the cursor, and **this test is expected to be
+    /// deleted with them**. Until then the end is the only insertion point the
+    /// field has, so a draft that changed anywhere changed there — and since
+    /// the cursor is part of the value, a changed draft carrying a stale offset
+    /// would break the whole-value `Composer::new(...)` comparisons the rest of
+    /// the crate is written with.
+    #[test]
+    fn every_key_that_changes_the_draft_leaves_the_cursor_at_the_end() {
+        let from = composer("one\ntwo").at(2);
+
+        for (what, next) in [
+            (
+                "a printable character",
+                after(press(KeyCode::Char('x')), &from),
+            ),
+            ("Alt+Enter", after(alt_enter(), &from)),
+            ("Backspace", after(press(KeyCode::Backspace), &from)),
+            ("a paste", pasted("and\nmore", &from)),
+        ] {
+            assert_eq!(
+                next.cursor(),
+                next.draft().len(),
+                "{what} should have left the cursor at the end of {:?}",
+                next.draft()
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_that_changes_nothing_moves_the_cursor_nowhere() {
+        // The other half: the incoming offset comes through untouched, so a
+        // key this field does not have is not a key that quietly re-homes the
+        // insertion point.
+        let before = composer("one\ntwo").at(2);
+
+        for code in [KeyCode::Delete, KeyCode::Insert, KeyCode::BackTab] {
+            assert_eq!(
+                compose_for(press(code), &before),
+                Composed::Typing(before.clone()),
+                "{code:?} should have changed nothing at all"
+            );
+        }
+
+        let mut muted = before.clone();
+        muted.set_muted(true);
+
+        assert_eq!(
+            pasted("and\nmore", &muted),
+            muted,
+            "a muted field takes no paste, and no paste moves its cursor"
+        );
     }
 
     #[test]
