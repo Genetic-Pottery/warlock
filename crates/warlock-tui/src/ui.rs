@@ -2846,7 +2846,7 @@ mod tests {
 
     use super::{
         Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, BRIEF_THREAD_TITLE,
-        CANCEL_KEY, COLLAPSE_KEY, COMMAND_KEY, COMPOSE_KEYS, COMPOSER_MIN_HEIGHT,
+        CANCEL_KEY, COLLAPSE_KEY, COMMAND_KEY, COMPOSE_KEYS, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT,
         CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS,
         CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FOCUS_KEY, FOOTER_HEIGHT, GUIDE,
         GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP,
@@ -7477,15 +7477,58 @@ mod tests {
 
     /// The rows of `buffer` the composer is drawn into, as text.
     fn composer_rows(buffer: &Buffer, composer: &Composer) -> Vec<String> {
-        let area = pane_inner(
-            areas(buffer.area, Some(composer))
-                .composer
-                .expect("a field on this frame"),
-        );
+        let area = composer_field(buffer, composer);
 
         (0..area.height)
             .map(|index| text_in(buffer, area, area.y + index))
             .collect()
+    }
+
+    /// The area of `buffer` the composer's rows are drawn in: its pane inside
+    /// its border, which is what every column and row below is counted from.
+    fn composer_field(buffer: &Buffer, composer: &Composer) -> Rect {
+        pane_inner(
+            areas(buffer.area, Some(composer))
+                .composer
+                .expect("a field on this frame"),
+        )
+    }
+
+    /// Every cell of the field that is drawn reversed, as the column and row it
+    /// is at inside the field and the symbol drawn in it.
+    ///
+    /// The caret is a reversed cell in the buffer and nothing else — the
+    /// terminal's own cursor is neither moved nor shown (see [`draw_composer`])
+    /// — so this is the whole of what a test can ask about where the caret is,
+    /// and it is asked of the drawn field rather than of the composer. A `Vec`
+    /// rather than the first one found, so that "the caret is here" and "there
+    /// is one caret" are the same assertion: a caret left behind on the row the
+    /// cursor used to be on would be a second entry.
+    fn caret_cells(buffer: &Buffer, composer: &Composer) -> Vec<(u16, u16, String)> {
+        let area = composer_field(buffer, composer);
+
+        (0..area.height)
+            .flat_map(|row| (0..area.width).map(move |column| (column, row)))
+            .filter_map(|(column, row)| {
+                let cell = &buffer[(area.x + column, area.y + row)];
+                cell.modifier
+                    .contains(Modifier::REVERSED)
+                    .then(|| (column, row, cell.symbol().to_owned()))
+            })
+            .collect()
+    }
+
+    /// The one caret of a field drawn with the keys in it: where it is and what
+    /// it is drawn over.
+    ///
+    /// # Panics
+    ///
+    /// If the field drew no caret, or more than one.
+    fn caret_cell(buffer: &Buffer, composer: &Composer) -> (u16, u16, String) {
+        let mut cells = caret_cells(buffer, composer);
+        assert_eq!(cells.len(), 1, "one caret and one only: {cells:?}");
+
+        cells.remove(0)
     }
 
     #[test]
@@ -7595,6 +7638,183 @@ mod tests {
             lines.last().map(String::as_str),
             "the newest line is the bottom row"
         );
+    }
+
+    #[test]
+    fn the_caret_is_drawn_at_the_cursor_and_not_after_the_last_character() {
+        // The field used to draw its caret by appending a reversed blank to the
+        // last row it drew, which was the right cell only while the cursor was
+        // at the end of the draft. With the cursor somewhere in the middle of
+        // one, the caret is the character it is on — the cell what is typed next
+        // pushes along — and there is nothing reversed at the end of the draft.
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_focus(Focus::Composer);
+
+        let draft = "what does the engine do?";
+        // `what |does the engine do?`: the first character of the second word.
+        let middle = Composer::new(draft).at(5);
+        let buffer = render_composer(&app, &middle, WIDTH, FIXTURE_HEIGHT);
+
+        assert_eq!(
+            composer_rows(&buffer, &middle).first().map(String::as_str),
+            Some(draft),
+            "the draft is drawn as it always was"
+        );
+        // One caret and one only, so the blank after the last character is not
+        // reversed as well.
+        assert_eq!(
+            caret_cell(&buffer, &middle),
+            (5, 0, "d".to_owned()),
+            "the caret is the character the cursor is on"
+        );
+
+        // And the end of the draft is where it goes when that is where the
+        // cursor is: the reversed blank, in the column after the last character,
+        // which is what the field drew before there was a cursor to ask.
+        let end = Composer::new(draft);
+        let buffer = render_composer(&app, &end, WIDTH, FIXTURE_HEIGHT);
+        let after = u16::try_from(display_width(draft)).expect("a short draft");
+        assert_eq!(
+            caret_cell(&buffer, &end),
+            (after, 0, COMPOSER_CURSOR.to_owned())
+        );
+    }
+
+    #[test]
+    fn the_caret_lands_in_the_cell_a_wide_character_draws_in() {
+        // Columns are cells and not characters. Three characters two columns
+        // wide, and from the second of them a caret counted by character would
+        // be drawn a column short of the character it is meant to be on — and
+        // then a column further short for each one after it.
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_focus(Focus::Composer);
+
+        let draft = "日本語 and more";
+        // The same row read out of the buffer cell by cell: the renderer leaves
+        // the second cell of a wide character blank, so each of the three has a
+        // blank behind it and the draft's own space comes after the third.
+        let drawn = "日 本 語  and more";
+        // The byte offset the cursor is at, the column the caret is drawn in,
+        // and the character drawn there. The offsets are three bytes apart
+        // across the wide characters and one byte apart after them; the columns
+        // are two apart and then one.
+        let cells = [
+            (0, 0, "日"),
+            (3, 2, "本"),
+            (6, 4, "語"),
+            (9, 6, " "),
+            (10, 7, "a"),
+        ];
+
+        for (offset, column, character) in cells {
+            let composer = Composer::new(draft).at(offset);
+            let buffer = render_composer(&app, &composer, WIDTH, FIXTURE_HEIGHT);
+
+            assert_eq!(
+                composer_rows(&buffer, &composer)
+                    .first()
+                    .map(String::as_str),
+                Some(drawn),
+                "the draft is drawn as it always was"
+            );
+            assert_eq!(
+                caret_cell(&buffer, &composer),
+                (column, 0, character.to_owned()),
+                "the cursor at byte {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_space_that_wraps_a_row_puts_the_caret_at_the_start_of_the_row_below() {
+        // An offset at a row break is column zero of the lower row and never a
+        // cell past the end of the row above — the rule the composer's maps
+        // keep, here on the drawn buffer. The space the reader typed is a
+        // character of the draft with a cell of its own at the end of the upper
+        // row, and the cursor it left behind is the cell after it, which is on
+        // the row below.
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_focus(Focus::Composer);
+
+        // The width the field is actually drawn at, asked of a frame rather than
+        // worked out, so the draft below breaks exactly once wherever the layout
+        // puts the pane's edge.
+        let probe = Composer::default();
+        let width = usize::from(
+            composer_field(
+                &render_composer(&app, &probe, WIDTH, FIXTURE_HEIGHT),
+                &probe,
+            )
+            .width,
+        );
+
+        // A word a column short of the field, so the space after it is the last
+        // cell that fits and the word after it is what does not.
+        let word = "a".repeat(width - 1);
+        let rest = "b".repeat(width - 1);
+        // Where typing that space leaves the cursor: immediately after it.
+        let composer = Composer::new(format!("{word} {rest}")).at(word.len() + 1);
+        let buffer = render_composer(&app, &composer, WIDTH, FIXTURE_HEIGHT);
+
+        // Two rows, and the space stayed on the upper one (the row text is read
+        // with its trailing blanks trimmed off, so it reads as the word).
+        assert_eq!(composer_rows(&buffer, &composer), [word, rest]);
+        // Column zero of the lower row, and the one caret, so the cell at the
+        // end of the row above is not reversed either.
+        assert_eq!(caret_cell(&buffer, &composer), (0, 1, "b".to_owned()));
+    }
+
+    #[test]
+    fn the_drawn_rows_follow_the_cursor_up_and_down_a_draft_past_the_cap() {
+        // A field six rows tall and a draft twice that: the rows on screen are
+        // the ones the cursor is among, wherever it has been moved to, so an Up
+        // never moves a cursor the reader cannot see.
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_focus(Focus::Composer);
+
+        let lines: Vec<String> = (0..usize::from(COMPOSER_MAX_ROWS) * 2)
+            .map(|line| format!("line {line}"))
+            .collect();
+        let draft = lines.join("\n");
+        // The byte offset each line starts at: its own length and the newline
+        // after it, line by line.
+        let starts: Vec<usize> = lines
+            .iter()
+            .scan(0, |offset, line| {
+                let start = *offset;
+                *offset += line.len() + 1;
+                Some(start)
+            })
+            .collect();
+
+        // The cases below name their lines, so the arithmetic they were worked
+        // out from is written down rather than assumed.
+        assert_eq!(COMPOSER_MAX_ROWS, 6);
+        assert_eq!(lines.len(), 12);
+
+        // Which line the cursor is on, and which line the top row of the field
+        // is then drawn from: the tail while the cursor is at the end of the
+        // draft, which is what the field drew before it followed anything; up
+        // with the cursor when it is moved above those rows, at the two-row
+        // margin until the top of the draft stops it; and down again after it.
+        for (line, first) in [(11, 6), (1, 0), (0, 0), (8, 6), (4, 2)] {
+            let composer = Composer::new(draft.clone()).at(starts[line]);
+            let buffer = render_composer(&app, &composer, WIDTH, 40);
+            let rows = usize::from(COMPOSER_MAX_ROWS);
+
+            assert_eq!(
+                composer_rows(&buffer, &composer),
+                lines[first..first + rows],
+                "the cursor on line {line}"
+            );
+            // On screen, on the row of its own line, at the start of it.
+            let row = u16::try_from(line - first).expect("a row of the field");
+            assert_eq!(
+                caret_cell(&buffer, &composer),
+                (0, row, "l".to_owned()),
+                "the cursor on line {line}"
+            );
+        }
     }
 
     #[test]
