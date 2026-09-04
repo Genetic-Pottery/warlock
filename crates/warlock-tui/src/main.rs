@@ -1057,6 +1057,12 @@ impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
     /// the copy taken before a pact — a copy of a flag that may have been
     /// toggled since — is put right before it is drawn.
     ///
+    /// So is the width, to the app and to the composer both, off one
+    /// measurement: the panel wraps what it holds at it and the field is drawn
+    /// in the same column, and the field's row-wise keys — Home, End, Up and
+    /// Down — move over the rows that width folds the draft into. See
+    /// [`Chat::set_composer_width`].
+    ///
     /// The instant the frame is drawn at is read here and handed to the
     /// renderer: the panel's newest clock counts up against it, so a frame drawn
     /// with no event waiting still shows a run that is moving. See [`draw`].
@@ -1066,12 +1072,20 @@ impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
     /// Whatever the screen says when the frame cannot be written.
     fn draw(&mut self, size: Size) -> io::Result<()> {
         self.app.set_mouse_captured(self.mouse_captured);
+        // One reading of the panel's inside width, told to both the things that
+        // are about to use it: the app wraps the document it holds at it, and
+        // the composer is drawn in the same column, so it is the width the
+        // field's own rows are folded at and therefore the width its row-wise
+        // keys move over. Told here, before the key that reads it, because the
+        // loop draws and then waits.
+        let width = panel_width(size);
+        self.chat.set_composer_width(width);
         let field = composer_on_screen(&self.app, self.chat.composer());
         let header = self.app.run_header();
         self.app.set_viewport_height(tree_height(size));
         self.app
             .set_panel_height(panel_height(size, field, header.as_ref()));
-        self.app.set_panel_width(panel_width(size));
+        self.app.set_panel_width(width);
 
         let (app, chrome, confirm, prompt) =
             (&self.app, &self.scope.chrome, self.confirm, &self.prompt);
