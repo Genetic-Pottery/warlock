@@ -29,10 +29,11 @@
 //!
 //! Both edges are `char` edges and never byte edges: a character goes in whole
 //! and comes out whole, so a draft with an accent or an emoji in it stays a
-//! `String` and the cursor stays somewhere the draft actually has. What has
-//! *not* caught up is the drawing — the caret is still a cell after the last
-//! character rather than at the cursor — which is why nothing here has to be
-//! true of the screen yet.
+//! `String` and the cursor stays somewhere the draft actually has. Where that
+//! offset is *drawn* is this module's answer as well: [`Composer::window`] comes
+//! back with the rows on screen and the cell the caret goes in among them, so
+//! the place the keys move the cursor to and the place a reader sees it are one
+//! piece of arithmetic rather than two.
 //!
 //! Because four of those six are row-wise, the value carries the width it was
 //! last drawn at ([`Composer::set_width`]), told to it once a round the way its
@@ -61,19 +62,26 @@
 //! anything here" is a question about the buffer rather than about what the
 //! buffer is for.
 //!
-//! ## Why the value knows its own height
+//! ## Why the value knows its own height, and where its window starts
 //!
 //! The composer is one row tall when it is empty and grows a row at a time as
 //! the draft wraps or a newline is inserted, up to [`COMPOSER_MAX_ROWS`], and
 //! the panel above it loses exactly the rows it takes. That arithmetic has to be
 //! done before the frame is cut, so it lives here rather than in the drawing:
 //! [`Composer::height`] is the number the layout asks for, and
-//! [`Composer::window`] is the tail of rows that number has room for. The tail
-//! rather than the head, because the end of the draft is where a draft being
-//! written grows — a window that followed the top would scroll what is being
-//! added off the bottom of itself. A window that follows the *cursor*, which is
-//! what a draft being edited in the middle wants, is the drawing slice's and is
-//! deliberately not here yet.
+//! [`Composer::window`] is the rows that number has room for, together with the
+//! cell the caret goes in ([`ComposerWindow`]).
+//!
+//! Past the cap the draft scrolls within the rows it has, and what the window
+//! follows is the *cursor*: it starts [`MARGIN`] rows above the row the cursor
+//! is on, as far as there are rows to start at. So a draft being written at its
+//! end shows its end — the tail the field drew before any of this, since a
+//! cursor on the last row leaves no rows below to keep — and a cursor moved back
+//! into the middle of a long draft brings the window to it rather than being
+//! moved somewhere nobody can see. It is derived from the draft, the cursor, the
+//! width and the height every time it is asked for, and nothing about a window
+//! is stored: there is no scroll offset to reset when a long draft is
+//! backspaced short again.
 //!
 //! Rows are counted with [`folded`](crate::wrap::folded), which breaks where the
 //! panel's own wrapper breaks, so a row counted here is a row the frame agrees
@@ -128,6 +136,19 @@ use crate::wrap::folded;
 /// scrolls within itself and the newest row stays at the bottom.
 pub const COMPOSER_MAX_ROWS: u16 = 6;
 
+/// How many rows of draft the window keeps above the cursor's row while it can:
+/// vim's `scrolloff`, at the one end that a field this short has room for.
+///
+/// The whole of the field's scrolling rule (see [`Composer::window`]). Two
+/// rather than none, because a window that started at the cursor's row would
+/// scroll the draft at every Down and one that ended there would do it at every
+/// Up: a margin treats the two directions alike, and it needs no memory of where
+/// the window was last frame — which is what lets the window stay derived and
+/// keeps a scroll offset off [`Composer`]. Two rather than three in a six-row
+/// field, so that a cursor moved into a long draft still has rows of it in front
+/// of the cursor as well as behind.
+const MARGIN: usize = 2;
+
 /// The modifiers that mean a character is a command rather than something
 /// somebody typed.
 ///
@@ -147,7 +168,8 @@ const CHORD: KeyModifiers = KeyModifiers::CONTROL
 /// it.
 ///
 /// One string, one offset, one width and one flag. No scroll offset, because the
-/// window is always the tail (see [`Composer::window`]).
+/// window is worked out from the cursor every time it is asked for (see
+/// [`Composer::window`]).
 ///
 /// The offset is [`Composer::cursor`], and it is where the editing keys act:
 /// what is typed goes in there, Backspace takes the character before it and
@@ -386,23 +408,82 @@ impl Composer {
             .min(COMPOSER_MAX_ROWS)
     }
 
-    /// The rows of the draft that fit in [`Composer::height`] at `width`, in
-    /// order, top row first.
+    /// The `height` rows of the draft that the cursor is in, top row first,
+    /// with the cell the caret is drawn at among them.
     ///
-    /// The *tail* of the draft's rows rather than the head, which is the whole
-    /// of the scrolling this field does: a draft being written grows at its end,
-    /// so a window ending at the last row is a window the writing appears in. A
-    /// window that follows [`Composer::cursor`] instead — which is what a draft
-    /// being edited in the middle of wants — is the drawing slice's and is not
-    /// here yet. Every row when the draft is inside
-    /// the cap, which is the ordinary case and is why nothing has to be reset
-    /// when a long draft is backspaced short again.
+    /// The window the drawing draws, whole: the rows and the caret come back
+    /// together as one [`ComposerWindow`], so [`Composer::place`] is applied in
+    /// exactly one place and a set of rows that disagrees with the caret drawn
+    /// on them cannot be built. `height` is the rows the border actually left,
+    /// which is at most [`Composer::height`] and can be fewer when the terminal
+    /// is squeezed; the width is the frame's, exactly as it is for
+    /// [`Composer::height`] and the maps.
+    ///
+    /// # Where it starts
+    ///
+    /// The first row on screen is a pure function of the draft, the cursor, the
+    /// width and the height, with nothing remembered between frames:
+    ///
+    /// ```text
+    /// first = clamp(cursor row - MARGIN, 0, rows - height)
+    /// ```
+    ///
+    /// So there is no scroll offset on the value, and nothing has to be reset
+    /// when a long draft is backspaced short again — a draft inside the height
+    /// is every row of it, and a cursor moved anywhere in a draft past it brings
+    /// the window along. A fixed [`MARGIN`] rather than the least scroll that
+    /// would do, because there is no previous window to be least against: this
+    /// is computed from scratch every time it is asked. A window ending at the
+    /// cursor's row would scroll the content at every Up, and one starting there
+    /// would do the same at every Down; a margin treats the two directions
+    /// alike. With the margin and a six-row field the cursor travels three rows
+    /// before the content moves at all, and then the window follows a row at a
+    /// time.
+    ///
+    /// The common case degenerates to the tail the field used to draw: a cursor
+    /// on the last row of a draft past the height is `rows - height` — the last
+    /// `height` rows — which is where a draft being typed at the end always
+    /// leaves it.
+    ///
+    /// # The edges
+    ///
+    /// A `height` past the number of rows is every row and no scrolling, since
+    /// the ceiling is zero. A `height` of zero — a border with nothing inside it
+    /// — is no rows at all, and the caret's row is zero, which no row exists at:
+    /// there is nothing to draw, and it is the one window whose caret is not a
+    /// row of its own rows. A `height` under [`MARGIN`] + 1 keeps the caret on
+    /// screen rather than the margin, since a caret off the window would be a
+    /// cursor the reader cannot see, which is the whole of what this is for.
     #[must_use]
-    pub fn window(&self, width: u16) -> Vec<String> {
+    pub fn window(&self, width: u16, height: u16) -> ComposerWindow {
+        let (row, column) = self.place(self.cursor, width);
         let rows = self.rows(width);
-        let from = rows.len().saturating_sub(usize::from(COMPOSER_MAX_ROWS));
+        let height = usize::from(height);
+        if height == 0 {
+            return ComposerWindow {
+                rows: Vec::new(),
+                row: 0,
+                column,
+            };
+        }
 
-        rows[from..].to_vec()
+        let first = row
+            .saturating_sub(MARGIN)
+            // Never past the last window there is rows for...
+            .min(rows.len().saturating_sub(height))
+            // ...and never so far up that the cursor's own row falls off the
+            // bottom, which the margin alone allows only in a field shorter
+            // than the margin. `row` is a row of `rows`, so this floor is at
+            // most the ceiling above it and the two never cross.
+            .max((row + 1).saturating_sub(height));
+
+        ComposerWindow {
+            rows: rows.into_iter().skip(first).take(height).collect(),
+            // `first` is at most `row`, both when the margin decided it and
+            // when either bound did, so this is a row of the window.
+            row: row - first,
+            column,
+        }
     }
 
     /// Every row the draft draws as at `width`, however many that is.
@@ -551,6 +632,47 @@ impl Composer {
 
         offset
     }
+}
+
+/// What the composer is drawn as at one width and one height: the rows on
+/// screen, and the cell the caret goes in among them.
+///
+/// One value rather than a pair of calls, because the rows and the caret are
+/// answers to the same question and have to be answered against the same window:
+/// a caret worked out beside a set of rows could be a row that was scrolled off
+/// them, and there would be two places [`Composer::place`] was applied and two
+/// chances to disagree. Coming back together, the disagreement is
+/// unrepresentable — [`Composer::window`] is the only thing that builds one.
+///
+/// A plain struct of three public fields and no methods: it is a frame's worth
+/// of arithmetic on its way to the drawing, and it holds nothing the drawing
+/// then has to ask it about.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ComposerWindow {
+    /// The rows on screen, top row first, at most the height asked for and
+    /// exactly the rows the drawing draws.
+    ///
+    /// Empty only for a height of zero. Otherwise never empty, because a draft
+    /// always has at least one row for the cursor to sit on.
+    pub rows: Vec<String>,
+    /// Which row of [`ComposerWindow::rows`] the caret is on — an index into
+    /// *these* rows and not into the draft's, so the drawing adds nothing to it
+    /// and cannot add the scroll twice.
+    ///
+    /// A row of `rows` for every height but zero, where it is zero and there is
+    /// nothing to draw it on.
+    pub row: usize,
+    /// Which column of that row the caret is drawn at, in cells rather than
+    /// characters — [`display_width`] of the row up to the cursor — so the caret
+    /// on a row of wide characters lands on the cell the character under it
+    /// draws in.
+    ///
+    /// Straight from [`Composer::place`], and so it keeps that map's row-break
+    /// rule: an offset at a soft wrap is column zero of the row below and never
+    /// a cell past the end of the row above. It can be the cell one past the end
+    /// of its row, which is where a cursor at the end of the draft sits and what
+    /// the drawing draws its blank caret in.
+    pub column: usize,
 }
 
 /// What a keystroke comes to while the composer holds the keyboard.
@@ -921,6 +1043,66 @@ mod tests {
         composer
     }
 
+    /// The rows a composer is drawn as at `width` in a field of the full
+    /// [`COMPOSER_MAX_ROWS`] — the height the layout gives any draft that wants
+    /// it, and the one the field is drawn at whenever the terminal is not
+    /// squeezed.
+    ///
+    /// The part of [`Composer::window`] the rules below are about, without the
+    /// caret they are not about. The window at other heights, and where the
+    /// caret lands in it, is asserted whole a few tests further down.
+    fn window_rows(composer: &Composer, width: u16) -> Vec<String> {
+        composer.window(width, COMPOSER_MAX_ROWS).rows
+    }
+
+    /// A draft of `rows` lines, each naming its own row number, so a window over
+    /// it says where it starts by what is in it.
+    ///
+    /// One row per line at every width these tests use, and no wrapping in it:
+    /// the scrolling rules are about which rows are on screen, and a draft that
+    /// re-flowed would put a second question in the same assertion.
+    fn numbered(rows: usize) -> String {
+        (0..rows)
+            .map(|row| format!("row {row}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// [`numbered`]'s `draft` with the cursor at the start of row `row`, last
+    /// drawn forty columns wide.
+    fn at_row(draft: &str, row: usize) -> Composer {
+        let offset = draft
+            .split('\n')
+            .take(row)
+            // The `\n` `split` took out from the end of each line.
+            .map(|line| line.len() + 1)
+            .sum();
+
+        drawn(draft, 40).at(offset)
+    }
+
+    /// Where a window over [`numbered`]'s draft sits: the row of the *draft* it
+    /// starts at, and the row of the draft the caret is on.
+    ///
+    /// Both as rows of the draft rather than of the window, because scrolling is
+    /// about which part of the draft is on screen — and the caret's own row
+    /// comes back from [`Composer::window`] as an index into the rows it came
+    /// with, which is what the drawing wants and not what these rules are
+    /// written in.
+    fn scrolled(composer: &Composer, height: u16) -> (usize, usize) {
+        let window = composer.window(40, height);
+        let first: usize = window
+            .rows
+            .first()
+            .expect("a window with a height in it has rows")
+            .strip_prefix("row ")
+            .expect("every row of the draft names its own number")
+            .parse()
+            .expect("every row of the draft names its own number");
+
+        (first, first + window.row)
+    }
+
     /// Where `key` leaves the cursor, having first insisted that it left every
     /// byte of the draft, the width and the muting exactly as they were.
     ///
@@ -1145,7 +1327,7 @@ mod tests {
         assert_eq!(muted.draft(), live.draft());
         assert_eq!(muted.is_submittable(), live.is_submittable());
         assert_eq!(muted.height(18), live.height(18));
-        assert_eq!(muted.window(18), live.window(18));
+        assert_eq!(window_rows(&muted, 18), window_rows(&live, 18));
     }
 
     #[test]
@@ -1870,7 +2052,7 @@ mod tests {
         // below — so End looks like it went down one, and Home from there comes
         // straight back to it rather than to the start of the row End left.
         let wrapped = drawn("one two", 4);
-        assert_eq!(wrapped.window(4), ["one ", "two"]);
+        assert_eq!(window_rows(&wrapped, 4), ["one ", "two"]);
 
         let ended = after(press(KeyCode::End), &wrapped.clone().at(0));
         assert_eq!(ended.cursor(), 4, "the end of the wrapped row is the break");
@@ -1894,7 +2076,7 @@ mod tests {
         // Down at a wrapped paragraph is asking for the row underneath rather
         // than for the end of it.
         let wrapped = drawn("one two six", 4);
-        assert_eq!(wrapped.window(4), ["one ", "two ", "six"]);
+        assert_eq!(window_rows(&wrapped, 4), ["one ", "two ", "six"]);
 
         assert_eq!(cursor_after(press(KeyCode::Up), &wrapped), 7);
         assert_eq!(cursor_after(press(KeyCode::Up), &wrapped.clone().at(7)), 3);
@@ -2053,8 +2235,10 @@ mod tests {
     #[test]
     fn a_tall_paste_grows_the_field_to_the_cap_and_windows_to_the_tail() {
         // Nothing about the field's own scrolling changes: the height stops at
-        // the cap and the window is the last rows, so the end of what was
-        // pasted — where the next character will go — is what is on screen.
+        // the cap, a paste snaps the cursor to the end of what it put in, and a
+        // cursor on the last row leaves the window at the last rows — so the
+        // end of what was pasted, where the next character will go, is what is
+        // on screen.
         let block = (1..=20)
             .map(|line| format!("line {line}"))
             .collect::<Vec<_>>()
@@ -2063,7 +2247,7 @@ mod tests {
 
         assert_eq!(next.height(40), COMPOSER_MAX_ROWS);
         assert_eq!(
-            next.window(40),
+            window_rows(&next, 40),
             [
                 "line 15", "line 16", "line 17", "line 18", "line 19", "line 20"
             ]
@@ -2075,14 +2259,17 @@ mod tests {
         // The field is always on screen and the cursor always has a row.
         for width in [1, 20, 200] {
             assert_eq!(composer("").height(width), 1);
-            assert_eq!(composer("").window(width), [""]);
+            assert_eq!(window_rows(&composer(""), width), [""]);
         }
     }
 
     #[test]
     fn a_draft_inside_the_width_is_one_row_tall() {
         assert_eq!(composer("why nine passes").height(40), 1);
-        assert_eq!(composer("why nine passes").window(40), ["why nine passes"]);
+        assert_eq!(
+            window_rows(&composer("why nine passes"), 40),
+            ["why nine passes"]
+        );
     }
 
     #[test]
@@ -2093,9 +2280,9 @@ mod tests {
         assert_eq!(composer("one\ntwo\n").height(40), 3);
         assert_eq!(composer("one\ntwo\nthree").height(40), 3);
 
-        assert_eq!(composer("one\ntwo").window(40), ["one", "two"]);
+        assert_eq!(window_rows(&composer("one\ntwo"), 40), ["one", "two"]);
         assert_eq!(
-            composer("one\n").window(40),
+            window_rows(&composer("one\n"), 40),
             ["one", ""],
             "the row after a newline is where the cursor is sitting"
         );
@@ -2103,7 +2290,7 @@ mod tests {
 
     #[test]
     fn a_wrap_is_one_row_more_and_the_rows_are_the_words_in_order() {
-        let rows = composer("It walks the tree and writes what it finds.").window(18);
+        let rows = window_rows(&composer("It walks the tree and writes what it finds."), 18);
 
         // The space each row broke at is kept, on the row above the break: the
         // draft is text somebody is still typing, so every space typed has a
@@ -2150,27 +2337,27 @@ mod tests {
         let long = composer(&"line\n".repeat(40));
 
         assert_eq!(long.height(40), COMPOSER_MAX_ROWS);
-        assert_eq!(long.window(40).len(), usize::from(COMPOSER_MAX_ROWS));
+        assert_eq!(window_rows(&long, 40).len(), usize::from(COMPOSER_MAX_ROWS));
 
         let wide = composer(&"word ".repeat(200));
 
         assert_eq!(wide.height(20), COMPOSER_MAX_ROWS);
-        assert_eq!(wide.window(20).len(), usize::from(COMPOSER_MAX_ROWS));
+        assert_eq!(window_rows(&wide, 20).len(), usize::from(COMPOSER_MAX_ROWS));
     }
 
     #[test]
-    fn the_window_is_the_tail_so_the_row_typing_lands_on_is_always_in_it() {
-        // Typing lands at the end of the draft, so the row it appears on is the
-        // last row: a window that ends there is a window it is in. A window
-        // that follows the cursor wherever the movers left it is the drawing
-        // slice's, and is not what this asserts.
+    fn the_window_ends_at_the_cursor_so_the_row_typing_lands_on_is_always_in_it() {
+        // Typing lands where the cursor is, and a draft being written has it at
+        // the end: the row it appears on is the last row, and the window that
+        // follows the cursor there is the tail the field drew before it followed
+        // anything, since there are no rows below to keep.
         let draft = (1..=20)
             .map(|line| format!("line {line}"))
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
         let composer = composer(&draft);
-        let window = composer.window(40);
+        let window = window_rows(&composer, 40);
 
         assert_eq!(
             window,
@@ -2181,6 +2368,104 @@ mod tests {
             Some(""),
             "the last row is the one the next character typed would appear on"
         );
+    }
+
+    #[test]
+    fn a_cursor_on_the_last_row_starts_the_window_at_the_tail() {
+        // The margin's degenerate case, stated in the numbers the rule is
+        // written in: ten rows, a field of six, the cursor on the last row —
+        // the first row drawn is the fourth, which is `rows - height` and the
+        // tail exactly. The ceiling wins over the margin here, and that is why
+        // a draft being typed at its end draws what it always drew.
+        let draft = numbered(10);
+        let window = composer(&draft).window(40, 6);
+
+        assert_eq!(
+            window.rows,
+            ["row 4", "row 5", "row 6", "row 7", "row 8", "row 9"]
+        );
+        assert_eq!(scrolled(&composer(&draft), 6), (4, 9));
+        assert_eq!(
+            window.row, 5,
+            "the caret is on the last drawn row, which is the last row of the draft"
+        );
+        assert_eq!(
+            window.column,
+            "row 9".len(),
+            "and in the cell after the last character, where the next one goes"
+        );
+    }
+
+    #[test]
+    fn the_cursor_travels_three_rows_before_the_window_follows_it_down() {
+        // Twelve rows in a field of six, walked from the top with the Down key.
+        // The first three rows are travelled with the content standing still —
+        // the margin is above the cursor, and at the top of a draft there is
+        // nothing above to keep — and from there every row takes the window
+        // with it, until the last window there are rows for.
+        let draft = numbered(12);
+        let mut current = drawn(&draft, 40).at(0);
+        let mut firsts = vec![scrolled(&current, 6).0];
+        for _ in 1..12 {
+            current = after(press(KeyCode::Down), &current);
+            firsts.push(scrolled(&current, 6).0);
+        }
+
+        assert_eq!(firsts, [0, 0, 0, 1, 2, 3, 4, 5, 6, 6, 6, 6]);
+    }
+
+    #[test]
+    fn the_window_follows_the_cursor_up_a_row_at_a_time_as_well_as_down() {
+        // The same twelve rows walked the other way with Up, from the last row
+        // to the first: a cursor moved above the six rows on screen brings them
+        // up to it rather than being moved somewhere nobody can see. The
+        // standing still is at the bottom this time, where the ceiling holds the
+        // window at the last six rows however far up the cursor is inside them.
+        let draft = numbered(12);
+        let mut current = drawn(&draft, 40);
+        let mut firsts = vec![scrolled(&current, 6).0];
+        for _ in 1..12 {
+            current = after(press(KeyCode::Up), &current);
+            firsts.push(scrolled(&current, 6).0);
+        }
+
+        assert_eq!(firsts, [6, 6, 6, 6, 5, 4, 3, 2, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn the_caret_is_on_the_cursors_own_row_of_every_window_it_comes_back_in() {
+        // The window and the caret are one answer, so there is no window the
+        // caret is not a row of: at every row of a long draft, at every height
+        // a field is ever drawn at, the caret's row is a row of the rows that
+        // came back with it, and it is the row the cursor is on.
+        let draft = numbered(12);
+        for row in 0..12 {
+            for height in 1..=COMPOSER_MAX_ROWS {
+                let composer = at_row(&draft, row);
+                let window = composer.window(40, height);
+                let (first, caret) = scrolled(&composer, height);
+
+                assert_eq!(caret, row, "the caret is on the cursor's row");
+                assert!(
+                    window.row < window.rows.len(),
+                    "row {row} at height {height} started at {first} and put the caret on row {} \
+                     of {} rows",
+                    window.row,
+                    window.rows.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_field_with_no_rows_inside_it_comes_back_with_none() {
+        // A border squeezed to nothing: there is no row to draw and no row to
+        // put a caret on, and the arithmetic says so rather than slicing past
+        // the end of the draft.
+        let window = composer(&numbered(12)).window(40, 0);
+
+        assert!(window.rows.is_empty());
+        assert_eq!(window.row, 0);
     }
 
     #[test]
@@ -2195,7 +2480,7 @@ mod tests {
             let composer = composer(&draft);
 
             assert_eq!(composer.height(40), u16::try_from(lines).expect("small"));
-            assert_eq!(composer.window(40).len(), lines);
+            assert_eq!(window_rows(&composer, 40).len(), lines);
         }
     }
 
@@ -2207,7 +2492,7 @@ mod tests {
         let long = "It walks the tree and writes what it finds.";
 
         assert_eq!(composer(long).height(0), 1);
-        assert_eq!(composer(long).window(0), [long]);
+        assert_eq!(window_rows(&composer(long), 0), [long]);
     }
 
     #[test]
@@ -2223,7 +2508,10 @@ mod tests {
                     height <= COMPOSER_MAX_ROWS,
                     "{draft:?} at {width} came back {height}"
                 );
-                assert_eq!(usize::from(height), composer(draft).window(width).len());
+                assert_eq!(
+                    usize::from(height),
+                    window_rows(&composer(draft), width).len()
+                );
             }
         }
     }
@@ -2279,7 +2567,7 @@ mod tests {
         // round trip: the round trip would pass just as well with the offset
         // drawn at the end of the row above.
         let wrapped = composer("one two");
-        assert_eq!(wrapped.window(4), ["one ", "two"]);
+        assert_eq!(window_rows(&wrapped, 4), ["one ", "two"]);
 
         // Offset 4 is both the cell after "one " and column zero of "two", and
         // it is the lower one.

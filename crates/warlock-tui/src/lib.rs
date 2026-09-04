@@ -295,6 +295,10 @@ pub use composer::Composed;
 /// column, with the cursor always at the end, and how many rows they need at a
 /// given width.
 pub use composer::Composer;
+/// What the composer is drawn as at one width and one height: the rows on
+/// screen, which follow the cursor rather than the end of the draft, and the
+/// cell the caret goes in among them.
+pub use composer::ComposerWindow;
 /// What a pasted block comes to at the composer, and the only thing it can come
 /// to: the draft goes on being typed into. There is no submit and no leave to
 /// return, so a paste can never start a turn however many newlines it carries.

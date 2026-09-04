@@ -81,7 +81,7 @@ use warlock_engine::{NodeState, scope};
 use crate::account::{Account, Line as Entry};
 use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
 use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
-use crate::composer::Composer;
+use crate::composer::{COMPOSER_MAX_ROWS, Composer};
 use crate::confirm::{Answer, QuitConfirm};
 use crate::panel::Mode;
 use crate::prompt::{ScopeField, ScopePrompt};
@@ -1939,7 +1939,11 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, live: b
     let inner = pane_inner(area);
     frame.render_widget(pane_block(live), area);
 
-    let rows = composer.window(inner.width);
+    // The height asked for is the cap rather than `inner.height`, and the cut
+    // below is still here, so this draws exactly what it drew before the window
+    // learned to follow the cursor. Passing the rows the border actually left
+    // and drawing the caret this window comes back with is the next slice.
+    let rows = composer.window(inner.width, COMPOSER_MAX_ROWS).rows;
     let from = rows.len().saturating_sub(usize::from(inner.height));
     let rows = &rows[from..];
     let room = rows
