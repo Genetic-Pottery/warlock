@@ -204,12 +204,14 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
 
 use ignore::WalkBuilder;
 
 use crate::document::Described;
+use crate::hash::length;
 use crate::ignores;
 use crate::languages;
 use crate::pact::{DOCUMENT_FILE, Error, MANIFEST_DIR, Observer};
@@ -1323,6 +1325,115 @@ fn is_prose(path: &Path) -> bool {
 /// walks by. Directories are not collected: a child directory matters here only
 /// as the place a `WARLOCK.md` was found, and a child with none simply never
 /// appears.
+/// Domain separation for the carry digest, on the same terms as
+/// [`HASH_CONTEXT`](crate::hash): this digest answers a different question from
+/// the subtree hash, and the two must not be capable of colliding.
+const CARRY_HASH_CONTEXT: &str = "warlock carry hash v1 2026-09-06";
+
+/// A digest over everything that has to be unchanged for `directory`'s recorded
+/// grant to stand without a new pass: what a pass would be shown — its own
+/// non-prose files and each immediate child's `WARLOCK.md` — **and the document
+/// that grant was earned for**.
+///
+/// # Why this is not [`subtree_hash`](crate::subtree_hash)
+///
+/// The subtree hash asks whether anything at or below a directory moved. That
+/// is the right trigger for *this document is owed a look*, and it stays the
+/// trigger. It is the wrong question for *would a pass write anything
+/// different*, because a request holds neither the directory's readme nor a
+/// single byte from below its immediate children: both can move, restale the
+/// directory, and leave the pass with the identical input it had last time.
+///
+/// This digest is taken over the request's own inputs instead, so two runs
+/// that would be shown the same thing agree — and [`pact`](crate::pact) can
+/// decline to pay for the second. It is the early cutoff a build system does
+/// with the hash of a target's output: the trigger stays mechanical and
+/// nobody's opinion enters, and what is skipped is the work that provably had
+/// nothing new to read.
+///
+/// # Why the directory's own document is in here, when no pass ever sees it
+///
+/// Because a cutoff carries that document forward and grants it, and a grant
+/// says a model pass produced what is on disk. A `WARLOCK.md` is prose, so it
+/// reaches no request and moves no other digest here — and a person who edits
+/// one by hand would otherwise slip past the cutoff and have their own
+/// sentences stamped granted, with no pass having read anything. That is the
+/// false green the ledger exists to prevent, and it is the reason the document
+/// is a third section below rather than an omission worth explaining.
+///
+/// So an edited document does not match, and the pass runs: the only road back
+/// to fresh is still a pass, exactly as the repository's own `CLAUDE.md` says.
+///
+/// # It cannot drift from the request
+///
+/// The walk is [`walk`], the same call [`gather_request`] makes, with the same
+/// depth, the same ignore rules and the same prose exclusion. A file the rules
+/// removed is absent from both; a readme is in neither. There is no second
+/// list to keep in step.
+///
+/// # Raw bytes, not the fitted form
+///
+/// A file is digested as it sits on disk, before elision. So editing a test
+/// body that [`languages`](crate::languages) would have dropped anyway still
+/// counts as a change, and still costs a pass. That is the conservative
+/// direction on purpose: this digest can charge for a pass that was not
+/// strictly owed, and can never skip one that was. A false green is the one
+/// outcome that has to be earned, and no saving is worth reaching it.
+///
+/// # `None` is safe, which is why it is `None` and not an error
+///
+/// A directory that cannot be walked, or a file that cannot be read, answers
+/// `None`, and the only thing a caller may conclude from `None` is *run the
+/// pass*. That is the opposite of [`subtree_hash`](crate::subtree_hash), where
+/// an unreadable file has to be a hard error because a digest that quietly
+/// skipped it would match the digest of a subtree that never had it — a false
+/// green. Nothing of the sort is reachable from here: every way this function
+/// fails costs a pass that might not have been owed, and none of them can skip
+/// one that was. So the failure is worth no error type of its own.
+pub(crate) fn carry_hash(directory: &Path) -> Option<String> {
+    let found = walk(directory).ok()?;
+    let mut hasher = blake3::Hasher::new_derive_key(CARRY_HASH_CONTEXT);
+
+    // Two sections, each length-prefixed and each announced by its count, so no
+    // arrangement of one can be read as the other: a directory holding a file
+    // named `x` and one holding a child `x` with a document are different
+    // inputs and must be different digests.
+    hasher.update(&length(found.files.len()).to_le_bytes());
+    for (relative, path) in &found.files {
+        hasher.update(&length(relative.len()).to_le_bytes());
+        hasher.update(relative.as_bytes());
+        let bytes = fs::read(path).ok()?;
+        hasher.update(&length(bytes.len()).to_le_bytes());
+        hasher.update(&bytes);
+    }
+
+    hasher.update(&length(found.child_documents.len()).to_le_bytes());
+    for (child, path) in &found.child_documents {
+        hasher.update(&length(child.len()).to_le_bytes());
+        hasher.update(child.as_bytes());
+        let bytes = fs::read(path).ok()?;
+        hasher.update(&length(bytes.len()).to_le_bytes());
+        hasher.update(&bytes);
+    }
+
+    // The third section: the document itself, absent and empty told apart by
+    // the marker byte, so a directory with no document cannot digest as one
+    // holding a document of nothing.
+    match fs::read(directory.join(DOCUMENT_FILE)) {
+        Ok(bytes) => {
+            hasher.update(&[1]);
+            hasher.update(&length(bytes.len()).to_le_bytes());
+            hasher.update(&bytes);
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            hasher.update(&[0]);
+        }
+        Err(_) => return None,
+    }
+
+    Some(hasher.finalize().to_hex().to_string())
+}
+
 fn walk(dir: &Path) -> Result<Found, Error> {
     let walker = WalkBuilder::new(dir)
         // The same three rules as `load` and `hash`, for the same reasons: a

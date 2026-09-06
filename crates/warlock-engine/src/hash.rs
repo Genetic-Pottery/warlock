@@ -215,7 +215,7 @@ fn files_under(dir: &Path) -> Result<BTreeMap<String, PathBuf>, Error> {
 /// every target this builds for, so the clamp is unreachable, and a hash
 /// function is the last place to introduce a panic over a case that cannot
 /// happen.
-fn length(bytes: usize) -> u64 {
+pub(crate) fn length(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 

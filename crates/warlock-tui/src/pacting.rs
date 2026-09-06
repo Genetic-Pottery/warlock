@@ -347,6 +347,13 @@ pub(crate) struct Running {
     pub(crate) work: Work,
     /// The app as it stood before the toggle painted the subtree.
     pub(crate) before: App,
+    /// Every directory the run carried forward rather than describing, as its
+    /// [`PactEvent::Unchanged`] arrived.
+    ///
+    /// Kept here rather than derived at the end because it cannot be derived:
+    /// a carried document and a freshly written one are the same bytes in the
+    /// same place, and only the run knows which happened.
+    pub(crate) unchanged: Vec<PathBuf>,
 }
 
 /// What a worker thread was asked to do: carry a pact toggle out, or refresh a
@@ -571,6 +578,17 @@ pub(crate) enum PactEvent {
         /// The directory, as an absolute path.
         directory: PathBuf,
     },
+    /// `directory` needed no pass and its document was carried forward — the
+    /// engine's own word, from [`pact::Observer::unchanged`].
+    ///
+    /// Recolours rows exactly as [`PactEvent::Documented`] does, because it
+    /// means the same thing about the tree. What it does not mean is that
+    /// anything was written, which is why it is a variant of its own rather
+    /// than the same one sent twice.
+    Unchanged {
+        /// The directory, as an absolute path.
+        directory: PathBuf,
+    },
     /// The run is over, however it went: exactly what [`apply_toggle`] returned.
     Finished(Result<Toggled, String>),
 }
@@ -679,6 +697,14 @@ impl pact::Observer for Reporting<'_> {
             directory: directory.to_path_buf(),
         });
     }
+
+    /// Passed on the same way, and for the same reason the engine sends it
+    /// separately: the row goes green either way, and only the wording differs.
+    fn unchanged(&mut self, directory: &Path) {
+        let _ = self.events.send(PactEvent::Unchanged {
+            directory: directory.to_path_buf(),
+        });
+    }
 }
 
 /// Run `work` on a thread of its own, and hand back the channel it reports on.
@@ -754,6 +780,7 @@ fn start_run<P: Wired + Agent>(
         cancel,
         work,
         before,
+        unchanged: Vec::new(),
     }
 }
 
@@ -1139,8 +1166,10 @@ fn drain(
     now: Instant,
 ) -> Option<Reloaded> {
     // No run, nothing drained, nothing reloaded — which is what almost every
-    // frame of warlock's life does here.
-    let running = run.as_ref()?;
+    // frame of warlock's life does here. Taken mutably because a carried
+    // directory is recorded on the run as its event arrives; the borrow is over
+    // before the `take` below.
+    let running = run.as_mut()?;
 
     let outcome = loop {
         match running.events.try_recv() {
@@ -1244,6 +1273,17 @@ fn drain(
                 // corrects rather than the thing it contradicts.
                 app.insert_file_row(directory.join(DOCUMENT_FILE));
             }
+            // The same two paints as `Documented` — the tree cannot tell the
+            // two apart and should not try — and one thing besides: the
+            // directory is remembered, because the filesystem cannot say
+            // afterwards whether the document on disk was written by this run
+            // or kept from the last, and the section's closing line turns on
+            // exactly that.
+            Ok(PactEvent::Unchanged { directory }) => {
+                app.set_subtree_state(&directory, NodeState::PactedFresh);
+                app.insert_file_row(directory.join(DOCUMENT_FILE));
+                running.unchanged.push(directory);
+            }
             Ok(PactEvent::Finished(outcome)) => break Some(outcome),
             // Still running, and nothing new to say.
             Err(TryRecvError::Empty) => return None,
@@ -1322,7 +1362,7 @@ fn drain(
     // screen and the account belongs to whichever one survives — and because a
     // run that ends without its clocks stopped is a finished run whose newest
     // line goes on counting up for as long as warlock is open.
-    close_account(app, scope, &refusals, cancelled, now);
+    close_account(app, scope, &refusals, &running.unchanged, cancelled, now);
 
     // The run is over and everything it recorded is on disk, so the rows on
     // screen are one load out of date whichever arm above ran. Saying so is the
@@ -1376,6 +1416,7 @@ fn close_account(
     app: &mut App,
     scope: &Scope,
     refusals: &[Refusal],
+    unchanged: &[PathBuf],
     cancelled: bool,
     now: Instant,
 ) {
@@ -1384,7 +1425,7 @@ fn close_account(
             account.close_section(&Outcome::Cancelled, now);
         }
         account.close_open_sections(now, |section| {
-            section_outcome(section, refusals, &scope.root)
+            section_outcome(section, refusals, unchanged, &scope.root)
         });
         account.finish(now);
     });
@@ -1406,7 +1447,12 @@ fn close_account(
 /// said rather than smoothed over: a run whose worker died half way through a
 /// pass leaves exactly this, and `wrote … — 0 bytes` would be a claim about a
 /// file that is not there.
-fn section_outcome(section: &Section, refusals: &[Refusal], root: &Path) -> Outcome {
+fn section_outcome(
+    section: &Section,
+    refusals: &[Refusal],
+    unchanged: &[PathBuf],
+    root: &Path,
+) -> Outcome {
     let refused = refusals
         .iter()
         .find(|refusal| Path::new(&section_label(root, &refusal.directory)) == section.directory());
@@ -1420,6 +1466,17 @@ fn section_outcome(section: &Section, refusals: &[Refusal], root: &Path) -> Outc
     // absolute path to go and look at it: the label is relative to the root, so
     // joining it back on is what the run walked.
     let document = section.directory().join(DOCUMENT_FILE);
+
+    // Asked before the filesystem is, because the filesystem cannot answer it:
+    // a document this run carried forward and one it wrote a moment ago are
+    // indistinguishable on disk, and calling the first one written would put a
+    // write in the panel that never happened.
+    if unchanged
+        .iter()
+        .any(|carried| Path::new(&section_label(root, carried)) == section.directory())
+    {
+        return Outcome::Unchanged { document };
+    }
     match fs::metadata(root.join(&document)) {
         Ok(written) => Outcome::Wrote {
             document,
@@ -2099,6 +2156,7 @@ mod tests {
             cancel: CancelGuard::new(),
             work: work.clone(),
             before,
+            unchanged: Vec::new(),
         });
         pact.keep_up(app, manifest, scope, Instant::now());
         assert!(!pact.running(), "the run reported its outcome and is over");
@@ -2475,6 +2533,7 @@ mod tests {
                 | PactEvent::Requesting { .. }
                 | PactEvent::Rejected { .. }
                 | PactEvent::Documented { .. }
+                | PactEvent::Unchanged { .. }
                 | PactEvent::Finished(_) => None,
             })
             .collect()
@@ -2496,6 +2555,7 @@ mod tests {
                 | PactEvent::Requesting { .. }
                 | PactEvent::Rejected { .. }
                 | PactEvent::Documented { .. }
+                | PactEvent::Unchanged { .. }
                 | PactEvent::Finished(_) => None,
             })
             .collect()
@@ -3736,6 +3796,70 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_the_run_carried_is_announced_unchanged_rather_than_documented() {
+        // The same fixture as the test below, minus the write into `crates`
+        // itself: only `beta/src` has anything new, so `beta` is described
+        // because its child's document moved under it, and `crates` is carried
+        // — its own files and its children's documents are what they were.
+        let scratch = two_crates("carried");
+        let before = pacted(&scratch, "crates");
+        scratch.write("crates/beta/src/lib.rs", "//! Beta, and something new.\n");
+
+        let agent = Canned::new(&scratch, []);
+        let events = events_from(
+            &scratch,
+            &before,
+            &refreshing(&scratch, "crates"),
+            &agent,
+            &Cancel::new(),
+        );
+
+        let carried: Vec<PathBuf> = events
+            .iter()
+            .filter_map(|event| match event {
+                PactEvent::Unchanged { directory } => Some(
+                    directory
+                        .strip_prefix(&scratch.root)
+                        .unwrap_or(directory)
+                        .to_path_buf(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            carried,
+            [PathBuf::from("crates")],
+            "the one directory that needed no pass says so in its own word",
+        );
+
+        // And it is not also announced as documented: one word per directory,
+        // or a front end would draw the write that did not happen.
+        let documented: Vec<PathBuf> = events
+            .iter()
+            .filter_map(|event| match event {
+                PactEvent::Documented { directory } => Some(
+                    directory
+                        .strip_prefix(&scratch.root)
+                        .unwrap_or(directory)
+                        .to_path_buf(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !documented.contains(&PathBuf::from("crates")),
+            "a carried directory is announced once, and not as documented: \
+             {documented:?}",
+        );
+
+        // The pass really was skipped, which is the whole point of the word.
+        assert!(
+            !agent.directories().contains(&PathBuf::from("crates")),
+            "no pass was paid for at `crates`",
+        );
+    }
+
+    #[test]
     fn a_refresh_describes_the_stale_directories_and_leaves_the_fresh_ones_as_they_were() {
         // A pact of everything, then one file moved under `beta`, then the
         // refresh key on the root of it all. Three of the five directories are
@@ -3753,6 +3877,11 @@ mod tests {
             })
             .collect();
         scratch.write("crates/beta/src/lib.rs", "//! Beta, and something new.\n");
+        // And one directly in `crates`, so the root of the run has something
+        // new to read too. Without it the early cutoff carries its document
+        // forward — `beta`'s document did not move — and the run is two
+        // directories rather than the three this is about.
+        scratch.write("crates/shared.rs", "//! Shared, and something new.\n");
 
         let agent = Canned::new(&scratch, []);
         let events = events_from(
@@ -3958,6 +4087,7 @@ mod tests {
             cancel,
             work: pact_of("/repo/crates"),
             before: App::from_tree(&tree),
+            unchanged: Vec::new(),
         };
 
         assert!(!watching.is_cancelled(), "a run in flight is not cancelled");
@@ -3995,6 +4125,7 @@ mod tests {
             cancel: CancelGuard::new(),
             work: pact_of("/repo/crates"),
             before: before.clone(),
+            unchanged: Vec::new(),
         };
         (app, before, Manifest::new(), events, running)
     }
@@ -4336,6 +4467,7 @@ mod tests {
             cancel: CancelGuard::new(),
             work: pact_of("/repo/crates"),
             before: app.clone(),
+            unchanged: Vec::new(),
         });
 
         // The deepest directory's pass delivers, and the run moves on to the
@@ -4408,6 +4540,7 @@ mod tests {
             cancel: CancelGuard::new(),
             work,
             before: app.clone(),
+            unchanged: Vec::new(),
         };
         (events, Pact::with_run(running))
     }
@@ -4623,6 +4756,7 @@ mod tests {
             cancel: CancelGuard::new(),
             work: pact_of("/repo/crates"),
             before: app.clone(),
+            unchanged: Vec::new(),
         });
 
         // The reader parks on `docs`, which is nowhere near the subtree
@@ -4703,6 +4837,7 @@ mod tests {
             cancel: CancelGuard::new(),
             work: pact_of("/repo/crates"),
             before: before.clone(),
+            unchanged: Vec::new(),
         });
 
         events
@@ -4839,6 +4974,7 @@ mod tests {
             cancel,
             work: work.clone(),
             before: app.clone(),
+            unchanged: Vec::new(),
         });
         let mut progress: Vec<String> = Vec::new();
         for (frame, event) in said.into_iter().enumerate() {
@@ -5511,6 +5647,7 @@ mod tests {
             cancel: CancelGuard::new(),
             work: pact_of(scope.root.clone()),
             before: app.clone(),
+            unchanged: Vec::new(),
         });
         let mut lengths = Vec::new();
         for (frame, event) in said.into_iter().enumerate() {
@@ -5707,6 +5844,7 @@ mod tests {
                 cancel: CancelGuard::new(),
                 work,
                 before: app.clone(),
+                unchanged: Vec::new(),
             });
             for (frame, event) in said.into_iter().enumerate() {
                 let frame = u64::try_from(frame).expect("a run of fewer than 2^64 events");
@@ -5772,6 +5910,7 @@ mod tests {
             cancel: CancelGuard::new(),
             work: pact_of("/repo/crates"),
             before: before.clone(),
+            unchanged: Vec::new(),
         };
         (app, before, Manifest::new(), events, running)
     }
@@ -6002,6 +6141,10 @@ mod tests {
                 "//! A crate of its own, and something new.\n",
             );
         }
+        // And one in `crates` itself, so the directory above all of them has
+        // something new to read rather than being carried forward by the early
+        // cutoff — the count this is about is seven passes, not six.
+        scratch.write("crates/shared.rs", "//! Shared, and something new.\n");
 
         let (mut app, scope) = load(&scratch);
         let mut manifest = pacted_once.clone();
@@ -6172,6 +6315,7 @@ mod tests {
             cancel: CancelGuard::new(),
             work: pact_of("/repo/crates"),
             before: before.clone(),
+            unchanged: Vec::new(),
         });
 
         events
@@ -6403,6 +6547,7 @@ mod tests {
             cancel: CancelGuard::new(),
             work: pact_of("/repo/crates"),
             before: before.clone(),
+            unchanged: Vec::new(),
         });
 
         events
@@ -6470,6 +6615,7 @@ mod tests {
                 cancel: CancelGuard::new(),
                 work: pact_of("/repo/crates"),
                 before,
+                unchanged: Vec::new(),
             });
 
             events
@@ -6542,6 +6688,7 @@ mod tests {
             cancel: CancelGuard::new(),
             work: pact_of(scratch.path("crates/engine")),
             before: app.clone(),
+            unchanged: Vec::new(),
         });
         events
             .send(PactEvent::Finished(Ok(Toggled {
@@ -6764,6 +6911,7 @@ mod tests {
                 cancel: CancelGuard::new(),
                 work: pact_of(scratch.path("crates/engine")),
                 before: app.clone(),
+                unchanged: Vec::new(),
             });
             events
                 .send(PactEvent::Finished(Ok(Toggled {

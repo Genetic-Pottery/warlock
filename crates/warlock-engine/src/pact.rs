@@ -221,7 +221,9 @@ use std::str::Utf8Error;
 use ignore::WalkBuilder;
 
 use crate::document::{self, ATTEMPTS, Defect, Fill};
-use crate::fitting::{Fitted, PER_FILE_BYTE_CAP, Problem, byte_count, carried_bytes, fit};
+use crate::fitting::{
+    Fitted, PER_FILE_BYTE_CAP, Problem, byte_count, carried_bytes, carry_hash, fit,
+};
 use crate::ignores;
 use crate::manifest::{ROOT_MODULE, temp_file_name, write_and_sync};
 use crate::scope::valid_scope;
@@ -359,7 +361,7 @@ pub fn pact_subtree(
         outcomes,
         failures,
         problems,
-    } = describe_and_grant(&directories, root, agent, observer);
+    } = describe_and_grant(&directories, root, &BTreeMap::new(), agent, observer);
 
     Ok(PactedSubtree {
         manifest: rewrite(manifest, &directories, root, outcomes),
@@ -494,11 +496,29 @@ pub fn refresh_subtree(
         .filter(|candidate| !is_fresh(manifest, root, candidate))
         .collect();
 
+    // What each stale directory looked like when it was last granted, for the
+    // early cutoff in phase one. Read here, where the manifest is, so `describe_and_grant`
+    // keeps knowing nothing about manifests: it is handed the digests the same
+    // way it is handed the list of directories.
+    //
+    // A directory with no recorded digest simply has no entry here, which is
+    // the same answer as a digest that does not match — the pass runs. That is
+    // what makes an old manifest, written before the field existed, cost one
+    // full refresh and no correctness at all.
+    let recorded: BTreeMap<PathBuf, String> = stale
+        .iter()
+        .filter_map(|candidate| {
+            let module = to_manifest_path(root, candidate).ok()?;
+            let carry = manifest.entry(&module)?.carry_hash()?;
+            Some((candidate.clone(), carry.to_string()))
+        })
+        .collect();
+
     let Described {
         outcomes,
         failures,
         problems,
-    } = describe_and_grant(&stale, root, agent, observer);
+    } = describe_and_grant(&stale, root, &recorded, agent, observer);
 
     // Covering nothing is the whole of the carry-through: `rewrite` drops an
     // existing entry only where the run covered its module and it earned
@@ -581,6 +601,14 @@ struct Grant {
     hash: String,
     /// The run's single [`now_rfc3339`] reading, RFC 3339.
     at: String,
+    /// What this directory must still look like for this grant to be carried
+    /// forward without a pass, from [`carry_hash`](crate::fitting::carry_hash):
+    /// its request's inputs and the document this grant is for.
+    ///
+    /// `None` where it could not be taken. Recorded that way rather than
+    /// dropped, because a grant with no input digest is a grant with no
+    /// shortcut next time, and that is the honest and the safe pair.
+    carry: Option<String>,
 }
 
 impl Outcome {
@@ -591,7 +619,8 @@ impl Outcome {
         entry.overwrite_run_fields(
             self.module,
             self.document,
-            self.grant.map(|Grant { hash, at }| (hash, at)),
+            self.grant
+                .map(|Grant { hash, at, carry }| (hash, at, carry)),
         );
     }
 
@@ -601,10 +630,83 @@ impl Outcome {
     fn into_entry(self) -> PactEntry {
         let entry = PactEntry::stored(self.module, self.document);
         match self.grant {
-            Some(Grant { hash, at }) => entry.with_grant(hash, at),
+            Some(Grant { hash, at, carry }) => {
+                let entry = entry.with_grant(hash, at);
+                match carry {
+                    Some(carry) => entry.with_carry_hash(carry),
+                    None => entry,
+                }
+            }
             None => entry,
         }
     }
+}
+
+/// The document `pacted` already has, where this run need not pay for another:
+/// `Some(path)` to carry that document forward, `None` to run the pass.
+///
+/// # What is being decided
+///
+/// The directory is stale — [`refresh_subtree`] filtered for that — so
+/// something at or below it moved. Stale is the trigger to *look*, and this is
+/// the look: if what a pass would be shown is byte for byte what the last pass
+/// was shown, then the document it would write is a document about the same
+/// evidence, and there is nothing to pay a model to re-read. The existing
+/// document stands, and phase two grants it against the directory's new subtree
+/// hash.
+///
+/// This is a build system's early cutoff, and it is the same bargain: the
+/// trigger stays mechanical, no opinion about whether a change *mattered* is
+/// asked for or offered, and what gets skipped is only ever work that provably
+/// had nothing new to read.
+///
+/// # Why it compounds
+///
+/// Editing one file restales every directory from it up to the root, and each
+/// of those ancestors holds a request made of its own files and its children's
+/// documents — nothing from further down. So if the edit did not change the
+/// leaf's document, no ancestor's request changed either, and the refresh costs
+/// the one pass at the bottom rather than one per level. That is why the digest
+/// is taken in phase one, where the children are already final.
+///
+/// # Where it fires, measured rather than assumed
+///
+/// On a real model, over a three-level fixture: a markdown file added or edited
+/// anywhere below cost three passes and now costs none, because prose reaches
+/// no request and so moves no digest at any level. **A code edit still costs
+/// the full path**, and will keep doing so — a pass rewrites its whole document
+/// in fresh wording every time it runs, so the leaf's document always moves,
+/// and a moved child document is a moved parent request. One measured case: a
+/// directory whose own file was byte-identical came back with every line
+/// reworded, same substance throughout.
+///
+/// The cutoff is therefore worth a great deal on prose and nothing on code, and
+/// it is never worse than the cascade it replaces. Closing the code half means
+/// digesting what a child's document *asserts* — its file and directory keys,
+/// its declared symbols — rather than the sentences it says them in, so that
+/// rewording stops propagating. That is a change to what goes into the digest
+/// and not to any of the reasoning above.
+///
+/// # The three conditions, all mechanical
+///
+/// * **A digest was recorded** to compare against. An entry granted before the
+///   field existed has none, and pays for one pass to get one.
+/// * **This run could take one.** [`carry_hash`] answers `None` on any failure
+///   and `None` never matches, so every way of not knowing runs the pass.
+/// * **The document is actually on disk.** A grant pointing at a file nobody
+///   wrote is precisely the false green the module exists to avoid, and a
+///   digest match says nothing about whether the document survived.
+fn carried_document(
+    pacted: &Path,
+    carry: Option<&str>,
+    recorded: &BTreeMap<PathBuf, String>,
+) -> Option<PathBuf> {
+    let before = recorded.get(pacted)?;
+    if carry? != before {
+        return None;
+    }
+    let carried = pacted.join(DOCUMENT_FILE);
+    carried.is_file().then_some(carried)
 }
 
 /// The two phases themselves, over exactly the `directories` handed in:
@@ -626,6 +728,7 @@ impl Outcome {
 fn describe_and_grant(
     directories: &[PathBuf],
     root: &Path,
+    recorded: &BTreeMap<PathBuf, String>,
     agent: &dyn Agent,
     observer: &mut dyn Observer,
 ) -> Described {
@@ -637,6 +740,10 @@ fn describe_and_grant(
     // are read in phase two and neither is acted on before it.
     let total = directories.len();
     let mut documents = BTreeMap::new();
+    // What each directory that got a document this run must still look like for
+    // its grant to be carried next time, kept from phase one so phase two
+    // records the digest that goes with the document actually on disk.
+    let mut carries: BTreeMap<PathBuf, Option<String>> = BTreeMap::new();
     let mut undocumented = Vec::new();
     for (index, pacted) in directories.iter().enumerate() {
         // Asked before the pass, not after it, so a front end names the
@@ -651,6 +758,25 @@ fn describe_and_grant(
             undocumented.extend(directories[index..].iter().cloned());
             break;
         }
+        // What this directory would have to be for its recorded grant to stand
+        // untouched, asked now rather than in phase two: the children below it
+        // have already had their turn, so their documents are final and this is
+        // the request that would go out.
+        let carry = carry_hash(pacted);
+
+        // Early cutoff: the pass is skipped where nothing it would read moved.
+        if let Some(carried) = carried_document(pacted, carry.as_deref(), recorded) {
+            carries.insert(pacted.clone(), carry);
+            documents.insert(pacted.clone(), carried);
+            if !undocumented
+                .iter()
+                .any(|missing| missing.starts_with(pacted))
+            {
+                observer.unchanged(pacted);
+            }
+            continue;
+        }
+
         // Through the watched form, so every summarising pass this directory
         // pays for is announced to the same observer that was just asked about
         // the directory itself.
@@ -660,6 +786,13 @@ fn describe_and_grant(
                 problems: caps,
             }) => {
                 problems.extend(caps);
+                // Taken again, now the pass has written its document: the
+                // document is part of this digest, so the reading from before
+                // the pass describes the directory as it no longer is. Only
+                // this directory's own `WARLOCK.md` moved in between — it is
+                // prose, so it is in no request and no other directory's digest
+                // — which is what makes the two readings comparable at all.
+                carries.insert(pacted.clone(), carry_hash(pacted));
                 documents.insert(pacted.clone(), document);
                 // Children before parents means everything under this
                 // directory has already had its turn, so whether its subtree
@@ -723,6 +856,7 @@ fn describe_and_grant(
                 Ok(hash) => Some(Grant {
                     hash,
                     at: granted_at.clone(),
+                    carry: carries.get(pacted).cloned().flatten(),
                 }),
                 Err(source) => {
                     failures.push(Failure::Hash {
@@ -1646,6 +1780,25 @@ pub trait Observer {
     /// exactly as [`summarising`](Observer::summarising) is, and for the same
     /// reason.
     fn documented(&mut self, directory: &Path) {
+        let _ = directory;
+    }
+
+    /// `directory` needed no pass: what one would have been shown, and the
+    /// document it would have been judged against, are exactly what they were
+    /// when the grant now being carried was earned.
+    ///
+    /// Sent *in place of* [`documented`](Observer::documented) and never beside
+    /// it, so a front end hears one word per directory and that word is a true
+    /// one. Everything `documented` means still holds here — this directory and
+    /// everything below it has a current document, and phase two is about to
+    /// grant it — so a reader that paints a row green on one should paint it
+    /// green on the other. The only difference is what it says happened, and
+    /// saying *wrote* would name a write that did not occur.
+    ///
+    /// An announcement, not a question, with a default body that does nothing,
+    /// so an [`Observer`] written before the cutoff existed keeps compiling and
+    /// simply hears nothing about a saving it never asked about.
+    fn unchanged(&mut self, directory: &Path) {
         let _ = directory;
     }
 }
@@ -4133,6 +4286,22 @@ mod tests {
     /// A whole-subtree pact over `crates/engine`, insisted on as green: the
     /// starting state of every refresh below, because a refresh only has
     /// something to skip once something is fresh.
+    /// A change in every directory on the path up from `inner`, leaving
+    /// `tests/` alone.
+    ///
+    /// One write at the bottom no longer makes a refresh describe the whole
+    /// path: [`carried_document`]'s early cutoff stops at the first ancestor
+    /// whose request did not move, and an ancestor's request is its own files
+    /// plus its children's documents. A fixture that wants a pass in each of
+    /// three directories has to give each of them something new to read, which
+    /// is what this does — and `tests/` is still left alone, so a run built on
+    /// it still has both kinds of directory in it.
+    fn restale_the_path(repo: &Path) {
+        write(repo, "crates/engine/src/inner/deep.rs", "fn deeper() {}\n");
+        write(repo, "crates/engine/src/wider.rs", "fn wider() {}\n");
+        write(repo, "crates/engine/outer.rs", "fn outer() {}\n");
+    }
+
     fn refreshable(repo: &Path) -> Manifest {
         let PactedSubtree {
             manifest,
@@ -4245,11 +4414,7 @@ mod tests {
         let engine = repo.path().join("crates/engine");
         let before = refreshable(repo.path());
 
-        write(
-            repo.path(),
-            "crates/engine/src/inner/deep.rs",
-            "fn deeper() {}\n",
-        );
+        restale_the_path(repo.path());
         let agent = Canned::filling();
 
         let PactedSubtree {
@@ -4302,16 +4467,12 @@ mod tests {
     }
 
     #[test]
-    fn one_changed_file_costs_one_pass_for_each_directory_above_it_and_no_others() {
+    fn a_change_in_every_directory_costs_one_pass_for_each_of_them_and_no_others() {
         let repo = project();
         let engine = repo.path().join("crates/engine");
         let manifest = refreshable(repo.path());
 
-        write(
-            repo.path(),
-            "crates/engine/src/inner/deep.rs",
-            "fn deeper() {}\n",
-        );
+        restale_the_path(repo.path());
         let agent = Canned::filling();
 
         let PactedSubtree { failures, .. } =
@@ -4326,15 +4487,97 @@ mod tests {
                 "crates/engine/src",
                 "crates/engine",
             ],
-            "the path from the changed file up to the refreshed root, deepest \
+            "the path from the changed files up to the refreshed root, deepest \
              first, and nothing beside it",
         );
         assert_eq!(
             agent.seen.borrow().len(),
             3,
-            "one pass per directory on that path — `crates/engine/tests` is a \
-             quarter of the subtree and costs nothing",
+            "one pass per directory that had something new to read — \
+             `crates/engine/tests` is a quarter of the subtree and costs nothing",
         );
+    }
+
+    #[test]
+    fn a_hand_edited_document_is_never_carried_forward_by_the_cutoff() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let manifest = refreshable(repo.path());
+
+        // Nothing about the code moves. Somebody edits the document instead,
+        // which is the one thing the request never sees: it is prose, so it
+        // reaches no pass and moves no other digest. If the cutoff went on the
+        // request alone, this would be carried forward and stamped granted —
+        // a person's sentences recorded as a pass's work.
+        let document = engine.join("src").join(DOCUMENT_FILE);
+        let edited = format!(
+            "{}\n\nA sentence a person added by hand.\n",
+            fs::read_to_string(&document).expect("the pact wrote a document"),
+        );
+        fs::write(&document, &edited).expect("writes the edit");
+
+        let agent = Canned::filling();
+        let PactedSubtree { failures, .. } =
+            refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)
+                .expect("refreshes");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(
+            described_by(&agent, repo.path()).contains(&"crates/engine/src".to_string()),
+            "the edited directory is described again rather than carried: the \
+             only road back to fresh is a pass",
+        );
+        assert_ne!(
+            fs::read_to_string(&document).expect("still a document"),
+            edited,
+            "and the pass overwrote the hand-written sentence rather than \
+             granting it",
+        );
+    }
+
+    #[test]
+    fn a_change_below_an_unmoved_request_costs_no_pass_at_the_directory_above_it() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let manifest = refreshable(repo.path());
+
+        // One file, at the bottom. Every directory from it to the root is
+        // stale — the subtree hash says so and that has not changed — but only
+        // the directories whose *request* moved are worth a pass.
+        write(
+            repo.path(),
+            "crates/engine/src/inner/deep.rs",
+            "fn deeper() {}\n",
+        );
+        let agent = Canned::filling();
+
+        let PactedSubtree { failures, .. } =
+            refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)
+                .expect("refreshes");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            described_by(&agent, repo.path()),
+            ["crates/engine/src/inner", "crates/engine/src"],
+            "the pass runs where the file changed, and at the parent whose \
+             child document changed under it — and stops at `crates/engine`, \
+             whose own files and children's documents are what they were",
+        );
+
+        // The cutoff is a saving, never a downgrade: the directory that paid
+        // for no pass is as green as the ones that did, because its document
+        // was granted against the subtree as it now stands.
+        for module in [
+            "crates/engine",
+            "crates/engine/src",
+            "crates/engine/src/inner",
+        ] {
+            assert_eq!(
+                state(&manifest, repo.path(), module),
+                NodeState::PactedStale,
+                "`{module}` is stale before the refresh",
+            );
+        }
     }
 
     #[test]
@@ -4477,11 +4720,7 @@ mod tests {
         let repo = project();
         let engine = repo.path().join("crates/engine");
         let before = refreshable(repo.path());
-        write(
-            repo.path(),
-            "crates/engine/src/inner/deep.rs",
-            "fn deeper() {}\n",
-        );
+        restale_the_path(repo.path());
 
         let PactedSubtree {
             manifest, failures, ..
@@ -4644,6 +4883,14 @@ mod tests {
         subtree_hash(from_manifest_path(repo, module)).expect("the subtree hashes")
     }
 
+    /// The carry digest recorded against `module`, taken from the fixture for
+    /// the same reason [`hash_of`] is: pasting a digest proves only that
+    /// somebody pasted it, and taking it here makes the literal insist that
+    /// each entry records the digest of its own directory as it stands.
+    fn carry_of(repo: &Path, module: &str) -> String {
+        super::carry_hash(&from_manifest_path(repo, module)).expect("the directory digests")
+    }
+
     /// The `granted_at` recorded against `module`, which a run mints once for
     /// the whole of itself.
     fn granted_at_of(manifest: &Manifest, module: &str) -> String {
@@ -4674,6 +4921,7 @@ mod tests {
              document = \"crates/engine/src/WARLOCK.md\"\n\
              granted_hash = \"{src}\"\n\
              granted_at = \"{granted_at}\"\n\
+             carry_hash = \"{src_carry}\"\n\
              \n\
              [[pact]]\n\
              module = \"crates/tui\"\n\
@@ -4686,22 +4934,29 @@ mod tests {
              document = \"crates/engine/WARLOCK.md\"\n\
              granted_hash = \"{root}\"\n\
              granted_at = \"{granted_at}\"\n\
+             carry_hash = \"{root_carry}\"\n\
              \n\
              [[pact]]\n\
              module = \"crates/engine/src/inner\"\n\
              document = \"crates/engine/src/inner/WARLOCK.md\"\n\
              granted_hash = \"{inner}\"\n\
              granted_at = \"{granted_at}\"\n\
+             carry_hash = \"{inner_carry}\"\n\
              \n\
              [[pact]]\n\
              module = \"crates/engine/tests\"\n\
              document = \"crates/engine/tests/WARLOCK.md\"\n\
              granted_hash = \"{tests}\"\n\
-             granted_at = \"{granted_at}\"\n",
+             granted_at = \"{granted_at}\"\n\
+             carry_hash = \"{tests_carry}\"\n",
             root = hash_of(repo, "crates/engine"),
             src = hash_of(repo, "crates/engine/src"),
             inner = hash_of(repo, "crates/engine/src/inner"),
             tests = hash_of(repo, "crates/engine/tests"),
+            root_carry = carry_of(repo, "crates/engine"),
+            src_carry = carry_of(repo, "crates/engine/src"),
+            inner_carry = carry_of(repo, "crates/engine/src/inner"),
+            tests_carry = carry_of(repo, "crates/engine/tests"),
         )
     }
 
@@ -4718,6 +4973,7 @@ mod tests {
              document = \"crates/engine/src/WARLOCK.md\"\n\
              granted_hash = \"{src}\"\n\
              granted_at = \"{pacted_at}\"\n\
+             carry_hash = \"{src_carry}\"\n\
              \n\
              [[pact]]\n\
              module = \"crates/tui\"\n\
@@ -4730,22 +4986,29 @@ mod tests {
              document = \"crates/engine/WARLOCK.md\"\n\
              granted_hash = \"{root}\"\n\
              granted_at = \"{refreshed_at}\"\n\
+             carry_hash = \"{root_carry}\"\n\
              \n\
              [[pact]]\n\
              module = \"crates/engine/src/inner\"\n\
              document = \"crates/engine/src/inner/WARLOCK.md\"\n\
              granted_hash = \"{inner}\"\n\
              granted_at = \"{pacted_at}\"\n\
+             carry_hash = \"{inner_carry}\"\n\
              \n\
              [[pact]]\n\
              module = \"crates/engine/tests\"\n\
              document = \"crates/engine/tests/WARLOCK.md\"\n\
              granted_hash = \"{tests}\"\n\
-             granted_at = \"{refreshed_at}\"\n",
+             granted_at = \"{refreshed_at}\"\n\
+             carry_hash = \"{tests_carry}\"\n",
             root = hash_of(repo, "crates/engine"),
             src = hash_of(repo, "crates/engine/src"),
             inner = hash_of(repo, "crates/engine/src/inner"),
             tests = hash_of(repo, "crates/engine/tests"),
+            root_carry = carry_of(repo, "crates/engine"),
+            src_carry = carry_of(repo, "crates/engine/src"),
+            inner_carry = carry_of(repo, "crates/engine/src/inner"),
+            tests_carry = carry_of(repo, "crates/engine/tests"),
         )
     }
 
@@ -4858,13 +5121,9 @@ mod tests {
             ],
         );
 
-        // One changed file, so the refresh describes the path up from it and
-        // skips `tests/` — both kinds of directory in one run.
-        write(
-            repo.path(),
-            "crates/engine/src/inner/deep.rs",
-            "fn deeper() {}\n",
-        );
+        // A change in each directory on the path up, so the refresh describes
+        // all three and skips `tests/` — both kinds of directory in one run.
+        restale_the_path(repo.path());
         let agent = Canned::filling();
 
         let PactedSubtree {

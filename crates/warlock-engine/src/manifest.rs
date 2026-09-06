@@ -357,6 +357,24 @@ pub struct PactEntry {
     /// arithmetic on. Absent alongside an absent hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     granted_at: Option<String>,
+    /// What this module must still look like for its grant to be carried
+    /// forward without a new pass: the digest of the directory's own non-prose
+    /// files, its children's documents and the document this grant is for, from
+    /// `fitting::carry_hash`. Opaque here, exactly as `granted_hash` is.
+    ///
+    /// It is beside the grant rather than in a cache of its own because it is
+    /// safety-critical and not merely an optimisation. A run consults it to
+    /// decide it need not pay for a pass, and a stale or missing answer that
+    /// said *unchanged* when the inputs had moved would grant freshness no pass
+    /// earned — a false green. Written in the same atomic save as the hash it
+    /// qualifies, the two cannot drift apart.
+    ///
+    /// Absent on every entry granted before this field existed, and absent is
+    /// the safe reading: no recorded input means nothing to compare against,
+    /// which means the pass runs. An old manifest costs a full refresh once and
+    /// records inputs on the way through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    carry_hash: Option<String>,
 }
 
 impl PactEntry {
@@ -396,6 +414,7 @@ impl PactEntry {
             scope: None,
             granted_hash: None,
             granted_at: None,
+            carry_hash: None,
         })
     }
 
@@ -415,11 +434,29 @@ impl PactEntry {
         self
     }
 
+    /// The same entry with the grant's carry digest recorded: what the module
+    /// must still look like for that grant to stand without a new pass.
+    ///
+    /// Separate from [`PactEntry::with_grant`] rather than a third argument to
+    /// it, because that signature is public and a caller with nothing to record
+    /// must stay able to grant. An entry that never meets this call is an entry
+    /// with no shortcut, which is the safe reading.
+    #[must_use]
+    pub fn with_carry_hash(mut self, carry_hash: impl Into<String>) -> Self {
+        self.carry_hash = Some(carry_hash.into());
+        self
+    }
+
     /// The same entry with any grant dropped, i.e. back to never-judged.
+    ///
+    /// The input digest goes with it. It describes what earned *that* grant, so
+    /// left behind it would be a claim about a judgement no longer recorded —
+    /// and the one use anything has for it is deciding a pass can be skipped.
     #[must_use]
     pub fn without_grant(mut self) -> Self {
         self.granted_hash = None;
         self.granted_at = None;
+        self.carry_hash = None;
         self
     }
 
@@ -482,17 +519,25 @@ impl PactEntry {
             scope: None,
             granted_hash: None,
             granted_at: None,
+            carry_hash: None,
         }
     }
 
     /// Overwrite the fields a pact run owns — `module`, `document` and the
     /// grant — and **touch nothing else on this entry**.
     ///
-    /// `grant` is the hash and the timestamp together, `None` for a module that
-    /// was left pacted and unjudged; passing `None` clears any grant already
-    /// recorded here, hash and timestamp both. The two travel as one so no
-    /// caller can leave a hash without the timestamp that says when it was
-    /// earned.
+    /// `grant` is the subtree hash, the timestamp and the carry digest
+    /// together, `None` for a module that was left pacted and unjudged; passing
+    /// `None` clears any grant already recorded here, all three at once. They
+    /// travel as one so no caller can leave a hash without the timestamp that
+    /// says when it was earned, and none can leave a carry digest describing a
+    /// grant that is no longer there — a carry digest outliving its grant is
+    /// exactly the stale answer that could later skip a pass that was owed.
+    ///
+    /// The carry digest is itself an `Option` inside that triple, because a
+    /// directory can be granted while it could not be digested
+    /// (`fitting::carry_hash` answers `None` on any failure). That records the
+    /// grant and no shortcut for next time, which is the safe pair.
     ///
     /// Crate-private, and written as a mutation rather than as a fresh entry to
     /// swap in, precisely so that a field a person owns rather than a run
@@ -504,13 +549,17 @@ impl PactEntry {
         &mut self,
         module: String,
         document: String,
-        grant: Option<(String, String)>,
+        grant: Option<(String, String, Option<String>)>,
     ) {
-        let (granted_hash, granted_at) = grant.unzip();
+        let (granted_hash, granted_at, carry_hash) = match grant {
+            Some((hash, at, carry)) => (Some(hash), Some(at), carry),
+            None => (None, None, None),
+        };
         self.module = module;
         self.document = document;
         self.granted_hash = granted_hash;
         self.granted_at = granted_at;
+        self.carry_hash = carry_hash;
     }
 
     /// The module directory as stored: relative, forward slashes, `"."` for
@@ -556,6 +605,16 @@ impl PactEntry {
     #[must_use]
     pub fn granted_hash(&self) -> Option<&str> {
         self.granted_hash.as_deref()
+    }
+
+    /// The carry digest recorded with that grant, or `None`.
+    ///
+    /// `None` means no shortcut is available for this module and the pass runs:
+    /// either it was granted before the field existed, or the run that granted
+    /// it could not digest what it had been shown.
+    #[must_use]
+    pub fn carry_hash(&self) -> Option<&str> {
+        self.carry_hash.as_deref()
     }
 
     /// When the grant happened, as stored (RFC 3339), or `None`.

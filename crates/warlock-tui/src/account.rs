@@ -300,6 +300,18 @@ pub enum Outcome {
         /// here.
         reason: String,
     },
+    /// This directory needed no pass: its document was carried forward and
+    /// granted as it stood.
+    ///
+    /// A separate outcome from [`Outcome::Wrote`] rather than a cheaper wording
+    /// of it, because the two are different facts and only one of them involved
+    /// a model. Naming the document anyway, because a reader looking at a
+    /// section that cost nothing still wants to know which file is being
+    /// vouched for.
+    Unchanged {
+        /// The document that was kept, relative to the repository root.
+        document: PathBuf,
+    },
     /// The run was stopped while this directory was being worked.
     ///
     /// Carries nothing: what a reader wants to know is what it had spent by
@@ -321,6 +333,10 @@ impl Outcome {
                 let document = document.display();
                 let cost = spend(cost);
                 format!("wrote {document} — {bytes} bytes, {cost}")
+            }
+            Self::Unchanged { document } => {
+                let document = document.display();
+                format!("unchanged — {document} kept, no pass needed")
             }
             Self::Refused { reason } => format!("refused — {reason}"),
             Self::Cancelled => {
@@ -1496,6 +1512,41 @@ mod tests {
         // While the line beneath it, being the newest, goes on ticking.
         assert_eq!(said(&account, at(base, 40))[2], "0:40 Read src/lib.rs");
         assert_eq!(said(&account, at(base, 41))[2], "0:41 Read src/lib.rs");
+    }
+
+    #[test]
+    fn a_carried_section_says_unchanged_and_names_no_write_and_no_cost() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        // A directory the run carried forward: it opened a section, because the
+        // engine announced it like any other, and then closed it having spent
+        // nothing and written nothing.
+        account.open_section("crates/engine", base);
+        account.close_section(
+            &Outcome::Unchanged {
+                document: "crates/engine/WARLOCK.md".into(),
+            },
+            at(base, 0),
+        );
+
+        let line = said(&account, at(base, 5))
+            .into_iter()
+            .find(|line| line.contains("crates/engine/WARLOCK.md"))
+            .expect("the section closed with a line naming its document");
+        assert!(
+            line.contains("unchanged"),
+            "the word a reader learns this from, and the one `wrote` would \
+             have lied about: {line}",
+        );
+        assert!(
+            !line.contains("wrote"),
+            "nothing was written, so nothing may say it was: {line}",
+        );
+        assert!(
+            !line.contains('$') && !line.contains("cost"),
+            "and a carried directory has no spend to report at all: {line}",
+        );
     }
 
     #[test]

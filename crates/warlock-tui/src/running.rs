@@ -313,6 +313,14 @@ impl<W: Write> pact::Observer for Progress<W> {
         let named = named(&self.root, directory);
         self.say(&format!("documented {named}"));
     }
+
+    /// The engine's other word for a finished directory, and the one that says
+    /// no pass was paid for: the document that was there is the document that
+    /// stands, and the grant is being carried rather than re-earned.
+    fn unchanged(&mut self, directory: &Path) {
+        let named = named(&self.root, directory);
+        self.say(&format!("unchanged {named}"));
+    }
 }
 
 /// `directory` as the manifest spells it: relative to `root`, forward slashes,
