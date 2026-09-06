@@ -135,6 +135,7 @@ impl Language {
     /// Whether `line` — already trimmed of its indentation — introduces
     /// something whose name is worth keeping.
     fn declares(&self, line: &str) -> bool {
+        let line = without_visibility(line);
         self.declarations
             .iter()
             .any(|prefix| line.starts_with(prefix))
@@ -286,6 +287,183 @@ static TABLE: &[Language] = &[
     },
 ];
 
+/// Words that may stand in front of a declaration without being part of it:
+/// visibility and the like, in any of the languages in [`TABLE`]. Stripped
+/// from the front of a line before the table is asked whether it declares
+/// anything, so `pub(crate) fn` is a declaration wherever `fn` is.
+const VISIBILITY: &[&str] = &[
+    "pub",
+    "pub(crate)",
+    "pub(super)",
+    "async",
+    "unsafe",
+    "extern",
+    "export",
+    "default",
+    "public",
+    "private",
+    "protected",
+    "internal",
+    "static",
+    "final",
+    "abstract",
+    "override",
+    "sealed",
+    "open",
+];
+
+/// The keywords that introduce a declaration and sit between any visibility
+/// and the name: skipped on the way to the first identifier.
+const KEYWORDS: &[&str] = &[
+    "fn",
+    "struct",
+    "enum",
+    "trait",
+    "type",
+    "mod",
+    "impl",
+    "class",
+    "def",
+    "defp",
+    "defmodule",
+    "func",
+    "function",
+    "let",
+    "var",
+    "const",
+    "interface",
+    "data",
+    "object",
+    "void",
+    "test",
+    "describe",
+    "it",
+    "module",
+];
+
+/// The names `text` declares, in file order, as the table understands
+/// declarations: the first identifier on each line that
+/// [`Language::declares`] once its visibility is stripped, after the keyword.
+///
+/// A table lookup, not a parser, on the same terms as [`elide`]: an extension
+/// with no row declares nothing, a line the row does not recognise declares
+/// nothing, and what comes back is only ever a word that is really on a line
+/// of the file. Comment and attribute prefixes in the table (`//`, `@`,
+/// `#[test]`) introduce no name and are skipped. Deduplicated, and capped so
+/// a generated file of ten thousand functions does not become ten thousand
+/// names in a document.
+///
+/// Free, in the sense that matters here: no model pass, no network, the same
+/// answer on every machine. It is the part of a file's account that cannot be
+/// invented, and the first thing a lookup's symbol is checked against.
+pub(crate) fn declared_names(path: &Path, text: &str) -> Vec<String> {
+    const CAP: usize = 64;
+    let Some(language) = language_of(path) else {
+        return Vec::new();
+    };
+    // A test file declares tests, and a test's name is a sentence about the
+    // code under test rather than a name anyone will look up in this file.
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| language.is_test_file(name))
+    {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = text.lines().collect();
+
+    // Public names first, then the rest, each in file order: what a reader
+    // opens a file for is usually what it exports, and the rendered list is
+    // capped, so the exports are the names that survive the cap.
+    let mut public: Vec<String> = Vec::new();
+    let mut private: Vec<String> = Vec::new();
+    for line in outside_blocks(language, &lines) {
+        let trimmed = line.trim_start();
+        let rest = without_visibility(trimmed);
+        let visible = rest.len() != trimmed.len();
+        // An `impl` block names a type declared elsewhere, and a comment or
+        // attribute prefix introduces nothing.
+        if rest.starts_with(['/', '@', '#'])
+            || rest.starts_with("impl ")
+            || !language.declares(rest)
+        {
+            continue;
+        }
+        let Some(name) = first_identifier(rest) else {
+            continue;
+        };
+        if public.iter().chain(&private).any(|known| known == name) {
+            continue;
+        }
+        if visible {
+            public.push(name.to_owned());
+        } else {
+            private.push(name.to_owned());
+        }
+    }
+    public.extend(private);
+    public.truncate(CAP);
+    public
+}
+
+/// The lines of `lines` that are not inside an inline test block, as
+/// [`keep_outside_blocks`] finds them — and every line where the language has
+/// no inline blocks, or a block never closes.
+fn outside_blocks<'a>(language: &Language, lines: &'a [&'a str]) -> Vec<&'a str> {
+    let mut outside = Vec::with_capacity(lines.len());
+    let mut index = 0usize;
+    while index < lines.len() {
+        let Some(block) = opens_here(language, lines, index) else {
+            outside.push(lines[index]);
+            index += 1;
+            continue;
+        };
+        let Some(end) = lines
+            .iter()
+            .enumerate()
+            .skip(index + 1)
+            .find(|(_, line)| line.trim_end() == block.closer)
+            .map(|(at, _)| at)
+        else {
+            outside.extend(&lines[index..]);
+            break;
+        };
+        index = end + 1;
+    }
+    outside
+}
+
+/// `line` with every leading word in [`VISIBILITY`] removed.
+fn without_visibility(line: &str) -> &str {
+    let mut rest = line;
+    loop {
+        let word = rest.split(char::is_whitespace).next().unwrap_or("");
+        if word.is_empty() || !VISIBILITY.contains(&word) {
+            return rest;
+        }
+        rest = rest[word.len()..].trim_start();
+    }
+}
+
+/// The first word of `line` that is an identifier and neither a keyword nor a
+/// visibility, or `None` where the first candidate is not an identifier.
+fn first_identifier(line: &str) -> Option<&str> {
+    let separators =
+        |c: char| c.is_whitespace() || matches!(c, '(' | '<' | '{' | ':' | '=' | ';' | ',' | '!');
+    for word in line.split(separators) {
+        if word.is_empty() || KEYWORDS.contains(&word) || VISIBILITY.contains(&word) {
+            continue;
+        }
+        let identifier = word.trim_matches(|c: char| !(c.is_alphanumeric() || c == '_'));
+        let starts_like_one = identifier
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_');
+        return starts_like_one.then_some(identifier);
+    }
+    None
+}
+
 /// The row claiming `path`'s extension, or `None` where nothing does.
 ///
 /// `None` is the ordinary answer and not a failure: it means warlock has
@@ -295,6 +473,43 @@ fn language_of(path: &Path) -> Option<&'static Language> {
     TABLE
         .iter()
         .find(|language| language.extensions.contains(&extension.as_str()))
+}
+
+/// `text` reduced to the lines that declare something: every signature the
+/// file states, verbatim and in order, with a marker where each run of dropped
+/// lines was.
+///
+/// [`elide`]'s move applied to the whole file rather than to its test blocks,
+/// and the reason the summarising passes this crate used to run are gone.
+/// Measured on this repository: `crates/warlock-tui/src` is 3.0 MB of source
+/// and 153 KB of declaration lines, so a directory that could never fit in a
+/// request fits five times over once the bodies go — and what a documenter
+/// needs from `app.rs` is what `app.rs` declares, not its four hundred
+/// kilobytes of statements.
+///
+/// The point is that **every line of the answer is a line of the file.** Prose
+/// about a file is a claim that has to be checked and cannot be; a signature
+/// lifted out of the file is evidence, so a route naming a symbol found here
+/// is anchored in real code rather than in something a pass wrote about code.
+///
+/// `None` where there is nothing to do: an extension with no row in
+/// [`TABLE`], or a file whose declarations are no smaller than the file. A
+/// lockfile, a minified bundle and a PNG all answer `None`, and the caller
+/// leaves them as a name and a size.
+pub(crate) fn skeleton(path: &Path, text: &str) -> Option<Elided> {
+    let language = language_of(path)?;
+    let lines: Vec<&str> = text.lines().collect();
+    let kept = keep_declarations_marked(language, &lines, 0, lines.len(), "bodies");
+
+    let before = byte_length(&lines);
+    let after = byte_length(&kept.iter().map(String::as_str).collect::<Vec<_>>());
+    if after >= before {
+        return None;
+    }
+    Some(Elided {
+        dropped: before - after,
+        text: kept.join("\n"),
+    })
 }
 
 /// What [`elide`] managed to leave out.
@@ -319,8 +534,16 @@ pub(crate) struct Elided {
 /// Lines rather than bytes, because the request already tells the pass the
 /// file's real size on disk and a second number in the middle of the text
 /// would only invite arithmetic against it.
-fn marker(lines: usize) -> String {
-    format!("… {lines} lines of test bodies elided …")
+/// The marker, saying what kind of lines were dropped.
+///
+/// The wording is load-bearing and was measured wrong once: a whole-file
+/// skeleton reused [`marker`]'s text, so a generated file of a thousand plain
+/// functions arrived saying "test bodies elided", and the pass dutifully wrote
+/// that the file was "mostly elided test bodies" — a false claim about the
+/// file, made from a true statement about the request. What was dropped is
+/// what the marker has to name.
+fn marker_for(lines: usize, dropped: &str) -> String {
+    format!("… {lines} lines of {dropped} elided …")
 }
 
 /// Drop what a documenter does not need from `text`, or answer `None` if there
@@ -370,6 +593,16 @@ fn byte_length(lines: &[&str]) -> u64 {
 /// Every line of `lines[from..to]` that introduces something, plus one marker
 /// standing for everything dropped.
 fn keep_declarations(language: &Language, lines: &[&str], from: usize, to: usize) -> Vec<String> {
+    keep_declarations_marked(language, lines, from, to, "test bodies")
+}
+/// [`keep_declarations`], saying in the marker what kind of lines went.
+fn keep_declarations_marked(
+    language: &Language,
+    lines: &[&str],
+    from: usize,
+    to: usize,
+    dropped_are: &str,
+) -> Vec<String> {
     let mut kept: Vec<String> = Vec::new();
     let mut dropped = 0usize;
 
@@ -381,7 +614,7 @@ fn keep_declarations(language: &Language, lines: &[&str], from: usize, to: usize
         }
     }
     if dropped > 0 {
-        kept.push(marker(dropped));
+        kept.push(marker_for(dropped, dropped_are));
     }
     kept
 }
@@ -682,5 +915,164 @@ mod writes {
         assert!(elided.text.contains("fn one()"), "{}", elided.text);
         assert!(elided.text.contains("fn two()"), "{}", elided.text);
         assert!(!elided.text.contains("let kept"), "{}", elided.text);
+    }
+
+    #[test]
+    fn declared_names_are_the_identifiers_on_declaring_lines_and_nothing_else() {
+        let text = "\
+//! Docs.
+use std::fs;
+
+pub struct Manifest {
+    entries: Vec<PactEntry>,
+}
+
+pub(crate) fn to_manifest_path(root: &Path) -> String {
+    let inner = 1;
+    fn nested() {}
+    inner.to_string()
+}
+
+impl Manifest {
+    pub fn load() {}
+}
+
+pub async fn later() {}
+enum State { A, B }
+#[test]
+fn a_test_name_is_a_declaration_too() {}
+";
+        assert_eq!(
+            super::declared_names(Path::new("manifest.rs"), text),
+            [
+                "Manifest",
+                "to_manifest_path",
+                "load",
+                "later",
+                "nested",
+                "State",
+                "a_test_name_is_a_declaration_too",
+            ],
+            "public names first, then the rest, each in file order; `impl Manifest` names \
+             nothing new"
+        );
+    }
+
+    #[test]
+    fn a_skeleton_is_every_declaration_line_of_the_file_and_nothing_invented() {
+        let source = "\
+//! Docs.
+use std::fs;
+
+pub struct Manifest {
+    entries: Vec<PactEntry>,
+}
+
+pub(crate) fn to_manifest_path(root: &Path) -> String {
+    let inner = 1;
+    inner.to_string()
+}
+
+impl Manifest {
+    pub fn load() {}
+}
+";
+        let skeleton = super::skeleton(Path::new("manifest.rs"), source).expect("reducible");
+        for line in skeleton.text.lines() {
+            assert!(
+                source.lines().any(|original| original == line) || line.contains("elided"),
+                "every line is the file's own: {line}"
+            );
+        }
+        assert!(
+            skeleton.text.contains("pub struct Manifest {"),
+            "{}",
+            skeleton.text
+        );
+        assert!(
+            skeleton
+                .text
+                .contains("pub(crate) fn to_manifest_path(root: &Path) -> String {"),
+            "a signature survives whole, visibility and arguments and all: {}",
+            skeleton.text
+        );
+        assert!(
+            !skeleton.text.contains("inner.to_string()"),
+            "bodies go: {}",
+            skeleton.text
+        );
+        assert!(skeleton.dropped > 0);
+    }
+
+    #[test]
+    fn a_file_the_table_does_not_know_has_no_skeleton() {
+        assert!(super::skeleton(Path::new("Cargo.lock"), "[[package]]\nname = \"x\"\n").is_none());
+        assert!(super::skeleton(Path::new("notes.txt"), "fn looks_like_rust() {}").is_none());
+    }
+
+    #[test]
+    fn names_inside_a_test_block_and_in_a_test_file_are_not_declarations() {
+        let text = "\
+pub fn work() {}
+
+#[cfg(test)]
+mod tests {
+    fn helper() {}
+
+    #[test]
+    fn it_works() {}
+}
+
+pub fn after() {}
+";
+        assert_eq!(
+            super::declared_names(Path::new("a.rs"), text),
+            ["work", "after"]
+        );
+        assert!(
+            super::declared_names(Path::new("a_test.go"), "func TestX(t *testing.T) {}").is_empty()
+        );
+    }
+
+    #[test]
+    fn a_language_the_table_does_not_know_declares_nothing() {
+        assert!(
+            super::declared_names(Path::new("notes.txt"), "fn looks_like_rust() {}").is_empty()
+        );
+        assert!(
+            super::declared_names(Path::new("Cargo.lock"), "[[package]]\nname = \"x\"").is_empty()
+        );
+    }
+
+    #[test]
+    fn python_and_go_declarations_come_out_by_their_own_keywords() {
+        assert_eq!(
+            super::declared_names(
+                Path::new("app.py"),
+                "@route\ndef handler(req):\n    pass\nclass Store:\n    pass\n"
+            ),
+            ["handler", "Store"]
+        );
+        assert_eq!(
+            super::declared_names(
+                Path::new("main.go"),
+                "// Package main.\nfunc main() {}\ntype Ledger struct{}\n"
+            ),
+            ["main", "Ledger"]
+        );
+    }
+
+    #[test]
+    fn declared_names_are_deduplicated_and_capped() {
+        let mut text = "fn same() {}\n".repeat(3);
+        for i in 0..100 {
+            text.push_str("fn f");
+            text.push_str(&i.to_string());
+            text.push_str("() {}\n");
+        }
+        let names = super::declared_names(Path::new("many.rs"), &text);
+        assert_eq!(names[0], "same");
+        assert_eq!(names.len(), 64);
+        assert_eq!(names.iter().filter(|n| *n == "same").count(), 1);
     }
 }

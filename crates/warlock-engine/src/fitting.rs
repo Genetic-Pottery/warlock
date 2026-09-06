@@ -31,18 +31,20 @@
 //! # What goes in, and nothing else
 //!
 //! * **The directory's own files**, each with its bytes: the whole listing,
-//!   except its own `WARLOCK.md`, which is carried separately (below). Files
-//!   below the immediate children are never read — that is the waste the
-//!   scoping exists to avoid.
+//!   except every markdown file in it — its own `WARLOCK.md`, its readme, and
+//!   anything else prose ([`PROSE_EXTENSIONS`]). Files below the immediate
+//!   children are never read — that is the waste the scoping exists to avoid.
 //! * **Each immediate child directory's `WARLOCK.md`**, where one exists. This
 //!   is how a directory learns what is under it: the children have already
 //!   described themselves, so their parent reads summaries instead of source.
 //!   A child with no document contributes no entry and is not an error; it is
 //!   the ordinary state of a directory nobody has pacted yet.
-//! * **This directory's own previous `WARLOCK.md`**, where it has one, in a
-//!   slot of its own rather than among the files. It is the last pass's claim
-//!   rather than evidence of anything, and [`agent::Request`] carries the whole
-//!   argument for why the two are kept apart.
+//!
+//! And one thing that never goes in: **this directory's own previous
+//! `WARLOCK.md`**. It is the last pass's claim about the directory rather than
+//! evidence of anything, and a pass shown it carried its sentences forward
+//! whether or not the files still supported them. [`agent::Request`] carries
+//! the whole argument; here it is simply dropped from the listing.
 //!
 //! The walk is the same walk as [`load`](crate::load) and [`hash`](crate::hash)
 //! — the [`ignore`] crate, `follow_links(false)`, `require_git(false)`,
@@ -207,9 +209,9 @@ use std::str::Utf8Error;
 
 use ignore::WalkBuilder;
 
+use crate::document::Described;
 use crate::ignores;
 use crate::languages;
-use crate::manifest::{temp_file_name, write_and_sync};
 use crate::pact::{DOCUMENT_FILE, Error, MANIFEST_DIR, Observer};
 use crate::{Agent, agent, to_manifest_path};
 
@@ -227,6 +229,11 @@ pub(crate) struct Fitted {
     pub(crate) request: agent::Request,
     /// Every file that did not go in whole, and why.
     pub(crate) problems: Vec<Problem>,
+    /// What the fitting learned that the directory pass is not asked for: the
+    /// line and routes each file pass wrote, and the names every text file
+    /// declares. Carried to the render, where it is written beside the
+    /// directory pass's own answer.
+    pub(crate) described: Described,
 }
 
 /// The request for `directory`, within both caps, and what it cost to get there.
@@ -248,7 +255,6 @@ pub(crate) struct Fitted {
 pub(crate) fn fit(
     prompt: &str,
     directory: &Path,
-    root: &Path,
     agent: &dyn Agent,
     observer: &mut dyn Observer,
 ) -> Result<Fitted, Error> {
@@ -262,27 +268,41 @@ pub(crate) fn fit(
         mut problems,
     } = gather_request(prompt, directory, cap)?;
 
+    // The names every file the gather read declares, off the text itself:
+    // free, mechanical, and the one part of a file's account nothing can
+    // invent. Files read later — over the per-file cap, or lifted from the
+    // cliff — are added as they are read.
+    let mut described = Described::default();
+    for file in request.files() {
+        let text = file.kept().or_else(|| {
+            file.bytes()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        });
+        if let Some(text) = text {
+            let names = languages::declared_names(Path::new(file.path()), text);
+            if !names.is_empty() {
+                described.declared.insert(file.path().to_owned(), names);
+            }
+        }
+    }
+
     // Before the pass that writes the document, the passes that describe what
     // the pass would otherwise only be able to name — or the entries under
     // `<root>/.warlock/summaries/` that mean those passes were paid for once
     // already. Infallible by construction: it answers with a request either
     // way, and every way it can go wrong is a `Problem` in the list above.
-    let request = summarise_over_cap(directory, root, request, &mut problems, agent, observer);
+    let mut passes = Reducing {
+        directory,
+        described: &mut described,
+    };
+    let request = summarise_over_cap(request, &mut problems, &mut passes);
 
     // Then the whole-request budget, which gather could only meet by turning its
     // biggest files into names: with an account of a file now something a request
     // can carry, the cap is met by demoting to summaries first and to names only
     // when even the summaries do not fit. Infallible in the same way, and through
     // the same cache: a file already described costs no passes here either.
-    let request = demote_to_budget(
-        directory,
-        root,
-        request,
-        cap,
-        &mut problems,
-        agent,
-        observer,
-    );
+    let request = demote_to_budget(request, cap, &mut problems, &mut passes);
 
     // What is about to be handed back, said out loud before it is: the only
     // point where both numbers are true, since summarising and demoting above
@@ -292,61 +312,15 @@ pub(crate) fn fit(
     // different request than the one that goes out.
     observer.requesting(
         request.files().len(),
-        carried_bytes(
-            request.files(),
-            request.child_documents(),
-            request.previous_document(),
-        ),
+        carried_bytes(request.files(), request.child_documents()),
     );
 
-    Ok(Fitted { request, problems })
+    Ok(Fitted {
+        request,
+        problems,
+        described,
+    })
 }
-/// Where accounts of over-cap files are kept, under [`MANIFEST_DIR`]: one file
-/// per entry, named for the digest of the bytes it describes.
-///
-/// It sits under `.warlock/` for the same reason the manifest does — it is
-/// Warlock's bookkeeping rather than content of any module — and it inherits
-/// everything that follows from being there: pruned by name from every walk in
-/// this crate, so it is in no tree, no [`subtree_hash`](crate::subtree_hash) and no request, and
-/// committed with the code rather than ignored, so a teammate's fresh clone
-/// arrives holding the accounts this repository has already paid for.
-///
-/// Flat rather than fanned out into subdirectories of the first byte or two.
-/// The population is one entry per distinct over-cap file a repository has ever
-/// had, which is tens, not the millions that make a fan-out worth its
-/// complication.
-const SUMMARY_DIR: &str = "summaries";
-
-/// The extension a cache entry's file name ends in.
-///
-/// The digest is the whole of the name in front of it, so the same bytes name
-/// the same file on every machine; the extension is there because the contents
-/// are prose, and a directory of prose that opens in an editor as prose beats a
-/// wall of extensionless hex when somebody goes looking at what was cached.
-const SUMMARY_EXTENSION: &str = "md";
-
-/// Domain separation for a summary cache key, via blake3's key derivation.
-///
-/// Its own context, and emphatically not the subtree hash's: the two digests
-/// answer different questions — "are these the bytes the document was granted
-/// against" versus "have these exact bytes already been read for us" — over
-/// different inputs, and one string shared between them would make a change to
-/// either one's meaning a change to the other's. Nothing in
-/// [`hash`](crate::hash) is touched by anything here.
-///
-/// The version is where a change to what an entry means announces itself.
-/// Bumping it makes every existing entry unreachable, which costs a fresh
-/// summarising pass per file and cannot produce a wrong answer: an entry that
-/// is never looked for is a cache miss, and a miss is the ordinary path.
-///
-/// Moved to `v2` when [`MAP_PROMPT`] and [`REDUCE_PROMPT`] began requiring the
-/// exact spelling and visibility of every name a file declares. A `v1` entry is
-/// prose that may not carry a single name, and a document written from one
-/// invented its API surface plausibly and wrongly — which is the whole reason
-/// those prompts changed. Reusing them would have kept exactly the summaries
-/// the change exists to replace.
-const SUMMARY_KEY_CONTEXT: &str = "warlock summary cache key v2 2026-09-03";
-
 /// How deep the walk goes: the directory itself (0), its own files and its
 /// immediate children (1), and the files directly inside those children (2),
 /// of which only `WARLOCK.md` is kept.
@@ -525,380 +499,6 @@ pub(crate) const fn request_byte_cap(context_tokens: u64) -> u64 {
 /// that could drift away from it.
 #[cfg(test)]
 pub(crate) const REQUEST_BYTE_CAP: u64 = request_byte_cap(crate::agent::DEFAULT_CONTEXT_TOKENS);
-
-/// The most bytes of a file's text one map pass is handed: 768 KiB.
-///
-/// Three quarters of [`PER_FILE_BYTE_CAP`], as it has always been, and strictly
-/// below it on purpose. A file sent whole is the whole of what its entry in a
-/// request carries; a chunk is never alone in its window. It arrives with the
-/// map prompt, the file's name and which part of how many it is, and the pass
-/// then has to write an account of it in what is left. The 256 KiB this keeps
-/// back under the per-file cap is that room — a margin, deliberately not a
-/// figure computed from the length of a prompt that is free to change in a diff.
-///
-/// It is a target rather than a limit, because chunks split on line boundaries
-/// and a file's lines are its own: see [`chunk_utf8`] for the one case that
-/// goes over, and why going over beats cutting.
-pub(crate) const CHUNK_BYTE_CAP: usize = 768 * 1024;
-
-/// The most chunks one file may become before it is left as a name and a size:
-/// 8.
-///
-/// What this protects against is one file quietly becoming hundreds of model
-/// passes. A pact is already minutes of passes per directory, and summarising
-/// is per file on top of that: with no ceiling, one checked-in 40 MB bundle
-/// turns a single directory's pact into four hundred passes, spending a
-/// caller's money and an hour of wall clock on the least interesting file in
-/// the repository. Eight chunks is 6 MB of text at [`CHUNK_BYTE_CAP`], plus one
-/// reduce: nine passes, which is the most any one file is worth.
-///
-/// It was thirty-two when a chunk was 96 KiB — the same 3 MB of file, cut into
-/// four times as many passes. A bigger chunk is why the count comes down: what
-/// this ceiling is really counting is passes somebody has to wait through, and
-/// the byte ceiling it works out to went *up*.
-///
-/// That covers what summarising exists for — a megabyte-scale lockfile or
-/// generated schema is a handful of chunks — and stops at the artefacts nobody
-/// reads line by line anyway. A file past the ceiling is neither an error nor a
-/// truncation: it stays exactly what it is today, a name and a size, with the
-/// reason said out loud.
-///
-/// The count is known before a single pass is spent, because [`chunk_utf8`] is
-/// a pure function over bytes already in memory. So this ceiling is checked for
-/// free, and can never be hit half way through a file with passes already paid
-/// for.
-pub(crate) const CHUNK_COUNT_CEILING: usize = 8;
-
-/// The fewest bytes a map or reduce answer may come to, once surrounding
-/// whitespace is trimmed, and still be used as an account of a file: 80.
-///
-/// The same rule as [`MINIMUM_DOCUMENT_BYTES`], for the same reason — a length
-/// is the only thing measured, and there is no phrase list here either — but at
-/// a lower number, because a summary is not a document. A document describes a
-/// whole directory and gets 200 bytes as its floor: a heading and two
-/// sentences. A summary describes one file, or one part of one, and the honest
-/// account of a chunk of a lockfile is genuinely short. 80 bytes is about a
-/// sentence and a half: above the answers that carry nothing ("Nothing of
-/// note.", "This is a lockfile."), and below the shortest sentence that
-/// actually says what a file's contents are.
-///
-/// An answer under it is not retried and not padded. The file demotes to a name
-/// and a size with the cause disclosed, which is where every other failure of
-/// summarising lands — the caps were never allowed to fail a pact, and neither
-/// are the passes the caps now cause.
-pub(crate) const MINIMUM_SUMMARY_BYTES: usize = 80;
-
-/// The whole instruction one map pass is given: describe one part of one file.
-///
-/// Code for the same reason [`PROMPT`] is code, and the argument is not
-/// repeated here: there is no configuration file, no template directory and no
-/// per-project override, so changing what a map pass is asked for is a change
-/// to this string, reviewed in a diff.
-///
-/// # What it assumes
-///
-/// **One invocation per chunk, holding that chunk and nothing else.** The
-/// request a map pass runs on carries one part of one file — no other file of
-/// the directory, no child document, no earlier map answer — and says which
-/// part of how many it is, so the prompt can talk about "this part" and about
-/// parts it was not given without either being a guess. The parts are cut on
-/// line boundaries by [`chunk_utf8`] and each is valid UTF-8 on its own, so a
-/// pass is never asked to make sense of half a character; it may well be
-/// handed half a function, which is why it is told there are other parts.
-///
-/// It also assumes its answer is the only thing that survives. The bytes are
-/// read once and dropped, and what reaches the reduce pass — and through it the
-/// directory pass — is this text. An account that leaves out what mattered
-/// cannot be recovered later by looking again.
-///
-/// # What it forbids
-///
-/// **Naming the file.** Both this prompt and [`REDUCE_PROMPT`] ask for an
-/// account of the file's *contents* and forbid restating its name, because a
-/// summary is about bytes and nothing else. Summaries will be keyed by the
-/// bytes alone, so a file that is renamed with its contents untouched keeps the
-/// summary already written for it — and a summary that opened "`Cargo.lock`
-/// is…" would be wrong the moment that happened, in a way nobody would notice.
-/// The name is in the request because a pass reads better text when it knows
-/// what it is looking at; it is out of the answer because the answer outlives
-/// it.
-///
-/// Also forbidden: guessing at the parts it was not given, and any wrapping of
-/// the answer — no preamble, no heading, no code fence — for the same reason
-/// [`PROMPT`] forbids them. What comes back is used verbatim.
-pub(crate) const MAP_PROMPT: &str = "\
-Describe what is in one part of a file.
-
-You are given a single part of a single file, and the text below says which \
-part of how many it is. Write a compact account of what these CONTENTS are: \
-what the text holds, how it is organised, and what a reader of the whole file \
-would need to know about this part of it. Nobody sees these bytes again — only \
-what you write — so leave out nothing that matters and invent nothing that is \
-not here.
-
-Names are the part of this that must not be paraphrased. Where the text \
-declares something a reader could later refer to — a function, type, constant, \
-class, method, field, export — give its name exactly as spelled, and say \
-whether the language marks it public or private. The exact spelling is worth \
-more than a description of it: `overwrite_run_fields` tells a reader where to \
-look and a method that overwrites the run's fields does not. Never invent a \
-name, never tidy one, and never report something as public, exported or \
-re-exported unless the text in front of you shows that it is. If the part does \
-not say, say nothing about it rather than completing the pattern.
-
-Write about the contents and nothing else. Do not name the file, do not \
-describe it by its name or its file type, and do not guess at the parts you \
-were not given.
-
-Output the account and nothing else: no preamble, no heading, no sign-off, no \
-commentary about the task, and no code fence. Plain prose.";
-
-/// The whole instruction one reduce pass is given: turn the accounts of a
-/// file's parts into one account of the file.
-///
-/// Code for the same reason [`PROMPT`] and [`MAP_PROMPT`] are code: no
-/// configuration file, no template, no override.
-///
-/// # What it assumes
-///
-/// **One invocation per file, holding every map answer for that file in
-/// order.** A reduce pass sees prose about the file and never a byte of the
-/// file itself, which is the one thing about its input it has to be told: an
-/// account of a part reads like the part, and a pass that mistook it for the
-/// text would quote a description as if it were source. It also assumes the
-/// parts are all of the file — the map passes covered it whole, in order —
-/// so it may write about the file rather than about a sample of it.
-///
-/// A file that came to a single part never reaches this prompt at all: the one
-/// map answer is already an account of the whole file, and a reduce pass over
-/// it would be a second pass paid for to rewrite prose.
-///
-/// # What it forbids
-///
-/// **Naming the file**, for the reason given on [`MAP_PROMPT`]: the summary is
-/// keyed by bytes, so it has to stay true when the name changes. Also
-/// forbidden: quoting an account as if it were the file's own text, adding
-/// anything no part reported, and wrapping the answer in a preamble, a heading
-/// or a code fence.
-pub(crate) const REDUCE_PROMPT: &str = "\
-Combine these accounts of the parts of one file into one account of the file.
-
-You are given, in order, the account an earlier pass wrote of each part of a \
-single file. They are prose about the file, not the file's own text: never \
-quote them as if they were. Together they cover the whole file. Write one \
-account of what its CONTENTS are: what the file holds, how it is organised, \
-and what a reader has to know about it, using only what the parts report.
-
-Carry every name the parts reported into your answer, spelled exactly as they \
-spelled it, with whatever each part said about its visibility. Those names are \
-the only handle anyone downstream has on this file, and one dropped here is \
-one nobody can look up. Do not promote a name to public, exported or \
-re-exported because it seems central; if no part said so, your answer does not \
-either.
-
-Write about the contents and nothing else. Do not name the file, do not \
-describe it by its name or its file type, and do not add anything no part \
-reported.
-
-Output the account and nothing else: no preamble, no heading, no sign-off, no \
-commentary about the task, and no code fence. Plain prose.";
-
-/// Build the request for one pass over `directory`, asking `prompt`.
-///
-/// The request carries `directory`'s own files and its immediate children's
-/// documents, gathered under the ignore rules and the two byte caps this module
-/// documents. Alongside it comes every [`Problem`] the budget caused — an empty
-/// list on the ordinary directory, and never a reason to stop.
-///
-/// Trimming, when [`request_byte_cap`] is exceeded, is largest-first: the
-/// biggest file is turned into a name and a size, then the next, until the
-/// request fits. Largest-first because it reaches the budget in the fewest
-/// omissions, and because a directory's biggest file is the least likely to be
-/// the one that explains what the directory is for. Ties are broken by path so
-/// the result is a value, not a race. Children's documents count towards the
-/// budget but are never dropped: a file left out still says its name and size,
-/// while a document left out would replace the only account of a whole subtree
-/// with nothing — so a pathological child document can leave a request over the
-/// cap with every file listed rather than sent, which is a fact about that
-/// document and still not a failure.
-///
-/// # What counts against the budget
-///
-/// Not what the directory weighs — what the request carries. A file sent whole
-/// spends its bytes, a file listed by name and size spends nothing, and a file
-/// carrying a summary spends the length of that summary, the way a child's
-/// document does. [`file_bytes`] is the whole rule.
-///
-/// # What is reported, and what is not
-///
-/// A [`Problem`] means a file whose contents did not reach the pass. A file
-/// that arrives with a summary is not one: a pass read the whole of it and what
-/// it found is in the request, so there is nothing left out to report and
-/// nothing for a caller to act on. Every *fallback* from that is still a
-/// `Problem` — the file could not be read, it is not text, it is past the
-/// ceiling on how many chunks one file is worth, or the summarising itself
-/// produced nothing usable — because each of those ends with a name and a size
-/// and no account of the file.
-///
-/// The summaries themselves are made after this returns, not in it: this
-/// function measures a file, lists it when it is too big, and runs no pass at
-/// all. The steps that turn those listings into [`agent::File::summarised`](crate::agent::File::summarised) work
-/// on the request and the problem list this one produced, and
-/// [`pact_directory`] is where they meet — [`summarise_over_cap`] for the files
-/// the per-file cap listed, [`demote_to_budget`] for the ones the trimming
-/// above gave up. So a `Problem` here is a file whose contents did not reach
-/// *this* step, and by the time a caller sees the list it has been narrowed to
-/// the files nothing could be said about.
-///
-/// A directory of one file beside a child that has already described itself
-/// gathers as one and one:
-///
-/// ```text
-/// dir/lib.rs            -> request.files()[0], bytes and all
-/// dir/inner/WARLOCK.md  -> request.child_documents()[0], directory "inner"
-/// dir/inner/deep.rs     -> read by nobody: a child's source is its own business
-/// ```
-///
-/// Not a doctest, because nothing outside this crate can call this any more —
-/// [`fit`] is the whole of the interface. The executed version of the same
-/// assertion is
-/// `tests::a_directory_sends_its_own_files_and_its_children_summarise_themselves`.
-///
-/// # Errors
-///
-/// Only the two ways there is no request to build at all — nothing about the
-/// caps is here, because nothing about the caps is fatal:
-///
-/// * [`Error::Walk`] if `directory` cannot be walked: it is not there, it
-///   cannot be listed, or something vanished from under the walk.
-/// * [`Error::Path`] if a file's path has no relative, forward-slash, UTF-8
-///   form, and so cannot be named to a model. The same rule, for the same
-///   reason, as [`subtree_hash`](crate::subtree_hash).
-pub(crate) fn gather_request(
-    prompt: impl Into<String>,
-    directory: impl AsRef<Path>,
-    cap: u64,
-) -> Result<Gathered, Error> {
-    let directory = directory.as_ref();
-    let found = walk(directory)?;
-
-    let mut problems = Vec::new();
-
-    // Children first: their documents are part of the budget the files are
-    // then fitted into, and they are the part that never gives way.
-    let mut child_documents = Vec::new();
-    for (child, path) in found.child_documents {
-        match fs::read_to_string(&path) {
-            Ok(text) => {
-                child_documents.push(agent::ChildDocument::new(child, text));
-            }
-            // Including a document that could not be read is not an option —
-            // there is no text — so it contributes nothing and says so.
-            Err(source) => problems.push(Problem {
-                path,
-                cause: Omission::Unreadable { source },
-            }),
-        }
-    }
-
-    // The directory's own document, on the same terms as a child's: read for
-    // its text, and never given up to the budget. It is the smallest thing in
-    // the request that changes what the pass writes, and dropping it to fit a
-    // source file would turn a refresh back into a first description without
-    // saying so.
-    //
-    // Under the same per-file cap as everything else, and for a reason the
-    // budget cannot cover: `trim_to_budget` only ever gives up files, so an
-    // enormous document would be carried whole with nothing able to drop it.
-    // A document that size is a hand-edited or generated accident rather than
-    // a pass's answer, and the honest answer to it is the one a too-large file
-    // gets — left out, and said so.
-    let previous_document = match found.own_document {
-        Some(path) => match fs::metadata(&path).map(|metadata| metadata.len()) {
-            Ok(size) if size > PER_FILE_BYTE_CAP => {
-                problems.push(Problem {
-                    path,
-                    cause: Omission::TooLarge { size },
-                });
-                None
-            }
-            Ok(_) => match fs::read_to_string(&path) {
-                Ok(text) => Some(text),
-                Err(source) => {
-                    problems.push(Problem {
-                        path,
-                        cause: Omission::Unreadable { source },
-                    });
-                    None
-                }
-            },
-            Err(source) => {
-                problems.push(Problem {
-                    path,
-                    cause: Omission::Unreadable { source },
-                });
-                None
-            }
-        },
-        None => None,
-    };
-
-    // Files in sorted order, each sent whole unless it alone is too big. The
-    // size comes from the filesystem before anything is opened, so an enormous
-    // file is never read into memory just to be dropped again.
-    let mut files = Vec::new();
-    let mut on_disk = Vec::new();
-    for (relative, path) in found.files {
-        let size = match fs::metadata(&path) {
-            Ok(metadata) => metadata.len(),
-            // No size means nothing true to list, so the file is left out
-            // entirely rather than listed at a made-up length.
-            Err(source) => {
-                problems.push(Problem {
-                    path,
-                    cause: Omission::Unreadable { source },
-                });
-                continue;
-            }
-        };
-
-        let file = if size > PER_FILE_BYTE_CAP {
-            problems.push(Problem {
-                path: path.clone(),
-                cause: Omission::TooLarge { size },
-            });
-            agent::File::omitted(relative, size)
-        } else {
-            match fs::read(&path) {
-                Ok(bytes) => elided_or_whole(&path, relative, size, bytes),
-                Err(source) => {
-                    problems.push(Problem {
-                        path: path.clone(),
-                        cause: Omission::Unreadable { source },
-                    });
-                    agent::File::omitted(relative, size)
-                }
-            }
-        };
-        files.push(file);
-        on_disk.push(path);
-    }
-
-    // Counted once, from what was actually gathered, rather than added up as
-    // the loops went: what a file spends is a property of the file that ended
-    // up in the request, not of the branch it came out of.
-    let carried = carried_bytes(&files, &child_documents, previous_document.as_deref());
-    trim_to_budget(&mut files, &on_disk, carried, cap, &mut problems);
-
-    let mut request = agent::Request::new(prompt, directory)
-        .with_files(files)
-        .with_child_documents(child_documents);
-    if let Some(text) = previous_document {
-        request = request.with_previous_document(text);
-    }
-
-    Ok(Gathered { request, problems })
-}
 
 /// The file as the pass should see it: its own lines with test bodies dropped
 /// where [`languages`](crate::languages) knows how, and otherwise the file whole.
@@ -1092,25 +692,17 @@ fn trim_to_budget(
 /// paid for. Nothing the observer does can stop any of this — see
 /// [`Observer::summarising`].
 fn summarise_over_cap(
-    directory: &Path,
-    root: &Path,
     request: agent::Request,
     problems: &mut Vec<Problem>,
-    agent: &dyn Agent,
-    observer: &mut dyn Observer,
+    passes: &mut Reducing<'_>,
 ) -> agent::Request {
+    let directory = passes.directory;
     let mut files = request.files().to_vec();
     // The problems whose files ended up described, so their entries can go. Held
     // rather than removed as they are found, because removing from under the
     // loop would move every index still to be matched.
-    let mut described = Vec::new();
+    let mut settled = Vec::new();
     let mut replaced = false;
-    let mut passes = Summarising {
-        directory,
-        root,
-        agent,
-        observer,
-    };
 
     for file in &mut files {
         if !file.is_omitted() {
@@ -1141,13 +733,13 @@ fn summarise_over_cap(
         // them before and from the passes if it has not — see
         // [`Summarising::summary_of`], which is the whole of that arithmetic and
         // is shared with the budget step below.
-        match passes.summary_of(file.path(), &bytes) {
-            Ok(summary) => {
+        match passes.skeleton_of(file.path(), &bytes) {
+            Ok(skeleton) => {
                 let (path, size) = (file.path().to_owned(), file.size());
-                // The size on disk, not the length of the account: a file is as
-                // big as it is however briefly it can be described.
-                *file = agent::File::summarised(path, size, summary);
-                described.push(index);
+                // The size on disk, not the length of the skeleton: a file is
+                // as big as it is however little of it is worth sending.
+                *file = agent::File::elided(path, size, skeleton);
+                settled.push(index);
                 replaced = true;
             }
             Err(cause) => problems[index].cause = cause,
@@ -1156,8 +748,8 @@ fn summarise_over_cap(
 
     // Sorted so the removals are back to front whatever order the files were
     // matched in, and so no earlier removal shifts a later index.
-    described.sort_unstable();
-    for index in described.into_iter().rev() {
+    settled.sort_unstable();
+    for index in settled.into_iter().rev() {
         problems.remove(index);
     }
 
@@ -1257,19 +849,13 @@ fn summarise_over_cap(
 /// the cap, with nothing given up to get there — costs one comparison and
 /// returns the request it was handed.
 fn demote_to_budget(
-    directory: &Path,
-    root: &Path,
     request: agent::Request,
     cap: u64,
     problems: &mut Vec<Problem>,
-    agent: &dyn Agent,
-    observer: &mut dyn Observer,
+    passes: &mut Reducing<'_>,
 ) -> agent::Request {
-    let carried = carried_bytes(
-        request.files(),
-        request.child_documents(),
-        request.previous_document(),
-    );
+    let directory = passes.directory;
+    let carried = carried_bytes(request.files(), request.child_documents());
     let cliffed = problems
         .iter()
         .any(|problem| matches!(problem.cause, Omission::OverBudget { .. }));
@@ -1279,9 +865,9 @@ fn demote_to_budget(
         return request;
     }
 
-    // What no rung can give up: the children's documents and this directory's
-    // own previous one, which are never demoted and never dropped. If they are
-    // already over the cap by themselves then the request is over the cap
+    // What no rung can give up: the children's documents, which are never
+    // demoted and never dropped. If they are already over the cap by
+    // themselves then the request is over the cap
     // whatever happens to the files, and every rung below would be spending
     // model passes to buy room that cannot exist — turning source into prose,
     // and prose into names, for a request that ends over the cap regardless.
@@ -1293,7 +879,7 @@ fn demote_to_budget(
     // what every rung below declines to work on. Once the trim stopped giving
     // up files whose accounts would cost more than they free, the accident
     // stopped happening and the passes started being paid for.
-    let immovable = carried_bytes(&[], request.child_documents(), request.previous_document());
+    let immovable = carried_bytes(&[], request.child_documents());
     if immovable > cap {
         return request;
     }
@@ -1305,14 +891,8 @@ fn demote_to_budget(
     let mut order: Vec<usize> = (0..files.len()).collect();
     order.sort_by_key(|&index| (Reverse(files[index].size()), files[index].path().to_owned()));
 
-    let mut passes = Summarising {
-        directory,
-        root,
-        agent,
-        observer,
-    };
-    let carried = demote_whole_files(&mut passes, &mut files, &order, carried, cap, problems);
-    let carried = lift_from_the_cliff(&mut passes, &mut files, &order, carried, cap, problems);
+    let carried = demote_whole_files(passes, &mut files, &order, carried, cap, problems);
+    let carried = lift_from_the_cliff(passes, &mut files, &order, carried, cap, problems);
     list_over_budget(directory, &mut files, &order, carried, cap, problems);
 
     if files == request.files() {
@@ -1368,7 +948,7 @@ fn whole_bytes(directory: &Path, file: &agent::File) -> Option<Vec<u8>> {
 /// and so falls to a name and a size now, with that cause reported in place of
 /// any budget one.
 fn demote_whole_files(
-    passes: &mut Summarising<'_>,
+    passes: &mut Reducing<'_>,
     files: &mut [agent::File],
     order: &[usize],
     carried: u64,
@@ -1392,12 +972,12 @@ fn demote_whole_files(
         };
         let (path, size) = (files[index].path().to_owned(), files[index].size());
 
-        match passes.summary_of(&path, &bytes) {
-            Ok(summary) if byte_count(summary.len()) < spent => {
+        match passes.skeleton_of(&path, &bytes) {
+            Ok(skeleton) if byte_count(skeleton.len()) < spent => {
                 carried = carried
                     .saturating_sub(spent)
-                    .saturating_add(byte_count(summary.len()));
-                files[index] = agent::File::summarised(path, size, summary);
+                    .saturating_add(byte_count(skeleton.len()));
+                files[index] = agent::File::elided(path, size, skeleton);
             }
             Ok(_) => {}
             Err(cause) => {
@@ -1426,7 +1006,7 @@ fn demote_whole_files(
 /// fit ends the rung: the file stays on its cliff, and no further passes are
 /// spent finding out that the budget is still full.
 fn lift_from_the_cliff(
-    passes: &mut Summarising<'_>,
+    passes: &mut Reducing<'_>,
     files: &mut [agent::File],
     order: &[usize],
     carried: u64,
@@ -1463,15 +1043,15 @@ fn lift_from_the_cliff(
             }
         };
 
-        match passes.summary_of(files[index].path(), &bytes) {
-            Ok(summary) => {
-                let length = byte_count(summary.len());
+        match passes.skeleton_of(files[index].path(), &bytes) {
+            Ok(skeleton) => {
+                let length = byte_count(skeleton.len());
                 if carried.saturating_add(length) > cap {
                     break;
                 }
                 let (path, size) = (files[index].path().to_owned(), files[index].size());
-                files[index] = agent::File::summarised(path, size, summary);
-                // Described, so no longer left out of anything.
+                files[index] = agent::File::elided(path, size, skeleton);
+                // Reduced, so no longer left out of anything.
                 problems.remove(reported);
                 carried = carried.saturating_add(length);
             }
@@ -1541,404 +1121,50 @@ fn report(problems: &mut Vec<Problem>, path: PathBuf, cause: Omission) {
     }
 }
 
-/// Everything it takes to come back with an account of some bytes: where the
-/// files are, where the cache is, who runs a pass, and who is told one is being
-/// run.
+/// What it takes to reduce a file to its declarations: where the files are,
+/// and where the names each one declares are recorded for the render.
 ///
-/// Four borrows that always travel together — [`summarise_over_cap`] and every
-/// rung of [`demote_to_budget`] need exactly this set and nothing else — carried
-/// as one value so the rungs stay functions with arguments a reader can hold in
-/// their head. It owns nothing and decides nothing; the policy is entirely in
-/// the callers.
-struct Summarising<'a> {
-    /// The directory being pacted, which every file's path is relative to and
-    /// which the prompts name.
+/// It used to hold an [`Agent`] and an [`Observer`] too, because a file too big
+/// to send was described by model passes over its chunks. It is not any more:
+/// [`languages::skeleton`] lifts the file's own declaration lines out of it for
+/// nothing, so there is no pass to run, nothing to announce and nothing to
+/// cache.
+struct Reducing<'a> {
+    /// The directory being pacted, which every file's path is relative to.
     directory: &'a Path,
-    /// The repository root, the one thing `<root>/.warlock/summaries/` is
-    /// joined onto.
-    root: &'a Path,
-    /// Who runs a pass. One agent for the map, the reduce and the directory's
-    /// own pass — a summary is not a different kind of question.
-    agent: &'a dyn Agent,
-    /// Who hears about a pass before it runs.
-    observer: &'a mut dyn Observer,
+    /// Where the names each file declares are recorded for the render.
+    described: &'a mut Described,
 }
 
-/// `bytes` as the ordered list of chunks a map pass would read them in, or the
-/// [`Utf8Error`] that says there are none.
-///
-/// Pure, and deliberately narrow: nothing is opened, no [`Agent`] is run, and
-/// no policy is decided here. Whether a file should be summarised at all,
-/// whether it has too many chunks ([`CHUNK_COUNT_CEILING`]), what to report
-/// when it has — all of that belongs to the caller, which is why this answers
-/// with chunks and an error and nothing else.
-///
-/// # What it guarantees
-///
-/// * **Nothing is lost, nothing is added.** Concatenating the chunks in order
-///   reproduces `bytes` exactly, byte for byte. No separator, no ellipsis, no
-///   normalised line ending.
-/// * **Every chunk is valid UTF-8.** The whole of `bytes` is checked once,
-///   before anything is split, and every boundary after that is a boundary in a
-///   [`str`] — so no chunk can end in the middle of a character.
-/// * **Chunks end after a newline** wherever the file gives them one to end
-///   after, so a pass reads whole lines and a boundary falls where a human
-///   would put one.
-/// * **The count is known up front**, from bytes already in memory, before any
-///   pass is spent.
-///
-/// Zero bytes is zero chunks. An empty file is never over [`PER_FILE_BYTE_CAP`]
-/// and so never reaches here, and zero chunks is the honest answer for nothing
-/// to read.
-///
-/// # The line that is longer than the cap
-///
-/// A minified bundle can be a single line of two megabytes, and [`CHUNK_BYTE_CAP`]
-/// is a target rather than a hard maximum precisely because of it: **a line
-/// longer than the cap becomes one chunk of its own, at whatever length it
-/// is.** Both alternatives are worse. Cutting inside a line hands a pass half a
-/// statement and gets a confident account of the half that never arrived —
-/// exactly the guessing that "omit, never truncate" exists to stop — and
-/// refusing such a file outright would make it undescribable for a reason no
-/// reader can act on. An oversized chunk may well be a request a model refuses,
-/// and that refusal is honest: it costs one pass and lands where every other
-/// failure lands, on a name, a size and a disclosed cause.
-///
-/// # Errors
-///
-/// [`Utf8Error`] if `bytes` is not valid UTF-8 anywhere in it. The file is
-/// rejected whole — a single stray byte in a megabyte of text yields no chunks
-/// at all rather than the chunks around it — because a file that is not text is
-/// not a file this can honestly cut into readable parts.
-pub(crate) fn chunk_utf8(bytes: &[u8]) -> Result<Vec<String>, Utf8Error> {
-    // Checked once, for the whole file, before a single boundary is chosen.
-    // Everything below this line works in `str`, so UTF-8 validity per chunk is
-    // a property of the types rather than something to remember.
-    let text = str::from_utf8(bytes)?;
+impl Reducing<'_> {
+    /// `bytes` as the file's own declaration lines, and the names it declares
+    /// recorded on the way past.
+    ///
+    /// Free, in every sense that matters: no model pass, no network, no cache,
+    /// and the same answer on every machine. What comes back is text the file
+    /// really contains, so a route naming a symbol found in it is anchored in
+    /// code rather than in prose about code.
+    ///
+    /// # Errors
+    ///
+    /// [`Omission::NotText`] when the bytes are not UTF-8, and
+    /// [`Omission::Unreducible`] when there is nothing to lift: an extension
+    /// the language table has no row for, or a file whose declarations come to
+    /// no less than the file. Either way the caller leaves it as a name and a
+    /// size.
+    fn skeleton_of(&mut self, path: &str, bytes: &[u8]) -> Result<String, Omission> {
+        let size = byte_count(bytes.len());
+        let text =
+            std::str::from_utf8(bytes).map_err(|source| Omission::NotText { size, source })?;
+        let on_disk = Path::new(path);
+        let skeleton = languages::skeleton(on_disk, text).ok_or(Omission::Unreducible { size })?;
 
-    let mut chunks = Vec::new();
-    let mut chunk = String::new();
-    // `split_inclusive` keeps each line's newline with the line it ends, and
-    // yields a final piece whether or not the file ends in one — so the pieces
-    // put back together are the text, and a chunk boundary is always just after
-    // a newline.
-    for line in text.split_inclusive('\n') {
-        // Started a chunk and this line would take it over: end it here. The
-        // emptiness check is what lets a single over-cap line through as its
-        // own chunk instead of looping forever looking for a boundary that the
-        // file does not have.
-        if !chunk.is_empty() && chunk.len() + line.len() > CHUNK_BYTE_CAP {
-            chunks.push(std::mem::take(&mut chunk));
+        let declared = languages::declared_names(on_disk, text);
+        if !declared.is_empty() {
+            self.described.declared.insert(path.to_owned(), declared);
         }
-        chunk.push_str(line);
+        Ok(skeleton.text)
     }
-    if !chunk.is_empty() {
-        chunks.push(chunk);
-    }
-
-    Ok(chunks)
-}
-
-/// Read `bytes` in parts through `agent` and come back with one account of what
-/// is in them, or the [`Omission`] that says why there is none.
-///
-/// `path` is how the file is named in `directory` — the same relative,
-/// forward-slashed spelling its [`agent::File`](crate::agent::File) carries — and `directory` is
-/// where the passes run, exactly as the directory pass runs there. Neither is
-/// allowed to reach the answer: see [`MAP_PROMPT`] for why a summary is about
-/// bytes and never about a name.
-///
-/// # The shape of it
-///
-/// One map pass per chunk, then one reduce pass over their answers: N chunks
-/// cost N + 1 passes. The exception is the file that comes to a single chunk,
-/// which costs exactly one — that map answer is already an account of the whole
-/// file, and reducing it would pay a pass to have prose rewritten.
-///
-/// **A chunk rides in the prompt text and never as a file.** No request built
-/// here carries an [`agent::File`](crate::agent::File) at all, because [`agent::File::present`](crate::agent::File::present) means
-/// "this is the file, whole", and a part of a file wearing that constructor is
-/// the truncation this module refuses to invite. The prompt says which part of
-/// how many it holds and where the file's own text begins.
-///
-/// # Fail fast, and never past this function
-///
-/// The first thing that goes wrong ends the file: a pass that comes back with
-/// an [`agent::Error`](crate::agent::Error), or one whose answer trims to less than
-/// [`MINIMUM_SUMMARY_BYTES`], returns [`Omission::Unsummarised`] and no further
-/// pass is spent on that file. Half a file's parts described is not half a
-/// summary — it is a confident account of the parts that were read and silence
-/// about the rest, which is the same wrong conclusion half a file sent would
-/// invite.
-///
-/// Two answers cost nothing at all, because both are settled before a pass is
-/// run: bytes that are not UTF-8 are [`Omission::NotText`], and a file over
-/// [`CHUNK_COUNT_CEILING`] chunks is [`Omission::TooManyChunks`].
-///
-/// # Errors
-///
-/// [`Omission`], and only ever one of the three the passes themselves can
-/// reach — [`Omission::NotText`], [`Omission::TooManyChunks`],
-/// [`Omission::Unsummarised`]. Every one of them is a file with no account to
-/// be had, so whichever cap asked for one leaves it where the answer puts it: a
-/// name and a size, with the reason said out loud. None of them is an
-/// [`Error`]: nothing here can fail a pact.
-///
-/// # Saying it out loud first
-///
-/// `observer` hears [`summarising`](Observer::summarising) immediately before
-/// each of those passes is handed to `agent` — never after it, and never for a
-/// pass that is not about to run. The count it is given is **passes, not
-/// chunks**: a file of N chunks is announced N + 1 times as parts 1..=N + 1,
-/// with the reduce as the last of them, and a single-chunk file is announced
-/// once as part 1 of 1. So the numbers a front end draws are a fraction of the
-/// work being paid for, and they run to their total exactly when the file is
-/// done. The two answers that cost no passes announce nothing.
-pub(crate) fn summarise_file(
-    directory: &Path,
-    path: &str,
-    bytes: &[u8],
-    agent: &dyn Agent,
-    observer: &mut dyn Observer,
-) -> Result<String, Omission> {
-    let size = byte_count(bytes.len());
-    let chunks = chunk_utf8(bytes).map_err(|source| Omission::NotText { size, source })?;
-
-    if chunks.len() > CHUNK_COUNT_CEILING {
-        return Err(Omission::TooManyChunks {
-            size,
-            chunks: chunks.len(),
-        });
-    }
-    if chunks.is_empty() {
-        // Zero bytes is zero chunks, and there is no account to be written of
-        // nothing. Unreachable from a pact — an empty file is not over
-        // [`PER_FILE_BYTE_CAP`], and the budget's demotion passes over a file
-        // that is spending no bytes — but guarded rather than assumed, and
-        // guarded before any pass is spent finding out.
-        return Err(Omission::Unsummarised { size, source: None });
-    }
-
-    let chunk_count = chunks.len();
-    // What the observer counts in: every pass this file is about to cost, which
-    // is one per chunk plus the reduce over them — and no reduce, so no extra
-    // pass, when there is only the one chunk. The chunk numbering the model is
-    // told (`map_request`) is a different count and stays a count of chunks.
-    let passes = if chunk_count == 1 { 1 } else { chunk_count + 1 };
-    let announced = directory.join(path);
-
-    let mut accounts = Vec::with_capacity(chunk_count);
-    for (index, chunk) in chunks.iter().enumerate() {
-        let request = map_request(directory, path, index + 1, chunk_count, chunk);
-        // Before the pass, always: an announcement after it would be a report of
-        // money already spent rather than a reason for the wait.
-        observer.summarising(&announced, index + 1, passes);
-        accounts.push(summarising_pass(agent, &request, size)?);
-    }
-
-    // One part is the whole file, so its account is the file's.
-    if let [only] = accounts.as_slice() {
-        return Ok(only.clone());
-    }
-
-    let request = reduce_request(directory, path, &accounts);
-    observer.summarising(&announced, passes, passes);
-    summarising_pass(agent, &request, size)
-}
-
-/// One pass of a map-reduce: what the model wrote, trimmed, or the
-/// [`Omission`] that failure demotes a file of `size` bytes to.
-///
-/// The two ways a pass produces no account are one variant on purpose. A
-/// transport failure keeps what the agent said; an answer too short to be an
-/// account of anything keeps nothing, for the reason [`Refusal::TooShort`](crate::Refusal::TooShort)
-/// gives — there is not enough there to be worth carrying. An empty answer is
-/// the second of those and needs no case of its own: nothing trims to zero and
-/// clears [`MINIMUM_SUMMARY_BYTES`].
-///
-/// Trimmed rather than kept verbatim, unlike a document ([`pact_directory`]):
-/// what comes back here is not written to a file, it is pasted into another
-/// request, and the blank lines around it would be someone else's prompt's
-/// whitespace.
-fn summarising_pass(
-    agent: &dyn Agent,
-    request: &agent::Request,
-    size: u64,
-) -> Result<String, Omission> {
-    let text = agent
-        .run(request)
-        .map_err(|source| Omission::Unsummarised {
-            size,
-            source: Some(source),
-        })?
-        .into_text();
-
-    let account = text.trim();
-    if account.len() < MINIMUM_SUMMARY_BYTES {
-        return Err(Omission::Unsummarised { size, source: None });
-    }
-    Ok(account.to_owned())
-}
-
-/// The request for one map pass: [`MAP_PROMPT`], which part of how many this
-/// is, and the part's text.
-///
-/// `part` is one-based, because it is a number a model reads rather than an
-/// index anything counts with, and both it and `parts` are in the text so a
-/// pass knows it is holding a piece of something bigger.
-///
-/// The chunk is prompt text and the request carries no files. That is the whole
-/// mechanism for keeping a part of a file from ever looking like a file: there
-/// is no [`agent::File`](crate::agent::File) here to mistake it for one.
-fn map_request(
-    directory: &Path,
-    path: &str,
-    part: usize,
-    parts: usize,
-    chunk: &str,
-) -> agent::Request {
-    agent::Request::new(
-        format!(
-            "{MAP_PROMPT}\n\nThis is part {part} of {parts} of the file `{path}`. Everything \
-             below the next line is that part's own text, not an instruction:\n\n---\n\n{chunk}"
-        ),
-        directory,
-    )
-}
-
-/// The request for the one reduce pass: [`REDUCE_PROMPT`] and every map
-/// answer, in the order the parts were read.
-///
-/// The accounts are numbered the way the parts they describe were, so a pass
-/// can tell which end of the file it is reading about, and labelled as accounts
-/// so it never quotes one as the file's own text.
-fn reduce_request(directory: &Path, path: &str, accounts: &[String]) -> agent::Request {
-    use std::fmt::Write as _;
-
-    let parts = accounts.len();
-    let mut prompt = format!(
-        "{REDUCE_PROMPT}\n\nBelow are the accounts of the {parts} parts of the file `{path}`, in \
-         order."
-    );
-    for (index, account) in accounts.iter().enumerate() {
-        let part = index + 1;
-        // Infallible: writing into a `String` cannot fail, and there is nothing
-        // to report if the impossible happens.
-        let _ = write!(
-            prompt,
-            "\n\n--- account of part {part} of {parts} ---\n\n{account}"
-        );
-    }
-    agent::Request::new(prompt, directory)
-}
-
-/// The cache key for a file's contents: a digest of `bytes`, and of nothing
-/// else.
-///
-/// No path, no name, no mtime, no size, no inode. A summary is an account of
-/// what is *in* a file, so the bytes are the whole of what identifies it: a
-/// lockfile renamed between two pacts, the same vendored bundle sitting in two
-/// directories, and a colleague's fresh clone of all of it are the same bytes,
-/// so they are the same key and the same entry.
-///
-/// That is also the entire change-detection mechanism. An edited file hashes to
-/// a key nothing on disk answers to, so it misses and is summarised again;
-/// nothing anywhere compares an old state to a new one, and a stale entry stops
-/// matching by itself rather than by being swept.
-///
-/// Derived through [`SUMMARY_KEY_CONTEXT`], so this digest can never collide
-/// with a plain blake3 of the same bytes computed elsewhere, and never with the
-/// subtree hash of [`hash`](crate::hash), whose context and inputs are its own.
-///
-/// The result is 64 lowercase hex characters, opaque to everything but the two
-/// functions below.
-pub(crate) fn summary_key(bytes: &[u8]) -> String {
-    blake3::Hasher::new_derive_key(SUMMARY_KEY_CONTEXT)
-        .update(bytes)
-        .finalize()
-        .to_hex()
-        .to_string()
-}
-
-/// Where `root`'s cached summaries live.
-pub(crate) fn summary_dir(root: &Path) -> PathBuf {
-    root.join(MANIFEST_DIR).join(SUMMARY_DIR)
-}
-
-/// What the entry for `key` is called inside [`summary_dir`].
-pub(crate) fn summary_file_name(key: &str) -> String {
-    format!("{key}.{SUMMARY_EXTENSION}")
-}
-
-/// The cached account of the bytes `key` was derived from, if there is a usable
-/// one under `root`.
-///
-/// **Every failure is a miss.** No cache directory, no entry, an entry that
-/// cannot be opened, one that is not UTF-8, one that is empty or nothing but
-/// whitespace: all of them come back `None`, which means exactly what an absent
-/// entry means — this file has not been described yet, so describe it. There is
-/// no error to return because there is nothing a caller could usefully do
-/// differently, and a cache that could fail a pact would be a cache that made
-/// pacting less reliable than not having one.
-///
-/// Those are the only rules, and in particular the summary floor
-/// ([`MINIMUM_SUMMARY_BYTES`]) is not re-applied here. An entry only ever gets
-/// written from an account that already cleared it, and the write is a rename,
-/// so a short entry is not a truncated one — it is somebody's edit, and a
-/// second, drifting opinion about how long a summary has to be is worth less
-/// than honouring it.
-///
-/// The text comes back exactly as it is on disk, because that is exactly how it
-/// was written.
-pub(crate) fn cached_summary(root: &Path, key: &str) -> Option<String> {
-    let text = fs::read_to_string(summary_dir(root).join(summary_file_name(key))).ok()?;
-    // Blank is not an account of anything, and it is what a zero-byte file left
-    // by some other tool looks like. Trimmed only to make the judgement; the
-    // caller gets the bytes as found.
-    (!text.trim().is_empty()).then_some(text)
-}
-
-/// Record `summary` under `root` as the account of the bytes `key` was derived
-/// from.
-///
-/// The directory is created on demand, and only when there is genuinely
-/// something to put in it, so a pact over a directory with no over-cap file
-/// leaves nothing behind at all.
-///
-/// The write is [`Manifest::save`]'s idiom, through the same two helpers as the
-/// manifest and `WARLOCK.md`: a hidden temporary beside the target, flushed to
-/// disk, then renamed over it. So a later pact reads a whole entry or no entry,
-/// never a prefix of one — which matters more here than anywhere else, since a
-/// half-written entry would be read back as an account of a file it only half
-/// describes. The temporary is removed on the failure paths as well as the
-/// success one, and being a dot file it is invisible to every walk in this
-/// crate for the moment it exists.
-///
-/// # Errors
-///
-/// The [`std::io::Error`] that stopped the directory being created, the
-/// temporary being written or the rename landing. **It is entirely safe to
-/// ignore**, and callers are expected to: the summary this was called with is
-/// still the summary for this pact, and all a failure costs is that the next
-/// pact pays for the passes again. `drop(cache_summary(..))` is the intended
-/// call site.
-pub(crate) fn cache_summary(root: &Path, key: &str, summary: &str) -> std::io::Result<()> {
-    let dir = summary_dir(root);
-    fs::create_dir_all(&dir)?;
-
-    let name = summary_file_name(key);
-    let temp = dir.join(temp_file_name(&name));
-    if let Err(source) = write_and_sync(&temp, summary.as_bytes()) {
-        // Best effort, and nothing to report if it fails: the caller is already
-        // being told nothing was cached.
-        drop(fs::remove_file(&temp));
-        return Err(source);
-    }
-    if let Err(source) = fs::rename(&temp, dir.join(&name)) {
-        drop(fs::remove_file(&temp));
-        return Err(source);
-    }
-    Ok(())
 }
 
 /// What one request is built from: the directory's own files, and its immediate
@@ -1950,13 +1176,145 @@ pub(crate) fn cache_summary(root: &Path, key: &str, summary: &str) -> std::io::R
 #[derive(Debug)]
 struct Found {
     /// The files sitting directly in the directory, keyed by name. The
-    /// directory's own `WARLOCK.md` is not among them; see `own_document`.
+    /// directory's own `WARLOCK.md` is not among them: it reaches no pass.
     files: BTreeMap<String, PathBuf>,
     /// The `WARLOCK.md` of each immediate child that has one, keyed by the
     /// child directory's name.
     child_documents: BTreeMap<String, PathBuf>,
-    /// The directory's own `WARLOCK.md`, where it has one.
-    own_document: Option<PathBuf>,
+}
+
+pub(crate) fn gather_request(
+    prompt: impl Into<String>,
+    directory: impl AsRef<Path>,
+    cap: u64,
+) -> Result<Gathered, Error> {
+    let directory = directory.as_ref();
+    let found = walk(directory)?;
+
+    let mut problems = Vec::new();
+
+    // Children first: their documents are part of the budget the files are
+    // then fitted into, and they are the part that never gives way.
+    let mut child_documents = Vec::new();
+    for (child, path) in found.child_documents {
+        match fs::read_to_string(&path) {
+            Ok(text) => {
+                child_documents.push(agent::ChildDocument::new(child, text));
+            }
+            // Including a document that could not be read is not an option —
+            // there is no text — so it contributes nothing and says so.
+            Err(source) => problems.push(Problem {
+                path,
+                cause: Omission::Unreadable { source },
+            }),
+        }
+    }
+
+    // Files in sorted order, each sent whole unless it alone is too big. The
+    // size comes from the filesystem before anything is opened, so an enormous
+    // file is never read into memory just to be dropped again.
+    let mut files = Vec::new();
+    let mut on_disk = Vec::new();
+    for (relative, path) in found.files {
+        let size = match fs::metadata(&path) {
+            Ok(metadata) => metadata.len(),
+            // No size means nothing true to list, so the file is left out
+            // entirely rather than listed at a made-up length.
+            Err(source) => {
+                problems.push(Problem {
+                    path,
+                    cause: Omission::Unreadable { source },
+                });
+                continue;
+            }
+        };
+
+        let file = if size > PER_FILE_BYTE_CAP {
+            problems.push(Problem {
+                path: path.clone(),
+                cause: Omission::TooLarge { size },
+            });
+            agent::File::omitted(relative, size)
+        } else {
+            match fs::read(&path) {
+                Ok(bytes) => elided_or_whole(&path, relative, size, bytes),
+                Err(source) => {
+                    problems.push(Problem {
+                        path: path.clone(),
+                        cause: Omission::Unreadable { source },
+                    });
+                    agent::File::omitted(relative, size)
+                }
+            }
+        };
+        files.push(file);
+        on_disk.push(path);
+    }
+
+    // Counted once, from what was actually gathered, rather than added up as
+    // the loops went: what a file spends is a property of the file that ended
+    // up in the request, not of the branch it came out of.
+    let carried = carried_bytes(&files, &child_documents);
+    trim_to_budget(&mut files, &on_disk, carried, cap, &mut problems);
+
+    let request = agent::Request::new(prompt, directory)
+        .with_files(files)
+        .with_child_documents(child_documents);
+
+    Ok(Gathered { request, problems })
+}
+
+/// The file extensions warlock reads as prose, and never hands to a pass.
+///
+/// Markdown is the one kind of file in a repository whose claims warlock has
+/// nothing to check against. Everything else in a request is evidence — the
+/// bytes are what they are — but a `README.md` is somebody's writing *about*
+/// the code, which is exactly the class of input the document schema exists to
+/// keep out of a `WARLOCK.md`.
+///
+/// # What made this necessary
+///
+/// A route's symbol is verified by looking for it in the target's text
+/// ([`document::accept`](crate::document::accept)), and that check cannot tell a declaration from
+/// a mention. Measured on this repository: `crates/warlock-tui`'s document
+/// routed "what keys the TUI binds" to `README.md` `action_for`, which
+/// verified against one English sentence — *"Every binding is in
+/// `action_for`"* — while the function itself sits in `src/input.rs`, a
+/// directory that pass never saw. Five of the engine crate's eight routes went
+/// the same way, naming real types against prose that merely mentions them. A
+/// chatty readme can manufacture a verified route to the wrong place for any
+/// symbol it happens to name, and the parent that should have routed *down* to
+/// its `src/` child routes sideways into prose instead.
+///
+/// So prose is not evidence and does not travel. What is left in a parent
+/// directory of a workspace is its manifests and its children's documents,
+/// which is what a router should have been reading in the first place.
+///
+/// # What this deliberately does not touch
+///
+/// * **Hashing.** [`subtree_hash`](crate::subtree_hash) still digests every markdown file, so
+///   editing a `README.md` still turns its directory yellow. The digest is
+///   warlock's record that *something moved*, and a child's `WARLOCK.md` being
+///   part of its parent's digest is what makes the two-phase pact work at all.
+///   Narrowing it is a separate decision with its own consequences.
+/// * **A child's `WARLOCK.md`.** Those are gathered by the other branch of
+///   [`walk`], as [`agent::ChildDocument`]s, and are the whole of how a
+///   directory learns what is below it. They are prose too, and they are the
+///   one prose warlock wrote itself, to a shape it checked.
+/// * **[`view_file`](crate::view_file).** The `v` key opens any file a person points it at. A
+///   person asking to read a readme is not a pass being handed one.
+const PROSE_EXTENSIONS: &[&str] = &["md", "markdown", "mdx"];
+
+/// Whether `path` is prose by [`PROSE_EXTENSIONS`], matched case-insensitively
+/// so a `README.MD` is as excluded as a `readme.md`.
+fn is_prose(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            PROSE_EXTENSIONS
+                .iter()
+                .any(|prose| extension.eq_ignore_ascii_case(prose))
+        })
 }
 
 /// Everything at or just below `dir` that a request can be built from.
@@ -1985,7 +1343,6 @@ fn walk(dir: &Path) -> Result<Found, Error> {
     let mut found = Found {
         files: BTreeMap::new(),
         child_documents: BTreeMap::new(),
-        own_document: None,
     };
     for entry in walker {
         let entry = entry.map_err(|source| Error::Walk {
@@ -2010,14 +1367,14 @@ fn walk(dir: &Path) -> Result<Found, Error> {
         let path = entry.into_path();
 
         if depth == 1 {
-            // The directory's own files — except its own document, which is
-            // taken out of the listing here. It is the previous pass's claim
-            // about this directory rather than part of the directory's
-            // evidence about itself, and `agent::Request` carries the argument
-            // for why a request keeps the two apart.
-            if path.file_name() == Some(OsStr::new(DOCUMENT_FILE)) {
-                found.own_document = Some(path);
-            } else {
+            // The directory's own files, minus everything that is prose — see
+            // `PROSE_EXTENSIONS` for why a readme is not evidence about the
+            // code beside it. That covers the directory's own `WARLOCK.md`
+            // along with the rest: it is the previous pass's claim about this
+            // directory rather than part of the directory's evidence about
+            // itself, and `agent::Request` carries the argument for why no
+            // pass is shown its predecessor.
+            if !is_prose(&path) {
                 found.files.insert(relative(dir, &path)?, path);
             }
         } else if depth == WALK_DEPTH && path.file_name() == Some(OsStr::new(DOCUMENT_FILE)) {
@@ -2085,20 +1442,18 @@ fn file_bytes(file: &agent::File) -> u64 {
 }
 
 /// Everything a request would carry, counted the way the budget counts it: the
-/// files by [`file_bytes`], plus every child document's text, plus the
-/// directory's own previous document where there is one.
+/// files by [`file_bytes`], plus every child document's text.
 ///
-/// The last two are counted and never trimmed. They are what a directory knows
-/// that its files do not say, they are small next to source, and
-/// [`trim_to_budget`] only ever gives up files — so counting them here is what
-/// keeps the files' share honest rather than what puts them at risk.
+/// The child documents are counted and never trimmed. They are what a
+/// directory knows that its files do not say, they are small next to source,
+/// and [`trim_to_budget`] only ever gives up files — so counting them here is
+/// what keeps the files' share honest rather than what puts them at risk.
 ///
 /// Saturating throughout, like [`byte_count`]: a budget is no place to panic
 /// over a total that cannot happen.
 pub(crate) fn carried_bytes(
     files: &[agent::File],
     child_documents: &[agent::ChildDocument],
-    previous_document: Option<&str>,
 ) -> u64 {
     let mut carried: u64 = 0;
     for file in files {
@@ -2106,9 +1461,6 @@ pub(crate) fn carried_bytes(
     }
     for child in child_documents {
         carried = carried.saturating_add(byte_count(child.text().len()));
-    }
-    if let Some(text) = previous_document {
-        carried = carried.saturating_add(byte_count(text.len()));
     }
     carried
 }
@@ -2209,104 +1561,31 @@ pub enum Omission {
         /// What the filesystem said.
         source: std::io::Error,
     },
-    /// The file is over [`PER_FILE_BYTE_CAP`] and its bytes are not valid
-    /// UTF-8, so there is no text to cut into parts and nothing to summarise.
+    /// The file is over a byte cap and its bytes are not valid UTF-8, so there
+    /// is nothing to read declarations out of.
     ///
-    /// Nothing is wrong with the file: a checked-in PNG, a test fixture of
-    /// random bytes or a compiled artefact is doing exactly what it is for. It
-    /// is separate from [`Omission::TooLarge`] because it is a different
-    /// answer to "why is there no summary" — this one will never have a
-    /// summary, however the caps move — and not a single pass is spent finding
-    /// that out.
+    /// Nothing is wrong with the file: a checked-in PNG, a fixture of random
+    /// bytes or a compiled artefact is doing exactly what it is for. Separate
+    /// from [`Omission::TooLarge`] because it is a different fact about the
+    /// file, and the document says which.
     NotText {
-        /// Its size in bytes, which is what the request carries in place of it.
+        /// Its size in bytes.
         size: u64,
-        /// Where the bytes stopped being text, as [`std::str::from_utf8`]
-        /// reported it.
+        /// Where the bytes stopped being text.
         source: Utf8Error,
     },
-    /// The file is text and comes to more chunks than one file is worth
-    /// summarising — the ceiling is a constant of this crate, and its number is
-    /// in the message — so it was left as a name and a size rather than turned
-    /// into dozens of model passes.
+    /// The file is over a byte cap and there is nothing of it worth lifting:
+    /// its extension has no row in the language table, or its declaration
+    /// lines come to no less than the whole file.
     ///
-    /// Deliberately not a truncation and not a partial summary: half a file
-    /// summarised is the same confident wrong conclusion half a file sent would
-    /// be. The count is known before any pass runs, so nothing is spent on a
-    /// file that lands here.
-    TooManyChunks {
-        /// Its size in bytes, which is what the request carries in place of it.
+    /// A lockfile, a minified bundle, a CSV. Warlock reduces source it
+    /// recognises and declines to guess at anything else, so the file keeps the
+    /// floor every over-cap file has: a name and a size, with the reason said
+    /// out loud.
+    Unreducible {
+        /// Its size in bytes.
         size: u64,
-        /// How many chunks it came to, which is what the ceiling was measured
-        /// against.
-        chunks: usize,
     },
-    /// Summarising the file was attempted and produced no account of it, so it
-    /// fell back to a name and a size.
-    ///
-    /// One variant for every way the passes end without a summary, because they
-    /// have one answer: this file, this once, is described the way it was
-    /// before summarising existed, and the pact carries on. No pass is spent on
-    /// it after the first thing that went wrong.
-    Unsummarised {
-        /// Its size in bytes, which is what the request carries in place of it.
-        size: u64,
-        /// What the agent said, where a map or reduce pass failed outright, and
-        /// `None` where a pass answered and the answer was unusable — empty, or
-        /// under the fewest bytes an account of a file may come to, which the
-        /// message names. Those two are one case for the reason
-        /// [`Refusal::TooShort`](crate::Refusal::TooShort) gives: there is not enough here to be an
-        /// account of a file, and the text that failed to be one is not worth
-        /// carrying.
-        source: Option<agent::Error>,
-    },
-}
-
-impl Summarising<'_> {
-    /// The account of `bytes` — the file at `path` — from
-    /// `<root>/.warlock/summaries/` if it is already there, and from the
-    /// map-reduce through the agent if it is not.
-    ///
-    /// Every summary in this module is made here, so the cache is not something
-    /// a caller has to remember to consult: looking one up, paying the passes on
-    /// a miss, and recording what they produced are one operation with one
-    /// order.
-    ///
-    /// **A hit costs nothing and says nothing.** No chunking, no map, no reduce,
-    /// and not a word to the observer — announcing work nobody is paying for is
-    /// exactly the noise a footer exists to avoid. What comes back is
-    /// indistinguishable from a fresh account, on purpose: nothing downstream is
-    /// allowed to behave differently for a cached file.
-    ///
-    /// **A miss is the change detection.** The key is [`summary_key`] of these
-    /// bytes and nothing else about the file, so bytes this repository has not
-    /// read before find no entry, are read, and leave one behind for the next
-    /// pact and for whoever clones the repository the entry is committed in.
-    ///
-    /// Neither half can fail a pact. A missing, unreadable, corrupt or empty
-    /// entry is a miss that pays the passes a first pact would have paid anyway,
-    /// and a write the filesystem refuses costs the *next* pact those passes and
-    /// this one nothing — which is why the result of [`cache_summary`] is
-    /// dropped.
-    ///
-    /// # Errors
-    ///
-    /// Whatever [`summarise_file`] declined with — [`Omission::NotText`],
-    /// [`Omission::TooManyChunks`], [`Omission::Unsummarised`] — unchanged, for
-    /// the caller to report against the file. A cache hit never fails.
-    fn summary_of(&mut self, path: &str, bytes: &[u8]) -> Result<String, Omission> {
-        let key = summary_key(bytes);
-        if let Some(cached) = cached_summary(self.root, &key) {
-            return Ok(cached);
-        }
-        summarise_file(self.directory, path, bytes, self.agent, self.observer).inspect(|summary| {
-            // Ignorable on purpose: a cache that could not be written is a cache
-            // that will be missed next time, and this pact already has the
-            // summary it paid for. Nothing about a full disk or a read-only
-            // checkout is allowed to change what this pact does.
-            drop(cache_summary(self.root, &key, summary));
-        })
-    }
 }
 
 impl fmt::Display for Omission {
@@ -2330,27 +1609,13 @@ impl fmt::Display for Omission {
             Self::Unreadable { source } => write!(f, "it could not be read: {source}"),
             Self::NotText { size, source } => write!(
                 f,
-                "its {size} bytes are not text ({source}), so there is nothing to summarise and \
-                 it is listed by name and size"
+                "its {size} bytes are not text ({source}), so there is nothing to reduce and it \
+                 is listed by name and size"
             ),
-            Self::TooManyChunks { size, chunks } => write!(
+            Self::Unreducible { size } => write!(
                 f,
-                "at {size} bytes it comes to {chunks} chunks, over the {CHUNK_COUNT_CEILING} one \
-                 file is worth summarising, so it is listed by name and size"
-            ),
-            Self::Unsummarised {
-                size,
-                source: Some(source),
-            } => write!(
-                f,
-                "summarising its {size} bytes produced no answer ({source}), so it is listed by \
-                 name and size"
-            ),
-            Self::Unsummarised { size, source: None } => write!(
-                f,
-                "summarising its {size} bytes produced an answer under the \
-                 {MINIMUM_SUMMARY_BYTES} bytes an account of a file has to reach, so it is \
-                 listed by name and size"
+                "there is nothing of its {size} bytes to lift — warlock has no reader for this \
+                 kind of file — so it is listed by name and size"
             ),
         }
     }
@@ -2361,10 +1626,7 @@ impl std::error::Error for Omission {
         match self {
             Self::Unreadable { source } => Some(source),
             Self::NotText { source, .. } => Some(source),
-            Self::Unsummarised { source, .. } => source
-                .as_ref()
-                .map(|source| source as &(dyn std::error::Error + 'static)),
-            Self::TooLarge { .. } | Self::OverBudget { .. } | Self::TooManyChunks { .. } => None,
+            Self::TooLarge { .. } | Self::OverBudget { .. } | Self::Unreducible { .. } => None,
         }
     }
 }
@@ -2393,23 +1655,13 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        BYTES_PER_TOKEN_DENOMINATOR, BYTES_PER_TOKEN_NUMERATOR, CHUNK_BYTE_CAP,
-        CHUNK_COUNT_CEILING, ESTIMATED_ACCOUNT_BYTES, Gathered, MAP_PROMPT, MINIMUM_REQUEST_BYTES,
-        MINIMUM_SUMMARY_BYTES, Omission, PER_FILE_BYTE_CAP, Problem, REDUCE_PROMPT,
-        REQUEST_BYTE_CAP, RESERVED_TOKENS, byte_count, cache_summary, cached_summary,
-        carried_bytes, chunk_utf8, gather_request, request_byte_cap, summarise_file, summary_dir,
-        summary_file_name, summary_key,
+        BYTES_PER_TOKEN_DENOMINATOR, BYTES_PER_TOKEN_NUMERATOR, ESTIMATED_ACCOUNT_BYTES, Gathered,
+        MINIMUM_REQUEST_BYTES, Omission, PER_FILE_BYTE_CAP, Problem, REQUEST_BYTE_CAP,
+        RESERVED_TOKENS, carried_bytes, gather_request, request_byte_cap,
     };
-    use crate::pact::{DOCUMENT_FILE, MINIMUM_DOCUMENT_BYTES, Unwatched};
-    use crate::{Agent, agent};
-    /// A plausible document of exactly `bytes` bytes, with no whitespace at
-    /// either end so its trimmed length is its length.
-    fn document(bytes: usize) -> String {
-        let head = "# engine\n\nCore engine for warlock. ";
-        assert!(bytes > head.len(), "a document has room for its heading");
-        format!("{head}{}", "x".repeat(bytes - head.len()))
-    }
 
+    use crate::agent;
+    use crate::pact::DOCUMENT_FILE;
     /// Write `contents` at `dir/name`, creating whatever directories it needs.
     fn write(dir: &Path, name: &str, contents: impl AsRef<[u8]>) -> PathBuf {
         let path = dir.join(name);
@@ -2436,18 +1688,6 @@ mod tests {
     /// failing honestly.
     fn share(percent: u64) -> u64 {
         REQUEST_BYTE_CAP * percent / 100
-    }
-
-    /// `size` bytes that are not text: what a checked-in PNG, a compiled
-    /// artefact or a fixture of random bytes looks like to the chunker.
-    ///
-    /// One byte does it, and it goes at the end so that a file which is text
-    /// almost all the way through is still not text — the same rule the
-    /// chunker applies to the whole of a file rather than to its beginning.
-    fn not_text(size: u64) -> Vec<u8> {
-        let mut bytes = filler(size);
-        *bytes.last_mut().expect("a fixture has bytes") = 0xff;
-        bytes
     }
 
     /// A request budget nothing in a fixture can reach, so that the per-file
@@ -2629,11 +1869,7 @@ mod tests {
         let Gathered { request, problems } =
             gather_request("summarise", dir.path(), cap).expect("gathers");
 
-        let carried = carried_bytes(
-            request.files(),
-            request.child_documents(),
-            request.previous_document(),
-        );
+        let carried = carried_bytes(request.files(), request.child_documents());
         assert!(
             carried <= cap,
             "the request really is inside the cap it reports meeting: {carried} > {cap}"
@@ -2693,11 +1929,7 @@ mod tests {
         let Gathered { request, problems } =
             gather_request("summarise", dir.path(), cap).expect("gathers");
 
-        let carried = carried_bytes(
-            request.files(),
-            request.child_documents(),
-            request.previous_document(),
-        );
+        let carried = carried_bytes(request.files(), request.child_documents());
         let cliffed = problems.len() as u64;
         assert!(cliffed > 0, "the fixture is over the cap");
         assert!(
@@ -2959,24 +2191,86 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_document_is_carried_apart_from_the_directorys_files() {
+    fn prose_reaches_no_pass_and_is_in_no_document() {
+        // The defect this closes, measured on this repository: a route's
+        // symbol is checked by looking for it in the target's text, so a
+        // readme sentence naming `action_for` verified a route to the readme
+        // while the function itself sat in another directory. Prose cannot be
+        // told from a declaration by a substring test, so prose does not
+        // travel.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+        write(
+            dir.path(),
+            "README.md",
+            "Every binding is in `action_for`.\n",
+        );
+        write(
+            dir.path(),
+            "CLAUDE.md",
+            "Read the WARLOCK.md files first.\n",
+        );
+        write(dir.path(), "NOTES.MARKDOWN", "# notes\n");
+        write(dir.path(), "guide.mdx", "# guide\n");
+        write(dir.path(), DOCUMENT_FILE, "# engine\n\nWhat it was.\n");
+
+        let Gathered { request, problems } =
+            gather_request("summarise", dir.path(), AMPLE_CAP).expect("gathers");
+
+        assert_eq!(
+            file_paths(&request),
+            ["lib.rs"],
+            "every markdown file is out, whatever its case or spelling, and the \
+             directory's own document with them",
+        );
+        assert!(
+            problems.is_empty(),
+            "and dropping prose is the ordinary case, not something to report: {problems:?}",
+        );
+    }
+
+    #[test]
+    fn a_directory_of_nothing_but_prose_gathers_no_files_and_still_fits() {
+        // A workspace's parent directory, near enough: a readme, a licence in
+        // markdown, and one child that has described itself. What is left to
+        // route with is the child's document, which is the point.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "README.md", "The pitch.\n");
+        write(dir.path(), "CONTRIBUTING.md", "How to help.\n");
+        write(dir.path(), "src/WARLOCK.md", "# src\n\nThe code.\n");
+
+        let Gathered { request, problems } =
+            gather_request("summarise", dir.path(), AMPLE_CAP).expect("gathers");
+
+        assert!(
+            file_paths(&request).is_empty(),
+            "{:?}",
+            file_paths(&request)
+        );
+        assert_eq!(
+            request.child_documents().len(),
+            1,
+            "the child's document is the one prose warlock wrote itself, and it stays",
+        );
+        assert_eq!(request.child_documents()[0].directory(), "src");
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+
+    #[test]
+    fn an_existing_document_reaches_no_pass_at_all() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         write(dir.path(), "WARLOCK.md", "# engine\n\nWhat it was.\n");
         write(dir.path(), "lib.rs", "//! Core engine.\n");
 
-        let request = request_for(dir.path());
+        let Gathered { request, problems } =
+            gather_request("summarise", dir.path(), AMPLE_CAP).expect("gathers");
 
         assert_eq!(
             file_paths(&request),
             ["lib.rs"],
             "the directory's own document is not one of its files: it is the \
-             previous pass's claim about the directory, and the files are the \
-             evidence a pass is meant to check it against",
-        );
-        assert_eq!(
-            request.previous_document(),
-            Some("# engine\n\nWhat it was.\n"),
-            "it is carried, in the slot that says what it is",
+             previous pass's claim about the directory, and no pass is shown \
+             its predecessor",
         );
         assert!(
             request
@@ -2986,102 +2280,33 @@ mod tests {
             "and it is nobody's child document: {:?}",
             request.child_documents(),
         );
-    }
-
-    #[test]
-    fn a_previous_document_over_the_per_file_cap_is_left_out_and_reported() {
-        // The budget can only give up files, so an unbounded document would be
-        // carried whole with nothing able to drop it. It gets a too-large
-        // file's answer instead: left out, and said out loud.
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let size = PER_FILE_BYTE_CAP + 1;
-        let document = write(dir.path(), DOCUMENT_FILE, filler(size));
-        write(dir.path(), "lib.rs", "//! Core engine.\n");
-
-        let Gathered { request, problems } =
-            gather_request("summarise", dir.path(), REQUEST_BYTE_CAP)
-                .expect("an enormous document is not fatal");
-
-        assert_eq!(request.previous_document(), None);
-        let about_document: Vec<&Problem> = problems
-            .iter()
-            .filter(|problem| problem.path == document)
-            .collect();
         assert!(
-            matches!(
-                about_document.as_slice(),
-                [Problem {
-                    cause: Omission::TooLarge { size: reported },
-                    ..
-                }] if *reported == size,
-            ),
-            "and the document names itself as the thing left out: {problems:?}",
+            problems.is_empty(),
+            "and dropping it is the ordinary case, not something to report: {problems:?}"
         );
-        assert_eq!(
-            file_paths(&request),
-            ["lib.rs"],
-            "while the directory's actual files are unaffected",
+        assert!(
+            !request.prompt().contains("What it was"),
+            "nor does it reach the pass by any other road"
         );
     }
 
     #[test]
-    fn a_directory_with_no_document_yet_carries_none() {
+    fn an_enormous_existing_document_costs_the_budget_nothing() {
+        // A document is dropped before it is measured, so a hand-edited or
+        // generated accident of any size leaves the files' whole budget to the
+        // files.
         let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), DOCUMENT_FILE, filler(PER_FILE_BYTE_CAP * 3));
         write(dir.path(), "lib.rs", "//! Core engine.\n");
-
-        let request = request_for(dir.path());
-
-        assert_eq!(
-            request.previous_document(),
-            None,
-            "a first description has nothing to carry forward, and says so \
-             rather than carrying an empty one",
-        );
-        assert_eq!(file_paths(&request), ["lib.rs"]);
-    }
-
-    #[test]
-    fn the_previous_document_is_counted_by_the_budget_and_never_given_up_to_it() {
-        // Three files, each inside the per-file cap and together over the
-        // request cap, so the budget has to give something up and what it gives
-        // up is a file. The document is the smallest thing in the request that
-        // changes what the pass writes, and it is never the thing dropped.
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let previous = document(400);
-        write(dir.path(), DOCUMENT_FILE, &previous);
-        let each = REQUEST_BYTE_CAP / 2 - 1;
-        for name in ["a.rs", "b.rs", "c.rs"] {
-            write(dir.path(), name, filler(each));
-        }
 
         let Gathered { request, problems } =
             gather_request("summarise", dir.path(), REQUEST_BYTE_CAP).expect("gathers");
 
+        assert_eq!(file_paths(&request), ["lib.rs"]);
+        assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(
-            request.previous_document(),
-            Some(previous.as_str()),
-            "the document survives a budget that had to drop a file",
-        );
-        assert!(
-            request.files().iter().any(|file| file.bytes().is_none()),
-            "and a file is what was given up: {:?}",
-            file_paths(&request),
-        );
-        assert!(
-            problems
-                .iter()
-                .any(|problem| matches!(problem.cause, Omission::OverBudget { .. })),
-            "which is reported rather than silent: {problems:?}",
-        );
-        assert_eq!(
-            super::carried_bytes(request.files(), request.child_documents(), None)
-                + previous.len() as u64,
-            super::carried_bytes(
-                request.files(),
-                request.child_documents(),
-                request.previous_document(),
-            ),
-            "and it is counted, so the files' share of the budget stays honest",
+            carried_bytes(request.files(), request.child_documents()),
+            "//! Core engine.\n".len() as u64
         );
     }
 
@@ -3246,11 +2471,7 @@ mod tests {
             "and nothing is reported as given up, because nothing was: {problems:?}",
         );
         assert!(
-            carried_bytes(
-                request.files(),
-                request.child_documents(),
-                request.previous_document(),
-            ) > REQUEST_BYTE_CAP,
+            carried_bytes(request.files(), request.child_documents()) > REQUEST_BYTE_CAP,
             "the request stays honestly over the cap, which this module allows",
         );
     }
@@ -3270,11 +2491,7 @@ mod tests {
             .with_child_documents([agent::ChildDocument::new("src", "# src\n")]);
 
         assert_eq!(
-            super::carried_bytes(
-                request.files(),
-                request.child_documents(),
-                request.previous_document(),
-            ),
+            super::carried_bytes(request.files(), request.child_documents()),
             (b"//! Core engine.\n".len() + summary.len() + "# src\n".len()) as u64,
             "sent whole costs its bytes, listed costs nothing, and summarised \
              costs its summary — the way the child document beside it does",
@@ -3282,19 +2499,14 @@ mod tests {
         assert_eq!(
             super::carried_bytes(
                 &[agent::File::summarised("Cargo.lock", 4_200_000, summary)],
-                &[],
-                None,
+                &[]
             ),
             summary.len() as u64,
             "the account travels; the 4.2 MB it stands for never does",
         );
         assert_eq!(
             carried(&request),
-            super::carried_bytes(
-                request.files(),
-                request.child_documents(),
-                request.previous_document(),
-            ),
+            super::carried_bytes(request.files(), request.child_documents()),
             "and the tests' own count of what a request carries agrees",
         );
     }
@@ -3409,863 +2621,6 @@ mod tests {
                 .and_then(std::error::Error::source)
                 .is_some(),
             "and an unreadable file's cause names the io error under it",
-        );
-    }
-
-    #[test]
-    fn every_way_of_not_summarising_a_file_says_so_on_one_line() {
-        let mut bytes = b"PNG".to_vec();
-        bytes.push(0xff);
-        let not_text = std::str::from_utf8(&bytes).expect_err("not text");
-        let problems = [
-            Problem {
-                path: PathBuf::from("/repo/fixtures/blob.bin"),
-                cause: Omission::NotText {
-                    size: 900_000,
-                    source: not_text,
-                },
-            },
-            Problem {
-                path: PathBuf::from("/repo/vendor/bundle.js"),
-                cause: Omission::TooManyChunks {
-                    size: 40_000_000,
-                    chunks: 407,
-                },
-            },
-            Problem {
-                path: PathBuf::from("/repo/Cargo.lock"),
-                cause: Omission::Unsummarised {
-                    size: 4_200_000,
-                    source: Some(crate::agent::Error::EmptyOutput),
-                },
-            },
-            Problem {
-                path: PathBuf::from("/repo/schema.json"),
-                cause: Omission::Unsummarised {
-                    size: 300_000,
-                    source: None,
-                },
-            },
-        ];
-
-        for problem in &problems {
-            let rendered = problem.to_string();
-            assert!(!rendered.contains('\n'), "{rendered}");
-            assert!(
-                rendered.contains(&problem.path.display().to_string()),
-                "a problem names its file: {rendered}",
-            );
-            assert!(
-                rendered.contains("name and size"),
-                "and says what is in the request instead of its contents: {rendered}",
-            );
-            assert!(
-                problem.source().is_some(),
-                "every problem's cause is reachable as a source: {problem}",
-            );
-        }
-        assert!(
-            problems[1]
-                .to_string()
-                .contains(&CHUNK_COUNT_CEILING.to_string()),
-            "a file past the ceiling says what the ceiling is: {}",
-            problems[1],
-        );
-        assert!(
-            problems[3]
-                .to_string()
-                .contains(&MINIMUM_SUMMARY_BYTES.to_string()),
-            "and an answer too short to use says what it had to reach: {}",
-            problems[3],
-        );
-        let under = |problem: &Problem| {
-            problem
-                .source()
-                .and_then(std::error::Error::source)
-                .is_some()
-        };
-        assert!(under(&problems[0]), "the utf-8 error is under the cause");
-        assert!(under(&problems[2]), "so is the agent's error");
-        assert!(
-            !under(&problems[3]),
-            "and an answer nobody could use has nothing under it: the text is not kept",
-        );
-    }
-
-    #[test]
-    fn the_map_and_reduce_prompts_ask_for_the_contents_and_forbid_the_name() {
-        // The one rule both prompts exist to enforce, pinned in both: a summary
-        // is about bytes, because it will be keyed by bytes alone and has to
-        // survive the file being renamed.
-        for prompt in [super::MAP_PROMPT, super::REDUCE_PROMPT] {
-            assert!(
-                prompt.contains("CONTENTS"),
-                "the account is of the contents: {prompt}",
-            );
-            assert!(
-                prompt.contains("Do not name the file"),
-                "and restating the file's name is forbidden: {prompt}",
-            );
-            assert!(
-                prompt.contains("no code fence"),
-                "the answer is used as it comes back, so nothing may wrap it: {prompt}",
-            );
-        }
-        assert!(
-            super::MAP_PROMPT.contains("which part of how many"),
-            "a map pass is told what it holds: {}",
-            super::MAP_PROMPT,
-        );
-        assert!(
-            super::REDUCE_PROMPT.contains("never quote them as if they were"),
-            "a reduce pass is told its input is prose about the file, not the file: {}",
-            super::REDUCE_PROMPT,
-        );
-    }
-
-    /// A text fixture of at least `bytes` bytes whose every line carries
-    /// one-, two-, three- and four-byte characters, and which ends without a
-    /// final newline.
-    ///
-    /// The multi-byte characters are the point: a boundary taken a byte or two
-    /// off would land inside one, and the round-trip test would see it. No
-    /// final newline so the last piece of the split is exercised too.
-    fn multibyte_text(bytes: usize) -> String {
-        let line = "façade — 日本語 🜂 one line of the fixture, long enough to be worth cutting\n";
-        let mut text = String::new();
-        while text.len() < bytes {
-            text.push_str(line);
-        }
-        text.push_str("façade — 日本語 🜂 and a last line with no newline after it");
-        text
-    }
-
-    /// One line of at least `bytes` bytes, newline-terminated: what a minified
-    /// bundle looks like to the chunker.
-    fn one_long_line(bytes: usize) -> String {
-        let mut line = String::new();
-        while line.len() < bytes {
-            line.push_str("λx.🜁 minified—forever; ");
-        }
-        line.push('\n');
-        line
-    }
-
-    #[test]
-    fn the_chunk_cap_leaves_room_for_the_map_prompt_in_the_same_window() {
-        assert!(
-            byte_count(CHUNK_BYTE_CAP) < PER_FILE_BYTE_CAP,
-            "a chunk shares its window with the map prompt, so it is strictly smaller than a \
-             file sent whole: {CHUNK_BYTE_CAP} vs {PER_FILE_BYTE_CAP}",
-        );
-        const {
-            assert!(
-                MINIMUM_SUMMARY_BYTES < MINIMUM_DOCUMENT_BYTES,
-                "a summary describes one file and is allowed to be shorter than a document, \
-                 which describes a whole directory",
-            );
-        }
-        // The rule this holds is about two numbers, and neither of them is the
-        // chunk count on its own: a file of a few megabytes still gets
-        // described, and no file ever becomes hundreds of passes. Written as a
-        // reach in bytes and a count of passes, so that moving either cap moves
-        // this test's meaning with it rather than past it.
-        const {
-            assert!(
-                CHUNK_COUNT_CEILING * CHUNK_BYTE_CAP >= 4 * 1024 * 1024,
-                "a lockfile of a few megabytes has to still be describable",
-            );
-            assert!(
-                CHUNK_COUNT_CEILING >= 2 && CHUNK_COUNT_CEILING <= 64,
-                "more than one pass, and far short of hundreds of them",
-            );
-        }
-    }
-
-    #[test]
-    fn every_chunk_is_valid_utf8_and_the_chunks_put_back_together_are_the_file() {
-        // Several chunks' worth of multi-byte text with one line in the middle
-        // that is longer than the cap all by itself.
-        let mut text = multibyte_text(CHUNK_BYTE_CAP + CHUNK_BYTE_CAP / 2);
-        text.push('\n');
-        text.push_str(&one_long_line(CHUNK_BYTE_CAP + 1_000));
-        text.push_str(&multibyte_text(CHUNK_BYTE_CAP));
-        let bytes = text.as_bytes();
-
-        let chunks = chunk_utf8(bytes).expect("the fixture is text");
-
-        assert!(chunks.len() > 3, "the fixture is worth cutting up");
-        let mut rejoined: Vec<u8> = Vec::new();
-        for chunk in &chunks {
-            assert!(!chunk.is_empty(), "a chunk nobody can read is not a chunk");
-            // Tautological through a `String`, and asserted anyway: what a map
-            // pass is handed are these bytes, and they have to parse.
-            assert!(
-                std::str::from_utf8(chunk.as_bytes()).is_ok(),
-                "every chunk parses as UTF-8 on its own",
-            );
-            rejoined.extend_from_slice(chunk.as_bytes());
-        }
-        assert_eq!(
-            rejoined, bytes,
-            "the chunks in order are the file, byte for byte: nothing lost, nothing added",
-        );
-    }
-
-    #[test]
-    fn a_chunk_ends_after_a_newline_and_stays_under_the_cap() {
-        let text = multibyte_text(CHUNK_BYTE_CAP * 3);
-
-        let chunks = chunk_utf8(text.as_bytes()).expect("the fixture is text");
-
-        assert!(chunks.len() >= 3, "{} chunks", chunks.len());
-        for chunk in &chunks[..chunks.len() - 1] {
-            assert!(
-                chunk.ends_with('\n'),
-                "every chunk but the last ends on a line boundary",
-            );
-            assert!(
-                chunk.len() <= CHUNK_BYTE_CAP,
-                "{} bytes is over the {CHUNK_BYTE_CAP}-byte chunk cap",
-                chunk.len(),
-            );
-        }
-    }
-
-    #[test]
-    fn a_line_longer_than_the_cap_becomes_one_chunk_rather_than_being_cut() {
-        let long = one_long_line(CHUNK_BYTE_CAP * 2);
-        let text = format!("first line\n{long}last line\n");
-
-        let chunks = chunk_utf8(text.as_bytes()).expect("the fixture is text");
-
-        assert_eq!(
-            chunks,
-            ["first line\n", &long, "last line\n"],
-            "the over-cap line is its own chunk, whole: cutting inside a line is the guessing \
-             this module refuses to invite",
-        );
-        assert!(
-            chunks[1].len() > CHUNK_BYTE_CAP,
-            "and it is over the cap, on purpose",
-        );
-    }
-
-    #[test]
-    fn a_file_that_is_not_text_yields_no_chunks_at_all() {
-        let bytes = [0xff_u8, 0xfe, 0x80, 0x00, 0x01];
-
-        let chunked = chunk_utf8(&bytes);
-
-        assert!(chunked.is_err(), "binary bytes are not chunked");
-        assert!(
-            chunked.unwrap_or_default().is_empty(),
-            "and there is nothing to spend a pass on",
-        );
-    }
-
-    #[test]
-    fn one_stray_byte_rejects_the_whole_file_rather_than_the_lines_around_it() {
-        let mut bytes = multibyte_text(CHUNK_BYTE_CAP * 2).into_bytes();
-        bytes.push(0x9f);
-        bytes.extend_from_slice(multibyte_text(CHUNK_BYTE_CAP).as_bytes());
-
-        assert!(
-            chunk_utf8(&bytes).is_err(),
-            "a file that is not text is rejected whole, not summarised in part",
-        );
-    }
-
-    #[test]
-    fn no_bytes_is_no_chunks() {
-        assert_eq!(
-            chunk_utf8(b"").expect("empty is valid UTF-8"),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn a_file_under_the_cap_is_one_chunk() {
-        let text = "//! Core engine.\nfn main() {}\n";
-
-        assert_eq!(
-            chunk_utf8(text.as_bytes()).expect("text"),
-            [text],
-            "one chunk, and the reduce that costs a pass is somebody else's decision",
-        );
-    }
-
-    /// The counting fake: a model pass that answers from a script, keeps every
-    /// request it was handed, and can therefore be asked afterwards how many
-    /// passes a file cost and what each one was told. Hand-written like every
-    /// other fake in this crate — no `claude`, no network, no terminal, no
-    /// mocking framework.
-    struct Counting {
-        /// What the first passes answer, in call order: the text of an answer,
-        /// or a function making the [`agent::Error`](crate::agent::Error) the pass fails with. A
-        /// function because `agent::Error` is not [`Clone`], the same trick
-        /// [`Fails`] uses.
-        script: Vec<Result<String, fn() -> agent::Error>>,
-        /// What every pass past the end of the script answers. A test that
-        /// expects no such pass proves it by counting, not by panicking here:
-        /// "it ran four passes when it should have run two" is a better
-        /// failure than a panic from inside a fake.
-        beyond: String,
-        /// Every request that reached it, whole and in call order.
-        seen: std::cell::RefCell<Vec<agent::Request>>,
-    }
-
-    impl Counting {
-        /// A fake answering `beyond` to every pass it is asked for.
-        fn new(beyond: impl Into<String>) -> Self {
-            Self {
-                script: Vec::new(),
-                beyond: beyond.into(),
-                seen: std::cell::RefCell::new(Vec::new()),
-            }
-        }
-
-        /// The same fake, with its first passes answered by `script`.
-        fn scripted(
-            mut self,
-            script: impl IntoIterator<Item = Result<String, fn() -> agent::Error>>,
-        ) -> Self {
-            self.script = script.into_iter().collect();
-            self
-        }
-
-        /// How many passes it was asked for.
-        fn passes(&self) -> usize {
-            self.seen.borrow().len()
-        }
-
-        /// The prompt of every pass, in call order.
-        fn prompts(&self) -> Vec<String> {
-            self.seen
-                .borrow()
-                .iter()
-                .map(|request| request.prompt().to_owned())
-                .collect()
-        }
-    }
-
-    impl Agent for Counting {
-        fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
-            let index = self.passes();
-            self.seen.borrow_mut().push(request.clone());
-            match self.script.get(index) {
-                Some(Ok(text)) => Ok(agent::Response::new(text.clone())),
-                Some(Err(fail)) => Err(fail()),
-                None => Ok(agent::Response::new(self.beyond.clone())),
-            }
-        }
-    }
-
-    /// A usable account of some contents, saying `about` so one pass's answer
-    /// is never mistaken for another's, and comfortably over
-    /// [`MINIMUM_SUMMARY_BYTES`].
-    fn account(about: &str) -> String {
-        let text = format!(
-            "These contents are {about}: dependency records and version pins, listed one after \
-             another with no code among them."
-        );
-        assert!(
-            text.trim().len() >= MINIMUM_SUMMARY_BYTES,
-            "a fixture answer is long enough to be used: {text}",
-        );
-        text
-    }
-
-    /// UTF-8 text that comes to exactly `parts` chunks, insisting on the count
-    /// rather than hoping for it — every pass count asserted below is read off
-    /// this number.
-    fn text_of_chunks(parts: usize) -> String {
-        let text = multibyte_text(CHUNK_BYTE_CAP * parts - CHUNK_BYTE_CAP / 2);
-        assert_eq!(
-            chunk_utf8(text.as_bytes())
-                .expect("the fixture is text")
-                .len(),
-            parts,
-            "the fixture comes to the number of parts the test is about",
-        );
-        text
-    }
-
-    /// Where the fixture files of these tests pretend to live. Nothing is
-    /// opened: `summarise_file` is handed bytes, and the directory is only what
-    /// the requests say they run in.
-    fn somewhere() -> &'static Path {
-        Path::new("crates/warlock-engine")
-    }
-
-    #[test]
-    fn a_file_of_several_parts_costs_one_pass_a_part_and_one_reduce() {
-        let text = text_of_chunks(3);
-        let agent = Counting::new(account("the whole file")).scripted([
-            Ok(account("the first part")),
-            Ok(account("the second part")),
-            Ok(account("the third part")),
-        ]);
-
-        let summary = summarise_file(
-            somewhere(),
-            "Cargo.lock",
-            text.as_bytes(),
-            &agent,
-            &mut Unwatched,
-        )
-        .expect("a file of three good parts is summarised");
-
-        assert_eq!(agent.passes(), 4, "three map passes and exactly one reduce");
-        assert_eq!(
-            summary,
-            account("the whole file"),
-            "the summary is what the reduce pass wrote, not any one part's account",
-        );
-        let prompts = agent.prompts();
-        for prompt in &prompts[..3] {
-            assert!(
-                prompt.contains(MAP_PROMPT),
-                "a map pass is asked the map prompt"
-            );
-        }
-        let reduce = &prompts[3];
-        assert!(
-            reduce.contains(REDUCE_PROMPT),
-            "and the last pass is asked the reduce prompt",
-        );
-        let mut read = 0;
-        for part in ["the first part", "the second part", "the third part"] {
-            let at = reduce
-                .find(&account(part))
-                .unwrap_or_else(|| panic!("the reduce pass is given the account of {part}"));
-            assert!(
-                at > read,
-                "and is given them in the order the parts were read"
-            );
-            read = at;
-        }
-    }
-
-    #[test]
-    fn one_part_is_one_pass_and_its_answer_is_the_summary() {
-        let text = text_of_chunks(1);
-        let agent = Counting::new(account("a reduce nobody asked for"))
-            .scripted([Ok(account("the only part"))]);
-
-        let summary = summarise_file(
-            somewhere(),
-            "vendor/schema.json",
-            text.as_bytes(),
-            &agent,
-            &mut Unwatched,
-        )
-        .expect("one good part is a summary");
-
-        assert_eq!(
-            agent.passes(),
-            1,
-            "one part is the whole file, so no pass is paid to rewrite its account",
-        );
-        assert_eq!(summary, account("the only part"));
-    }
-
-    #[test]
-    fn a_map_pass_is_told_which_part_of_how_many_it_holds() {
-        let text = text_of_chunks(3);
-        let agent = Counting::new(account("anything"));
-
-        summarise_file(
-            somewhere(),
-            "Cargo.lock",
-            text.as_bytes(),
-            &agent,
-            &mut Unwatched,
-        )
-        .expect("summarised");
-
-        let prompts = agent.prompts();
-        for (index, prompt) in prompts[..3].iter().enumerate() {
-            let part = index + 1;
-            let said = prompt.to_lowercase();
-            assert!(
-                said.contains(&format!("part {part}")),
-                "map pass {part} is told which part it holds: {}",
-                &prompt[..MAP_PROMPT.len().min(prompt.len()) + 200],
-            );
-            assert!(
-                said.contains("of 3"),
-                "and how many parts there are in all: pass {part}",
-            );
-            assert!(
-                prompt.contains("Cargo.lock"),
-                "and what it is looking at, so it reads the text better",
-            );
-        }
-    }
-
-    #[test]
-    fn no_pass_is_ever_handed_a_chunk_as_a_file() {
-        let text = text_of_chunks(3);
-        let agent = Counting::new(account("anything"));
-
-        summarise_file(
-            somewhere(),
-            "vendor/bundle.js",
-            text.as_bytes(),
-            &agent,
-            &mut Unwatched,
-        )
-        .expect("summarised");
-
-        for request in agent.seen.borrow().iter() {
-            assert!(
-                request.files().is_empty(),
-                "a part of a file rides in the prompt: there is no `agent::File` here to mistake \
-                 it for the whole file",
-            );
-            assert!(
-                request.child_documents().is_empty(),
-                "and a pass about one file carries nothing about the directory around it",
-            );
-            assert_eq!(
-                request.directory(),
-                somewhere(),
-                "every pass runs where the directory pass runs",
-            );
-        }
-        let chunks = chunk_utf8(text.as_bytes()).expect("the fixture is text");
-        let prompts = agent.prompts();
-        for (part, chunk) in chunks.iter().enumerate() {
-            assert!(
-                prompts[part].contains(chunk.as_str()),
-                "and the part's text did travel, whole, as prompt text: part {}",
-                part + 1,
-            );
-        }
-    }
-
-    #[test]
-    fn bytes_that_are_not_text_are_never_chunked_and_cost_nothing() {
-        let mut bytes = multibyte_text(CHUNK_BYTE_CAP).into_bytes();
-        bytes.push(0xff);
-        let agent = Counting::new(account("a pass that must never run"));
-
-        let cause = summarise_file(
-            somewhere(),
-            "fixtures/blob.bin",
-            &bytes,
-            &agent,
-            &mut Unwatched,
-        )
-        .expect_err("bytes that are not text have no summary");
-
-        assert_eq!(agent.passes(), 0, "not one pass is spent finding that out");
-        assert!(
-            matches!(cause, Omission::NotText { size, .. } if size == byte_count(bytes.len())),
-            "and the cause says it is not text, with the size the request carries: {cause}",
-        );
-    }
-
-    #[test]
-    fn a_file_over_the_chunk_ceiling_is_left_alone_and_costs_nothing() {
-        let parts = CHUNK_COUNT_CEILING + 1;
-        let text = text_of_chunks(parts);
-        let agent = Counting::new(account("a pass that must never run"));
-
-        let cause = summarise_file(
-            somewhere(),
-            "vendor/bundle.js",
-            text.as_bytes(),
-            &agent,
-            &mut Unwatched,
-        )
-        .expect_err("a file past the ceiling is not summarised");
-
-        assert_eq!(
-            agent.passes(),
-            0,
-            "the count is known before a pass is spent, so nothing is spent",
-        );
-        assert!(
-            matches!(cause, Omission::TooManyChunks { chunks, .. } if chunks == parts),
-            "and the cause says how many chunks it came to: {cause}",
-        );
-    }
-
-    #[test]
-    fn a_failing_map_pass_ends_the_file_where_it_failed() {
-        let text = text_of_chunks(3);
-        // Annotated because a closure only becomes a function pointer where the
-        // type it is going into says so, and the array literal is where it says
-        // so.
-        let script: [Result<String, fn() -> agent::Error>; 2] = [
-            Ok(account("the first part")),
-            Err(|| agent::Error::EmptyOutput),
-        ];
-        let agent = Counting::new(account("a pass past the failure")).scripted(script);
-
-        let cause = summarise_file(
-            somewhere(),
-            "Cargo.lock",
-            text.as_bytes(),
-            &agent,
-            &mut Unwatched,
-        )
-        .expect_err("a map pass that fails leaves no summary");
-
-        assert_eq!(
-            agent.passes(),
-            2,
-            "the third part and the reduce are never asked for: the file is over",
-        );
-        assert!(
-            matches!(
-                cause,
-                Omission::Unsummarised {
-                    source: Some(_),
-                    ..
-                }
-            ),
-            "and what the agent said is kept under the cause: {cause}",
-        );
-    }
-
-    #[test]
-    fn a_failing_reduce_pass_demotes_the_file_its_parts_were_read_for() {
-        let text = text_of_chunks(2);
-        let script: [Result<String, fn() -> agent::Error>; 3] = [
-            Ok(account("the first part")),
-            Ok(account("the second part")),
-            Err(|| agent::Error::EmptyOutput),
-        ];
-        let agent = Counting::new(account("never reached")).scripted(script);
-
-        let cause = summarise_file(
-            somewhere(),
-            "Cargo.lock",
-            text.as_bytes(),
-            &agent,
-            &mut Unwatched,
-        )
-        .expect_err("a reduce that fails leaves no summary");
-
-        assert_eq!(
-            agent.passes(),
-            3,
-            "two map passes and the reduce that failed"
-        );
-        assert!(
-            matches!(
-                cause,
-                Omission::Unsummarised {
-                    source: Some(_),
-                    ..
-                }
-            ),
-            "and the file is back to a name and a size: {cause}",
-        );
-    }
-
-    #[test]
-    fn an_answer_too_short_to_be_an_account_is_no_account_at_all() {
-        // Empty, whitespace, and a sentence that says nothing: one rule covers
-        // all three, and it is a length.
-        for answer in ["", "   \n\n  ", "It is a lockfile."] {
-            let text = text_of_chunks(2);
-            let agent = Counting::new(answer);
-
-            let cause = summarise_file(
-                somewhere(),
-                "Cargo.lock",
-                text.as_bytes(),
-                &agent,
-                &mut Unwatched,
-            )
-            .expect_err("an unusable answer is not a summary");
-
-            assert_eq!(
-                agent.passes(),
-                1,
-                "the first unusable answer ends the file: the second part is never asked for",
-            );
-            assert!(
-                matches!(cause, Omission::Unsummarised { source: None, .. }),
-                "and nothing is kept of the text that failed to be an account: {cause}",
-            );
-        }
-    }
-
-    #[test]
-    fn a_reduce_answer_too_short_to_use_demotes_the_file_too() {
-        let text = text_of_chunks(2);
-        let agent = Counting::new("Two parts, both dull.").scripted([
-            Ok(account("the first part")),
-            Ok(account("the second part")),
-        ]);
-
-        let cause = summarise_file(
-            somewhere(),
-            "Cargo.lock",
-            text.as_bytes(),
-            &agent,
-            &mut Unwatched,
-        )
-        .expect_err("a reduce answer under the floor is not a summary");
-
-        assert_eq!(agent.passes(), 3, "the passes ran; the answer was unusable");
-        assert!(
-            matches!(cause, Omission::Unsummarised { source: None, .. }),
-            "and a short answer has nothing under it: {cause}",
-        );
-    }
-
-    /// A plausible cached account of a file: long enough to be a real one, and
-    /// with no whitespace at either end, so a round trip through the cache is
-    /// asserted on byte for byte.
-    fn summary() -> String {
-        "A Cargo lockfile pinning 214 packages, ratatui and blake3 among them.".to_owned()
-    }
-
-    /// Where the entry for `key` sits under `root`, spelled out of the two
-    /// helpers the cache names things with.
-    fn entry(root: &Path, key: &str) -> PathBuf {
-        summary_dir(root).join(summary_file_name(key))
-    }
-
-    /// The file names sitting in `root`'s cache directory, sorted.
-    fn entries(root: &Path) -> Vec<String> {
-        let mut names = fs::read_dir(summary_dir(root))
-            .expect("lists the cache directory")
-            .map(|entry| {
-                entry
-                    .expect("an entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect::<Vec<_>>();
-        names.sort();
-        names
-    }
-
-    #[test]
-    fn a_key_is_the_bytes_and_nothing_else_about_the_file() {
-        let (one, two) = (
-            tempfile::tempdir().expect("a temporary directory"),
-            tempfile::tempdir().expect("a second temporary directory"),
-        );
-        // The same bytes, under two roots, at two names, at two depths.
-        let bytes = filler(PER_FILE_BYTE_CAP + 1);
-        let here = write(one.path(), "Cargo.lock", &bytes);
-        let there = write(two.path(), "vendor/nested/other-name.lock", &bytes);
-        assert_ne!(here, there, "two genuinely different absolute paths");
-
-        let key = summary_key(&fs::read(&here).expect("reads"));
-        assert_eq!(
-            key,
-            summary_key(&fs::read(&there).expect("reads")),
-            "no path, no name, no directory and no mtime is in the key",
-        );
-        assert_eq!(key.len(), 64, "blake3 as lowercase hex: {key}");
-        assert!(
-            key.chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
-            "{key}",
-        );
-
-        let mut edited = bytes.clone();
-        edited[0] = b'y';
-        assert_ne!(
-            summary_key(&edited),
-            key,
-            "and one byte different is a different key, which is the whole of \
-             the change detection",
-        );
-    }
-
-    #[test]
-    fn an_entry_written_under_one_root_is_the_same_entry_under_another() {
-        let (one, two) = (
-            tempfile::tempdir().expect("a temporary directory"),
-            tempfile::tempdir().expect("a second temporary directory"),
-        );
-        let key = summary_key(&filler(PER_FILE_BYTE_CAP + 1));
-        cache_summary(one.path(), &key, &summary()).expect("caches");
-
-        // What a clone does: the directory arrives with the code, and this
-        // working copy has never pacted anything.
-        fs::create_dir_all(summary_dir(two.path())).expect("creates the cache directory");
-        fs::copy(entry(one.path(), &key), entry(two.path(), &key)).expect("copies the entry");
-
-        assert_eq!(
-            cached_summary(two.path(), &key).as_deref(),
-            Some(summary().as_str()),
-            "the key names the same file on both sides, so the second root \
-             reads what the first one wrote",
-        );
-    }
-
-    #[test]
-    fn an_absent_empty_or_corrupt_entry_is_a_miss_and_never_an_error() {
-        let root = tempfile::tempdir().expect("a temporary directory");
-        let key = summary_key(&filler(PER_FILE_BYTE_CAP + 1));
-
-        assert!(
-            cached_summary(root.path(), &key).is_none(),
-            "no cache directory at all",
-        );
-
-        fs::create_dir_all(summary_dir(root.path())).expect("creates the cache directory");
-        assert!(
-            cached_summary(root.path(), &key).is_none(),
-            "a directory with nothing in it",
-        );
-
-        for (what, bytes) in [
-            ("an empty entry", b"".as_slice()),
-            ("whitespace only", b"\n  \n".as_slice()),
-            ("not text at all", &not_text(64)),
-        ] {
-            fs::write(entry(root.path(), &key), bytes).expect("writes an entry");
-            assert!(
-                cached_summary(root.path(), &key).is_none(),
-                "{what} is unusable, so it reads as a miss",
-            );
-        }
-
-        // And the good entry over the top of the bad one is read.
-        cache_summary(root.path(), &key, &summary()).expect("caches");
-        assert_eq!(
-            cached_summary(root.path(), &key).as_deref(),
-            Some(summary().as_str()),
-        );
-    }
-
-    #[test]
-    fn caching_a_summary_makes_the_directory_and_leaves_one_file_and_no_temporary() {
-        let root = tempfile::tempdir().expect("a temporary directory");
-        let key = summary_key(&filler(PER_FILE_BYTE_CAP + 1));
-        assert!(
-            !summary_dir(root.path()).exists(),
-            "nothing exists before there is something to put in it",
-        );
-
-        cache_summary(root.path(), &key, &summary()).expect("caches");
-        assert_eq!(
-            entries(root.path()),
-            [summary_file_name(&key)],
-            "the entry, and no temporary beside it",
-        );
-
-        // Writing the same key again is a rename over the same name, not a
-        // second file and not a leftover.
-        cache_summary(root.path(), &key, "A different account of the same bytes.")
-            .expect("caches again");
-        assert_eq!(entries(root.path()), [summary_file_name(&key)]);
-        assert_eq!(
-            cached_summary(root.path(), &key).as_deref(),
-            Some("A different account of the same bytes."),
         );
     }
 }

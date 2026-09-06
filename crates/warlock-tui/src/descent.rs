@@ -174,7 +174,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use warlock_engine::{Agent, Manifest, Unwatched, agent};
+    use warlock_engine::{Agent, Manifest, Unwatched, agent, stub_answer};
     use warlock_tui::Cancel;
 
     use super::{Descent, carry_on, descend};
@@ -184,16 +184,10 @@ mod tests {
     struct Answering;
 
     impl Agent for Answering {
-        fn run(&self, _request: &agent::Request) -> Result<agent::Response, agent::Error> {
-            // Comfortably over `MINIMUM_DOCUMENT_BYTES`, which is the whole of
-            // what the engine asks of an answer before it will write it down.
-            Ok(agent::Response::new(
-                "# a directory\n\nLong enough to be a document that warlock will \
-                 actually write down. The engine measures the trimmed answer and \
-                 refuses anything under a couple of hundred bytes, on the grounds \
-                 that a pass which came back with a sentence did not read the \
-                 directory, so this fixture says rather more than it needs to.\n",
-            ))
+        fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
+            // Every slot the engine checks for, filled: what a pass has to
+            // answer before the engine will write a document down.
+            Ok(agent::Response::new(stub_answer(request)))
         }
     }
 

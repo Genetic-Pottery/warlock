@@ -148,6 +148,16 @@ describes. Use it to find the surface area a question touches — which
 directory, which file, which function — and then open that file and check.
 Every document says this at the top, in the line warlock stamps on it.
 
+**Every document has the same shape.** A heading, a purpose, then `## Files`
+(one line per file, with its size), `## Directories` (one line per child
+that has a document), and, where there is anything to say, `## Structure`,
+`## Rules` and `## Where to look`: routes from a question to the file, and
+the name in it, to open. Warlock lays that out itself from a model's
+answer, and checks the answer against the directory before writing it, so
+a line cannot name a file or a symbol that is not there. Start at the
+nearest document above the code you are about to touch, follow `## Where
+to look` and the file lines down, and open the file they name.
+
 Two habits follow from that, and they matter more than anything else here:
 
 - **Verify before you rely.** Confirm a claim against the source before you

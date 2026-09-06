@@ -3,36 +3,36 @@ version = 1
 [[pact]]
 module = "crates/warlock-tui/src"
 document = "crates/warlock-tui/src/WARLOCK.md"
-granted_hash = "f67d7e233e93fb9a477f3df680ce779082c957378ff1efab02a194fcba64aec3"
-granted_at = "2026-09-03T09:24:49Z"
+granted_hash = "d4c8cfa9ec68b747765fe90958d53a52958007cf50e601b9db49bae964ee21ac"
+granted_at = "2026-09-06T09:35:23Z"
 
 [[pact]]
 module = "."
 document = "WARLOCK.md"
 scope = "warlock-team"
-granted_hash = "1524d30ab62f47ef70ccb4feb2650adb89c2bf2aaa5598895764f39ec3d4f967"
-granted_at = "2026-09-03T10:37:55Z"
+granted_hash = "683f66ae99150fe189f41910e3b0a2d72283750282c203d9def7fe7c8a4d9283"
+granted_at = "2026-09-06T09:35:23Z"
 
 [[pact]]
 module = "crates"
 document = "crates/WARLOCK.md"
-granted_hash = "28c5a7dd6fde762b81a08bce96af1c4436c82053ddea0fa3b7e97bc4c81d9094"
-granted_at = "2026-09-03T10:37:55Z"
+granted_hash = "54c1e3e4fa098b59579fbed71ac4ce9b450ceca50b871481a39fe3a893fdd0e5"
+granted_at = "2026-09-06T09:35:23Z"
 
 [[pact]]
 module = "crates/warlock-engine"
 document = "crates/warlock-engine/WARLOCK.md"
-granted_hash = "96886b2c61564e7f8aa1fdc458f4c47ba3a3c10c001568a8de9a2a06a796cbaa"
-granted_at = "2026-09-03T10:37:55Z"
-
-[[pact]]
-module = "crates/warlock-engine/src"
-document = "crates/warlock-engine/src/WARLOCK.md"
-granted_hash = "c8036f944709e762e3703ee9f61525863d257fc95e5c4c18d4dbdd3f963b23a2"
-granted_at = "2026-09-03T10:37:55Z"
+granted_hash = "8e6731e4e72a7b212e17a8d87a7565fc84fe6edf81a9f7556dc7c113cfc0ce43"
+granted_at = "2026-09-06T09:35:23Z"
 
 [[pact]]
 module = "crates/warlock-tui"
 document = "crates/warlock-tui/WARLOCK.md"
-granted_hash = "2b868d41310d0b1916ebc19baa487338bbe77ead965df5c53dd68765522a410e"
-granted_at = "2026-09-03T09:24:49Z"
+granted_hash = "577050a65a4d5f822bce9cfef609a12d94d753a66c439786ec1e02606a215408"
+granted_at = "2026-09-06T09:35:23Z"
+
+[[pact]]
+module = "crates/warlock-engine/src"
+document = "crates/warlock-engine/src/WARLOCK.md"
+granted_hash = "cf48cda0581c3d2ef41ba774f734f910c477b2ad9a50012a45f943f4cf6b082f"
+granted_at = "2026-09-06T09:35:23Z"

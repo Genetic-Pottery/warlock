@@ -10,8 +10,8 @@
 //! slow in the way a process is slow.
 //!
 //! These two are the other adapter at each seam. [`Passing`] answers a pass with
-//! a document it was built with; [`Saying`] answers a turn with a sentence it
-//! was built with. Neither spawns anything, so a test over them runs on any
+//! a stand-in fill the engine accepts; [`Saying`] answers a turn with a sentence
+//! it was built with. Neither spawns anything, so a test over them runs on any
 //! platform and in microseconds.
 //!
 //! ## What they deliberately do not do
@@ -29,37 +29,31 @@
 //! `chatting.rs`, because that is where the fact is real; a second record of it
 //! here would be a copy for the two to disagree over.
 
-use warlock_engine::{Agent, agent};
+use warlock_engine::{Agent, agent, stub_answer};
 use warlock_tui::{Activities, Cancel, Converses, Wired};
 
-/// An agent that answers every pass with the same document, out of memory.
+/// An agent that answers every pass with a stand-in fill, out of memory.
 ///
 /// The second adapter at the pass seam. Whatever the request names — the
 /// directory, the files under it, the documents of its children — the answer is
-/// the string this was built with, because a test above this seam is about what
-/// warlock does with a document rather than about what a model wrote.
-#[derive(Debug, Clone)]
-pub(crate) struct Passing {
-    /// What every pass answers with.
-    document: String,
-}
+/// [`Fill::stub`] for that request: every slot the engine will check for,
+/// filled with a line saying it is a stand-in. A test above this seam is about
+/// what warlock does with a document rather than about what a model wrote, and
+/// a stub is accepted for any request, so nothing here has to know which
+/// directory is being pacted.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Passing;
 
 impl Passing {
-    /// An agent whose every pass answers with `document`.
-    ///
-    /// Long enough to be kept is the caller's business: the engine drops a
-    /// document under `MINIMUM_DOCUMENT_BYTES`, so a test that expects one to
-    /// land has to hand over one that survives that.
-    pub(crate) fn answering(document: impl Into<String>) -> Self {
-        Self {
-            document: document.into(),
-        }
+    /// An agent whose every pass answers with a fill the engine accepts.
+    pub(crate) fn filling() -> Self {
+        Self
     }
 }
 
 impl Agent for Passing {
-    fn run(&self, _request: &agent::Request) -> Result<agent::Response, agent::Error> {
-        Ok(agent::Response::new(self.document.clone()))
+    fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
+        Ok(agent::Response::new(stub_answer(request)))
     }
 }
 
@@ -68,7 +62,7 @@ impl Wired for Passing {
     ///
     /// See this module's own note about what that rules out.
     fn wired(&self, _cancel: Cancel, _activities: Activities) -> Self {
-        self.clone()
+        *self
     }
 }
 

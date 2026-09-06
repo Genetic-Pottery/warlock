@@ -3,25 +3,39 @@
 
 # warlock
 
-The repository root of Warlock — the freshness-ledger tool this codebase builds. It holds the workspace-level Cargo configuration, the project's licence, the pitch and complete reference document, the pact/freshness/scope vocabulary the whole repository operates under, and a short vocabulary crib. No executable code lives at this level; all of it is one directory down under `crates/`, whose `WARLOCK.md` describes its two members — `warlock-engine` (headless domain library) and `warlock-tui` (terminal front end and sole spawner of a `claude` subprocess) — joined by a dependency edge that runs one direction only: TUI → engine, never back.
+Root of the warlock workspace: the Cargo workspace manifest and shared lint/dependency policy for the two crates that make up warlock, plus licensing and formatting config for the repo.
 
-## What is here
+## Files
 
-- **`README.md`** (22.4KB) — the pitch and the full mental model: why the interface is a tree of `WARLOCK.md` documents rather than a bolted-on chat window, the pact/brief/refresh workflow, the complete key-bind tables (movement, tree filters, mutating keys, composer, quit and scope prompts, mouse), the scope/sigil boundary and exactly which keys it gates, the `/brief`–`/write`–`/chat` composer commands, the full headless CLI (`init`, `config`, `stale`, `fresh`, `check`, `unpact`, `scope add`/`remove`, `pact`, `refresh`) with its exit-status table (0, 1, 2, 3, 4, 130, each distinct enough to switch on), a font-rendering troubleshooting note about box-drawing glyphs, and the three-command Contributing gate. States plainly what Warlock is not: not autonomous, not a project generator, not a way to stop knowing your own codebase, not an editor, and never a writer of a project's own `README.md`. Read this before touching `crates/`.
-- **`CLAUDE.md`** (6.9KB) — the project instructions, held between `warlock:begin`/`warlock:end` markers, matching the block `warlock init` writes into a project's own `CLAUDE.md` per `README.md`'s account of that subcommand. It is spec and operating instructions together: the fresh/stale/unpacted vocabulary, the claim that a subtree's own hash moving is what makes it stale (not a judgement that the document is wrong), the scope/sigil boundary and precisely which of warlock's own mutating keys (`p` in both directions, `r`, `s`) refuse across a closed one, and the directive — addressed to whoever works in this repository — to read `WARLOCK.md` files before source and to name rather than silently work around a crossed scope. This is the same text supplied to this document-writing pass as project instructions, sitting above the WARLOCK content in the file the way `warlock init` composes it.
-- **`CONTEXT.md`** (1.45KB) — a short, separate vocabulary gloss (Pact, Fresh, Stale, Scope, Sigil, `/brief`, `/write`) that states explicitly that the scope/sigil system is a guardrail rather than a hard gate, easily sidestepped, with the final human gate always a reviewed PR. It agrees with `CLAUDE.md`'s account of scopes and sigils and states that human-review framing more plainly than either `CLAUDE.md` or `README.md`.
-- **`Cargo.toml`** (7.1KB) — the workspace manifest. Declares the two members (`crates/warlock-engine`, `crates/warlock-tui`) and centralises `[workspace.package]`, `[workspace.lints]`, and `[workspace.dependencies]`. Hard rules enforced here: `unsafe_code = "deny"`; `missing_docs`, `unreachable_pub`, `missing_debug_implementations`, and the `rust_2018_idioms` group all warn; `clippy::pedantic` runs as a group at priority -1 (`clippy::nursery` and `clippy::cargo` are deliberately left off, with the specific lints that made them not worth it named in a comment — `missing_const_for_fn` and `cargo_common_metadata`); `clippy::dbg_macro` warns. Every workspace dependency carries a justifying comment: `serde` (derive-based (de)serialisation), `serde_json` with `preserve_order` (the untrusted `stream-json` wire format a model pass is read through, and the reason a `--json` object's keys print in write order rather than alphabetically), `toml` (the hand-editable, git-committed `.warlock/pacts.toml`), `ratatui` (whose re-exported `crossterm` is used in place of naming crossterm directly, making frontend/backend version skew impossible), `ignore` (gitignore-aware directory walking), `blake3` (the subtree hash a grant is compared against — fast, stable, reproducible across machines), `notify` (cross-platform filesystem watching, avoiding a polling re-walk), `clap` with `derive` (justified by the nested `scope add`/`scope remove` surface and per-subcommand help), `ctrlc` (the one dependency taken because it needs `unsafe`, which the workspace otherwise denies — Ctrl-C handled off signal context so a run in flight can be killed safely), plus dev-only `serde_test` (round-tripping derives through serde's token stream) and `tempfile` (self-cleaning directories for manifest tests). A new shared dependency added without a justifying comment like these is a review flag.
-- **`Cargo.lock`** (53.9KB / 58180 bytes per its own header) — generated, workspace-wide, not hand-edited. Lists the two workspace members with their concrete dependency sets — `warlock-engine` depending on `blake3`, `ignore`, `serde`, `serde_test`, `tempfile`, `toml`, and `warlock-tui` depending on `clap`, `ctrlc`, `notify`, `ratatui`, `serde_json`, `tempfile`, and `warlock-engine` itself — confirming the one-directional TUI→engine dependency edge stated in `crates/WARLOCK.md`.
-- **`rustfmt.toml`** (1.4KB) — deliberately close to rustfmt defaults, each deviation commented with its reason: `edition = "2024"` and `style_edition = "2024"` (so a bare `rustfmt` invocation, not just `cargo fmt`, parses 2024 syntax correctly and formatting stays reproducible across toolchain bumps), `newline_style = "Unix"` (so `--check` is platform-independent even though CI runs on Linux), and `use_field_init_shorthand = true` (the one stylistic addition, writing `Foo { name }` instead of `Foo { name: name }`).
-- **`LICENSE`** (11.4KB) — Apache License, Version 2.0, standard text with no repository-specific modification.
+- `Cargo.lock` (56.8 KB) — Auto-generated, pinned dependency graph for the workspace, including warlock-engine and warlock-tui and every third-party crate they resolve to (ratatui, clap, notify, blake3, toml, serde, etc.).
+- `Cargo.toml` (6.9 KB) — Workspace manifest: members crates/warlock-engine and warlock-tui, workspace.package metadata, shared workspace.lints, and workspace.dependencies with justifications.
+- `LICENSE` (11.0 KB) — Full text of the Apache License, Version 2.0 under which the project is licensed.
+- `rustfmt.toml` (1.3 KB) — rustfmt configuration: pins edition/style_edition to 2024, newline_style Unix, use_field_init_shorthand true, kept close to rustfmt defaults.
 
-## What a reader has to know before changing anything
+## Directories
 
-- **There is no code at this level.** Anything behavioural belongs under `crates/`; a change made directly here is workspace wiring, licensing, or top-level policy, not a feature.
-- **The three checks in `README.md`'s Contributing section are the whole gate**, and run locally exactly as they run in CI: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
-- **Lint changes belong in this `Cargo.toml`'s `[workspace.lints]`, not in a crate.** Per `crates/WARLOCK.md`, a lint that feels wrong in one crate is more likely a fix here than a local `#[allow]` there, and any new `allow` anywhere in the tree needs a comment saying why, following the pattern already set here.
-- **A new shared dependency goes in `[workspace.dependencies]` with a justifying comment**, following the pattern every existing entry sets — the comments are load-bearing documentation of why the supply-chain cost was accepted, not decoration.
-- **This project treats its own `README.md` as sacred**, per the promise `README.md` makes about the tool it describes: Warlock never writes to a project's `README.md`. Extend the same care editing this one by hand; it is authored prose, not a generated artifact, unlike a `WARLOCK.md`.
-- **`README.md` is the exhaustive account of behaviour and CLI surface; `CLAUDE.md` and `CONTEXT.md` are the vocabulary.** Where the question is "what does this key do" or "what does this exit status mean," `README.md` has the table. Where it is "what do these words mean and why," `CLAUDE.md` is the fuller spec and `CONTEXT.md` the shorter gloss that adds the human-review framing.
-- **Consult `crates/WARLOCK.md`** before making any change that is not purely workspace-level wiring. It names the TUI→engine dependency edge as the load-bearing architectural fact of this workspace, and describes how scope/sigil enforcement is split across it: `warlock-engine` matches a held sigil against the scope covering a directory without refusing anything itself, and `warlock-tui` owns the actual refusal — in the panel behind `p`, `r`, and `s`, and ahead of the headless `warlock pact`/`warlock scope`/`warlock refresh`, before a model pass is spent.
-- **`p` (whole subtree, and its own inverse) and `r` (only the already-stale members of one already-pacted subtree) are different operations**, per both `CLAUDE.md` and `crates/WARLOCK.md`. Editing any `WARLOCK.md` by hand makes its own directory stale again immediately, since the document's own bytes are part of the digest recorded at the moment it was last granted.
+- `crates/` — The two workspace crates, warlock-engine (terminal-free core domain logic) and warlock-tui (terminal front end and warlock binary); go there for pacting, hashing, freshness, scopes/sigils, document schema, or TUI panels/rendering code.
+
+## Structure
+
+- Cargo.toml's [workspace] members list points to crates/warlock-engine and crates/warlock-tui
+- workspace.lints and workspace.dependencies defined here are inherited by both crates via `workspace = true`
+- Cargo.lock is generated from Cargo.toml and records the resolved versions, including the warlock-engine and warlock-tui workspace packages themselves
+
+## Rules
+
+- unsafe_code is denied workspace-wide; any future use requires an explicit #[allow] visible in the diff
+- CI runs cargo clippy --workspace --all-targets -D warnings, so every workspace lint here is a build-breaking check
+- clippy::pedantic is warned on as a group; clippy::nursery and clippy::cargo are deliberately left off
+- any dependency added to workspace.dependencies must carry a one-line comment above it explaining why
+- any lint set to allow must carry a comment directly above it saying why
+- rustfmt targets Rust/style edition 2024, always emits Unix (LF) line endings, and assumes nixpkgs stable rustc with no rustup shims
+
+## Where to look
+
+- which crates exist and how they depend on each other → `crates` `warlock-engine`
+- why a particular third-party dependency was chosen → `Cargo.toml` `workspace.dependencies`
+- what lints or clippy groups are enforced in CI → `Cargo.toml` `workspace.lints`
+- the exact resolved version of a dependency → `Cargo.lock` `warlock-tui`
+- code formatting rules or edition settings → `rustfmt.toml` `style_edition`
+- licensing terms → `LICENSE` `Apache License`

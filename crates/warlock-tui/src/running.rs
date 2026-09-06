@@ -725,7 +725,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use warlock_engine::{
-        Agent, Manifest, PactEntry, PactedSubtree, agent, manifest_path, save_sigils,
+        Agent, Manifest, PactEntry, PactedSubtree, agent, manifest_path, save_sigils, stub_answer,
     };
 
     use warlock_tui::Cancel;
@@ -903,14 +903,8 @@ mod tests {
                     program: CLAUDE.to_owned(),
                 });
             }
-            Ok(agent::Response::new(document()))
+            Ok(agent::Response::new(stub_answer(request)))
         }
-    }
-
-    /// A document long enough for the engine to accept. The rule is a byte
-    /// count and nothing here reads what it says, so this is filler.
-    fn document() -> String {
-        format!("# module\n\n{}\n", "What it does, at length. ".repeat(20))
     }
 
     /// `directory` as the manifest spells it, for the assertions. The

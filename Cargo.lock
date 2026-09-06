@@ -1984,6 +1984,7 @@ dependencies = [
  "blake3",
  "ignore",
  "serde",
+ "serde_json",
  "serde_test",
  "tempfile",
  "toml",

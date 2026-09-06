@@ -2411,7 +2411,7 @@ mod tests {
             screen: FakeScreen::of(80, 24),
             scope,
             manifest: Manifest::new(),
-            pact: Pact::with_agent(Passing::answering(DOCUMENT)),
+            pact: Pact::with_agent(Passing::filling()),
             chat: Chat::with_agent(root, Saying::answering(ANSWER)),
             confirm: QuitConfirm::default(),
             prompt: ScopePrompt::default(),
@@ -2432,15 +2432,6 @@ mod tests {
             .press(key, Instant::now())
             .expect("no key pressed here writes to a terminal")
     }
-
-    /// What the stand-in model answers a pass with: long enough that the engine
-    /// keeps it rather than dropping it under `MINIMUM_DOCUMENT_BYTES`.
-    const DOCUMENT: &str = "# crates\n\nWhat this directory is for, said at about the length a \
-                            real document says it at, so that the engine keeps what comes back \
-                            instead of refusing it as too short to be a document. The floor is \
-                            `MINIMUM_DOCUMENT_BYTES`, which is two hundred bytes, and a stand-in \
-                            that answers with less than that is a stand-in whose passes all \
-                            quietly fail.";
 
     /// What the stand-in model answers a turn with.
     const ANSWER: &str = "The tree, the manifest and the pact.";
@@ -2496,7 +2487,7 @@ mod tests {
             screen: FakeScreen::of(80, 24),
             scope,
             manifest: Manifest::new(),
-            pact: Pact::with_agent(Passing::answering(DOCUMENT)),
+            pact: Pact::with_agent(Passing::filling()),
             chat: Chat::with_agent(repo_root, Saying::answering(ANSWER)),
             confirm: QuitConfirm::default(),
             prompt: ScopePrompt::default(),

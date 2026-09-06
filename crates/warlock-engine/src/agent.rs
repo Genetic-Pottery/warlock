@@ -135,36 +135,30 @@ pub const DEFAULT_CONTEXT_TOKENS: u64 = 128_000;
 /// What one pass needs in order to run: a prompt, where to run it, and the
 /// context it is scoped to.
 ///
-/// The context is two lists and one optional document. The directory's own
-/// files ([`agent::File`](crate::agent::File)) — its whole listing, each either carrying its bytes,
-/// standing in as a name and a size, or standing in as a name, a size and an
-/// account of what it contains — the `WARLOCK.md` of each immediate child
-/// ([`agent::ChildDocument`](crate::agent::ChildDocument)), which is how a directory learns what is underneath it
-/// without reading a single source file down there, and this directory's *own*
-/// previous `WARLOCK.md` where it already has one.
+/// The context is two lists. The directory's own files ([`agent::File`](crate::agent::File)) —
+/// its whole listing, each either carrying its bytes, standing in as a name and
+/// a size, or standing in as a name, a size and an account of what it contains
+/// — and the `WARLOCK.md` of each immediate child
+/// ([`agent::ChildDocument`](crate::agent::ChildDocument)), which is how a
+/// directory learns what is underneath it without reading a single source file
+/// down there.
 ///
-/// # Why the previous document has a slot of its own
+/// # What is deliberately not here: the directory's own previous document
 ///
-/// It used to be one of [`agent::Request::files`](crate::agent::Request::files), listed like any other file, and
-/// this doc said it deliberately always would be: giving it a slot was said to
-/// bake a refresh workflow into the transport before anything had decided what
-/// a refresh was. Both halves of that have expired. A refresh is decided and
-/// shipped ([`refresh_subtree`](crate::refresh_subtree)), and the arrangement
-/// turned out to have a defect that is not about workflow at all.
+/// A request used to carry the directory's last `WARLOCK.md` in a slot of its
+/// own, labelled as a claim to be checked rather than evidence. That
+/// instruction was unfollowable whenever the evidence for a claim was not in
+/// the request — which, for anything about another directory, is always — so
+/// a false sentence written once survived every later pass on confidence, read
+/// more established each time, and the ledger stamped the result granted.
+/// Warlock's own documents carried several such sentences when this was found.
 ///
-/// A file in the listing is *evidence*: it is the directory as it currently is.
-/// The previous document is a *claim*, written by an earlier pass against code
-/// that may since have moved. Handed over as an ordinary file the two are
-/// indistinguishable, so a claim carries the authority of evidence — and at any
-/// directory holding no source of its own, which is every interior directory of
-/// a workspace, there is nothing in the request that can contradict it. A false
-/// sentence written once is then re-copied by every later pass, reading more
-/// established each time, and the ledger stamps the result granted. Warlock had
-/// four such sentences in its own documents when this was found.
-///
-/// Separating the two is what lets the prompt say which is which, and lets a
-/// pass be told to check a carried claim against the files rather than trust
-/// its own predecessor.
+/// So no pass sees its predecessor. Every document is written from the files
+/// and the children's documents alone, and what the previous pass concluded is
+/// available to nobody. The one thing that costs is that a refresh may reword
+/// a document it could have left alone; the shape a document is laid out in
+/// (see [`document`](crate::document)) is warlock's rather than the model's,
+/// which keeps that rewording to the lines that changed.
 ///
 /// The fields are private and reached through [`agent::Request::new`](crate::agent::Request::new), the
 /// builder-style `with_*` methods and the accessors. Every widening so far has
@@ -183,11 +177,6 @@ pub struct Request {
     /// The `WARLOCK.md` of each immediate child directory that has one. A
     /// child without one contributes no entry.
     child_documents: Vec<ChildDocument>,
-    /// This directory's own `WARLOCK.md` as it stands before this pass, where
-    /// it has one. `None` for a directory being described for the first time,
-    /// which is the whole of the difference between a pact and a refresh as
-    /// this transport sees it.
-    previous_document: Option<String>,
 }
 
 impl Request {
@@ -219,7 +208,6 @@ impl Request {
             directory: directory.into(),
             files: Vec::new(),
             child_documents: Vec::new(),
-            previous_document: None,
         }
     }
 
@@ -284,26 +272,28 @@ impl Request {
         self
     }
 
-    /// The same request carrying `text` as this directory's previous
-    /// `WARLOCK.md`.
+    /// The same request with its prompt replaced by `prompt`.
     ///
-    /// Replaces rather than appends, unlike the two `with_*` methods above:
-    /// there is one previous document or there is none, and a second call is a
-    /// caller correcting itself rather than adding a second opinion.
+    /// Replaces rather than appends, because there is one prompt. It exists
+    /// for the pass that has to know what it carries before it can be asked
+    /// for anything: [`pact_directory`](crate::pact_directory) fits a
+    /// directory first and only then knows which files and children the
+    /// answer will be checked against, so the instructions that list them are
+    /// written onto the request after the fitting, not before.
     ///
     /// ```
     /// use warlock_engine::agent;
     ///
-    /// let request = agent::Request::new("describe this module", "crates/engine")
-    ///     .with_previous_document("# engine\n\nWhat an earlier pass concluded.\n");
+    /// let request = agent::Request::new("placeholder", "crates/engine")
+    ///     .with_files([agent::File::present("lib.rs", *b"//! Core engine.\n")])
+    ///     .with_prompt("describe these files");
     ///
-    /// assert!(request.previous_document().is_some());
-    /// // It is not one of the files: the claim and the evidence stay apart.
-    /// assert!(request.files().is_empty());
+    /// assert_eq!(request.prompt(), "describe these files");
+    /// assert_eq!(request.files().len(), 1, "everything else is untouched");
     /// ```
     #[must_use]
-    pub fn with_previous_document(mut self, text: impl Into<String>) -> Self {
-        self.previous_document = Some(text.into());
+    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.prompt = prompt.into();
         self
     }
 
@@ -321,8 +311,8 @@ impl Request {
 
     /// The files sitting directly in that directory.
     ///
-    /// The directory's own `WARLOCK.md` is *not* among them — it is
-    /// [`agent::Request::previous_document`](crate::agent::Request::previous_document), for the reason given on the type.
+    /// The directory's own `WARLOCK.md` is *not* among them — no pass is shown
+    /// its predecessor, for the reason given on the type.
     #[must_use]
     pub fn files(&self) -> &[File] {
         &self.files
@@ -332,13 +322,6 @@ impl Request {
     #[must_use]
     pub fn child_documents(&self) -> &[ChildDocument] {
         &self.child_documents
-    }
-
-    /// This directory's own `WARLOCK.md` as it stood before this pass, where it
-    /// had one.
-    #[must_use]
-    pub fn previous_document(&self) -> Option<&str> {
-        self.previous_document.as_deref()
     }
 }
 
@@ -1072,28 +1055,33 @@ mod tests {
     }
 
     #[test]
-    fn the_directorys_own_document_is_an_ordinary_file_of_it() {
-        // The one assertion that has to keep holding: `WARLOCK.md` gets no slot
-        // of its own, so an existing document arrives as a file like any other
-        // and no caller can special-case what it cannot find.
-        let request = Request::new("summarise", "/repo/crates/engine").with_files([
-            File::present("WARLOCK.md", *b"# engine\n"),
-            File::present("src/lib.rs", *b"//! Core engine.\n"),
-        ]);
+    fn a_request_has_no_slot_for_the_directorys_own_previous_document() {
+        // The assertion that has to keep holding: a pass is shown the files
+        // and the children's documents and nothing its predecessor wrote. The
+        // type has no field for one, so the only way a previous document could
+        // reach a pass is as an ordinary file — and `fitting` drops it from the
+        // listing. What is checked here is the half this type owns.
+        let request = Request::new("summarise", "/repo/crates/engine")
+            .with_files([File::present("src/lib.rs", *b"//! Core engine.\n")])
+            .with_child_documents([ChildDocument::new("src", "# src\n")]);
 
-        let document = request
-            .files()
-            .iter()
-            .find(|file| file.path() == "WARLOCK.md")
-            .expect("the existing document is in the listing");
-        assert_eq!(document.bytes(), Some(&b"# engine\n"[..]));
+        assert_eq!(request.files().len(), 1);
         assert!(
             request
                 .child_documents()
                 .iter()
-                .all(|child| child.directory() != "."),
+                .all(|child| child.directory() != "." && child.directory() != "WARLOCK.md"),
             "a directory's own document is not one of its children's"
         );
+    }
+
+    #[test]
+    fn the_prompt_can_be_replaced_once_the_context_is_known() {
+        let request = Request::new("placeholder", "/repo")
+            .with_files([File::present("a.rs", *b"a")])
+            .with_prompt("the real instructions");
+        assert_eq!(request.prompt(), "the real instructions");
+        assert_eq!(request.files().len(), 1);
     }
 
     #[test]

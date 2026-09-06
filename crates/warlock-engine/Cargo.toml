@@ -12,6 +12,11 @@ repository.workspace = true
 blake3 = { workspace = true }
 ignore = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+# The shape a pass fills in is JSON: a fixed object the engine builds, hands
+# over, reads back and checks (`document`). The engine owns that contract, so
+# it owns the parser for it; the TUI's use of the same crate is for a different
+# stream, the CLI's own.
+serde_json = { workspace = true }
 toml = { workspace = true }
 
 # Tests only. `serde_test` round-trips a value through serde's own tokens, which

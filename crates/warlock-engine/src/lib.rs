@@ -20,6 +20,7 @@ pub mod briefs;
 pub mod claude_md;
 pub mod clock;
 pub mod decide;
+pub mod document;
 pub mod fitting;
 pub mod hash;
 mod ignores;
@@ -86,6 +87,14 @@ pub use clock::now_rfc3339;
 /// directory at a time, to decide stale-or-skip: fresh directories are passed
 /// over with their entries untouched, and everything else is described again.
 pub use decide::decide_state;
+/// What a pass fills in — one slot per file it was shown, one per child
+/// document, a purpose and three short lists — checked and laid out by
+/// [`document`]. Public so a test double in any crate can answer a request with
+/// [`document::Fill::stub`] and be accepted.
+pub use document::Fill;
+/// The answer a stand-in model gives any request, in the shape the pass that
+/// sent it checks for: for test doubles in any crate.
+pub use document::stub_answer;
 /// Why one file's contents are not in a request: too large by itself, left by
 /// the whole-request cap with no room for even an account of it, unreadable, or
 /// — for a file too large to send that summarising did not rescue — not text at
@@ -135,10 +144,6 @@ pub use manifest::to_manifest_path;
 /// [`fitting::Problem`], never a failure.
 /// One directory a subtree pact did not finish with: no document, no manifest
 /// entry, or no hash to grant it against. Never fatal to the pact around it.
-/// The fewest bytes an answer may come to, trimmed, and still be written as a
-/// document. A length is the only measure taken: nothing anywhere reads what
-/// the text says.
-pub use pact::MINIMUM_DOCUMENT_BYTES;
 /// Where a subtree pact has got to and whether it should carry on: the port a
 /// front end draws progress from and cancels through, asked once per directory
 /// and never bound to a thread. It is also told, without being asked anything,
@@ -152,8 +157,8 @@ pub use pact::PactedSubtree;
 /// What a [`pact::Observer`] answers about the directory it was just offered:
 /// pact it, or stop the pact before it.
 pub use pact::Pacting;
-/// Why a model pass produced no document: the agent failed, or the answer was
-/// too short to be one. The whole rejection policy, in two variants.
+/// Why a model pass produced no document: the agent failed, or no answer fitted
+/// the object it was asked to fill. The whole rejection policy, in two variants.
 pub use pact::Refusal;
 /// Why a file has no text to show: it could not be read, or it is not text.
 /// Two answers because they are worth different words in front of a person, and
@@ -179,7 +184,8 @@ pub use pact::Viewed;
 /// nothing.
 pub use pact::closed_scopes_at_or_below;
 /// Pact one directory: gather it, describe the files too big to send, run one
-/// model pass over it, and write what came back verbatim to its `WARLOCK.md`.
+/// model pass over it, and write the document laid out from what came back to
+/// its `WARLOCK.md`.
 /// Describing a file is passes of its own, and no way it can fail is fatal.
 /// Writes no manifest entry and grants nothing.
 pub use pact::pact_directory;

@@ -3,37 +3,31 @@
 
 # warlock-tui
 
-The terminal front end of warlock: the crate that ships the `warlock` executable — a `[[bin]]` named `warlock`, distinct from the crate name `warlock-tui`, so `cargo run` from the repo root builds and runs `warlock` — and also exposes a library, `warlock_tui`, carrying the pure parts of the front end as ordinary reachable API shared by the binary and its own tests.
+The warlock-tui crate: the terminal front end that shows and edits a warlock tree, packaged as the `warlock` binary with a library of pure state, panel cards, boundary/write logic and rendering behind it.
 
-## What lives here
+## Files
 
-Three files sit directly in this directory, plus `src/`, which holds all of the code proper and carries its own `WARLOCK.md` inventorying it file by file. Read `src/`'s document before touching anything under `src/`.
+- `Cargo.toml` (1.6 KB) — Crate manifest: binary is `warlock` (src/main.rs), library `warlock_tui` (src/lib.rs), depends on warlock-engine and ratatui; the TUI->engine dependency edge and lint-inheritance are noted in comments.
 
-**`Cargo.toml`** (1677 bytes) — the dependency contract. Declares the `[[bin]] warlock` at `src/main.rs` and the `[lib] warlock_tui` at `src/lib.rs`; lists `clap`, `ctrlc`, `notify`, `ratatui`, `serde_json`, and `warlock-engine` (a `path` dependency) as direct dependencies, `tempfile` as a dev-dependency, and pulls lints from `[workspace.lints]`. Its comments state the one hard rule the crate is built around — TUI depends on the engine, never the reverse — and explain two choices worth naming: crossterm is not a direct dependency because code uses `ratatui::crossterm`, Ratatui's own re-export of the backend it was built against, so frontend and backend can never skew apart; and `ctrlc` exists only for the headless runs (per `src/running.rs`'s comment), because a `warlock pact` is minutes of model passes with no panel to press Esc in.
+## Directories
 
-**`README.md`** (21550 bytes) — a long prose account of the panel, written earlier than the code as it now stands. **It is stale relative to `src/`'s document and the source, and materially so.** It describes a footer with a plain tally/keys/message line and only a `p`/`r` key set, and says a viewer pane is "deliberately unbuilt." `src/`'s document instead describes a three-card panel (a running pact's account, a conversation thread, and a read document), a composer, distinct modal machinery in `input.rs`/`composer.rs`/`confirm.rs`/`prompt.rs`, a `ChatAgent` alongside `ClaudeAgent`, a `v` key that reads a file into the document card (`viewing.rs`), an `e` key that hands a file to `$EDITOR` (`editing.rs`), an `s` key that writes a scope (`scoping.rs`), and boundary/scope enforcement (`boundary.rs::verdict`, reached via `session.rs::closed_scope` on the panel side and `edits.rs`'s `Opened` on the headless side) — none of which the README mentions. Where the two disagree, `src/`'s document and the source are right; the README is kept as a record of an earlier design, not as a current account.
+- `src/` — All source: App state, key/mouse input, panel cards, boundary/write logic, rendering, model-seam agents, and the binary's headless subcommands.
 
-## What this crate is for
+## Structure
 
-It draws the current state of the work tree the engine loads from wherever the binary was launched, and turns keystrokes into requests back to the engine. It computes nothing about the tree itself — colour, freshness, and module boundaries are decided by `warlock-engine` before a frame is drawn; this crate only asks and renders what comes back. It also enforces, at the keys and subcommands that write, the scope/sigil boundary: `src/`'s document names `boundary.rs::verdict` as the one check point behind the pact/refresh keys, the scope-write key, and the headless subcommands.
+- The binary (src/main.rs) depends on the library (src/lib.rs), which re-exports the crate's API
+- The crate depends on warlock-engine for domain vocabulary; the engine has no terminal knowledge
+- ctrlc is used only by headless runs (src/running.rs) since a pact run has no panel to press Esc in
+- tempfile is a dev-dependency for `warlock config` tests needing a throwaway home directory, off the engine's explicit home parameter
 
-## How the parts fit together
+## Rules
 
-`Cargo.toml` states the dependency edge: **TUI → `warlock-engine`, and never back**. This crate knows terminal and keystroke vocabulary; the engine knows neither, and never depends on this crate.
+- The executable name is `warlock`, distinct from the crate/library name `warlock-tui`/`warlock_tui`
+- Lint configuration is inherited from the workspace root manifest, not set here
+- ctrlc, notify, serde_json, ratatui and warlock-engine are the only non-dev dependencies
 
-Within `src/` (summarized there, not restated here), the split is between a pure library core — flattened/filtered view state (`app.rs`), rendering (`ui.rs`), input translation (`input.rs`), colour rules (`colour.rs`), the panel's three cards (`panel.rs`, `thread.rs`, `account.rs`), the modal windows (`composer.rs`, `confirm.rs`, `prompt.rs`), brief-template support (`template.rs`), line wrapping (`wrap.rs`), and filesystem-watch policy (`watch.rs`) — as data transformations, versus a thin impure shell in the binary's other modules. Only `claude.rs` sits among the library-flavoured modules and is itself impure — the sole process-spawning point, home to both `ClaudeAgent` and `ChatAgent`. The rest of the binary's impure surface (terminal lifecycle in `terminal.rs`, the watcher's handle owned in `watch.rs`, the event loop and dispatch in `main.rs`/`input.rs`, `$EDITOR` suspension in `editing.rs`, and disk writes in `pacting.rs`/`scoping.rs`/`running.rs`/`edits.rs`) lives in the binary's own modules, per `src/`'s document. That split is what lets minutes-long pacts and a whole UI be driven through tests in microseconds against in-memory buffers (`stubs.rs`, `fixture.rs`) and hand-fed instants (`watch.rs`'s `WatchPolicy`).
+## Where to look
 
-## What a reader has to know before changing anything
-
-- **Domain logic belongs in the engine, never here.** What a pact means, how freshness is judged, prompt composition, and what makes a scope or sigil valid are engine questions.
-- **View state is never persisted.** `App`'s collapsed set, filters, selection and scroll, and the three overlay windows (composer, confirm, prompt), are held only in memory, per `src/`'s document — load-bearing, since it's what makes "answering No/Esc leaves the app untouched" true by construction.
-- **The manifest is `.warlock/pacts.toml`, one per repository, committed to git**, saved once per run through `descent.rs::descend`, never once per directory.
-- **The purity boundary is the whole design of `src/`.** `claude.rs` is the sole process-spawning point among the library-flavoured modules; `terminal.rs`, `watch.rs`, and the signal handling in `main.rs`/`running.rs` are the binary's other named impure seams.
-- **Two agents share the one process-spawning seam.** `ClaudeAgent` implements the engine's `Agent` port for pacts; `ChatAgent` is a sibling used for read-only, session-persistent conversation turns, both defined in `claude.rs`.
-- **A pact running behind a conversation must never leak into it, and vice versa** — the account card and the thread card are kept strictly separate (`panel.rs`, `account.rs`, `thread.rs`).
-- **The boundary check happens before any write.** `boundary.rs::verdict` (via `session.rs::closed_scope` and `edits.rs::Opened`) is named by `src/`'s document as the single point enforcing who may pact, refresh, un-pact, or write a scope over a directory, reused by both the TUI keys and the headless subcommands so a refusal's wording (`error.rs`'s `one_line`, `boundary.rs`'s `Verdict::message`) is asserted in one place.
-- **This is not an IDE.** The panel is a freshness ledger with a narrow composer (`composer.rs`) and a conversation bolted on (`thread.rs`, `chatting.rs`).
-
-## `src/`
-
-Summarized in its own document, not restated here: one crate blending a `warlock_tui` library-flavoured surface (pure state, drawing, key/mouse translation — `app.rs`'s `App` and its `Row`/`Focus`, `panel.rs`'s `Panel`/`Card<T>`, `account.rs`'s `Account`/`Log`, `thread.rs`'s `Thread`/`Turn`, `colour.rs`'s colour rules, `wrap.rs`'s wrapping, the three modal-state modules `composer.rs`/`confirm.rs`/`prompt.rs`, `submission.rs`'s classification, `template.rs`'s brief-template machinery, `watch.rs`'s watch policy, and `claude.rs`'s `ClaudeAgent`/`ChatAgent`) with the `warlock` binary's dispatch and impure seams (`main.rs`, `error.rs`, `boundary.rs`, `standing.rs`, `session.rs`, `descent.rs`, `edits.rs`, `running.rs`, `writing.rs`, `pacting.rs`, `scoping.rs`, `viewing.rs`, `editing.rs`, `terminal.rs`, `input.rs`, `chatting.rs`, `query.rs`, `check.rs`, `config.rs`) plus test-only support (`stubs.rs`, `fixture.rs`). No document for a subdirectory of `src` was supplied along with `src/`'s own document, so nothing below `src/` is described here.
+- what does the binary actually do and where does its source live → `src` `main`
+- why is ctrlc a dependency at all → `Cargo.toml` `ctrlc`
+- how config tests avoid touching the real home directory → `Cargo.toml` `tempfile`

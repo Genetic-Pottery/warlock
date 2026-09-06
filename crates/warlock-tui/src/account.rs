@@ -86,6 +86,13 @@ pub(crate) const WRITING: &str = "writing";
 /// model's business and is not reported here.
 const SUMMARISING: &str = "summarising";
 
+/// The word a line opens with when the engine turned a pass's answer down:
+/// the answer came back, and it was not the object the pass was asked to fill.
+/// What follows is the attempt it was and the first of what was wrong, so a
+/// reader can see why a directory is costing a second pass — or why it is
+/// about to fail — without reading the footer.
+const REJECTED: &str = "rejected";
+
 /// One line of a section, and the instant it arrived.
 ///
 /// The instant is kept even though a line's *displayed* clock is usually the one
@@ -762,6 +769,45 @@ impl Account {
         section
             .log
             .push(format!("{WAITING} · {files}, {}", size(bytes)), at);
+    }
+
+    /// The engine turned this directory's answer down: attempt `attempt` of
+    /// `attempts`, for `defects`, each already rendered to one line.
+    ///
+    /// One line, filed like [`Account::record_waiting`]'s and for the same
+    /// reason: it is why the wait that follows is a second one, or why the
+    /// directory is about to fail. Not an [`Activity`]: the stream reported an
+    /// answer, and it was warlock that refused it.
+    ///
+    /// Pushed rather than extended, and silent when there is no live section or
+    /// the newest one is frozen, for the reasons
+    /// [`Account::record_summarising`] gives.
+    pub fn record_rejected(
+        &mut self,
+        defects: &[String],
+        attempt: usize,
+        attempts: usize,
+        at: Instant,
+    ) {
+        let Some(section) = self.sections.last_mut() else {
+            return;
+        };
+        if section.is_closed() {
+            return;
+        }
+
+        // The first defect and a count of the rest: a line, not the list. The
+        // engine's own refusal carries the whole list, and the footer shows
+        // that when the directory fails.
+        let first = defects.first().map_or("no answer", String::as_str);
+        let rest = match defects.len() {
+            0 | 1 => String::new(),
+            more => format!(" (+{})", more - 1),
+        };
+        section.log.push(
+            format!("{REJECTED} · attempt {attempt}/{attempts}: {first}{rest}"),
+            at,
+        );
     }
 
     /// Stop whatever section is still live moving as of `at`, without ending

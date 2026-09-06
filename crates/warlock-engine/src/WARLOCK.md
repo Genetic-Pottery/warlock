@@ -3,59 +3,65 @@
 
 # src
 
-This is the whole of the `warlock-engine` crate's source: the domain logic for Warlock, the freshness-ledger tool the project's `CLAUDE.md` describes. It has two build-target-relevant files — `lib.rs`, which declares the crate's modules and re-exports its public surface, and every other file, which is a `pub mod` (or private `mod`) hung off it — plus one `#[cfg(test)]`-only concern threaded through most of them. Nothing here spawns a process, opens a socket, or depends on the TUI; the dependency edge runs the other way, per `lib.rs`'s own doc comment.
+The core engine crate for warlock: the domain vocabulary for pacting directories, hashing subtrees, deciding freshness, and laying out the WARLOCK.md documents a model pass fills in, with no dependency on any terminal or TUI.
 
-## What the directory is for
+## Files
 
-Warlock's job, as `lib.rs` states it, is to build a coloured tree of a project's directories (`Unpacted` / `PactedStale` / `PactedFresh`), decide that colour from a hash comparison, and produce or refresh the `WARLOCK.md` at a node by sending a model a bounded request and writing back what it says — all without ever running a subprocess itself. Every file below is one piece of that pipeline or one piece of its supporting bookkeeping (the pact manifest, machine-local sigils, scopes, the `CLAUDE.md` a repo gets on `warlock init`).
+- `agent.rs` (46.9 KB) — The Agent trait, Request/Response and File/ChildDocument types: the port through which the engine reaches a model without spawning a process itself. · declares `Request`, `new`, `with_files`, `with_child_documents`, `with_prompt`, `prompt`, `directory`, `files` (+23)
+- `briefs.rs` (21.2 KB) — briefs_path and load_briefs read .warlock/briefs.toml, answering DEFAULT_BRIEF_DIRECTORY where a repository states no preference. · declares `briefs_path`, `load_briefs`, `Error`, `check_relative`, `Briefs`, `default_directory`, `fmt`, `source`
+- `claude_md.rs` (44.5 KB) — write_claude_md splices warlock's orientation block, bounded by BEGIN/END markers, into a repository's CLAUDE.md via Written::Created/Updated. · declares `write_claude_md`, `Written`, `path`, `Error`, `section`, `splice`, `fmt`, `source`
+- `clock.rs` (15.3 KB) — now_rfc3339 renders the wall clock as an RFC 3339 UTC timestamp using hand-written calendar arithmetic (civil_from_days), no date/time dependency. · declares `now_rfc3339`, `rfc3339_from_unix_seconds`, `civil_from_days`
+- `decide.rs` (10.9 KB) — decide_state maps a PactEntry and a computed hash to a NodeState: absent is Unpacted, mismatched or unjudged is PactedStale, matched is PactedFresh. · declares `decide_state`
+- `document.rs` (83.4 KB) — Fill, FileFill, Lookup and Described define the WARLOCK.md schema; accept/check/render enforce shape and lay out the document from a model's answer. · declares `Fill`, `Lookup`, `FileFill`, `FileLookup`, `to_json`, `stub`, `Described`, `retain_accounts_in` (+37)
+- `fitting.rs` (187.5 KB) — not read by the pass, over the size cap; name and size only
+- `hash.rs` (31.1 KB) — subtree_hash computes the blake3 digest of everything at and below a directory, honouring ignore rules and .warlockignore, used as the staleness trigger. · declares `subtree_hash`, `Error`, `files_under`, `length`, `fmt`, `source`
+- `ignores.rs` (5.1 KB) — is_ignored and FILENAME (".warlockignore") answer whether a directory itself is excluded by the repository's own ignore file. · declares `is_ignored`, `walk_one_deep`
+- `languages.rs` (32.7 KB) — The per-language table (Language, Block, TABLE) behind elision: declared_names and elide drop test bodies while keeping declaration lines verbatim. · declares `Block`, `Language`, `declared_names`, `Elided`, `elide`, `real`, `work`, `between` (+32)
+- `lib.rs` (15.7 KB) — The crate root: declares all modules and re-exports the public API (Agent, Manifest, Tree, pact_subtree, scope_covering, sigils functions, etc.).
+- `load.rs` (72.5 KB) — load_tree and repository_root build a Tree from disk, colouring nodes via the manifest and hashing pacted subtrees, reporting Problem/ProblemCause. · declares `load_tree`, `Loaded`, `Problem`, `ProblemCause`, `repository_root`, `Error`, `fmt`, `source` (+10)
+- `manifest.rs` (61.8 KB) — Manifest and PactEntry: the in-memory shape of .warlock/pacts.toml, with to/from_manifest_path, save/load, and SCHEMA_VERSION. · declares `Manifest`, `new`, `with_entries`, `entries`, `push`, `entry`, `to_toml_string`, `from_toml_str` (+27)
+- `pact.rs` (309.0 KB) — Pacting: pact_directory writes one directory's WARLOCK.md; pact_subtree/refresh_subtree/unpact_subtree operate whole subtrees via describe_and_grant, rewrite; view_file, closed_scopes_at_or_below, Observer, Pacted, Failure, Refusal, Error, Unviewable. · declares `pact_subtree`, `refresh_subtree`, `unpact_subtree`, `closed_scopes_at_or_below`, `pact_directory`, `pactable_directories`, `view_file`, `Pacting` (+28)
+- `scope.rs` (36.1 KB) — validate_scope, validate_sigil, scope_covering and scope_opens_to define what a scope string may be and whether held sigils open it. · declares `Rule`, `validate_scope`, `validate_sigil`, `scope_covering`, `valid_scope`, `scope_opens_to`, `fmt`, `valid_scope_on` (+3)
+- `sigils.rs` (32.1 KB) — project_directory, sigils_path, load_sigils and save_sigils manage the machine-local <home>/.warlock/<project>/config.toml holding held sigils. · declares `project_directory`, `sigils_path`, `load_sigils`, `save_sigils`, `Error`, `project_dir`, `readable_name`, `Config` (+2)
+- `state.rs` (3.8 KB) — NodeState: the three-state vocabulary (Unpacted, PactedStale, PactedFresh) with no fourth 'unknown' state. · declares `NodeState`
+- `tree.rs` (34.8 KB) — Node, Tree, DepthFirst and StateCounts: the pure shape of the project tree, independent of how it was built. · declares `Node`, `new`, `with_children`, `with_files`, `with_ignored`, `is_ignored`, `with_scope`, `is_leaf` (+10)
 
-## How the pieces fit together
+## Structure
 
-The rough data flow a reader should hold in mind:
+- load.rs calls decide.rs's decide_state and hash.rs's subtree_hash to colour each Node built from tree.rs's types
+- pact.rs (not detailed here) drives document.rs's Fill/accept/render together with agent.rs's Agent trait to produce and write WARLOCK.md files
+- manifest.rs's temp_file_name and write_and_sync are reused by claude_md.rs and sigils.rs for atomic writes
+- document.rs's fitting decisions rely on languages.rs's elide and declared_names to shrink oversized files before a pass
+- scope.rs reads PactEntry/Manifest from manifest.rs to compute coverage, and load.rs consults it per node
+- lib.rs re-exports the public surface of every other module in this directory
 
-- **`load.rs`** (`load_tree`) walks a real directory and the `manifest.rs` file above it to build a `tree::Tree` of `tree::Node`s, each coloured by **`decide.rs`**'s `decide_state`, which itself compares a `manifest::PactEntry`'s recorded `granted_hash` against a hash freshly computed by **`hash.rs`**'s `subtree_hash`.
-- **`pact.rs`** is where a directory actually gets pacted: `pact_directory` calls into **`fitting.rs`** (`fit`) to build a model request bounded to a byte budget, sends it through the **`agent.rs`** `Agent` trait, and writes the response verbatim to `WARLOCK.md`. `pact_subtree`/`refresh_subtree` repeat that over a whole tree and then grant hashes via `manifest.rs`.
-- **`fitting.rs`**'s ladder (whole file → elided → summarised → name-and-size) leans on **`languages.rs`** (`elide`, dropping test bodies by a per-language table) for one rung and on `agent.rs`'s `File`/`Request` types to carry the result.
-- **`ignores.rs`** (`.warlockignore` handling) is consulted by both `load.rs` (to mark rather than prune) and `hash.rs`/`pact.rs` (to actually exclude content).
-- **`scope.rs`** and **`sigils.rs`** are the two halves of the access-boundary vocabulary described in the project's `CLAUDE.md`: scopes live in the manifest (repo-side), sigils live under `$HOME` (machine-side), and `pact.rs` (`closed_scopes_at_or_below`) is the one place that asks both at once.
-- **`briefs.rs`** and **`claude_md.rs`** are peripheral, standalone conveniences — where a repo wants generated briefs written, and writing/splicing the orientation block into a repo's own `CLAUDE.md` — neither integrated into the pact/load pipeline.
-- **`clock.rs`** and **`state.rs`** are small, low-level supports: a timestamp formatter used by manifest grants, and the closed three-variant `NodeState` enum everything else colours nodes with.
-- **`tree.rs`** is the pure data shape (`Node`, `Tree`) that `load.rs` populates and `pact.rs`/callers walk.
+## Rules
 
-A reader changing behaviour here should know: **`decide.rs`** is the entire staleness rule (a four-row table collapsed to "never judged and judged-differently are both stale"); **`hash.rs`** is the entire definition of "changed" (paths + bytes only, sorted, `.warlockignore`-aware, unreadable file = hard error not skip); and **`pact.rs`** is by a wide margin the largest file (327,383 bytes) and owns essentially all the write-side policy — the manifest schema itself is defined in `manifest.rs`, but what gets written into it (grants, scopes preserved across runs) is decided in `pact.rs`.
+- agent.rs: this crate spawns no subprocess; Agent::run is implemented only by the binary
+- hash.rs: a file that cannot be read is a fatal Error, never silently skipped
+- manifest.rs: an unsupported schema version is rejected outright rather than guessed at
+- manifest.rs: paths are stored relative to the manifest directory with forward slashes
+- scope.rs: a scope is 1 to 24 chars, ASCII lowercase/digits/-/_, starts with a letter, no trailing separator
+- document.rs: ENTRY_CHARS caps a slot at 280 characters, ENTRY_MINIMUM floors it at 20
+- document.rs: ATTEMPTS limits a directory to two model passes before its answer is given up on
+- sigils.rs: a missing sigil file is Error::NotFound, never an invented empty set
+- load.rs: an unpacted node is never hashed
 
-## File-by-file
+## Where to look
 
-- **`agent.rs`** (48,596 bytes, test bodies elided). Defines the model-transport seam: the `Agent` trait (`run`, `context_tokens`), `Request`/`Response`, `File` (with its `present`/`omitted`/`elided`/`summarised` states — bytes, a bare name+size, verbatim-but-trimmed lines, or prose-about-the-file, respectively), `ChildDocument`, and the `Error` enum (`NotFound`, `Failed`, `EmptyOutput`, `TimedOut`, `Io`). The binary crate implements `Agent` by shelling out to `claude`; nothing in this crate or file runs a process. `STDERR_EXCERPT` and `one_line` bound how much of a failure's stderr reaches `Display`.
-
-- **`briefs.rs`** (21,752 bytes, test bodies elided). Reads `.warlock/briefs.toml` (`briefs_path`, `load_briefs`) to learn which directory a repo wants generated briefs written to. A missing or empty file is silently `DEFAULT_BRIEF_DIRECTORY` (`"docs"`); malformed TOML, an absolute `directory`, or one with a `..` component are named errors (`Error::Io`/`Syntax`/`AbsoluteDirectory`/`ParentDirectory`). Read-only — writes nothing, ever.
-
-- **`claude_md.rs`** (44,982 bytes, test bodies elided). Writes/updates `<root>/CLAUDE.md`: `write_claude_md` splices a fixed, hand-written `BODY` string (the same text reproduced verbatim in the project's own `CLAUDE.md`, which this file's tests pin against) between `<!-- warlock:begin -->`/`<!-- warlock:end -->` markers (`splice`), leaving every other byte of a reader's file untouched and making a second run a byte-identical no-op. Uses the same temp-file-then-rename idiom as `manifest.rs`. `Written` (`Created`/`Updated`) and `Error` (`Read`/`NotText`/`Write`) are its result types.
-
-- **`clock.rs`** (15,763 bytes, test bodies elided). `now_rfc3339` — the wall-clock timestamp format (`2026-08-21T14:03:11Z`) manifest grants (`PactEntry::with_grant`) are stamped with. Hand-rolled calendar arithmetic (`civil_from_days`, Howard Hinnant's algorithm) rather than a date/time dependency; UTC-only, second precision, clamped to what a four-digit-year RFC 3339 string can hold.
-
-- **`decide.rs`** (11,206 bytes, test bodies elided). One function, `decide_state(entry: Option<&PactEntry>, computed_hash: &str) -> NodeState`: the entire staleness/freshness rule as a four-row table (no entry → `Unpacted`; entry with no/mismatched grant → `PactedStale`; matching grant → `PactedFresh`). Pure, total, no I/O.
-
-- **`fitting.rs`** (189,500 bytes, summarised). The ladder that turns a directory into a size-bounded `agent::Request`: `fit` is the entry point; `gather_request` builds the initial request; `summarise_over_cap` and `demote_to_budget` do the degrade-don't-truncate work (whole → elided/summarised → name-and-size) via `chunk_utf8`/`summarise_file`'s map-reduce model passes, cached on disk (`cached_summary`/`cache_summary`/`summary_key`) under a `summaries/` directory. Exposes `PER_FILE_BYTE_CAP`, `request_byte_cap`, `Problem`/`Omission` (the non-fatal per-file exclusion vocabulary `pact.rs` and `lib.rs` re-export). Its own large test suite exercises trimming order, chunking, and cache round-trips with a hand-rolled fake `Agent`.
-
-- **`hash.rs`** (31,946 bytes, test bodies elided). `subtree_hash(dir)`: the mechanical definition of "this directory's content changed" — a blake3 digest, domain-separated by `HASH_CONTEXT` (`"warlock subtree hash v1 …"`), over sorted relative-path + bytes pairs for every file the `ignore` walk (plus `.warlockignore` via `ignores.rs`) keeps. `files_under` does the walk; an unreadable file is `Error::Read`, deliberately fatal rather than skipped, because skipping would hash identically to deletion.
-
-- **`ignores.rs`** (5,278 bytes, sent whole). Owns `.warlockignore` as a concept: the filename constant `FILENAME` and `is_ignored(path)`, which answers whether a directory is itself excluded by rules above it — needed because a walker never applies its own rules to the root it's handed. Used by `hash.rs`, `load.rs`, and `pact.rs`.
-
-- **`languages.rs`** (24,923 bytes, test bodies elided). The per-language table (`TABLE`, `Language`, `Block`) behind `fitting.rs`'s elision rung: `elide(path, text)` drops test-file bodies while keeping declaration lines (function/struct names), covering Rust, Zig, Go, TypeScript/JavaScript, Python, Ruby, Java/Kotlin/C#/Swift, and Elixir by file extension and naming convention. An unrecognised extension is returned untouched (`None`), never guessed at; inline-block matching is deliberately naive (column-zero anchoring, no lexer) and gives up rather than risk deleting real code.
-
-- **`lib.rs`** (15,800 bytes, sent whole). The crate root: declares every module listed here (`pub mod agent`, `briefs`, `claude_md`, `clock`, `decide`, `fitting`, `hash`, `mod ignores` and `mod languages` (private), `pub mod load`, `manifest`, `pact`, `scope`, `sigils`, `state`, `tree`) and re-exports the public surface (types and functions from nearly every file above) with a doc comment on each `pub use` line. States the crate's core promise: it touches the filesystem but spawns no subprocess and never follows a symlink out of a caller's directory.
-
-- **`load.rs`** (74,320 bytes, test bodies elided). `load_tree(working_dir)`: builds a `Tree` rooted at `working_dir`, coloured by the manifest found at `repository_root` (nearest ancestor with `.git/`). `Builder::node` recurses over what `walk` found, calling `Builder::state_of` (uses `decide_state`/`subtree_hash`) and `Builder::scope_of` per directory; both push non-fatal `Problem`s (`ProblemCause::Hash`/`Scope`) rather than failing the whole load. `mark_excluded` marks (never prunes) `.warlockignore`d directories via `ignores.rs`, reusing the same `WalkBuilder` config (`builder`) as the main walk so the two cannot drift. Returns `Loaded { tree, problems }`.
-
-- **`manifest.rs`** (63,300 bytes, test bodies elided). The `.warlock/pacts.toml` schema: `Manifest` (`version`, `entries: Vec<PactEntry>`) and `PactEntry` (`module`, `document`, `scope`, `granted_hash`, `granted_at`), all paths stored relative-with-forward-slashes via `to_manifest_path`/`from_manifest_path`. `Manifest::load`/`save` do the atomic (temp-file + `fs::rename`) read/write; `write_and_sync` and `temp_file_name` are the shared write idiom `claude_md.rs`, `fitting.rs`, and `sigils.rs` all reuse. `PactEntry::overwrite_run_fields` is deliberately the only way a pact run can touch `module`/`document`/grant — `scope` is untouchable except through `with_scope`/`without_scope`, so a person's boundary survives every run.
-
-- **`pact.rs`** (327,383 bytes, summarised — the largest file in the directory). The full pacting subsystem: `pact_directory` (gather → describe oversized files → fit to budget → one agent pass → write `WARLOCK.md`, via `PROMPT`/`STAMP` constants), `pact_subtree` (children-first over a directory, then hash-and-grant), `refresh_subtree` (same, restricted to directories `decide_state` calls stale), `unpact_subtree` (drops manifest entries, leaves documents on disk), `closed_scopes_at_or_below` (the scope×sigil boundary check), and `view_file`. Cancellation runs through the `Observer` trait / `Pacting` enum. Result/error types: `PactedSubtree`, `Pacted`, `Viewed`, `Unviewable`, `Refusal`, `Error`, `Failure` — all with `Display`/`Error` impls. `MINIMUM_DOCUMENT_BYTES` (200) is the one length check on a model's answer.
-
-- **`scope.rs`** (36,980 bytes, test bodies elided). Defines what a scope string may be: `validate_scope` (1–24 chars, lowercase+digits+`-`/`_`, starts with a letter, doesn't end with a separator) and `validate_sigil` (the same plus the wildcard `*`). `scope_covering(path, root, manifest)` walks a path's manifest-relative ancestors (`at_or_above`) to find the nearest valid scope — nearest wins outright, never accumulates. `scope_opens_to(covering, held)` is the membership test: `None` covering is open to anyone, an empty `held` opens nothing scoped, any matching or wildcard sigil opens it. `RULES` is the one-line rule text shared by every prompt that asks for a scope. This module judges only — never lower-cases, trims, or corrects a string.
-
-- **`sigils.rs`** (32,931 bytes, test bodies elided). The machine-local counterpart to `scope.rs`: `project_directory(root)` derives a per-checkout directory name (readable name + blake3 digest of the canonical path, domain-separated by `PROJECT_CONTEXT`) under `<home>/.warlock/`; `sigils_path`, `load_sigils`, `save_sigils` read/write `config.toml` there (atomic write, same idiom as `manifest.rs`). `home` is always a parameter, never read from the environment. A missing file is `Error::NotFound`, distinct from an empty sigil set.
-
-- **`state.rs`** (3,943 bytes, test bodies elided). `NodeState`: the closed three-variant enum (`Unpacted`, `PactedStale`, `PactedFresh`), `NodeState::ALL`, and `is_pacted`. Deliberately no fourth "unknown" variant — the module doc says unjudged *is* stale.
-
-- **`tree.rs`** (35,718 bytes, test bodies elided). The pure tree shape `load.rs` populates: `Node` (`path`, `document`, `state`, `ignored`, `scope`, `children`, `files` — all plain stored fields, nothing derived) with builder methods `with_children`/`with_files`/`with_ignored`/`with_scope`; `IntoDocument` (impl'd for `Option<PathBuf>`, `PathBuf`, `&Path`, `&str`, `String`); `Tree` (`root`, `walk` → `DepthFirst` iterator, `counts` → `StateCounts`, `find`). No filesystem access anywhere in this file.
+- how a model pass is actually invoked → `agent.rs` `Agent`
+- the shape and validation of a WARLOCK.md → `document.rs` `Fill`
+- what makes a directory stale or fresh → `decide.rs` `decide_state`
+- computing the subtree hash → `hash.rs` `subtree_hash`
+- reading or writing .warlock/pacts.toml → `manifest.rs` `Manifest`
+- walking a directory into a coloured tree → `load.rs` `load_tree`
+- scopes and sigils and who can act where → `scope.rs` `scope_opens_to`
+- where a person's sigils are stored → `sigils.rs` `sigils_path`
+- cutting test bodies out of a big source file → `languages.rs` `elide`
+- the CLAUDE.md orientation block → `claude_md.rs` `write_claude_md`
+- where briefs get written → `briefs.rs` `load_briefs`
+- the tree's node and walk types → `tree.rs` `DepthFirst`
+- how does warlock decide which directories get re-described on an edit instead of repacting everything → `pact.rs` `refresh_subtree`
+- why did un-pacting a directory not delete its WARLOCK.md → `pact.rs` `unpact_subtree`
+- what stops a machine outside a scope from un-pacting across it → `pact.rs` `closed_scopes_at_or_below`
+- how does a long pact report progress or get cancelled from a UI → `pact.rs` `Observer`

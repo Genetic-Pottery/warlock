@@ -37,7 +37,8 @@ use std::time::Instant;
 use std::{fs, io, thread};
 
 use warlock_engine::{
-    Agent, Manifest, NodeState, PactedSubtree, Pacting, Tree, fitting, pact, to_manifest_path,
+    Agent, Manifest, NodeState, PactedSubtree, Pacting, Tree, document::Defect, fitting, pact,
+    to_manifest_path,
 };
 use warlock_tui::{
     Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactToggle, Run, Section, Sigils,
@@ -521,29 +522,6 @@ pub(crate) enum PactEvent {
     /// worked, and anything more is the business of whoever draws these rather
     /// than of the channel that carries them.
     Doing(Activity),
-    /// A summarising pass over one over-cap file inside the directory being
-    /// worked is about to run: pass `part` of `parts`, counting from one.
-    ///
-    /// The reason a directory holding a two-megabyte lockfile is minutes long,
-    /// said while it is being paid for rather than afterwards. Like
-    /// [`Doing`](PactEvent::Doing) it carries no directory, because the
-    /// [`Starting`](PactEvent::Starting) before it already named the one whose
-    /// pass is running; unlike it, it names the file, because the file is the
-    /// whole of what it has to say.
-    ///
-    /// `parts` counts *passes*, not chunks — a file read in three chunks is
-    /// announced four times, the last of them the reduce over them — because
-    /// that is the fraction of the wait a reader can do something with. See
-    /// [`pact::Observer::summarising`], whose numbers these are, unaltered.
-    Summarising {
-        /// The file being summarised, as an absolute path; the footer spells it
-        /// relative to the tree on screen, as it does a directory.
-        file: PathBuf,
-        /// Which pass over that file this is, counting from one.
-        part: usize,
-        /// How many passes the file costs in all.
-        parts: usize,
-    },
     /// The directory's own request has been handed to the pass: `files` files
     /// in it, `bytes` bytes counted the way the budget counts them.
     ///
@@ -564,6 +542,24 @@ pub(crate) enum PactEvent {
         /// What it weighs: the files plus each child directory's document,
         /// which is the total the caps are checked against.
         bytes: u64,
+    },
+    /// The pass running now answered and the engine turned the answer down:
+    /// attempt `attempt` of `attempts`, for the defects listed. When there is
+    /// an attempt left a second [`Requesting`](PactEvent::Requesting) follows
+    /// for it; when there is not, the directory is about to fail. See
+    /// [`pact::Observer::rejected`], whose report this is, rendered to lines.
+    ///
+    /// Carries no directory, for [`Doing`](PactEvent::Doing)'s reason: the
+    /// [`Starting`](PactEvent::Starting) before it already named the one whose
+    /// pass this is.
+    Rejected {
+        /// What was wrong with the answer, one line each, in the order the
+        /// engine found it.
+        defects: Vec<String>,
+        /// Which attempt this was, counting from one.
+        attempt: usize,
+        /// How many attempts a directory gets.
+        attempts: usize,
     },
     /// `directory` and everything under it is documented: its pass delivered,
     /// and no pass below it failed. The engine's own word, sent the moment it
@@ -653,22 +649,6 @@ impl pact::Observer for Reporting<'_> {
         Pacting::Continue
     }
 
-    /// Pass the announcement on and get out of the way.
-    ///
-    /// One send, exactly as `starting` does it and with the same shrug at a
-    /// failure: a receiver that has gone away is an application that is
-    /// quitting. No cancellation check of its own, deliberately — this is
-    /// called from inside a directory's pass, where the engine asks nothing and
-    /// could act on no answer, and the one place a pact stops is still the
-    /// question asked between directories above.
-    fn summarising(&mut self, file: &Path, part: usize, parts: usize) {
-        let _ = self.events.send(PactEvent::Summarising {
-            file: file.to_path_buf(),
-            part,
-            parts,
-        });
-    }
-
     /// Pass the two numbers on, exactly as `summarising` is passed on and with
     /// the same shrug at a send that fails.
     ///
@@ -678,6 +658,18 @@ impl pact::Observer for Reporting<'_> {
     /// asked between directories above.
     fn requesting(&mut self, files: usize, bytes: u64) {
         let _ = self.events.send(PactEvent::Requesting { files, bytes });
+    }
+
+    /// Pass the refusal on as text, exactly as `summarising` is passed on and
+    /// with the same shrug at a send that fails. The defects travel as their
+    /// one-line renderings rather than as the engine's type, because a line is
+    /// all the panel will ever do with one.
+    fn rejected(&mut self, _directory: &Path, defects: &[Defect], attempt: usize, attempts: usize) {
+        let _ = self.events.send(PactEvent::Rejected {
+            defects: defects.iter().map(ToString::to_string).collect(),
+            attempt,
+            attempts,
+        });
     }
 
     /// Pass the announcement on, exactly as `summarising` is passed on and
@@ -1196,32 +1188,6 @@ fn drain(
             Ok(PactEvent::Doing(activity)) => {
                 app.write_run(|account| account.record(&activity, now));
             }
-            // Both, and for two different readers. The panel gets a line per
-            // pass because the passes over one over-cap file can be most of a
-            // directory's wait, and a screen that has not moved in eight
-            // minutes is the thing this run is trying not to be; the footer
-            // goes on saying which pass is running *now*, replacing itself
-            // every time, which is a different question and the one it has
-            // always answered.
-            //
-            // The panel first, so the line lands under the directory the
-            // `Starting` before it opened — the same reason activities are
-            // filed where they are, and the same silence when there is no
-            // account or the newest section is already closed. The file is
-            // spelled relative to the tree on screen, as a section heading is,
-            // so a narrow panel spends its width on the part of the path the
-            // reader does not already know.
-            //
-            // The footer's state is cleared by the next directory's `Starting`
-            // and by the end of the run, both of which `App` does for itself,
-            // so no chunk wording is ever attributed to a directory the run has
-            // moved past. The panel's line needs no such sweeping up: it is a
-            // line, and a line stays where the run put it.
-            Ok(PactEvent::Summarising { file, part, parts }) => {
-                let spelled = section_label(&scope.root, &file);
-                app.write_run(|account| account.record_summarising(&spelled, part, parts, now));
-                app.set_pact_summarising(file, part, parts);
-            }
             // The panel only, and one line: the request this directory's pass
             // was handed, filed under whichever section the `Starting` before
             // it opened, exactly as an activity and a summarising pass are.
@@ -1237,6 +1203,16 @@ fn drain(
             // it. See `Account::record_waiting`.
             Ok(PactEvent::Requesting { files, bytes }) => {
                 app.write_run(|account| account.record_waiting(files, bytes, now));
+            }
+            // The panel only, and one line, filed like the request line above
+            // it: why this directory is about to cost a second pass, or why it
+            // is about to fail, in the engine's own words.
+            Ok(PactEvent::Rejected {
+                defects,
+                attempt,
+                attempts,
+            }) => {
+                app.write_run(|account| account.record_rejected(&defects, attempt, attempts, now));
             }
             // The one recolouring a run does before it is over. The engine
             // only says this of a directory whose whole subtree delivered —
@@ -1696,8 +1672,8 @@ mod tests {
     use std::{env, fs, process};
 
     use warlock_engine::{
-        Agent, Loaded, Manifest, Node, NodeState, PER_FILE_BYTE_CAP, PactEntry, Tree, Unwatched,
-        agent, decide_state, load_tree, repository_root, subtree_hash,
+        Agent, Loaded, Manifest, Node, NodeState, PactEntry, Tree, Unwatched, agent, decide_state,
+        load_tree, repository_root, stub_answer, subtree_hash,
     };
     use warlock_tui::{
         Account, Activities, Activity, App, Chrome, ClaudeAgent, Line, Mode, PactToggle, Run,
@@ -1875,20 +1851,15 @@ mod tests {
                 cancel.cancel();
             }
             if self.refused.iter().any(|name| Path::new(name) == relative) {
-                // Short enough that the engine turns it down: the cheapest
-                // way to fail one directory of a pact for real, rather than
-                // by reaching into the engine's error types, which are
-                // `#[non_exhaustive]` and cannot be built from here.
+                // Not the object the engine asked for, so it is turned down —
+                // on every attempt, since the answer never changes: the
+                // cheapest way to fail one directory of a pact for real,
+                // rather than by reaching into the engine's error types, which
+                // are `#[non_exhaustive]` and cannot be built from here.
                 return Ok(agent::Response::new("no."));
             }
-            Ok(agent::Response::new(document()))
+            Ok(agent::Response::new(stub_answer(request)))
         }
-    }
-
-    /// A document long enough for the engine to accept. The rule is a byte
-    /// count and nothing here reads what it says, so this is filler.
-    fn document() -> String {
-        format!("# module\n\n{}\n", "What it does, at length. ".repeat(20))
     }
 
     /// The manifest as it sits on disk under `root`, or `None` when there
@@ -2501,8 +2472,8 @@ mod tests {
                     position, total, ..
                 } => Some((*position, *total)),
                 PactEvent::Doing(_)
-                | PactEvent::Summarising { .. }
                 | PactEvent::Requesting { .. }
+                | PactEvent::Rejected { .. }
                 | PactEvent::Documented { .. }
                 | PactEvent::Finished(_) => None,
             })
@@ -2522,8 +2493,8 @@ mod tests {
                         .to_path_buf(),
                 ),
                 PactEvent::Doing(_)
-                | PactEvent::Summarising { .. }
                 | PactEvent::Requesting { .. }
+                | PactEvent::Rejected { .. }
                 | PactEvent::Documented { .. }
                 | PactEvent::Finished(_) => None,
             })
@@ -2732,102 +2703,6 @@ mod tests {
         );
     }
 
-    /// A file too big for one request and too big for one chunk of one:
-    /// comfortably over [`PER_FILE_BYTE_CAP`], so the engine summarises it
-    /// rather than sending it, and over twice the chunk size under that cap, so
-    /// summarising it is several map passes and a reduce over them.
-    ///
-    /// Lines, because the chunker cuts just after a newline, and lockfile-ish
-    /// filler because that is what an over-cap file in a repository actually is.
-    fn over_the_cap() -> String {
-        let line = "checksum = \"0123456789abcdef0123456789abcdef\"\n";
-        let cap = usize::try_from(PER_FILE_BYTE_CAP).expect("the cap is a few kilobytes");
-        let lines = 2 * cap / line.len() + 1;
-        line.repeat(lines)
-    }
-
-    #[test]
-    fn the_passes_over_a_big_file_are_announced_inside_the_directory_holding_it() {
-        let scratch = one_crate("summarising");
-        scratch.write("crates/engine/src/deps.lock", &over_the_cap());
-        // The same fake as everywhere else: its answer is long enough to clear
-        // `MINIMUM_DOCUMENT_BYTES` and so more than long enough to be kept as
-        // an account of a chunk, which is all a summarising pass asks of it.
-        let agent = Canned::new(&scratch, []);
-
-        let events = events_of(
-            &scratch,
-            &toggle(&scratch, "crates/engine", true),
-            &agent,
-            &Cancel::new(),
-        );
-
-        // The two directories' announcements, by where they landed in the one
-        // sequence: everything between them is work done inside the first of
-        // them, which is the whole reason these ride the same channel rather
-        // than a second one that could arrive out of order.
-        let starting: Vec<usize> = events
-            .iter()
-            .enumerate()
-            .filter(|(_, event)| matches!(event, PactEvent::Starting { .. }))
-            .map(|(index, _)| index)
-            .collect();
-        let [first, second] = starting.as_slice() else {
-            panic!("one announcement per directory: {events:?}");
-        };
-
-        let passes: Vec<(&PathBuf, usize, usize)> = events
-            .iter()
-            .enumerate()
-            .filter_map(|(index, event)| match event {
-                PactEvent::Summarising { file, part, parts } => {
-                    assert!(
-                        index > *first && index < *second,
-                        "a pass over a file in crates/engine/src arrived outside it: {events:?}"
-                    );
-                    Some((file, *part, *parts))
-                }
-                _ => None,
-            })
-            .collect();
-
-        // And the stretch they had to land in is the right one: children before
-        // parents, so the first directory announced is the deeper one, which is
-        // where the big file is.
-        assert_eq!(
-            announced(&events, &scratch)[0],
-            PathBuf::from("crates/engine/src")
-        );
-
-        let parts = passes
-            .first()
-            .expect("an over-cap file costs at least one pass")
-            .2;
-        assert!(
-            parts > 1,
-            "several chunks and the reduce over them: {passes:?}"
-        );
-        assert_eq!(
-            passes.len(),
-            parts,
-            "every pass the file costs is announced: {passes:?}"
-        );
-        // Carried, not computed with: the file the engine named, the count it
-        // gave, and the parts running 1..=parts in order.
-        for (index, (file, part, of)) in passes.iter().enumerate() {
-            assert_eq!(*file, &scratch.path("crates/engine/src/deps.lock"));
-            assert_eq!(*part, index + 1);
-            assert_eq!(*of, parts, "the count does not move: {passes:?}");
-        }
-
-        // And none of it changed how the run went: the passes are an
-        // announcement, not a vote.
-        assert!(
-            matches!(outcome_of(&events), Ok(Toggled { granted: true, .. })),
-            "the run still granted the subtree: {events:?}"
-        );
-    }
-
     /// A `claude` that prints one tool use and then a result line carrying
     /// `document`, and exits.
     ///
@@ -2857,13 +2732,19 @@ mod tests {
         // test made itself would prove only that the test can call
         // `activity_port`.
         let scratch = one_crate("spawned-activities");
-        // Long enough that the engine keeps what comes back:
-        // `MINIMUM_DOCUMENT_BYTES` is 200. `\n` inside the JSON string is
-        // the two characters JSON wants, not a newline in the shell's way.
-        let prose =
-            "What this directory is for, said at about the length a real document says it at. ";
-        let document = format!("# engine\\n\\n{prose}{prose}{prose}");
-        let script = stand_in(&document);
+        // The object the engine accepts for the one directory this run covers
+        // — the leaf, so a single canned answer fits every pass — escaped as
+        // the contents of a JSON string, which is how a result line carries
+        // it. The quotes inside become `\"`, and the shell's single quotes
+        // around the whole line leave them alone.
+        let fill = serde_json::json!({
+            "purpose": "The source of the engine crate.",
+            "files": {"lib.rs": "the crate root of the engine library"},
+        })
+        .to_string();
+        let escaped = serde_json::to_string(&fill).expect("a string serialises");
+        let document = &escaped[1..escaped.len() - 1];
+        let script = stand_in(document);
         let agent = ClaudeAgent::new()
             .with_program("/bin/sh")
             .with_args(["-c", script.as_str()]);
@@ -2871,7 +2752,7 @@ mod tests {
         let received = spawn_pact(
             &Manifest::new(),
             &scratch.root,
-            &toggle(&scratch, "crates/engine", true),
+            &toggle(&scratch, "crates/engine/src", true),
             &agent,
             Cancel::new(),
         );
@@ -2888,12 +2769,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // Two directories, and each pass says the same two things: the tool
-        // it used, with its one whitelisted detail, and what it cost.
+        // One directory, and its pass says two things: the tool it used, with
+        // its one whitelisted detail, and what it cost.
         assert_eq!(
             activities.len(),
-            4,
-            "both passes reported through the port `spawn_pact` attached: {events:?}"
+            2,
+            "the pass reported through the port `spawn_pact` attached: {events:?}"
         );
         assert!(
             activities.iter().all(|activity| matches!(
@@ -3736,7 +3617,18 @@ mod tests {
             PathBuf::from("crates/alpha"),
         ];
         assert_eq!(announced(&events, &scratch), worked);
-        assert_eq!(agent.directories(), worked);
+        // The refused directory costs two passes — the engine asks once more
+        // with the defects listed before giving up — so it is seen twice.
+        assert_eq!(
+            agent.directories(),
+            [
+                PathBuf::from("crates/beta/src"),
+                PathBuf::from("crates/beta"),
+                PathBuf::from("crates/alpha/src"),
+                PathBuf::from("crates/alpha/src"),
+                PathBuf::from("crates/alpha"),
+            ]
+        );
 
         let Ok(Toggled {
             manifest,
@@ -4026,20 +3918,16 @@ mod tests {
             [
                 "crates/alpha".to_owned(),
                 // What the stopped pass had been handed: no files at all — this
-                // directory holds nothing but documents — and the bytes of two
-                // of those, its own previous one and its child's. The document
-                // it already had is carried apart from the listing now, so it
-                // is counted here without being counted as a file.
+                // directory holds nothing but documents — and the bytes of its
+                // child's document. Its own previous document is not among
+                // them: no pass is shown its predecessor.
                 // Through `account::size` rather than with the unit spelled
                 // out: what this line asserts is the count, and a fixture that
                 // grew past a kilobyte should not be able to fail a test about
                 // where a cancel is recorded.
                 format!(
                     "0:20 waiting · 0 files, {}",
-                    warlock_tui::size(
-                        document_bytes(&scratch, "crates/alpha")
-                            + document_bytes(&scratch, "crates/alpha/src")
-                    )
+                    warlock_tui::size(document_bytes(&scratch, "crates/alpha/src"))
                 ),
                 "0:30 Read crates/alpha".to_owned(),
                 "1:00 thinking".to_owned(),
@@ -4263,85 +4151,6 @@ mod tests {
             panel_text(&app, at(base, 65)),
             ["engine", "0:04 Bash cargo test", "1:05 thinking"],
             "the line beneath the newest one is frozen and the newest is not"
-        );
-    }
-
-    #[test]
-    fn every_summarising_pass_over_a_big_file_draws_a_line_under_its_directory() {
-        // The eight minutes a directory holding an over-cap lockfile spends
-        // being read in pieces, as fourteen lines rather than as one `waiting`
-        // that has not moved since the run reached it. Every clock here is
-        // exact because nothing in the account reads a clock of its own: the
-        // whole run is one base instant and some arithmetic.
-        let base = Instant::now();
-        let (mut app, before, mut manifest, events, running) = a_run_in_flight(base);
-        let mut pact = Pact::with_run(running);
-
-        events
-            .send(PactEvent::Starting {
-                directory: PathBuf::from("/repo/crates/engine"),
-                position: 1,
-                total: 1,
-            })
-            .expect("the loop is still listening");
-        pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
-
-        // A pass every half minute, each drained on the frame it arrived on,
-        // which is what the event loop does with them.
-        for part in 1..=14 {
-            events
-                .send(PactEvent::Summarising {
-                    file: PathBuf::from("/repo/crates/engine/src/deps.lock"),
-                    part,
-                    parts: 14,
-                })
-                .expect("the loop is still listening");
-            pact.keep_up(
-                &mut app,
-                &mut manifest,
-                &nowhere(),
-                at(base, part as u64 * 30),
-            );
-        }
-
-        // Fourteen lines under the one heading, in arrival order, each
-        // spelling the file relative to the tree on screen — `engine/src`
-        // rather than `/repo/crates/engine/src`, as the heading above them is
-        // spelled. Every line but the last is frozen at the instant the next
-        // one arrived; the last counts up with the caller's `now`, which is
-        // half a minute past the fourteenth pass here.
-        assert_eq!(
-            panel_text(&app, at(base, 450)),
-            [
-                "engine",
-                "1:00 summarising engine/src/deps.lock (1/14)",
-                "1:30 summarising engine/src/deps.lock (2/14)",
-                "2:00 summarising engine/src/deps.lock (3/14)",
-                "2:30 summarising engine/src/deps.lock (4/14)",
-                "3:00 summarising engine/src/deps.lock (5/14)",
-                "3:30 summarising engine/src/deps.lock (6/14)",
-                "4:00 summarising engine/src/deps.lock (7/14)",
-                "4:30 summarising engine/src/deps.lock (8/14)",
-                "5:00 summarising engine/src/deps.lock (9/14)",
-                "5:30 summarising engine/src/deps.lock (10/14)",
-                "6:00 summarising engine/src/deps.lock (11/14)",
-                "6:30 summarising engine/src/deps.lock (12/14)",
-                "7:00 summarising engine/src/deps.lock (13/14)",
-                "7:30 summarising engine/src/deps.lock (14/14)",
-            ],
-            "one line per pass, under the directory whose wait they are"
-        );
-
-        // And the footer is untouched by any of it: it still names the pass
-        // running now and replaces itself every time, which is the other
-        // reader's question and not the panel's.
-        let mut in_flight = before.clone();
-        in_flight.set_pact_in_flight("/repo/crates/engine", 1, 1);
-        in_flight.set_pact_summarising("/repo/crates/engine/src/deps.lock", 14, 14);
-        assert_eq!(
-            app.pact_line(),
-            in_flight.pact_line(),
-            "the footer says exactly what it said before the panel joined in"
         );
     }
 
@@ -5172,14 +4981,44 @@ mod tests {
         );
 
         let lines = panel_text(&app, at(base, 10_000));
-        let [first, _, _, _, refused, second, _, _, _, wrote, summary] = lines.as_slice() else {
+        // The refused directory's section: its first request, the pass, the
+        // engine turning the answer down, the second request with the
+        // defects listed, that pass, the second rejection, and the refusal.
+        let [
+            first,
+            _,
+            _,
+            _,
+            rejected_once,
+            _,
+            _,
+            _,
+            rejected_twice,
+            refused,
+            second,
+            _,
+            _,
+            _,
+            wrote,
+            summary,
+        ] = lines.as_slice()
+        else {
             panic!("a two-directory run reads as two sections and a summary: {lines:?}");
         };
         assert_eq!(first, "crates/engine/src");
         assert_eq!(second, "crates/engine");
+        assert!(
+            rejected_once
+                .starts_with("1:00 rejected · attempt 1/2: the answer is not a JSON object"),
+            "the first answer is turned down in the engine's words: {rejected_once}"
+        );
+        assert!(
+            rejected_twice.starts_with("1:50 rejected · attempt 2/2: "),
+            "and so is the second: {rejected_twice}"
+        );
 
         let reason = refused
-            .strip_prefix("0:50 refused — ")
+            .strip_prefix("1:50 refused — ")
             .unwrap_or_else(|| panic!("the section says why it was refused: {refused}"));
         assert!(
             reason.contains("crates/engine/src"),
@@ -5210,7 +5049,9 @@ mod tests {
                 .exists(),
             "the refused directory really has no document"
         );
-        assert_eq!(summary, "pact finished — 2 directories, 1:40, $0.50");
+        // Three passes in all: the refused directory's two and the parent's
+        // one, each reporting what it cost.
+        assert_eq!(summary, "pact finished — 2 directories, 2:40, $0.75");
     }
 
     #[test]

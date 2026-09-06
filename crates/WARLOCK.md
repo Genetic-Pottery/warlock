@@ -3,25 +3,19 @@
 
 # crates
 
-The Cargo workspace root for Warlock: two member crates, `warlock-engine` and `warlock-tui`, bound together by a shared workspace manifest and lockfile. No implementation code lives here directly — this directory is build plumbing (dependency wiring, shared lints, shared versioning), not design documentation.
+The crates directory holds the two crates that make up warlock: warlock-engine, the terminal-free core domain logic, and warlock-tui, the terminal front end and `warlock` binary built on it.
 
-## What's here
+## Directories
 
-- **`Cargo.toml`** — the workspace manifest. Declares the two members, `warlock-engine` and `warlock-tui`, and holds the `[workspace.lints]` block each crate inherits via its own `[lints] workspace = true`, plus the shared `version`/`edition`/`rust-version`/`license`/`repository` fields each crate's own manifest sets to `.workspace = true` rather than restating. It is also where the one-direction dependency shape is expressed: `warlock-tui`'s manifest lists `warlock-engine` as a `path` dependency, never the reverse.
-- **`Cargo.lock`** — the resolved dependency graph for the whole workspace, generated from the two crates' manifests; not hand-edited.
-- **`warlock-engine/`** — the domain library crate. Per its own `WARLOCK.md`, it owns the three-state freshness vocabulary (`state.rs`), the tree shape (`tree.rs`), the on-disk manifest (`manifest.rs`), the subtree hash (`hash.rs`) and the pure staleness decision it feeds (`decide.rs`), an ignore vocabulary (`ignores.rs`), the directory loader (`load.rs`), the model-pass seam (`agent.rs`), the pact operation that writes documents and grants freshness (`pact.rs`), and the scope/sigil vocabulary (`scope.rs`, `sigils.rs`) that judges a boundary match without ever refusing on it. Its own `Cargo.toml` states explicitly that no TUI, terminal, HTTP, or Anthropic dependency belongs in it, even transitively. Its `README.md` is a long design argument that predates several of its current modules (`briefs.rs`, `ignores.rs`, `scope.rs`, `sigils.rs`, `claude_md.rs`, `clock.rs`, `fitting.rs`, `languages.rs` go unmentioned in it), so its own `src/` document, and the source itself, are the trustworthy account of the present module list.
-- **`warlock-tui/`** — the terminal front end: a `[[bin]]` named `warlock` plus a `warlock_tui` library. Per its own `WARLOCK.md`, it draws whatever `warlock-engine` computes, translates keystrokes and other input into engine calls, owns the sole process-spawning seam (`claude.rs`, hosting `ClaudeAgent` and `ChatAgent`), and enforces the scope/sigil boundary at the point of writing via `boundary.rs::verdict`, reached through `session.rs::closed_scope` on the panel side and `edits.rs::Opened` on the headless side. Its own `README.md` has drifted materially behind its `src/`'s document — describing an older footer, keyset, and an "unbuilt" viewer pane where the current shape has a three-card panel, a composer, several modal windows, and disk-writing subcommands — so its `src/` document and source, not its README, are the trustworthy account there.
+- `warlock-engine/` — Core engine crate: pacting, hashing, freshness decisions, scope/sigils, the Fill/WARLOCK.md document schema; no TUI, terminal, HTTP or Anthropic dependency.
+- `warlock-tui/` — Terminal front end crate, packaged as the `warlock` binary plus the warlock_tui library: App state, panels, boundary/write logic, rendering, headless subcommands.
 
-## How the two crates relate
+## Structure
 
-The dependency edge runs **TUI → engine, never back**. Both crates' own documents assert this independently, and both `Cargo.toml`s are built around it: `warlock-engine` is a `path` dependency of `warlock-tui`; `warlock-engine`'s manifest carries no terminal, subprocess, or TUI dependency. This is the load-bearing architectural fact of the workspace — a change that reverses it, or that lets terminal or keystroke concepts leak into `warlock-engine`, breaks the design regardless of how the manifests happen to be written.
+- warlock-tui depends on warlock-engine for domain vocabulary
+- the dependency edge runs TUI -> engine and never back
 
-Scope/sigil enforcement is split across that same edge: `warlock-engine` owns the vocabulary and the match (`scope.rs`'s `scope_covering`/`scope_opens_to`, and `pact.rs::closed_scopes_at_or_below`, which reports which scopes a set of held sigils fails to open but refuses nothing itself); `warlock-tui` owns the actual refusal, gating `p`, `r`, `s`, and the headless `warlock pact`/`refresh`/scope-write commands through `boundary.rs::verdict`. Neither side does the other's half — a change to what gets refused belongs in the TUI, a change to how the question is answered belongs in the engine.
+## Where to look
 
-## What a reader has to know before changing anything
-
-- **This is a two-crate, one-direction workspace.** Before adding a dependency to either crate, check which side of the TUI→engine edge it belongs on; a rendering, input, or subprocess-spawning dependency has no business in `warlock-engine`'s `Cargo.toml`, even if convenient there.
-- **Lints are workspace-owned**, declared once in this directory's `Cargo.toml` under `[workspace.lints]`. A lint that feels wrong in one crate is more likely a fix here than a local `#[allow]` in that crate.
-- **This directory is build plumbing, not design documentation.** The actual design — the three-state model, manifest format, key bindings, view architecture, purity boundaries — lives in the two crates' own READMEs and `WARLOCK.md`s, and each crate's document says its own source outranks its own README where they disagree.
-- **Freshness is granted per-subtree, not per-directory**, via `pact.rs::pact_subtree`/`refresh_subtree` in `warlock-engine`, with `r` narrowing first to whatever `decide_state` finds stale within an already-pacted subtree, and `p` covering pacting or un-pacting the whole subtree.
-- **`Cargo.lock` belongs to the workspace as a whole**, not to either crate individually — a dependency bump in one crate's manifest changes it for both.
+- core domain logic, pacting, hashing, freshness, document schema → `warlock-engine` `Agent`
+- the warlock terminal binary or TUI panels and rendering → `warlock-tui` `warlock_tui`
