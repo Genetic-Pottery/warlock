@@ -21,7 +21,7 @@
 //! is truncated ever.
 //!
 //! That is the reason the ladder is behind one function rather than beside it.
-//! It used to be four calls in a row — gather, summarise what is over the
+//! It used to be four calls in a row — gather, reduce what is over the
 //! per-file cap, demote until the whole request fits, then announce the weight
 //! — and getting the order or the announcement wrong was a caller's mistake to
 //! make. Now the order is not a caller's to get wrong, and the numbers
@@ -57,12 +57,12 @@
 //!
 //! 1. **Gather.** Walk the directory, read what is under the per-file cap, and
 //!    leave anything over it as a name and a size.
-//! 2. **Describe what was too big.** Every file left over the per-file cap gets
-//!    an account of its contents from a map-reduce of model passes over its
-//!    chunks — or from the cache, if those passes were paid for once already.
-//! 3. **Fit the whole request.** With accounts now something a request can
-//!    carry, meet the request cap by demoting to summaries first and to names
-//!    only when even the summaries do not fit.
+//! 2. **Reduce what was too big.** Every file left over the per-file cap comes
+//!    back as its own declaration lines, from the language table. No model
+//!    pass, no cache, no network.
+//! 3. **Fit the whole request.** With skeletons now something a request can
+//!    carry, meet the request cap by demoting to skeletons first and to names
+//!    only when even the skeletons do not fit.
 //! 4. **Announce the weight**, once, immediately before the request is handed
 //!    back: the only point where both numbers are true, since steps 2 and 3 are
 //!    exactly what changes them.
@@ -80,14 +80,14 @@
 //! arrived; a name and a size is accurate information a model can document
 //! honestly ("a 4.1 MB `Cargo.lock`, not read"). That is the floor an over-cap
 //! file can never fall below — and neither cap drops a file onto it while there
-//! is a rung in between. A file in a request is **sent whole**, or
-//! **summarised** (a name, a size and prose about its contents), or **listed**
-//! by name and size, and both caps are met in that order: the per-file one in
-//! [`summarise_over_cap`], the whole-request one in [`demote_to_budget`]. A
-//! name and a size is where a file lands when nothing better can be said about
-//! it, not the first answer either cap gives. The sections below are that
-//! ladder in full: how a summary is made, how it is kept, and how the
-//! whole-request cap climbs down it.
+//! is a rung in between. A file in a request is **sent whole**, or **reduced**
+//! (a name, a size, and the file's own declaration lines with a marker where
+//! the bodies were), or **listed** by name and size, and both caps are met in
+//! that order: the per-file one in [`lift_over_cap`], the whole-request one in
+//! [`demote_to_budget`]. A name and a size is where a file lands when nothing
+//! better can be said about it, not the first answer either cap gives. The
+//! sections below are that ladder in full: how a skeleton is made, and how the
+//! whole-request cap climbs down to it.
 //!
 //! **Over budget is never fatal.** Section 3 of the design doc says Warlock
 //! never makes the wrong thing impossible, and failing here would do exactly
@@ -111,74 +111,26 @@
 //! is a two-megabyte lockfile got a document that could say the lockfile is
 //! there and nothing whatever about what is in it — freshness with a hole in
 //! the middle of it. So between the gather and the directory's own pass sits a
-//! step of its own, [`summarise_over_cap`]: every file the per-file cap listed
-//! is read from disk, cut into chunks of at most [`CHUNK_BYTE_CAP`] on line
-//! boundaries by [`chunk_utf8`], put through one map pass per chunk and one
-//! reduce over their answers — all of it through the same [`Agent`] the
-//! directory pass uses — and put back into the request as
-//! [`agent::File::summarised`](crate::agent::File::summarised): a name, a size, and prose about its contents. A
-//! file that chunks into one part costs one pass and no reduce.
+//! step of its own, [`lift_over_cap`]: every file the per-file cap listed is
+//! read from disk and put back into the request as its own declaration lines,
+//! by [`Reducing::skeleton_of`] and the table in
+//! [`languages`](crate::languages).
 //!
-//! What travels back is prose, never bytes. A chunk is never attached to a
-//! request as a file's contents, so the three states of a file in a request stay
-//! three: sent whole, sent as a summary, listed by name and size. Omit-and-list
-//! is still the floor and truncation is still forbidden — half a file quoted as
-//! if it were the file is exactly the confident wrong conclusion the cap exists
-//! to prevent, and a summary is prose *about* the whole file rather than a part
-//! of it. [`MAP_PROMPT`] and [`REDUCE_PROMPT`] say so to the model, and, because
-//! an account of a file is keyed by its bytes alone (below), both ask about
-//! contents and forbid restating the name.
+//! **What travels back is the file's own text, and no model pass is spent on
+//! it.** A skeleton is lines the file really contains, in the order it contains
+//! them, with a marker where the bodies were — so a route naming a symbol found
+//! in one is anchored in code rather than in prose about code, and a second
+//! pact over unchanged bytes costs exactly what the first did, because there
+//! was never anything to cache.
 //!
-//! # Read once, keep the account: `.warlock/summaries/`
-//!
-//! Those passes are the expensive part of a pact, and a committed lockfile is
-//! the same two megabytes on every pact after the first. So before the
-//! map-reduce, the bytes just read are hashed ([`summary_key`]) and the digest
-//! looked for under `<root>/.warlock/summaries/`: a hit is the summary, at the
-//! cost of no passes at all, and a miss runs the map-reduce and writes what it
-//! produced there. A second pact over unchanged bytes therefore costs the
-//! directory passes and nothing more.
-//!
-//! Three properties are the point of it. **The miss is the change detection**:
-//! the key is the file's bytes and nothing else — no path, no name, no size, no
-//! mtime — so an edited file asks for an entry that does not exist and is read
-//! again, a renamed one asks for the entry it already has, and no code anywhere
-//! compares a before to an after. **The entries are repository state**, not a
-//! scratch directory: they are committed with the code, so a teammate's fresh
-//! clone never re-pays for a file this repository has already read. And
-//! **nothing is ever evicted** — there is no sweep, no size limit and no age. A
-//! stale entry stops matching anything on disk by itself, which is a cheaper
-//! and more honest form of expiry than any policy this crate could apply.
-//!
-//! Like every other budget decision here, none of it can fail a pact: an
-//! absent, unreadable, corrupt or empty entry is a miss and pays the passes, and
-//! a write the filesystem refuses costs the next pact those passes and this one
-//! nothing at all. The cache lives under `.warlock/`, which every walk in this
-//! crate prunes by name, so it is in no tree, no [`subtree_hash`](crate::subtree_hash) and no
-//! request: writing summaries cannot move a hash or make a directory stale.
-//!
-//! Summarising declines in three ways, and each of them puts the file back on
-//! the floor it started from:
-//!
-//! * **It is not text** ([`Omission::NotText`]). The bytes are not UTF-8, so
-//!   there are no lines to cut on and no honest way to send a piece of it.
-//!   Nothing is spent finding out — the check is a pure one over bytes already
-//!   in memory.
-//! * **It is too many chunks** ([`Omission::TooManyChunks`]). The file is past
-//!   [`CHUNK_COUNT_CEILING`], which is what stops one checked-in artefact
-//!   quietly becoming hundreds of model passes. The count is known before the
-//!   first pass, so this is never hit with passes already paid for.
-//! * **The passes produced nothing usable** ([`Omission::Unsummarised`]). A map
-//!   or reduce pass returned an [`agent::Error`], or an empty answer, or one under
-//!   [`MINIMUM_SUMMARY_BYTES`] trimmed — the same length-only rule the document
-//!   floor uses, and no phrase list here either. The first failure ends that
-//!   file; no further passes are spent on it.
-//!
-//! All three are the caps' own bargain one level up: a [`Problem`] said out
-//! loud, beside a request that is still perfectly good. No [`Error`] variant is
-//! reachable from any of it, an agent that fails every map pass still leaves a
-//! pact that writes every document, and a file that does come back described is
-//! no `Problem` at all — nothing about it was left out.
+//! This replaced a map-reduce of model passes over each file's chunks, whose
+//! answers were kept under `.warlock/summaries/`. Both are gone. Prose about a
+//! file is a claim nothing can check and it cost a pass per chunk to obtain;
+//! the declarations lifted out of the file are evidence, and they are free. A
+//! file the table cannot reduce — an extension with no row, or one already all
+//! declarations — stays exactly where it was, a name and a size, which is the
+//! floor the whole ladder is built on and the one rung that never lies about
+//! having read anything.
 //!
 //! # The cliff becomes a ladder
 //!
@@ -186,12 +138,12 @@
 //! now makes it in the same order. [`gather_request`] runs no passes, so the
 //! only move it has is the old one — the biggest files become names and sizes
 //! ([`trim_to_budget`]) — and [`demote_to_budget`] is that decision taken again
-//! where the summaries exist. Whole files step down to their accounts, largest
-//! first, until the request fits; the files gather already cliffed are read once
-//! more and step *up* to accounts of themselves wherever one fits in what is
-//! left of the budget, never back to their bytes; and a file loses its account
-//! altogether only when the request is still over the cap with every account in
-//! it. Three passes over a fixed list, so it always terminates, and a request
+//! where the skeletons exist. Whole files step down to their declaration lines,
+//! largest first, until the request fits; the files gather already cliffed are
+//! read once more and step *up* to skeletons of themselves wherever one fits in
+//! what is left of the budget, never back to their bytes; and a file loses its
+//! skeleton altogether only when the request is still over the cap with every
+//! skeleton in it. Three passes over a fixed list, so it always terminates, and a request
 //! that will not fit whatever is given up — an enormous child document, a
 //! directory of files that cannot be described — is simply sent as it is, over
 //! the cap, with the problems that say why. The rung a file lands on is the
@@ -241,10 +193,10 @@ pub(crate) struct Fitted {
 /// The request for `directory`, within both caps, and what it cost to get there.
 ///
 /// The whole of this module's interface. `prompt` is the instruction the pass
-/// runs under, `root` is the repository root — the one thing
-/// `<root>/.warlock/summaries/` is joined onto, taken rather than discovered —
-/// `agent` runs the summarising passes, and `observer` hears about each of them
-/// before it runs and about the finished request's weight once.
+/// runs under, `agent` is the port the directory's own pass will run through,
+/// and `observer` hears the finished request's weight once. Reducing a file
+/// that is over the per-file cap runs no pass of its own, so there is nothing
+/// between those two for either of them to hear about.
 ///
 /// # Errors
 ///
@@ -288,22 +240,22 @@ pub(crate) fn fit(
         }
     }
 
-    // Before the pass that writes the document, the passes that describe what
-    // the pass would otherwise only be able to name — or the entries under
-    // `<root>/.warlock/summaries/` that mean those passes were paid for once
-    // already. Infallible by construction: it answers with a request either
-    // way, and every way it can go wrong is a `Problem` in the list above.
+    // Before the pass that writes the document, the step that gives it lines to
+    // read for the files it would otherwise only be able to name. Costs no pass
+    // and keeps nothing between runs. Infallible by construction: it answers
+    // with a request either way, and every way it can go wrong is a `Problem`
+    // in the list above.
     let mut passes = Reducing {
         directory,
         described: &mut described,
     };
-    let request = summarise_over_cap(request, &mut problems, &mut passes);
+    let request = lift_over_cap(request, &mut problems, &mut passes);
 
     // Then the whole-request budget, which gather could only meet by turning its
-    // biggest files into names: with an account of a file now something a request
-    // can carry, the cap is met by demoting to summaries first and to names only
-    // when even the summaries do not fit. Infallible in the same way, and through
-    // the same cache: a file already described costs no passes here either.
+    // biggest files into names: with a skeleton of a file now something a
+    // request can carry, the cap is met by demoting to skeletons first and to
+    // names only when even the skeletons do not fit. Infallible in the same
+    // way, and free in the same way.
     let request = demote_to_budget(request, cap, &mut problems, &mut passes);
 
     // What is about to be handed back, said out loud before it is: the only
@@ -351,11 +303,14 @@ const WALK_DEPTH: usize = 2;
 /// to catch minified bundles, and paying for it in the worst currency there is:
 /// one model pass per 96 KiB chunk, serially, while somebody watched. Pacting
 /// `crates/warlock-tui/src` cost fifteen passes and 8m55s, of which fourteen
-/// passes were summarising three ordinary Rust files.
+/// passes were summarising three ordinary Rust files. Those passes are gone
+/// entirely now — an over-cap file is reduced to its declaration lines by the
+/// language table — but the cap stays raised, because the rung below whole is
+/// still worse than whole.
 ///
-/// What the raise buys is not only time. A document written from summaries of
-/// chunks of a file is a worse document than one written from the file, and at
-/// 1 MiB the source goes to the pass that describes it.
+/// What the raise buys is not only time. A document written from part of a file
+/// is a worse document than one written from the file, and at 1 MiB the source
+/// goes to the pass that describes it.
 pub const PER_FILE_BYTE_CAP: u64 = 1024 * 1024;
 
 /// Bytes of source text per token, as a fraction, for turning a context window
@@ -473,12 +428,12 @@ const MINIMUM_REQUEST_BYTES: u64 = 64 * 1024;
 /// # What the budget counts
 ///
 /// Everything the request carries: the bytes of the files sent whole, the
-/// surviving lines of the ones elided, the accounts of the ones summarised, and
-/// the text of the children's documents. Only files ever give anything up to
-/// get under it, and they give it up in rungs — bytes before account, account
-/// before name. [`gather_request`] makes the first answer with no model pass at
-/// all, and [`demote_to_budget`] is that answer reconsidered once summaries
-/// exist.
+/// surviving lines of the ones elided or reduced to declarations, and the text
+/// of the children's documents. Only files ever give anything up to get under
+/// it, and they give it up in rungs — bytes before skeleton, skeleton before
+/// name. [`gather_request`] makes the first answer without reading the
+/// over-cap files at all, and [`demote_to_budget`] is that answer reconsidered
+/// once their skeletons exist.
 pub(crate) const fn request_byte_cap(context_tokens: u64) -> u64 {
     let budget = context_tokens
         .saturating_sub(RESERVED_TOKENS)
@@ -550,13 +505,13 @@ fn elided_or_whole(path: &Path, relative: String, size: u64, bytes: Vec<u8>) -> 
 /// already listed, which is still a request and still not an error.
 ///
 /// Every file it can be handed is either sent whole or already listed, because
-/// this runs inside [`gather_request`], which is agent-free and makes no
-/// summaries: the third state does not exist yet when this runs, so the demotion
-/// order it calls for — whole, then summarised, then a bare name — is not a case
-/// this has to answer. It is answered one level up, by [`demote_to_budget`],
-/// which runs the same budget over the same order once the summaries exist and
-/// steps every file this function cliffed back up to an account of itself
-/// wherever one fits. So a listing made here is a first answer rather than a
+/// this runs inside [`gather_request`], which never opens an over-cap file: the
+/// third state does not exist yet when this runs, so the demotion order it
+/// calls for — whole, then reduced, then a bare name — is not a case this has
+/// to answer. It is answered one level up, by [`demote_to_budget`], which runs
+/// the same budget over the same order once the skeletons exist and steps every
+/// file this function cliffed back up to a skeleton of itself wherever one
+/// fits. So a listing made here is a first answer rather than a
 /// final one, and this function stays what it is: the budget as it can be met
 /// with no model pass at all.
 fn trim_to_budget(
@@ -634,8 +589,9 @@ fn trim_to_budget(
 /// handed the request that gather built and the problems it reported, and it
 /// answers with the request the pass is actually run on: the same prompt, the
 /// same directory, the same children's documents, and files in the same order,
-/// with each successfully described one turned from [`agent::File::omitted`](crate::agent::File::omitted) into
-/// [`agent::File::summarised`](crate::agent::File::summarised).
+/// with each successfully reduced one turned from [`agent::File::omitted`](crate::agent::File::omitted) into
+/// [`agent::File::elided`](crate::agent::File::elided), carrying the file's own
+/// declaration lines.
 ///
 /// # Which files
 ///
@@ -644,41 +600,29 @@ fn trim_to_budget(
 /// name and a size. Deliberately not the others that share that fate: a file the
 /// filesystem refused ([`Omission::Unreadable`]) has no bytes to read, and a
 /// file the request cap gave up ([`Omission::OverBudget`]) was given up to make
-/// the request smaller, so paying model passes to put some of it back is the
-/// opposite of what was asked. The problem is found by matching its path against
+/// the request smaller, so putting some of it back is the opposite of what was
+/// asked. The problem is found by matching its path against
 /// `directory.join(file.path())`, which is exact here because only the
 /// directory's own files are gathered.
 ///
-/// # The cache comes first
+/// # There is nothing kept between runs
 ///
-/// The bytes are read once, here, and the first thing done with them is a
-/// [`summary_key`] and a look under `<root>/.warlock/summaries/`. A hit is an
-/// [`agent::File::summarised`](crate::agent::File::summarised) with **no pass run at all** and is in every other
-/// respect a summary: the file's `TooLarge` problem goes the same way, and
-/// nothing downstream can tell which of the two it was handed. A miss runs the
-/// map-reduce exactly as it always did and records the account it produced
-/// under that key.
-///
-/// That miss is the whole of the change detection. Nothing compares an old
-/// state to a new one: an edited file hashes to a key no entry answers to, so
-/// it is described again, and the entry its old bytes wrote simply stops being
-/// asked for. The entries are committed repository state rather than a scratch
-/// directory — a colleague's fresh clone hits on its first pact — and nothing
-/// evicts, sweeps or ages them out.
-///
-/// Neither half of the cache can fail a pact. An entry that is missing,
-/// unreadable, corrupt or empty is a miss and costs the passes a first pact
-/// would have cost anyway; a write that fails costs the *next* pact those
-/// passes and costs this one nothing.
+/// The bytes are read once, here, reduced by the language table, and dropped.
+/// This step used to hash them, look the digest up under
+/// `<root>/.warlock/summaries/`, and pay a map-reduce of model passes on a
+/// miss — a cache that existed because those passes were the expensive part of
+/// a pact. Lifting declarations costs nothing, so there is nothing left worth
+/// keeping, and the same bytes give the same lines on every machine without a
+/// stored artefact to go stale, be committed, or be explained.
 ///
 /// # What it does to the problem list
 ///
-/// One file, one entry, always. A file that comes back described has its
-/// `TooLarge` entry **removed** — its contents reached the pass, so there is
+/// One file, one entry, always. A file that comes back reduced has its
+/// `TooLarge` entry **removed** — lines of it reached the pass, so there is
 /// nothing left out to report. A file that does not has that same entry's cause
-/// **replaced** by the one that says why there is no summary: not text, past the
-/// chunk ceiling, no usable answer, or — for the read this step does and gather
-/// did not — the filesystem refusing. Replaced rather than added, so a reader is
+/// **replaced** by the one that says why there is no skeleton: an extension the
+/// table has no row for, a file that is already all declarations, or — for the
+/// read this step does and gather did not — the filesystem refusing. Replaced rather than added, so a reader is
 /// never told twice about one file, and the entry that survives is the one with
 /// something to say.
 ///
@@ -688,12 +632,12 @@ fn trim_to_budget(
 ///
 /// # What the observer hears
 ///
-/// `observer` is told about each pass that is really run, immediately before it
-/// is run, by [`summarise_file`]. A cache hit is the one path that says nothing
-/// at all: it runs no passes, so there is nothing to announce and nothing being
-/// paid for. Nothing the observer does can stop any of this — see
-/// [`Observer::summarising`].
-fn summarise_over_cap(
+/// Nothing here is announced to an observer and nothing here is paid for: the
+/// reduction is a table lookup over bytes already in hand, so there is no pass
+/// to report the start of and no spend to attribute. This used to run a
+/// map-reduce of model passes per file and announce each one to the observer;
+/// the passes, the announcement and the hook that carried it are all gone.
+fn lift_over_cap(
     request: agent::Request,
     problems: &mut Vec<Problem>,
     passes: &mut Reducing<'_>,
@@ -731,10 +675,8 @@ fn summarise_over_cap(
             }
         };
 
-        // The account of those bytes, from the cache if this repository has read
-        // them before and from the passes if it has not — see
-        // [`Summarising::summary_of`], which is the whole of that arithmetic and
-        // is shared with the budget step below.
+        // The file's own declaration lines. Free — a table lookup over bytes
+        // already read — so there is nothing to cache and nothing to bill.
         match passes.skeleton_of(file.path(), &bytes) {
             Ok(skeleton) => {
                 let (path, size) = (file.path().to_owned(), file.size());
@@ -773,7 +715,7 @@ fn summarise_over_cap(
 /// after, so the whole-request cap costs a file its text rather than every
 /// account of it.
 ///
-/// This is the step between [`summarise_over_cap`] and the directory pass, and
+/// This is the step between [`lift_over_cap`] and the directory pass, and
 /// it is where the third state of a file finally reaches the whole-request
 /// budget. [`trim_to_budget`], inside [`gather_request`], knows two states and
 /// so has one move: a file too big for the budget becomes a name and a size, and
@@ -813,7 +755,7 @@ fn summarise_over_cap(
 ///    go.
 /// 3. **Anything still carrying bytes becomes a name and a size**, largest
 ///    first, while the request is *still* over the cap — summaries from rung one,
-///    summaries from [`summarise_over_cap`], and the whole files rung one left
+///    summaries from [`lift_over_cap`], and the whole files rung one left
 ///    alone. This is the old cliff, and it is now the last thing tried rather
 ///    than the first: a file only loses its account when the request does not fit
 ///    with the accounts in it.
@@ -834,7 +776,7 @@ fn summarise_over_cap(
 ///
 /// # What it does to the problem list
 ///
-/// One file, one entry, the rule [`summarise_over_cap`] established. A file that
+/// One file, one entry, the rule [`lift_over_cap`] established. A file that
 /// ends up described has no entry — its contents reached the pass, so there is
 /// nothing left out to report — and a file that ends up a name has exactly one,
 /// whose cause is the honest reason there is no account of it: `OverBudget` when
@@ -919,7 +861,7 @@ fn demote_to_budget(
 /// false thing to describe, because a summary written from them would say a
 /// file has no tests when what happened is that warlock dropped their bodies.
 /// So the file is re-read, and the account is of the whole of it — the same
-/// account [`summarise_over_cap`] would have made, and the same cache entry,
+/// account [`lift_over_cap`] would have made, and the same cache entry,
 /// since both are keyed by the file's real contents.
 ///
 /// `None` for a file with no text in the request at all: a name and a size, or
@@ -999,7 +941,7 @@ fn demote_whole_files(
 /// Only the files [`Omission::OverBudget`] put on the problem list, and never
 /// back to their own bytes — see [`demote_to_budget`] for why the ladder only
 /// goes one way. A file the summarising has already declined once
-/// ([`summarise_over_cap`]) is not asked again, because it would be the same
+/// ([`lift_over_cap`]) is not asked again, because it would be the same
 /// passes for the same no.
 ///
 /// A file that comes back described stops being a [`Problem`]; one the
@@ -1071,7 +1013,7 @@ fn lift_from_the_cliff(
 /// this is the pass's business rather than any caller's.
 ///
 /// [`trim_to_budget`]'s move, made last instead of first and over all three
-/// states: the accounts rung one made, the accounts [`summarise_over_cap`] made,
+/// states: the accounts rung one made, the accounts [`lift_over_cap`] made,
 /// and the whole files rung one had no shorter account for. Reaching it at all
 /// means the request does not fit with every account in it, which is why the
 /// cause is [`Omission::OverBudget`] whatever the file was a moment ago.
@@ -1445,7 +1387,7 @@ fn walk(dir: &Path) -> Result<Found, Error> {
         .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR))
         // The repository's own exclusions, on the same terms as everywhere
         // else: a file the rules removed reaches no request in any of its three
-        // states — not whole, not as a name and a size, not as a summary —
+        // states — not whole, not as a name and a size, not as declarations —
         // because it is never found here to be put in one.
         .add_custom_ignore_filename(ignores::FILENAME)
         .max_depth(Some(WALK_DEPTH))
@@ -1530,11 +1472,11 @@ pub(crate) fn byte_count(bytes: usize) -> u64 {
 ///   the request as a fact about the directory, but no contents travel with it,
 ///   and charging the budget for bytes nobody sent is how a directory holding
 ///   one lockfile ends up sending nothing else.
-/// * A file **summarised** ([`agent::File::summarised`](crate::agent::File::summarised)) spends the length of its
-///   summary — exactly the way a child's document is counted, and for the same
-///   reason: the summary is the text that travels. Its on-disk size is never
-///   what is counted here; a four-megabyte file described in three hundred
-///   bytes costs three hundred bytes.
+/// * A file **reduced** to its declaration lines spends the length of those
+///   lines — exactly the way a child's document is counted, and for the same
+///   reason: that text is what travels. Its on-disk size is never what is
+///   counted here; a four-megabyte file whose declarations come to three
+///   hundred bytes costs three hundred bytes.
 fn file_bytes(file: &agent::File) -> u64 {
     if let Some(bytes) = file.bytes() {
         return byte_count(bytes.len());
@@ -1601,13 +1543,12 @@ pub(crate) struct Gathered {
 /// full. A caller that ignores these gets a pact built on slightly less than the
 /// whole directory, which is safe, just unexplained.
 ///
-/// One thing this is deliberately not: a file that reached the request as a
-/// summary ([`agent::File::summarised`](crate::agent::File::summarised)) is **not** a `Problem`. Its contents were
-/// read in full and an account of them is in the request, which is the opposite
-/// of being left out. What stays a `Problem` is every fallback from that — the
-/// file could not be read, it is not text, it is beyond what summarising will
-/// attempt, or the summarising failed — since each of those leaves the pass with
-/// a name and a size and nothing more.
+/// One thing this is deliberately not: a file that reached the request as its
+/// declaration lines is **not** a `Problem`. It was read in full and real lines
+/// of it are in the request, which is the opposite of being left out. What
+/// stays a `Problem` is every fallback from that — the file could not be read,
+/// or the language table had no way to reduce it — since each of those leaves
+/// the pass with a name and a size and nothing more.
 #[derive(Debug)]
 pub struct Problem {
     /// The file that was left out, as it sits on disk.
@@ -1625,21 +1566,21 @@ pub struct Problem {
 ///   [`Omission::OverBudget`] call for nothing at all — a huge generated file
 ///   is working as intended — though a directory that keeps tripping the
 ///   whole-request cap is one worth splitting up. `OverBudget` in particular is
-///   a file the request had no room for even as an account of itself, since
-///   summaries are what the cap takes first and names only after.
+///   a file the request had no room for even as its declaration lines, since
+///   skeletons are what the cap takes first and names only after.
 /// * **The filesystem.** [`Omission::Unreadable`] calls for a look at the disk,
 ///   because a file Warlock cannot read is a file nobody's tooling can read.
-/// * **The ways summarising an over-cap file does not happen.** The file is not
-///   text ([`Omission::NotText`]), it is beyond what summarising will attempt
-///   ([`Omission::TooManyChunks`]), or the passes ran and produced no usable
-///   account of it ([`Omission::Unsummarised`]). None of these calls for
-///   anything either: each is a file that is back to being what every over-cap
-///   file used to be, said out loud rather than silently.
+///
+/// There used to be a third group — the ways summarising an over-cap file could
+/// fail, when reducing one meant a map-reduce of model passes. Reducing is a
+/// table lookup now, so the only ways it does not happen are an extension with
+/// no row and a file that is already all declarations, and both of those leave
+/// the file exactly where it was rather than anywhere new to report.
 ///
 /// Every variant is a file whose contents the pass never saw, and every one of
-/// them leaves the same thing in the request: a name and a size. A file
-/// described by a summary has no variant here and never will — see [`Problem`]
-/// — while each way of failing to describe one does, as it lands.
+/// them leaves the same thing in the request: a name and a size. A file that
+/// reached the pass as its declaration lines has no variant here and never will
+/// — see [`Problem`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Omission {
@@ -1653,15 +1594,15 @@ pub enum Omission {
     /// for an account of it: the directory as a whole was over
     /// [`request_byte_cap`] and this was one of the largest files in it.
     ///
-    /// The last rung rather than the first. [`gather_request`] runs no model
-    /// pass, so this is the only move it has and it makes it there and then;
-    /// but by the time a *pact* hands this back, the budget has been met the
-    /// cheap way as far as it will go — the largest files demoted to summaries
-    /// — and this file still had nowhere to stand: either the request was over
-    /// the cap with every account in it, or the budget was already full when
-    /// its turn came. See [`demote_to_budget`]. A file the whole-request cap
-    /// cost its bytes but not its summary is described in the request and is no
-    /// [`Problem`] at all.
+    /// The last rung rather than the first. [`gather_request`] never opens an
+    /// over-cap file, so this is the only move it has and it makes it there and
+    /// then; but by the time a *pact* hands this back, the budget has been met
+    /// the cheap way as far as it will go — the largest files demoted to their
+    /// declaration lines — and this file still had nowhere to stand: either the
+    /// request was over the cap with every skeleton in it, or the budget was
+    /// already full when its turn came. See [`demote_to_budget`]. A file the
+    /// whole-request cap cost its bytes but not its skeleton is in the request
+    /// and is no [`Problem`] at all.
     OverBudget {
         /// Its size in bytes, which is what the request carries in place of it.
         size: u64,

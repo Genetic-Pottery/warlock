@@ -126,7 +126,7 @@ document and the code disagree, the code is right.\n";
 /// are the files it was shown the text of and the child directories whose
 /// documents it was handed, and [`accept`] turns an answer down whose keys are
 /// any other set. A file it was shown only an account of is not among them:
-/// its line was written by the file pass that read it ([`FileFill`]). The three lists may be empty, and an empty list is left out
+/// its line was written by the pass that read the directory. The three lists may be empty, and an empty list is left out
 /// of the document rather than rendered as a heading over nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fill {
@@ -241,12 +241,13 @@ impl Fill {
 }
 
 /// The answer a stand-in model gives `request`, in whichever shape the pass
-/// that sent it checks for: a [`Fill`] for a directory pass, a [`FileFill`]
-/// for a file pass, and plain prose for a map pass over one part of a file.
+/// that sent it checks for: a [`Fill`] as JSON where the prompt is this
+/// module's, and plain prose for anything else.
 ///
-/// For test doubles in any crate, so a fake need not know which of the three
-/// kinds of pass the engine is running to be accepted by all of them. Nothing
-/// production-side calls this.
+/// For test doubles in any crate, so a fake need not know what the engine is
+/// asking for to be accepted by it. The prose branch is what a caller with its
+/// own prompt gets — the engine itself now runs only the document pass and its
+/// repair, both of which want a [`Fill`]. Nothing production-side calls this.
 #[must_use]
 pub fn stub_answer(request: &Request) -> String {
     const PROSE: &str = "A stand-in account of some contents, written by a test double that read \

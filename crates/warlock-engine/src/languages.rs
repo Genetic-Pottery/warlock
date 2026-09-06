@@ -135,10 +135,22 @@ impl Language {
     /// Whether `line` — already trimmed of its indentation — introduces
     /// something whose name is worth keeping.
     fn declares(&self, line: &str) -> bool {
-        let line = without_visibility(line);
+        // Both the line as written and the line with its modifiers stripped,
+        // because one word is a modifier in one language and the declaration
+        // itself in another. `static` is the case that forced this: Java and
+        // C# write `public static void main`, so it has to come off before
+        // `void main` can be recognised, while Rust's `static TABLE: …` *is*
+        // the declaration and stripping it leaves `TABLE: …`, which matches
+        // nothing and drops a real constant out of the skeleton.
+        //
+        // Asking both ways costs one more `starts_with` and can only ever keep
+        // a line that would have been dropped, never drop one that would have
+        // been kept — the safe direction for a table whose whole job is to
+        // leave the file's own declaration lines standing.
+        let stripped = without_visibility(line);
         self.declarations
             .iter()
-            .any(|prefix| line.starts_with(prefix))
+            .any(|prefix| line.starts_with(prefix) || stripped.starts_with(prefix))
     }
 }
 
@@ -169,6 +181,21 @@ static TABLE: &[Language] = &[
             "struct ",
             "enum ",
             "impl ",
+            // The item kinds a skeleton used to drop on the floor. A constant
+            // is public API a reader looks up by name — warlock's own
+            // ENTRY_CHARS, ATTEMPTS and PER_FILE_BYTE_CAP are all consts, and
+            // none of them survived into a document before this line — and a
+            // trait is the shape of a seam, which is the thing a map is most
+            // often asked for. Every other row in this table already carries
+            // its language's equivalents: zig has `const`, go has `type`,
+            // typescript has `const`, `type` and `interface`. Rust was the
+            // one row that did not.
+            "const ",
+            "static ",
+            "trait ",
+            "type ",
+            "union ",
+            "macro_rules!",
         ],
     },
     // Zig. `test "name" { … }` sits at the top level of the file it tests.
@@ -1042,6 +1069,53 @@ pub fn after() {}
         assert!(
             super::declared_names(Path::new("Cargo.lock"), "[[package]]\nname = \"x\"").is_empty()
         );
+    }
+
+    #[test]
+    fn a_rust_skeleton_keeps_constants_traits_and_type_aliases() {
+        // The gap that failed a real refresh: `pub const COALESCED_RELOADS`
+        // lives in warlock's own watch.rs, a pass named it in a lookup, and
+        // the answer was rejected because the skeleton had dropped the line
+        // the symbol is on. A constant is public API and a trait is the shape
+        // of a seam; a map that cannot name either is worth less than one that
+        // can.
+        let source = "\
+pub const COALESCED_RELOADS: usize = 1;
+static TABLE: &[u8] = &[];
+pub trait Agent {
+    fn run(&self) -> u8;
+}
+pub type Reply = Result<u8, ()>;
+macro_rules! shout {
+    () => {};
+}
+pub fn ordinary() -> u8 {
+    let a = 1;
+    let b = 2;
+    let c = a + b;
+    let d = c * 2;
+    let e = d - 1;
+    e
+}
+";
+        let kept = super::skeleton(Path::new("watch.rs"), source)
+            .expect("a rust file is reducible")
+            .text;
+
+        for symbol in [
+            "COALESCED_RELOADS",
+            "TABLE",
+            "Agent",
+            "Reply",
+            "shout",
+            "ordinary",
+        ] {
+            assert!(
+                kept.contains(symbol),
+                "`{symbol}` has to survive the skeleton, or a lookup naming it \
+                 cannot be verified: {kept}",
+            );
+        }
     }
 
     #[test]

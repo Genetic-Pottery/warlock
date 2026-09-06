@@ -160,7 +160,7 @@
 //! nothing to show and nothing to cancel.
 //!
 //! Inside a directory, the same observer is told about each summarising pass
-//! just before it runs ([`Observer::summarising`]): which file, which pass of
+//! just before it runs: which file, which pass of
 //! how many that file costs. A two-megabyte lockfile is a dozen model passes
 //! inside one directory's turn, and without this the fraction of directories
 //! would sit still through all of them. That one only announces — it answers
@@ -1638,12 +1638,16 @@ fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
 /// entirely the caller's: draw a line, send it down a channel, count it, ignore
 /// it.
 ///
-/// Inside a directory it also calls [`summarising`](Observer::summarising),
-/// once immediately before every model pass spent describing a file too big to
-/// send — the part of a pact that can otherwise be minutes of apparent silence.
-/// That one is an announcement rather than a question: it answers nothing, and
-/// it has a default body that does nothing, so an observer only interested in
+/// Inside a directory it also calls [`rejected`](Observer::rejected), once for
+/// every answer the document schema turned down and asked again for. That one
+/// is an announcement rather than a question: it answers nothing, and it has a
+/// default body that does nothing, so an observer only interested in
 /// directories implements [`starting`](Observer::starting) and stops there.
+///
+/// There is no longer a call per file: reducing a file too big to send is a
+/// table lookup rather than the map-reduce of model passes it once was, so the
+/// minutes of apparent silence that hook existed to fill are not spent any
+/// more.
 ///
 /// Between those two it calls [`requesting`](Observer::requesting), once per
 /// directory, at the moment that directory's request is handed to the
@@ -1730,7 +1734,7 @@ pub trait Observer {
     ///
     /// # Nothing is asked
     ///
-    /// An announcement, like [`summarising`](Observer::summarising) and for the
+    /// An announcement, like [`rejected`](Observer::rejected) and for the
     /// same reason: the pass it is about is handed over in the next breath, and
     /// no answer here could be acted on before it comes back. The default body
     /// does nothing, so an observer that does not care what a request weighs
@@ -1752,7 +1756,7 @@ pub trait Observer {
     /// what the model got wrong.
     ///
     /// An announcement, not a question, with a default body that does nothing
-    /// — exactly as [`summarising`](Observer::summarising) is, and for the
+    /// — exactly as [`documented`](Observer::documented) is, and for the
     /// same reason.
     fn rejected(&mut self, directory: &Path, defects: &[Defect], attempt: usize, attempts: usize) {
         let _ = (directory, defects, attempt, attempts);
@@ -1777,7 +1781,7 @@ pub trait Observer {
     /// hands back is the record.
     ///
     /// An announcement, not a question, with a default body that does nothing —
-    /// exactly as [`summarising`](Observer::summarising) is, and for the same
+    /// exactly as [`rejected`](Observer::rejected) is, and for the same
     /// reason.
     fn documented(&mut self, directory: &Path) {
         let _ = directory;

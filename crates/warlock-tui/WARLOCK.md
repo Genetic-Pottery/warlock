@@ -3,31 +3,32 @@
 
 # warlock-tui
 
-The warlock-tui crate: the terminal front end that shows and edits a warlock tree, packaged as the `warlock` binary with a library of pure state, panel cards, boundary/write logic and rendering behind it.
+The warlock-tui crate: the workspace manifest for warlock's terminal front end and its binary, wiring the crate name warlock_tui and its bin warlock to a src that depends on warlock-engine and never the reverse.
 
 ## Files
 
-- `Cargo.toml` (1.6 KB) — Crate manifest: binary is `warlock` (src/main.rs), library `warlock_tui` (src/lib.rs), depends on warlock-engine and ratatui; the TUI->engine dependency edge and lint-inheritance are noted in comments.
+- `Cargo.toml` (1.6 KB) — Crate manifest: declares the warlock_tui lib and warlock binary, its dependency on warlock-engine, ctrlc for headless Ctrl-C, tempfile as a dev-dependency for config tests, and workspace lints.
 
 ## Directories
 
-- `src/` — All source: App state, key/mouse input, panel cards, boundary/write logic, rendering, model-seam agents, and the binary's headless subcommands.
+- `src/` — The crate's whole implementation — tree/panel UI, model seams, boundary and confirmation prompts, and the headless subcommands — go here for any question about behaviour or code.
 
 ## Structure
 
-- The binary (src/main.rs) depends on the library (src/lib.rs), which re-exports the crate's API
-- The crate depends on warlock-engine for domain vocabulary; the engine has no terminal knowledge
-- ctrlc is used only by headless runs (src/running.rs) since a pact run has no panel to press Esc in
-- tempfile is a dev-dependency for `warlock config` tests needing a throwaway home directory, off the engine's explicit home parameter
+- Cargo.toml declares src/main.rs as the warlock binary and src/lib.rs as the warlock_tui library
+- The dependency edge runs TUI -> engine: this crate depends on warlock-engine, not the reverse
+- tempfile is a dev-dependency only, used by config tests that need a throwaway home directory
 
 ## Rules
 
-- The executable name is `warlock`, distinct from the crate/library name `warlock-tui`/`warlock_tui`
-- Lint configuration is inherited from the workspace root manifest, not set here
-- ctrlc, notify, serde_json, ratatui and warlock-engine are the only non-dev dependencies
+- The dependency edge runs TUI -> engine: the front end knows the domain vocabulary, the engine knows nothing about terminals
+- ctrlc is pressed into service only by headless runs from src/running.rs, since a pact run has no panel to press Esc in
+- tempfile keeps warlock config tests off the developer's real home directory
+- Lint configuration lives in the root manifest's [workspace.lints], not here
 
 ## Where to look
 
-- what does the binary actually do and where does its source live → `src` `main`
-- why is ctrlc a dependency at all → `Cargo.toml` `ctrlc`
-- how config tests avoid touching the real home directory → `Cargo.toml` `tempfile`
+- what binary does this crate produce and where is its entry point → `Cargo.toml` `warlock`
+- why does a headless pact run need a Ctrl-C dependency → `Cargo.toml` `ctrlc`
+- how do the warlock config tests avoid touching a real home directory → `Cargo.toml` `tempfile`
+- where does the actual TUI and subcommand logic live → `src` `App`

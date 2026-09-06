@@ -3,31 +3,25 @@
 
 # warlock-engine
 
-The core engine crate for warlock: pacting directories, hashing subtrees, deciding freshness, and laying out the WARLOCK.md documents a model pass fills in, with no TUI or terminal dependency.
+Crate root for warlock-engine: the core domain logic for pacting a codebase's directories with model-written WARLOCK.md documents, deciding staleness by content hash, and enforcing scope/sigil boundaries, with no dependency on any TUI, terminal, HTTP or subprocess.
 
 ## Files
 
-- `Cargo.toml` (1.1 KB) — Crate manifest: no TUI/terminal/HTTP/Anthropic deps allowed, serde_json owns the Fill contract, dev-deps serde_test and tempfile, lints from workspace.
+- `Cargo.toml` (1.1 KB) — Manifest: declares dependencies (blake3, ignore, serde, serde_json, toml), dev-dependencies (serde_test, tempfile), and pins the dependency edge to run TUI -> engine and never back.
 
 ## Directories
 
-- `src/` — All engine source: Agent trait, pacting, hashing, manifest, scope/sigils, document schema, tree types.
-
-## Structure
-
-- Cargo.toml declares dependencies consumed by src's modules (blake3, ignore, serde, serde_json, toml)
-- dependency edge runs TUI -> engine and never back, per this manifest's comment
-- dev-dependencies (serde_test, tempfile) are used only by tests in src
+- `src/` — All engine source: agent/document/pact/manifest/scope/hash modules; open for the domain vocabulary, staleness decisions, and boundary enforcement.
 
 ## Rules
 
-- No TUI, terminal, HTTP or Anthropic dependency belongs here: the dependency edge runs TUI -> engine and never back
-- The engine owns the JSON document contract's parser, not just its use
-- Lint configuration lives in the root manifest; this crate uses [lints] workspace = true
+- No TUI, terminal, HTTP or Anthropic dependency belongs in this crate: the dependency edge runs TUI -> engine and never back
+- The JSON shape a pass fills in (`document`) is owned by this crate, including its parser, even though the TUI and CLI use the same serde_json dependency for other streams
+- serde_test and tempfile are dev-dependencies only, used to round-trip serde derives and to give manifest tests a throwaway directory
+- Lint configuration is not set here; it is inherited from `[workspace.lints]` in the root manifest
 
 ## Where to look
 
-- what dependencies the engine crate uses → `Cargo.toml` `blake3`
-- why no TUI or Anthropic crate is depended on here → `Cargo.toml` `workspace`
-- the actual engine source code and types → `src` `Agent`
-- how the JSON document (Fill) is parsed and validated → `src` `Fill`
+- what dependencies this crate is allowed and forbidden to have → `Cargo.toml` `dependencies`
+- the core domain logic and module layout → `src` `pact_subtree`
+- why serde_json is a dependency here → `Cargo.toml` `serde_json`
