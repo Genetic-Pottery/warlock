@@ -379,11 +379,6 @@ pub enum Defect {
         /// The slot, as `files["path"]` or `directories["name"]`.
         field: String,
     },
-    /// An entry for a file or directory that is not in the request.
-    Unknown {
-        /// The slot, as `files["path"]` or `directories["name"]`.
-        field: String,
-    },
     /// A slot is empty, or whitespace.
     Empty {
         /// The slot.
@@ -453,9 +448,6 @@ impl fmt::Display for Defect {
         match self {
             Self::NotJson { detail } => write!(f, "the answer is not a JSON object: {detail}"),
             Self::Missing { field } => write!(f, "{field} is missing"),
-            Self::Unknown { field } => {
-                write!(f, "{field} names something that is not in this directory")
-            }
             Self::Empty { field } => write!(f, "{field} is empty"),
             Self::Multiline { field } => write!(f, "{field} runs to more than one line"),
             Self::TooShort {
@@ -600,40 +592,96 @@ pub fn skeleton(expected: &Expected<'_>) -> String {
     blank.to_json()
 }
 
-/// `answer` as a [`Fill`] for `expected`, or every way it is not one.
+/// What one pass's answer amounts to: the whole of [`accept`]'s reply.
 ///
-/// # Errors
+/// Three cases and not two, because a caller with a pass left to spend wants
+/// something a yes-or-no cannot carry — the fill a *defective* answer amounts
+/// to, which is what the repair pass is shown and asked to mend. Losing it
+/// would mean asking for the whole object again, which is how a pass that left
+/// out one file of eighteen comes back having left out a different one.
 ///
-/// A non-empty list of [`Defect`]s: the one parse failure, or every shape
-/// check the parsed answer fails — all of them, not the first, because the
-/// list is what the next pass is shown and a pass told about one defect at a
-/// time is two passes short of being told about three.
-pub fn accept(answer: &str, expected: &Expected<'_>) -> Result<Fill, Vec<Defect>> {
-    let fill = parse(answer).map_err(|defect| vec![defect])?;
-    let defects = check(&fill, expected);
-    if defects.is_empty() {
-        Ok(fill)
-    } else {
-        Err(defects)
+/// [`Accepted::settled`] reads it as the yes-or-no instead, for a caller with
+/// no second pass to spend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Accepted {
+    /// The answer is the document: nothing was wrong with it.
+    Filled(Fill),
+    /// The answer is an object, and not the one that was asked for: what it
+    /// amounts to once any patch is written over what came before, and every
+    /// way it still falls short. `defects` is never empty.
+    Defective {
+        /// The fill as it stands, entries for files that are not here already
+        /// dropped. What a repair pass is shown.
+        fill: Fill,
+        /// Every way it is not what was asked for — all of them, not the
+        /// first, because the list is what the next pass is shown and a pass
+        /// told about one defect at a time is two passes short of being told
+        /// about three.
+        defects: Vec<Defect>,
+    },
+    /// The answer is not an object of the shape at all, so there is nothing to
+    /// mend and nothing to repair from: the next pass is asked cold.
+    Unparsed(Defect),
+}
+
+impl Accepted {
+    /// The document this answer amounts to, or every way it is not one.
+    ///
+    /// The yes-or-no reading, for a caller with no second pass to spend: the
+    /// mended fill of a [`Accepted::Defective`] answer is of no use to
+    /// somebody who is not about to ask for a repair, and an
+    /// [`Accepted::Unparsed`] one is its single defect as a list of one.
+    ///
+    /// # Errors
+    ///
+    /// A non-empty list of [`Defect`]s, for either of the other two cases.
+    pub fn settled(self) -> Result<Fill, Vec<Defect>> {
+        match self {
+            Self::Filled(fill) => Ok(fill),
+            Self::Defective { defects, .. } => Err(defects),
+            Self::Unparsed(defect) => Err(vec![defect]),
+        }
     }
 }
 
-/// `answer` parsed as a [`Fill`] and nothing more: no check against any
-/// request. What a repair pass's patch is read with, since a patch is a
-/// partial fill by design.
+/// `answer` as a [`Fill`] for `expected`: parsed, written over what `carried`
+/// says came before, and checked.
 ///
-/// # Errors
+/// The one road from a pass's text to a document, and the whole of it. A first
+/// pass carries nothing: `answer` is read as the whole object, entries for
+/// files that are not in `expected` are dropped, and what is left is checked.
+/// A repair pass carries the fill it is mending and the [`Repair`] it was
+/// asked for: `answer` is read as a patch over those slots alone, written onto
+/// that fill, and the result checked exactly as a first answer is. Both roads
+/// end at one [`check`], so a repaired document is held to the same shape as a
+/// document that never needed one.
 ///
-/// The one parse [`Defect`], when there is no object of the shape in `answer`.
-pub fn parse_fill(answer: &str) -> Result<Fill, Defect> {
-    parse(answer)
-}
-
-/// Every shape check `fill` fails against `expected`: [`accept`] without the
-/// parse, for a fill assembled from a previous answer and a patch.
+/// Dropping an entry for a file that is not here is deliberately not a defect:
+/// no answer could make it right, so it is taken out without spending a pass
+/// on it. That is the one thing done to an answer rather than judged about it.
 #[must_use]
-pub fn check_fill(fill: &Fill, expected: &Expected<'_>) -> Vec<Defect> {
-    check(fill, expected)
+pub fn accept(
+    carried: Option<(&Fill, &Repair)>,
+    answer: &str,
+    expected: &Expected<'_>,
+) -> Accepted {
+    let parsed = match parse(answer) {
+        Ok(parsed) => parsed,
+        Err(defect) => return Accepted::Unparsed(defect),
+    };
+    // Nothing carried is the same operation with nothing to write over: the
+    // answer is its own base, and an empty repair changes no slot — it is here
+    // for the entries it drops, which is what both roads share.
+    let blank = Repair::default();
+    let (previous, repair) = carried.unwrap_or((&parsed, &blank));
+
+    let fill = repair.apply(previous, &parsed, expected);
+    let defects = check(&fill, expected);
+    if defects.is_empty() {
+        Accepted::Filled(fill)
+    } else {
+        Accepted::Defective { fill, defects }
+    }
 }
 
 /// The slots a second pass is asked to do again, read off the first pass's
@@ -667,8 +715,9 @@ impl Repair {
         let mut repair = Self::default();
         for defect in defects {
             let field = match defect {
-                // Nothing to ask: the entry goes.
-                Defect::Unknown { .. } | Defect::NotJson { .. } => continue,
+                // Nothing to ask: there is no slot, only an answer that was
+                // not an object.
+                Defect::NotJson { .. } => continue,
                 Defect::Missing { field }
                 | Defect::Empty { field }
                 | Defect::Multiline { field }
@@ -1015,11 +1064,15 @@ fn keyed(name: &str, given: &BTreeMap<String, String>, wanted: &[&str], defects:
         }
     }
     for (key, value) in given {
+        // An entry for something the request does not hold cannot reach here:
+        // it is taken out by `Repair::apply` before the check, because no
+        // answer could make it right and a pass spent asking for one is a pass
+        // wasted. See [`accept`].
+        debug_assert!(
+            wanted.contains(&key.as_str()),
+            "{name}[{key:?}] was never asked for"
+        );
         let field = format!("{name}[{key:?}]");
-        if !wanted.contains(&key.as_str()) {
-            defects.push(Defect::Unknown { field });
-            continue;
-        }
         line(&field, value, ENTRY_MINIMUM, ENTRY_CHARS, defects);
     }
 }
@@ -1187,9 +1240,9 @@ fn human(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ATTEMPTS, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Expected, Fill, LIST_CAP, Lookup,
-        PROMPT, PURPOSE_CHARS, Repair, STAMP, accept, human, instructions, render,
-        repair_instructions, skeleton, stub_answer,
+        ATTEMPTS, Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Expected, Fill,
+        LIST_CAP, Lookup, PROMPT, PURPOSE_CHARS, Repair, STAMP, accept, human, instructions,
+        render, repair_instructions, skeleton, stub_answer,
     };
     use std::collections::BTreeMap;
 
@@ -1240,7 +1293,8 @@ mod tests {
 
     fn defects(fill: &Fill) -> Vec<Defect> {
         let request = request();
-        accept(&fill.to_json(), &Expected::of(&request))
+        accept(None, &fill.to_json(), &Expected::of(&request))
+            .settled()
             .err()
             .unwrap_or_default()
     }
@@ -1271,14 +1325,18 @@ mod tests {
         let asked = request
             .clone()
             .with_prompt(instructions(&Expected::of(&request), &[]));
-        let fill = accept(&stub_answer(&asked), &Expected::of(&asked)).expect("accepted");
+        let fill = accept(None, &stub_answer(&asked), &Expected::of(&asked))
+            .settled()
+            .expect("accepted");
         assert_eq!(fill.files.len(), 3);
 
         let bare = Request::new("x", "/repo/empty");
         let bare = bare
             .clone()
             .with_prompt(instructions(&Expected::of(&bare), &[]));
-        accept(&stub_answer(&bare), &Expected::of(&bare)).expect("accepted too");
+        accept(None, &stub_answer(&bare), &Expected::of(&bare))
+            .settled()
+            .expect("accepted too");
 
         // Anything that is not a directory pass gets plain prose.
         assert!(!stub_answer(&request).trim_start().starts_with('{'));
@@ -1298,7 +1356,9 @@ mod tests {
             format!("```json\n{json}\n```"),
             format!("Here is the object:\n\n{json}\n\nLet me know if you need more."),
         ] {
-            accept(&wrapped, &expected).expect("read from the outermost braces");
+            accept(None, &wrapped, &expected)
+                .settled()
+                .expect("read from the outermost braces");
         }
     }
 
@@ -1313,41 +1373,50 @@ mod tests {
             "[1, 2]",
             "{",
         ] {
-            let found = accept(answer, &expected).expect_err("turned down");
+            let outcome = accept(None, answer, &expected);
+            assert!(
+                matches!(outcome, Accepted::Unparsed(Defect::NotJson { .. })),
+                "{answer:?}: {outcome:?}"
+            );
+            let found = outcome.settled().expect_err("turned down");
             assert_eq!(found.len(), 1, "{answer:?}: {found:?}");
-            assert!(matches!(found[0], Defect::NotJson { .. }), "{found:?}");
         }
     }
 
     #[test]
-    fn a_missing_or_invented_key_is_named() {
+    fn a_missing_key_is_named_and_an_invented_one_is_dropped() {
         let mut fill = good();
         fill.files.remove("lib.rs");
         fill.files
             .insert("main.rs".to_owned(), "invented, and not here".to_owned());
-        let found = defects(&fill);
-        assert!(found.contains(&Defect::Missing {
-            field: "files[\"lib.rs\"]".to_owned()
-        }));
-        assert!(found.contains(&Defect::Unknown {
-            field: "files[\"main.rs\"]".to_owned()
-        }));
-        assert_eq!(found.len(), 2, "{found:?}");
+
+        // The slot that is missing is the one a second pass can do something
+        // about, so it is the only one reported.
+        assert_eq!(
+            defects(&fill),
+            [Defect::Missing {
+                field: "files[\"lib.rs\"]".to_owned()
+            }]
+        );
     }
 
     #[test]
     fn a_file_the_pass_was_not_shown_is_not_a_slot_it_may_fill() {
+        let request = request();
         let mut fill = good();
         fill.files.insert(
             "Cargo.lock".to_owned(),
             "the lockfile, presumably".to_owned(),
         );
-        assert_eq!(
-            defects(&fill),
-            [Defect::Unknown {
-                field: "files[\"Cargo.lock\"]".to_owned()
-            }]
-        );
+
+        // Taken out rather than turned down: no answer could make an entry for
+        // a file that is not here right, so it costs no pass and the rest of
+        // the answer stands.
+        let accepted = accept(None, &fill.to_json(), &Expected::of(&request))
+            .settled()
+            .expect("the invented entry is dropped, not refused");
+        assert!(!accepted.files.contains_key("Cargo.lock"));
+        assert_eq!(accepted.files.len(), 3);
     }
 
     #[test]
@@ -1500,7 +1569,8 @@ mod tests {
         let mut fill = Fill::stub(&parent);
         fill.purpose = "Warlock's source, in one crate.".to_owned();
         assert!(matches!(
-            accept(&fill.to_json(), &Expected::of(&parent))
+            accept(None, &fill.to_json(), &Expected::of(&parent))
+                .settled()
                 .expect_err("refused")
                 .as_slice(),
             [Defect::ToolNamed { .. }]
@@ -1511,7 +1581,9 @@ mod tests {
             .with_files([File::present("lib.rs", *b"//! Core engine for warlock.\n")]);
         let mut fill = Fill::stub(&own);
         fill.purpose = "Warlock's engine crate, in one line.".to_owned();
-        accept(&fill.to_json(), &Expected::of(&own)).expect("accepted");
+        accept(None, &fill.to_json(), &Expected::of(&own))
+            .settled()
+            .expect("accepted");
     }
 
     #[test]
@@ -1654,9 +1726,6 @@ mod tests {
                 chars: 300,
                 cap: ENTRY_CHARS,
             },
-            Defect::Unknown {
-                field: "files[\"ghost.rs\"]".to_owned(),
-            },
             Defect::UnverifiedSymbol {
                 field: "lookups[2].symbol".to_owned(),
                 symbol: "x".to_owned(),
@@ -1672,15 +1741,18 @@ mod tests {
                 directories: Vec::new(),
                 lists: vec!["lookups".to_owned()],
             },
-            "an unknown entry is dropped rather than re-asked; a list is re-asked whole"
+            "a list is re-asked whole"
         );
         assert_eq!(
             repair.skeleton(),
             "{\n  \"files\": {\n    \"tree.rs\": \"\",\n    \"lib.rs\": \"\"\n  },\n  \"lookups\": []\n}"
         );
         assert!(
-            Repair::of(&[found[2].clone()]).is_empty(),
-            "nothing there to ask a pass for"
+            Repair::of(&[Defect::NotJson {
+                detail: "expected value".to_owned()
+            }])
+            .is_empty(),
+            "an answer that is not an object names no slot to ask again for"
         );
     }
 
@@ -1726,7 +1798,10 @@ mod tests {
             "a list asked for again is replaced whole"
         );
         assert_eq!(mended.rules, previous.rules);
-        assert_eq!(accept(&mended.to_json(), &expected), Ok(mended.clone()));
+        assert_eq!(
+            accept(None, &mended.to_json(), &expected),
+            Accepted::Filled(mended.clone())
+        );
     }
 
     #[test]
@@ -1762,9 +1837,6 @@ mod tests {
             },
             Defect::Missing {
                 field: "files[\"a\"]".to_owned(),
-            },
-            Defect::Unknown {
-                field: "files[\"b\"]".to_owned(),
             },
             Defect::Empty {
                 field: "purpose".to_owned(),

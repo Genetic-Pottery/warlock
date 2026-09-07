@@ -1084,8 +1084,9 @@ impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
         let header = self.app.run_header();
         self.app.set_viewport_height(tree_height(size));
         self.app
-            .set_panel_height(panel_height(size, field, header.as_ref()));
-        self.app.set_panel_width(width);
+            .panel_mut()
+            .set_height(panel_height(size, field, header.as_ref()));
+        self.app.panel_mut().set_width(width);
 
         let (app, chrome, confirm, prompt) =
             (&self.app, &self.scope.chrome, self.confirm, &self.prompt);
@@ -2704,7 +2705,7 @@ mod tests {
                 "this test is about the keyboard being somewhere else"
             );
             let selected = driven.app.selected();
-            let mode = driven.app.mode();
+            let mode = driven.app.panel().mode();
 
             driven.paste("crates\ndocs\n");
 
@@ -2718,7 +2719,11 @@ mod tests {
                 selected,
                 "the pasted lines moved the tree's selection"
             );
-            assert_eq!(driven.app.mode(), mode, "the pasted lines changed register");
+            assert_eq!(
+                driven.app.panel().mode(),
+                mode,
+                "the pasted lines changed register"
+            );
             assert!(
                 driven.app.message().is_none(),
                 "a paste nobody can act on said something on the footer"
@@ -2779,7 +2784,7 @@ mod tests {
                 "a newline in a paste started a turn"
             );
             assert!(
-                driven.app.thread().is_none(),
+                driven.app.panel().thread().is_none(),
                 "a paste sent something: there is a conversation and nobody asked for one"
             );
             assert!(

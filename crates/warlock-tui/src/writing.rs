@@ -382,9 +382,9 @@ pub(crate) fn write_submit(
     // came back: it is the same number, and asking the filesystem again would be
     // a second way for this line to fail after the write succeeded.
     let bytes = u64::try_from(document.len()).unwrap_or(u64::MAX);
-    app.note(wrote_line(&stored, bytes), now);
+    app.panel_mut().note(wrote_line(&stored, bytes), now);
     if let Some(module) = pacted_above(manifest, &stored) {
-        app.note(stale_line(module), now);
+        app.panel_mut().note(stale_line(module), now);
     }
     ScopePrompt::Closed
 }
@@ -427,7 +427,7 @@ fn document(reply: &str) -> String {
 /// the prompt opened over, since nothing can be asked while the field holds the
 /// keyboard. One copy of the document, on the card the reader is looking at.
 fn document_on(app: &App) -> Option<String> {
-    let thread = app.thread()?;
+    let thread = app.panel().thread()?;
     let reply = thread.turns().last().copied()?.answer()?;
     Some(document(reply))
 }
@@ -1187,8 +1187,8 @@ mod writes {
             None::<PathBuf>,
             NodeState::Unpacted,
         )));
-        app.start_turn("/write", now());
-        app.answer_turn(reply, now());
+        app.panel_mut().start_turn("/write", now());
+        app.panel_mut().answer_turn(reply, now());
         app.set_message(LAST_KEY);
         app
     }
@@ -1219,7 +1219,8 @@ mod writes {
     /// Warlock's own lines on the conversation, in order — which is what a
     /// write says for itself, as against the turn it was asked in.
     fn notes(app: &App) -> Vec<String> {
-        app.thread()
+        app.panel()
+            .thread()
             .expect("the conversation is there")
             .lines(now())
             .into_iter()
@@ -1896,7 +1897,7 @@ mod writes {
             // repository is as empty as it was.
             let repo = a_repo();
             let mut app = app_answering(repo.path(), REPLY);
-            app.set_mode(Mode::Brief);
+            app.panel_mut().set_mode(Mode::Brief);
             let before = app.clone();
             let prompt = write_opened(repo.path(), DIRECTORY, REPLY);
 
@@ -1911,7 +1912,7 @@ mod writes {
 
             assert_eq!(prompt, ScopePrompt::Closed);
             assert_eq!(app, before, "Esc moved something on the app");
-            assert_eq!(app.mode(), Mode::Brief);
+            assert_eq!(app.panel().mode(), Mode::Brief);
             assert_eq!(everything_under(repo.path()), Vec::<String>::new());
         }
 
@@ -2077,7 +2078,7 @@ mod writes {
             )));
             // The register the command is only allowed in, and the pact the
             // written file is about to make stale.
-            app.set_mode(Mode::Brief);
+            app.panel_mut().set_mode(Mode::Brief);
             let manifest = pacts(&["docs"]);
             // The conversation, rooted in that repository: where a brief goes
             // is its own now, settled at `/brief` and read at `/write` without
@@ -2115,7 +2116,11 @@ mod writes {
             );
             // The card shows the word that was typed and the document that came
             // back — never the paragraph warlock sent.
-            let rows = app.thread().expect("the conversation is there").lines(base);
+            let rows = app
+                .panel()
+                .thread()
+                .expect("the conversation is there")
+                .lines(base);
             assert_eq!(
                 rows.first(),
                 Some(&Line::Said {

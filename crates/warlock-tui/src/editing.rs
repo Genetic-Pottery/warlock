@@ -98,7 +98,7 @@
 //! [`App::show_document`](warlock_tui::App::show_document)). The loop keeps it,
 //! from what [`view_press`](crate::viewing::view_press) hands back, and passes it
 //! in here. And the re-read goes through
-//! [`App::refill_document`](warlock_tui::App::refill_document) rather than
+//! [`Panel::refill_document`](warlock_tui::Panel::refill_document) rather than
 //! `show_document`, which is the same filling minus the one line that decides
 //! what is on screen: an edit is not the reader asking to look at something, so
 //! the panel stays on whichever card it was on.
@@ -234,7 +234,7 @@ pub(crate) fn edit_press(
 /// the window somewhere back at the top of a file nobody changed.
 ///
 /// Which card is on screen does not move either way: the re-read goes through
-/// [`App::refill_document`](warlock_tui::App::refill_document), which fills the
+/// [`Panel::refill_document`](warlock_tui::Panel::refill_document), which fills the
 /// card and stops there.
 ///
 /// A re-read that fails — the editor deleted the file, saved something that is
@@ -260,7 +260,7 @@ fn came_back(app: &mut App, scope: &Scope, edited: &Path, showing: Option<&Path>
         return;
     }
     match view_file(edited) {
-        Ok(Viewed { text, cut }) => app.refill_document(text.lines(), cut),
+        Ok(Viewed { text, cut }) => app.panel_mut().refill_document(text.lines(), cut),
         // The engine's wording, flattened onto one line exactly as `view_press`
         // flattens it — the same failure, reached without a keystroke of its own.
         Err(error) => note(app, one_line(&error.to_string())),
@@ -775,7 +775,7 @@ mod tests {
             let repo_root =
                 repository_root(tree.root_path()).expect("the load found a repository root");
             let mut app = App::from_tree(&tree);
-            app.set_panel_height(PANEL);
+            app.panel_mut().set_height(PANEL);
             let scope = Scope {
                 chrome: Chrome::of(&repo_root, tree.root_path()),
                 root: tree.root_path().to_path_buf(),
@@ -796,7 +796,8 @@ mod tests {
         /// What the panel is drawing at `now`, whichever card is showing: a
         /// document's own text, or the account's headings and clocked lines.
         fn shown(app: &App, now: Instant) -> Vec<String> {
-            app.panel_lines(now)
+            app.panel()
+                .window(now)
                 .into_iter()
                 .map(|line| match line {
                     Line::Directory { path } => path.display().to_string(),
@@ -816,7 +817,7 @@ mod tests {
         /// tests below are about is what the reader is looking at: a document
         /// draws as text and an account never does.
         fn is_document(app: &App, now: Instant) -> bool {
-            matches!(app.panel_lines(now).first(), Some(Line::Text { .. }))
+            matches!(app.panel().window(now).first(), Some(Line::Text { .. }))
         }
 
         /// `text` as the lines a card holding it draws.
@@ -831,7 +832,8 @@ mod tests {
         /// showing and empty cannot be told from the other one.
         fn with_an_account(app: &mut App, at: Instant) {
             app.start_account(at);
-            app.account_mut()
+            app.panel_mut()
+                .account_mut()
                 .expect("the press that started the run opened one")
                 .open_section("crates/engine", at);
         }
@@ -923,11 +925,11 @@ mod tests {
             // A panel small enough to have a window to park, and a reader who
             // has parked it: a card read again for no reason would put them
             // back at the top of a file nobody changed.
-            app.set_panel_height(2);
+            app.panel_mut().set_height(2);
             app.show_document(lines_of(NOTES), false);
             app.scroll_panel_down(1);
             let before = shown(&app, now);
-            let parked = app.panel_scroll_offset();
+            let parked = app.panel().scroll_offset();
 
             fs::write(&edited, REWRITTEN).expect("the document rewrites");
             came_back(&mut app, &scope, &edited, Some(&notes));
@@ -938,7 +940,11 @@ mod tests {
                 before,
                 "a file this press never touched was read again"
             );
-            assert_eq!(app.panel_scroll_offset(), parked, "the reader's line moved");
+            assert_eq!(
+                app.panel().scroll_offset(),
+                parked,
+                "the reader's line moved"
+            );
         }
 
         #[test]
@@ -954,8 +960,11 @@ mod tests {
             fs::write(&edited, REWRITTEN).expect("the document rewrites");
             came_back(&mut app, &scope, &edited, None);
 
-            assert!(!app.has_document(), "a card nobody asked for was filled");
-            assert!(!app.has_panel_content(), "the panel drew something");
+            assert!(
+                !app.panel().has_document(),
+                "a card nobody asked for was filled"
+            );
+            assert!(!app.panel().has_content(), "the panel drew something");
             assert!(shown(&app, now).is_empty());
         }
 

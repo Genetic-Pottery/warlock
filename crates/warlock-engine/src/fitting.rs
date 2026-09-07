@@ -807,19 +807,18 @@ fn lift_over_cap(
 /// One file, one entry, the rule [`lift_over_cap`] established. A file that
 /// ends up described has no entry — its contents reached the pass, so there is
 /// nothing left out to report — and a file that ends up a name has exactly one,
-/// whose cause is the honest reason there is no account of it: `OverBudget` when
-/// the request simply had no room for one, and the summarising's own cause
-/// ([`Omission::NotText`], [`Omission::TooManyChunks`],
-/// [`Omission::Unsummarised`], [`Omission::Unreadable`]) when there was room and
-/// no account could be made.
+/// whose cause is the honest reason there is no account of it: `OverBudget`
+/// when the request simply had no room for one, and the reduction's own cause
+/// ([`Omission::NotText`], [`Omission::Unreducible`], [`Omission::Unreadable`])
+/// when there was room and no account could be made.
 ///
-/// # What it costs, and what the observer hears
+/// # What it costs
 ///
-/// Every account goes through [`Summarising::summary_of`], so a file this
-/// repository has read before costs no passes at all and announces nothing;
-/// only the passes really run reach `observer`. The common directory — inside
-/// the cap, with nothing given up to get there — costs one comparison and
-/// returns the request it was handed.
+/// Nothing but reading and a table lookup: reducing a file to its declaration
+/// lines is [`languages::skeleton`], not a model pass, so no directory pays for
+/// this in passes and there is nothing here to announce. The common directory —
+/// inside the cap, with nothing given up to get there — costs one comparison
+/// and returns the request it was handed.
 fn demote_to_budget(
     request: agent::Request,
     cap: u64,

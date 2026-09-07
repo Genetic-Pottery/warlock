@@ -63,12 +63,11 @@
 //! root, the way the manifest spells them, so a line of output and a line of
 //! `.warlock/pacts.toml` say the same word about the same directory.
 //!
-//! The two announcements the engine makes *inside* a directory — the summarising
-//! passes over over-cap files, and the request handed over — are deliberately
-//! left silent. They are the TUI's, where there is a footer to overwrite ten
-//! times a second and a panel to keep the history in; on a pipe they would be
-//! tens of lines per directory competing with the two that say where the run has
-//! got to. The default bodies on
+//! The announcements the engine makes *inside* a directory — the request handed
+//! over, and every answer the schema turns down — are deliberately left silent.
+//! They are the TUI's, where there is a footer to overwrite ten times a second
+//! and a panel to keep the history in; on a pipe they would be several lines
+//! per directory competing with the two that say where the run has got to. The default bodies on
 //! [`Observer`](warlock_engine::pact::Observer) are what makes not writing them
 //! the same thing as saying nothing.
 //!

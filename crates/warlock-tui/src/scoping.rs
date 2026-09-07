@@ -321,7 +321,7 @@ mod tests {
     /// [`closed_scope`](crate::session::closed_scope) answers `None` and the
     /// press behaves exactly as it did before boundaries existed — which is what
     /// every test using this shadow is about. It is `*` rather than
-    /// [`Sigils::Nothing`] because the fixture manifest *does* scope
+    /// [`Sigils::Nothing`](warlock_tui::Sigils::Nothing) because the fixture manifest *does* scope
     /// `crates/engine`, and holding nothing opens nothing that is scoped: an
     /// empty set here would turn a suite about the scope prompt into a suite
     /// about being refused. The tests that *are* about the boundary call
@@ -886,7 +886,7 @@ mod tests {
             assert_eq!(prompt, ScopePrompt::Closed);
             assert!(!app.is_pacting(), "writing {text:?} started a run");
             assert_eq!(app.pact_line(), None, "and put a progress line up");
-            assert!(app.account().is_none(), "and opened an account");
+            assert!(app.panel().account().is_none(), "and opened an account");
             assert_eq!(app.message(), Some(LAST_KEY), "and took the message line");
             assert_eq!(app, before, "writing {text:?} moved the view");
         }

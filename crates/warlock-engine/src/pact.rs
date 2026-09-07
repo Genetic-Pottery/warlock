@@ -31,10 +31,10 @@
 //! Section 11 of the design doc calls context scoping "the actual
 //! differentiator: maximal relevant context, minimal waste". That sentence is
 //! made mechanical one module along, in [`fitting`](crate::fitting): what a
-//! directory's request holds, the two byte caps, the sent → summarised → listed
-//! ladder that meets them, and the account cache under `.warlock/summaries/`
-//! are all argued there. Nothing in this module decides any of it — a pact
-//! calls [`fit`] and runs the pass on what comes back.
+//! directory's request holds, the two byte caps, and the sent → elided →
+//! summarised → listed ladder that meets them are all argued there. Nothing in
+//! this module decides any of it — a pact calls [`fit`] and runs the pass on
+//! what comes back.
 //!
 //! Two of its guarantees are worth restating here, because they are what let
 //! this module have no opinion about the caps at all. **Neither cap can fail a
@@ -159,13 +159,11 @@
 //! descent there and then, and [`Unwatched`] is the answer for a caller with
 //! nothing to show and nothing to cancel.
 //!
-//! Inside a directory, the same observer is told about each summarising pass
-//! just before it runs: which file, which pass of
-//! how many that file costs. A two-megabyte lockfile is a dozen model passes
-//! inside one directory's turn, and without this the fraction of directories
-//! would sit still through all of them. That one only announces — it answers
-//! nothing, it stops nothing, and it has a default body that does nothing, so
-//! it costs an existing observer no code.
+//! Inside a directory the same observer hears
+//! [`requesting`](Observer::requesting) once, when that directory's request is
+//! handed to the pass: how many files went into it and how many bytes that is.
+//! That one only announces — it answers nothing, it stops nothing, and it has a
+//! default body that does nothing, so it costs an existing observer no code.
 //!
 //! Two things this deliberately is not. It is not a *progress channel* — the
 //! engine hands a borrowed path to a caller-supplied trait object, with no
@@ -220,7 +218,7 @@ use std::str::Utf8Error;
 
 use ignore::WalkBuilder;
 
-use crate::document::{self, ATTEMPTS, Defect, Fill};
+use crate::document::{self, ATTEMPTS, Accepted, Defect, Fill};
 use crate::fitting::{
     Fitted, PER_FILE_BYTE_CAP, Problem, byte_count, carried_bytes, carry_hash, fit,
 };
@@ -777,9 +775,9 @@ fn describe_and_grant(
             continue;
         }
 
-        // Through the watched form, so every summarising pass this directory
-        // pays for is announced to the same observer that was just asked about
-        // the directory itself.
+        // Through the watched form, so what this directory's request weighs is
+        // announced to the same observer that was just asked about the
+        // directory itself.
         match pact_directory_watched(pacted, agent, observer) {
             Ok(Pacted {
                 document,
@@ -1193,8 +1191,7 @@ pub fn closed_scopes_at_or_below<'manifest>(
 /// There is no `root` parameter and nothing under `.warlock/` is touched: a
 /// directory is fitted from its own files and its children's documents, and
 /// the files too big to send are reduced to their declaration lines by the
-/// language table rather than described by passes whose answers had to be
-/// cached. One directory in, one document out.
+/// language table. One directory in, one document out.
 ///
 /// ```
 /// use std::fs;
@@ -1248,14 +1245,11 @@ pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<
     pact_directory_watched(directory.as_ref(), agent, &mut Unwatched)
 }
 
-/// [`pact_directory`], with somewhere to announce the summarising passes to.
+/// [`pact_directory`], with somewhere to announce this directory's progress to.
 ///
 /// The whole of the difference is `observer`, which hears
-/// [`summarising`](Observer::summarising) immediately before every model pass
-/// spent describing a file too big to send — and hears nothing at all for a file
-/// whose account came from the cache, because that file costs no passes — and
-/// hears [`requesting`](Observer::requesting) once, when the request those
-/// passes were spent on is handed over.
+/// [`requesting`](Observer::requesting) once, when the request is handed over,
+/// and [`rejected`](Observer::rejected) for every answer the schema turns down.
 /// [`starting`](Observer::starting) is not called from here: which directory a
 /// pact is on is [`pact_subtree`]'s to say, and this function pacts exactly one.
 ///
@@ -1278,8 +1272,6 @@ fn pact_directory_watched(
     // is asked to fill is derived from which files and children the fitting
     // left in the request, and that is not known until it comes back.
     //
-    // `root` is where `.warlock/` — and so the summary cache — is found by
-    // joining, and is taken here rather than discovered; see the docs above.
     let Fitted {
         request,
         problems,
@@ -1292,10 +1284,12 @@ fn pact_directory_watched(
     // defects and its own words for those slots in front of it, and its answer
     // is a patch written over the first ([`document::Repair`]) — unless the
     // first was not an object at all, in which case it is asked cold again.
-    // An entry for a file that is not here is dropped without a pass. A
-    // transport failure ends it at once — a pass that produced no answer is not
-    // a pass that produced a wrong one, and retrying a missing `claude` finds
-    // it still missing.
+    // What an answer amounts to either way is `document::accept`'s to say: it
+    // is handed what this attempt carries and comes back with the fill and
+    // whatever is still wrong with it, so the two roads are one call here and
+    // one road there. A transport failure ends it at once — a pass that
+    // produced no answer is not a pass that produced a wrong one, and retrying
+    // a missing `claude` finds it still missing.
     let mut defects: Vec<Defect> = Vec::new();
     let mut previous: Option<Fill> = None;
     let mut accepted = None;
@@ -1326,35 +1320,33 @@ fn pact_directory_watched(
         let text = response.text();
 
         // What this attempt amounts to, once any patch is written over what
-        // came before: a fill, and every defect it still has.
-        let (candidate, found) = match (&previous, &repair) {
-            (Some(fill), Some(repair)) => match document::parse_fill(text) {
-                Ok(patch) => {
-                    let mended = repair.apply(fill, &patch, &expected);
-                    let found = document::check_fill(&mended, &expected);
-                    (Some(mended), found)
-                }
-                Err(defect) => (None, vec![defect]),
-            },
-            _ => match document::parse_fill(text) {
-                Ok(fill) => {
-                    // Entries for files that are not here go without a pass;
-                    // whatever is wrong after that is what a repair is for.
-                    let mended = document::Repair::default().apply(&fill, &fill, &expected);
-                    let found = document::check_fill(&mended, &expected);
-                    (Some(mended), found)
-                }
-                Err(defect) => (None, vec![defect]),
-            },
-        };
-        if found.is_empty() {
-            accepted = candidate;
-            break;
-        }
-        observer.rejected(directory, &found, attempt, ATTEMPTS);
-        defects = found;
-        if candidate.is_some() {
-            previous = candidate;
+        // came before. `previous.zip(repair)` is exactly what a repair pass
+        // carries: both or neither, since a repair with nothing to repair from
+        // is a first pass.
+        match document::accept(previous.as_ref().zip(repair.as_ref()), text, &expected) {
+            Accepted::Filled(fill) => {
+                accepted = Some(fill);
+                break;
+            }
+            Accepted::Defective {
+                fill,
+                defects: found,
+            } => {
+                observer.rejected(directory, &found, attempt, ATTEMPTS);
+                defects = found;
+                // Kept as what the next pass repairs from: it is mostly right,
+                // and asking for all of it again is how a pass that left out
+                // one file of eighteen comes back having left out another.
+                previous = Some(fill);
+            }
+            Accepted::Unparsed(defect) => {
+                let found = vec![defect];
+                observer.rejected(directory, &found, attempt, ATTEMPTS);
+                defects = found;
+                // `previous` is left where it was: an answer that is not an
+                // object is nothing to repair from, so the next pass is asked
+                // for whatever the last readable one was still missing.
+            }
         }
     }
     let Some(fill) = accepted else {
@@ -1618,17 +1610,6 @@ fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-// The summary cache: five small functions over `<root>/.warlock/summaries/`,
-// and nothing else. A key from a file's bytes, the two names that key becomes
-// on disk, a read that answers `None` to everything that is not a good entry,
-// and a write that can be ignored. None of them can fail a pact: there is no
-// `Error` variant and no `Omission` for a cache, because every way one of these
-// can go wrong is already the ordinary path — summarise the file.
-//
-// [`summarise_over_cap`](crate::fitting::summarise_over_cap) is their only caller: it asks for a key over the bytes
-// it has just read, looks the entry up, and writes one back when a map-reduce
-// actually produced an account.
-
 /// Where a subtree pact has got to, and whether it should carry on: the port a
 /// front end shows progress through and cancels through.
 ///
@@ -1654,13 +1635,13 @@ fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
 /// [`Agent`]: how many files went into it and how many bytes that is. The
 /// silence a reader is looking at between then and the pass coming back is the
 /// pass itself, and these are the two numbers that say why it is as long as it
-/// is. An announcement with the same do-nothing default as `summarising`.
+/// is. An announcement rather than a question, with a do-nothing default.
 ///
 /// And when a directory comes out of its pass with its document written — and
 /// every directory beneath it already has one — it calls
 /// [`documented`](Observer::documented), so a front end can mark work done as
 /// it is done rather than when the whole run is. An announcement like
-/// `summarising`, with the same do-nothing default.
+/// `requesting`, with the same do-nothing default.
 ///
 /// # What this trait is careful not to require
 ///
@@ -1714,8 +1695,7 @@ pub trait Observer {
     /// # What the two numbers count
     ///
     /// `files` is how many files the request carries, each one a name with
-    /// either its text, an account of it written by a summarising pass, or
-    /// neither. `bytes` is everything the request carries counted the way the
+    /// either its text, its declaration lines, an account of it, or neither. `bytes` is everything the request carries counted the way the
     /// budget counts it — the files, plus every child directory's document —
     /// so the two do not cover quite the same set, and `bytes` is the number
     /// the caps are checked against. Both are read off the request as it
@@ -1725,9 +1705,9 @@ pub trait Observer {
     ///
     /// Because neither number is true yet when `starting` is called. That is
     /// asked before the directory is read at all, and what the request holds is
-    /// settled only after gathering, after the summarising passes over files too
-    /// big to send, and after the demotions that bring the whole request under
-    /// its cap. Carrying the counts on `starting` would mean asking about
+    /// settled only after gathering, after the reduction of files too big to
+    /// send, and after the demotions that bring the whole request under its
+    /// cap. Carrying the counts on `starting` would mean asking about
     /// cancelling after all of that work, and answering [`Pacting::Stop`] would
     /// then cost a directory's worth of passes to act on — the property worth
     /// keeping is that a cancel costs nothing.
@@ -1938,8 +1918,8 @@ pub enum Unviewable {
     ///
     /// Separate from [`Unviewable::Unreadable`] because nothing is wrong: the
     /// read worked, and what came back is a file that is not text. The same
-    /// judgement [`Omission::NotText`](crate::Omission::NotText) makes about summarising, made for the
-    /// same reason.
+    /// judgement [`Omission::NotText`](crate::Omission::NotText) makes about
+    /// reducing a file, made for the same reason.
     NotText {
         /// The file that is not text.
         path: PathBuf,
@@ -3888,9 +3868,6 @@ mod tests {
         );
         assert_eq!(Unwatched.starting(&engine, 1, 4), Pacting::Continue);
     }
-
-    // Announcing the summarising passes: what the observer hears while one
-    // directory's big file is being read, and in what order.
 
     // Announcing the request itself: what the directory's own pass was handed.
 

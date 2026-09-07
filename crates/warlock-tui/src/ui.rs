@@ -1092,7 +1092,7 @@ const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
 /// takes. `None` is a frame with no composer at all, which is what a test that
 /// is not about the field draws; and a `Some` handed in while the document card
 /// has the panel is put back to `None` here (see [`on_screen`]), so the rule
-/// about when the field is on screen is [`App::composer_showable`]'s and is
+/// about when the field is on screen is [`Panel::composer_showable`](crate::Panel::composer_showable)'s and is
 /// asked rather than repeated.
 #[expect(
     clippy::too_many_arguments,
@@ -1266,7 +1266,7 @@ fn split_column(column: Rect, composer: Option<&Composer>) -> (Rect, Option<Rect
 /// One question asked in one place, because four things have to give the same
 /// answer to it: what [`draw`] draws, what [`panel_height`] tells the app to
 /// scroll the account by, what [`composer_height`] says that cost, and what
-/// [`hit_test`] is pointing at. The rule itself is [`App::composer_showable`]'s
+/// [`hit_test`] is pointing at. The rule itself is [`Panel::composer_showable`](crate::Panel::composer_showable)'s
 /// — the panel holds one card at a time and a document takes the whole column —
 /// and it is asked here rather than stated again, so the frame agrees with the
 /// app that is already keeping the keyboard off a hidden field (see
@@ -1277,7 +1277,7 @@ fn split_column(column: Rect, composer: Option<&Composer>) -> (Rect, Option<Rect
 /// still hand the app out mutably to draw it.
 #[must_use]
 pub fn composer_on_screen<'a>(app: &App, composer: &'a Composer) -> Option<&'a Composer> {
-    app.composer_showable().then_some(composer)
+    app.panel().composer_showable().then_some(composer)
 }
 
 /// [`composer_on_screen`] for a caller that may not have a field at all: the
@@ -1653,8 +1653,8 @@ fn pane_block(focused: bool) -> Block<'static> {
 /// One slot and three cards. The panel holds the account of the pact, the
 /// conversation somebody is having and the document they asked to read, and
 /// draws whichever of them is showing — which is the app's answer and never this
-/// function's. [`App::panel_lines`] hands over the showing card's window and
-/// [`App::panel_lines_below`] counts what is under it, so a swap (see
+/// function's. [`Panel::window`](crate::Panel::window) hands over the showing card's window and
+/// [`Panel::lines_below`](crate::Panel::lines_below) counts what is under it, so a swap (see
 /// [`App::swap_card`]) changes what reaches the screen without changing a line of
 /// the drawing. All three are drawn in the same border, at the same width, under
 /// the same indicator: what mostly differs between them is what the lines say,
@@ -1682,7 +1682,7 @@ fn pane_block(focused: bool) -> Block<'static> {
 /// hints. A screen that said something before anything had happened would be
 /// saying it about nothing; a screen carrying the program's mark is saying whose
 /// screen it is, which is true before anything happens and stops being worth the
-/// room the moment there is something to put there. [`App::has_panel_content`]
+/// room the moment there is something to put there. [`Panel::has_content`](crate::Panel::has_content)
 /// is the switch, and not the number of lines: an account that has started and
 /// has nothing in it yet is a pact under way, and the mark does not come back
 /// for it. A panel too small for the mark and its margins draws the bare border,
@@ -1695,7 +1695,7 @@ fn pane_block(focused: bool) -> Block<'static> {
 /// conversation: a question somebody typed, one thing the model was seen doing
 /// while it answered, or a row of the answer itself. With the document showing,
 /// every row is a line of the file, from its first. Which rows those are is
-/// [`App::panel_lines`]'s answer, window and all — the app owns the scrolling,
+/// [`Panel::window`](crate::Panel::window)'s answer, window and all — the app owns the scrolling,
 /// exactly as it owns the tree's — and this only words them and cuts them to the
 /// width.
 ///
@@ -1737,10 +1737,10 @@ fn pane_block(focused: bool) -> Block<'static> {
 /// recognised by its colour would be a card nobody could recognise on a terminal
 /// without one.
 fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
-    let below = app.panel_lines_below();
+    let below = app.panel().lines_below();
     let mut block = pane_block(app.focus() == Focus::Panel);
-    if app.showing_thread() {
-        block = block.title_top(Line::from(thread_title(app.mode())).bold());
+    if app.panel().showing_thread() {
+        block = block.title_top(Line::from(thread_title(app.panel().mode())).bold());
     }
     if below > 0 {
         block = block.title_bottom(Line::from(scrollback(below)).right_aligned().dim());
@@ -1754,13 +1754,14 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
         draw_run_header(frame, area, header);
     }
 
-    if !app.has_panel_content() {
+    if !app.panel().has_content() {
         draw_mark(frame, inner);
         return;
     }
 
     let rows: Vec<Line<'static>> = app
-        .panel_lines(now)
+        .panel()
+        .window(now)
         .iter()
         .map(|line| panel_row(line, inner.width))
         .collect();
@@ -2477,6 +2478,7 @@ fn pulse_colour(app: &App, now: Instant) -> Option<Color> {
     }
 
     let fresh = app
+        .panel()
         .account()
         .and_then(Account::open_section_started)
         .is_some_and(|started| {
@@ -3155,8 +3157,10 @@ mod tests {
     fn pacting_app(base: Instant, width: u16, height: u16) -> App {
         let mut app = App::from_tree(&fixture::tree());
         app.set_viewport_height(tree_height(Size::new(width, height)));
-        app.set_panel_height(panel_height(Size::new(width, height), None, None));
-        app.set_panel_width(panel_width(Size::new(width, height)));
+        app.panel_mut()
+            .set_height(panel_height(Size::new(width, height), None, None));
+        app.panel_mut()
+            .set_width(panel_width(Size::new(width, height)));
         app.start_account(base);
         app
     }
@@ -3910,7 +3914,8 @@ mod tests {
         let base = Instant::now();
         let mut app = select(pacting_app(base, WIDTH, FIXTURE_HEIGHT), "warlock/crates");
         assert!(app.toggle_pact().is_some(), "the crates row takes a pact");
-        app.account_mut()
+        app.panel_mut()
+            .account_mut()
             .expect("a pact has started")
             .open_section("crates/engine", base);
         app.set_pact_in_flight("warlock/crates/engine", 1, 2);
@@ -4239,7 +4244,8 @@ mod tests {
         app.toggle_files();
         // Then the run reaching its first directory, the way the progress
         // handler does it: a section opened, and that path put in flight.
-        app.account_mut()
+        app.panel_mut()
+            .account_mut()
             .expect("a pact has started")
             .open_section("crates/engine", base);
         app.set_pact_in_flight("warlock/crates/engine", 1, 2);
@@ -4309,7 +4315,8 @@ mod tests {
         let base = Instant::now();
         let mut app = select(pacting_app(base, WIDTH, FIXTURE_HEIGHT), "warlock/crates");
         assert!(app.toggle_pact().is_some(), "the crates row takes a pact");
-        app.account_mut()
+        app.panel_mut()
+            .account_mut()
             .expect("a pact has started")
             .open_section("crates/engine", base);
         app.set_pact_in_flight("warlock/crates/engine", 1, 2);
@@ -4325,7 +4332,8 @@ mod tests {
             colour_for(NodeState::PactedFresh)
         );
 
-        app.account_mut()
+        app.panel_mut()
+            .account_mut()
             .expect("a pact has started")
             .open_section("crates/tui", handover);
         app.set_pact_in_flight("warlock/crates/tui", 2, 2);
@@ -4363,7 +4371,8 @@ mod tests {
         // in flight and no section to measure a phase against yet.
         app.set_pact_in_flight("warlock/crates/engine", 1, 2);
         assert!(
-            app.account()
+            app.panel()
+                .account()
                 .expect("a pact has started")
                 .open_section_started()
                 .is_none()
@@ -4395,7 +4404,8 @@ mod tests {
         // No keypress here on purpose: the fixture's engine is fresh already,
         // so the pulse's stale phase is visibly not this row's own colour and a
         // row that kept pulsing could not pass for one that had stopped.
-        app.account_mut()
+        app.panel_mut()
+            .account_mut()
             .expect("a pact has started")
             .open_section("crates/engine", base);
         app.set_pact_in_flight("warlock/crates/engine", 1, 2);
@@ -4775,49 +4785,6 @@ mod tests {
         assert_eq!(
             rows_text(&render(&app, KEYS_WIDTH, height)),
             rows_text(&before)
-        );
-    }
-
-    #[test]
-    fn a_summarising_pass_words_the_progress_line_and_grows_no_fourth_footer_line() {
-        let mut app = App::from_tree(&fixture::tree());
-        let height = 10;
-
-        app.set_pact_in_flight("warlock/crates/engine", 3, 12);
-        let quiet = render(&app, KEYS_WIDTH, height);
-        app.set_pact_summarising("warlock/crates/engine/Cargo.toml", 2, 9);
-        let buffer = render(&app, KEYS_WIDTH, height);
-
-        // A file too big for one request is a dozen model passes inside one
-        // directory, and the footer says so: same last row, same directory and
-        // fraction leading it, with the file and its part of the total added.
-        assert_eq!(
-            footer_line(&buffer, FOOTER_HEIGHT - 1),
-            "pacting warlock/crates/engine (3/12) — summarising warlock/crates/engine/Cargo.toml (2/9)"
-        );
-        // The keys line is untouched — a pass running is not a key to press —
-        // and so is the tally above it.
-        assert_eq!(
-            footer_line(&buffer, 1),
-            pacting_keys_line(usize::from(KEYS_WIDTH))
-        );
-        assert_eq!(footer_line(&buffer, 0), footer_line(&quiet, 0));
-        // And the footer is still exactly `FOOTER_HEIGHT` lines: the longer line
-        // took the message line it was already on rather than wrapping onto a
-        // fourth, so nothing above the footer moved and the tree is the tree it
-        // was before the pass was announced.
-        assert_eq!(buffer.area.height, height);
-        for y in 0..height - FOOTER_HEIGHT {
-            assert_eq!(row_text(&buffer, y), row_text(&quiet, y), "row {y}");
-        }
-        assert_eq!(tree_rows(&buffer), tree_rows(&quiet));
-
-        // The refusal suffix still goes last, after the summarising clause, so
-        // a narrow terminal cuts the answer to a keystroke before the fraction.
-        app.set_pact_refused();
-        assert!(
-            row_text(&render(&app, KEYS_WIDTH, height), height - 1)
-                .ends_with("(2/9) — already running")
         );
     }
 
@@ -5333,7 +5300,7 @@ mod tests {
         // a slip rather than as a band of its own.
         let base = Instant::now();
         let mut app = pacting_app(base, WIDTH, HEIGHT);
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section("crates/warlock-engine", base);
         let buffer = render_at(&app, WIDTH, HEIGHT, at(base, 1));
 
@@ -5909,9 +5876,9 @@ mod tests {
         // Neither card holds anything, which is the whole of what puts the mark
         // there: one slot with two empty cards in it draws no lines at all.
         let mut app = App::from_tree(&fixture::tree());
-        assert!(!app.has_account());
-        assert!(!app.has_document());
-        assert!(!app.has_panel_content());
+        assert!(!app.panel().has_account());
+        assert!(!app.panel().has_document());
+        assert!(!app.panel().has_content());
         for _ in 0..2 {
             let buffer = render(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT);
 
@@ -6013,7 +5980,7 @@ mod tests {
         // keeps it off the screen is the account and never the width.
         let base = Instant::now();
         let mut app = pacting_app(base, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT);
-        assert!(app.has_account());
+        assert!(app.panel().has_account());
         assert!(
             mark_area(panel_area(&render(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT))).is_some(),
             "this size has room for the mark"
@@ -6023,8 +5990,8 @@ mod tests {
         // is empty, and empty is not the same as free. The run took the panel
         // because the card it took it from had nothing on it (see
         // [`App::start_account`]), so what is drawn is the account's border.
-        assert!(app.panel_lines(at(base, 1)).is_empty());
-        assert!(!app.showing_thread(), "the run took the empty card");
+        assert!(app.panel().window(at(base, 1)).is_empty());
+        assert!(!app.panel().showing_thread(), "the run took the empty card");
         assert_bare_panel(&render_at(
             &app,
             MARK_ROOM_WIDTH,
@@ -6033,7 +6000,7 @@ mod tests {
         ));
 
         // With lines in it, the account has the rows and the mark none of them.
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section("crates/engine", base);
         for line in 0..MANY {
             account.record(&numbered(line), at(base, line as u64 + 1));
@@ -6047,7 +6014,7 @@ mod tests {
         app.toggle_focus();
         app.select_first();
         let scrolled = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 99));
-        assert!(app.panel_lines_below() > 0);
+        assert!(app.panel().lines_below() > 0);
         assert!(!panel_rows(&scrolled)[0].is_empty());
         assert_no_mark(&scrolled);
         app.toggle_focus();
@@ -6055,7 +6022,7 @@ mod tests {
         // And a second pact starts a fresh account with no lines in it, which
         // is the first case again and still not a screen for the mark.
         app.start_account(at(base, 100));
-        assert!(app.panel_lines(at(base, 101)).is_empty());
+        assert!(app.panel().window(at(base, 101)).is_empty());
         assert_bare_panel(&render_at(
             &app,
             MARK_ROOM_WIDTH,
@@ -6068,7 +6035,7 @@ mod tests {
     fn every_line_of_the_account_gets_one_row_under_the_directory_it_happened_in() {
         let base = Instant::now();
         let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section("crates/engine", base);
         account.record(&Activity::Thinking, at(base, 2));
         account.record(
@@ -6096,7 +6063,7 @@ mod tests {
         // still counting up towards the instant this frame was drawn at.
         let drawn: Vec<String> = panel_rows(&buffer)
             .into_iter()
-            .take(app.panel_lines(at(base, 40)).len())
+            .take(app.panel().window(at(base, 40)).len())
             .collect();
         assert_eq!(
             drawn,
@@ -6113,7 +6080,10 @@ mod tests {
         );
         // Which is one row per line of the account and not one more: nothing
         // wrapped, and nothing was drawn that the account does not hold.
-        assert_eq!(drawn.len(), app.account().expect("a pact").line_count());
+        assert_eq!(
+            drawn.len(),
+            app.panel().account().expect("a pact").line_count()
+        );
         for (index, row) in panel_rows(&buffer).iter().enumerate().skip(drawn.len()) {
             assert_eq!(row, "", "panel row {index} should be blank");
         }
@@ -6123,7 +6093,7 @@ mod tests {
     fn the_newest_lines_clock_counts_up_between_frames_with_no_event_arriving() {
         let base = Instant::now();
         let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section("crates/engine", base);
         account.record(&Activity::Thinking, at(base, 1));
 
@@ -6144,7 +6114,7 @@ mod tests {
         let narrow = 40;
         let base = Instant::now();
         let mut app = pacting_app(base, narrow, FIXTURE_HEIGHT);
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section("crates/warlock-engine", base);
         account.record(
             &Activity::Tool {
@@ -6199,8 +6169,10 @@ mod tests {
     fn viewing_app(width: u16, height: u16, cut: bool) -> App {
         let mut app = App::from_tree(&fixture::tree());
         app.set_viewport_height(tree_height(Size::new(width, height)));
-        app.set_panel_height(panel_height(Size::new(width, height), None, None));
-        app.set_panel_width(panel_width(Size::new(width, height)));
+        app.panel_mut()
+            .set_height(panel_height(Size::new(width, height), None, None));
+        app.panel_mut()
+            .set_width(panel_width(Size::new(width, height)));
         app.show_document(
             [
                 "# The engine",
@@ -6253,7 +6225,7 @@ mod tests {
         // Three lines, five rows: what a wrapped line costs is rows of the
         // panel, which is what the window is cut out of and what the scrollback
         // counts.
-        assert_eq!(app.panel_lines(now).len(), 5);
+        assert_eq!(app.panel().window(now).len(), 5);
         for (index, row) in drawn.iter().enumerate().skip(5) {
             assert_eq!(row, "", "panel row {index} should be blank");
         }
@@ -6305,7 +6277,7 @@ mod tests {
     /// test can swap between them and assert what reaches the screen.
     fn two_card_app(base: Instant, width: u16, height: u16) -> App {
         let mut app = pacting_app(base, width, height);
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section("crates/engine", base);
         account.record(&Activity::Thinking, at(base, 1));
         app.show_document(["# The engine", "", "It walks the tree."], false);
@@ -6387,7 +6359,7 @@ mod tests {
     fn the_thread_and_the_account_do_not_draw_alike_with_the_same_words_on_them() {
         let base = Instant::now();
         let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section(SAME_WORDS, base);
         account.record(&Activity::Thinking, base);
 
@@ -6404,8 +6376,8 @@ mod tests {
         // The same two things said on the thread — the question is word for
         // word the account's heading, and the same activity is recorded at the
         // same instant — and the card still does not draw like the account.
-        app.start_turn(SAME_WORDS, base);
-        app.record_turn(&Activity::Thinking, base);
+        app.panel_mut().start_turn(SAME_WORDS, base);
+        app.panel_mut().record_turn(&Activity::Thinking, base);
         let showing_thread = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
         assert_eq!(
             panel_rows(&showing_thread)[..2],
@@ -6451,16 +6423,17 @@ mod tests {
         let base = Instant::now();
         let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None, None));
         let mut app = pacting_app(base, WIDTH, HEIGHT);
-        app.start_turn(QUESTION, base);
+        app.panel_mut().start_turn(QUESTION, base);
         for line in 0..height * 3 {
-            app.record_turn(&numbered(line), at(base, line as u64 + 1));
+            app.panel_mut()
+                .record_turn(&numbered(line), at(base, line as u64 + 1));
         }
 
         // Following the newest line, so what is on screen is work lines: the one
         // marked row is above the window and there is no prose yet either.
         let buffer = render_at(&app, WIDTH, HEIGHT, at(base, 99));
         let drawn = panel_rows(&buffer);
-        assert!(app.panel_lines_below() == 0 && drawn.len() == height);
+        assert!(app.panel().lines_below() == 0 && drawn.len() == height);
         assert!(
             !drawn.iter().any(|row| row.contains(SAID_MARKER)),
             "the question should be off the top: {drawn:?}"
@@ -6480,18 +6453,21 @@ mod tests {
     fn the_thread_title_says_which_register_the_conversation_is_in() {
         let base = Instant::now();
         let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
-        app.start_turn(QUESTION, base);
-        app.answer_turn(ANSWER, at(base, 1));
+        app.panel_mut().start_turn(QUESTION, base);
+        app.panel_mut().answer_turn(ANSWER, at(base, 1));
 
         // Chat is where a conversation starts, and the edge says only the card.
-        assert_eq!(app.mode(), Mode::Chat);
+        assert_eq!(app.panel().mode(), Mode::Chat);
         let chat = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 2));
         let chat_edge = panel_top_edge(&chat);
         assert!(chat_edge.contains(THREAD_TITLE.trim()), "{chat_edge:?}");
         assert!(!chat_edge.contains("brief"), "{chat_edge:?}");
 
         // The mode changed, so the same card at the same width says so.
-        assert!(app.set_mode(Mode::Brief), "chat to brief is a change");
+        assert!(
+            app.panel_mut().set_mode(Mode::Brief),
+            "chat to brief is a change"
+        );
         let brief = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 2));
         let brief_edge = panel_top_edge(&brief);
         assert!(
@@ -6520,36 +6496,50 @@ mod tests {
 
         // A mode is a fact about the conversation, so the card the reader
         // swapped to still names nothing on its edge.
-        assert!(app.showing_thread(), "the mode moved the card showing");
+        assert!(
+            app.panel().showing_thread(),
+            "the mode moved the card showing"
+        );
         app.swap_card();
         let account = panel_top_edge(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 2)));
         assert!(!account.contains(THREAD_TITLE.trim()), "{account:?}");
         assert!(!account.contains("brief"), "{account:?}");
-        assert_eq!(app.mode(), Mode::Brief, "the swap changed the register");
+        assert_eq!(
+            app.panel().mode(),
+            Mode::Brief,
+            "the swap changed the register"
+        );
 
         // Setting the mode it is already in changes nothing, and is said to
         // change nothing: that is what a re-sent instruction is told by.
-        assert!(!app.set_mode(Mode::Brief), "brief to brief is no change");
-        assert!(app.set_mode(Mode::Chat), "brief to chat is a change");
+        assert!(
+            !app.panel_mut().set_mode(Mode::Brief),
+            "brief to brief is no change"
+        );
+        assert!(
+            app.panel_mut().set_mode(Mode::Chat),
+            "brief to chat is a change"
+        );
     }
 
     #[test]
     fn no_model_prose_is_ever_drawn_on_the_account_card() {
         let base = Instant::now();
         let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section(SAME_WORDS, base);
         account.record(&Activity::Thinking, at(base, 1));
 
         // A turn asked and answered while the run is still going, so both cards
         // are being written and the answer is on one of them.
-        app.start_turn(QUESTION, at(base, 2));
-        app.record_turn(&Activity::Thinking, at(base, 3));
-        app.answer_turn(ANSWER, at(base, 4));
+        app.panel_mut().start_turn(QUESTION, at(base, 2));
+        app.panel_mut()
+            .record_turn(&Activity::Thinking, at(base, 3));
+        app.panel_mut().answer_turn(ANSWER, at(base, 4));
 
         // The thread came to the front when the question was asked: the answer
         // is there, whole, in the model's own words.
-        assert!(app.showing_thread());
+        assert!(app.panel().showing_thread());
         let showing_thread = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
         assert!(
             panel_rows(&showing_thread)
@@ -6562,7 +6552,7 @@ mod tests {
         // Swap round to the account — past the document card, which nothing has
         // filled — and not a word of the model's prose is anywhere on the frame.
         app.swap_card();
-        assert!(!app.showing_thread());
+        assert!(!app.panel().showing_thread());
         let showing_account = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
         for row in rows_text(&showing_account) {
             assert!(!row.contains(ANSWER), "{row:?}");
@@ -6581,7 +6571,7 @@ mod tests {
 
         // And the run going on afterwards puts nothing of the conversation on
         // it either: a second directory, its own lines, no prose.
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section("crates/tui", at(base, 10));
         account.record(&Activity::Writing { bytes: 0 }, at(base, 11));
         for row in rows_text(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 20))) {
@@ -6596,8 +6586,8 @@ mod tests {
         let narrow = 40;
         let base = Instant::now();
         let mut app = pacting_app(base, narrow, FIXTURE_HEIGHT);
-        app.start_turn(QUESTION, base);
-        app.answer_turn(ANSWER, at(base, 1));
+        app.panel_mut().start_turn(QUESTION, base);
+        app.panel_mut().answer_turn(ANSWER, at(base, 1));
 
         let buffer = render_at(&app, narrow, FIXTURE_HEIGHT, at(base, 2));
 
@@ -6699,8 +6689,8 @@ mod tests {
         let size = Size::new(MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT);
         let mut app = App::from_tree(&fixture::tree());
         app.set_viewport_height(tree_height(size));
-        app.set_panel_height(panel_height(size, None, None));
-        app.set_panel_width(panel_width(size));
+        app.panel_mut().set_height(panel_height(size, None, None));
+        app.panel_mut().set_width(panel_width(size));
 
         // Nothing has happened at all: no pact, no question, no read. The panel
         // is warlock's mark on the conversation's own border — the card a
@@ -6716,7 +6706,7 @@ mod tests {
 
         // A question fills the thread and brings it to the front: the mark is
         // gone and the edge says which card took its place.
-        app.start_turn(QUESTION, base);
+        app.panel_mut().start_turn(QUESTION, base);
         let asked = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 1));
         assert_no_mark(&asked);
         assert_eq!(
@@ -6734,7 +6724,7 @@ mod tests {
         // the footer says why.
         app.swap_card();
         let swapped = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 1));
-        assert!(app.showing_thread());
+        assert!(app.panel().showing_thread());
         assert_no_mark(&swapped);
         assert!(panel_top_edge(&swapped).contains(THREAD_TITLE.trim()));
         assert!(app.message().is_some(), "the refusal says what would help");
@@ -6743,14 +6733,14 @@ mod tests {
         // mark: the account it fills is the card behind.
         app.start_account(at(base, 2));
         let running = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 3));
-        assert!(app.showing_thread());
+        assert!(app.panel().showing_thread());
         assert_no_mark(&running);
 
         // Now that a pact has filled it the account is worth a press again, and
         // what it draws is the run rather than the mark.
         app.swap_card();
         let account = render_at(&app, MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT, at(base, 3));
-        assert!(!app.showing_thread());
+        assert!(!app.panel().showing_thread());
         assert_no_mark(&account);
     }
 
@@ -6759,15 +6749,16 @@ mod tests {
         let base = Instant::now();
         let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None, None));
         let mut app = pacting_app(base, WIDTH, HEIGHT);
-        app.start_turn(QUESTION, base);
+        app.panel_mut().start_turn(QUESTION, base);
         for line in 0..height * 3 {
-            app.record_turn(&numbered(line), at(base, line as u64 + 1));
+            app.panel_mut()
+                .record_turn(&numbered(line), at(base, line as u64 + 1));
         }
 
         // Following the newest line: nothing below the view, so the edge says
         // nothing about scrollback and names the card and nothing else.
         let live = render_at(&app, WIDTH, HEIGHT, at(base, 99));
-        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(app.panel().lines_below(), 0);
         assert!(!panel_bottom_edge(&live).contains(SCROLLBACK_ARROW));
 
         // Scrolled back by the ordinary movement keys, the indicator counts the
@@ -6775,7 +6766,7 @@ mod tests {
         app.toggle_focus();
         app.select_first();
         let scrolled = render_at(&app, WIDTH, HEIGHT, at(base, 99));
-        let below = app.panel_lines_below();
+        let below = app.panel().lines_below();
         assert!(below > 0);
         let edge = panel_bottom_edge(&scrolled);
         assert!(
@@ -6827,21 +6818,21 @@ mod tests {
         // ordinary movement keys, with a document shorter than the panel over
         // the top of it.
         let mut app = pacting_app(base, WIDTH, HEIGHT);
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section("crates/engine", base);
         for line in 0..height * 3 {
             account.record(&numbered(line), at(base, line as u64 + 1));
         }
         app.toggle_focus();
         app.select_first();
-        let parked = app.panel_lines_below();
+        let parked = app.panel().lines_below();
         assert!(parked > 0, "the account should be scrolled back");
         app.show_document(["# The engine", "It walks the tree."], false);
 
         // The document is showing and the whole of it is on screen, so the edge
         // says nothing — whatever is under the account behind it.
         let showing_document = render_at(&app, WIDTH, HEIGHT, at(base, 99));
-        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(app.panel().lines_below(), 0);
         let edge = panel_bottom_edge(&showing_document);
         assert!(!edge.contains(SCROLLBACK_ARROW), "{edge:?}");
         assert!(!edge.contains("more"), "{edge:?}");
@@ -6852,7 +6843,7 @@ mod tests {
         app.swap_card();
         app.swap_card();
         let showing_account = render_at(&app, WIDTH, HEIGHT, at(base, 99));
-        assert_eq!(app.panel_lines_below(), parked);
+        assert_eq!(app.panel().lines_below(), parked);
         let edge = panel_bottom_edge(&showing_account);
         assert!(
             edge.contains(&format!("{SCROLLBACK_ARROW} {parked} more ({LIVE_KEY})")),
@@ -6862,14 +6853,14 @@ mod tests {
         // The other way round, on a fresh app: a document longer than the panel
         // at its first line, over an account that is following its newest one.
         let mut app = pacting_app(base, WIDTH, HEIGHT);
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section("crates/engine", base);
         for line in 0..height * 3 {
             account.record(&numbered(line), at(base, line as u64 + 1));
         }
         app.show_document((0..height * 3).map(|line| format!("line {line}")), false);
 
-        let below = app.panel_lines_below();
+        let below = app.panel().lines_below();
         assert_eq!(below, height * 3 - height);
         let edge = panel_bottom_edge(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
         assert!(
@@ -6880,7 +6871,7 @@ mod tests {
         // And swapping to an account that is following takes it away again, even
         // though the card left behind has most of itself below the window.
         app.swap_card();
-        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(app.panel().lines_below(), 0);
         let edge = panel_bottom_edge(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
         assert!(!edge.contains(SCROLLBACK_ARROW), "{edge:?}");
         assert!(!edge.contains("more"), "{edge:?}");
@@ -6918,7 +6909,7 @@ mod tests {
         let base = Instant::now();
         let mut app = pacting_app(base, WIDTH, HEIGHT);
         let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None, None));
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section("crates/engine", base);
         for line in 0..height * 3 {
             account.record(&numbered(line), at(base, line as u64 + 1));
@@ -6927,7 +6918,7 @@ mod tests {
         // Following the newest line: there is nothing below the view, so the
         // edge says nothing.
         let live = render_at(&app, WIDTH, HEIGHT, at(base, 99));
-        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(app.panel().lines_below(), 0);
         assert!(
             !panel_bottom_edge(&live).contains(SCROLLBACK_ARROW),
             "{:?}",
@@ -6940,7 +6931,7 @@ mod tests {
         app.select_first();
         let buffer = render_at(&app, WIDTH, HEIGHT, at(base, 99));
 
-        let below = app.panel_lines_below();
+        let below = app.panel().lines_below();
         assert_eq!(below, height * 3 + 1 - height);
         let edge = panel_bottom_edge(&buffer);
         assert!(
@@ -6962,7 +6953,7 @@ mod tests {
         // scrolled.
         app.select_last();
         let back = render_at(&app, WIDTH, HEIGHT, at(base, 99));
-        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(app.panel().lines_below(), 0);
         assert_eq!(rows_text(&back), rows_text(&live));
     }
 
@@ -7001,7 +6992,7 @@ mod tests {
             let measured = panel_height(Size::new(WIDTH, height), None, None);
             let base = Instant::now();
             let mut app = pacting_app(base, WIDTH, height);
-            let account = app.account_mut().expect("a pact has started");
+            let account = app.panel_mut().account_mut().expect("a pact has started");
             account.open_section("crates/engine", base);
             for line in 0..usize::from(measured) * 2 {
                 account.record(&numbered(line), at(base, line as u64 + 1));
@@ -7047,7 +7038,7 @@ mod tests {
     /// account by a row the header owns.
     fn measure_panel(app: &mut App, width: u16, height: u16) {
         let header = app.run_header();
-        app.set_panel_height(panel_height(
+        app.panel_mut().set_height(panel_height(
             Size::new(width, height),
             None,
             header.as_ref(),
@@ -7074,7 +7065,7 @@ mod tests {
     /// Put `lines` numbered activities in `app`'s account, one a second from
     /// `base`, under a section for the directory the run is working.
     fn fill_account(app: &mut App, base: Instant, lines: usize) {
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section(RUNNING_LABEL, base);
         for line in 0..lines {
             account.record(&numbered(line), at(base, line as u64 + 1));
@@ -7211,7 +7202,7 @@ mod tests {
         fill_account(&mut app, base, window * 3);
 
         let live = panel_rows(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
-        assert_eq!(app.panel_lines_below(), 0, "the account is following");
+        assert_eq!(app.panel().lines_below(), 0, "the account is following");
 
         // Scrolled back through the account by the ordinary movement keys.
         app.toggle_focus();
@@ -7221,7 +7212,7 @@ mod tests {
         // The window is the one the header left, so what is below it counts the
         // lines the reader has yet to come back down through — and not the row
         // the header is sitting on.
-        assert_eq!(app.panel_lines_below(), window * 3 + 1 - window);
+        assert_eq!(app.panel().lines_below(), window * 3 + 1 - window);
         // The header is not a line of the account: it is byte for byte where it
         // was, and everything that moved is under it.
         assert_eq!(scrolled.len(), live.len());
@@ -7356,7 +7347,7 @@ mod tests {
             // Following its newest line, so there is nothing below the window
             // and the edge says nothing: the row the header sits on is not
             // something a reader can scroll back through.
-            assert_eq!(app.panel_lines_below(), 0, "{name}");
+            assert_eq!(app.panel().lines_below(), 0, "{name}");
             let edge = panel_bottom_edge(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
             assert!(!edge.contains(SCROLLBACK_ARROW), "{name}: {edge:?}");
 
@@ -7366,9 +7357,9 @@ mod tests {
             app.toggle_focus();
             app.select_first();
             let buffer = render_at(&app, WIDTH, HEIGHT, at(base, 99));
-            let below = app.panel_lines_below();
+            let below = app.panel().lines_below();
 
-            assert_eq!(app.panel_scroll_offset(), 0, "{name}");
+            assert_eq!(app.panel().scroll_offset(), 0, "{name}");
             assert_eq!(below, lines - window, "{name}");
             let edge = panel_bottom_edge(&buffer);
             assert!(
@@ -7388,9 +7379,13 @@ mod tests {
             // indicator is gone when it gets there.
             for step in 1..=below {
                 app.select_next();
-                assert_eq!(app.panel_lines_below(), below - step, "{name}, {step} down");
+                assert_eq!(
+                    app.panel().lines_below(),
+                    below - step,
+                    "{name}, {step} down"
+                );
             }
-            assert!(app.panel_follows(), "{name}");
+            assert!(app.panel().follows(), "{name}");
             let edge = panel_bottom_edge(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
             assert!(!edge.contains(SCROLLBACK_ARROW), "{name}: {edge:?}");
 
@@ -7935,13 +7930,18 @@ mod tests {
     fn app_running_under_a_thread(base: Instant) -> App {
         let mut app = App::from_tree(&fixture::tree());
         app.set_focus(Focus::Composer);
-        app.start_turn("what does the engine do?", at(base, 1));
-        app.answer_turn("It walks the tree.", at(base, 2));
+        app.panel_mut()
+            .start_turn("what does the engine do?", at(base, 1));
+        app.panel_mut()
+            .answer_turn("It walks the tree.", at(base, 2));
         app.start_account(at(base, 3));
         app.set_pact_in_flight("warlock/crates/engine", 1, 2);
 
-        assert!(app.showing_thread(), "the run swapped the card away");
-        assert!(app.composer_showable(), "the run hid the field");
+        assert!(
+            app.panel().showing_thread(),
+            "the run swapped the card away"
+        );
+        assert!(app.panel().composer_showable(), "the run hid the field");
         app
     }
 
@@ -8101,7 +8101,10 @@ mod tests {
         // Shift-Tab back to the conversation, which is the very next card, and
         // the field is there again — dim, with every character still in it.
         app.swap_card();
-        assert!(app.showing_thread(), "the swap landed somewhere else");
+        assert!(
+            app.panel().showing_thread(),
+            "the swap landed somewhere else"
+        );
         assert_eq!(composer_on_screen(&app, &muted), Some(&muted));
         assert_eq!(muted.draft(), live.draft());
     }
@@ -8288,7 +8291,7 @@ mod tests {
     fn busy_app(base: Instant, width: u16, height: u16) -> App {
         let mut app = pacting_app(base, width, height);
         let detail = [UNDERNEATH; MANY].join(" ");
-        let account = app.account_mut().expect("a pact has started");
+        let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section("crates/engine", base);
         for line in 0..MANY {
             account.record(

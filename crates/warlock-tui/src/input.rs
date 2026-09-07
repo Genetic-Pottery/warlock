@@ -54,7 +54,7 @@ pub(crate) enum Action {
     /// would be three names for the same keystroke read three times. Which
     /// places the cycle can stop at is the app's, not this function's — the
     /// composer is skipped while the document card hides it, see
-    /// [`App::toggle_focus`](crate::App::toggle_focus).
+    /// [`App::toggle_focus`](warlock_tui::App::toggle_focus).
     ToggleFocus,
     /// Move the selection one row up.
     SelectPrevious,
@@ -1861,7 +1861,7 @@ mod tests {
             }
             let mut app = App::from_rows(rows);
             app.set_viewport_height(tree_height(SIZE));
-            app.set_panel_height(panel_height(SIZE, None, None));
+            app.panel_mut().set_height(panel_height(SIZE, None, None));
             app
         }
 
@@ -1887,7 +1887,7 @@ mod tests {
             // cannot move cannot catch a key that moved it.
             let started = Instant::now();
             app.start_account(started);
-            if let Some(account) = app.account_mut() {
+            if let Some(account) = app.panel_mut().account_mut() {
                 for n in 0..40 {
                     account.open_section(format!("/repo/d{n:02}"), started);
                 }
@@ -2100,12 +2100,12 @@ mod tests {
             assert!(app.pacted_only(), "and so is the pacted-only filter");
             assert_ne!(app.selected(), fresh.selected(), "the selection has moved");
             assert_ne!(
-                app.panel_scroll_offset(),
+                app.panel().scroll_offset(),
                 0,
                 "the panel's window is off the top"
             );
             assert!(
-                !app.panel_follows(),
+                !app.panel().follows(),
                 "and no longer following the newest line"
             );
             assert_eq!(app.focus(), Focus::Panel, "the panel has the keys");
@@ -2994,7 +2994,7 @@ mod tests {
             /// Tab from the panel puts it.
             ///
             /// The card matters. The field is drawn under the conversation and
-            /// under nothing else (see [`App::composer_showable`]), so an app
+            /// under nothing else (see [`Panel::composer_showable`](warlock_tui::Panel::composer_showable)), so an app
             /// showing the run cannot have the keyboard in a field it is not
             /// drawing. The turn is answered at length for [`app_in_use`]'s
             /// reason: a panel with more in it than its window holds is one
@@ -3002,8 +3002,10 @@ mod tests {
             fn app_composing() -> App {
                 let mut app = app_in_use();
                 let asked = Instant::now();
-                app.start_turn("what does the engine do?", asked);
-                app.answer_turn("It walks the tree.\n".repeat(40), asked);
+                app.panel_mut()
+                    .start_turn("what does the engine do?", asked);
+                app.panel_mut()
+                    .answer_turn("It walks the tree.\n".repeat(40), asked);
                 app.scroll_panel_up(5);
                 app.set_focus(Focus::Composer);
                 assert_eq!(
@@ -3361,9 +3363,13 @@ mod tests {
                 // does — including `p`, which is a letter here and the pact key
                 // only at the tree.
                 let mut app = app_composing();
-                app.start_turn("what does the engine do?", Instant::now());
+                app.panel_mut()
+                    .start_turn("what does the engine do?", Instant::now());
                 app.set_pact_in_flight("/repo/crates/engine", 3, 12);
-                assert!(app.showing_thread(), "the thread is the card on screen");
+                assert!(
+                    app.panel().showing_thread(),
+                    "the thread is the card on screen"
+                );
                 assert_eq!(app.focus(), Focus::Composer, "the field has the keyboard");
 
                 let live = Composer::new(TYPED);
@@ -3913,7 +3919,7 @@ mod tests {
         fn app_on_screen() -> App {
             let mut app = App::from_rows(rows());
             app.set_viewport_height(tree_height(SIZE));
-            app.set_panel_height(panel_height(SIZE, None, None));
+            app.panel_mut().set_height(panel_height(SIZE, None, None));
             app
         }
 
@@ -4233,8 +4239,8 @@ mod tests {
             assert_eq!(app.focus(), Focus::Panel);
             assert_eq!(app.selected(), before.selected(), "the tree did not move");
             assert_eq!(
-                app.panel_scroll_offset(),
-                before.panel_scroll_offset(),
+                app.panel().scroll_offset(),
+                before.panel().scroll_offset(),
                 "the panel's window did not move either"
             );
         }

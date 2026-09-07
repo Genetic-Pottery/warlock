@@ -77,15 +77,6 @@ pub(crate) const WAITING: &str = "waiting";
 /// section adds how much of the answer has arrived, per [`writing_line`].
 pub(crate) const WRITING: &str = "writing";
 
-/// The whole of what "a big file is being read in pieces" is worth saying.
-///
-/// One word about warlock rather than about the model, like [`WAITING`]: a
-/// summarising pass is warlock's own doing — a file over the per-file cap is
-/// read in parts — and the file and the fraction are the only two things a
-/// reader can act on. What the pass is *thinking* about that part is the
-/// model's business and is not reported here.
-const SUMMARISING: &str = "summarising";
-
 /// The word a line opens with when the engine turned a pass's answer down:
 /// the answer came back, and it was not the object the pass was asked to fill.
 /// What follows is the attempt it was and the first of what was wrong, so a
@@ -680,56 +671,6 @@ impl Account {
         }
     }
 
-    /// Record that a summarising pass over `file` — part `part` of `parts` —
-    /// started at `at`.
-    ///
-    /// A file over the per-file cap is read in pieces, and for a directory
-    /// holding one those pieces are most of the wait: a run can spend eight
-    /// minutes on them behind a single `writing` line that never moves. One
-    /// line per pass is what turns that into something a reader can watch.
-    ///
-    /// The line names the file and the fraction and nothing else — no estimate,
-    /// no percentage of its own, no time remaining. The fraction is the honest
-    /// half of a progress bar and the rest would be a guess; the clock every
-    /// line already carries says how long this part has been going.
-    ///
-    /// `file` is spelled however the caller spells it — relative to the tree on
-    /// screen for preference, as with [`Outcome::Wrote`] — because which tree a
-    /// path should be read against is not a fact this module holds.
-    ///
-    /// Not an [`Activity`]: activities are what the claude stream reports, and
-    /// the stream knows nothing about how warlock chose to feed it a file.
-    ///
-    /// Filed as an ordinary [`Entry`], so it draws, clocks, freezes and counts
-    /// exactly like every other line: the line above freezes at `at` and this
-    /// one ticks until something newer arrives. Does nothing when there is no
-    /// live section, or when the newest one is frozen — the same silence
-    /// [`Account::record`] keeps, and for the same reason.
-    pub fn record_summarising(
-        &mut self,
-        file: impl AsRef<Path>,
-        part: usize,
-        parts: usize,
-        at: Instant,
-    ) {
-        let Some(section) = self.sections.last_mut() else {
-            return;
-        };
-        if section.is_closed() {
-            return;
-        }
-
-        // Pushed rather than run through `Log::extend_or_open`, which the
-        // repeated-report activities use: the two differ only for an event that
-        // repeats *identically*, and every pass carries its own `part`, so the
-        // ticket is one line per pass either way. Pushing says that outright
-        // instead of leaving a reader to work out that the texts never collide.
-        let file = file.as_ref().display();
-        section
-            .log
-            .push(format!("{SUMMARISING} {file} ({part}/{parts})"), at);
-    }
-
     /// Record that the live directory's request — `files` files, `bytes` bytes
     /// of them — was handed to a pass at `at`.
     ///
@@ -743,8 +684,7 @@ impl Account {
     /// # Why this is an entry and not the placeholder
     ///
     /// The drawn [`WAITING`] placeholder is only there while the section has
-    /// heard nothing at all, so it can say nothing about a directory that
-    /// summarised first — and it carries no numbers, because it is about the
+    /// heard nothing at all, and it carries no numbers, because it is about the
     /// silence rather than about whatever is being waited for. An entry does
     /// both. It is also filed at the handover rather than at the section
     /// opening, so the stretch it covers, from its arrival to whatever arrives
@@ -753,10 +693,6 @@ impl Account {
     /// once this lands, nothing having been stored for it and nothing deleted.
     /// Its clock is the module's ordinary one — elapsed since the section
     /// opened, moving until something newer arrives.
-    ///
-    /// On a directory that summarised first there is no placeholder to replace,
-    /// and this lands below those lines exactly as it would land below any
-    /// other.
     ///
     /// Its text is deliberately not the bare [`WAITING`] constant, so
     /// [`Log::extend_or_open`] cannot fold it into the line above or a later
@@ -770,9 +706,11 @@ impl Account {
     /// caller's arithmetic rather than this module's — `bytes` is what was sent,
     /// and it is the number the caps are checked against.
     ///
-    /// Pushed rather than extended, and silent when there is no live section or
-    /// the newest one is frozen, for the reasons
-    /// [`Account::record_summarising`] gives.
+    /// Pushed rather than run through [`Log::extend_or_open`], which the
+    /// repeated-report activities use: the two differ only for an event that
+    /// repeats *identically*, and a handover happens once per pass. Does
+    /// nothing when there is no live section, or when the newest one is frozen
+    /// — the same silence [`Account::record`] keeps, and for the same reason.
     pub fn record_waiting(&mut self, files: usize, bytes: u64, at: Instant) {
         let Some(section) = self.sections.last_mut() else {
             return;
@@ -796,8 +734,8 @@ impl Account {
     /// answer, and it was warlock that refused it.
     ///
     /// Pushed rather than extended, and silent when there is no live section or
-    /// the newest one is frozen, for the reasons
-    /// [`Account::record_summarising`] gives.
+    /// the newest one is frozen, for the reasons [`Account::record_waiting`]
+    /// gives.
     pub fn record_rejected(
         &mut self,
         defects: &[String],
@@ -1425,8 +1363,7 @@ mod tests {
     #[test]
     fn writing_after_something_else_opens_a_line_with_its_own_count() {
         // A stretch that ends and begins again — a tool call between two text
-        // blocks, and a summarising pass between two directories' worth of
-        // work — counts its own block's bytes from its own instant, rather
+        // blocks — counts its own block's bytes from its own instant, rather
         // than continuing the earlier line's total.
         let base = Instant::now();
         let mut account = Account::new(base);
@@ -1435,7 +1372,7 @@ mod tests {
         account.record(&Activity::Writing { bytes: 2_048 }, at(base, 10));
         account.record(&tool("Read", "src/lib.rs"), at(base, 30));
         account.record(&Activity::Writing { bytes: 512 }, at(base, 40));
-        account.record_summarising("src/big.rs", 1, 3, at(base, 50));
+        account.record(&tool("Read", "src/big.rs"), at(base, 50));
         account.record(&Activity::Writing { bytes: 100 }, at(base, 60));
 
         assert_eq!(
@@ -1445,7 +1382,7 @@ mod tests {
                 "0:30 writing · 2.0 KB".to_owned(),
                 "0:40 Read src/lib.rs".to_owned(),
                 "0:50 writing · 512 bytes".to_owned(),
-                "1:00 summarising src/big.rs (1/3)".to_owned(),
+                "1:00 Read src/big.rs".to_owned(),
                 "1:30 writing · 100 bytes".to_owned(),
             ],
             "each stretch its own line, its own count and its own clock",
@@ -1611,64 +1548,7 @@ mod tests {
     }
 
     #[test]
-    fn a_summarising_pass_is_one_line_naming_the_file_and_its_fraction() {
-        let base = Instant::now();
-        let mut account = Account::new(base);
-
-        // The shape of a directory holding one file over the cap: a little
-        // thinking, then pass after pass over the pieces of that file, then the
-        // document. Each pass is its own line, in arrival order among the rest.
-        account.open_section("crates/engine", base);
-        account.record(&Activity::Thinking, at(base, 2));
-        account.record_summarising("crates/engine/Cargo.lock", 1, 3, at(base, 10));
-        account.record_summarising("crates/engine/Cargo.lock", 2, 3, at(base, 70));
-        account.record(&tool("Read", "src/lib.rs"), at(base, 130));
-        account.record_summarising("crates/engine/Cargo.lock", 3, 3, at(base, 131));
-        account.record(&Activity::Writing { bytes: 0 }, at(base, 190));
-
-        assert_eq!(
-            said(&account, at(base, 200)),
-            vec![
-                "crates/engine".to_owned(),
-                "0:10 thinking".to_owned(),
-                "1:10 summarising crates/engine/Cargo.lock (1/3)".to_owned(),
-                "2:10 summarising crates/engine/Cargo.lock (2/3)".to_owned(),
-                "2:11 Read src/lib.rs".to_owned(),
-                "3:10 summarising crates/engine/Cargo.lock (3/3)".to_owned(),
-                "3:20 writing".to_owned(),
-            ],
-        );
-        // Counted as well as drawn: a heading and six lines.
-        assert_eq!(account.line_count(), 7);
-    }
-
-    #[test]
-    fn a_run_of_summarising_passes_is_a_line_apiece_however_long_it_goes_on() {
-        let base = Instant::now();
-        let mut account = Account::new(base);
-
-        // Fourteen passes at half a minute each: the wait that draws as one
-        // motionless line today draws as fourteen, and none of them coalesces
-        // into the one above it.
-        account.open_section("crates/engine", base);
-        for part in 1..=14 {
-            account.record_summarising("Cargo.lock", part, 14, at(base, part as u64 * 30));
-        }
-
-        let rows = said(&account, at(base, 500));
-        assert_eq!(rows.len(), 15);
-        assert_eq!(rows[1], "1:00 summarising Cargo.lock (1/14)");
-        assert_eq!(rows[13], "7:00 summarising Cargo.lock (13/14)");
-        // The newest is the only one still moving.
-        assert_eq!(rows[14], "8:20 summarising Cargo.lock (14/14)");
-        assert_eq!(
-            said(&account, at(base, 900))[14],
-            "15:00 summarising Cargo.lock (14/14)",
-        );
-    }
-
-    #[test]
-    fn a_summarising_line_freezes_and_ticks_like_any_other() {
+    fn a_pushed_line_freezes_and_ticks_like_any_other() {
         let base = Instant::now();
         let mut account = Account::new(base);
 
@@ -1676,7 +1556,7 @@ mod tests {
         account.record(&Activity::Thinking, at(base, 1));
 
         // Its arrival freezes the line above it, at the instant it arrived.
-        account.record_summarising("Cargo.lock", 1, 2, at(base, 20));
+        account.record_waiting(11, 34 * 1024, at(base, 20));
         for now in [at(base, 20), at(base, 60), at(base, 900)] {
             assert_eq!(said(&account, now)[1], "0:20 thinking");
         }
@@ -1684,45 +1564,21 @@ mod tests {
         // And, being the newest, it counts up until something newer lands.
         assert_eq!(
             said(&account, at(base, 40))[2],
-            "0:40 summarising Cargo.lock (1/2)"
+            "0:40 waiting · 11 files, 34 KB"
         );
         assert_eq!(
             said(&account, at(base, 41))[2],
-            "0:41 summarising Cargo.lock (1/2)"
+            "0:41 waiting · 11 files, 34 KB"
         );
         account.record(&Activity::Writing { bytes: 0 }, at(base, 50));
         for now in [at(base, 50), at(base, 900)] {
-            assert_eq!(said(&account, now)[2], "0:50 summarising Cargo.lock (1/2)");
+            assert_eq!(said(&account, now)[2], "0:50 waiting · 11 files, 34 KB");
         }
 
-        // A section frozen by the next one opening stops with a summarising
-        // line under it exactly as it stops with anything else.
+        // A section frozen by the next one opening stops with a pushed line
+        // under it exactly as it stops with anything else.
         account.open_section("crates/tui", at(base, 80));
         assert_eq!(said(&account, at(base, 4_000))[3], "1:20 writing");
-    }
-
-    #[test]
-    fn no_summarising_line_is_filed_where_there_is_no_live_section() {
-        let base = Instant::now();
-        let mut account = Account::new(base);
-
-        // Before the first directory.
-        account.record_summarising("Cargo.lock", 1, 2, at(base, 1));
-        assert_eq!(account.line_count(), 0);
-
-        // And after the current one has been worded and frozen: swallowed
-        // whole, exactly as an activity is.
-        account.open_section("crates/engine", at(base, 2));
-        account.close_section(&Outcome::Cancelled, at(base, 3));
-        account.record_summarising("Cargo.lock", 1, 2, at(base, 4));
-
-        assert_eq!(
-            said(&account, at(base, 9)),
-            vec![
-                "crates/engine".to_owned(),
-                "0:01 cancelled — nothing reported spent".to_owned(),
-            ],
-        );
     }
 
     #[test]
@@ -1795,16 +1651,15 @@ mod tests {
     }
 
     #[test]
-    fn a_handed_over_request_lands_below_the_summarising_passes_before_it() {
+    fn a_handed_over_request_lands_below_whatever_spoke_before_it() {
         let base = Instant::now();
         let mut account = Account::new(base);
 
-        // A directory holding a file over the cap: the summarising passes speak
-        // first, so the placeholder never appears at all, and the request line
-        // lands under them like any other line.
+        // Anything filed before the handover means the placeholder never
+        // appears at all, and the request line lands under it like any other.
         account.open_section("crates/engine", base);
-        account.record_summarising("crates/engine/Cargo.lock", 1, 2, at(base, 10));
-        account.record_summarising("crates/engine/Cargo.lock", 2, 2, at(base, 70));
+        account.record(&tool("Read", "Cargo.lock"), at(base, 10));
+        account.record(&tool("Read", "src/lib.rs"), at(base, 70));
         account.record_waiting(11, 34 * 1024, at(base, 130));
         account.record(&Activity::Thinking, at(base, 190));
 
@@ -1812,8 +1667,8 @@ mod tests {
             said(&account, at(base, 200)),
             vec![
                 "crates/engine".to_owned(),
-                "1:10 summarising crates/engine/Cargo.lock (1/2)".to_owned(),
-                "2:10 summarising crates/engine/Cargo.lock (2/2)".to_owned(),
+                "1:10 Read Cargo.lock".to_owned(),
+                "2:10 Read src/lib.rs".to_owned(),
                 // Frozen where thinking began: the wait for this pass's first
                 // word was a minute.
                 "3:10 waiting · 11 files, 34 KB".to_owned(),
@@ -1853,7 +1708,7 @@ mod tests {
         let mut account = Account::new(base);
 
         // Before the first directory, and after the current one has been worded
-        // and frozen: the same silence `record` and `record_summarising` keep.
+        // and frozen: the same silence `record` keeps.
         account.record_waiting(11, 34 * 1024, at(base, 1));
         assert_eq!(account.line_count(), 0);
 

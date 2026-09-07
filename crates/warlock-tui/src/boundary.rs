@@ -50,7 +50,6 @@
 use std::path::Path;
 
 use warlock_engine::{Manifest, closed_scopes_at_or_below, scope_covering, scope_opens_to};
-use warlock_tui::Sigils;
 
 /// How far a boundary question reaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +116,18 @@ impl Verdict {
 /// The one place the question is decided. Both doors call it, neither adds to
 /// it, and nothing about which door asked reaches in here.
 ///
+/// `held` is what this machine holds, and it is a plain slice rather than the
+/// header's [`Sigils`](warlock_tui::Sigils): the decision is two-valued —
+/// either a held sigil matches the covering scope or none does — and the
+/// header's third state, a config that would not parse, is a thing to *say*
+/// rather than a third answer to give. Flattening it is
+/// [`Sigils::as_slice`](warlock_tui::Sigils::as_slice)'s, where the reading is
+/// argued: a machine that has recorded nothing and one whose config is broken
+/// are both refused by every scope, exactly as one holding the wrong sigil is.
+/// Taking the flattened fact is what keeps a change to the header from being a
+/// change to who may write, and what lets the shell's doors reach this without
+/// building a value whose other half is a line they never print.
+///
 /// A path with no manifest-relative spelling answers [`Verdict::Open`] rather
 /// than refusing. It is not a boundary question — it takes a tree rooted outside
 /// its own repository to reach — and every caller has a better sentence for it
@@ -126,16 +137,9 @@ pub(crate) fn verdict(
     directory: &Path,
     repo_root: &Path,
     manifest: &Manifest,
-    sigils: &Sigils,
+    held: &[String],
     reach: Reach,
 ) -> Verdict {
-    // `Nothing` and `Unknown` are both the empty slice on the way in
-    // (`Sigils::as_slice`), which is what closes every scoped directory to a
-    // machine that has never been configured and to one whose config will not
-    // parse. An operator who has recorded nothing is refused by every scope,
-    // exactly as one holding the wrong sigil is.
-    let held = sigils.as_slice();
-
     let covering = scope_covering(directory, repo_root, manifest)
         .ok()
         .flatten();
@@ -234,11 +238,9 @@ mod tests {
 
     /// What a machine holding `sigils` is answered about `module`, at `reach`.
     fn asked(manifest: &Manifest, module: &str, sigils: &[&str], reach: Reach) -> Verdict {
-        let held = Sigils::held(sigils.iter().copied());
+        let held: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
         verdict(&at(module), &PathBuf::from(ROOT), manifest, &held, reach)
     }
-
-    use warlock_tui::Sigils;
 
     #[test]
     fn a_directory_nothing_covers_is_open_to_anyone() {

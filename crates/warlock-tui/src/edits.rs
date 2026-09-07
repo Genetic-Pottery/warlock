@@ -60,8 +60,8 @@
 //! that is scoped are all decided in `crates/warlock-engine/src/scope.rs` and
 //! nowhere else. What is held is [`sigils_under`]'s answer, which is the
 //! header's own reading of the file `warlock config` writes: both
-//! [`Sigils::Nothing`] — nobody has run `warlock config` on this machine — and
-//! [`Sigils::Unknown`] — the config is there and will not parse — hold nothing,
+//! [`Sigils::Nothing`](warlock_tui::Sigils::Nothing) — nobody has run `warlock config` on this machine — and
+//! [`Sigils::Unknown`](warlock_tui::Sigils::Unknown) — the config is there and will not parse — hold nothing,
 //! so a scoped directory refuses them both. There is no `--force`, no
 //! environment variable and no flag past this: `warlock config` is the one road.
 //!
@@ -159,7 +159,6 @@
 use std::path::{Path, PathBuf};
 
 use warlock_engine::{Manifest, PactEntry, unpact_subtree, validate_scope};
-use warlock_tui::Sigils;
 
 use crate::boundary::{Reach, Verdict, verdict};
 use crate::error::Error;
@@ -189,7 +188,7 @@ use crate::standing::{FOR_SCOPE_ADD, FOR_SCOPE_REMOVE, FOR_UNPACT, Standing};
 ///
 /// Three of the fields are the whole of what such a write needs: where the
 /// manifest lives, what it currently says, and where the reader pointed. The
-/// fourth is this machine's sigils, kept because there is a *second* boundary
+/// fourth is what this machine holds, kept because there is a *second* boundary
 /// question and exactly one of the three writes asks it: an un-pact reaches
 /// below the path it was handed and drops the scopes it finds there, so
 /// [`Opened::unpacted`] asks what the act would reach after this constructor has
@@ -213,7 +212,7 @@ pub(crate) struct Opened {
     /// `warlock config` writes, for the one question that is left to ask:
     /// whether an un-pact of `target` would drop a boundary it does not hold.
     /// Read by [`Opened::unpacted`] and by nothing else.
-    sigils: Sigils,
+    held: Vec<String>,
 }
 
 impl Opened {
@@ -249,14 +248,19 @@ impl Opened {
         // check reads from disk is read inside the check. A home that cannot be
         // resolved is nothing held rather than a config that would not read:
         // there is no file in that case, so there is nothing broken to report.
-        let sigils = home.map_or(Sigils::Nothing, |home| sigils_under(home, &repo_root));
+        // Flattened here, at the door: what the shell needs is the two-valued
+        // fact the gate takes, and the third state is a line only the header
+        // and `warlock check` ever print. See `boundary::verdict`.
+        let held: Vec<String> = home.map_or_else(Vec::new, |home| {
+            sigils_under(home, &repo_root).as_slice().to_vec()
+        });
         // The decision is [`verdict`]'s, and this is the shell's half of what to
         // do about it: an `Error`, which carries the exit status and prints the
         // very sentence the panel's footer says. The panel renders the same
         // verdict onto the footer and neither of them works the answer out for
         // itself. See `boundary.rs`.
         if let Verdict::Closed { scope } =
-            verdict(&target, &repo_root, &manifest, &sigils, Reach::Here)
+            verdict(&target, &repo_root, &manifest, &held, Reach::Here)
         {
             return Err(Error::ClosedScope {
                 // Refused paths are spellable by construction: a path with no
@@ -272,7 +276,7 @@ impl Opened {
             repo_root,
             manifest,
             target,
-            sigils,
+            held,
         })
     }
 
@@ -374,7 +378,7 @@ impl Opened {
             &self.target,
             &self.repo_root,
             &self.manifest,
-            &self.sigils,
+            &self.held,
             Reach::HereAndBelow,
         ) {
             return Err(Error::ClosedScopeBelow { path, scopes });

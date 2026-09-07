@@ -151,7 +151,7 @@ const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes 
 /// It names the way in, because the way in is the one thing a reader who has
 /// just been refused cannot work out from the screen: the border title says
 /// which register the conversation is in, and this says which register `/write`
-/// wants and what puts it there. Decided from [`App::mode`] — the very state
+/// wants and what puts it there. Decided from [`Panel::mode`](warlock_tui::Panel::mode) — the very state
 /// that title is drawn from — so the refusal and the header cannot disagree.
 const NOT_BRIEFING: &str = "/write is only in brief mode — /brief enters it";
 
@@ -439,7 +439,7 @@ impl<C: Converses> Chat<C> {
     /// is the only way of keeping.
     ///
     /// Everything else is identical to a typed message, deliberately and by
-    /// construction rather than by resemblance: the same [`App::start_turn`], the
+    /// construction rather than by resemblance: the same [`Panel::start_turn`](warlock_tui::Panel::start_turn), the
     /// same [`start_turn`] worker, the same channel, the same say-when and the
     /// same drain at the bottom of the loop. So the instruction's reply lands
     /// under it like any other answer, its work lines are clocked from the
@@ -462,8 +462,12 @@ impl<C: Converses> Chat<C> {
         asked: Asked,
         now: Instant,
     ) {
-        app.start_turn(shown, now);
-        self.turn = Some(start_turn(sent, &asking(&self.agent, app.mode()), asked));
+        app.panel_mut().start_turn(shown, now);
+        self.turn = Some(start_turn(
+            sent,
+            &asking(&self.agent, app.panel().mode()),
+            asked,
+        ));
         self.settle_field();
     }
 
@@ -562,7 +566,7 @@ impl<C: Converses> Chat<C> {
     /// A **message** is what it always was: it goes on the thread as a new turn —
     /// which is also what brings the thread card to the front, so the reader is
     /// looking at the conversation from the instant they asked rather than from
-    /// whenever the model first says something (see [`App::start_turn`]) — and then
+    /// whenever the model first says something (see [`Panel::start_turn`](warlock_tui::Panel::start_turn)) — and then
     /// the worker: [`chatting::start_turn`] owns the channel, the say-when and this
     /// turn's copy of the agent, and what comes back is the one value the loop keeps
     /// about a turn it is not performing. Nothing is waited for here — everything
@@ -578,7 +582,7 @@ impl<C: Converses> Chat<C> {
     /// file or no `directory`.
     ///
     /// **`/brief`** is two things in the order the reader experiences them: the mode,
-    /// and one ordinary turn. [`App::set_mode`] answers whether that was a *change*,
+    /// and one ordinary turn. [`Panel::set_mode`](warlock_tui::Panel::set_mode) answers whether that was a *change*,
     /// and a change is worth exactly one unclocked note ([`BRIEF_NOTE`]) at the point
     /// in the history the command was typed — where a `/brief` typed in brief mode is
     /// a re-send with nothing new to say about the register and adds none. Then the
@@ -632,7 +636,7 @@ impl<C: Converses> Chat<C> {
     /// Outside brief mode it is refused, on [`ALREADY_CHATTING`]'s rule: one
     /// unclocked line ([`NOT_BRIEFING`]) and no turn, because there is no document
     /// being converged on and asking for one anyway is a screenful of invention
-    /// nobody wanted. The decision is read off [`App::mode`], which is the same
+    /// nobody wanted. The decision is read off [`Panel::mode`](warlock_tui::Panel::mode), which is the same
     /// state the panel's border title is drawn from, so the line and the title can
     /// never disagree about which register the conversation is in.
     ///
@@ -705,8 +709,8 @@ impl<C: Converses> Chat<C> {
                             // it: that is the whole of what makes the file edited
                             // between two briefs take effect without a restart.
                             self.directory = directory;
-                            if app.set_mode(Mode::Brief) {
-                                app.note(BRIEF_NOTE, now);
+                            if app.panel_mut().set_mode(Mode::Brief) {
+                                app.panel_mut().note(BRIEF_NOTE, now);
                             }
                             self.say(app, BRIEF_COMMAND, &instruction, Asked::Answer, now);
                         }
@@ -715,18 +719,18 @@ impl<C: Converses> Chat<C> {
                         // own default quietly put in its place. See
                         // [`brief_reading`], [`unreadable_template`] and
                         // [`unreadable_briefs`].
-                        Err(line) => app.note(line, now),
+                        Err(line) => app.panel_mut().note(line, now),
                     },
                     // The same, one way only: there is no register to leave in chat
                     // mode, so the command says so on the card and stops. A turn
                     // spent telling the model it is where it already was would be a
                     // question nobody asked and money nobody meant to spend.
                     Submitted::Chat => {
-                        if app.set_mode(Mode::Chat) {
-                            app.note(CHAT_NOTE, now);
+                        if app.panel_mut().set_mode(Mode::Chat) {
+                            app.panel_mut().note(CHAT_NOTE, now);
                             self.say(app, CHAT_COMMAND, CHAT_INSTRUCTION, Asked::Answer, now);
                         } else {
-                            app.note(ALREADY_CHATTING, now);
+                            app.panel_mut().note(ALREADY_CHATTING, now);
                         }
                     }
                     // The artifact, asked for as one ordinary turn — and only where
@@ -735,10 +739,10 @@ impl<C: Converses> Chat<C> {
                     // the state the border title is drawn from and two readings of
                     // the register would eventually be two answers.
                     Submitted::Write => {
-                        if app.mode() == Mode::Brief {
+                        if app.panel().mode() == Mode::Brief {
                             self.say(app, WRITE_COMMAND, WRITE_INSTRUCTION, Asked::Document, now);
                         } else {
-                            app.note(NOT_BRIEFING, now);
+                            app.panel_mut().note(NOT_BRIEFING, now);
                         }
                     }
                     // The one that stops here, without a question and without a
@@ -747,7 +751,7 @@ impl<C: Converses> Chat<C> {
                     // written down in one place.
                     said @ Submitted::Refused => {
                         if let Some(line) = said.refusal() {
-                            app.note(line, now);
+                            app.panel_mut().note(line, now);
                         }
                     }
                 }
@@ -1005,7 +1009,7 @@ pub(crate) fn spawn_turn<C: Converses>(
 /// has said stop to.
 ///
 /// Nothing is said to the app here. The reader's message goes on the thread card
-/// by [`App::start_turn`](warlock_tui::App::start_turn), at the keystroke, so
+/// by [`Panel::start_turn`](warlock_tui::Panel::start_turn), at the keystroke, so
 /// that the question is on screen from the moment it is asked rather than from
 /// whenever the model first says something.
 ///
@@ -1114,7 +1118,7 @@ pub(crate) fn apply_turn(
             // and not this file's — a tool is its name and its one detail,
             // thinking and writing are the words for them, and a cost is summed
             // rather than drawn. See `Thread::record`.
-            Ok(TurnEvent::Doing(activity)) => app.record_turn(&activity, now),
+            Ok(TurnEvent::Doing(activity)) => app.panel_mut().record_turn(&activity, now),
             Ok(TurnEvent::Finished(finished)) => break Some(finished),
             // Still going, and nothing new to say.
             Err(TryRecvError::Empty) => return None,
@@ -1135,7 +1139,7 @@ pub(crate) fn apply_turn(
             // and a `/write` whose answer went to the loop instead of the thread
             // would be a document nobody could read.
             let document = (asked == Asked::Document).then(|| answer.clone());
-            app.answer_turn(answer, now);
+            app.panel_mut().answer_turn(answer, now);
             document
         }
         Some(Err(ending)) => {
@@ -1166,7 +1170,7 @@ pub(crate) fn apply_turn(
 /// as ordinary as the last.
 fn end(app: &mut App, ending: &Ending, now: Instant) {
     app.set_message(ending.line());
-    app.end_turn(ending, now);
+    app.panel_mut().end_turn(ending, now);
 }
 
 /// What one turn on a worker thread does: what it says on the way, what it ends
@@ -1202,12 +1206,12 @@ mod tests {
     /// and the loop's end of the channel that turn reports on.
     ///
     /// Everything a submitted message leaves behind at the keystroke: the
-    /// question is on the card already — [`App::start_turn`] put it there — and
+    /// question is on the card already — [`Panel::start_turn`](warlock_tui::Panel::start_turn) put it there — and
     /// the worker is represented by a receiver this test sends down itself.
     fn asking(base: Instant) -> (App, Sender<TurnEvent>, Option<Chatting>) {
         let (events, received) = mpsc::channel();
         let mut app = App::default();
-        app.start_turn(ASKED, base);
+        app.panel_mut().start_turn(ASKED, base);
         (app, events, Some(chatting(received)))
     }
 
@@ -1249,7 +1253,10 @@ mod tests {
 
     /// Every row of the app's thread card, clocked against `now`.
     fn rows(app: &App, now: Instant) -> Vec<Line> {
-        app.thread().expect("a question has been asked").lines(now)
+        app.panel()
+            .thread()
+            .expect("a question has been asked")
+            .lines(now)
     }
 
     /// The reader's own message as the card draws it.
@@ -1343,7 +1350,7 @@ mod tests {
         let base = Instant::now();
         let (events, received) = mpsc::channel();
         let mut app = App::default();
-        app.start_turn("/write", base);
+        app.panel_mut().start_turn("/write", base);
         let mut chat = Some(writing(received));
 
         events
@@ -1402,7 +1409,7 @@ mod tests {
             let base = Instant::now();
             let (events, received) = mpsc::channel();
             let mut app = App::default();
-            app.start_turn("/write", base);
+            app.panel_mut().start_turn("/write", base);
             let mut chat = Some(writing(received));
 
             events
@@ -1426,7 +1433,7 @@ mod tests {
         let base = Instant::now();
         let (events, received) = mpsc::channel();
         let mut app = App::default();
-        app.start_turn("/write", base);
+        app.panel_mut().start_turn("/write", base);
         let mut chat = Some(writing(received));
 
         drop(events);
@@ -1443,7 +1450,7 @@ mod tests {
         let base = Instant::now();
         let (events, received) = mpsc::channel();
         let mut app = App::default();
-        app.start_turn("/write", base);
+        app.panel_mut().start_turn("/write", base);
         let mut chat = Some(writing(received));
 
         events
@@ -1496,6 +1503,7 @@ mod tests {
             // failure is two things to keep in step.
             assert_eq!(app.message(), Some(ending.line().as_str()), "{ending:?}");
             let turn = app
+                .panel()
                 .thread()
                 .and_then(|thread| thread.turns().last().map(|turn| (**turn).clone()))
                 .expect("the turn is on the card");
@@ -1578,7 +1586,8 @@ mod tests {
         // the failed one still on the card above it.
         let (again, received) = mpsc::channel();
         let mut chat = Some(chatting(received));
-        app.start_turn("and which of those is the biggest?", at(base, 10));
+        app.panel_mut()
+            .start_turn("and which of those is the biggest?", at(base, 10));
         again
             .send(TurnEvent::Finished(Ok("The engine.".to_owned())))
             .expect("the loop is still listening");
@@ -1710,9 +1719,11 @@ mod tests {
 
         // The register was really entered and really left — otherwise the
         // vectors below would be equal for the dullest of reasons.
-        assert_eq!(app.mode(), Mode::Chat);
+        assert_eq!(app.panel().mode(), Mode::Chat);
         assert_eq!(
-            app.thread().map_or(0, |thread| thread.turns().len()),
+            app.panel()
+                .thread()
+                .map_or(0, |thread| thread.turns().len()),
             4,
             "the commands did not cost the four turns they are supposed to",
         );
@@ -2141,7 +2152,7 @@ mod tests {
         fn a_whole_turn_reaches_the_card_the_way_the_loop_drives_it() {
             let base = Instant::now();
             let mut app = App::default();
-            app.start_turn(ASKED, base);
+            app.panel_mut().start_turn(ASKED, base);
             let mut chat = Some(chatting(spawn_turn(
                 ASKED,
                 &stand_in(&printing(&TURN)),
@@ -2324,7 +2335,7 @@ mod tests {
             let directory = scratch("write-answers");
             let base = Instant::now();
             let mut app = App::default();
-            app.set_mode(Mode::Brief);
+            app.panel_mut().set_mode(Mode::Brief);
             let mut chat = Chat::with_agent(NO_REPOSITORY, stand_in(&printing(&TURN)));
 
             chat.say(
@@ -2363,7 +2374,11 @@ mod tests {
                 ],
                 "the document left the card it was answered on"
             );
-            assert_eq!(app.mode(), Mode::Brief, "the register moved for a write");
+            assert_eq!(
+                app.panel().mode(),
+                Mode::Brief,
+                "the register moved for a write"
+            );
             clean_up(&directory);
         }
 
@@ -2387,7 +2402,7 @@ mod tests {
             );
             let base = Instant::now();
             let mut app = App::default();
-            app.set_mode(Mode::Brief);
+            app.panel_mut().set_mode(Mode::Brief);
             let mut chat = Chat::with_agent(NO_REPOSITORY, stand_in(&script));
 
             chat.say(
@@ -2417,7 +2432,11 @@ mod tests {
                     clocked(1, &line),
                 ]
             );
-            assert_eq!(app.mode(), Mode::Brief, "a failed write left the register");
+            assert_eq!(
+                app.panel().mode(),
+                Mode::Brief,
+                "a failed write left the register"
+            );
 
             // And the conversation goes on: the next question is asked into the
             // very `Chat` the write failed in.
@@ -2584,14 +2603,17 @@ mod tests {
         /// Every row of the app's thread card, or none at all when nothing has
         /// put a card there.
         fn rows(app: &App, now: Instant) -> Vec<Line> {
-            app.thread()
+            app.panel()
+                .thread()
                 .map(|thread| thread.lines(now))
                 .unwrap_or_default()
         }
 
         /// How many turns the thread holds, card or no card.
         fn turns(app: &App) -> usize {
-            app.thread().map_or(0, |thread| thread.turns().len())
+            app.panel()
+                .thread()
+                .map_or(0, |thread| thread.turns().len())
         }
 
         /// The path a `/write` would pre-fill for a mode pointed at
@@ -2677,7 +2699,11 @@ mod tests {
             for draft in ["/write", "  /write  "] {
                 let (app, chat) = submit(draft, now);
 
-                assert_eq!(app.mode(), Mode::Chat, "{draft:?} moved the register");
+                assert_eq!(
+                    app.panel().mode(),
+                    Mode::Chat,
+                    "{draft:?} moved the register"
+                );
                 assert_eq!(
                     rows(&app, now),
                     vec![note(NOT_BRIEFING)],
@@ -2719,7 +2745,7 @@ mod tests {
             submit_into(&mut app, &mut chat, "/brief", now);
             submit_into(&mut app, &mut chat, "  /write  ", now);
 
-            assert_eq!(app.mode(), Mode::Brief, "/write moved the register");
+            assert_eq!(app.panel().mode(), Mode::Brief, "/write moved the register");
             assert_eq!(
                 rows(&app, now),
                 [
@@ -2761,7 +2787,11 @@ mod tests {
             for draft in ["/brief", "  /brief  "] {
                 let (app, chat) = submit(draft, now);
 
-                assert_eq!(app.mode(), Mode::Brief, "{draft:?} did not enter the mode");
+                assert_eq!(
+                    app.panel().mode(),
+                    Mode::Brief,
+                    "{draft:?} did not enter the mode"
+                );
                 assert_eq!(
                     rows(&app, now),
                     [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
@@ -2791,7 +2821,7 @@ mod tests {
 
             submit_into(&mut app, &mut chat, "/brief", now);
 
-            assert_eq!(app.mode(), Mode::Brief, "the mode was not entered");
+            assert_eq!(app.panel().mode(), Mode::Brief, "the mode was not entered");
             assert_eq!(
                 rows(&app, now),
                 [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
@@ -2825,7 +2855,7 @@ mod tests {
 
             submit_into(&mut app, &mut chat, "/brief", now);
 
-            assert_eq!(app.mode(), Mode::Brief, "the mode was not entered");
+            assert_eq!(app.panel().mode(), Mode::Brief, "the mode was not entered");
             assert_eq!(turns(&app), 1, "the brief did not open one turn");
             assert!(chat.answering());
 
@@ -2864,7 +2894,7 @@ mod tests {
 
             submit_into(&mut app, &mut chat, "/brief", now);
 
-            assert_eq!(app.mode(), Mode::Chat, "a refusal entered the mode");
+            assert_eq!(app.panel().mode(), Mode::Chat, "a refusal entered the mode");
             assert_eq!(turns(&app), 0, "a refusal spent a turn");
             assert!(!chat.answering(), "a refusal asked the model something");
             assert!(chat.composer().draft().is_empty());
@@ -2898,7 +2928,11 @@ mod tests {
             fs::write(&path, "## Ours\n\nsay the thing.").expect("a template file");
             submit_into(&mut app, &mut chat, "/brief", now);
 
-            assert_eq!(app.mode(), Mode::Brief, "the mode was still not entered");
+            assert_eq!(
+                app.panel().mode(),
+                Mode::Brief,
+                "the mode was still not entered"
+            );
             assert_eq!(turns(&app), 1, "the second brief opened no turn");
         }
 
@@ -2920,7 +2954,7 @@ mod tests {
 
             submit_into(&mut app, &mut chat, "/brief", now);
 
-            assert_eq!(app.mode(), Mode::Brief, "the mode was not entered");
+            assert_eq!(app.panel().mode(), Mode::Brief, "the mode was not entered");
             assert_eq!(turns(&app), 1, "the brief did not open one turn");
             assert_eq!(rows(&app, now).len(), 1 + 2, "something was said about it");
             assert_eq!(chat.directory(), DEFAULT_BRIEF_DIRECTORY);
@@ -2947,7 +2981,7 @@ mod tests {
 
             submit_into(&mut app, &mut chat, "/brief", now);
 
-            assert_eq!(app.mode(), Mode::Brief, "the mode was not entered");
+            assert_eq!(app.panel().mode(), Mode::Brief, "the mode was not entered");
             assert_eq!(
                 rows(&app, now),
                 [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
@@ -2986,7 +3020,7 @@ mod tests {
 
             submit_into(&mut app, &mut chat, "/brief", now);
 
-            assert_eq!(app.mode(), Mode::Chat, "a refusal entered the mode");
+            assert_eq!(app.panel().mode(), Mode::Chat, "a refusal entered the mode");
             assert_eq!(turns(&app), 0, "a refusal spent a turn");
             assert!(!chat.answering(), "a refusal asked the model something");
             assert!(chat.composer().draft().is_empty());
@@ -3017,7 +3051,11 @@ mod tests {
             fs::write(&path, "directory = \"plans\"\n").expect("a briefs config");
             submit_into(&mut app, &mut chat, "/brief", now);
 
-            assert_eq!(app.mode(), Mode::Brief, "the mode was still not entered");
+            assert_eq!(
+                app.panel().mode(),
+                Mode::Brief,
+                "the mode was still not entered"
+            );
             assert_eq!(turns(&app), 1, "the second brief opened no turn");
             assert_eq!(chat.directory(), "plans");
         }
@@ -3039,7 +3077,7 @@ mod tests {
 
             submit_into(&mut app, &mut chat, "/brief", now);
 
-            assert_eq!(app.mode(), Mode::Chat, "a refusal entered the mode");
+            assert_eq!(app.panel().mode(), Mode::Chat, "a refusal entered the mode");
             assert_eq!(turns(&app), 0, "a refusal spent a turn");
             let said = rows(&app, now);
             assert_eq!(said.len(), 1, "two files, two lines: {said:?}");
@@ -3057,7 +3095,7 @@ mod tests {
             submit_into(&mut app, &mut chat, "/brief", now);
 
             assert_eq!(
-                app.mode(),
+                app.panel().mode(),
                 Mode::Chat,
                 "the second refusal entered the mode"
             );
@@ -3143,7 +3181,7 @@ mod tests {
                 "notes/adr",
                 "the second /brief re-read nothing"
             );
-            assert_eq!(app.mode(), Mode::Brief);
+            assert_eq!(app.panel().mode(), Mode::Brief);
             assert_eq!(turns(&app), 2, "the second /brief cost no turn");
         }
 
@@ -3159,7 +3197,7 @@ mod tests {
             submit_into(&mut app, &mut chat, "/brief", now);
             submit_into(&mut app, &mut chat, "/brief", now);
 
-            assert_eq!(app.mode(), Mode::Brief);
+            assert_eq!(app.panel().mode(), Mode::Brief);
             assert_eq!(
                 rows(&app, now),
                 [
@@ -3184,7 +3222,11 @@ mod tests {
             submit_into(&mut app, &mut chat, "/brief", now);
             submit_into(&mut app, &mut chat, "/chat", now);
 
-            assert_eq!(app.mode(), Mode::Chat, "/chat did not leave the mode");
+            assert_eq!(
+                app.panel().mode(),
+                Mode::Chat,
+                "/chat did not leave the mode"
+            );
             assert_eq!(
                 rows(&app, now),
                 [
@@ -3207,7 +3249,7 @@ mod tests {
             let now = Instant::now();
             let (app, chat) = submit("/chat", now);
 
-            assert_eq!(app.mode(), Mode::Chat);
+            assert_eq!(app.panel().mode(), Mode::Chat);
             assert_eq!(rows(&app, now), vec![note(ALREADY_CHATTING)]);
             assert_eq!(turns(&app), 0, "/chat in chat mode opened a turn");
             assert!(!chat.answering(), "/chat in chat mode asked the model");
@@ -3282,20 +3324,22 @@ mod tests {
             // One turn that was worked at and answered, and one that ended
             // without an answer: both are things a mode change could drop.
             submit_into(&mut app, &mut chat, "why nine passes?", now);
-            app.record_turn(
+            app.panel_mut().record_turn(
                 &Activity::Tool {
                     name: "Read".to_owned(),
                     detail: Some("crates/warlock-engine/src/lib.rs".to_owned()),
                 },
                 now,
             );
-            app.record_turn(&Activity::Thinking, now);
-            app.answer_turn("One pass per directory, bottom up.", now);
+            app.panel_mut().record_turn(&Activity::Thinking, now);
+            app.panel_mut()
+                .answer_turn("One pass per directory, bottom up.", now);
             submit_into(&mut app, &mut chat, "and the manifest?", now);
-            app.end_turn(&Ending::NothingSaid, now);
+            app.panel_mut().end_turn(&Ending::NothingSaid, now);
 
             let before = rows(&app, later);
             let asked_already: Vec<_> = app
+                .panel()
                 .thread()
                 .expect("two questions were asked")
                 .turns()
@@ -3333,6 +3377,7 @@ mod tests {
             // And the turns under those rows: the message, the answer and the
             // ending of each, unchanged and in the order they were asked in.
             let asked_now: Vec<_> = app
+                .panel()
                 .thread()
                 .expect("the conversation is still there")
                 .turns()
@@ -3349,7 +3394,11 @@ mod tests {
                 asked_already.len() + 2,
                 "the two commands did not cost the two turns they are supposed to"
             );
-            assert_eq!(app.mode(), Mode::Chat, "the register was never left");
+            assert_eq!(
+                app.panel().mode(),
+                Mode::Chat,
+                "the register was never left"
+            );
         }
 
         #[test]

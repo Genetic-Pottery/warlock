@@ -41,8 +41,8 @@ use warlock_engine::{
     to_manifest_path,
 };
 use warlock_tui::{
-    Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactToggle, Run, Section, Sigils,
-    Wired,
+    Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactIntent, PactToggle, Run, Section,
+    Sigils, Wired,
 };
 
 use crate::boundary::{Reach, Verdict, verdict};
@@ -494,12 +494,12 @@ impl Drop for CancelGuard {
 /// What a worker thread has to say for itself.
 ///
 /// Six things, and the order of two of them is fixed: one
-/// [`PactEvent::Starting`] per directory as the run reaches it, any number of
-/// [`PactEvent::Summarising`] from the passes over the big files inside it, at
-/// most one [`PactEvent::Requesting`] as that directory's own request is handed
-/// over, any number of [`PactEvent::Doing`] from the pass that then runs, at
-/// most one [`PactEvent::Documented`] per directory as its pass delivers, and
-/// then exactly one [`PactEvent::Finished`]. Nothing else is sent, and nothing
+/// [`PactEvent::Starting`] per directory as the run reaches it, at most one
+/// [`PactEvent::Requesting`] as that directory's own request is handed over,
+/// any number of [`PactEvent::Doing`] from the pass that then runs, any number
+/// of [`PactEvent::Rejected`] for an answer the schema turns down, at most one
+/// [`PactEvent::Documented`] per directory as its pass delivers, and then
+/// exactly one [`PactEvent::Finished`]. Nothing else is sent, and nothing
 /// is sent after the outcome — the worker drops its end of the channel and
 /// stops.
 ///
@@ -537,8 +537,7 @@ pub(crate) enum PactEvent {
     /// nothing is said, and the two numbers are the whole of what a reader can
     /// use to explain why this directory is slow.
     ///
-    /// Carries no directory, for [`Doing`](PactEvent::Doing)'s reason and
-    /// [`Summarising`](PactEvent::Summarising)'s: the
+    /// Carries no directory, for [`Doing`](PactEvent::Doing)'s reason: the
     /// [`Starting`](PactEvent::Starting) before it already named the one whose
     /// request this is. It is deliberately not folded into that `Starting`
     /// either, because neither number is true when `Starting` is sent — see
@@ -633,9 +632,9 @@ fn activity_port(events: &Sender<PactEvent>) -> Activities {
 /// place a stop can come from — nobody but a person at a keyboard decides that a
 /// pact has gone on long enough.
 ///
-/// The summarising passes inside a directory go out the same way and ask
-/// nothing: they are an announcement of what is being paid for while it is
-/// being paid for, and the port answers them with a send and nothing else.
+/// The announcements inside a directory go out the same way and ask nothing:
+/// they say what is being paid for while it is being paid for, and the port
+/// answers them with a send and nothing else.
 ///
 /// The handle is read before anything is sent, so a cancelled run neither
 /// announces a directory it will not work nor works it. The engine's rule that
@@ -667,18 +666,16 @@ impl pact::Observer for Reporting<'_> {
         Pacting::Continue
     }
 
-    /// Pass the two numbers on, exactly as `summarising` is passed on and with
-    /// the same shrug at a send that fails.
+    /// Pass the two numbers on, with a shrug at a send that fails.
     ///
-    /// No cancellation check of its own, for `summarising`'s reason: the
-    /// request is handed to the pass in the next breath, the engine asks
-    /// nothing here, and the one place a pact stops is still the question
-    /// asked between directories above.
+    /// No cancellation check of its own: the request is handed to the pass in
+    /// the next breath, the engine asks nothing here, and the one place a pact
+    /// stops is still the question asked between directories above.
     fn requesting(&mut self, files: usize, bytes: u64) {
         let _ = self.events.send(PactEvent::Requesting { files, bytes });
     }
 
-    /// Pass the refusal on as text, exactly as `summarising` is passed on and
+    /// Pass the refusal on as text, exactly as `requesting` is passed on and
     /// with the same shrug at a send that fails. The defects travel as their
     /// one-line renderings rather than as the engine's type, because a line is
     /// all the panel will ever do with one.
@@ -690,7 +687,7 @@ impl pact::Observer for Reporting<'_> {
         });
     }
 
-    /// Pass the announcement on, exactly as `summarising` is passed on and
+    /// Pass the announcement on, exactly as `requesting` is passed on and
     /// with the same shrug at a send that fails.
     fn documented(&mut self, directory: &Path) {
         let _ = self.events.send(PactEvent::Documented {
@@ -960,7 +957,19 @@ fn pact_press(
     if blocked_unpact(app, manifest, repo_root, sigils) {
         return None;
     }
-    let toggle = app.toggle_pact()?;
+    // Both boundary questions are past, so what is left is the app's own
+    // rules about the row. Asked and then carried out, rather than in one
+    // painting call, so the press acted on is provably the press the two
+    // questions above were asked about.
+    let toggle = match app.pact_intent() {
+        PactIntent::Toggles(toggle) => toggle,
+        PactIntent::Refused(message) => {
+            app.set_message(message);
+            return None;
+        }
+        PactIntent::NoRow => return None,
+    };
+    app.apply_toggle(&toggle);
     if toggle.pacted {
         app.start_account(at);
     }
@@ -976,24 +985,26 @@ fn pact_press(
 /// an outcome into a sentence would be a second place deciding what a refused
 /// press means.
 ///
-/// # The direction is read off the row, and it has to be read here
+/// # The direction is asked of the app, not worked out again
 ///
-/// `p` is one key with two meanings, and which one it has is
-/// `!row.state.is_pacted()` — the very expression `App::toggle_pact` uses to
-/// decide what to paint. It is asked here rather than of the toggle because the
-/// toggle is not a question: it paints a whole subtree and hands back what it
-/// painted, so there is no asking it what the press would mean and then
-/// declining. A row that is not pacted is passed through: pacting-ward, `p`
-/// writes documents and leaves every scope exactly as it found it.
+/// `p` is one key with two meanings, and which one it has is a fact about the
+/// selected row. [`App::pact_reach`] is the one place that says which — it
+/// takes `&self` and paints nothing, so it can be asked before the press is
+/// allowed to happen — and this asks it rather than reading the row and
+/// deriving the direction a second time. A press that is pacting-ward is
+/// passed through: `p` that way writes documents and leaves every scope exactly
+/// as it found it.
 ///
 /// # A file row is not this function's business either
 ///
-/// For [`closed_scope`]'s reason and by the same test: `App::toggle_pact`
-/// refuses a file on better grounds — a file is part of a module rather than
-/// being one — and that refusal names the row for what it is. An *ignored*
-/// directory is not passed through, which is deliberate and matches
-/// [`closed_scope`]: whether a boundary would be lost is settled before what the
-/// repository's own rules would have made of the press.
+/// For [`closed_scope`]'s reason: `App::pact_intent` refuses a file on better
+/// grounds — a file is part of a module rather than being one — and that
+/// refusal names the row for what it is, so [`App::pact_reach`] answers `None`
+/// for one and this passes it through. An *ignored* directory is not passed
+/// through, which is deliberate and matches [`closed_scope`]: whether a
+/// boundary would be lost is settled before what the repository's own rules
+/// would have made of the press, so `pact_reach` answers for an excluded row
+/// like any other.
 ///
 /// # A path the manifest cannot spell is open
 ///
@@ -1001,10 +1012,12 @@ fn pact_press(
 /// boundary nobody could have drawn is not one anybody is crossing, and the
 /// press's own answer is the better sentence than a refusal on a technicality.
 fn blocked_unpact(app: &mut App, manifest: &Manifest, repo_root: &Path, sigils: &Sigils) -> bool {
-    let Some(row) = app.selected_row() else {
+    // Which directory the press reaches and which way it goes, both off one
+    // answer: a press that would pact rather than un-pact loses no boundary.
+    let Some(reach) = app.pact_reach() else {
         return false;
     };
-    if row.is_file() || !row.state.is_pacted() {
+    if reach.pacted {
         return false;
     }
 
@@ -1012,8 +1025,14 @@ fn blocked_unpact(app: &mut App, manifest: &Manifest, repo_root: &Path, sigils: 
     // is the panel's half of what to do about it. `closed_scope` has already
     // asked the narrower question by the time this runs — see [`pact_press`] —
     // so what is left to say here is only ever about what is underneath.
-    let path = row.path.clone();
-    let answer = verdict(&path, repo_root, manifest, sigils, Reach::HereAndBelow);
+    let path = reach.path;
+    let answer = verdict(
+        &path,
+        repo_root,
+        manifest,
+        sigils.as_slice(),
+        Reach::HereAndBelow,
+    );
     if !matches!(answer, Verdict::ClosedBelow { .. }) {
         return false;
     }
@@ -1129,7 +1148,7 @@ fn refresh_press(
 ///
 /// Everything that lands here lands on the account card and nowhere else. A pact
 /// or a refresh started while the thread or a document was on screen fills its
-/// own card behind them ([`App::start_account`], [`App::write_run`]) and changes
+/// own card behind them ([`App::start_account`], [`Panel::write_run`](warlock_tui::Panel::write_run)) and changes
 /// neither which card is showing nor a line of what is on it: the run is where
 /// the reader left it when they swap to it, and what they were reading is what
 /// they go on reading.
@@ -1192,7 +1211,8 @@ fn drain(
                 // computed once, outside the closure — one spelling of a
                 // directory, handed to the account holding this run.
                 let heading = section_label(&scope.root, &directory);
-                app.write_run(|account| account.open_section(&heading, now));
+                app.panel_mut()
+                    .write_run(|account| account.open_section(&heading, now));
                 // The fraction is the observer's own, whichever run is
                 // reporting: a refresh of a subtree of forty directories with
                 // seven stale ones counts to seven, because seven is what the
@@ -1215,11 +1235,12 @@ fn drain(
             // word `thinking`, and a cost is added to the section's spend rather
             // than drawn as a line of its own. See `Account::record`.
             Ok(PactEvent::Doing(activity)) => {
-                app.write_run(|account| account.record(&activity, now));
+                app.panel_mut()
+                    .write_run(|account| account.record(&activity, now));
             }
             // The panel only, and one line: the request this directory's pass
             // was handed, filed under whichever section the `Starting` before
-            // it opened, exactly as an activity and a summarising pass are.
+            // it opened, exactly as an activity is.
             // The footer is left alone — it is already saying which directory
             // of how many is being worked, which is the question it answers,
             // and a byte total is not that.
@@ -1231,7 +1252,8 @@ fn drain(
             // opening and would label a multi-pass directory's whole wait with
             // it. See `Account::record_waiting`.
             Ok(PactEvent::Requesting { files, bytes }) => {
-                app.write_run(|account| account.record_waiting(files, bytes, now));
+                app.panel_mut()
+                    .write_run(|account| account.record_waiting(files, bytes, now));
             }
             // The panel only, and one line, filed like the request line above
             // it: why this directory is about to cost a second pass, or why it
@@ -1241,7 +1263,8 @@ fn drain(
                 attempt,
                 attempts,
             }) => {
-                app.write_run(|account| account.record_rejected(&defects, attempt, attempts, now));
+                app.panel_mut()
+                    .write_run(|account| account.record_rejected(&defects, attempt, attempts, now));
             }
             // The one recolouring a run does before it is over. The engine
             // only says this of a directory whose whole subtree delivered —
@@ -1400,7 +1423,7 @@ const DOCUMENT_FILE: &str = "WARLOCK.md";
 /// it are worded exactly as they would have been, because they finished.
 ///
 /// The endings go to the run through the one call every other event goes through
-/// ([`App::write_run`]), on all four endings — the run that wrote its documents,
+/// ([`Panel::write_run`](warlock_tui::Panel::write_run)), on all four endings — the run that wrote its documents,
 /// the one whose engine call failed, the one whose worker was lost, and the one
 /// the reader stopped — because all four leave a run that is over, and an
 /// account left open would go on ticking under whatever happens next.
@@ -1420,7 +1443,7 @@ fn close_account(
     cancelled: bool,
     now: Instant,
 ) {
-    app.write_run(|account| {
+    app.panel_mut().write_run(|account| {
         if cancelled {
             account.close_section(&Outcome::Cancelled, now);
         }
@@ -2049,7 +2072,8 @@ mod tests {
     /// of it fits.
     fn panel_text(app: &App, now: Instant) -> Vec<String> {
         as_text(
-            &app.account()
+            &app.panel()
+                .account()
                 .map(|account| account.lines(now))
                 .unwrap_or_default(),
         )
@@ -2083,7 +2107,7 @@ mod tests {
     /// tests give the app is [`WHOLE_PANEL`] lines tall, so the two agree
     /// exactly whenever the account is the card showing.
     fn shown(app: &App, now: Instant) -> Vec<String> {
-        as_text(&app.panel_lines(now))
+        as_text(&app.panel().window(now))
     }
 
     /// A scope for a tree that is not on disk anywhere.
@@ -3040,7 +3064,10 @@ mod tests {
                 .is_some_and(|message| message.contains(".warlockignore")),
             "the excluded row said nothing about the rules that keep it out"
         );
-        assert!(!app.has_account(), "an account was opened for no run");
+        assert!(
+            !app.panel().has_account(),
+            "an account was opened for no run"
+        );
         assert_eq!(app.pact_line(), None, "nothing is running to be refused by");
         let refused = {
             let mut refused = before.clone();
@@ -3098,7 +3125,7 @@ mod tests {
         assert_eq!(toggle, None, "the press must not paint or start a run");
         assert_eq!(app.message(), Some(CLOSED));
         assert!(
-            !app.has_account(),
+            !app.panel().has_account(),
             "a refused press opened an account for a run that never happened"
         );
         let said = {
@@ -3273,7 +3300,10 @@ mod tests {
         // on documents that are theirs to have an opinion about.
         assert_eq!(directory, None);
         assert_eq!(app.message(), Some(CLOSED));
-        assert!(!app.has_account(), "a refused refresh opened an account");
+        assert!(
+            !app.panel().has_account(),
+            "a refused refresh opened an account"
+        );
         let said = {
             let mut said = before.clone();
             said.set_message(CLOSED);
@@ -3421,15 +3451,18 @@ mod tests {
         let mut app = App::from_tree(&tree);
         let base = Instant::now();
 
-        assert!(!app.has_account(), "no pact has run this session");
+        assert!(!app.panel().has_account(), "no pact has run this session");
 
         // The pact, and a line of the run it started.
         let toggle = pact_press(&mut app, false, base).expect("a directory can be pacted");
         assert!(toggle.pacted);
-        let account = app.account_mut().expect("the press started an account");
+        let account = app
+            .panel_mut()
+            .account_mut()
+            .expect("the press started an account");
         account.open_section("crates", base);
         account.record(&Activity::Thinking, at(base, 1));
-        assert_eq!(app.account().map(Account::line_count), Some(2));
+        assert_eq!(app.panel().account().map(Account::line_count), Some(2));
 
         // The un-pact. It runs no pass and reports nothing, so wiping the
         // record of the run that wrote the documents it is removing would
@@ -3437,7 +3470,7 @@ mod tests {
         let toggle = pact_press(&mut app, false, at(base, 2)).expect("it is pacted now");
         assert!(!toggle.pacted, "the second press takes the pact off");
         assert_eq!(
-            app.account().map(Account::line_count),
+            app.panel().account().map(Account::line_count),
             Some(2),
             "the last run's account is still on screen"
         );
@@ -3447,7 +3480,7 @@ mod tests {
         let toggle = pact_press(&mut app, false, at(base, 3)).expect("it can be pacted again");
         assert!(toggle.pacted);
         assert_eq!(
-            app.account().map(Account::line_count),
+            app.panel().account().map(Account::line_count),
             Some(0),
             "a new run starts from nothing"
         );
@@ -3467,7 +3500,8 @@ mod tests {
         let mut app = App::from_tree(&tree);
         let base = Instant::now();
         app.start_account(base);
-        app.account_mut()
+        app.panel_mut()
+            .account_mut()
             .expect("the press that started the run opened one")
             .open_section("engine", base);
         app.set_run_in_flight(Run::Refresh, "/repo/crates/engine", 2, 7);
@@ -3504,8 +3538,8 @@ mod tests {
             "the refusal did not go through the message"
         );
         assert_eq!(
-            app.account().map(Account::line_count),
-            before.account().map(Account::line_count),
+            app.panel().account().map(Account::line_count),
+            before.panel().account().map(Account::line_count),
             "the running run's account was cleared"
         );
 
@@ -3533,18 +3567,24 @@ mod tests {
             NodeState::Unpacted,
         ));
         let mut app = App::from_tree(&tree);
-        app.set_panel_height(WHOLE_PANEL);
+        app.panel_mut().set_height(WHOLE_PANEL);
         let base = Instant::now();
 
         // A question and its answer, then a run started over the top of them.
-        app.start_turn("what does the engine do?", at(base, 1));
-        app.answer_turn("It walks the tree.", at(base, 2));
+        app.panel_mut()
+            .start_turn("what does the engine do?", at(base, 1));
+        app.panel_mut()
+            .answer_turn("It walks the tree.", at(base, 2));
         app.start_account(at(base, 3));
         // Through the one call the loop writes a run with.
-        app.write_run(|account| account.open_section("engine", at(base, 3)));
+        app.panel_mut()
+            .write_run(|account| account.open_section("engine", at(base, 3)));
         app.set_pact_in_flight("/repo/crates/engine", 3, 12);
         app.set_message("something the last key said");
-        assert!(app.showing_thread(), "the run swapped the card away");
+        assert!(
+            app.panel().showing_thread(),
+            "the run swapped the card away"
+        );
         let before = app.clone();
         // Read at the instant the assertion below reads it at, so what is
         // compared is the lines and not how long the clocks have been running.
@@ -3582,7 +3622,7 @@ mod tests {
 
         // And the reader is still looking at what they were looking at: the same
         // card, the same lines, and none of the run's among them.
-        assert!(app.showing_thread(), "the refusal swapped the card");
+        assert!(app.panel().showing_thread(), "the refusal swapped the card");
         assert_eq!(shown(&app, at(base, 6)), thread, "the refusal moved a line");
         assert!(
             thread.iter().any(|line| line == "what does the engine do?"),
@@ -3612,7 +3652,10 @@ mod tests {
             None,
             "there is nothing under it to describe again"
         );
-        assert!(!app.has_account(), "a run nobody started has no account");
+        assert!(
+            !app.panel().has_account(),
+            "a run nobody started has no account"
+        );
         assert!(
             app.message()
                 .is_some_and(|message| message.contains("already fresh")),
@@ -3635,7 +3678,10 @@ mod tests {
             Some(PathBuf::from("/repo/crates")),
             "a stale subtree is a thing to refresh"
         );
-        let account = app.account_mut().expect("the press started an account");
+        let account = app
+            .panel_mut()
+            .account_mut()
+            .expect("the press started an account");
         account.open_section("crates", at(base, 5));
         account.finish(at(base, 5));
         assert_eq!(
@@ -4265,7 +4311,8 @@ mod tests {
             panel_text(&app, at(base, 6))
         );
         assert_eq!(
-            app.account()
+            app.panel()
+                .account()
                 .expect("a run is under way")
                 .sections()
                 .first()
@@ -4333,7 +4380,7 @@ mod tests {
             "the line stopped counting the silence it is about"
         );
 
-        // And the footer is untouched by it, as it is by a summarising pass:
+        // And the footer is untouched by it, as it is by an activity:
         // it still says which directory of how many is being worked, which is
         // the question it answers.
         let mut in_flight = before.clone();
@@ -5067,12 +5114,12 @@ mod tests {
         // all reachable: three lines of panel, and the reader can walk the
         // eleven the run wrote a screenful at a time.
         app.toggle_focus();
-        app.set_panel_height(3);
+        app.panel_mut().set_height(3);
         app.select_first();
         let mut walked = Vec::new();
         loop {
-            walked.extend(app.panel_lines(at(base, 10_000)));
-            if app.panel_lines_below() == 0 {
+            walked.extend(app.panel().window(at(base, 10_000)));
+            if app.panel().lines_below() == 0 {
                 break;
             }
             app.select_page_down();
@@ -5085,7 +5132,8 @@ mod tests {
         walked.dedup();
         assert_eq!(
             walked,
-            app.account()
+            app.panel()
+                .account()
                 .expect("the run left one")
                 .lines(at(base, 10_000)),
             "every line of the run is still reachable through a short panel"
@@ -5281,7 +5329,7 @@ mod tests {
     /// read before the pact starts and some during it, since the reader's card
     /// is theirs either way round.
     fn reading_a_file(app: &mut App) {
-        app.set_panel_height(WHOLE_PANEL);
+        app.panel_mut().set_height(WHOLE_PANEL);
         app.show_document(document_lines(), false);
     }
 
@@ -5304,13 +5352,22 @@ mod tests {
             document_lines(),
             "the run took the panel from the reader"
         );
-        assert!(app.has_document(), "the run threw the document away");
-        assert!(app.has_account(), "the run left no account behind it");
+        assert!(
+            app.panel().has_document(),
+            "the run threw the document away"
+        );
+        assert!(
+            app.panel().has_account(),
+            "the run left no account behind it"
+        );
 
         // Past the conversation, which is always a stop of its own: it is where
         // the field is, and a reader is never more than a press from it.
         app.swap_card();
-        assert!(app.showing_thread(), "the cycle skipped the conversation");
+        assert!(
+            app.panel().showing_thread(),
+            "the cycle skipped the conversation"
+        );
         app.swap_card();
         let account = shown(app, now);
         assert_eq!(
@@ -5539,18 +5596,18 @@ mod tests {
     /// the run they then start has to arrive inside it rather than in place of
     /// it.
     fn a_conversation(app: &mut App, base: Instant) {
-        app.set_panel_height(WHOLE_PANEL);
-        app.start_turn(QUESTION, base);
-        app.record_turn(
+        app.panel_mut().set_height(WHOLE_PANEL);
+        app.panel_mut().start_turn(QUESTION, base);
+        app.panel_mut().record_turn(
             &Activity::Tool {
                 name: "Grep".to_owned(),
                 detail: Some("engine".to_owned()),
             },
             base,
         );
-        app.answer_turn(ANSWER, base);
+        app.panel_mut().answer_turn(ANSWER, base);
         assert!(
-            app.showing_thread(),
+            app.panel().showing_thread(),
             "a question brings the conversation to the front by itself"
         );
     }
@@ -5571,10 +5628,13 @@ mod tests {
     /// about the same screen as the assertions inside it.
     fn conversation_untouched(app: &mut App, now: Instant) -> Vec<String> {
         assert!(
-            app.showing_thread(),
+            app.panel().showing_thread(),
             "the run took the panel from the reader"
         );
-        let thread = app.thread().expect("a question was asked before the run");
+        let thread = app
+            .panel()
+            .thread()
+            .expect("a question was asked before the run");
         assert_eq!(
             thread.turns().len(),
             1,
@@ -5603,7 +5663,10 @@ mod tests {
 
         // And one swap away is the run's own card, which is where the whole of
         // the run is.
-        assert!(app.has_account(), "the run left no account behind it");
+        assert!(
+            app.panel().has_account(),
+            "the run left no account behind it"
+        );
         app.swap_card();
         let card = shown(app, now);
         assert_eq!(
@@ -5614,7 +5677,7 @@ mod tests {
 
         app.swap_card();
         assert!(
-            app.showing_thread(),
+            app.panel().showing_thread(),
             "the conversation did not come back whole"
         );
         assert_eq!(shown(app, now), shown_now);
@@ -5656,8 +5719,12 @@ mod tests {
             events.send(event).expect("the loop is still listening");
             pact.keep_up(&mut app, &mut manifest, &scope, now);
 
-            assert!(app.showing_thread(), "the run swapped the card away");
+            assert!(
+                app.panel().showing_thread(),
+                "the run swapped the card away"
+            );
             let card = app
+                .panel()
                 .account()
                 .expect("the press started the run's own card")
                 .lines(now);
@@ -5819,7 +5886,7 @@ mod tests {
             let base = Instant::now();
             a_conversation(&mut app, base);
             assert!(
-                app.set_mode(Mode::Brief),
+                app.panel_mut().set_mode(Mode::Brief),
                 "the conversation was in the register before the test put it there"
             );
             let asked = shown(&app, base);
@@ -5853,7 +5920,7 @@ mod tests {
                 pact.keep_up(&mut app, &mut manifest, &scope, now);
 
                 assert_eq!(
-                    app.mode(),
+                    app.panel().mode(),
                     Mode::Brief,
                     "the run left the register at frame {frame}"
                 );
@@ -5870,7 +5937,7 @@ mod tests {
 
             assert!(!pact.running(), "the run reported its outcome and is over");
             assert_eq!(
-                app.mode(),
+                app.panel().mode(),
                 Mode::Brief,
                 "the register did not survive the run: {refreshing_it}"
             );
@@ -5939,7 +6006,7 @@ mod tests {
                 .send(PactEvent::Doing(Activity::Thinking))
                 .expect("the loop is still listening");
             pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
-            assert!(app.showing_thread(), "{failure:?}");
+            assert!(app.panel().showing_thread(), "{failure:?}");
 
             match failure {
                 Some(reason) => events
@@ -6008,7 +6075,7 @@ mod tests {
         );
         if talked_first {
             assert!(
-                app.showing_thread(),
+                app.panel().showing_thread(),
                 "the run was supposed to happen inside the conversation"
             );
         }

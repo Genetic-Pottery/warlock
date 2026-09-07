@@ -383,7 +383,9 @@ pub(crate) fn closed_scope(
     // back to the key that asked. The shell renders the same verdict as an
     // `Error` and neither of them works the answer out for itself.
     let path = row.path.clone();
-    let Verdict::Closed { scope } = verdict(&path, repo_root, manifest, sigils, Reach::Here) else {
+    let Verdict::Closed { scope } =
+        verdict(&path, repo_root, manifest, sigils.as_slice(), Reach::Here)
+    else {
         return None;
     };
 
@@ -408,7 +410,7 @@ pub(crate) fn closed_scope(
 ///
 /// A home that cannot be resolved reads as nothing held rather than as a config
 /// that would not read. There is no file in that case and no path to name one
-/// by, so [`Sigils::Unknown`] would be claiming that something on disk is broken
+/// by, so [`Sigils::Unknown`](warlock_tui::Sigils::Unknown) would be claiming that something on disk is broken
 /// when nothing on disk was ever looked at.
 fn sigils_held(repo_root: &Path) -> Sigils {
     Standing::home().map_or(Sigils::Nothing, |home| sigils_under(&home, repo_root))
@@ -420,12 +422,12 @@ fn sigils_held(repo_root: &Path) -> Sigils {
 /// Never an error, and this is the whole of the reason it is a function of its
 /// own: what a machine holds is a line on a header, and warlock is a way of
 /// reading a tree. A config that will not parse must not keep the tree off the
-/// screen, so it becomes [`Sigils::Unknown`] — said out loud, so that broken is
+/// screen, so it becomes [`Sigils::Unknown`](warlock_tui::Sigils::Unknown) — said out loud, so that broken is
 /// never drawn as absent — and nothing here can return upwards to end the event
 /// loop.
 ///
 /// The engine's "not found" is the one error that is not a problem (see
-/// [`load_sigils`]) and joins the empty set as [`Sigils::Nothing`]: a machine
+/// [`load_sigils`]) and joins the empty set as [`Sigils::Nothing`](warlock_tui::Sigils::Nothing): a machine
 /// that has never run `warlock config` and one that cleared its sigils hold the
 /// same nothing, and the header says nothing about either.
 ///

@@ -70,7 +70,7 @@
 //! movement clears only the one that belongs to a keystroke.
 //!
 //! What that pact has been *doing* is the same kind of thing again, held one
-//! field along: the [`Account`] of the run, or nothing at all before the first
+//! field along: the [`Account`](crate::Account) of the run, or nothing at all before the first
 //! pact of the session. The account is one of the panel's two cards — the other
 //! is the document last read — and the window onto each is view state exactly as
 //! the tree's is: a height set per frame for the slot they share, and an offset
@@ -95,10 +95,7 @@ use std::time::Instant;
 
 use warlock_engine::{IntoDocument, NodeState, StateCounts, Tree, to_manifest_path};
 
-use crate::account::{Account, Line};
-use crate::claude::Activity;
-use crate::panel::{Mode, Panel, Showing};
-use crate::thread::{Ending, Thread};
+use crate::panel::{Panel, Showing};
 
 /// One line of the flattened tree: what to draw, how far to indent it, and
 /// which colour it takes.
@@ -400,6 +397,25 @@ pub struct PactToggle {
     pub pacted: bool,
 }
 
+/// What the pact key would mean on the selected row: the answer
+/// [`App::pact_intent`] gives.
+///
+/// Three cases and not two, because "nothing to press it on" and "pressed on
+/// something that cannot take it" are answered differently: an empty tree has
+/// nothing to say, and a file row has a sentence saying what the row is. The
+/// sentence comes back rather than being written, so asking is free of
+/// consequence — see [`App::pact_intent`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PactIntent {
+    /// The press means this: which directory, and which way.
+    Toggles(PactToggle),
+    /// The press means nothing, and this is the one line saying why.
+    Refused(String),
+    /// There is no row under the selection at all. Not a refusal: there was
+    /// nothing to refuse.
+    NoRow,
+}
+
 /// Which kind of run is in flight: a pact over a whole subtree, or a refresh
 /// over the stale parts of one.
 ///
@@ -531,36 +547,6 @@ impl RunHeader {
     }
 }
 
-/// A summarising pass running inside the directory a pact is working: the file
-/// it is about, and which pass of how many it is.
-///
-/// An over-cap file is read in chunks and summarised a chunk at a time, so a
-/// single directory can be a dozen model passes over one file, minutes long, with
-/// nothing on [`InFlight`] moving for the whole of it. This is what turns that
-/// silence into a fraction that advances. `part` is one-based and `parts` is the
-/// number of passes that file costs — the engine's own counting, see
-/// `Observer::summarising` — so it reads as `(2/5)` beside a `parts` that does
-/// not move for the length of that file.
-///
-/// The file is kept as the path the caller was handed rather than as finished
-/// text, for the same reason [`InFlight`] keeps its directory that way: the label
-/// is spelled relative to the root of the tree *on screen* at draw time, by
-/// [`App::pact_line`].
-///
-/// Private, and nothing at all is given out of it — not even the yes-or-no
-/// [`InFlight`] answers. A caller can put it there, and it goes when the
-/// directory changes or the run ends; the only thing it does is add a clause to
-/// the one line the app words.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Summarising {
-    /// The file the pass about to run is over.
-    path: PathBuf,
-    /// Which pass over that file this is, counting from one.
-    part: usize,
-    /// How many passes that file costs in total.
-    parts: usize,
-}
-
 /// Which of the screen's three places the keys are driving.
 ///
 /// The screen is a tree column, a panel beside it, and the composer at the foot
@@ -581,7 +567,7 @@ struct Summarising {
 /// composer is drawn under the conversation and under neither of the other two
 /// cards, and focus must never sit on a field nobody can see. That rule lives on
 /// the app rather than here, because it is a fact about which card is showing —
-/// see [`App::composer_showable`].
+/// see [`Panel::composer_showable`](crate::Panel::composer_showable).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Focus {
     /// The tree column. The movement keys move its selection, which is what
@@ -592,7 +578,7 @@ pub enum Focus {
     Tree,
     /// The panel beside it. The same movement keys scroll the panel's window
     /// over whichever of its two cards is showing — the account of the pact or
-    /// the document last read, see [`App::panel_scroll_offset`] — and the tree's
+    /// the document last read, see [`Panel::scroll_offset`](crate::Panel::scroll_offset) — and the tree's
     /// selection stays exactly where the reader left it.
     Panel,
     /// The composer under the panel. The keyboard is the draft's while focus is
@@ -937,7 +923,7 @@ impl Chrome {
 /// state: an index names whichever node now sits at that position, so the
 /// selection has to travel by path and be looked up again in the new rows.
 ///
-/// Holds an [`Account`], which holds an [`f64`] cost, so it is [`PartialEq`] and
+/// Holds an [`Account`](crate::Account), which holds an [`f64`] cost, so it is [`PartialEq`] and
 /// not [`Eq`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct App {
@@ -1043,12 +1029,6 @@ struct Viewpoint {
 /// keystrokes for that reason, and takes the message line while it is there:
 /// see [`App::pact_line`].
 ///
-/// `summarising` is the pass over one big file happening inside that directory,
-/// if one is, and is set and cleared by the same caller for the same reason —
-/// see [`App::set_pact_summarising`]. It hangs off `in_flight` rather than
-/// standing beside it: it is wording added to that one line, and it goes whenever
-/// `in_flight` moves or goes, so no file is ever named under a directory the run
-/// has left.
 ///
 /// `pact_refused` is the one keystroke that has nowhere else to go: the pact key
 /// pressed while `in_flight` is already there. It is a flag rather than a
@@ -1063,7 +1043,6 @@ struct Viewpoint {
 struct Status {
     message: Option<String>,
     in_flight: Option<InFlight>,
-    summarising: Option<Summarising>,
     pact_refused: bool,
     mouse_captured: bool,
 }
@@ -1184,7 +1163,6 @@ impl App {
             status: Status {
                 message: None,
                 in_flight: None,
-                summarising: None,
                 pact_refused: false,
                 mouse_captured: false,
             },
@@ -1269,10 +1247,6 @@ impl App {
     /// the last keystroke left is still the last keystroke's, and is still there
     /// when the pact is over. Movement does not undo this either — a pact
     /// carries on being in flight however much the reader scrolls.
-    ///
-    /// Takes down whatever [`App::set_pact_summarising`] last said: the file
-    /// being summarised belonged to the directory the run has just left, so a
-    /// new directory never inherits the last one's file.
     pub fn set_pact_in_flight(&mut self, path: impl Into<PathBuf>, position: usize, total: usize) {
         self.set_run_in_flight(Run::Pact, path, position, total);
     }
@@ -1317,36 +1291,6 @@ impl App {
             total,
             run,
         });
-        self.status.summarising = None;
-    }
-
-    /// Say that a summarising pass over the file at `path` is running — pass
-    /// `part` of `parts` — inside the directory the pact is working.
-    ///
-    /// A file too big for one request is read in chunks and summarised a chunk at
-    /// a time, so one directory of the run can be a dozen model passes over a
-    /// single file. Without this the footer would sit unchanged for the whole of
-    /// it, which is the one thing the progress line exists to prevent; with it,
-    /// the line names the file and how far through it the run is. `part` counts
-    /// from one and `parts` is how many passes that file costs — the engine's own
-    /// counting, which a caller passes straight through rather than deriving.
-    ///
-    /// The caller's to set, as [`App::set_pact_in_flight`] is and for the same
-    /// reason: the passes happen on another thread. It is not the caller's to
-    /// take away one by one, though — moving the run on with
-    /// [`App::set_pact_in_flight`] clears it, and so does
-    /// [`App::clear_pact_in_flight`], so there is no way for a file to outlive
-    /// the directory it was found in.
-    ///
-    /// Says nothing on its own: it adds a clause to [`App::pact_line`], which
-    /// exists only while a pact is in flight. Not a keystroke, so it says nothing
-    /// and takes nothing down.
-    pub fn set_pact_summarising(&mut self, path: impl Into<PathBuf>, part: usize, parts: usize) {
-        self.status.summarising = Some(Summarising {
-            path: path.into(),
-            part,
-            parts,
-        });
     }
 
     /// Say that no pact is running any more.
@@ -1358,10 +1302,6 @@ impl App {
     /// about how the run went is on screen the moment the progress line is off
     /// it.
     ///
-    /// Takes the summarising pass down with it — see
-    /// [`App::set_pact_summarising`] — so no chunk wording survives the end of a
-    /// run.
-    ///
     /// The run's high-water position goes with it too, because it is a field of
     /// the record being dropped rather than something kept beside it: this is
     /// the boundary between one run and the next, so a second run reports 1 of
@@ -1371,7 +1311,6 @@ impl App {
     /// A no-op when no pact was in flight.
     pub fn clear_pact_in_flight(&mut self) {
         self.status.in_flight = None;
-        self.status.summarising = None;
     }
 
     /// Say that the pact key was pressed while a pact was already running, so
@@ -1455,8 +1394,8 @@ impl App {
     ///
     /// The verb is the one the caller said the run was started by — see [`Run`]
     /// and [`App::set_run_in_flight`] — and it is the only difference between the
-    /// two lines: the directory, the fraction, the summarising clause and the
-    /// refusal suffix are worded the same way for both, because a refresh is a
+    /// two lines: the directory, the fraction and the refusal suffix are worded
+    /// the same way for both, because a refresh is a
     /// run in flight in every way that matters here.
     ///
     /// The directory is named relative to the root of the tree on screen, in the
@@ -1473,20 +1412,11 @@ impl App {
     /// holds it, and it appears when the run ends — which is what makes the
     /// precedence a display rule rather than a loss of state.
     ///
-    /// While a summarising pass is running inside that directory the line says so
-    /// too — `pacting crates/engine (3/12) — summarising Cargo.lock (2/5)` — so
-    /// the minutes a single big file costs are minutes of a fraction advancing
-    /// rather than of a screen that has not changed: see
-    /// [`App::set_pact_summarising`]. Still one line, and the directory and its
-    /// fraction still come first, because they are what the rest of the run is
-    /// measured in. The file is named relative to the root of the tree at draw
-    /// time exactly as the directory is.
-    ///
     /// A press of the pact key refused because this run is already going adds
     /// `— already running` to the end of it, rather than taking a line of its
-    /// own: see [`App::set_pact_refused`]. It is a suffix and goes last — after
-    /// the summarising clause as well — so that a narrow terminal cuts the answer
-    /// to a key just pressed rather than the fraction, which is the part that
+    /// own: see [`App::set_pact_refused`]. It is a suffix and goes last, so that
+    /// a narrow terminal cuts the answer to a key just pressed rather than the
+    /// fraction, which is the part that
     /// says Warlock has not hung. The line is rebuilt every frame, so a progress
     /// event arriving after the press re-words it around the new directory and
     /// position and carries the suffix along.
@@ -1494,18 +1424,10 @@ impl App {
     pub fn pact_line(&self) -> Option<String> {
         self.status.in_flight.as_ref().map(|in_flight| {
             let label = self.label_for(&in_flight.path);
-            let mut line = match in_flight.run {
+            let line = match in_flight.run {
                 Run::Pact => pacting_message(&label, in_flight.position, in_flight.total),
                 Run::Refresh => refreshing_message(&label, in_flight.position, in_flight.total),
             };
-            if let Some(summarising) = self.status.summarising.as_ref() {
-                line = summarising_message(
-                    &line,
-                    &self.label_for(&summarising.path),
-                    summarising.part,
-                    summarising.parts,
-                );
-            }
             if self.status.pact_refused {
                 already_running_message(&line)
             } else {
@@ -1560,7 +1482,7 @@ impl App {
     /// This is also the only way an app comes to have an account at all: before
     /// the first call there is none, and the panel draws nothing whatever rather
     /// than an empty frame around a run that has not happened. See
-    /// [`App::has_account`].
+    /// [`Panel::has_account`](crate::Panel::has_account).
     ///
     /// Not a keystroke — the pact key reaches this by way of whoever starts the
     /// run — so it neither says anything nor takes down what the last keystroke
@@ -1591,7 +1513,7 @@ impl App {
     /// it in one press once it does.
     ///
     /// The focus is rescued with it, because the account is a card with no field
-    /// under it (see [`App::composer_showable`]): a keyboard pointed at a
+    /// under it (see [`Panel::composer_showable`](crate::Panel::composer_showable)): a keyboard pointed at a
     /// composer that has just stopped being drawn goes to the panel, exactly as
     /// it does when a document takes the field away.
     pub fn start_account(&mut self, at: Instant) {
@@ -1602,13 +1524,6 @@ impl App {
         self.panel.open_account(at);
     }
 
-    /// Do `write` to the account of the run in flight.
-    ///
-    /// The panel's, forwarded: see [`Panel::write_run`], where the whole of
-    /// this lives and is argued.
-    pub fn write_run(&mut self, write: impl FnOnce(&mut Account)) {
-        self.panel.write_run(write);
-    }
     /// Put the lines of a file on the panel's document card, from its first
     /// line, and show it.
     ///
@@ -1638,7 +1553,7 @@ impl App {
     /// Not a keystroke's whole answer: it neither says anything nor takes down
     /// what the last keystroke said, exactly as [`App::start_account`] does not.
     ///
-    /// The one other way lines reach this card is [`App::refill_document`],
+    /// The one other way lines reach this card is [`Panel::refill_document`](crate::Panel::refill_document),
     /// which is this method minus the last two lines of it: a file read again
     /// because something changed it under the reader does not get to decide what
     /// they are looking at, and so cannot hide the composer either.
@@ -1652,73 +1567,11 @@ impl App {
         self.rescue_focus();
     }
 
-    /// Put the lines of a file on the document card again, leaving which card is
-    /// showing exactly as it was.
-    ///
-    /// The panel's, forwarded: see [`Panel::refill_document`], where the whole of
-    /// this lives and is argued.
-    pub fn refill_document(
-        &mut self,
-        lines: impl IntoIterator<Item = impl Into<String>>,
-        cut: bool,
-    ) {
-        self.panel.refill_document(lines, cut);
-    }
-
-    /// Put `message` on the thread as a new turn asked at `at`, and show it.
-    ///
-    /// The panel's, forwarded: see [`Panel::start_turn`], where the whole of
-    /// this lives and is argued.
-    pub fn start_turn(&mut self, message: impl Into<String>, at: Instant) {
-        self.panel.start_turn(message, at);
-    }
-
-    /// Put one line of warlock's own on the thread at `at`, and show it.
-    ///
-    /// The panel's, forwarded: see [`Panel::note`], where the whole of
-    /// this lives and is argued.
-    pub fn note(&mut self, text: impl Into<String>, at: Instant) {
-        self.panel.note(text, at);
-    }
-
-    /// Record what the live turn was seen doing at `at`.
-    ///
-    /// The panel's, forwarded: see [`Panel::record_turn`], where the whole of
-    /// this lives and is argued.
-    pub fn record_turn(&mut self, activity: &Activity, at: Instant) {
-        self.panel.record_turn(activity, at);
-    }
-
-    /// Land `answer` on the live turn at `at` and close it.
-    ///
-    /// The panel's, forwarded: see [`Panel::answer_turn`], where the whole of
-    /// this lives and is argued.
-    pub fn answer_turn(&mut self, answer: impl Into<String>, at: Instant) {
-        self.panel.answer_turn(answer, at);
-    }
-
-    /// Close the live turn at `at` with the one line `ending` makes.
-    ///
-    /// The panel's, forwarded: see [`Panel::end_turn`], where the whole of
-    /// this lives and is argued.
-    pub fn end_turn(&mut self, ending: &Ending, at: Instant) {
-        self.panel.end_turn(ending, at);
-    }
-
-    /// The conversation this session has had, or `None` before the first
-    /// question.
-    ///
-    /// The panel's, forwarded: see [`Panel::thread`], where the whole of
-    /// this lives and is argued.
-    #[must_use]
-    pub const fn thread(&self) -> Option<&Thread> {
-        self.panel.thread()
-    }
     /// Show the next card of the panel: the account, then the thread, then the
     /// document, then the account again.
     ///
     /// The whole of what the swap key does, and the only thing besides
-    /// [`App::show_document`] and [`App::start_turn`] that decides which card is
+    /// [`App::show_document`] and [`Panel::start_turn`](crate::Panel::start_turn) that decides which card is
     /// on screen — which is what makes a document survive a pact starting,
     /// finishing, failing or being cancelled underneath it. A cycle rather than
     /// three "show the account" / "show the thread" / "show the document" calls,
@@ -1765,90 +1618,29 @@ impl App {
         self.rescue_focus();
     }
 
-    /// Whether a pact has run this session, and so whether the panel has an
-    /// account card to draw.
+    /// The panel beside the tree: the three cards, which one is showing, and
+    /// the window over it.
     ///
-    /// The panel's, forwarded: see [`Panel::has_account`], where the whole of
-    /// this lives and is argued.
+    /// The panel is a value of its own with its own interface, and this is how
+    /// that interface is reached — rather than a method on [`App`] per method
+    /// on [`Panel`], which is a second name for every one of them and a second
+    /// place each has to be documented. What the app adds over the panel is the
+    /// handful of methods that do something *besides* passing the call on:
+    /// [`App::swap_card`] words a refusal, [`App::show_document`] spells a
+    /// label, [`App::start_account`] carries the run header, and
+    /// [`App::restore_from`] decides which panel a re-seated app keeps.
+    ///
+    /// [`Panel`]: crate::Panel
     #[must_use]
-    pub const fn has_account(&self) -> bool {
-        self.panel.has_account()
+    pub const fn panel(&self) -> &Panel {
+        &self.panel
     }
 
-    /// Whether anybody has asked anything this session, and so whether the panel
-    /// has a thread card to draw.
-    ///
-    /// The panel's, forwarded: see [`Panel::has_thread`], where the whole of
-    /// this lives and is argued.
-    #[must_use]
-    pub const fn has_thread(&self) -> bool {
-        self.panel.has_thread()
+    /// The panel, to write to: see [`App::panel`].
+    pub const fn panel_mut(&mut self) -> &mut Panel {
+        &mut self.panel
     }
 
-    /// Whether a file somebody asked to read is on the panel's document card.
-    ///
-    /// The panel's, forwarded: see [`Panel::has_document`], where the whole of
-    /// this lives and is argued.
-    #[must_use]
-    pub const fn has_document(&self) -> bool {
-        self.panel.has_document()
-    }
-    /// Whether the card the panel is showing has anything to draw.
-    ///
-    /// What the renderer asks before it draws warlock's mark instead: the mark is
-    /// what is there while the showing card is empty, and a card somebody has
-    /// filled is something having happened. Asked of the showing card and not of
-    /// the slot, because a document held behind an account nobody has started is
-    /// not on screen and cannot be what the panel draws.
-    #[must_use]
-    pub const fn has_panel_content(&self) -> bool {
-        self.panel.has_content()
-    }
-
-    /// Whether the card on screen is the conversation.
-    ///
-    /// The panel's, forwarded: see [`Panel::showing_thread`], where the whole of
-    /// this lives and is argued.
-    #[must_use]
-    pub const fn showing_thread(&self) -> bool {
-        self.panel.showing_thread()
-    }
-
-    /// Which register the conversation is in: [`Mode::Chat`] until somebody
-    /// types `/brief`.
-    ///
-    /// The panel's, forwarded: see [`Panel::mode`], where the whole of
-    /// this lives and is argued.
-    #[must_use]
-    pub const fn mode(&self) -> Mode {
-        self.panel.mode()
-    }
-
-    /// Put the conversation in `mode`, and say whether that changed anything.
-    ///
-    /// The panel's, forwarded: see [`Panel::set_mode`], where the whole of
-    /// this lives and is argued.
-    pub fn set_mode(&mut self, mode: Mode) -> bool {
-        self.panel.set_mode(mode)
-    }
-
-    /// The account of the pact running now, or of the last one to run, or `None`
-    /// before the first pact of the session.
-    ///
-    /// The panel's, forwarded: see [`Panel::account`], where the whole of
-    /// this lives and is argued.
-    #[must_use]
-    pub const fn account(&self) -> Option<&Account> {
-        self.panel.account()
-    }
-
-    /// The same account, to record what the run has just been seen doing.
-    ///
-    /// The panel's, forwarded: see [`Panel::account_mut`], where the whole of
-    /// this lives and is argued.
-    pub const fn account_mut(&mut self) -> Option<&mut Account> {
-        self.panel.account_mut()
-    }
     /// Put `view` back in place of this app, keeping this app's panel.
     ///
     /// The one move a run that ended with nothing recorded needs, and the whole
@@ -1872,96 +1664,6 @@ impl App {
         // a copy taken with the composer focused, put back over a panel that has
         // a document up since. See `rescue_focus`.
         self.rescue_focus();
-    }
-
-    /// How many lines of whatever the panel holds fit in it, as last set by
-    /// [`App::set_panel_height`].
-    ///
-    /// The panel's, forwarded: see [`Panel::height`], where the whole of
-    /// this lives and is argued.
-    #[must_use]
-    pub const fn panel_height(&self) -> usize {
-        self.panel.height()
-    }
-
-    /// Tell the app how many lines fit in the panel.
-    ///
-    /// The panel's, forwarded: see [`Panel::set_height`], where the whole of
-    /// this lives and is argued.
-    pub fn set_panel_height(&mut self, height: u16) {
-        self.panel.set_height(height);
-    }
-
-    /// How many columns wide the panel is, as last set by
-    /// [`App::set_panel_width`].
-    ///
-    /// The panel's, forwarded: see [`Panel::width`], where the whole of
-    /// this lives and is argued.
-    #[must_use]
-    pub const fn panel_width(&self) -> usize {
-        self.panel.width()
-    }
-
-    /// Tell the app how many columns wide the panel is.
-    ///
-    /// The panel's, forwarded: see [`Panel::set_width`], where the whole of
-    /// this lives and is argued.
-    pub fn set_panel_width(&mut self, width: u16) {
-        self.panel.set_width(width);
-    }
-
-    /// Whether the showing card's window is following the newest line of what is
-    /// on it.
-    ///
-    /// The panel's, forwarded: see [`Panel::follows`], where the whole of
-    /// this lives and is argued.
-    #[must_use]
-    pub const fn panel_follows(&self) -> bool {
-        self.panel.follows()
-    }
-    /// Which line of the showing card is drawn at the panel's top row.
-    ///
-    /// Derived rather than stored while that card is following: the answer is
-    /// then the end of the account, which changes every time a line is
-    /// appended, and computing it here is what keeps the newest line pinned to
-    /// the bottom without anything having to be recomputed as the run reports.
-    /// Parked, it is where the reader left the window, clamped to what the
-    /// card's length allows — which is where a document starts, since a file is
-    /// read from its first line and nothing follows it.
-    ///
-    /// `0` for an app whose showing card is empty, and for a panel shorter than
-    /// the account it holds is the first line of the last screenful.
-    #[must_use]
-    pub fn panel_scroll_offset(&self) -> usize {
-        self.panel.scroll_offset()
-    }
-
-    /// The lines the panel draws now, with every clock measured against `now`.
-    ///
-    /// The window [`App::panel_scroll_offset`] describes, [`App::panel_height`]
-    /// lines of it, taken from the showing card, and empty for an app whose
-    /// showing card is empty. `now` is the caller's, because the newest line of a
-    /// live section counts up between events and the only thing that knows what
-    /// the time is when a frame is drawn is whoever is drawing it. A document has
-    /// no clock in it and so does not move with `now` at all.
-    #[must_use]
-    pub fn panel_lines(&self, now: Instant) -> Vec<Line> {
-        self.panel.window(now)
-    }
-
-    /// How many lines of the showing card sit below the panel's window.
-    ///
-    /// `0` while the panel is showing the end of that card, which is what an
-    /// indicator saying how far back the reader has scrolled is switched off by,
-    /// and `0` for an app whose showing card is empty. Independent of `now`:
-    /// the clocks move, the number of lines does not.
-    ///
-    /// A panel nobody has measured draws nothing, so the whole of it is below
-    /// it — which no frame ever sees, since a frame that asks this has just told
-    /// the app how tall the panel it is drawing is.
-    #[must_use]
-    pub fn panel_lines_below(&self) -> usize {
-        self.panel.lines_below()
     }
 
     /// Every row that is drawn, in the order it is drawn: the engine's walk
@@ -2219,15 +1921,6 @@ impl App {
         self.viewpoint.focus
     }
 
-    /// Whether the composer is a thing on screen: whether it is drawn, and so
-    /// whether focus is allowed to land on it.
-    ///
-    /// The panel's, forwarded: see [`Panel::composer_showable`], where the whole of
-    /// this lives and is argued.
-    #[must_use]
-    pub const fn composer_showable(&self) -> bool {
-        self.panel.composer_showable()
-    }
     /// Move the focus one place round the cycle: tree, panel, composer, tree.
     ///
     /// The whole of what the focus key does. It is a cycle rather than three
@@ -2236,7 +1929,7 @@ impl App {
     /// fourth.
     ///
     /// The composer is skipped while it is not on screen — see
-    /// [`App::composer_showable`] — so a reader with a document up tabs between
+    /// [`Panel::composer_showable`](crate::Panel::composer_showable) — so a reader with a document up tabs between
     /// the tree and the panel and never lands on a field that is not there. One
     /// skip is enough and there is no loop here: the composer is the only place
     /// that can be unavailable, and the place after it is always the tree.
@@ -2249,7 +1942,7 @@ impl App {
     pub const fn toggle_focus(&mut self) {
         let next = self.viewpoint.focus.next();
         self.viewpoint.focus = match next {
-            Focus::Composer if !self.composer_showable() => next.next(),
+            Focus::Composer if !self.panel().composer_showable() => next.next(),
             Focus::Tree | Focus::Panel | Focus::Composer => next,
         };
     }
@@ -2291,7 +1984,7 @@ impl App {
     /// a keystroke's answer.
     const fn rescue_focus(&mut self) {
         match self.viewpoint.focus {
-            Focus::Composer if !self.composer_showable() => {
+            Focus::Composer if !self.panel().composer_showable() => {
                 self.viewpoint.focus = Focus::Panel;
             }
             Focus::Tree | Focus::Panel | Focus::Composer => {}
@@ -2332,7 +2025,7 @@ impl App {
     /// the panel.
     ///
     /// A screenful is the focused pane's own height — [`App::viewport_height`]
-    /// or [`App::panel_height`] — so the row that was at the top of the window is
+    /// or [`Panel::height`](crate::Panel::height) — so the row that was at the top of the window is
     /// roughly the one at the bottom afterwards: paging by the window's own
     /// height is what makes reading a long list a sequence of screens rather
     /// than a slide.
@@ -2460,7 +2153,7 @@ impl App {
     /// moved, and the line explaining the last keystroke belongs to the tree —
     /// the same reading a movement key at the panel takes, see `movement`.
     pub fn scroll_panel_down(&mut self, lines: usize) {
-        self.scroll_panel_to(self.panel_scroll_offset().saturating_add(lines));
+        self.scroll_panel_to(self.panel().scroll_offset().saturating_add(lines));
     }
 
     /// Scroll the panel's window `lines` lines back towards the start of the
@@ -2471,7 +2164,7 @@ impl App {
     /// lines that arrive afterwards leave the window where the reader put it —
     /// which is the whole of what scrolling back through a live log is for.
     pub fn scroll_panel_up(&mut self, lines: usize) {
-        self.scroll_panel_to(self.panel_scroll_offset().saturating_sub(lines));
+        self.scroll_panel_to(self.panel().scroll_offset().saturating_sub(lines));
     }
 
     /// Carry out a movement key: `tree` says where the selection lands, `panel`
@@ -2510,7 +2203,7 @@ impl App {
             self.selected = tree(self);
             self.moved();
         } else if focus.drives_the_panel() {
-            let offset = panel(self, self.panel_scroll_offset());
+            let offset = panel(self, self.panel().scroll_offset());
             self.scroll_panel_to(offset);
         }
     }
@@ -2761,32 +2454,96 @@ impl App {
     /// Writing documents and saving the manifest are the caller's job. This is
     /// app state and touches no file.
     pub fn toggle_pact(&mut self) -> Option<PactToggle> {
-        let row = self.rows.get(self.selected)?;
-        let path = row.path.clone();
-        let ignored = row.is_ignored();
-        if row.is_file() {
-            // Answered as a file first: that is what the row *is*, and it is the
-            // answer whether or not the rules also keep it out.
-            self.status.message = Some(file_row_message(&self.label_for(&path)));
-            return None;
+        match self.pact_intent() {
+            PactIntent::Toggles(toggle) => {
+                self.apply_toggle(&toggle);
+                Some(toggle)
+            }
+            PactIntent::Refused(message) => {
+                self.status.message = Some(message);
+                None
+            }
+            PactIntent::NoRow => None,
         }
-        if ignored {
-            self.status.message = Some(ignored_row_message(&self.label_for(&path)));
-            return None;
-        }
+    }
 
-        let pacted = !row.state.is_pacted();
+    /// What the pact key would mean on the selected row, asked without pressing
+    /// it.
+    ///
+    /// [`App::toggle_pact`] is this and [`App::apply_toggle`] in one call, and
+    /// the reason the two are separable is that `p` is one key with two
+    /// meanings — pact a subtree, or drop the pact on one — and the second is
+    /// the direction a scope boundary is lost in. A caller that has to decline
+    /// the press before anything moves cannot ask a method that paints a whole
+    /// subtree what the press would have meant, so it would work the direction
+    /// out from the row for itself, and `!row.state.is_pacted()` would be an
+    /// expression two modules had to keep in step. It is here instead, once.
+    ///
+    /// Nothing is changed, said or painted: this takes `&self`, so a caller
+    /// that asks and then declines leaves the app exactly as it found it, and
+    /// the sentence a refusal would have put on the message line comes back as
+    /// a value rather than being written.
+    ///
+    /// The rules are the row's own: a file is not a module, and a directory
+    /// `.warlockignore` excludes is not warlock's to manage. A file is answered
+    /// as a file first — that is what the row *is*, and it is the answer whether
+    /// or not the exclusion would also have kept it out.
+    #[must_use]
+    pub fn pact_intent(&self) -> PactIntent {
+        let Some(row) = self.rows.get(self.selected) else {
+            return PactIntent::NoRow;
+        };
+        let path = row.path.clone();
+        if row.is_file() {
+            return PactIntent::Refused(file_row_message(&self.label_for(&path)));
+        }
+        if row.is_ignored() {
+            return PactIntent::Refused(ignored_row_message(&self.label_for(&path)));
+        }
+        PactIntent::Toggles(PactToggle {
+            pacted: !row.state.is_pacted(),
+            path,
+        })
+    }
+
+    /// Which directory the pact key would reach and which way it would go,
+    /// before this repository's own rules are applied to the press.
+    ///
+    /// [`App::pact_intent`] without the refusals, and the difference is one
+    /// row: a directory `.warlockignore` excludes answers here like any other.
+    /// That is deliberate rather than an oversight — whether a press would lose
+    /// a scope boundary is settled before what the repository's own rules would
+    /// have made of it, so the boundary question has to be able to ask about a
+    /// row the press is going to be refused on anyway. A file row answers
+    /// `None`: it is no module, so there is no subtree for a press to reach.
+    #[must_use]
+    pub fn pact_reach(&self) -> Option<PactToggle> {
+        let row = self.rows.get(self.selected)?;
+        (!row.is_file()).then(|| PactToggle {
+            path: row.path.clone(),
+            pacted: !row.state.is_pacted(),
+        })
+    }
+
+    /// Carry out the press [`App::pact_intent`] described: repaint the subtree
+    /// and word what was left on disk.
+    ///
+    /// The other half of [`App::toggle_pact`], and the half that changes
+    /// something. Takes the toggle rather than reading the selection again, so
+    /// the press that is carried out is provably the press that was asked
+    /// about — a selection moved between the question and the answer cannot
+    /// repaint a different subtree than the one a caller was told about.
+    pub fn apply_toggle(&mut self, toggle: &PactToggle) {
         self.set_subtree_state(
-            &path,
-            if pacted {
+            &toggle.path,
+            if toggle.pacted {
                 NodeState::PactedStale
             } else {
                 NodeState::Unpacted
             },
         );
-        self.status.message = (!pacted).then(|| left_on_disk_message(&self.label_for(&path)));
-
-        Some(PactToggle { path, pacted })
+        self.status.message =
+            (!toggle.pacted).then(|| left_on_disk_message(&self.label_for(&toggle.path)));
     }
 
     /// Ask for the selected directory's stale parts to be described again, and
@@ -3735,23 +3492,6 @@ fn no_document_message() -> String {
     "nothing has been read this session — press v on a file row, and there will be a document to swap to".to_owned()
 }
 
-/// What the app says while a summarising pass over the file named `label` is
-/// running inside the directory `pacting` — a line from [`pacting_message`] or
-/// [`refreshing_message`] — is about: that same line with
-/// `— summarising <file> (part/parts)` after it.
-///
-/// A clause on the run's line rather than a line of its own, because the footer
-/// is a fixed three lines and because this *is* the run: it is where the minutes
-/// are going right now. The directory and its fraction keep the front of the line
-/// — they are what the whole run is measured in, and the file is a detail inside
-/// one of their steps — and the second fraction is what moves while the first one
-/// cannot, which is the difference between a big file being paid for and a hung
-/// Warlock. Named with the same participle as the pass itself, so the two
-/// fractions read as one sentence about one piece of work.
-fn summarising_message(pacting: &str, label: &str, part: usize, parts: usize) -> String {
-    format!("{pacting} — summarising {label} ({part}/{parts})")
-}
-
 /// What the app says when the pact or refresh key is pressed while `pacting` — a
 /// line from [`pacting_message`] or [`refreshing_message`] — is already on the
 /// footer: that same line with `— already running` on the end.
@@ -3821,12 +3561,13 @@ mod tests {
     use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
     use super::{
-        Account, App, Chrome, Focus, Line, Mode, PactToggle, Row, Run, Showing, Sigils,
-        cut_at_cap_message, no_document_message, reseat_on, scroll_offset_for,
+        App, Chrome, Focus, PactIntent, PactToggle, Row, Run, Showing, Sigils, cut_at_cap_message,
+        ignored_row_message, no_document_message, reseat_on, scroll_offset_for,
     };
-    use crate::account::Outcome;
+    use crate::account::{Account, Line, Outcome};
     use crate::claude::Activity;
     use crate::fixture;
+    use crate::panel::Mode;
     use crate::panel::panel_offset_for;
     use crate::thread::Ending;
 
@@ -5047,7 +4788,7 @@ mod tests {
         assert_eq!(app.message(), None);
         assert_eq!(app.rows(), before.rows());
         assert_eq!(app.counts(), before.counts());
-        assert!(!app.has_account());
+        assert!(!app.panel().has_account());
         assert!(!app.is_pacting());
     }
 
@@ -5123,8 +4864,67 @@ mod tests {
         // repainted, no selection moved, no account started, no run in flight.
         before.set_message(message);
         assert_eq!(app, before, "refusing an excluded row moved something else");
-        assert!(!app.has_account());
+        assert!(!app.panel().has_account());
         assert!(!app.is_pacting());
+    }
+
+    #[test]
+    fn asking_what_the_pact_key_means_changes_nothing_at_all() {
+        // The whole point of splitting the question off the press: a caller
+        // that has to decline before anything moves can ask, and asking is
+        // free of consequence — no subtree repainted, no message written, no
+        // selection moved.
+        for (row, expected) in [
+            (
+                "repo/crates",
+                PactIntent::Toggles(PactToggle {
+                    path: PathBuf::from("repo/crates"),
+                    pacted: true,
+                }),
+            ),
+            (
+                "repo/notes",
+                PactIntent::Refused(ignored_row_message("repo/notes")),
+            ),
+        ] {
+            let app = select(App::from_rows(rows_with_one_kept_out()), row);
+            let before = app.clone();
+
+            assert_eq!(app.pact_intent(), expected, "{row}");
+            assert_eq!(app.pact_intent(), expected, "{row}: asking twice differs");
+            assert_eq!(app, before, "{row}: asking moved something");
+            assert_eq!(app.message(), None, "{row}: asking said something");
+        }
+    }
+
+    #[test]
+    fn the_reach_of_a_press_answers_for_a_row_its_meaning_refuses() {
+        // The two questions are deliberately not the same one. Whether a press
+        // would lose a scope boundary is settled before the repository's own
+        // rules are applied to it, so an excluded row has a reach even though
+        // it has no meaning.
+        let app = select(App::from_rows(rows_with_one_kept_out()), "repo/notes");
+        assert!(matches!(app.pact_intent(), PactIntent::Refused(_)));
+        assert_eq!(
+            app.pact_reach(),
+            Some(PactToggle {
+                path: PathBuf::from("repo/notes"),
+                pacted: true,
+            }),
+            "an excluded row still says which way a press would go"
+        );
+
+        // A file row is no module either way: there is no subtree to reach.
+        let mut app = App::from_rows(vec![
+            Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedFresh),
+            Row::file(1, "repo/lib.rs", NodeState::PactedFresh),
+        ]);
+        // File rows are detail asked for, so they have to be on screen before
+        // one can be selected.
+        app.toggle_files();
+        let app = select(app, "repo/lib.rs");
+        assert!(matches!(app.pact_intent(), PactIntent::Refused(_)));
+        assert_eq!(app.pact_reach(), None);
     }
 
     #[test]
@@ -5657,21 +5457,13 @@ mod tests {
             3,
             7,
         );
-        app.set_pact_summarising(
-            Path::new("/repo").join("crates").join("warlock-engine"),
-            2,
-            5,
-        );
         app.set_pact_refused();
 
-        // The summarising clause and the refusal are worded exactly as they are
-        // for a pact, and the refusal still goes last.
+        // The refusal is worded exactly as it is for a pact, and still goes
+        // last.
         assert_eq!(
             app.pact_line().as_deref(),
-            Some(
-                "refreshing crates/warlock-engine (3/7) — summarising \
-                 crates/warlock-engine (2/5) — already running"
-            )
+            Some("refreshing crates/warlock-engine (3/7) — already running")
         );
 
         // The run moving on re-words the line around the new directory and
@@ -5731,22 +5523,29 @@ mod tests {
     fn setting_the_mode_changes_the_mode_and_nothing_else() {
         let base = Instant::now();
         let mut app = App::from_rows(rooted_rows());
-        app.start_turn("what does this do", base);
-        app.answer_turn("it walks the tree", at(base, 1));
+        app.panel_mut().start_turn("what does this do", base);
+        app.panel_mut()
+            .answer_turn("it walks the tree", at(base, 1));
         app.set_run_in_flight(Run::Pact, Path::new("/repo").join("crates"), 1, 4);
 
-        let before = app.panel_lines(at(base, 2));
+        let before = app.panel().window(at(base, 2));
         let header = app.run_header().expect("a run in flight has a header");
 
         // Chat until somebody says otherwise, and the change is reported.
-        assert_eq!(app.mode(), Mode::Chat);
-        assert!(app.set_mode(Mode::Brief), "chat to brief is a change");
-        assert_eq!(app.mode(), Mode::Brief);
+        assert_eq!(app.panel().mode(), Mode::Chat);
+        assert!(
+            app.panel_mut().set_mode(Mode::Brief),
+            "chat to brief is a change"
+        );
+        assert_eq!(app.panel().mode(), Mode::Brief);
 
         // Nothing else moved: same rows in the same order, same card, same
         // header — the mode wrote no note and started no turn of its own.
-        assert_eq!(app.panel_lines(at(base, 2)), before);
-        assert!(app.showing_thread(), "the mode moved the card showing");
+        assert_eq!(app.panel().window(at(base, 2)), before);
+        assert!(
+            app.panel().showing_thread(),
+            "the mode moved the card showing"
+        );
         let after = app.run_header().expect("the mode took the header down");
         assert_eq!(after.run(), header.run());
         assert_eq!(after.directory(), header.directory());
@@ -5755,10 +5554,16 @@ mod tests {
 
         // Setting the mode it is already in is no change, and says so: that is
         // how a re-sent instruction knows to add no second note.
-        assert!(!app.set_mode(Mode::Brief), "brief to brief is no change");
-        assert_eq!(app.mode(), Mode::Brief);
-        assert!(app.set_mode(Mode::Chat), "brief to chat is a change");
-        assert_eq!(app.panel_lines(at(base, 2)), before);
+        assert!(
+            !app.panel_mut().set_mode(Mode::Brief),
+            "brief to brief is no change"
+        );
+        assert_eq!(app.panel().mode(), Mode::Brief);
+        assert!(
+            app.panel_mut().set_mode(Mode::Chat),
+            "brief to chat is a change"
+        );
+        assert_eq!(app.panel().window(at(base, 2)), before);
     }
 
     #[test]
@@ -6128,94 +5933,6 @@ mod tests {
         // message.
         assert_eq!(app.pact_line(), None);
         assert_eq!(app.message(), Some("something the caller said"));
-    }
-
-    #[test]
-    fn a_summarising_pass_names_the_file_and_its_part_beside_the_directory() {
-        let mut app = App::from_rows(rooted_rows());
-        app.set_pact_in_flight(Path::new("/repo").join("crates"), 3, 12);
-
-        app.set_pact_summarising(Path::new("/repo").join("crates").join("Cargo.lock"), 2, 5);
-
-        // One line: the directory and where the run is in it first, because that
-        // is what the whole run is measured in, then the file being paid for now
-        // and how far through it the passes are. Both named relative to the root
-        // of the tree on screen, in the manifest spelling.
-        assert_eq!(
-            app.pact_line().as_deref(),
-            Some("pacting crates (3/12) — summarising crates/Cargo.lock (2/5)")
-        );
-
-        // And the second fraction moves while the first one cannot, which is the
-        // whole point of it.
-        app.set_pact_summarising(Path::new("/repo").join("crates").join("Cargo.lock"), 3, 5);
-        assert_eq!(
-            app.pact_line().as_deref(),
-            Some("pacting crates (3/12) — summarising crates/Cargo.lock (3/5)")
-        );
-    }
-
-    #[test]
-    fn the_next_directory_does_not_inherit_the_last_ones_summarising_file() {
-        let mut app = App::from_rows(rooted_rows());
-        app.set_pact_in_flight(Path::new("/repo").join("crates"), 3, 12);
-        app.set_pact_summarising(Path::new("/repo").join("crates").join("Cargo.lock"), 2, 5);
-
-        app.set_pact_in_flight(
-            Path::new("/repo").join("crates").join("warlock-engine"),
-            4,
-            12,
-        );
-
-        // The file belonged to the directory the run has just left, so it goes
-        // with it: the footer never names a file under a directory that is not
-        // the one holding it.
-        assert_eq!(
-            app.pact_line().as_deref(),
-            Some("pacting crates/warlock-engine (4/12)")
-        );
-    }
-
-    #[test]
-    fn no_summarising_wording_survives_the_end_of_a_run() {
-        let mut app = App::from_rows(rooted_rows());
-        app.set_pact_in_flight(Path::new("/repo").join("crates"), 3, 12);
-        app.set_pact_summarising(Path::new("/repo").join("crates").join("Cargo.lock"), 2, 5);
-
-        app.clear_pact_in_flight();
-
-        assert_eq!(app.pact_line(), None);
-        // And nothing of it comes back with the next run either.
-        app.set_pact_in_flight(Path::new("/repo").join("crates"), 1, 2);
-        assert_eq!(app.pact_line().as_deref(), Some("pacting crates (1/2)"));
-    }
-
-    #[test]
-    fn a_summarising_pass_says_nothing_while_no_pact_is_in_flight() {
-        let mut app = App::from_rows(rooted_rows());
-
-        app.set_pact_summarising(Path::new("/repo").join("crates").join("Cargo.lock"), 2, 5);
-
-        // There is no line for it to be a clause on: the file is a detail inside
-        // a directory of a run, and outside a run it describes nothing.
-        assert_eq!(app.pact_line(), None);
-    }
-
-    #[test]
-    fn the_already_running_suffix_still_goes_last_with_a_summarising_pass() {
-        let mut app = App::from_rows(rooted_rows());
-        app.set_pact_in_flight(Path::new("/repo").join("crates"), 3, 12);
-        app.set_pact_summarising(Path::new("/repo").join("crates").join("Cargo.lock"), 2, 5);
-
-        app.set_pact_refused();
-
-        // The answer to a key just pressed is still the last thing on the line,
-        // so a terminal too narrow for all of it cuts that before it cuts either
-        // fraction.
-        assert_eq!(
-            app.pact_line().as_deref(),
-            Some("pacting crates (3/12) — summarising crates/Cargo.lock (2/5) — already running")
-        );
     }
 
     #[test]
@@ -7520,12 +7237,18 @@ mod tests {
     fn the_composer_is_showable_only_while_the_conversation_is_the_card_up() {
         let base = Instant::now();
         let mut app = App::from_rows(three_rows());
-        assert!(app.composer_showable(), "an app opens with room to type");
+        assert!(
+            app.panel().composer_showable(),
+            "an app opens with room to type"
+        );
 
         // The file gives the panel those rows back, and so does the run: a
         // field under either is a field about the wrong card.
         app.show_document(["a line of a file"], false);
-        assert!(!app.composer_showable(), "the document card hid nothing");
+        assert!(
+            !app.panel().composer_showable(),
+            "the document card hid nothing"
+        );
 
         app.start_account(base);
         assert_eq!(
@@ -7533,15 +7256,21 @@ mod tests {
             Showing::Document,
             "the run took the panel"
         );
-        assert!(!app.composer_showable());
+        assert!(!app.panel().composer_showable());
 
         app.swap_card();
         assert_eq!(app.panel.showing(), Showing::Thread);
-        assert!(app.composer_showable(), "the conversation gave it back");
+        assert!(
+            app.panel().composer_showable(),
+            "the conversation gave it back"
+        );
 
         app.swap_card();
         assert_eq!(app.panel.showing(), Showing::Account);
-        assert!(!app.composer_showable(), "the run drew a field of its own");
+        assert!(
+            !app.panel().composer_showable(),
+            "the run drew a field of its own"
+        );
     }
 
     #[test]
@@ -7551,21 +7280,21 @@ mod tests {
         // Nothing said and nothing read: the panel is warlock's mark, and the
         // run the reader just asked for is worth more than that.
         let mut app = App::from_rows(three_rows());
-        app.set_panel_height(PANEL);
+        app.panel_mut().set_height(PANEL);
         app.start_account(base);
         assert_eq!(app.panel.showing(), Showing::Account);
 
         // A conversation on screen is something they chose to look at, and a
         // run started behind it leaves it exactly where it is.
         let mut app = App::from_rows(three_rows());
-        app.set_panel_height(PANEL);
+        app.panel_mut().set_height(PANEL);
         ask_and_answer(&mut app, base);
         app.start_account(at(base, 10));
         assert_eq!(app.panel.showing(), Showing::Thread);
 
         // And so is a file.
         let mut app = App::from_rows(three_rows());
-        app.set_panel_height(PANEL);
+        app.panel_mut().set_height(PANEL);
         app.show_document(document_lines(), false);
         app.start_account(at(base, 10));
         assert_eq!(app.panel.showing(), Showing::Document);
@@ -7576,14 +7305,14 @@ mod tests {
         // The account draws no field, so a keyboard left pointing at one would
         // be pointing at nothing — the same rescue a document does.
         let mut app = App::from_rows(three_rows());
-        app.set_panel_height(PANEL);
+        app.panel_mut().set_height(PANEL);
         app.set_focus(Focus::Composer);
         assert_eq!(app.focus(), Focus::Composer);
 
         app.start_account(Instant::now());
 
         assert_eq!(app.panel.showing(), Showing::Account);
-        assert!(!app.composer_showable());
+        assert!(!app.panel().composer_showable());
         assert_eq!(
             app.focus(),
             Focus::Panel,
@@ -7655,7 +7384,10 @@ mod tests {
 
         app.restore_from(before);
 
-        assert!(!app.composer_showable(), "the panel came back with the app");
+        assert!(
+            !app.panel().composer_showable(),
+            "the panel came back with the app"
+        );
         assert_eq!(
             app.focus(),
             Focus::Panel,
@@ -7695,8 +7427,8 @@ mod tests {
                 "{name} scrolled"
             );
             assert_eq!(
-                app.panel_scroll_offset(),
-                before.panel_scroll_offset(),
+                app.panel().scroll_offset(),
+                before.panel().scroll_offset(),
                 "{name} moved the panel's window"
             );
             assert_eq!(app.focus(), Focus::Composer, "{name} moved the focus");
@@ -7780,7 +7512,7 @@ mod tests {
     #[test]
     fn nothing_but_a_movement_key_cares_which_pane_has_the_focus() {
         type Change = fn(&mut App);
-        let changes: [(&str, Change); 9] = [
+        let changes: [(&str, Change); 8] = [
             ("toggle_collapsed", App::toggle_collapsed),
             ("toggle_pacted_only", App::toggle_pacted_only),
             ("toggle_files", App::toggle_files),
@@ -7790,13 +7522,8 @@ mod tests {
             ("set_pact_in_flight", |app| {
                 app.set_pact_in_flight("warlock/crates", 2, 5);
             }),
-            ("set_pact_summarising", |app| {
-                app.set_pact_in_flight("warlock/crates", 2, 5);
-                app.set_pact_summarising("warlock/crates/Cargo.lock", 2, 5);
-            }),
             ("clear_pact_in_flight", |app| {
                 app.set_pact_in_flight("warlock/crates", 2, 5);
-                app.set_pact_summarising("warlock/crates/Cargo.lock", 2, 5);
                 app.clear_pact_in_flight();
             }),
             ("set_subtree_state", |app| {
@@ -7840,11 +7567,14 @@ mod tests {
     /// say which line it is looking at from the text alone.
     fn app_pacting(lines: usize, base: Instant) -> App {
         let mut app = App::from_rows(three_rows());
-        app.set_panel_height(PANEL);
+        app.panel_mut().set_height(PANEL);
         app.toggle_focus();
         app.start_account(base);
 
-        let account = app.account_mut().expect("a run has just started");
+        let account = app
+            .panel_mut()
+            .account_mut()
+            .expect("a run has just started");
         account.open_section("crates/engine", base);
         for line in 0..lines {
             account.record(
@@ -7861,7 +7591,8 @@ mod tests {
     /// What the panel is drawing, as plain text, so a test asserts on the window
     /// a reader would see rather than on an offset.
     fn panel_text(app: &App, now: Instant) -> Vec<String> {
-        app.panel_lines(now)
+        app.panel()
+            .window(now)
             .into_iter()
             .map(|line| match line {
                 Line::Directory { path } => path.display().to_string(),
@@ -7887,13 +7618,13 @@ mod tests {
             App::from_tree(&fixture::tree()),
         ] {
             let mut app = app;
-            app.set_panel_height(PANEL);
+            app.panel_mut().set_height(PANEL);
 
-            assert!(!app.has_account());
-            assert_eq!(app.account(), None);
-            assert_eq!(app.panel_lines(now), Vec::new());
-            assert_eq!(app.panel_lines_below(), 0);
-            assert_eq!(app.panel_scroll_offset(), 0);
+            assert!(!app.panel().has_account());
+            assert_eq!(app.panel().account(), None);
+            assert_eq!(app.panel().window(now), Vec::new());
+            assert_eq!(app.panel().lines_below(), 0);
+            assert_eq!(app.panel().scroll_offset(), 0);
 
             // Not even a movement key can make a panel with no account say
             // something.
@@ -7901,8 +7632,8 @@ mod tests {
             for (_, movement) in MOVEMENTS {
                 movement(&mut app);
             }
-            assert!(!app.has_account());
-            assert_eq!(app.panel_lines(now), Vec::new());
+            assert!(!app.panel().has_account());
+            assert_eq!(app.panel().window(now), Vec::new());
         }
     }
 
@@ -7910,15 +7641,15 @@ mod tests {
     fn a_second_pact_starts_the_account_again_from_empty() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
-        assert_eq!(app.account().map(Account::line_count), Some(10));
+        assert_eq!(app.panel().account().map(Account::line_count), Some(10));
 
         app.start_account(at(base, 100));
 
-        assert!(app.has_account());
-        assert_eq!(app.account().map(Account::line_count), Some(0));
-        assert_eq!(app.panel_lines(at(base, 100)), Vec::new());
-        assert_eq!(app.panel_scroll_offset(), 0);
-        assert!(app.panel_follows());
+        assert!(app.panel().has_account());
+        assert_eq!(app.panel().account().map(Account::line_count), Some(0));
+        assert_eq!(app.panel().window(at(base, 100)), Vec::new());
+        assert_eq!(app.panel().scroll_offset(), 0);
+        assert!(app.panel().follows());
     }
 
     #[test]
@@ -7926,14 +7657,15 @@ mod tests {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
         app.select_first();
-        assert!(!app.panel_follows());
+        assert!(!app.panel().follows());
 
         app.start_account(at(base, 100));
-        app.account_mut()
+        app.panel_mut()
+            .account_mut()
             .expect("a run has just started")
             .open_section("crates/tui", at(base, 100));
 
-        assert!(app.panel_follows());
+        assert!(app.panel().follows());
         assert_eq!(
             panel_text(&app, at(base, 100)),
             ["crates/tui".to_owned(), "waiting".to_owned()]
@@ -7947,7 +7679,7 @@ mod tests {
 
         // Shorter than the panel: everything is on screen and there is nothing
         // to scroll.
-        assert_eq!(app.panel_scroll_offset(), 0);
+        assert_eq!(app.panel().scroll_offset(), 0);
         assert_eq!(
             panel_text(&app, at(base, 3)),
             ["crates/engine", "Read line 0", "Read line 1"],
@@ -7958,18 +7690,21 @@ mod tests {
         // rather than thinking, because a stretch of thinking is one line
         // however often it is reported and this test needs several.
         for line in 2..6 {
-            app.account_mut().expect("a run is under way").record(
-                &Activity::Tool {
-                    name: "Read".to_owned(),
-                    detail: Some(format!("line {line}")),
-                },
-                at(base, line + 1),
-            );
+            app.panel_mut()
+                .account_mut()
+                .expect("a run is under way")
+                .record(
+                    &Activity::Tool {
+                        name: "Read".to_owned(),
+                        detail: Some(format!("line {line}")),
+                    },
+                    at(base, line + 1),
+                );
         }
 
-        assert!(app.panel_follows());
-        assert_eq!(app.panel_scroll_offset(), 7 - usize::from(PANEL));
-        assert_eq!(app.panel_lines_below(), 0);
+        assert!(app.panel().follows());
+        assert_eq!(app.panel().scroll_offset(), 7 - usize::from(PANEL));
+        assert_eq!(app.panel().lines_below(), 0);
         assert_eq!(
             panel_text(&app, at(base, 7)),
             ["Read line 3", "Read line 4", "Read line 5"],
@@ -7987,19 +7722,20 @@ mod tests {
 
         app.select_previous();
 
-        assert!(!app.panel_follows());
+        assert!(!app.panel().follows());
         let parked = panel_text(&app, at(base, 9));
         assert_eq!(parked, ["Read line 5", "Read line 6", "Read line 7"]);
 
         // And the lines that arrive afterwards leave the window where it is.
         for line in 9..20 {
-            app.account_mut()
+            app.panel_mut()
+                .account_mut()
                 .expect("a run is under way")
                 .record(&Activity::Thinking, at(base, line + 1));
         }
 
         assert_eq!(panel_text(&app, at(base, 30)), parked);
-        assert_eq!(app.panel_scroll_offset(), 6);
+        assert_eq!(app.panel().scroll_offset(), 6);
     }
 
     #[test]
@@ -8007,19 +7743,20 @@ mod tests {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
         app.select_first();
-        assert!(!app.panel_follows());
-        assert_eq!(app.panel_scroll_offset(), 0);
+        assert!(!app.panel().follows());
+        assert_eq!(app.panel().scroll_offset(), 0);
 
         app.select_last();
 
-        assert!(app.panel_follows());
+        assert!(app.panel().follows());
         assert_eq!(
             panel_text(&app, at(base, 9)),
             ["Read line 6", "Read line 7", "Read line 8"],
         );
 
         // Live means live: the next line to arrive moves the window again.
-        app.account_mut()
+        app.panel_mut()
+            .account_mut()
             .expect("a run is under way")
             .record(&Activity::Thinking, at(base, 10));
 
@@ -8035,16 +7772,16 @@ mod tests {
         let mut app = app_pacting(9, base);
 
         app.select_page_up();
-        assert!(!app.panel_follows());
+        assert!(!app.panel().follows());
 
         app.select_next();
         app.select_next();
-        assert!(!app.panel_follows());
+        assert!(!app.panel().follows());
 
         app.select_next();
 
-        assert!(app.panel_follows());
-        assert_eq!(app.panel_lines_below(), 0);
+        assert!(app.panel().follows());
+        assert_eq!(app.panel().lines_below(), 0);
     }
 
     #[test]
@@ -8053,23 +7790,23 @@ mod tests {
         let mut app = app_pacting(9, base);
 
         // Ten lines, three of them on screen at the end: nothing below.
-        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(app.panel().lines_below(), 0);
 
         app.select_first();
-        assert_eq!(app.panel_lines_below(), 10 - usize::from(PANEL));
+        assert_eq!(app.panel().lines_below(), 10 - usize::from(PANEL));
 
         app.select_next();
-        assert_eq!(app.panel_lines_below(), 10 - usize::from(PANEL) - 1);
+        assert_eq!(app.panel().lines_below(), 10 - usize::from(PANEL) - 1);
 
         app.select_last();
-        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(app.panel().lines_below(), 0);
     }
 
     #[test]
     fn a_panel_nobody_has_measured_has_nothing_to_scroll() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
-        app.set_panel_height(0);
+        app.panel_mut().set_height(0);
 
         // No height means no window: nothing is drawn, so the honest offset is
         // the top however long the account is, and no movement key can push it
@@ -8078,18 +7815,18 @@ mod tests {
         for (name, movement) in MOVEMENTS {
             movement(&mut app);
             assert_eq!(
-                app.panel_scroll_offset(),
+                app.panel().scroll_offset(),
                 0,
                 "{name} moved a panel of no height"
             );
-            assert_eq!(app.panel_lines(at(base, 9)), Vec::new(), "{name}");
+            assert_eq!(app.panel().window(at(base, 9)), Vec::new(), "{name}");
             // Nothing is drawn, so the whole account is below what is drawn.
-            assert_eq!(app.panel_lines_below(), 10, "{name}");
+            assert_eq!(app.panel().lines_below(), 10, "{name}");
         }
 
         // And the window is measurable again the moment somebody measures it.
-        app.set_panel_height(PANEL);
-        assert_eq!(app.panel_scroll_offset(), 10 - usize::from(PANEL));
+        app.panel_mut().set_height(PANEL);
+        assert_eq!(app.panel().scroll_offset(), 10 - usize::from(PANEL));
     }
 
     #[test]
@@ -8131,6 +7868,7 @@ mod tests {
             // row the header took off the window.
             let mut app = app_pacting(11, base);
             let lines = app
+                .panel()
                 .account()
                 .map(Account::line_count)
                 .expect("a run has started");
@@ -8138,40 +7876,41 @@ mod tests {
             if in_flight {
                 app.set_run_in_flight(Run::Pact, "crates/engine", 2, 5);
             }
-            app.set_panel_height(u16::try_from(window).expect("a window this small"));
+            app.panel_mut()
+                .set_height(u16::try_from(window).expect("a window this small"));
 
             // Following the newest line: the window is the last screenful of
             // the window it was given, and nothing is below it however many
             // rows the header took.
-            assert!(app.panel_follows(), "{name}");
+            assert!(app.panel().follows(), "{name}");
             assert_eq!(
-                app.panel_scroll_offset(),
+                app.panel().scroll_offset(),
                 panel_offset_for(lines, window, 0, true),
                 "{name}"
             );
-            assert_eq!(app.panel_scroll_offset(), lines - window, "{name}");
-            assert_eq!(app.panel_lines_below(), 0, "{name}");
-            assert_eq!(app.panel_lines(at(base, 99)).len(), window, "{name}");
+            assert_eq!(app.panel().scroll_offset(), lines - window, "{name}");
+            assert_eq!(app.panel().lines_below(), 0, "{name}");
+            assert_eq!(app.panel().window(at(base, 99)).len(), window, "{name}");
 
             // Parked at the first line: what is below is everything the shorter
             // window does not cover, counted against that window rather than
             // against the one the panel would have had with no header on it.
             app.select_first();
-            assert!(!app.panel_follows(), "{name}");
+            assert!(!app.panel().follows(), "{name}");
             assert_eq!(
-                app.panel_scroll_offset(),
+                app.panel().scroll_offset(),
                 panel_offset_for(lines, window, 0, false),
                 "{name}"
             );
-            assert_eq!(app.panel_lines_below(), lines - window, "{name}");
-            below_at_top.push(app.panel_lines_below());
+            assert_eq!(app.panel().lines_below(), lines - window, "{name}");
+            below_at_top.push(app.panel().lines_below());
 
             // Parked in the middle: what is above the window, what is drawn in
             // it and what is below it come to the account, so the header's row
             // is neither counted twice nor lost between the three.
             app.select_next();
             app.select_next();
-            let offset = app.panel_scroll_offset();
+            let offset = app.panel().scroll_offset();
             assert_eq!(offset, 2, "{name}");
             assert_eq!(
                 offset,
@@ -8179,7 +7918,7 @@ mod tests {
                 "{name}"
             );
             assert_eq!(
-                offset + app.panel_lines(at(base, 99)).len() + app.panel_lines_below(),
+                offset + app.panel().window(at(base, 99)).len() + app.panel().lines_below(),
                 lines,
                 "{name}"
             );
@@ -8187,12 +7926,16 @@ mod tests {
             // And the count is off by exactly nothing: a line at a time down
             // reaches the end of the account after that many presses, and the
             // window is following again when it gets there.
-            let below = app.panel_lines_below();
+            let below = app.panel().lines_below();
             for step in 1..=below {
                 app.select_next();
-                assert_eq!(app.panel_lines_below(), below - step, "{name}, {step} down");
+                assert_eq!(
+                    app.panel().lines_below(),
+                    below - step,
+                    "{name}, {step} down"
+                );
             }
-            assert!(app.panel_follows(), "{name}");
+            assert!(app.panel().follows(), "{name}");
 
             // An offset past the end is clamped to the last screenful of the
             // window there is, header or no header.
@@ -8218,32 +7961,32 @@ mod tests {
     fn a_document_is_drawn_from_its_first_line_in_the_order_it_was_given() {
         let now = Instant::now();
         let mut app = App::from_tree(&fixture::tree());
-        app.set_panel_height(PANEL);
+        app.panel_mut().set_height(PANEL);
 
         app.show_document(document_lines(), false);
 
         // The window is the top of the file: a file is read from its first line,
         // and nothing is appended to it for the panel to follow.
-        assert!(app.has_document());
-        assert!(!app.panel_follows());
-        assert_eq!(app.panel_scroll_offset(), 0);
+        assert!(app.panel().has_document());
+        assert!(!app.panel().follows());
+        assert_eq!(app.panel().scroll_offset(), 0);
         assert_eq!(panel_text(&app, now), ["line 0", "line 1", "line 2"]);
         // And the count agrees with what was handed over: five lines, three of
         // them on screen.
-        assert_eq!(app.panel_lines_below(), 5 - usize::from(PANEL));
+        assert_eq!(app.panel().lines_below(), 5 - usize::from(PANEL));
 
         // A panel tall enough for the whole file draws the whole file, in order,
         // with nothing below it.
-        app.set_panel_height(9);
+        app.panel_mut().set_height(9);
         assert_eq!(panel_text(&app, now), document_lines());
-        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(app.panel().lines_below(), 0);
     }
 
     #[test]
     fn a_read_the_cap_cut_short_says_so_under_the_last_line_it_got() {
         let now = Instant::now();
         let mut app = App::from_tree(&fixture::tree());
-        app.set_panel_height(9);
+        app.panel_mut().set_height(9);
 
         app.show_document(document_lines(), true);
 
@@ -8281,8 +8024,8 @@ mod tests {
     fn a_document_line_wider_than_the_panel_is_drawn_in_as_many_rows_as_it_needs() {
         let now = Instant::now();
         let mut app = App::from_tree(&fixture::tree());
-        app.set_panel_height(9);
-        app.set_panel_width(NARROW);
+        app.panel_mut().set_height(9);
+        app.panel_mut().set_width(NARROW);
 
         app.show_document(a_long_line(), false);
 
@@ -8298,7 +8041,7 @@ mod tests {
                 "done",
             ]
         );
-        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(app.panel().lines_below(), 0);
     }
 
     #[test]
@@ -8307,11 +8050,11 @@ mod tests {
         // it the width, and until one has, a line is the row it arrived as.
         let now = Instant::now();
         let mut app = App::from_tree(&fixture::tree());
-        app.set_panel_height(9);
+        app.panel_mut().set_height(9);
 
         app.show_document(a_long_line(), false);
 
-        assert_eq!(app.panel_width(), 0);
+        assert_eq!(app.panel().width(), 0);
         assert_eq!(panel_text(&app, now), a_long_line());
     }
 
@@ -8322,17 +8065,17 @@ mod tests {
         // has always held, without anything being read again.
         let now = Instant::now();
         let mut app = App::from_tree(&fixture::tree());
-        app.set_panel_height(9);
-        app.set_panel_width(80);
+        app.panel_mut().set_height(9);
+        app.panel_mut().set_width(80);
         app.show_document(a_long_line(), false);
         assert_eq!(panel_text(&app, now), a_long_line());
 
-        app.set_panel_width(NARROW);
+        app.panel_mut().set_width(NARROW);
 
         assert_eq!(panel_text(&app, now).len(), 5);
         // And wider again is the document it was: nothing was lost on the way
         // through the narrow panel, because the lines held are the file's.
-        app.set_panel_width(80);
+        app.panel_mut().set_width(80);
         assert_eq!(panel_text(&app, now), a_long_line());
     }
 
@@ -8340,23 +8083,23 @@ mod tests {
     fn the_panel_scrolls_by_rows_of_a_wrapped_document_rather_than_by_its_lines() {
         let now = Instant::now();
         let mut app = App::from_tree(&fixture::tree());
-        app.set_panel_height(2);
-        app.set_panel_width(NARROW);
+        app.panel_mut().set_height(2);
+        app.panel_mut().set_width(NARROW);
         app.show_document(a_long_line(), false);
 
         // Five rows in a panel two tall: what is below the window is counted in
         // rows, so a reader scrolling past a wrapped line scrolls through it.
-        assert_eq!(app.panel_lines_below(), 3);
+        assert_eq!(app.panel().lines_below(), 3);
         assert_eq!(panel_text(&app, now), ["# The engine", "It walks the tree"]);
 
         app.scroll_panel_down(1);
 
-        assert_eq!(app.panel_scroll_offset(), 1);
+        assert_eq!(app.panel().scroll_offset(), 1);
         assert_eq!(
             panel_text(&app, now),
             ["It walks the tree", "and writes what it"]
         );
-        assert_eq!(app.panel_lines_below(), 2);
+        assert_eq!(app.panel().lines_below(), 2);
     }
 
     #[test]
@@ -8368,8 +8111,11 @@ mod tests {
         // [`mod@crate::wrap`].
         let base = Instant::now();
         let mut app = app_pacting(0, base);
-        app.set_panel_height(9);
-        let account = app.account_mut().expect("a run has just started");
+        app.panel_mut().set_height(9);
+        let account = app
+            .panel_mut()
+            .account_mut()
+            .expect("a run has just started");
         account.record(
             &Activity::Tool {
                 name: "Read".to_owned(),
@@ -8379,10 +8125,10 @@ mod tests {
         );
 
         // Nobody has measured the panel yet: two lines, two rows.
-        assert_eq!(app.panel_width(), 0);
+        assert_eq!(app.panel().width(), 0);
         assert_eq!(panel_text(&app, at(base, 9)).len(), 2);
 
-        app.set_panel_width(NARROW);
+        app.panel_mut().set_width(NARROW);
 
         // Five rows, and the whole of the path on screen. The clock's own
         // columns are blank under it rather than repeated, so a row with
@@ -8397,11 +8143,11 @@ mod tests {
                 "       src/pact.rs",
             ]
         );
-        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(app.panel().lines_below(), 0);
 
         // And wider again is the account it always was: what a card holds is
         // what happened, never the rows some width once broke it into.
-        app.set_panel_width(80);
+        app.panel_mut().set_width(80);
         assert_eq!(panel_text(&app, at(base, 9)).len(), 2);
     }
 
@@ -8409,7 +8155,7 @@ mod tests {
     /// at the top of its window, and whether it is still following its newest
     /// one.
     ///
-    /// Asked of the card rather than of [`App::panel_scroll_offset`], because
+    /// Asked of the card rather than of [`Panel::scroll_offset`](crate::Panel::scroll_offset), because
     /// the point of every test below is what the card that is *not* showing is
     /// doing.
     fn account_window(app: &App) -> (usize, bool) {
@@ -8453,18 +8199,18 @@ mod tests {
     fn a_document_shows_over_the_account_rather_than_taking_the_panel_from_it() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
-        assert!(app.has_account());
+        assert!(app.panel().has_account());
 
         app.show_document(document_lines(), false);
 
         // Two cards in one slot: the document is what is drawn, and the account
         // is still there behind it — held, handed out by the getters, and with
         // its own window exactly where it was.
-        assert!(app.has_document());
-        assert!(app.has_account());
-        assert_eq!(app.account().map(Account::line_count), Some(10));
-        assert!(app.account_mut().is_some());
-        assert!(app.has_panel_content());
+        assert!(app.panel().has_document());
+        assert!(app.panel().has_account());
+        assert_eq!(app.panel().account().map(Account::line_count), Some(10));
+        assert!(app.panel_mut().account_mut().is_some());
+        assert!(app.panel().has_content());
         assert_eq!(panel_text(&app, at(base, 9))[0], "line 0");
         assert_eq!(account_window(&app), (10 - usize::from(PANEL), true));
     }
@@ -8481,22 +8227,25 @@ mod tests {
         // The run took nothing: the document is still the card on screen, and
         // the account started behind it on its own terms — empty, at the top,
         // following.
-        assert!(app.has_document());
+        assert!(app.panel().has_document());
         assert_eq!(panel_text(&app, at(base, 100)), shown);
-        assert_eq!(app.panel_scroll_offset(), 0);
-        assert!(!app.panel_follows());
-        assert!(app.has_account());
-        assert_eq!(app.account().map(Account::line_count), Some(0));
+        assert_eq!(app.panel().scroll_offset(), 0);
+        assert!(!app.panel().follows());
+        assert!(app.panel().has_account());
+        assert_eq!(app.panel().account().map(Account::line_count), Some(0));
         assert_eq!(account_window(&app), (0, true));
 
         // And the run goes on reporting into that card while the reader reads,
         // with its window following the newest line for when they swap to it.
-        let account = app.account_mut().expect("the run has its own card");
+        let account = app
+            .panel_mut()
+            .account_mut()
+            .expect("the run has its own card");
         account.open_section("crates/tui", at(base, 100));
         for line in 0..9 {
             account.record(&Activity::Thinking, at(base, 101 + line));
         }
-        assert_eq!(app.account().map(Account::line_count), Some(2));
+        assert_eq!(app.panel().account().map(Account::line_count), Some(2));
         assert_eq!(panel_text(&app, at(base, 120)), shown);
         assert_eq!(account_window(&app), (0, true));
     }
@@ -8518,14 +8267,14 @@ mod tests {
         // is where the reader left it, still parked.
         app.select_next();
         assert_eq!(document_window(&app), (1, false));
-        assert_eq!(app.panel_scroll_offset(), 1);
+        assert_eq!(app.panel().scroll_offset(), 1);
         assert_eq!(account_window(&app), (1, false));
 
         // Including when the movement takes the document to its own end, which
         // is the one thing that sets a follow flag.
         app.select_last();
         assert_eq!(document_window(&app), (5 - usize::from(PANEL), true));
-        assert!(app.panel_follows());
+        assert!(app.panel().follows());
         assert_eq!(account_window(&app), (1, false));
     }
 
@@ -8543,7 +8292,7 @@ mod tests {
 
             assert_eq!(account_window(&app), parked, "{name} moved the account");
             assert_eq!(
-                app.panel_scroll_offset(),
+                app.panel().scroll_offset(),
                 document_window(&app).0,
                 "{name} scrolled something other than the document"
             );
@@ -8569,17 +8318,17 @@ mod tests {
     fn an_empty_document_is_still_something_the_panel_is_holding() {
         let now = Instant::now();
         let mut app = App::from_tree(&fixture::tree());
-        app.set_panel_height(PANEL);
+        app.panel_mut().set_height(PANEL);
 
         app.show_document(Vec::<String>::new(), false);
 
         // An empty file read is not the same as nothing having happened: the
         // panel is holding it, so the mark does not come back.
-        assert!(app.has_document());
-        assert!(app.has_panel_content());
-        assert_eq!(app.panel_lines(now), Vec::new());
-        assert_eq!(app.panel_lines_below(), 0);
-        assert_eq!(app.panel_scroll_offset(), 0);
+        assert!(app.panel().has_document());
+        assert!(app.panel().has_content());
+        assert_eq!(app.panel().window(now), Vec::new());
+        assert_eq!(app.panel().lines_below(), 0);
+        assert_eq!(app.panel().scroll_offset(), 0);
     }
 
     #[test]
@@ -8598,15 +8347,15 @@ mod tests {
         // field is — so the file is two presses from the run either way.
         app.swap_card();
         assert_eq!(app.panel.showing(), Showing::Thread);
-        assert!(!app.has_panel_content(), "nothing has been asked");
+        assert!(!app.panel().has_content(), "nothing has been asked");
 
         app.swap_card();
         assert_eq!(panel_text(&app, at(base, 9)), account);
-        assert!(app.has_panel_content());
+        assert!(app.panel().has_content());
 
         app.swap_card();
         assert_eq!(panel_text(&app, at(base, 9)), document);
-        assert!(app.has_panel_content());
+        assert!(app.panel().has_content());
     }
 
     #[test]
@@ -8655,13 +8404,13 @@ mod tests {
         assert_eq!(app.panel.showing(), Showing::Account);
         let account = panel_text(&app, at(base, 9));
 
-        app.refill_document(rewritten_lines(), false);
+        app.panel_mut().refill_document(rewritten_lines(), false);
 
         // The panel is exactly where they left it. The new lines are on the card
         // behind it, waiting for the swap they will ask for themselves — a file
         // being saved in an editor is not a reason to take a run off the screen.
         assert_eq!(panel_text(&app, at(base, 9)), account);
-        assert!(app.has_document());
+        assert!(app.panel().has_document());
         assert_eq!(document_text(&app), rewritten_lines());
 
         app.swap_card();
@@ -8676,17 +8425,17 @@ mod tests {
         // Parked at the end of the file that was there before, which is the
         // window a re-read has to decide what to do with.
         app.select_last();
-        assert!(app.panel_follows());
+        assert!(app.panel().follows());
         let parked = account_window(&app);
 
-        app.refill_document(rewritten_lines(), false);
+        app.panel_mut().refill_document(rewritten_lines(), false);
 
         // Still the card on screen — nothing about which card is showing moved —
         // and showing the new file from its first line: line five of what was
         // there is not line five of what is there now.
         assert_eq!(panel_text(&app, at(base, 9)), rewritten_lines());
-        assert_eq!(app.panel_scroll_offset(), 0);
-        assert!(!app.panel_follows());
+        assert_eq!(app.panel().scroll_offset(), 0);
+        assert!(!app.panel().follows());
         // And the account behind it is where it was, still following its own
         // newest line.
         assert_eq!(account_window(&app), parked);
@@ -8696,10 +8445,10 @@ mod tests {
     fn a_re_read_the_cap_cut_short_says_so_exactly_as_the_first_read_did() {
         let now = Instant::now();
         let mut app = App::from_tree(&fixture::tree());
-        app.set_panel_height(9);
+        app.panel_mut().set_height(9);
         app.show_document(document_lines(), false);
 
-        app.refill_document(document_lines(), true);
+        app.panel_mut().refill_document(document_lines(), true);
 
         // The one line a document did not write, added here for the same reason
         // it is added to a first read: the words are the screen's.
@@ -8722,7 +8471,7 @@ mod tests {
         app.set_message("something the last keystroke said");
         let mut before = app.clone();
 
-        app.refill_document(rewritten_lines(), false);
+        app.panel_mut().refill_document(rewritten_lines(), false);
 
         // The whole of what changed is what is on the one card: the account, the
         // focus, the selection, the tree's window, the bit saying which card is
@@ -8756,13 +8505,13 @@ mod tests {
         app.swap_card();
         app.swap_card();
         assert_eq!(app.panel.showing(), Showing::Account);
-        assert_eq!(app.panel_scroll_offset(), parked.0);
+        assert_eq!(app.panel().scroll_offset(), parked.0);
         assert_eq!(panel_text(&app, at(base, 9))[0], "Read line 0");
 
         // And back: the document is on the line they left it on.
         app.swap_card();
         assert_eq!(document_window(&app), left);
-        assert_eq!(app.panel_scroll_offset(), left.0);
+        assert_eq!(app.panel().scroll_offset(), left.0);
         assert_eq!(
             panel_text(&app, at(base, 9)),
             ["line 1", "line 2", "line 3"]
@@ -8782,7 +8531,7 @@ mod tests {
         app.swap_card();
         app.swap_card();
         let drawn = panel_text(&app, at(base, 20));
-        assert!(app.panel_follows());
+        assert!(app.panel().follows());
         assert_eq!(drawn.last().expect("the account has lines"), "Read line 11");
 
         // Parked: the reader put that window where it is, and lines arriving
@@ -8794,8 +8543,8 @@ mod tests {
 
         app.swap_card();
         app.swap_card();
-        assert!(!app.panel_follows());
-        assert_eq!(app.panel_scroll_offset(), 0);
+        assert!(!app.panel().follows());
+        assert_eq!(app.panel().scroll_offset(), 0);
         assert_eq!(panel_text(&app, at(base, 20))[0], "crates/engine");
     }
 
@@ -8803,7 +8552,7 @@ mod tests {
     /// the way [`app_pacting`] fills one, so a test can go on writing a run that
     /// started before it.
     fn record_lines(app: &mut App, lines: std::ops::Range<u64>, base: Instant) {
-        let account = app.account_mut().expect("a run has started");
+        let account = app.panel_mut().account_mut().expect("a run has started");
         for line in lines {
             account.record(
                 &Activity::Tool {
@@ -8819,7 +8568,7 @@ mod tests {
     fn the_document_card_is_a_snapshot_of_what_was_read_and_nothing_rewrites_it() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
-        app.set_panel_height(9);
+        app.panel_mut().set_height(9);
         app.show_document(document_lines(), false);
         assert_eq!(document_text(&app), document_lines());
 
@@ -8839,7 +8588,8 @@ mod tests {
         app.swap_card();
         app.swap_card();
         app.start_account(at(base, 100));
-        app.account_mut()
+        app.panel_mut()
+            .account_mut()
             .expect("a second run has started")
             .open_section("crates/tui", at(base, 100));
         record_lines(&mut app, 0..4, at(base, 100));
@@ -8852,7 +8602,7 @@ mod tests {
         assert_eq!(document_text(&app), document_lines());
         assert_eq!(panel_text(&app, at(base, 200)), document_lines());
         assert_eq!(
-            app.account().map(Account::line_count),
+            app.panel().account().map(Account::line_count),
             Some(5),
             "the run behind the document recorded nothing"
         );
@@ -8870,7 +8620,7 @@ mod tests {
         // no pact has run and no file has been read, and the two cards the key
         // would reach are both cards about nothing.
         let mut app = App::from_rows(three_rows());
-        app.set_panel_height(PANEL);
+        app.panel_mut().set_height(PANEL);
         app.set_message("something the last keystroke said");
         let mut before = app.clone();
 
@@ -8883,7 +8633,7 @@ mod tests {
         assert_eq!(message, no_document_message(), "{message}");
         assert!(message.contains("press v"), "{message}");
         assert_eq!(app.panel.showing(), Showing::Thread);
-        assert!(!app.has_panel_content());
+        assert!(!app.panel().has_content());
         before.set_message(message);
         assert_eq!(app, before, "the refusal moved something else");
     }
@@ -8901,9 +8651,9 @@ mod tests {
     /// Five rows, so a [`PANEL`]-tall window over it has a top and a bottom that
     /// are not the same row, and every row says which one it is.
     fn ask_and_answer(app: &mut App, base: Instant) {
-        app.start_turn(QUESTION, at(base, 1));
+        app.panel_mut().start_turn(QUESTION, at(base, 1));
         for line in 0..3 {
-            app.record_turn(
+            app.panel_mut().record_turn(
                 &Activity::Tool {
                     name: "Grep".to_owned(),
                     detail: Some(format!("thread line {line}")),
@@ -8911,7 +8661,7 @@ mod tests {
                 at(base, line + 2),
             );
         }
-        app.answer_turn(ANSWER, at(base, 5));
+        app.panel_mut().answer_turn(ANSWER, at(base, 5));
     }
 
     #[test]
@@ -8923,7 +8673,7 @@ mod tests {
         // A question brings the thread to the front by itself, the way a read
         // brings the document; both cards are filled behind whatever is drawn.
         ask_and_answer(&mut app, base);
-        assert!(app.has_thread());
+        assert!(app.panel().has_thread());
         let thread = panel_text(&app, at(base, 9));
         app.show_document(document_lines(), false);
         let document = panel_text(&app, at(base, 9));
@@ -8964,7 +8714,7 @@ mod tests {
         let account = panel_text(&app, at(base, 9));
         ask_and_answer(&mut app, base);
         let thread = panel_text(&app, at(base, 9));
-        assert!(!app.has_document());
+        assert!(!app.panel().has_document());
 
         // The empty card is stepped over rather than shown, so the key never
         // spends a press on warlock's mark — and it is never refused either,
@@ -8985,10 +8735,10 @@ mod tests {
         // on this screen that says nothing.
         let base = Instant::now();
         let mut app = App::from_rows(three_rows());
-        app.set_panel_height(PANEL);
+        app.panel_mut().set_height(PANEL);
         ask_and_answer(&mut app, base);
         let thread = panel_text(&app, at(base, 9));
-        assert!(!app.has_account(), "no pact has run this session");
+        assert!(!app.panel().has_account(), "no pact has run this session");
 
         app.show_document(document_lines(), false);
         let document = panel_text(&app, at(base, 9));
@@ -9015,14 +8765,14 @@ mod tests {
         // to go to, the empty account is the only one there is — and a reader
         // who has read a file on a fresh session can still type.
         let mut app = App::from_rows(three_rows());
-        app.set_panel_height(PANEL);
+        app.panel_mut().set_height(PANEL);
         app.show_document(document_lines(), false);
-        assert!(!app.composer_showable());
+        assert!(!app.panel().composer_showable());
 
         app.swap_card();
 
-        assert!(app.composer_showable());
-        assert!(!app.has_panel_content(), "the account is the empty one");
+        assert!(app.panel().composer_showable());
+        assert!(!app.panel().has_content(), "the account is the empty one");
         assert!(app.message().is_none(), "a swap that worked said something");
     }
 
@@ -9048,9 +8798,9 @@ mod tests {
 
         // Every card is still filled and every window is still where it was
         // left: showing one card neither empties the others nor moves them.
-        assert!(app.has_account());
-        assert!(app.has_thread());
-        assert!(app.has_document());
+        assert!(app.panel().has_account());
+        assert!(app.panel().has_thread());
+        assert!(app.panel().has_document());
         assert_eq!(account_window(&app), (1, false));
         assert_eq!(thread_window(&app), (1, false));
         assert_eq!(document_window(&app), (1, false));
@@ -9086,19 +8836,20 @@ mod tests {
         // other two go on being what they were. The document first, then round
         // the cycle: the conversation it left following, then the account it
         // left parked.
-        assert!(!app.panel_follows());
-        assert_eq!(app.panel_scroll_offset(), 0);
+        assert!(!app.panel().follows());
+        assert_eq!(app.panel().scroll_offset(), 0);
         app.swap_card();
-        assert!(app.panel_follows());
-        assert_eq!(app.panel_scroll_offset(), 2);
+        assert!(app.panel().follows());
+        assert_eq!(app.panel().scroll_offset(), 2);
         app.swap_card();
-        assert!(!app.panel_follows());
-        assert_eq!(app.panel_scroll_offset(), 0);
+        assert!(!app.panel().follows());
+        assert_eq!(app.panel().scroll_offset(), 0);
 
         // A turn already under way goes on being answered behind a document,
         // and the document does not move an inch while it is. Asking brings the
         // conversation to the front, so the file is two presses back.
-        app.start_turn("and how long does it take?", at(base, 6));
+        app.panel_mut()
+            .start_turn("and how long does it take?", at(base, 6));
         assert_eq!(app.panel.showing(), Showing::Thread);
         app.swap_card();
         app.swap_card();
@@ -9107,7 +8858,7 @@ mod tests {
             panel_text(&app, at(base, 9)),
             ["line 0", "line 1", "line 2"]
         );
-        app.answer_turn("About a second.", at(base, 7));
+        app.panel_mut().answer_turn("About a second.", at(base, 7));
         assert_eq!(
             panel_text(&app, at(base, 9)),
             ["line 0", "line 1", "line 2"]
@@ -9117,7 +8868,7 @@ mod tests {
         // to it, exactly as a run left following is.
         app.swap_card();
         assert_eq!(app.panel.showing(), Showing::Thread);
-        assert!(app.panel_follows());
+        assert!(app.panel().follows());
         assert_eq!(
             panel_text(&app, at(base, 9)).last().map(String::as_str),
             Some("About a second.")
@@ -9128,15 +8879,15 @@ mod tests {
     fn every_line_wider_than_the_panel_is_drawn_in_as_many_rows_as_it_needs() {
         let base = Instant::now();
         let mut app = app_pacting(11, base);
-        app.set_panel_height(11);
+        app.panel_mut().set_height(11);
         ask_and_answer(&mut app, base);
 
         // Nobody has measured the panel yet, so nothing is wrapped: five lines,
         // five rows.
-        assert_eq!(app.panel_width(), 0);
+        assert_eq!(app.panel().width(), 0);
         assert_eq!(panel_text(&app, at(base, 5)).len(), 5);
 
-        app.set_panel_width(NARROW);
+        app.panel_mut().set_width(NARROW);
 
         // Eleven rows now, and nothing has run off the edge. The answer is
         // prose and is broken at spaces into three; the question is broken
@@ -9158,22 +8909,22 @@ mod tests {
                 "finds.",
             ]
         );
-        assert_eq!(app.panel_lines_below(), 0);
+        assert_eq!(app.panel().lines_below(), 0);
 
         // The window is cut out of those rows and not out of the lines: a panel
         // three tall over eleven rows shows the last three and has eight above
         // them, and a reader who goes back to the top has those eight below.
-        app.set_panel_height(PANEL);
-        assert_eq!(app.panel_scroll_offset(), 8);
-        assert_eq!(app.panel_lines_below(), 0);
+        app.panel_mut().set_height(PANEL);
+        assert_eq!(app.panel().scroll_offset(), 8);
+        assert_eq!(app.panel().lines_below(), 0);
         app.select_first();
-        assert_eq!(app.panel_lines_below(), 8);
+        assert_eq!(app.panel().lines_below(), 8);
 
         // And wider again is the answer it always was — the lines held are the
         // model's own, so a terminal dragged about re-flows what is on screen
         // rather than asking anything again.
-        app.set_panel_height(9);
-        app.set_panel_width(80);
+        app.panel_mut().set_height(9);
+        app.panel_mut().set_width(80);
         let drawn = panel_text(&app, at(base, 5));
         assert_eq!(drawn.len(), 5);
         assert_eq!(drawn.last().map(String::as_str), Some(ANSWER));
@@ -9185,20 +8936,22 @@ mod tests {
         let mut app = app_pacting(9, base);
         // Nothing asked yet: there is no thread at all, and what a turn would
         // have reported falls on the floor rather than making one.
-        assert!(!app.has_thread());
-        assert!(app.thread().is_none());
-        app.record_turn(&Activity::Thinking, base);
-        app.answer_turn("nobody asked", base);
-        assert!(!app.has_thread());
+        assert!(!app.panel().has_thread());
+        assert!(app.panel().thread().is_none());
+        app.panel_mut().record_turn(&Activity::Thinking, base);
+        app.panel_mut().answer_turn("nobody asked", base);
+        assert!(!app.panel().has_thread());
 
         ask_and_answer(&mut app, base);
-        app.start_turn("and what did that cost?", at(base, 6));
-        app.record_turn(&Activity::Cost { usd: 0.02 }, at(base, 7));
-        app.end_turn(&Ending::Cancelled, at(base, 8));
+        app.panel_mut()
+            .start_turn("and what did that cost?", at(base, 6));
+        app.panel_mut()
+            .record_turn(&Activity::Cost { usd: 0.02 }, at(base, 7));
+        app.panel_mut().end_turn(&Ending::Cancelled, at(base, 8));
 
         // One session, one conversation: the second turn is under the first and
         // the first is exactly as it was answered.
-        let thread = app.thread().expect("a question has been asked");
+        let thread = app.panel().thread().expect("a question has been asked");
         assert_eq!(thread.turns().len(), 2);
         assert_eq!(thread.turns()[0].message(), QUESTION);
         assert_eq!(thread.turns()[0].answer(), Some(ANSWER));
@@ -9206,13 +8959,13 @@ mod tests {
         assert_eq!(thread.turns()[1].ending(), Some(&Ending::Cancelled));
 
         // A second ending is the first one still: the line on screen wins.
-        app.end_turn(&Ending::NothingSaid, at(base, 9));
-        let thread = app.thread().expect("a question has been asked");
+        app.panel_mut().end_turn(&Ending::NothingSaid, at(base, 9));
+        let thread = app.panel().thread().expect("a question has been asked");
         assert_eq!(thread.turns()[1].ending(), Some(&Ending::Cancelled));
 
         // And the run behind all of it never heard a word: a conversation is
         // not a pact.
-        assert_eq!(app.account().map(Account::line_count), Some(10));
+        assert_eq!(app.panel().account().map(Account::line_count), Some(10));
     }
 
     #[test]
@@ -9225,20 +8978,20 @@ mod tests {
         // the card as well as land on it.
         app.show_document(document_lines(), false);
         assert_eq!(app.panel.showing(), Showing::Document);
-        assert!(!app.has_thread());
+        assert!(!app.panel().has_thread());
 
-        app.note(REFUSED, base);
+        app.panel_mut().note(REFUSED, base);
 
         // The conversation comes to the front the way a question brings it: the
         // line answers what the reader just typed, and an answer on a card they
         // are not looking at is not an answer.
         assert_eq!(app.panel.showing(), Showing::Thread);
-        assert!(app.has_thread());
+        assert!(app.panel().has_thread());
         assert_eq!(panel_text(&app, at(base, 9)), [REFUSED]);
 
         // And it is warlock's own line, not a turn: nobody was asked anything,
         // so nothing is in flight and the composer is free.
-        let thread = app.thread().expect("the note made the card");
+        let thread = app.panel().thread().expect("the note made the card");
         assert!(thread.turns().is_empty());
         assert!(thread.in_flight().is_none());
         assert_eq!(thread.line_count(), 1);
@@ -9246,9 +8999,10 @@ mod tests {
         // The card accumulates, as it does for a question: what is said next
         // goes under the note rather than in place of it.
         ask_and_answer(&mut app, base);
-        app.note("wrote docs/brief.md", at(base, 6));
+        app.panel_mut().note("wrote docs/brief.md", at(base, 6));
 
         let lines = app
+            .panel()
             .thread()
             .expect("a question has been asked")
             .lines(at(base, 9));
@@ -9265,11 +9019,14 @@ mod tests {
                 text: "wrote docs/brief.md".to_owned(),
             })
         );
-        assert_eq!(app.thread().map(|thread| thread.turns().len()), Some(1));
+        assert_eq!(
+            app.panel().thread().map(|thread| thread.turns().len()),
+            Some(1)
+        );
 
         // The other two cards are exactly as they were left, lines and all.
-        assert!(app.has_account());
-        assert!(app.has_document());
+        assert!(app.panel().has_account());
+        assert!(app.panel().has_document());
     }
 
     #[test]
@@ -9284,9 +9041,9 @@ mod tests {
         // The tree is read again *because* something happened, and a
         // conversation is not a claim about the tree: the card, the turn on it
         // and the card showing all come over.
-        assert!(reseated.has_thread());
+        assert!(reseated.panel().has_thread());
         assert_eq!(
-            reseated.thread().map(|thread| thread.turns().len()),
+            reseated.panel().thread().map(|thread| thread.turns().len()),
             Some(1)
         );
         assert_eq!(panel_text(&reseated, at(base, 9)), thread);
@@ -9308,8 +9065,11 @@ mod tests {
         // a question somebody asked is not a claim about the tree, and rolling
         // one back would take the answer off the screen of the reader who
         // wanted it.
-        assert!(app.has_thread());
-        assert_eq!(app.thread().map(|thread| thread.turns().len()), Some(1));
+        assert!(app.panel().has_thread());
+        assert_eq!(
+            app.panel().thread().map(|thread| thread.turns().len()),
+            Some(1)
+        );
         assert_eq!(panel_text(&app, at(base, 9)), thread);
     }
 
@@ -9322,9 +9082,10 @@ mod tests {
     /// nowhere near each other, and every row says which one it is.
     fn run_a_pact(app: &mut App, base: Instant, from: u64) {
         app.start_account(at(base, from));
-        app.write_run(|account| account.open_section("crates/tui", at(base, from)));
+        app.panel_mut()
+            .write_run(|account| account.open_section("crates/tui", at(base, from)));
         for line in 0..3 {
-            app.write_run(|account| {
+            app.panel_mut().write_run(|account| {
                 account.record(
                     &Activity::Tool {
                         name: "Read".to_owned(),
@@ -9334,7 +9095,7 @@ mod tests {
                 );
             });
         }
-        app.write_run(|account| {
+        app.panel_mut().write_run(|account| {
             account.close_section(
                 &Outcome::Wrote {
                     document: PathBuf::from("crates/tui").join("WARLOCK.md"),
@@ -9343,7 +9104,8 @@ mod tests {
                 at(base, from + 4),
             );
         });
-        app.write_run(|account| account.finish(at(base, from + 5)));
+        app.panel_mut()
+            .write_run(|account| account.finish(at(base, from + 5)));
     }
 
     #[test]
@@ -9351,7 +9113,7 @@ mod tests {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
         ask_and_answer(&mut app, base);
-        assert!(app.showing_thread());
+        assert!(app.panel().showing_thread());
         let asked = panel_text(&app, at(base, 9));
 
         run_a_pact(&mut app, base, 10);
@@ -9359,9 +9121,9 @@ mod tests {
         // The card the reader was on is the card they are on, drawing exactly
         // what it drew: a pact has a card of its own, and a conversation that
         // also carried it would be the same run written twice on one screen.
-        assert!(app.showing_thread(), "the run took the panel");
+        assert!(app.panel().showing_thread(), "the run took the panel");
         assert_eq!(panel_text(&app, at(base, 20)), asked);
-        let thread = app.thread().expect("a question has been asked");
+        let thread = app.panel().thread().expect("a question has been asked");
         assert_eq!(thread.turns().len(), 1, "the run took a turn");
         assert_eq!(thread.turns()[0].message(), QUESTION);
         assert_eq!(thread.turns()[0].answer(), Some(ANSWER));
@@ -9370,7 +9132,7 @@ mod tests {
         assert!(thread.in_flight().is_none());
 
         // The run is all on its own card, whole.
-        assert_eq!(app.account().map(Account::line_count), Some(6));
+        assert_eq!(app.panel().account().map(Account::line_count), Some(6));
     }
 
     #[test]
@@ -9384,10 +9146,11 @@ mod tests {
         // the conversation: a run fills one card, as it happens, and the other
         // two are none of its business.
         app.start_account(at(base, 10));
-        app.write_run(|account| account.open_section("crates/tui", at(base, 10)));
+        app.panel_mut()
+            .write_run(|account| account.open_section("crates/tui", at(base, 10)));
         let mut seen = Vec::new();
         for (line, now) in [(0, 11), (1, 12), (2, 13)] {
-            app.write_run(|account| {
+            app.panel_mut().write_run(|account| {
                 account.record(
                     &Activity::Tool {
                         name: "Read".to_owned(),
@@ -9396,7 +9159,7 @@ mod tests {
                     at(base, now),
                 );
             });
-            let card = app.account().expect("the run started its own card");
+            let card = app.panel().account().expect("the run started its own card");
             seen.push(card.line_count());
             assert_eq!(panel_text(&app, at(base, 20)), asked);
         }
@@ -9406,7 +9169,7 @@ mod tests {
 
         // And the outcome and the summary are the same story: the account says
         // how the run went, and the thread still says what was asked.
-        app.write_run(|account| {
+        app.panel_mut().write_run(|account| {
             account.close_section(
                 &Outcome::Refused {
                     reason: "the model would not".to_owned(),
@@ -9415,7 +9178,7 @@ mod tests {
             );
             account.finish(at(base, 15));
         });
-        let card = app.account().expect("the run started its own card");
+        let card = app.panel().account().expect("the run started its own card");
         assert!(
             card.lines(at(base, 30))
                 .iter()
@@ -9424,7 +9187,7 @@ mod tests {
         );
         assert_eq!(panel_text(&app, at(base, 30)), asked);
         assert_eq!(
-            app.thread().map(|thread| thread.turns().len()),
+            app.panel().thread().map(|thread| thread.turns().len()),
             Some(1),
             "the run took a turn of the conversation"
         );
@@ -9434,7 +9197,7 @@ mod tests {
     fn a_run_with_no_conversation_behind_it_conjures_no_thread() {
         let base = Instant::now();
         let mut app = app_pacting(9, base);
-        assert!(!app.has_thread());
+        assert!(!app.panel().has_thread());
 
         run_a_pact(&mut app, base, 10);
 
@@ -9442,18 +9205,18 @@ mod tests {
         // nothing else, and it took the panel because the panel had nothing on
         // it — the mark is not worth more than the run the reader just asked
         // for.
-        assert!(!app.has_thread());
-        assert!(app.thread().is_none());
+        assert!(!app.panel().has_thread());
+        assert!(app.panel().thread().is_none());
         assert_eq!(app.panel.showing(), Showing::Account);
-        assert_eq!(app.account().map(Account::line_count), Some(6));
+        assert_eq!(app.panel().account().map(Account::line_count), Some(6));
 
         // The conversation is still a card to swap to, empty or not: it is
         // where the field is, so a reader who wants to ask something about the
         // run they are watching is one press away from being able to.
         app.swap_card();
         assert_eq!(app.panel.showing(), Showing::Thread);
-        assert!(!app.has_panel_content(), "nothing has been asked");
-        assert!(app.composer_showable(), "the field came with it");
+        assert!(!app.panel().has_content(), "nothing has been asked");
+        assert!(app.panel().composer_showable(), "the field came with it");
         assert!(app.message().is_none(), "a swap that worked said something");
 
         // With no document read the key goes between those two and is never
@@ -9489,9 +9252,9 @@ mod tests {
         // still what is drawn, and the run filled the one card it is about.
         assert_eq!(app.panel.showing(), Showing::Document);
         assert_eq!(panel_text(&app, at(base, 20)), document);
-        assert_eq!(app.account().map(Account::line_count), Some(6));
+        assert_eq!(app.panel().account().map(Account::line_count), Some(6));
         assert_eq!(
-            app.thread().map(|thread| thread.turns().len()),
+            app.panel().thread().map(|thread| thread.turns().len()),
             Some(1),
             "the run took a turn of the conversation"
         );
@@ -9519,7 +9282,7 @@ mod tests {
         // reader's place in the thread had nothing to do with it.
         app.swap_card();
         assert_eq!(app.panel.showing(), Showing::Account);
-        assert_eq!(app.account().map(Account::line_count), Some(6));
+        assert_eq!(app.panel().account().map(Account::line_count), Some(6));
         assert_eq!(account_window(&app), (6 - usize::from(PANEL), true));
         assert_eq!(panel_text(&app, at(base, 20))[0], "Read run line 2");
 
@@ -9547,10 +9310,10 @@ mod tests {
         // A run that ends with nothing recorded is exactly the run a reader
         // most wants to see the end of, and the panel is what a rollback keeps:
         // the account survives whole, and so does the conversation beside it.
-        assert!(app.showing_thread());
+        assert!(app.panel().showing_thread());
         assert_eq!(panel_text(&app, at(base, 20)), thread);
-        assert_eq!(app.account().map(Account::line_count), Some(6));
-        let held = app.thread().expect("a question has been asked");
+        assert_eq!(app.panel().account().map(Account::line_count), Some(6));
+        let held = app.panel().thread().expect("a question has been asked");
         assert_eq!(held.turns().len(), 1);
         assert_eq!(held.turns()[0].answer(), Some(ANSWER));
     }
@@ -9562,14 +9325,16 @@ mod tests {
 
         // The run is under way, and then somebody asks something.
         app.start_account(at(base, 10));
-        app.start_turn(QUESTION, at(base, 11));
-        app.write_run(|account| account.open_section("crates/tui", at(base, 12)));
-        app.write_run(|account| account.finish(at(base, 13)));
+        app.panel_mut().start_turn(QUESTION, at(base, 11));
+        app.panel_mut()
+            .write_run(|account| account.open_section("crates/tui", at(base, 12)));
+        app.panel_mut()
+            .write_run(|account| account.finish(at(base, 13)));
 
         // The run has a card and the question has a turn: a line filed under
         // the question would put a pact's work under somebody's sentence.
-        assert_eq!(app.account().map(Account::line_count), Some(3));
-        let thread = app.thread().expect("a question has been asked");
+        assert_eq!(app.panel().account().map(Account::line_count), Some(3));
+        let thread = app.panel().thread().expect("a question has been asked");
         assert_eq!(thread.turns().len(), 1);
         assert_eq!(thread.turns()[0].message(), QUESTION);
         assert_eq!(thread.turns()[0].answer(), None);
@@ -9582,17 +9347,21 @@ mod tests {
         ask_and_answer(&mut app, base);
         run_a_pact(&mut app, base, 10);
         let thread = panel_text(&app, at(base, 20));
-        let turns = app.thread().map(|thread| thread.turns().len());
+        let turns = app.panel().thread().map(|thread| thread.turns().len());
 
         // A late event — a worker that reported after its outcome landed — is
         // dropped by the account, which is finished and says so on screen. The
         // conversation hears nothing either, as it heard nothing about the rest
         // of the run.
-        app.write_run(|account| account.record(&Activity::Thinking, at(base, 21)));
+        app.panel_mut()
+            .write_run(|account| account.record(&Activity::Thinking, at(base, 21)));
 
-        assert_eq!(app.thread().map(|thread| thread.turns().len()), turns);
+        assert_eq!(
+            app.panel().thread().map(|thread| thread.turns().len()),
+            turns
+        );
         assert_eq!(panel_text(&app, at(base, 30)), thread);
-        assert_eq!(app.account().map(Account::line_count), Some(6));
+        assert_eq!(app.panel().account().map(Account::line_count), Some(6));
     }
 
     #[test]
@@ -9609,7 +9378,7 @@ mod tests {
             // Nothing moved — not the message, not the panel, nothing: the
             // reading has not happened yet.
             assert_eq!(app, before, "an accepted press moved something on {path}");
-            assert!(!app.has_panel_content(), "{path} drew something");
+            assert!(!app.panel().has_content(), "{path} drew something");
         }
     }
 
@@ -9638,7 +9407,7 @@ mod tests {
             // is untouched.
             before.set_message(message);
             assert_eq!(app, before, "refusing {path} moved something else");
-            assert!(!app.has_panel_content(), "{path} drew something");
+            assert!(!app.panel().has_content(), "{path} drew something");
         }
     }
 
@@ -9659,7 +9428,7 @@ mod tests {
         assert!(message.contains("press p to pact it"), "{message}");
         before.set_message(message);
         assert_eq!(app, before, "refusing a directory moved something else");
-        assert!(!app.has_panel_content(), "the refusal drew something");
+        assert!(!app.panel().has_content(), "the refusal drew something");
     }
 
     #[test]
@@ -9668,7 +9437,7 @@ mod tests {
 
         assert_eq!(app.view_target(), None);
         assert_eq!(app.message(), None);
-        assert!(!app.has_panel_content());
+        assert!(!app.panel().has_content());
     }
 
     /// How many rows or lines the tests below move by where they stand in for
@@ -9833,13 +9602,13 @@ mod tests {
             }
             wheeled.scroll_panel_up(lines);
             assert_eq!(
-                wheeled.panel_scroll_offset(),
-                stepped.panel_scroll_offset(),
+                wheeled.panel().scroll_offset(),
+                stepped.panel().scroll_offset(),
                 "{lines} up"
             );
             assert_eq!(
-                wheeled.panel_follows(),
-                stepped.panel_follows(),
+                wheeled.panel().follows(),
+                stepped.panel().follows(),
                 "{lines} up"
             );
 
@@ -9848,13 +9617,13 @@ mod tests {
             }
             wheeled.scroll_panel_down(lines);
             assert_eq!(
-                wheeled.panel_scroll_offset(),
-                stepped.panel_scroll_offset(),
+                wheeled.panel().scroll_offset(),
+                stepped.panel().scroll_offset(),
                 "{lines} back down"
             );
             assert_eq!(
-                wheeled.panel_follows(),
-                stepped.panel_follows(),
+                wheeled.panel().follows(),
+                stepped.panel().follows(),
                 "{lines} back down"
             );
         }
@@ -9868,29 +9637,30 @@ mod tests {
         // panel, and that is the whole of what decides which pane scrolls.
         app.set_focus(Focus::Tree);
         let selected = app.selected();
-        assert!(app.panel_follows());
+        assert!(app.panel().follows());
 
         app.scroll_panel_up(NOTCH);
 
-        assert!(!app.panel_follows());
+        assert!(!app.panel().follows());
         assert_eq!(
             panel_text(&app, at(base, 9)),
             ["Read line 3", "Read line 4", "Read line 5"],
         );
 
         // Parked means parked: the lines that arrive next leave it where it is.
-        app.account_mut()
+        app.panel_mut()
+            .account_mut()
             .expect("a run is under way")
             .record(&Activity::Thinking, at(base, 10));
-        assert_eq!(app.panel_scroll_offset(), 10 - usize::from(PANEL) - NOTCH);
-        assert!(!app.panel_follows());
+        assert_eq!(app.panel().scroll_offset(), 10 - usize::from(PANEL) - NOTCH);
+        assert!(!app.panel().follows());
 
         // And scrolling back to the end is live again, with nothing having to
         // say so.
         app.scroll_panel_down(MANY);
 
-        assert!(app.panel_follows());
-        assert_eq!(app.panel_lines_below(), 0);
+        assert!(app.panel().follows());
+        assert_eq!(app.panel().lines_below(), 0);
         assert_eq!(
             panel_text(&app, at(base, 10)),
             ["Read line 7", "Read line 8", "thinking"],
@@ -9981,10 +9751,10 @@ mod tests {
 
         let reseated = reseat_on(&app, &fixture::tree());
 
-        assert_eq!(reseated.account(), app.account());
-        assert_eq!(reseated.panel_height(), usize::from(PANEL));
-        assert_eq!(reseated.panel_scroll_offset(), 0);
-        assert!(!reseated.panel_follows());
+        assert_eq!(reseated.panel().account(), app.panel().account());
+        assert_eq!(reseated.panel().height(), usize::from(PANEL));
+        assert_eq!(reseated.panel().scroll_offset(), 0);
+        assert!(!reseated.panel().follows());
         assert_eq!(panel_text(&reseated, at(base, 9)), before);
     }
 
@@ -10007,12 +9777,12 @@ mod tests {
         // the account back would take a document out of the reader's hands at
         // exactly the moment they were reading it.
         assert_eq!(reseated.panel.showing(), Showing::Document);
-        assert!(reseated.has_document());
+        assert!(reseated.panel().has_document());
         assert_eq!(panel_text(&reseated, at(base, 9)), showing);
         assert_eq!(document_window(&reseated), document_window(&app));
         // And the account is intact behind it, lines, window and all.
-        assert!(reseated.has_account());
-        assert_eq!(reseated.account(), app.account());
+        assert!(reseated.panel().has_account());
+        assert_eq!(reseated.panel().account(), app.panel().account());
         assert_eq!(account_window(&reseated), account_window(&app));
         // The card is a snapshot: the reload rewrote none of its lines, and the
         // swap still comes back to the whole of what was read.
@@ -10202,7 +9972,6 @@ mod tests {
         app.select_previous();
         app.set_message("something from the last keystroke");
         app.set_pact_in_flight("warlock/crates", 2, 5);
-        app.set_pact_summarising("warlock/crates/Cargo.lock", 2, 5);
         app.toggle_focus();
         // A view with something to lose in every field there is.
         assert!(app.scroll_offset() > 0);

@@ -250,7 +250,7 @@ mod tests {
     fn app_on(root: &Path, path: &Path) -> App {
         let mut app = App::from_tree(&tree(root));
         app.toggle_files();
-        app.set_panel_height(PANEL);
+        app.panel_mut().set_height(PANEL);
         while app.selected_row().expect("the fixture has rows").path != path {
             let before = app.selected();
             app.select_next();
@@ -274,7 +274,8 @@ mod tests {
     /// A document draws as text and nothing else — no clock, no heading, no
     /// summary — so anything else here is the panel showing the wrong card.
     fn panel_text(app: &App) -> Vec<String> {
-        app.panel_lines(Instant::now())
+        app.panel()
+            .window(Instant::now())
             .into_iter()
             .map(|line| match line {
                 Line::Text { text } => text,
@@ -293,7 +294,7 @@ mod tests {
         // The file that is now on the card, said out loud: the app is never told
         // which file it is holding, so the press has to say.
         assert_eq!(read, Some(repo.path().join("crates/engine/WARLOCK.md")));
-        assert!(app.has_document(), "nothing was read");
+        assert!(app.panel().has_document(), "nothing was read");
         assert_eq!(
             panel_text(&app),
             [
@@ -304,8 +305,8 @@ mod tests {
             "one row per line of the file, from its first"
         );
         // From the top and not following: a file is read from its first line.
-        assert_eq!(app.panel_scroll_offset(), 0);
-        assert!(!app.panel_follows());
+        assert_eq!(app.panel().scroll_offset(), 0);
+        assert!(!app.panel().follows());
         // A successful read says nothing: the line the last keystroke left is
         // still the line on the footer.
         assert_eq!(app.message(), Some(LAST_KEY));
@@ -337,7 +338,7 @@ mod tests {
         let message = app.message().expect("a directory row is refused");
         assert!(message.contains("is a directory"), "{message}");
         assert!(message.contains("WARLOCK.md"), "{message}");
-        assert!(!app.has_panel_content(), "a directory drew something");
+        assert!(!app.panel().has_content(), "a directory drew something");
         // The message is the whole of what the press changed.
         before.set_message(message);
         assert_eq!(app, before, "refusing a directory moved something else");
@@ -356,7 +357,7 @@ mod tests {
         // Nothing to point at, so it points at the key that would make
         // something to point at.
         assert!(message.contains("press p to pact it"), "{message}");
-        assert!(!app.has_panel_content(), "a directory drew something");
+        assert!(!app.panel().has_content(), "a directory drew something");
         before.set_message(message);
         assert_eq!(app, before, "refusing a directory moved something else");
     }
@@ -406,7 +407,7 @@ mod tests {
     fn app_holding_a_document_on(root: &Path, file: &Path) -> App {
         let mut app = app_on_file(root, "WARLOCK.md");
         assert!(view_press(&mut app).is_some(), "the fixture read nothing");
-        assert!(app.has_document(), "the fixture read nothing");
+        assert!(app.panel().has_document(), "the fixture read nothing");
         select(&mut app, file);
         // After the selection, because moving the selection is what takes a
         // message down.
@@ -500,7 +501,7 @@ mod tests {
         let mut app = app_on_file(repo.path(), "logo.png");
 
         assert_eq!(view_press(&mut app), None);
-        assert!(!app.has_panel_content(), "the failed read drew something");
+        assert!(!app.panel().has_content(), "the failed read drew something");
 
         let notes = repo.path().join("crates/engine/notes.txt");
         select(&mut app, &notes);

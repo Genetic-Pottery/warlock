@@ -35,8 +35,8 @@
 //! will not parse printed as `[]` would tell an operator they hold nothing when
 //! the truth is that warlock could not read what they hold.
 //!
-//! A home directory that cannot be resolved is [`Sigils::Nothing`] and not
-//! [`Sigils::Unknown`], which is [`sigils_held`](crate::session) reading of it
+//! A home directory that cannot be resolved is [`Sigils::Nothing`](warlock_tui::Sigils::Nothing) and not
+//! [`Sigils::Unknown`](warlock_tui::Sigils::Unknown), which is [`sigils_held`](crate::session) reading of it
 //! and is the honest one: `Unknown` says *a file is there and would not read*,
 //! and the prose for it names that file. With no home there is no file and no
 //! path to name one by, so there is nothing broken to report — only a machine
@@ -106,7 +106,7 @@ struct Checked {
     /// What this machine holds, in the header's own three states.
     sigils: Sigils,
     /// The config those sigils were read from, or `None` when there is no home
-    /// directory to look under. Named in the prose for [`Sigils::Unknown`] and
+    /// directory to look under. Named in the prose for [`Sigils::Unknown`](warlock_tui::Sigils::Unknown) and
     /// unused otherwise: a file that would not read is only useful to a reader
     /// who is told which file it is.
     config: Option<PathBuf>,
@@ -336,7 +336,7 @@ fn object(checked: &Checked) -> Value {
 /// What is held, as JSON's three answers: the list, `[]`, and `null`.
 ///
 /// The three-valuedness is the whole point of this function. `[]` for
-/// [`Sigils::Unknown`] would tell an operator they hold nothing when the truth
+/// [`Sigils::Unknown`](warlock_tui::Sigils::Unknown) would tell an operator they hold nothing when the truth
 /// is that warlock could not read what they hold, and those two mean opposite
 /// things about what is on disk — so the broken case is `null`, which a consumer
 /// has to handle deliberately rather than iterate over by accident.
