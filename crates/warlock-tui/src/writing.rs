@@ -1,74 +1,17 @@
-//! Where a brief goes, and the writing of it: the reply unwrapped, its title
-//! slugged, the next number in the directory, and then the bytes on disk.
+//! The path `/write` proposes, and the one function in warlock that puts a
+//! document somebody asked for on disk.
 //!
-//! Two halves with the field between them. [`proposed_path`] is the arithmetic
-//! behind the path the `/write` prompt opens holding, and it writes nothing;
-//! [`write_submit`] is what Enter in that field comes to, and it is the one
-//! thing in warlock that puts a document somebody asked for on disk. The path
-//! written is the path on screen when Enter was pressed, never the proposal
-//! unless the reader left it alone.
-//!
-//! Every rule in the first half is a guess at what somebody would have typed
-//! into an editable field, which is what makes the guesses cheap: none of them
-//! refuses anything, and nothing in that half returns a [`Result`].
-//!
-//! `directory` is a parameter of both halves rather than a constant, because the
-//! event loop settles it once when brief mode is entered and holds it for the
-//! life of that mode. Nothing in here reads a config file or can fail for want
-//! of one.
-//!
-//! [`unfenced`] runs before the title is looked for, so a fenced reply's heading
-//! still supplies the slug, and it is the same function the write itself uses,
-//! so the path proposed and the bytes written cannot disagree about what the
-//! document is. It unwraps only a reply that is *entirely* one block; a document
-//! that merely contains code blocks is left alone, because stripping its first
-//! and last lines would be warlock editing prose it promised to copy.
-//!
-//! The slug is the title lower-cased with runs of non-alphanumerics collapsed,
-//! and nothing before a colon is stripped: a title's first word is usually the
-//! subject, and a filename that throws it away is a filename nobody can find.
-//! No stop-word list, no transliteration and no dictionary — each would be
-//! warlock having opinions about English in a string the reader can retype. The
-//! cap is broken at a hyphen so the slug ends on a whole word, and a single word
-//! longer than the cap is kept whole, which is why the cap is "about".
-//!
-//! Every digit run in every name in the directory counts towards the number,
-//! rather than only names matching warlock's own shape: `docs/` holds
-//! `red-brief-12-…` written by another hand, and a rule that counted only
-//! `warlock-brief-NN-…` would propose `01` into a directory whose next brief is
-//! plainly the thirteenth. The cost is that a name carrying a year proposes a
-//! number nobody expected, one keystroke from being fixed. Past ninety-nine the
-//! number simply gets wider — the padding exists to make `01` sort before `10`.
-//!
-//! Everything is spelled from the repository root: not the tree's root, which
-//! may be a subdirectory somebody started warlock in, and not the working
-//! directory, which nothing on screen names. One rule for three things at once —
-//! where the bytes land, how the path is spelled on the line announcing it, and
-//! which entries of `.warlock/pacts.toml` count as above it.
-//!
-//! The reply is written as it stands but for two things: the fence taken off,
-//! and one trailing newline ensured. Nothing is reformatted, re-indented,
-//! spell-checked or repaired. The one exception is a check rather than a
-//! transformation — a document missing a section the shape asked for is refused
-//! and nothing is written — because that failure is the silent one: a brief with
-//! a section missing reads perfectly well, and nobody finds out until somebody
-//! goes looking for the slices days later. [`missing_sections`] never adds a
-//! heading, reorders one or edits a byte.
-//!
-//! The shape is read here rather than remembered from when brief mode was
-//! entered, on [`brief_template`]'s own "read every time, cached never", so a
-//! template edited during the conversation is the one the document is held to.
-//!
-//! The bytes come off the card: [`write_submit`] writes the newest turn's
-//! answer, so what lands in the file is what the reader was looking at, and
-//! there is no second copy of the document for the two to disagree about.
-//!
-//! A target that exists — file, directory or anything else — writes nothing and
-//! reopens the field with the typed path still in it. No `.bak`, no suffix
-//! warlock invents, no prompt asking a second time. A disk that will not take
-//! the file puts its reason on the footer and takes the prompt down, on
-//! [`scope_submit`](crate::scoping::scope_submit)'s rule: a write that did not
-//! happen is news for the footer and not a reason to tear the screen down.
+//! [`write_submit`] writes the path that was on screen when Enter was pressed,
+//! never the proposal, which is what makes every rule in the first half cheap:
+//! none of them refuses anything and none returns a [`Result`]. [`unfenced`]
+//! runs before the title is looked for and is the same function the write
+//! itself uses, so the proposed path and the written bytes cannot disagree.
+//! Every digit run in every name counts towards the number, not only names of
+//! warlock's own shape, because `docs/` holds briefs written by another hand.
+//! [`missing_sections`] refuses and writes nothing; it never repairs, because a
+//! brief with a section missing reads perfectly well and nobody finds out for
+//! days. An existing target, or a disk that will not take the file, is news for
+//! the footer and not a reason to tear the screen down.
 
 use std::path::Path;
 use std::time::Instant;

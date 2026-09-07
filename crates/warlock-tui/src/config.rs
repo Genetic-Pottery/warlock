@@ -1,19 +1,15 @@
-//! `warlock config`: the sigils this machine holds for this repository. A
-//! scope is committed in `.warlock/pacts.toml` and read by everyone who clones
-//! the repository; a sigil is what one person holds on one machine, so nothing
-//! here writes, or offers to write, a file inside the checkout.
+//! `warlock config`: the sigils this machine holds for this repository. A scope
+//! is committed in `.warlock/pacts.toml` and read by everyone who clones the
+//! repository; a sigil is what one person holds on one machine, so nothing here
+//! writes, or offers to write, a file inside the checkout.
 //!
 //! One line in and one file out, with everything the answer turns on printed
-//! above the cursor — including that a blank line clears the set, which is a
-//! prompt saying out loud that its blank answer destroys something. That is
-//! what buys the single entry point: no `warlock config clear`, no flag, no
-//! second spelling, and so no argument parser and no line editor here.
-//!
-//! EOF is the one answer that writes nothing, and it is told apart from a blank
-//! line in [`read_line`] rather than anywhere below it. Ctrl-C needs no code at
-//! all: this subcommand never enters raw mode and installs no panic hook, so a
-//! SIGINT ends the process before the read returns and therefore before
-//! anything is parsed or written.
+//! above the cursor — including that a blank line clears the set. That is what
+//! buys the single entry point: no `warlock config clear`, no flag, no second
+//! spelling, and so no argument parser and no line editor here. EOF is the one
+//! answer that writes nothing, told apart from a blank line in [`read_line`]
+//! rather than anywhere below it. Ctrl-C needs no code at all, because this
+//! subcommand never enters raw mode and installs no panic hook.
 
 use std::fmt;
 use std::io::{self, Write};

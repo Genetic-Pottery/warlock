@@ -1,47 +1,18 @@
-//! Running `claude` as a child process: the transport half of the engine's
-//! agent seam, and the only module in this library that spawns anything.
+//! Running `claude` as a child process: the only module in this library that
+//! spawns anything. Nothing about a prompt is decided here — a pass's text is
+//! the engine's and a turn's is the reader's, and both go through untouched.
 //!
-//! Two kinds of run, one body. [`ClaudeAgent`] implements the engine's
-//! [`Agent`] port — a pass over one directory, whose prompt and attachments the
-//! engine composed. [`ChatAgent`] implements no port, for the reason its own
-//! docs give, and everything after the spawn is [`invoke`] either way, because
-//! the deadlocks below are the same deadlocks whichever run is in flight.
-//!
-//! Nothing about a prompt is decided here: a pass's text is the engine's and a
-//! turn's is the reader's, and both go through untouched. The words this file
-//! does write — [`CHAT_SYSTEM_PROMPT`], [`brief_instruction`],
-//! [`CHAT_INSTRUCTION`], [`WRITE_INSTRUCTION`] — say what warlock is and what
-//! it is asking for, which is knowledge about this program rather than about
-//! any repository, and so is not the engine's to hold. The three instructions
-//! are sent as ordinary turns into the session already running, never as a
-//! second system prompt, so a mode change costs one message and never the
-//! conversation.
-//!
-//! # Why the spawn is not "wait, then read"
-//!
-//! Three ways the obvious code deadlocks, and the shape each one forces:
-//!
-//! * A pipe holds something like 64KiB, so waiting for exit before reading
-//!   hangs on exactly the long passes worth having. Stdout and stderr each get
-//!   a thread, running concurrently with the wait.
-//! * `claude` reads stdin until it closes, so the write happens on a thread
-//!   that drops the handle when it is done rather than in line here.
-//! * [`Child::wait`](std::process::Child::wait) takes `&mut self`, so a waiter
-//!   blocked in it owns the only handle there is and leaves the caller nothing
-//!   to kill with. [`watch`] polls
-//!   [`try_wait`](std::process::Child::try_wait) through a shared
-//!   [`Mutex<Child>`](std::sync::Mutex) instead and reports over a channel, so
-//!   the caller can time out and still kill.
-//!
-//! That shared handle is what makes [`Cancel`] possible at all: cancelling
-//! reaches into a run in flight rather than waiting politely for it to end.
-//! [`Activities`] is the same idea pointed the other way — a sink the caller
-//! attaches, defaulting to one that swallows — and it is why stdout is asked
-//! for as `stream-json` and read a line at a time, since an [`Activity`] heard
-//! only after the run is over is one nobody needed.
-//!
-//! Threads and channels throughout: no async runtime, and no dependency for any
-//! of it.
+//! Three ways the obvious "wait, then read" deadlocks, and the shape each one
+//! forces. A pipe holds something like 64KiB, so waiting for exit before
+//! reading hangs on exactly the long passes worth having: stdout and stderr
+//! each get a thread. `claude` reads stdin until it closes, so the write
+//! happens on a thread that drops the handle. And
+//! [`Child::wait`](std::process::Child::wait) takes `&mut self`, leaving a
+//! blocked waiter holding the only handle there is, so [`watch`] polls
+//! [`try_wait`](std::process::Child::try_wait) through a shared
+//! [`Mutex<Child>`](std::sync::Mutex) and reports over a channel — which is
+//! what lets [`Cancel`] reach into a run in flight, and why stdout is asked for
+//! as `stream-json` and read a line at a time. No async runtime.
 
 use std::env;
 use std::ffi::{OsStr, OsString};

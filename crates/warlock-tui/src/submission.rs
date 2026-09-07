@@ -2,22 +2,14 @@
 //! two mistakes do not cost the same: a refusal costs one line on the card,
 //! read and corrected in a second, while a send costs a turn — a question to
 //! the model, money, and a wait — to discover that warlock guessed. Where the
-//! costs are that lopsided the cheap failure is the right one, and it keeps the
-//! set of things that are commands small and stateable rather than a family of
-//! spellings nobody can enumerate.
+//! costs are that lopsided the cheap failure is the right one.
 //!
 //! `Submitted::refusal` is the entire discovery mechanism, which is why there
 //! is no `/help`: a fourth command whose job was to print the list would be a
-//! thing to discover before you could discover anything. One line, because the
-//! card it lands on is where the reader's own words and the model's answers
-//! are, and warlock speaking there at length would be warlock talking over
-//! them.
-//!
-//! Nothing here carries the draft's text, exactly as `Composed::Submit` carries
-//! none: the draft is already in the caller's hand, so a copy here would be a
-//! second version of what was typed, free to disagree with the first. And
-//! nothing here enters a mode, writes a file or opens a turn — what a
-//! recognised command *does* belongs to the loop that owns the thread.
+//! thing to discover before you could discover anything. Nothing here carries
+//! the draft's text, exactly as `Composed::Submit` carries none — the draft is
+//! already in the caller's hand, and a copy would be free to disagree with it —
+//! and nothing here enters a mode, writes a file or opens a turn.
 
 // Stated once, here, because it is the only place warlock says which commands
 // exist: a second copy of this sentence in the loop or in a test fixture would

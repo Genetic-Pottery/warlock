@@ -1,33 +1,20 @@
-//! The scope prompt: which directory is being scoped, what has been typed into
-//! the field, and the one line under it saying why the last submit was refused.
+//! The scope prompt: the directory being scoped, the text typed into the field,
+//! and the one line under it saying why the last submit was refused.
 //!
 //! [`ScopePrompt`] is a value of its own and *not* a field on
-//! [`App`](crate::App), for the reason [`QuitConfirm`](crate::QuitConfirm) is
-//! not one: Esc has to leave the app exactly as it was, and an app that never
-//! heard of the prompt is a cheaper guarantee of that than putting every field
-//! back.
+//! [`App`](crate::App), because Esc has to leave the app exactly as it was and
+//! an app that never heard of the prompt is a cheaper guarantee of that than
+//! putting every field back. Nothing moves the cursor, so it is always at the
+//! end of the text and is not a field anybody has to keep true; arrow-key
+//! editing would break that and would claim keys that are otherwise characters.
+//! Nothing here judges the text either — Enter comes back as
+//! [`Edited::Submit`] whatever has been typed, empty included, because that is
+//! how a scope is cleared.
 //!
-//! Printable characters append, Backspace takes one back, Enter submits and Esc
-//! closes; that is the entire editor. Because nothing moves the cursor, it is
-//! always at the end of the text and so is not a field anybody has to keep true
-//! — whoever draws the field puts the caret after the last character and is
-//! right by construction. Adding arrow-key editing would break that and would
-//! claim keys that are otherwise characters being typed into a string of at most
-//! twenty-four.
-//!
-//! Nothing here judges the text. Enter comes back as [`Edited::Submit`] whatever
-//! has been typed, empty included — that is how a scope is *cleared* — and the
-//! caller asks the engine's
-//! [`validate_scope`](warlock_engine::validate_scope), which is the workspace's
-//! only judge of what a scope may be.
-//!
-//! Ctrl-C is deliberately not answered here. It is a key event and not a signal
-//! — raw mode is exactly the mode in which the terminal stops turning it into
-//! `SIGINT` — so the loop has to take it before it consults this module, both
-//! with the prompt open and closed. Through here it is one of the keys that
-//! change nothing, which is why a chord is never treated as text: the one
-//! keystroke every reader trusts to get them out would otherwise put a `c` in
-//! the field.
+//! Ctrl-C is deliberately not answered here. Raw mode is exactly the mode in
+//! which the terminal stops turning it into `SIGINT`, so the loop takes it
+//! before consulting this module; treated as text it would put a `c` in the
+//! field.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 

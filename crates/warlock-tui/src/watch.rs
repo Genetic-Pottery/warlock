@@ -1,22 +1,17 @@
 //! Two questions about a moving disk, answered as values — which movements are
-//! Warlock's business ([`NodeSet`]) and when to act on them ([`WatchPolicy`]) —
+//! warlock's business ([`NodeSet`]) and when to act on them ([`WatchPolicy`]) —
 //! plus the impure third that hears about them ([`Watch`]).
 //!
 //! The filter is the last walk itself. The loader already applied gitignore,
 //! skip lists and hidden-file rules on the way to the tree it returned, so
 //! re-deciding any of that here would be a second implementation free to
 //! disagree with the first; `target/` and `.git/` are rejected for one reason
-//! only, that no walk ever produced them.
-//!
-//! [`Instant::now`] is never called in this file. Every instant the policy
-//! compares against is handed in by the event loop, which already reads the
-//! clock once a frame, so a ten-second burst is driven through it in
+//! only, that no walk ever produced them. [`Instant::now`] is never called in
+//! this file either, so a ten-second burst is driven through the policy in
 //! microseconds with no sleeping and no real disk.
 //!
-//! Nothing here reloads. The policy says a reload is *owed*; reading the tree
-//! again is the binary's business, on the thread that draws. No `notify` type
-//! appears in a signature — paths leave as [`PathBuf`], a failed start as a
-//! [`String`].
+//! Nothing here reloads: the policy says a reload is *owed*, and reading the
+//! tree again is the binary's business, on the thread that draws.
 
 use std::collections::HashSet;
 use std::fmt;

@@ -1,46 +1,17 @@
 //! The conversation the binary keeps: an agent, at most one turn in flight, the
 //! draft at the foot of the panel, and the window a written brief opens in.
 //!
-//! [`Chat`] is one value because the rules between those parts are what this
-//! module is. The register the conversation is in is deliberately *not* one of
-//! them — it lives on the panel, which is the state the border title is drawn
-//! from and the one part of the app a failed pact restores untouched, so a copy
-//! here would be a second answer to which mode the reader is in.
+//! The register the conversation is in is deliberately not held here. It lives
+//! on the panel, the one part of the app a failed pact restores untouched, so a
+//! copy would be a second answer to which mode the reader is in. Nothing here
+//! returns an error either: a missing `claude`, a non-zero exit, a timeout, an
+//! empty answer and a Ctrl-C are five facts and one consequence, because an
+//! event loop a bad answer could end would take the tree down with it.
 //!
-//! # A turn is [`pacting`](crate::pacting) over a much smaller job
-//!
-//! The same four parts in the same order: [`spawn_turn`] starts the worker and
-//! hands back the channel, [`start_turn`] is everything the event loop keeps
-//! about work it is not doing, [`run_turn`] is the worker's whole body as a free
-//! function so a test can drive it with no thread at all, and [`apply_turn`]
-//! drains with `try_recv` so no frame is ever spent waiting on a model. The
-//! say-when is `pacting`'s own [`CancelGuard`], reused rather than written a
-//! second time: dropping a `Chat` takes its `claude` with it, so no exit path
-//! has to remember to stop the turn.
-//!
-//! What is not shared is the ending. Nothing here returns an error — a missing
-//! `claude`, a non-zero exit, a timeout, an empty answer and a Ctrl-C are five
-//! facts and one consequence, an [`Ending`] on the card and the same sentence on
-//! the footer, with the session as usable for the next question as it was for
-//! this one. An event loop a bad answer could end would be a chat that takes the
-//! tree down with it.
-//!
-//! # Two orderings that are load-bearing
-//!
-//! [`Chat::compose`] reads both of `/brief`'s files before it touches the mode.
-//! A file that is there and cannot be read is a command that does not happen at
-//! all, so a mode set first would be a register entered by a refusal — and
-//! neither warlock's own template nor its own default directory is ever quietly
-//! put in place of one the repository meant.
-//!
-//! The mode is then set before the turn is sent, because [`asking`] reads the
-//! mode off the app at the moment the worker starts: the instruction that enters
-//! brief mode is itself asked at brief mode's level.
-//!
-//! `/write`, by contrast, reads nothing. The directory it proposes into was
-//! settled at the last `/brief` and has been held since, which is the whole of
-//! why a document twenty turns in the making cannot arrive at a window that
-//! refuses to open.
+//! [`Chat::compose`] reads both of `/brief`'s files before it touches the mode,
+//! so a file that cannot be read is a command that does not happen rather than a
+//! register entered by a refusal. The mode is then set before the turn is sent,
+//! because [`asking`] reads it off the app at the moment the worker starts.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};

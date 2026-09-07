@@ -3,22 +3,17 @@
 //!
 //! Two roots, and keeping them apart is most of this module. The *tree* is
 //! rooted at the path the reader named, because a listing is "at or below
-//! here"; the *spelling* is against the repository root, because a manifest path
-//! is repository-root-relative and `warlock stale crates` run from one shell
-//! must not name a directory differently from `warlock stale` run from another.
-//! An omitted path is the repository root and never the working directory.
+//! here"; the *spelling* is against the repository root, because a manifest
+//! path is repository-root-relative and `warlock stale crates` run from one
+//! shell must not name a directory differently from `warlock stale` run from
+//! another. Nothing here decides what stale means, and the words for the states
+//! are [`state_word`]'s rather than [`NodeState`]'s serde derive, which spells
+//! an internal form the engine stays free to rename.
 //!
-//! Nothing here decides what stale means: every state printed is the one
-//! [`load_tree`] already put on the node. The words for those states are
-//! [`state_word`]'s and not [`NodeState`]'s serde derive, because the derive
-//! spells an internal form the engine stays free to rename and these three words
-//! are what a script greps for.
-//!
-//! An empty answer is a success — nothing on stdout, exit 0 — so anything
-//! warlock could not answer has to be a refusal instead, including a load's
-//! non-fatal problems: a directory whose subtree could not be hashed is coloured
-//! stale on no evidence, and printing it under `warlock stale` would be
-//! inventing a verdict out of an unreadable file.
+//! An empty answer is a success, so anything warlock could not answer has to be
+//! a refusal instead: a directory whose subtree could not be hashed is coloured
+//! stale on no evidence, and printing it here would be inventing a verdict out
+//! of an unreadable file.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

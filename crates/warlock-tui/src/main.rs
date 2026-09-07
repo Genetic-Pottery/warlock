@@ -1,32 +1,20 @@
 //! The terminal front end: the impure shell around the pure parts in
 //! `warlock_tui`. It owns the terminal's lifecycle, the directory warlock was
-//! invoked from, and the event loop, and nothing else — what a frame looks like
-//! is [`warlock_tui::draw`]'s and what a keystroke means is [`mod@input`]'s.
+//! invoked from, and the event loop, and nothing else.
 //!
-//! Two things about the ordering here are load-bearing.
+//! Every subcommand is dispatched *before* anything touches the terminal, and
+//! none of them installs the panic hook: they print on the ordinary screen for
+//! a script reading through a pipe, and `Cli::parse` exits the process itself
+//! on `--help`, which is only safe while there is nothing attached to the
+//! terminal to leave un-restored. The terminal is then restored on every way
+//! out, including a panic on any thread, which is why [`install_panic_hook`]
+//! runs before [`TerminalGuard::enter`] and why the guard lives inside [`run`].
 //!
-//! First, every subcommand is dispatched *before* anything touches the
-//! terminal, and none of them installs the panic hook. They print on the
-//! ordinary screen and a script reads them through a pipe; one that had entered
-//! the alternate screen would tear it down around the answer. `Cli::parse` also
-//! exits the process itself on `--help` or a parse error, which is only safe
-//! while there is nothing attached to the terminal to leave un-restored.
-//!
-//! Second, the terminal is restored on every way out — a return, a `?`, and a
-//! panic on any thread. Raw mode left on means a shell that no longer echoes,
-//! which is not something a reader should have to know how to fix. That is why
-//! [`install_panic_hook`] runs before [`TerminalGuard::enter`] and why the guard
-//! lives inside [`run`]: quitting is returning from `run`, and everything else
-//! unwinds from there.
-//!
-//! The loop draws and then *polls* for [`POLL_INTERVAL`] rather than blocking on
-//! a key, because the long keystrokes — the pact key, the refresh key, a turn —
-//! run on worker threads and report over channels that only the bottom of the
-//! loop drains. Blocking would mean a progress line that waits for somebody to
-//! press something.
-//!
-//! Doc comments on `#[arg]` fields below are clap's `--help` text, not prose:
-//! deleting one changes what `warlock --help` prints.
+//! The loop draws and then *polls* for [`POLL_INTERVAL`] rather than blocking
+//! on a key, because the long keystrokes run on worker threads and report over
+//! channels that only the bottom of the loop drains. Doc comments on the
+//! `#[arg]` fields below are clap's `--help` text, not prose: deleting one
+//! changes what `warlock --help` prints.
 
 
 use std::io;

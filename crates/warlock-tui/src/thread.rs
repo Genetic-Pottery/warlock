@@ -1,41 +1,20 @@
-//! The conversation card: an ordered list of entries. Most are turns — one
-//! message somebody typed, the work the model was seen doing about it, and the
-//! answer — and the rest are notes, one line warlock says for itself.
+//! The conversation card: an ordered list of turns and of notes, one line each,
+//! that warlock says for itself.
 //!
 //! Plain data, as the account is. [`Instant::now`] is never called in this file,
-//! so a whole conversation can be driven through it off `base +
-//! Duration::from_secs` with nothing attached to stdout and no `claude`
-//! installed.
-//!
-//! The clock rule is the account's, and is the account's *code*: both are built
-//! on [`Log`], so a work line counts from the start of its turn, the newest one
-//! ticks against whatever `now` the caller hands in, and it freezes when the
-//! next line arrives. Tool results, model reasoning and fragments of an answer
-//! arriving early are all kept out — the answer is one value and lands whole.
-//!
-//! A pact or a refresh running behind the conversation puts nothing here. The
-//! account card is one swap away and already carries the headings, the passes
-//! and the summary, so a turn carrying them too would be a second copy of the
-//! same run for the reader to reconcile with the first.
+//! so a whole conversation can be driven off `base + Duration::from_secs` with
+//! nothing attached to stdout and no `claude` installed. The clock rule is
+//! literally the account's code — both are built on [`Log`] — and tool results,
+//! model reasoning and early fragments of an answer are kept out so the answer
+//! lands whole.
 //!
 //! Notes share the sequence with the turns rather than sitting in a side table,
 //! because *when* one was said is the whole of what it means: a warning above
 //! the turn it is about and the same warning three turns later are different
-//! warnings. A note is unclocked — a clock would say warlock had been at
-//! something for that long, and the note is the whole event — and it opens no
-//! turn, closes none and freezes none.
-//!
-//! A command that ends up asking the model something (`/brief`, `/write`) is a
-//! turn whose message is the command, never the paragraph of instructions
-//! actually sent: the reader typed one word, and a screen of prose they did not
-//! write in the place their own question goes would be warlock putting words in
-//! their mouth. Nothing here builds such a turn yet, but the entry model is the
-//! one that has to allow it.
-//!
-//! What a turn costs is heard and discarded (see [`Thread::record`]). A pact's
-//! spending is part of what the run did and the account reports it; a price
-//! under a single reply belongs to no total and is a number a reader cannot use
-//! for anything.
+//! warnings. A pact running behind the conversation puts nothing here, because
+//! the account card already carries the passes and the summary. What a turn
+//! costs is heard and discarded (see [`Thread::record`]): a price under a single
+//! reply belongs to no total.
 
 use std::time::{Duration, Instant};
 

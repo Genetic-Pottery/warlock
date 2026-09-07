@@ -10,12 +10,9 @@
 //! The clock rule is `Log::shown_at`: a line shows the instant the line beneath
 //! it arrived, or, when it is the newest, `now` while the log is live and the
 //! instant it froze once it is not. So the newest clock counts up while a pass
-//! is silent and stops where it got to instead of snapping back — which is the
-//! only thing on screen distinguishing a slow pass from a hung one.
-//!
-//! Text is stored whole. Cutting a line to a width belongs to whoever knows the
-//! width, and wrapping to [`Line::Wrapped`] happens in [`mod@crate::wrap`] on
-//! the way to the screen.
+//! is silent and stops where it got to instead of snapping back, which is the
+//! only thing on screen telling a slow pass from a hung one. Text is stored
+//! whole; cutting a line to a width belongs to whoever knows the width.
 
 
 use std::path::{Path, PathBuf};

@@ -1,30 +1,19 @@
-//! The headless writes: `warlock unpact <path>`, `warlock scope add <path>
-//! <scope>` and `warlock scope remove <path>`, and the boundary all three are
-//! asked over.
-//!
-//! A question may be answered by anybody; a write may not, and the rule about
-//! who may write where is one rule with two doors onto it. Inside warlock the
-//! door is [`closed_scope`](crate::session::closed_scope), which refuses `p`,
-//! `r` and `s`. From a shell the door is [`Opened::new`]. Neither is written in
-//! terms of the other — one is about a selected row on an `App` and there is no
-//! app here — so both ask the engine the same two questions in the same order
-//! and print the same sentence.
+//! The headless writes — `warlock unpact`, `warlock scope add` and `warlock
+//! scope remove` — and the boundary all three are asked over.
 //!
 //! [`Opened`] cannot be built without that question having been asked, which is
-//! how the ordering is kept: a subcommand gets a root, a manifest and a path
-//! from [`opened`] or gets none of them. And first means first — before the
-//! spelling, before the existence check, before any look at what the manifest
-//! holds. A closed boundary must not be able to answer "there is no entry for
-//! that directory", because that is a fact about the inside of a manifest a
-//! reader has just been told they may not work in.
+//! how the ordering is kept, and first means first: before the spelling, before
+//! the existence check, before any look at what the manifest holds. A closed
+//! boundary must not be able to answer "there is no entry for that directory",
+//! because that is a fact about the inside of a manifest a reader has just been
+//! told they may not work in. [`closed_scope`](crate::session::closed_scope) is
+//! the same rule's other door and is not written in terms of this one, since it
+//! is about a selected row on an `App` and there is no app here.
 //!
-//! A boundary this machine does not open is one line on stderr and **exit status
-//! 3**, with `.warlock/pacts.toml` byte-identical to what was read. 3 rather
-//! than 1 because the two want opposite things done about them: a 1 is warlock
-//! unable to do the thing, a 3 is warlock declining to, and re-running will
-//! never work — the road out is `warlock config` and a sigil somebody else hands
-//! over. A script telling those apart by their wording would be parsing prose.
-//! There is no `--force` and no environment variable past this.
+//! A boundary this machine does not open is one line on stderr and exit status
+//! **3** rather than 1, because the two want opposite things done about them: a
+//! 1 is warlock unable to do the thing, a 3 is warlock declining to, and
+//! re-running will never work. There is no `--force`.
 
 use std::path::{Path, PathBuf};
 

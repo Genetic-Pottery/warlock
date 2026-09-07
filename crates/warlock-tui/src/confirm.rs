@@ -1,25 +1,17 @@
 //! The accident that costs a session is the reflex second Esc — the first
 //! cancels a pact, the run is still tidying up, and the next press lands in a
 //! shell nobody meant to be in. Which is why Esc answers No here: the key that
-//! means "not this" cannot also be the key that leaves.
+//! means "not this" cannot also be the key that leaves. For the same reason the
+//! mode is a value of its own and *not* a field on `App`, so an app compared
+//! before opening and after closing is equal because nothing about it was
+//! touched rather than because every field was carefully put back.
 //!
-//! The mode is a value of its own and *not* a field on `App`. Answering No has
-//! to leave the app exactly as it was, and the cheapest way to be sure of that
-//! is for the app never to have heard of the dialog — an `App` compared before
-//! opening and after closing is equal because nothing about it was touched,
-//! rather than because every field was carefully put back.
-//!
-//! Yes is drawn on the left and No on the right, which is what makes Left and
-//! Right positional here rather than a toggle: a toggle would read as an arrow
-//! that moves the highlight *away* from the side it points at as soon as it is
-//! already there. Whoever draws the two answers draws them in that order.
-//!
-//! Ctrl-C is deliberately not answered here. It is a key event and not a signal
-//! — raw mode is exactly the mode in which the terminal stops turning it into
-//! `SIGINT` — so the loop answers it before consulting this mode, open or
-//! closed. Coming through here it would be an ordinary character with a
-//! modifier riding along, and the one keystroke every reader trusts to get them
-//! out would be the one the dialog swallowed.
+//! Yes is drawn on the left and No on the right, which makes Left and Right
+//! positional rather than a toggle — a toggle would move the highlight *away*
+//! from the side the arrow points at once it is already there. Ctrl-C is not
+//! answered here at all: raw mode is exactly the mode in which the terminal
+//! stops turning it into `SIGINT`, so the loop takes it before consulting this
+//! mode, and coming through here the dialog would swallow it.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 

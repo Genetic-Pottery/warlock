@@ -8,11 +8,8 @@
 //! remember rather than one the type keeps.
 //!
 //! Every warlock command is a single letter, so while this field holds the
-//! keyboard the loop consults it *instead of* `input::action_for` rather than as
-//! well: `p` is the letter p. Nothing here reads a terminal or a clock — the
-//! width and the muting are facts about the session, told in from outside once a
-//! round, which is what keeps both functions pure functions of a key and a
-//! composer.
+//! keyboard the loop consults it *instead of* `input::action_for` rather than
+//! as well: `p` is the letter p.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 

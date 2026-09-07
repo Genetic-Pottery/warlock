@@ -6,14 +6,11 @@
 //! The two questions are genuinely different rather than one asked twice.
 //! Whether an operator may act *at* a directory looks up, at the scopes at and
 //! above it; whether an un-pact may proceed looks down, because it drops every
-//! pact in the subtree and a scope is a term of a pact rather than a thing
-//! beside it, so a directory that is itself open may sit above boundaries this
-//! operator was never entitled to move. Neither answer implies the other. What
-//! *was* duplicated is the order they are asked in.
-//!
-//! The wording lives here for the same reason the decision does: the footer
-//! calls these functions and `Error`'s `Display` calls them too, so the two
-//! doors cannot drift into wording one refusal differently.
+//! pact in the subtree and a directory that is itself open may sit above
+//! boundaries this operator was never entitled to move. Neither answer implies
+//! the other; what *was* duplicated is the order they are asked in. The wording
+//! lives here for the same reason, since the footer calls these functions and
+//! `Error`'s `Display` calls them too.
 
 use std::path::Path;
 

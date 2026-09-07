@@ -1,27 +1,18 @@
-//! The `s` key, from the press to the saved manifest: [`scope_press`] decides
-//! whether the window opens and what it opens holding, [`scope_edit`] turns one
-//! keystroke into the next prompt, and [`scope_submit`] judges the text and
-//! writes `.warlock/pacts.toml`.
+//! The `s` key, from the press to the saved `.warlock/pacts.toml`.
 //!
 //! Unlike a pact — the sibling to read this against, in [`mod@crate::pacting`] —
 //! nothing here is a run. A scope is one string written into one entry of a file
 //! already in this thread's hand, so [`scope_submit`] writes on the event loop's
-//! own thread between two frames, and spawns no worker, opens no channel and
-//! keeps no account. It reloads nothing either: a scope changes no directory's
-//! state and no row's colour, so re-reading the tree would walk the whole
-//! repository to arrive at the tree already on screen.
+//! own thread between two frames. It reloads nothing either: a scope changes no
+//! directory's state and no row's colour, so re-reading the tree would walk the
+//! whole repository to arrive at the tree already on screen.
 //!
-//! A successful write says nothing at all, and the message line is left exactly
-//! as it was found across both a set and a clear. The fact a scope write
-//! produces is the `(scope)` label beside the directory, which is a sibling
-//! slice and not here yet; inventing a sentence to stand in for it would have to
-//! be taken out again the week the label lands.
-//!
-//! Whether a string is a scope is [`validate_scope`]'s answer and nobody else's
-//! — no length constant and no character predicate lives in this crate. Case is
-//! folded before asking, so `Data-Plane` and `data-plane` are one boundary and
-//! the string judged is the string stored. An empty field is not a refusal: it
-//! clears the scope.
+//! A successful write says nothing at all and leaves the message line as it
+//! found it, across both a set and a clear. Whether a string is a scope is
+//! [`validate_scope`]'s answer and nobody else's — no length constant and no
+//! character predicate lives in this crate — and case is folded before asking,
+//! so the string judged is the string stored. An empty field clears the scope
+//! rather than being refused.
 
 use std::path::Path;
 

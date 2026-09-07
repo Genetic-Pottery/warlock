@@ -2,14 +2,12 @@
 //!
 //! [`Scope`] is the two paths everything else is resolved against, settled once
 //! by [`load_app`] and kept for as long as warlock runs, and it carries the
-//! [`Chrome`] for the same reason: neither the roots nor what this machine holds
-//! can change under a running warlock, so an app rebuilt on every reload has no
-//! business carrying them. That is also why the sigil config is read once, on
-//! the way in, and why that read cannot fail — a home that will not resolve or a
+//! [`Chrome`] for the same reason: neither the roots nor what this machine
+//! holds can change under a running warlock, so an app rebuilt on every reload
+//! has no business carrying them. That is also why the sigil config is read on
+//! the way in and why that read cannot fail — a home that will not resolve or a
 //! config that will not parse is a state on the header rather than a reason not
-//! to draw a tree. The three cases it can come back as are turned into a
-//! [`Sigils`] by [`sigils_under`], which `warlock check` and the headless writes
-//! borrow rather than reading the file a second way.
+//! to draw a tree.
 //!
 //! [`closed_scope`] is the one place the boundary question is asked, by all
 //! three keys that can be refused over it, so a pact, a refresh and a scope

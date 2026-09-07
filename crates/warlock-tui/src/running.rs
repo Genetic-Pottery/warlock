@@ -1,65 +1,21 @@
-//! The headless run: `warlock pact <path>` and `warlock refresh <path>` — the
-//! first two subcommands that spend anything. Everything before them is
-//! arithmetic, over before the reader's hand leaves the keyboard; these descend
-//! a subtree, hand one `claude --print` per directory to a model, write a
-//! `WARLOCK.md` beside each and rewrite somebody's prose. That is why this is
-//! its own file rather than two more arms of [`mod@crate::edits`].
+//! `warlock pact <path>` and `warlock refresh <path>`: the two subcommands that
+//! spend anything, hence their own file rather than two more arms of
+//! [`mod@crate::edits`].
 //!
-//! No operation is invented here. `pact` and `refresh` reach
-//! [`descend`] with the arguments the `p` and `r` keys
-//! use and the agent they use. Which directories a refresh describes is the
-//! engine's judgement and is not re-decided: a front end holding a second
-//! opinion about staleness would be a second answer waiting to disagree with the
-//! colour the tree is drawn in. What is left is four things — the boundary, an
-//! observer that prints, the exit status, and where the environment is read.
+//! [`ran`] takes an [`Opened`], so the boundary is asked before the walk. Asked
+//! afterwards it would have listed somebody else's directories before refusing;
+//! asked after the first directory it would have spent a pass and overwritten a
+//! `WARLOCK.md` that no exit status puts back. Which directories a refresh
+//! describes stays the engine's judgement, because a second opinion about
+//! staleness here would disagree with the colour the tree is drawn in.
 //!
-//! The boundary is asked first, and here the ordering is the money. [`Opened`]
-//! is the gate, borrowed whole from [`mod@crate::edits`], and [`ran`] takes one,
-//! so there is no other road to the engine call. Asked after the walk it would
-//! have listed somebody else's directories before refusing; asked after the
-//! first directory it would have spent a pass and overwritten a `WARLOCK.md`
-//! that was not this machine's to touch, and no exit status puts that back.
-//!
-//! Progress is lines on stdout rather than a screen: no terminal is entered, no
-//! raw mode, no alternate screen. Directories are named relative to the
-//! repository root the way the manifest spells them, so a line of output and a
-//! line of `.warlock/pacts.toml` say the same word. The announcements the engine
-//! makes *inside* a directory are left silent — they are the TUI's, where there
-//! is a footer to overwrite ten times a second, and on a pipe they would be
-//! several lines per directory competing with the two saying where the run has
-//! got to. The default bodies on [`Observer`](warlock_engine::pact::Observer)
-//! are what makes not writing them the same as saying nothing.
-//!
-//! Failures are named on stderr, one line each, then counted. Not the footer's
-//! shape: [`pact_message`](crate::pacting) quotes one failure and counts the
-//! rest because a footer is one line tall and the reader has a panel with the
-//! others; a shell has as many lines as it likes, the reader is often a script
-//! or a log read tomorrow, and a run that says "and 99 more" has thrown away the
-//! only list of what to go and look at. The count is what stops that list being
-//! illegible in the case that produces it most often — no `claude` on this
-//! machine, so every directory fails the same way.
-//!
-//! Ctrl-C is the only key a run has. The signal handler spends the press on the
-//! run's [`Cancel`], which is the same handle the agent was built with and the
-//! observer reads: latching kills the pass in flight, and `starting` then answers
-//! [`Pacting::Stop`] so the engine leaves at the next directory boundary, the
-//! only place a descent can stop without abandoning a half-written document. A
-//! second press is the other question, answered with [`process::exit`] from
-//! inside the handler; nothing is saved on that road, and because every file is
-//! written beside and renamed over, what is on disk is whole either way.
-//!
-//! A cancelled run does not report. The killed pass comes back in
-//! [`PactedSubtree::failures`] like any other failure and nothing in that list
-//! says which entries the reader caused, so naming them would put directories on
-//! stderr as though somebody had to go and look at them.
-//!
-//! The environment is read in exactly one place, [`started`], which resolves the
-//! [`Opened`], installs the handler and builds the agent and the [`Progress`]
-//! writing to stdout. Everything under it takes the repository, the agent, the
-//! observer and the say-when as parameters, which is the seam the tests run
-//! through: a scratch repository, a throwaway home, a fake agent, a [`Cancel`]
-//! latched from inside a pass in place of a keypress, and a `Vec<u8>` for
-//! stdout.
+//! Failures are named on stderr one line each, unlike the footer's one-line
+//! shape: the reader here is often a script or a log read tomorrow, and "and 99
+//! more" throws away the only list of what to go and look at. A cancelled run
+//! names none of its own, because nothing tells the killed pass apart from a
+//! real failure. The environment is read in [`started`] alone; everything under
+//! it takes the repository, agent, observer and say-when as parameters, which
+//! is the seam the tests run through.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

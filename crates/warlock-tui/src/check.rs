@@ -2,22 +2,17 @@
 //! holds, and whether the two meet — printed, and nothing written anywhere.
 //!
 //! Both halves of the answer are the engine's [`scope_covering`] and
-//! [`scope_opens_to`], called once each and neither re-implemented here. That is
-//! the point of the subcommand: the alternative for a script is walking
+//! [`scope_opens_to`], called once each and neither re-implemented here. That
+//! is the point of the subcommand: the alternative for a script is walking
 //! `.warlock/pacts.toml` upwards by hand, which is the boundary rule written a
-//! second time somewhere it will drift from the first. It is the same pair the
-//! TUI's run keys are refused by, asked here with nothing on screen — and this
-//! only reports. There is nothing to refuse.
+//! second time somewhere it will drift from the first.
 //!
 //! A closed scope is an answer, not a failure: `opens` is `false` and the exit
 //! status is 0, which is what makes `warlock check <path> --json | jq -e
 //! '.opens'` the CI recipe, with `jq` and not warlock spending the non-zero
 //! status on the verdict. So is a config that will not read — three-valued for
-//! that reason, because printing `[]` for it would tell an operator they hold
-//! nothing when the truth is warlock could not read what they hold. The one
-//! refusal is a path [`scope_covering`] itself refuses: outside the root or not
-//! spellable, which is not an unscoped path but one this manifest has nothing
-//! whatever to say about.
+//! that reason, because printing `[]` would tell an operator they hold nothing
+//! when the truth is warlock could not read what they hold.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

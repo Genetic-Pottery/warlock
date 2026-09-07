@@ -7,12 +7,9 @@
 //! rule below one assertion. Two of those parameters are read in exactly one
 //! arm each: `in_flight` re-reads Esc in [`action_for`] and `q` in
 //! [`press_for`], and `answered` re-reads Ctrl-C — which [`press_for`] takes at
-//! the top, before [`action_for`] is ever asked. No other key means anything
-//! different while a run or a turn is out.
-//!
-//! Nothing here decides what a window *is* — [`answer_for`], [`edit_for`] and
-//! [`compose_for`] own their own keys. [`press_for`] only decides which of them
-//! is asked, and the order it asks in is the precedence.
+//! the top, before [`action_for`] is ever asked. Nothing here decides what a
+//! window *is*; [`press_for`] only decides which of them is asked, and the
+//! order it asks in is the precedence.
 
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,

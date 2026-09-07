@@ -4,19 +4,16 @@
 //!
 //! Editing a `WARLOCK.md` restales the directory it describes, because the
 //! document is an ordinary file in the walk
-//! [`subtree_hash`](warlock_engine::subtree_hash) makes of that directory. The
-//! only road back to green is `r` and a pass, so a press of `e` on a document
-//! should be expected to cost one; [`came_back`] reloads the tree so the row
-//! says so at once rather than at the reader's next keystroke.
+//! [`subtree_hash`](warlock_engine::subtree_hash) makes; [`came_back`] reloads
+//! the tree so the row says so at once rather than at the next keystroke.
 //!
 //! `$EDITOR` is split on whitespace and never handed to `sh -c`. A shell in the
 //! middle would make warlock's behaviour depend on which `/bin/sh` a machine
 //! has, turn a path with a space in it into two arguments, and make a `$EDITOR`
-//! set from a variable a way to run arbitrary commands. The price is quoting: an
-//! editor whose own arguments contain spaces cannot be spelled here. `VISUAL` is
-//! not consulted and there is no fallback editor, because dropping somebody who
-//! has never used it into a modal editor they cannot leave is worse than a line
-//! of footer saying what to set.
+//! set from a variable a way to run arbitrary commands. The price is quoting.
+//! `VISUAL` is not consulted and there is no fallback editor, because dropping
+//! somebody into a modal editor they cannot leave is worse than a line of
+//! footer saying what to set.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

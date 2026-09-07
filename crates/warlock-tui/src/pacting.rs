@@ -1,42 +1,20 @@
-//! The two long keystrokes — `p` and `r` — as a worker thread, a channel of
+//! The two long keystrokes, `p` and `r`, as a worker thread, a channel of
 //! [`PactEvent`], and one reload at the end.
 //!
-//! [`Pact`] is everything the event loop keeps about work it is not doing: the
-//! agent every pass is made with, and the [`Running`] there is at most one of.
-//! Four entry points and no other surface — [`Pact::press`] decides what a
-//! press comes to and starts a worker, [`Pact::keep_up`] drains what the worker
-//! has said since the last frame, and [`Pact::stop`] and [`Pact::running`] are
-//! the two questions `main.rs` asks.
-//!
-//! A pact and a refresh are one machine, not two. [`Work`] is the single value
-//! that says which a run is; the worker, the channel, the account, the say-when
-//! and the reload are shared, and the difference comes down to one call in
+//! A pact and a refresh are one machine, not two: [`Work`] is the value that
+//! says which a run is, and the difference comes down to one call in
 //! [`apply_toggle`] and one verb on the footer. One run at a time falls out of
 //! [`Pact::press`] reading the `run` field before it decides anything, so
-//! neither key has to be told about the other.
+//! neither key has to be told about the other. Esc and quitting are kept apart
+//! on purpose — [`Pact::stop`] leaves the worker still saving what it finished,
+//! while dropping the [`Pact`] drops the [`CancelGuard`] and leaves the
+//! manifest as it was.
 //!
-//! [`Chat`](crate::chatting::Chat) is the same four parts over a much smaller
-//! job and reuses [`CancelGuard`] from here. The asymmetry is the ending: a
-//! turn writes nothing, while a run writes documents and saves the manifest, so
-//! only this module owes the caller a [`Reloaded`].
-//!
-//! # Stopping
-//!
-//! Two spellings, kept apart on purpose. Esc *cancels* — [`Pact::stop`] trips
-//! the flag, the pass in flight gives up, and the worker still saves and
-//! reports what it finished. Quitting drops the [`Pact`], and with it the
-//! guard, whose `Drop` kills the `claude` in flight and leaves the manifest as
-//! it was. An un-pact spends no model time and so is not reworded on cancel;
-//! see `Work::is_cancellable`.
-//!
-//! # The one reload, and why nothing reloads before it
-//!
-//! [`descend`] saves the manifest once, after the whole descent. Until that
-//! save lands, disk still holds the pre-run manifest, so re-reading the tree
-//! mid-run would re-derive every row from a stale record and wipe the green
-//! that `Documented` has been painting a directory at a time. The single
-//! `reload_tree` at the foot of [`drain`] is therefore not an optimisation: it
-//! is the only point at which disk is the honest account.
+//! [`descend`] saves the manifest once, after the whole descent, so until that
+//! save lands disk still holds the pre-run record. Re-reading the tree mid-run
+//! would re-derive every row from it and wipe the green the run has been
+//! painting; the single `reload_tree` at the foot of [`drain`] is not an
+//! optimisation but the only point at which disk is the honest account.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
