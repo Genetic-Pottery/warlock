@@ -3,23 +3,23 @@
 
 # warlock-engine
 
-Core engine crate for warlock: the domain logic for pacting directories into WARLOCK.md documents, tracking a three-colour freshness ledger over a pact manifest, scoping who may change what, and fitting a directory's files into a model request.
+Core engine crate for warlock: the domain vocabulary for pacting a repository, holding the manifest, freshness ledger, module document tree, agent seam, and request-fitting logic, with no terminal, subprocess or network dependency.
 
 ## Files
 
-- `Cargo.toml` (1.1 KB) — Crate manifest: no TUI/terminal/HTTP/Anthropic deps allowed here (dependency edge runs TUI -> engine); blake3, ignore, serde, serde_json, toml deps; serde_test/tempfile dev-deps; lints from workspace.
+- `Cargo.toml` (1.1 KB) — Crate manifest for warlock-engine, pinning workspace deps (blake3, ignore, serde, serde_json, toml) and dev-deps (serde_test, tempfile), enforcing TUI/terminal/HTTP/Anthropic isolation.
 
 ## Directories
 
-- `src/` — The engine's source: agent port, document schema/validation, fitting ladder, hash/tree/manifest, scope/sigil boundary logic, and pact operations.
+- `src/` — The engine's Rust source: agent seam, manifest, freshness ledger, document schema, request fitting, and pacting operations.
 
 ## Rules
 
-- No TUI, terminal, HTTP or Anthropic dependency belongs in this crate: the dependency edge runs TUI -> engine and never back
-- The engine owns the parser for the pass-fill JSON contract (document), since it owns that shape
-- Lint configuration is inherited from the root manifest's [workspace.lints] so every crate is held to the same bar
+- No TUI, terminal, HTTP or Anthropic dependency belongs here: the dependency edge runs TUI -> engine and never back
+- The engine owns the parser for the pass-filled JSON document contract, built via serde_json
+- Lint configuration lives in the root manifest's [workspace.lints]; this crate defers to it
 
 ## Where to look
 
-- what dependencies the engine crate uses → `Cargo.toml` `serde_json`
-- the actual engine source code and logic → `src` `Agent`
+- what modules make up the engine and how they fit together → `src` `pact_subtree`
+- what dependencies this crate pulls in and why → `Cargo.toml` `serde_json`
