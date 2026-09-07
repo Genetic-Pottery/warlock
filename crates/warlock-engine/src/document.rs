@@ -376,10 +376,7 @@ pub fn skeleton(expected: &Expected<'_>) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Accepted {
     Filled(Fill),
-    Defective {
-        fill: Fill,
-        defects: Vec<Defect>,
-    },
+    Defective { fill: Fill, defects: Vec<Defect> },
     Unparsed(Defect),
 }
 

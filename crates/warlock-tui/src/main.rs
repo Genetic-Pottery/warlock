@@ -16,7 +16,6 @@
 //! `#[arg]` fields below are clap's `--help` text, not prose: deleting one
 //! changes what `warlock --help` prints.
 
-
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;

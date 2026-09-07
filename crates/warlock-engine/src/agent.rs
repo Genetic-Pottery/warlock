@@ -191,14 +191,8 @@ pub struct File {
 enum Content {
     Bytes(Vec<u8>),
     Omitted(u64),
-    Elided {
-        size: u64,
-        kept: String,
-    },
-    Summarised {
-        size: u64,
-        summary: String,
-    },
+    Elided { size: u64, kept: String },
+    Summarised { size: u64, summary: String },
 }
 
 impl File {
@@ -372,20 +366,11 @@ impl Response {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    NotFound {
-        program: String,
-    },
-    Failed {
-        code: Option<i32>,
-        stderr: String,
-    },
+    NotFound { program: String },
+    Failed { code: Option<i32>, stderr: String },
     EmptyOutput,
-    TimedOut {
-        after: Duration,
-    },
-    Io {
-        source: std::io::Error,
-    },
+    TimedOut { after: Duration },
+    Io { source: std::io::Error },
 }
 
 impl fmt::Display for Error {

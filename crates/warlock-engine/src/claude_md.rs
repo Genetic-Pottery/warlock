@@ -257,12 +257,8 @@ pub fn write_claude_md(root: impl AsRef<Path>) -> Result<Written, Error> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Written {
-    Created {
-        path: PathBuf,
-    },
-    Updated {
-        path: PathBuf,
-    },
+    Created { path: PathBuf },
+    Updated { path: PathBuf },
 }
 
 impl Written {

@@ -798,22 +798,11 @@ pub struct Problem {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Omission {
-    TooLarge {
-        size: u64,
-    },
-    OverBudget {
-        size: u64,
-    },
-    Unreadable {
-        source: std::io::Error,
-    },
-    NotText {
-        size: u64,
-        source: Utf8Error,
-    },
-    Unreducible {
-        size: u64,
-    },
+    TooLarge { size: u64 },
+    OverBudget { size: u64 },
+    Unreadable { source: std::io::Error },
+    NotText { size: u64, source: Utf8Error },
+    Unreducible { size: u64 },
 }
 
 impl fmt::Display for Omission {

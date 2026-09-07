@@ -30,14 +30,10 @@ pub(crate) enum Verdict {
     // The permissive default sits on the directory rather than on the
     // operator: a pacted directory with no scope above it is open to anyone.
     Open,
-    Closed {
-        scope: String,
-    },
+    Closed { scope: String },
     // Only ever answered for `Reach::HereAndBelow`, and only ever to an
     // un-pact.
-    ClosedBelow {
-        scopes: Vec<String>,
-    },
+    ClosedBelow { scopes: Vec<String> },
 }
 
 impl Verdict {

@@ -504,14 +504,10 @@ pub enum Hit {
     Footer,
     Border,
     TreeHeader,
-    TreeRow {
-        offset: u16,
-    },
+    TreeRow { offset: u16 },
     TreeBelowRows,
     PanelHeader,
-    PanelLine {
-        offset: u16,
-    },
+    PanelLine { offset: u16 },
     Composer,
 }
 

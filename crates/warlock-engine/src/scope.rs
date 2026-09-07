@@ -20,19 +20,10 @@ const WILDCARD: &str = "*";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rule {
     Empty,
-    TooLong {
-        characters: usize,
-        maximum: usize,
-    },
-    Character {
-        character: char,
-    },
-    Beginning {
-        character: char,
-    },
-    Ending {
-        character: char,
-    },
+    TooLong { characters: usize, maximum: usize },
+    Character { character: char },
+    Beginning { character: char },
+    Ending { character: char },
 }
 
 impl fmt::Display for Rule {

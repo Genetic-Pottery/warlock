@@ -14,7 +14,6 @@
 //! only thing on screen telling a slow pass from a hung one. Text is stored
 //! whole; cutting a line to a width belongs to whoever knows the width.
 
-
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -165,16 +164,9 @@ impl Log {
 /// know what it cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    Wrote {
-        document: PathBuf,
-        bytes: u64,
-    },
-    Refused {
-        reason: String,
-    },
-    Unchanged {
-        document: PathBuf,
-    },
+    Wrote { document: PathBuf, bytes: u64 },
+    Refused { reason: String },
+    Unchanged { document: PathBuf },
     Cancelled,
 }
 

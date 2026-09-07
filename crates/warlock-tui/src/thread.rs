@@ -35,20 +35,11 @@ use crate::claude::Activity;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ending {
     Cancelled,
-    NoModel {
-        program: String,
-    },
-    Failed {
-        code: Option<i32>,
-        stderr: String,
-    },
-    TimedOut {
-        after: Duration,
-    },
+    NoModel { program: String },
+    Failed { code: Option<i32>, stderr: String },
+    TimedOut { after: Duration },
     NothingSaid,
-    Broke {
-        reason: String,
-    },
+    Broke { reason: String },
 }
 
 impl Ending {
@@ -218,10 +209,7 @@ impl Turn {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Entry {
     Turn(Turn),
-    Note {
-        text: String,
-        at: Instant,
-    },
+    Note { text: String, at: Instant },
 }
 
 impl Entry {
