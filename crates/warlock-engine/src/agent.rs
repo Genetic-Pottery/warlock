@@ -1,74 +1,20 @@
-//! The agent seam: how the engine reaches a model without reaching for one.
-//!
-//! Section 11 of the design doc fixes the mechanism for talking to a model:
-//! Warlock runs the `claude` CLI, hands it a prompt, and reads what it writes
-//! to stdout. It holds no credentials of its own and is inert without a
-//! logged-in `claude` on `PATH`. That mechanism is a subprocess, and this crate
-//! promises in [`lib.rs`](crate)'s first paragraph that it spawns none.
-//!
-//! Both stay true because the two halves are split at a port. The engine owns
-//! the domain — what to ask, what an answer is, and what each way of not
-//! getting one means — and states it here as a trait ([`Agent`]) over a request
-//! ([`Request`]) and a response ([`Response`]). The binary owns the transport:
-//! the child process, its stdin, its stdout, its stderr, its exit status and
-//! its timeout. Nothing in this module runs anything.
-//!
-//! Three consequences are worth stating, because they are the reasons the seam
-//! is drawn here rather than anywhere else:
-//!
-//! * **The engine's tests need no `claude`, no network and no terminal.** A
-//!   hand-written fake implementing [`Agent`] returns canned markdown, so every
-//!   decision built on top of a model pass is exercised in memory. That is the
-//!   standing rule for this crate's tests, and it is why no mocking framework
-//!   is needed.
-//! * **No process type crosses the seam.** [`Error::Failed`] carries an exit
-//!   code as an [`Option<i32>`] and captured stderr as a [`String`], not a
-//!   [`std::process::ExitStatus`]. Those variants describe transport failures
-//!   the binary reports back in the engine's vocabulary; a caller reading them
-//!   never learns that a process was involved, and a future implementation that
-//!   is not a process still fits.
-//! * **This is transport, not payload.** A [`Request`] carries the prompt, the
-//!   directory to run it in, that directory's own files ([`File`]), and the
-//!   `WARLOCK.md` of each immediate child ([`ChildDocument`]) — the context one
-//!   pass is scoped to, and nothing about how that scope was decided. Which
-//!   files a walk gathers, what it does with one too large to send, and how any
-//!   of it is spelled into prompt text are decisions elsewhere. The fields are
-//!   private behind [`Request::new`] and builder methods that only ever add, so
-//!   the next thing a pass needs lands here without touching [`Agent::run`] or
-//!   any implementation of it.
-//!
-//! The failure vocabulary is deliberately not one `Io` bucket. Each variant is
-//! a different thing for a caller to say or do: a missing `claude` is the
-//! ordinary state of a fresh machine and deserves a message naming the binary
-//! rather than "No such file or directory (os error 2)"; a non-zero exit means
-//! the model was reached and refused, and its stderr is the only clue why;
-//! empty stdout means it was reached, said nothing, and there is no document to
-//! write; a timeout is a hang, distinguishable from a refusal because the
-//! answer to it is "try again or ask for less", not "read the error".
+// The port, and nothing behind it. Reaching a model means running the `claude`
+// CLI, and this crate promises to spawn no subprocess, so the engine states the
+// domain here and the binary owns the transport. Implementing `Agent` in this
+// module — however small the implementation looked — is the edit that breaks
+// that promise, and with it the rule that the engine's tests need no `claude`,
+// no network and no terminal.
+//
+// The corollary is that no transport type crosses the seam: exit codes and
+// stderr arrive as `Option<i32>` and `String`, never as a `std::process` type,
+// so a future agent that is not a process still fits.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// How much of a failed pass's stderr goes into its [`Display`](fmt::Display).
-///
-/// A `Display` that has to fit one line of a footer cannot carry a megabyte of
-/// backtrace, and the whole text is still on the error for anything that wants
-/// it — the excerpt is a rendering choice, not a lossy capture.
 const STDERR_EXCERPT: usize = 200;
 
-/// One pass of a model over one directory.
-///
-/// The engine defines this and never implements it: the implementation is the
-/// binary's, because running a model means running the `claude` CLI and this
-/// crate spawns nothing. One method, because a pact is one question and one
-/// answer — anything a later slice needs to send belongs on [`agent::Request`](crate::agent::Request), where
-/// adding it breaks nobody.
-///
-/// `&self` rather than `&mut self` so an implementation can be shared, and the
-/// method is free to be called more than once: nothing here says a pass is
-/// unrepeatable.
-///
 /// ```
 /// use warlock_engine::{agent, Agent};
 ///
@@ -88,108 +34,39 @@ const STDERR_EXCERPT: usize = 200;
 /// # Ok::<(), warlock_engine::agent::Error>(())
 /// ```
 pub trait Agent {
-    /// Run one pass and return what the model said.
-    ///
-    /// # Errors
-    ///
-    /// [`agent::Error`](crate::agent::Error), in the engine's vocabulary rather than the transport's: the
-    /// agent command was not found, it exited non-zero, it wrote nothing, it
-    /// did not finish in time, or the attempt failed with some other I/O
-    /// error.
     fn run(&self, request: &Request) -> Result<Response, Error>;
 
-    /// How many tokens of context a pass on this agent can actually read.
-    ///
-    /// The one thing the engine cannot work out for itself. A budget exists
-    /// because a context window does, and the window is a property of the model
-    /// — which is the front end's business, not the engine's: the engine has
-    /// never known what it is talking to, and this keeps that true by asking
-    /// rather than guessing.
-    ///
-    /// **Answer low rather than high.** [`fitting`](crate::fitting) turns this into a byte
-    /// budget and gives files up until the request meets it, so an answer that
-    /// is too large does not fail — it sends more than the model can read, and
-    /// whatever silently drops the excess downstream does it with none of the
-    /// care this crate takes: no order, no ladder, no [`Problem`](crate::fitting::Problem) naming what
-    /// went. Over-reporting the window converts warlock's disclosed policy into
-    /// somebody else's undisclosed one, which is the failure the budget is
-    /// there to prevent.
-    ///
-    /// The default is [`DEFAULT_CONTEXT_TOKENS`], deliberately modest, so an
-    /// agent that has not thought about it is merely thrifty rather than
-    /// wrong.
+    // Answer low rather than high. `fitting` turns this into a byte budget and
+    // stops giving files up once the request meets it, so an over-reported
+    // window does not fail — it sends more than the model can read and lets
+    // something downstream drop the excess with no order, no ladder and no
+    // `Problem` naming what went.
     fn context_tokens(&self) -> u64 {
         DEFAULT_CONTEXT_TOKENS
     }
 }
 
-/// The context window assumed of an [`Agent`] that does not name its own.
-///
-/// Small on purpose. Every model worth pointing warlock at has a larger window
-/// than this, so the cost of the default is a little summarising nobody needed
-/// — while the cost of a default set optimistically would be requests quietly
-/// too big for the model, which is the failure this number exists to make
-/// impossible for an agent whose author never considered it.
+// Modest on purpose, for the reason above: an agent whose author never thought
+// about the window should end up thrifty, not wrong.
 pub const DEFAULT_CONTEXT_TOKENS: u64 = 128_000;
 
-/// What one pass needs in order to run: a prompt, where to run it, and the
-/// context it is scoped to.
-///
-/// The context is two lists. The directory's own files ([`agent::File`](crate::agent::File)) —
-/// its whole listing, each either carrying its bytes, standing in as a name and
-/// a size, or standing in as a name, a size and an account of what it contains
-/// — and the `WARLOCK.md` of each immediate child
-/// ([`agent::ChildDocument`](crate::agent::ChildDocument)), which is how a
-/// directory learns what is underneath it without reading a single source file
-/// down there.
-///
-/// # What is deliberately not here: the directory's own previous document
-///
-/// A request used to carry the directory's last `WARLOCK.md` in a slot of its
-/// own, labelled as a claim to be checked rather than evidence. That
-/// instruction was unfollowable whenever the evidence for a claim was not in
-/// the request — which, for anything about another directory, is always — so
-/// a false sentence written once survived every later pass on confidence, read
-/// more established each time, and the ledger stamped the result granted.
-/// Warlock's own documents carried several such sentences when this was found.
-///
-/// So no pass sees its predecessor. Every document is written from the files
-/// and the children's documents alone, and what the previous pass concluded is
-/// available to nobody. The one thing that costs is that a refresh may reword
-/// a document it could have left alone; the shape a document is laid out in
-/// (see [`document`](crate::document)) is warlock's rather than the model's,
-/// which keeps that rewording to the lines that changed.
-///
-/// The fields are private and reached through [`agent::Request::new`](crate::agent::Request::new), the
-/// builder-style `with_*` methods and the accessors. Every widening so far has
-/// been additive for exactly that reason: an existing [`Agent`] implementation
-/// and every existing call site keep compiling.
+// No slot here for the directory's own previous document, and that absence is
+// deliberate. A request used to carry it, labelled as a claim to be checked;
+// the instruction was unfollowable whenever the evidence for a claim was not in
+// the request — which for anything about another directory is always — so one
+// false sentence survived every later pass, read more established each time,
+// and the ledger stamped the result granted. Warlock's own documents carried
+// several. Every pass is now written from the files and the children's
+// documents alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Request {
-    /// The whole text handed to the model.
     prompt: String,
-    /// The directory the pass runs in, so relative paths in the prompt mean
-    /// what the model would see if it looked.
     directory: PathBuf,
-    /// The files sitting directly in that directory, in whatever order the
-    /// caller added them.
     files: Vec<File>,
-    /// The `WARLOCK.md` of each immediate child directory that has one. A
-    /// child without one contributes no entry.
     child_documents: Vec<ChildDocument>,
 }
 
 impl Request {
-    /// A pass that asks `prompt`, run from `directory`, carrying no files and
-    /// no child documents.
-    ///
-    /// Infallible: nothing is validated here. Whether the directory exists is
-    /// the transport's problem, and it reports back as [`agent::Error::Io`](crate::agent::Error::Io). Context
-    /// is added afterwards with [`agent::Request::with_files`](crate::agent::Request::with_files) and
-    /// [`agent::Request::with_child_documents`](crate::agent::Request::with_child_documents), so a caller that has none — a test,
-    /// or a question about a directory rather than about its contents — says
-    /// nothing extra.
-    ///
     /// ```
     /// use std::path::Path;
     /// use warlock_engine::agent;
@@ -211,13 +88,6 @@ impl Request {
         }
     }
 
-    /// The same request with `files` appended to the directory's listing.
-    ///
-    /// Appends rather than replaces, and can be called more than once: a
-    /// caller gathering a directory in passes never has to hold the whole
-    /// listing in one iterator. Order is the caller's — nothing here sorts,
-    /// because the order files reach a prompt in is the prompt's business.
-    ///
     /// ```
     /// use warlock_engine::{agent};
     ///
@@ -249,11 +119,6 @@ impl Request {
         self
     }
 
-    /// The same request with `documents` appended to the child documents.
-    ///
-    /// Appends rather than replaces, on the same terms as
-    /// [`agent::Request::with_files`](crate::agent::Request::with_files).
-    ///
     /// ```
     /// use warlock_engine::{agent};
     ///
@@ -272,15 +137,6 @@ impl Request {
         self
     }
 
-    /// The same request with its prompt replaced by `prompt`.
-    ///
-    /// Replaces rather than appends, because there is one prompt. It exists
-    /// for the pass that has to know what it carries before it can be asked
-    /// for anything: [`pact_directory`](crate::pact_directory) fits a
-    /// directory first and only then knows which files and children the
-    /// answer will be checked against, so the instructions that list them are
-    /// written onto the request after the fitting, not before.
-    ///
     /// ```
     /// use warlock_engine::agent;
     ///
@@ -297,115 +153,55 @@ impl Request {
         self
     }
 
-    /// The text to hand the model.
     #[must_use]
     pub fn prompt(&self) -> &str {
         &self.prompt
     }
 
-    /// The directory the pass runs in.
     #[must_use]
     pub fn directory(&self) -> &Path {
         &self.directory
     }
 
-    /// The files sitting directly in that directory.
-    ///
-    /// The directory's own `WARLOCK.md` is *not* among them — no pass is shown
-    /// its predecessor, for the reason given on the type.
     #[must_use]
     pub fn files(&self) -> &[File] {
         &self.files
     }
 
-    /// The `WARLOCK.md` of each immediate child directory that has one.
     #[must_use]
     pub fn child_documents(&self) -> &[ChildDocument] {
         &self.child_documents
     }
 }
 
-/// One file of the directory a pass is about: its path, and its bytes if they
-/// were sent.
-///
-/// Bytes rather than text, because a directory's files are whatever is in it —
-/// a PNG, a binary fixture, a latin-1 CSV — and a type that could only hold
-/// UTF-8 would make those unrepresentable rather than merely awkward.
-///
-/// A file the caller chose not to send is here all the same, as its path and
-/// its size ([`agent::File::omitted`](crate::agent::File::omitted)). That is the whole vocabulary for leaving
-/// something out: there is no half-sent file, because a truncated source file
-/// invites confident wrong conclusions about the part that never arrived,
-/// while a name and a size is accurate information a model can document
-/// honestly.
-///
-/// Between the two sits a third state ([`agent::File::summarised`](crate::agent::File::summarised)): a name, a size,
-/// and an account of what the file contains, written by an earlier pass that
-/// did read the whole thing. It is not a shorter version of the file and not
-/// the beginning of it — it is prose *about* the file, which is why it is
-/// reached through [`agent::File::summary`](crate::agent::File::summary) and never through [`File::bytes`].
-/// Truncation stays forbidden and omit-and-list stays the floor: a summary is
-/// something better than a bare name and a size, not something less than the
-/// whole file.
-///
-/// Above the summary, and below the whole file, sits one more
-/// ([`agent::File::elided`](crate::agent::File::elided)): the file's own lines, verbatim and in order,
-/// with whole regions a documenter has no use for — test bodies — replaced by a
-/// marker saying how many lines stood there. It is still not truncation, and
-/// the difference is the one that matters: truncation stops at an arbitrary
-/// byte and says nothing, while an elision drops named regions on whole-line
-/// boundaries and leaves a marker where each one was. Nothing here is
-/// paraphrased, so unlike a summary it may be quoted as the file's own text —
-/// which is why it comes back through [`agent::File::kept`](crate::agent::File::kept) rather than through
-/// [`agent::File::summary`](crate::agent::File::summary), and why it is text rather than bytes: a file that is
-/// not UTF-8 has no lines to keep.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct File {
-    /// Where the file is, relative to the request's directory, spelled with
-    /// forward slashes — the same spelling the manifest uses, so one path
-    /// means one thing on every platform.
     path: String,
-    /// Its bytes, the size standing in for them, or an account of them.
     content: Content,
 }
 
-/// What a [`agent::File`](crate::agent::File) has to say about its contents: all of them, how many there
-/// were, or what they amount to.
-///
-/// Private, and reached through [`agent::File::bytes`], [`File::size`] and
-/// [`agent::File::summary`](crate::agent::File::summary), so "omitted" and "summarised" stay bits of the public
-/// surface rather than variants callers match on and grow special cases
-/// around.
+// Four states, and no fifth: there is no truncated file. Sending the first n
+// bytes of a source file was rejected because it invites confident wrong
+// conclusions about the part that never arrived, where a name and a size is
+// accurate. `Elided` is the file's own lines with named regions dropped on
+// line boundaries, so it may be quoted; `Summarised` is prose *about* the file
+// and may not be, which is why the two come back through separate accessors and
+// why neither is reachable through `File::bytes`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Content {
-    /// The file, whole.
     Bytes(Vec<u8>),
-    /// The file's size in bytes, its contents left out.
     Omitted(u64),
-    /// The file's size in bytes, and the file's own lines with regions a
-    /// documenter does not need dropped and marked.
     Elided {
-        /// How many bytes the file has on disk — what it costs to store, not
-        /// what it costs to send.
         size: u64,
-        /// The surviving lines, verbatim, with a marker where each dropped
-        /// region was.
         kept: String,
     },
-    /// The file's size in bytes, and an account of its contents that is
-    /// explicitly not its text — never a prefix, never an excerpt, never
-    /// something to quote as what the file says.
     Summarised {
-        /// How many bytes the file has on disk, unaffected by how long the
-        /// account of it happens to be.
         size: u64,
-        /// What an earlier pass over the whole file reported it contains.
         summary: String,
     },
 }
 
 impl File {
-    /// A file sent whole: `path`, carrying `bytes`.
     #[must_use]
     pub fn present(path: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
         Self {
@@ -414,11 +210,6 @@ impl File {
         }
     }
 
-    /// A file listed but not sent: `path`, and the `size` in bytes it has on
-    /// disk.
-    ///
-    /// The size is given rather than measured, because the point of this
-    /// constructor is that nobody is holding the bytes.
     #[must_use]
     pub fn omitted(path: impl Into<String>, size: u64) -> Self {
         Self {
@@ -427,19 +218,6 @@ impl File {
         }
     }
 
-    /// A file sent with regions dropped: `path`, the `size` in bytes it has on
-    /// disk, and `kept` — its own lines, in order, with a marker standing where
-    /// each dropped region was.
-    ///
-    /// The size is the file's size on disk rather than the length of `kept`,
-    /// for [`agent::File::summarised`](crate::agent::File::summarised)'s reason exactly: how big the file is and how
-    /// much of it was sent are two facts, and collapsing them would hide the
-    /// second.
-    ///
-    /// Every line in `kept` is a line the file really contains. That is what
-    /// separates this from truncation and what lets a reader quote it, which a
-    /// summary may never be.
-    ///
     /// ```
     /// use warlock_engine::agent;
     ///
@@ -465,19 +243,6 @@ impl File {
         }
     }
 
-    /// A file described rather than sent: `path`, the `size` in bytes it has
-    /// on disk, and `summary` — an account of its contents written by an
-    /// earlier pass that read the whole thing.
-    ///
-    /// The size is given rather than derived from the summary, because the two
-    /// measure different things: the file is as big as it is on disk however
-    /// briefly it can be described.
-    ///
-    /// The summary is prose about the file, not any part of the file. Nothing
-    /// reading it back may present it as the file's text — which is why it
-    /// comes out of [`agent::File::summary`](crate::agent::File::summary) and [`File::bytes`] still answers
-    /// `None`.
-    ///
     /// ```
     /// use warlock_engine::agent;
     ///
@@ -502,18 +267,11 @@ impl File {
         }
     }
 
-    /// Where the file is, relative to the request's directory.
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
     }
 
-    /// The file's bytes, or `None` if it was listed or summarised rather than
-    /// sent.
-    ///
-    /// A summarised file answers `None` here like an omitted one: an account
-    /// of a file's contents is not its contents, and there is nowhere else it
-    /// could be mistaken for them.
     #[must_use]
     pub fn bytes(&self) -> Option<&[u8]> {
         match &self.content {
@@ -522,13 +280,6 @@ impl File {
         }
     }
 
-    /// The file's surviving lines, or `None` if it was sent whole, summarised
-    /// or merely listed.
-    ///
-    /// Verbatim text of the file, unlike [`agent::File::summary`](crate::agent::File::summary): what comes back
-    /// here may be quoted as what the file says, as long as nothing reads the
-    /// absence of a line as the absence of the thing — which is what the
-    /// markers in it are for.
     #[must_use]
     pub fn kept(&self) -> Option<&str> {
         match &self.content {
@@ -537,11 +288,6 @@ impl File {
         }
     }
 
-    /// How many bytes the file has — answered whether or not they were sent,
-    /// which is what makes an omitted file a fact rather than a hole.
-    ///
-    /// For a summarised file this is its size on disk, not the length of the
-    /// account of it.
     #[must_use]
     pub fn size(&self) -> u64 {
         match &self.content {
@@ -552,11 +298,6 @@ impl File {
         }
     }
 
-    /// What an earlier pass reported this file contains, or `None` if it was
-    /// sent whole or merely listed.
-    ///
-    /// An account of the file, never a piece of it: a caller may report what
-    /// it says, and may not quote it as the file's text.
     #[must_use]
     pub fn summary(&self) -> Option<&str> {
         match &self.content {
@@ -565,42 +306,23 @@ impl File {
         }
     }
 
-    /// Whether the file was listed rather than sent.
-    ///
-    /// A summarised file is *not* an omitted one and answers `false`: nothing
-    /// was left out of it, because a pass read the whole thing and what came
-    /// back is on [`agent::File::summary`](crate::agent::File::summary). Only a file nobody has anything to say
-    /// about — a name and a size — is omitted.
     #[must_use]
     pub fn is_omitted(&self) -> bool {
         matches!(self.content, Content::Omitted(_))
     }
 }
 
-/// One immediate child directory's `WARLOCK.md`, as its parent's pass sees it.
-///
-/// This is how a directory describes what it contains without reading it: the
-/// children summarise themselves, and their parent is handed those summaries
-/// instead of every source file below. Nothing deeper than the immediate
-/// children ever appears — a grandchild is already described by the child's
-/// document.
-///
-/// Text rather than bytes, unlike [`agent::File`](crate::agent::File): this is Warlock's own document,
-/// the same string an [`Agent`] handed back as a [`agent::Response`](crate::agent::Response) when the child
-/// was pacted, not an arbitrary file that happens to sit in a directory.
+// Immediate children only. Descending further was rejected as redundant rather
+// than merely expensive: a grandchild is already described by its own parent's
+// document, which is what lets a directory say what it contains without any
+// pass reading a source file below it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChildDocument {
-    /// The child directory, relative to the request's directory, with forward
-    /// slashes. The directory rather than the document, because the document's
-    /// name is the same for every child and the directory is what a reader
-    /// needs to place it.
     directory: String,
-    /// The document, verbatim.
     text: String,
 }
 
 impl ChildDocument {
-    /// The document `text`, belonging to the child directory `directory`.
     #[must_use]
     pub fn new(directory: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
@@ -609,99 +331,59 @@ impl ChildDocument {
         }
     }
 
-    /// The child directory, relative to the request's directory.
     #[must_use]
     pub fn directory(&self) -> &str {
         &self.directory
     }
 
-    /// What that child's document says.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
     }
 }
 
-/// What one pass produced: the text the model wrote.
-///
-/// Unparsed, and it stays that way — Warlock does not read `WARLOCK.md`, it
-/// cares that one exists and what its bytes hash to. A response that reached
-/// this type is a response the transport already judged usable: non-empty
-/// output from a run that exited cleanly.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Response {
-    /// Everything the model said, verbatim.
     text: String,
 }
 
 impl Response {
-    /// A response holding `text`.
     #[must_use]
     pub fn new(text: impl Into<String>) -> Self {
         Self { text: text.into() }
     }
 
-    /// What the model said.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
     }
 
-    /// What the model said, taking ownership.
     #[must_use]
     pub fn into_text(self) -> String {
         self.text
     }
 }
 
-/// Everything that can stop a model pass producing a document.
-///
-/// Hand-rolled like [`manifest::Error`](crate::manifest::Error) and
-/// [`hash::Error`](crate::hash::Error), for the same reason: a handful of variants
-/// do not pay for an error-handling dependency. Every variant's
-/// [`Display`](fmt::Display) is a single line, because these are read in a
-/// one-line footer as often as in a log — which is why [`agent::Error::Failed`](crate::agent::Error::Failed)
-/// flattens and excerpts the stderr it carries instead of printing it whole.
-///
-/// `#[non_exhaustive]`: this is the list of failures the transport reports
-/// today, not a claim that a transport can fail in no other way.
+// Not one `Io` bucket, because each of these is a different thing for a caller
+// to say or do: a missing `claude` is the ordinary state of a fresh machine, a
+// non-zero exit means the model was reached and refused and its stderr is the
+// only clue, empty output means there is nothing to write, and a timeout is
+// answered by asking for less rather than by reading an error.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// The agent command is not on `PATH`. The common case on a machine that
-    /// has never installed it, so the message names the command rather than
-    /// passing on an errno nobody can act on.
     NotFound {
-        /// The command that was looked for, e.g. `claude`.
         program: String,
     },
-    /// The pass ran and exited non-zero: the model was reached and something
-    /// went wrong on the far side.
     Failed {
-        /// The exit code, or `None` if it was killed before it could set one.
-        /// A plain [`i32`] rather than a [`std::process::ExitStatus`] so no
-        /// process type crosses the seam.
         code: Option<i32>,
-        /// Everything the pass wrote to stderr, verbatim and possibly
-        /// multi-line. Usually the only explanation there is.
         stderr: String,
     },
-    /// The pass exited cleanly and wrote nothing to stdout, so there is no
-    /// document. Distinct from [`agent::Error::Failed`](crate::agent::Error::Failed) because nothing failed:
-    /// there is simply no answer to write.
     EmptyOutput,
-    /// The pass did not finish inside the time it was given and was stopped.
-    /// Its own variant rather than an exit code, because a hang and a refusal
-    /// call for different answers.
     TimedOut {
-        /// How long it was given.
         after: Duration,
     },
-    /// The pass could not be run, or could not be read from, for some other
-    /// reason: the directory is gone, a pipe broke, a handle could not be
-    /// opened.
     Io {
-        /// What the operating system said.
         source: std::io::Error,
     },
 }
@@ -748,13 +430,10 @@ impl std::error::Error for Error {
     }
 }
 
-/// `text` as one line: runs of whitespace collapsed to single spaces, and no
-/// more than [`STDERR_EXCERPT`] characters of it.
-///
-/// Cut on a character boundary, counting characters rather than bytes, so a
-/// stack trace full of arrows and box drawing cannot panic the formatter.
 fn one_line(text: &str) -> String {
     let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Cut on a character boundary rather than at byte `STDERR_EXCERPT`: a stack
+    // trace full of arrows and box drawing would otherwise panic the formatter.
     match flattened.char_indices().nth(STDERR_EXCERPT) {
         Some((cut, _)) => format!("{}…", &flattened[..cut]),
         None => flattened,
@@ -769,19 +448,12 @@ mod tests {
 
     use super::{Agent, ChildDocument, Error, File, Request, Response};
 
-    /// The whole point of the seam, in one struct: an [`Agent`] that answers
-    /// with canned markdown. No `claude`, no terminal, no network, no mocking
-    /// framework — and every test below runs on a machine that has none of
-    /// them.
     struct Canned {
-        /// What every pass returns.
         markdown: &'static str,
-        /// Where each pass was asked to run, in call order.
         seen: std::cell::RefCell<Vec<(String, PathBuf)>>,
     }
 
     impl Canned {
-        /// A fake answering `markdown` to anything.
         fn new(markdown: &'static str) -> Self {
             Self {
                 markdown,
@@ -800,9 +472,6 @@ mod tests {
         }
     }
 
-    /// The other half of a fake: one that never reaches a model. Written as a
-    /// separate type rather than a mode flag on [`Canned`] so a test reading
-    /// it can see which behaviour it asked for.
     struct Refuses;
 
     impl Agent for Refuses {
@@ -813,7 +482,6 @@ mod tests {
         }
     }
 
-    /// One of every variant, for the properties that hold across all of them.
     fn every_variant() -> Vec<Error> {
         vec![
             Error::NotFound {
