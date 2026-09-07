@@ -1,89 +1,35 @@
-//! The wall clock, in the one spelling the manifest records: RFC 3339, UTC.
-//!
-//! A grant carries a timestamp — [`PactEntry::with_grant`] takes a
-//! `granted_at` — and that string is written into `.warlock/pacts.toml`, a file
-//! that is committed to git, read by people and diffed against other clones. So
-//! it has exactly two jobs: be honest about the instant, and be spelled the
-//! same way every time by every build on every machine. Nothing in this
-//! workspace ever parses it back; the manifest stores it verbatim and the
-//! staleness decision is made from hashes alone.
-//!
-//! That is why this is thirty lines of arithmetic rather than a dependency.
-//! A date/time crate would buy parsing, time zones, leap seconds, formatting
-//! languages and a calendar back to the Julian reform — none of which anybody
-//! here asks for — in exchange for a supply chain the root manifest's rule
-//! ("prefer std", every dependency comments why it earns its place) would have
-//! to justify. What is actually needed is a total function from
-//! [`SystemTime`] to twenty ASCII bytes, and the
-//! proleptic Gregorian calendar is closed-form.
-//!
-//! ## What is computed, and what is deliberately not
-//!
-//! * **UTC only.** The `Z` is a constant, not a rendered offset. A local offset
-//!   would make two people's manifests disagree about the same instant and
-//!   would need the tz database to produce.
-//! * **Seconds, no fraction.** `2026-08-21T14:03:11Z`, always twenty
-//!   characters. RFC 3339 makes the fractional part optional, and a grant is
-//!   not an event log.
-//! * **Unix time, as the platform reports it.** Leap seconds are not modelled,
-//!   because the input does not contain them: `SystemTime`'s epoch offset is
-//!   already the leap-second-free count everything else on the machine agrees
-//!   on. Inventing a correction here would put this crate's idea of "now" at
-//!   odds with `ls -l`.
-//! * **The proleptic Gregorian calendar**, extended backwards past 1582 without
-//!   apology. The alternative is a Julian/Gregorian switch whose date depends
-//!   on which country you ask, for the sake of instants no clock on this
-//!   machine can be set to.
-//!
-//! ## The days-to-date algorithm
-//!
-//! [`civil_from_days`] is Howard Hinnant's `civil_from_days`, whose trick is to
-//! move the start of the year to 1 March. Do that and the leap day falls at the
-//! *end* of the year, where it perturbs nothing: every month's length becomes a
-//! plain arithmetic progression in the month index (the `(153 * mp + 2) / 5`
-//! below), and the whole conversion is four divisions with no table and no
-//! branch per month. The 400-year "era" then absorbs the century rules — 400
-//! Gregorian years are exactly 146 097 days, always — so the only leap-year
-//! reasoning left in the code is that constant.
-//!
-//! [`PactEntry::with_grant`]: crate::PactEntry::with_grant
+//! Thirty lines of arithmetic rather than a date/time dependency. What is
+//! needed is a total function from [`SystemTime`] to twenty ASCII bytes, always
+//! UTC, always to the second; nothing in this workspace parses the string back,
+//! so parsing, time zones, leap seconds and locales would all be bought and
+//! unused. The proleptic Gregorian calendar is closed-form, extended backwards
+//! past 1582 rather than modelling a switch whose date depends on the country.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Seconds in a day, as this calendar counts them: no leap second ever makes a
-/// Unix day 86 401 seconds long, by construction of Unix time.
+/// No leap second ever makes a Unix day 86 401 seconds long, by construction of
+/// Unix time, so leap seconds need no modelling here.
 const SECONDS_PER_DAY: i64 = 86_400;
 
-/// Days from `0000-03-01` (the shifted-year epoch this arithmetic counts from)
-/// to `1970-01-01`. Adding it turns a Unix day number into an era-relative one.
+/// From `0000-03-01`, the shifted-year epoch [`civil_from_days`] counts from.
 const DAYS_FROM_SHIFTED_EPOCH_TO_UNIX_EPOCH: i64 = 719_468;
 
-/// Days in one 400-year Gregorian era. Exact, and the reason the century rules
-/// need no code of their own.
+/// Exact, and the reason the century rules need no code of their own.
 const DAYS_PER_ERA: i64 = 146_097;
 
-/// The earliest instant RFC 3339 can spell with a four-digit year:
-/// `0000-01-01T00:00:00Z`.
+/// `0000-01-01T00:00:00Z`, the earliest instant a four-digit year can spell.
 const MIN_REPRESENTABLE: i64 = -62_167_219_200;
 
-/// The latest instant RFC 3339 can spell with a four-digit year:
-/// `9999-12-31T23:59:59Z`.
+/// `9999-12-31T23:59:59Z`, the latest one.
 const MAX_REPRESENTABLE: i64 = 253_402_300_799;
 
-/// Now, as an RFC 3339 UTC timestamp to the second: `2026-08-21T14:03:11Z`.
+/// Infallible by decision. The one thing that can go wrong — a system clock set
+/// before 1970 — is not a failure a caller can act on: refusing to grant a pact
+/// because a laptop came back from a dead battery at 1969 is a worse answer
+/// than writing `1969-12-31T23:59:59Z` into a field nothing parses.
 ///
-/// Total and infallible, which is a decision rather than an accident. The one
-/// thing that can go wrong — a system clock set before 1970, so that
-/// [`SystemTime::now`] is *behind* [`UNIX_EPOCH`] — is not a failure this
-/// crate can do anything about and not one a caller can either: refusing to
-/// grant a pact because a laptop came back from a dead battery with its clock
-/// at 1969 would be a worse answer than writing `1969-12-31T23:59:59Z` into a
-/// field nothing parses. So a pre-epoch clock produces a pre-epoch timestamp,
-/// and the signature stays a plain `String`.
-///
-/// The value is whatever the platform's wall clock says. It is not monotonic,
-/// two calls can go backwards across an NTP step, and none of that matters
-/// here: this is a note for a human reading a manifest, never an ordering key.
+/// Not monotonic, and never an ordering key: two calls can go backwards across
+/// an NTP step.
 ///
 /// ```
 /// let stamp = warlock_engine::now_rfc3339();
@@ -96,7 +42,7 @@ const MAX_REPRESENTABLE: i64 = 253_402_300_799;
 #[must_use]
 pub fn now_rfc3339() -> String {
     // `duration_since` reports a clock behind the epoch as an error carrying
-    // how far behind it is, so the negative branch is a negation, not a
+    // how far behind it is, so the error branch is a negation rather than a
     // fallback to some made-up instant.
     let seconds = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(elapsed) => i64::try_from(elapsed.as_secs()).unwrap_or(MAX_REPRESENTABLE),
@@ -107,19 +53,13 @@ pub fn now_rfc3339() -> String {
     rfc3339_from_unix_seconds(seconds)
 }
 
-/// An instant given in seconds since the Unix epoch, as an RFC 3339 UTC
-/// timestamp to the second.
+/// Split from [`now_rfc3339`] so the calendar arithmetic is testable against
+/// fixed instants.
 ///
-/// Pure: no clock, no filesystem, no allocation beyond the string returned.
-/// [`now_rfc3339`] is this function plus a call to [`SystemTime::now`], which
-/// is what makes the calendar arithmetic testable against fixed instants.
-///
-/// Seconds outside the range RFC 3339's four-digit year can spell are clamped
-/// to its ends rather than rendered with a fifth digit or a leading `-`. The
-/// output of this function is always a valid RFC 3339 timestamp of exactly
-/// twenty characters — that invariant is worth more than fidelity to a clock
-/// claiming to be in the year 12 000, and reaching either clamp needs an error
-/// of nearly two thousand years.
+/// Seconds outside what a four-digit year can spell are clamped rather than
+/// rendered with a fifth digit or a leading `-`: always twenty valid characters
+/// is worth more than fidelity to a clock claiming to be in the year 12 000,
+/// and reaching either clamp needs an error of nearly two thousand years.
 fn rfc3339_from_unix_seconds(seconds: i64) -> String {
     let seconds = seconds.clamp(MIN_REPRESENTABLE, MAX_REPRESENTABLE);
 
@@ -137,33 +77,20 @@ fn rfc3339_from_unix_seconds(seconds: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
-/// The proleptic Gregorian year, month (1-12) and day (1-31) of a day number
-/// counted from `1970-01-01`, which is day 0.
-///
-/// Howard Hinnant's `civil_from_days`, transcribed into integer arithmetic that
-/// cannot overflow for any day number a clamped [`rfc3339_from_unix_seconds`]
-/// can hand it. The shape of it, in the order the lines run:
-///
-/// 1. Shift the epoch to `0000-03-01`, so that a year runs March to February
-///    and its leap day is the last day of it.
-/// 2. Split into a 400-year *era* (exactly [`DAYS_PER_ERA`] days) and a day
-///    within it, flooring so that negative day numbers land in earlier eras
-///    instead of at a negative offset in this one.
-/// 3. Recover the year of the era by removing the leap days the four-, hundred-
-///    and four-hundred-year rules insert, then divide by 365.
-/// 4. Turn the day of that shifted year into a month and a day with the
-///    `(153 * mp + 2) / 5` progression, which encodes the 31/30/31/30/31 …
-///    pattern the March-first ordering makes regular.
-/// 5. Shift back: months 0-9 are March-December, months 10-11 are the January
-///    and February that belong to the *next* real year.
+/// Howard Hinnant's `civil_from_days`, taking a day number counted from
+/// `1970-01-01` to a proleptic Gregorian year, month (1-12) and day (1-31).
+/// Its trick is to start the year on 1 March, which puts the leap day at the
+/// end where it perturbs nothing: month lengths become the arithmetic
+/// progression `(153 * mp + 2) / 5` below, and the 400-year era absorbs the
+/// century rules. Nothing here is derivable by reading the constants, so change
+/// it against the reference rather than by reasoning about the lines.
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let shifted = days + DAYS_FROM_SHIFTED_EPOCH_TO_UNIX_EPOCH;
     let era = shifted.div_euclid(DAYS_PER_ERA);
     let day_of_era = shifted.rem_euclid(DAYS_PER_ERA); // [0, 146_096]
 
-    // Remove the era's leap days before dividing: the +1/4 (every fourth year),
-    // -1/100 (except centuries) and +1/400 (except every fourth century) of the
-    // Gregorian rule, applied in day-of-era terms.
+    // Remove the era's leap days before dividing: the +1/4, -1/100 and +1/400
+    // of the Gregorian rule, in day-of-era terms.
     let year_of_era =
         (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365; // [0, 399]
     let year = year_of_era + era * 400;
@@ -186,10 +113,8 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 mod tests {
     use super::{MAX_REPRESENTABLE, MIN_REPRESENTABLE, now_rfc3339, rfc3339_from_unix_seconds};
 
-    /// Fixed instants and the string each one must produce, computed
-    /// independently of this code. The table is the specification: if the
-    /// arithmetic is ever rewritten, these are what it has to keep agreeing
-    /// with.
+    /// The table is the specification: computed independently of this code, and
+    /// what a rewrite of the arithmetic has to keep agreeing with.
     #[test]
     fn fixed_instants() {
         let cases = [
@@ -235,8 +160,6 @@ mod tests {
 
     #[test]
     fn a_year_rolls_over_at_the_right_second() {
-        // The last second of a year and the first of the next differ by one, and
-        // every field moves at once.
         let rollovers = [
             (946_684_799, "1999-12-31T23:59:59Z", "2000-01-01T00:00:00Z"),
             (
@@ -291,10 +214,8 @@ mod tests {
 
     #[test]
     fn every_second_of_a_day_is_spelled_in_range() {
-        // Walk a whole day a second at a time across a leap-day boundary and
-        // check the fields never leave their ranges. Cheap, and it catches an
-        // off-by-one in the hour/minute/second split that a handful of fixed
-        // instants could miss.
+        // Cheap, and it catches an off-by-one in the hour/minute/second split
+        // that a handful of fixed instants could miss.
         let start = 1_709_164_800; // 2024-02-29T00:00:00Z
         for offset in 0..2 * 86_400 {
             let stamp = rfc3339_from_unix_seconds(start + offset);
