@@ -1,61 +1,22 @@
-//! When the disk moves, and what to do about it.
+//! Two questions about a moving disk, answered as values — which movements are
+//! Warlock's business ([`NodeSet`]) and when to act on them ([`WatchPolicy`]) —
+//! plus the impure third that hears about them ([`Watch`]).
 //!
-//! Warlock's tree is read from disk, and the disk keeps moving after it has
-//! been read: a file is saved in another window, a branch is checked out, a
-//! build writes ten thousand object files. Hearing about that is one small
-//! impure thing — a [`Watch`], which owns a `notify` watcher and passes on the
-//! paths it reports — and everything done with what it hears is two questions
-//! answered as values, with no watcher, no terminal and no file.
-//!
-//! The first is *which* movements are Warlock's business. The answer is the
-//! last walk itself: an event counts only when its immediate parent is a
-//! directory the last successful load produced. That is what [`NodeSet`] holds
-//! — one path per node of a [`Tree`], and nothing else. There is no gitignore
-//! matching here, no skip list and no path rules of this module's own, because
-//! the loader already applied all of that on the way to the tree it returned;
-//! re-deciding it here would be a second implementation of gitignore semantics
-//! that could disagree with the first. `target/debug/` and `.git/` are rejected
-//! for the one reason that matters: no walk ever produced them, so nothing
-//! inside them has a parent in the set.
-//!
-//! The second is *when* to act. A single editor save is three or four events —
-//! a write, a rename over the original, a chmod — and a `git checkout` is
-//! thousands, so reloading per event would reload a tree that nobody asked
-//! about dozens of times a second. [`WatchPolicy`] is the timing answer, in
-//! three rules that are three named constants: [`QUIET_PERIOD`],
-//! [`RELOAD_CEILING`] and [`COALESCED_RELOADS`].
-//!
-//! # The watcher hears; it does not decide
-//!
-//! [`Watch`] is the whole of the impure half: it starts a watcher over the
-//! tree's root and the manifest, keeps the handle alive, and hands on every path
-//! it is told about, in the order it was told, unfiltered. It answers neither
-//! question above, so nothing that matters rests on a real disk having moved in
-//! a test. Not being able to start one is a value too — [`Watching::Off`] — for
-//! the same reason: warlock without live updates is warlock as it was, and
-//! failing to launch over a watcher would be the tail wagging the dog.
-//!
-//! # The rest holds no clock
+//! The filter is the last walk itself. The loader already applied gitignore,
+//! skip lists and hidden-file rules on the way to the tree it returned, so
+//! re-deciding any of that here would be a second implementation free to
+//! disagree with the first; `target/` and `.git/` are rejected for one reason
+//! only, that no walk ever produced them.
 //!
 //! [`Instant::now`] is never called in this file. Every instant the policy
-//! reasons about is handed in by whoever is driving the event loop — which
-//! already reads the clock once a frame — so a ten-second burst of events can be
-//! driven through the policy in a test in microseconds, with no sleeping, no
-//! watcher and nothing attached to stdout. What the policy answers is one
-//! question, [`WatchPolicy::due`]: reload now, or not yet.
+//! compares against is handed in by the event loop, which already reads the
+//! clock once a frame, so a ten-second burst is driven through it in
+//! microseconds with no sleeping and no real disk.
 //!
-//! # What is not here
-//!
-//! No `notify` type in any signature: what comes out of [`Watch`] is
-//! [`PathBuf`]s and what a failure to start comes out as is a [`String`], so the
-//! crate that hears about the disk stops at this file's edge. Nothing reloads
-//! either — the policy says *that* a reload is owed and never performs one,
-//! because reading the tree again is the binary's business and has to happen on
-//! the thread that draws. No debouncing by anybody else: the timing rules are
-//! [`WatchPolicy`]'s, which is why no debouncer crate is anywhere near this.
-//! And no state outlives a process: a [`NodeSet`] is thrown away and rebuilt by
-//! every successful load, which is exactly why it is replaceable, and a
-//! [`Watch`] stops watching the moment it is dropped.
+//! Nothing here reloads. The policy says a reload is *owed*; reading the tree
+//! again is the binary's business, on the thread that draws. No `notify` type
+//! appears in a signature — paths leave as [`PathBuf`], a failed start as a
+//! [`String`].
 
 use std::collections::HashSet;
 use std::fmt;
@@ -66,73 +27,44 @@ use std::time::{Duration, Instant};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
 use warlock_engine::{Tree, manifest_path};
 
-/// How long the disk has to be quiet before a reload — the debounce.
-///
-/// What it protects against: one save arriving as several events. An editor
-/// writing a file typically writes a temporary, renames it over the original
-/// and fixes its mode, and each of those is an event of its own; a reload per
-/// event would re-walk and re-hash the tree three or four times for one
-/// keystroke in another window. Waiting for a quarter second of silence after
-/// the *last* accepted event turns that burst into one reload.
-///
-/// A quarter second is chosen to sit above the gap between the events of one
-/// save — which are milliseconds apart — and below the point where a person
-/// reads the screen as not having noticed. It is longer than the event loop's
-/// poll interval, so the deadline is checked several times before it passes.
+/// The debounce, measured from the *last* accepted event. One editor save
+/// arrives as several events — write, rename over the original, chmod — and a
+/// reload apiece would re-walk and re-hash the tree for one keystroke in
+/// another window. A quarter second sits above the millisecond gaps within one
+/// save and below being read as not having noticed, and is longer than the
+/// event loop's poll interval, so the deadline is checked before it passes.
 pub const QUIET_PERIOD: Duration = Duration::from_millis(250);
 
-/// The longest a reload is put off while events keep arriving — the ceiling.
-///
-/// What it protects against: starvation by a burst that never ends. A `git
-/// checkout`, a `cargo build` inside a watched directory or a formatter run
-/// over the whole repository emits events faster than [`QUIET_PERIOD`], so the
-/// quiet the debounce waits for never comes and a purely debounced tree would
-/// sit stale for as long as the burst lasts. Once this much time has passed
-/// since the first event of the current burst, the tree is read again whether
-/// or not the disk has gone quiet.
-///
-/// A couple of seconds, so that the two failure modes are both out of reach:
-/// the tree never goes minutes without moving, and a long burst still reloads a
-/// handful of times rather than four times a second.
+/// The starvation guard, measured from the *first* event of the burst. A `git
+/// checkout` or a formatter run over the repository emits faster than
+/// [`QUIET_PERIOD`], so the quiet a pure debounce waits for never comes and the
+/// tree would sit stale for as long as the burst lasted.
 pub const RELOAD_CEILING: Duration = Duration::from_secs(2);
 
-/// How many further reloads the events arriving during a reload are worth: one,
-/// however many of them there were.
-///
-/// What it protects against: a queue. Reading the tree again takes real time —
-/// a walk and a hash per pacted subtree — and the documents a pact writes land
-/// during it, so events arrive while the reload that will already see them is
-/// still running. Remembering them as a count, or as a list, would leave the
-/// loop owing a reload per event and re-walking the tree until the backlog
-/// drained. So they are remembered as a flag instead: one bit, set by the first
-/// such event and by every one after it, cleared by the single reload it earns.
-///
-/// Named as a number rather than left implicit in the code because it is the
-/// rule, and the rule is that this number is 1 and can never grow.
+/// How many further reloads the events arriving *during* a reload are worth
+/// between them, however many of them there were. Held as one bit rather than a
+/// count or a list, because a pact writes documents while the reload that will
+/// already see them runs: remembering each would leave the loop owing a reload
+/// per event and re-walking until the backlog drained. Named rather than left
+/// implicit in the code because the number is the rule, and it cannot grow.
 pub const COALESCED_RELOADS: usize = 1;
 
-/// The directories the last successful load produced: the filter every
+/// One path per node of the [`Tree`] a load returned: the filter every
 /// filesystem event is held against.
 ///
-/// One path per node of the [`Tree`] a load returned, and nothing more. It is
-/// built from the tree rather than from what is on screen on purpose: rows are
-/// filtered by the pacted-only and file toggles, so a filter built from them
-/// would stop noticing directories the moment somebody pressed a key.
+/// Built from the tree and never from what is on screen — rows are filtered by
+/// the pacted-only and file toggles, so a filter built from them would stop
+/// noticing directories the moment somebody pressed a key.
 ///
 /// Paths are compared as stored, with no normalisation and no filesystem
-/// access, exactly as [`Tree::find`] compares them. The tree's paths come back
-/// from the load rooted where the load was rooted, and a watcher reports events
-/// under the same root, so the two agree without anybody canonicalising
-/// anything.
+/// access. Tree paths and watcher events are both rooted where the load was
+/// rooted, so the two agree without anybody canonicalising.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeSet {
-    /// Every node path of the tree this set was built from.
     directories: HashSet<PathBuf>,
 }
 
 impl NodeSet {
-    /// The directories of `tree`, taken from its nodes.
-    ///
     /// ```
     /// use warlock_engine::{Node, NodeState, Tree};
     /// use warlock_tui::NodeSet;
@@ -155,21 +87,15 @@ impl NodeSet {
         }
     }
 
-    /// Whether an event about `path` is Warlock's business: `true` when the
-    /// path's *immediate* parent is one of these directories.
+    /// The path's *immediate* parent, not any ancestor, and that is the whole
+    /// of the rule. Matching any ancestor would accept everything under
+    /// `target/` and `.git/` the moment the root was walked; matching the
+    /// immediate parent rejects them however deep they sit, with no ignore
+    /// rules read here, while still accepting a brand-new directory — whose
+    /// parent *was* walked — so it becomes a node of its own on the next load.
     ///
-    /// Immediate, not any ancestor, and that is the whole of the rule. It
-    /// accepts a file written in a directory the walk produced and a directory
-    /// created there — a brand-new directory is a path whose parent is in the
-    /// set, so the tree is read again and the new directory becomes a node of
-    /// its own. It rejects everything reached through a directory the walk
-    /// never produced, which is how an ignored subtree is skipped without any
-    /// ignore rules being read: nothing under `target/debug/` or `.git/` has a
-    /// parent in the set, however deep it sits.
-    ///
-    /// A path with no parent at all — the filesystem root — is rejected, as is
-    /// the tree's own root path, whose parent is above everything the load
-    /// produced.
+    /// The filesystem root has no parent, and the tree's own root has one above
+    /// everything the load produced; both are rejected.
     #[must_use]
     pub fn accepts(&self, path: impl AsRef<Path>) -> bool {
         path.as_ref()
@@ -177,29 +103,20 @@ impl NodeSet {
             .is_some_and(|parent| self.directories.contains(parent))
     }
 
-    /// How many directories are in the set.
     #[must_use]
     pub fn len(&self) -> usize {
         self.directories.len()
     }
 
-    /// Whether the set holds no directories, which is what a policy built
-    /// before any load has one.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.directories.is_empty()
     }
 }
 
-/// The timing half of watching: it is told what happened and when, and answers
-/// whether the tree is owed a reload right now.
-///
-/// It performs nothing. Reading the tree again is the event loop's job, on the
-/// thread that draws; this type only says when that is worth doing, from
-/// [`QUIET_PERIOD`], [`RELOAD_CEILING`] and [`COALESCED_RELOADS`]. It reads no
-/// clock either: every instant it compares against is one the caller handed it.
-///
-/// The shape of a use of it, once per turn of the event loop:
+/// The timing half: told what happened and when, it answers whether the tree is
+/// owed a reload. It performs nothing and reads no clock — every instant it
+/// compares against is one the caller handed it.
 ///
 /// ```
 /// use std::time::Instant;
@@ -225,31 +142,18 @@ impl NodeSet {
 /// ```
 #[derive(Debug, Clone)]
 pub struct WatchPolicy {
-    /// The directories the last successful load produced. Replaced by
-    /// [`follow`](WatchPolicy::follow) after every one, because every load
-    /// produces a new one and the old one describes a tree that no longer
-    /// exists.
     watched: NodeSet,
-    /// When the first accepted event of the burst now pending arrived, or
-    /// `None` when nothing is pending. [`RELOAD_CEILING`] is measured from it.
+    /// [`RELOAD_CEILING`] is measured from this, [`QUIET_PERIOD`] from
+    /// `last_event`; the two are `Some` together or not at all, and `None`
+    /// means nothing is pending.
     burst_began: Option<Instant>,
-    /// When the most recent accepted event of the pending burst arrived.
-    /// [`QUIET_PERIOD`] is measured from it. `Some` exactly when
-    /// `burst_began` is.
     last_event: Option<Instant>,
-    /// Whether a reload is in progress, between
-    /// [`reload_started`](WatchPolicy::reload_started) and
-    /// [`reload_finished`](WatchPolicy::reload_finished). Nothing is due while
-    /// it is.
     reloading: bool,
-    /// Whether anything arrived during the reload now in progress: the
-    /// [`COALESCED_RELOADS`] flag, one bit rather than a count, so a thousand
-    /// events during one reload are worth exactly one more.
+    /// The [`COALESCED_RELOADS`] bit, not a count.
     moved_during_reload: bool,
 }
 
 impl WatchPolicy {
-    /// A policy filtering against the directories of `tree`, owing nothing.
     #[must_use]
     pub fn new(tree: &Tree) -> Self {
         Self {
@@ -261,32 +165,21 @@ impl WatchPolicy {
         }
     }
 
-    /// Filter against the directories of `tree` from now on: what a successful
-    /// load hands over, since the walk it just did is the new filter.
-    ///
-    /// Only the filter is replaced. Whatever the policy owes — a burst waiting
-    /// out its quiet period, an event seen during a reload — is untouched,
-    /// because a new tree says nothing about events that have already been
-    /// accepted.
+    /// Only the filter is replaced. What the policy owes — a burst waiting out
+    /// its quiet period, an event seen during a reload — survives, because a
+    /// new tree says nothing about events already accepted.
     pub fn follow(&mut self, tree: &Tree) {
         self.watched = NodeSet::from_tree(tree);
     }
 
-    /// The directories being filtered against.
     #[must_use]
     pub fn watched(&self) -> &NodeSet {
         &self.watched
     }
 
-    /// Take one filesystem event, about `path`, seen at `at`. Answers whether
-    /// it was accepted.
-    ///
-    /// An accepted event either starts a burst or extends the one pending,
-    /// unless a reload is in progress, in which case it sets the coalescing
-    /// flag instead — see [`COALESCED_RELOADS`]. A rejected event does nothing
-    /// at all, which is what makes a `cargo build` free: thousands of paths
-    /// under a directory no walk produced, thousands of rejections, no reload
-    /// and no hash.
+    /// Returns whether the event was accepted. A rejected event does nothing at
+    /// all, which is what makes a `cargo build` free: thousands of paths under
+    /// a directory no walk produced, no reload and no hash.
     pub fn saw(&mut self, path: impl AsRef<Path>, at: Instant) -> bool {
         let accepted = self.watched.accepts(path);
         if accepted {
@@ -295,13 +188,10 @@ impl WatchPolicy {
         accepted
     }
 
-    /// Record an event that something else accepted, seen at `at`.
-    ///
-    /// The escape hatch for the paths that matter without being under a node of
-    /// the tree — the manifest under `.warlock/`, which is hidden and so was
-    /// never walked, yet changes what every node's colour should be. Whoever
-    /// decides that such a path counts calls this, and the timing rules are then
-    /// exactly the same as for anything [`saw`](WatchPolicy::saw) accepted.
+    /// The way in for a path that matters without being under a node of the
+    /// tree: the manifest is hidden, so no walk produced it and
+    /// [`saw`](WatchPolicy::saw) would reject it, yet it changes what every
+    /// node's colour should be. Timing rules are the same from here on.
     pub fn accepted(&mut self, at: Instant) {
         if self.reloading {
             // One bit, however many events land here.
@@ -312,14 +202,8 @@ impl WatchPolicy {
         self.last_event = Some(at);
     }
 
-    /// Whether the tree is owed a reload as of `now`: the whole question this
-    /// module exists to answer.
-    ///
-    /// True when something has been accepted and either the disk has been quiet
-    /// for [`QUIET_PERIOD`] since the last of it, or [`RELOAD_CEILING`] has
-    /// passed since the first of it and the events are still coming. False
-    /// while a reload is in progress, since that reload will see whatever has
-    /// happened.
+    /// False while a reload is in progress: that reload will see whatever has
+    /// happened, so owing another for it would be owing it twice.
     #[must_use]
     pub fn due(&self, now: Instant) -> bool {
         if self.reloading {
@@ -332,16 +216,13 @@ impl WatchPolicy {
             || now.saturating_duration_since(began) >= RELOAD_CEILING
     }
 
-    /// Say that the reload the policy asked for has begun.
+    /// The pending burst is discharged here, at the start, not when the reload
+    /// ends: the walk about to happen sees the disk as it is now, so every
+    /// event that arrived before this call is answered by this reload and
+    /// everything after it is the coalescing case.
     ///
-    /// The pending burst is discharged here rather than when the reload ends,
-    /// because the walk about to happen sees the disk as it is now: an event
-    /// that arrived before this call is answered by this reload. Anything
-    /// arriving from now until [`reload_finished`](WatchPolicy::reload_finished)
-    /// is the coalescing case.
-    ///
-    /// No instant, because nothing here is measured from the moment a reload
-    /// began — the clock that matters starts again when it ends.
+    /// No instant, because nothing is measured from the moment a reload began —
+    /// the clock that matters starts again when it ends.
     pub fn reload_started(&mut self) {
         self.burst_began = None;
         self.last_event = None;
@@ -349,13 +230,10 @@ impl WatchPolicy {
         self.moved_during_reload = false;
     }
 
-    /// Say that the reload has finished, at `at`.
-    ///
-    /// If anything moved while it ran, exactly one further reload is owed —
-    /// [`COALESCED_RELOADS`] of them, never a queue — and it is owed on the same
-    /// terms as any other burst: a [`QUIET_PERIOD`] from here, so a stream of
-    /// events that ran right through the reload settles before the tree is read
-    /// again, and the ceiling from here too, so it cannot be put off for ever.
+    /// Anything that moved while the reload ran is owed one further reload, on
+    /// the same terms as any other burst and dated from `at` rather than from
+    /// when the events arrived — so a stream running right through a reload
+    /// still has to settle, and still cannot be put off past the ceiling.
     pub fn reload_finished(&mut self, at: Instant) {
         self.reloading = false;
         if std::mem::take(&mut self.moved_during_reload) {
@@ -364,86 +242,49 @@ impl WatchPolicy {
         }
     }
 
-    /// Whether anything at all is pending: a burst waiting out its quiet
-    /// period, or an event seen during the reload now running.
-    ///
-    /// For a caller that has a reason not to reload just yet — a pact in flight
-    /// — and wants to know whether it is sitting on something.
+    /// Unlike [`due`](WatchPolicy::due) this ignores the clock and the
+    /// in-progress flag: it is for a caller with its own reason to hold a
+    /// reload back — a pact in flight — asking whether it is sitting on
+    /// anything.
     #[must_use]
     pub fn owes_reload(&self) -> bool {
         self.burst_began.is_some() || self.moved_during_reload
     }
 }
 
-/// What came of asking the operating system to watch the tree.
-///
 /// A value rather than a `Result`, because there is nothing here for a caller
-/// to fail over: warlock without a watcher is warlock as it was before this
-/// existed — it draws, pacts, navigates and quits, and only reloads when
-/// something asks it to. So the two cases are two variants a caller matches on
-/// and carries on from, and the failure carries the one line it would put on
-/// the footer rather than an error type nobody upstream can act on.
+/// to fail over: warlock without a watcher still draws, pacts, navigates and
+/// quits, and merely reloads only when asked. The failure carries the operating
+/// system's own words as a plain [`String`], so no `notify` type leaves this
+/// module and the caller is left free to frame it for the footer.
 #[derive(Debug)]
 pub enum Watching {
-    /// The operating system is watching; the loop calls [`Watch::drain`] once a
-    /// turn to hear what it said.
     Live(Watch),
-    /// Nothing is being watched, and why, in the operating system's own words.
-    ///
-    /// The words are the error's, unwrapped to a plain [`String`] so no `notify`
-    /// type leaves this module; framing it as a sentence and fitting it to one
-    /// line is the caller's, which is where the house style for footer wording
-    /// lives.
     Off(String),
 }
 
-/// A running filesystem watcher and the events it has produced: the impure half
-/// of watching, and the only part of this module that talks to the operating
-/// system.
-///
-/// It decides nothing. Every path it hears about is passed on exactly as it
-/// arrived, because *which* paths matter is [`NodeSet`]'s question and *when* to
-/// act on them is [`WatchPolicy`]'s; a filter here would be a second one, in the
-/// half that cannot be tested without a real disk. What it does own is the
-/// watcher handle, and owning it is the point: dropping the handle stops the
-/// watch, so it lives in this struct for as long as warlock does.
-///
-/// Events reach the loop over an [`mpsc`](std::sync::mpsc) channel, drained with
-/// [`try_recv`](Receiver::try_recv) and never with a blocking receive: the
-/// thread that drains is the thread that draws, and a frame is not worth waiting
-/// on a quiet disk for.
+/// The only part of this module that talks to the operating system, and it
+/// decides nothing: every path is passed on as it arrived, because a filter
+/// here would be a second one living in the half that cannot be tested without
+/// a real disk.
 pub struct Watch {
-    /// The watcher itself, held only to keep it alive — `notify` stops watching
-    /// when the handle is dropped, and everything it has to say arrives on the
-    /// channel below rather than through this field.
+    /// Held only to keep the watch alive: `notify` stops watching when the
+    /// handle is dropped. Nothing is read through this field — what the watcher
+    /// has to say arrives on `events`.
     _handle: RecommendedWatcher,
-    /// Every path the watcher has reported and nobody has drained yet, one entry
-    /// per path of each event.
     events: Receiver<PathBuf>,
-    /// Whether the channel is still connected. False once the watcher's end has
-    /// gone, which is a watcher that died mid-session: nothing further will
-    /// arrive, and nothing about that is fatal.
     live: bool,
 }
 
 impl Watch {
-    /// Start watching `root` recursively and the manifest under `repo_root`.
+    /// `root` is the tree's own root, the path the load came back rooted at, and
+    /// never `repo_root` standing in for it: warlock run from a subdirectory
+    /// shows that subdirectory, and watching the repository above would hear
+    /// about a build in a sibling crate that is not on screen.
     ///
-    /// `root` is the tree's own root — the path the load came back rooted at —
-    /// and never the repository root standing in for it: warlock run from a
-    /// subdirectory shows that subdirectory, and watching the repository above
-    /// it would hear about a build in a sibling crate that is not on screen.
-    ///
-    /// `.warlock/pacts.toml` is watched as well, because a pact granted or
-    /// dropped in another window changes what every node's colour should be
-    /// while nothing inside the tree has moved at all. The manifest is often
-    /// absent — no pact has been made yet — and a path that is not there cannot
-    /// be watched, so `.warlock/` itself is the fallback and no watch at all is
-    /// the last resort: the tree is what live updates are mostly about, and
-    /// losing the manifest watch is not worth losing that.
-    ///
-    /// Returns [`Watching`], never a `Result`. A watcher is a nicety; warlock
-    /// runs without one.
+    /// The manifest is watched separately because a pact granted in another
+    /// window changes what every node's colour should be while nothing inside
+    /// the tree has moved.
     #[must_use]
     pub fn start(root: impl AsRef<Path>, repo_root: impl AsRef<Path>) -> Watching {
         let (sender, events) = mpsc::channel();
@@ -475,18 +316,13 @@ impl Watch {
         })
     }
 
-    /// Every path reported since the last drain, in the order it arrived, and
-    /// without blocking.
+    /// [`try_recv`](Receiver::try_recv) and never a blocking receive: the thread
+    /// that drains is the thread that draws, and a frame is not worth waiting
+    /// on a quiet disk for.
     ///
-    /// Raw paths, unfiltered and undeduplicated: a single save arrives as
-    /// several, and a `cargo build` arrives as thousands that
-    /// [`NodeSet::accepts`] will reject for nothing. That is the division of
-    /// labour — this half hears, the other half decides.
-    ///
-    /// A watcher that has died takes the channel down with it, which shows up
-    /// here as an empty drain and [`live`](Watch::live) going false. It is not
-    /// an error and never a reason to stop: warlock carries on with no live
-    /// updates, exactly as it does when none could be started.
+    /// A watcher that died takes the channel with it, which surfaces here as an
+    /// empty drain and [`live`](Watch::live) going false — not an error, and
+    /// never a reason to stop.
     pub fn drain(&mut self) -> Vec<PathBuf> {
         let mut paths = Vec::new();
         loop {
@@ -502,9 +338,8 @@ impl Watch {
         paths
     }
 
-    /// Whether anything is still expected to arrive: false once the watcher has
-    /// gone. A drain is what notices, since nothing else here touches the
-    /// channel.
+    /// Only a drain can notice the watcher going, since nothing else here
+    /// touches the channel.
     #[must_use]
     pub fn live(&self) -> bool {
         self.live
@@ -512,9 +347,9 @@ impl Watch {
 }
 
 impl fmt::Debug for Watch {
-    /// The handle is a platform type with nothing readable in it, and the
-    /// channel's contents cannot be looked at without taking them, so what a
-    /// failure prints is what can be said honestly: whether it is still alive.
+    // Hand-written because the handle is a platform type with nothing readable
+    // in it and the channel cannot be inspected without draining it. Liveness
+    // is all that can be printed honestly.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Watch")
@@ -523,18 +358,12 @@ impl fmt::Debug for Watch {
     }
 }
 
-/// Add the manifest to what `handle` is watching, if it can be added at all.
+/// Falls back from the file to `.warlock/` because the manifest is often absent
+/// — no pact made yet — and an absent path cannot be watched; the directory
+/// watch also catches the create, and the rename a write lands as.
 ///
-/// Three attempts, weakest last: the file, the `.warlock/` directory it lives
-/// in — which catches the manifest being created for the first time, and is
-/// where a write-then-rename lands — and then nothing. Non-recursive in both
-/// cases: `.warlock/` holds the manifest and the temporary file it is renamed
-/// from, and nothing under it is worth a subtree watch.
-///
-/// Whether it worked is not reported anywhere, because there is nothing to
-/// report it to: a caller offered the news could only carry on regardless, and
-/// the difference is one reload that happens at the end of a pact instead of
-/// during it.
+/// Failure is not reported because there is nobody to report it to: the cost is
+/// one reload that happens at the end of a pact instead of during it.
 fn watch_manifest(handle: &mut RecommendedWatcher, repo_root: &Path) {
     let manifest = manifest_path(repo_root);
     if handle.watch(&manifest, RecursiveMode::NonRecursive).is_ok() {
@@ -553,27 +382,21 @@ mod tests {
 
     use super::{COALESCED_RELOADS, NodeSet, QUIET_PERIOD, RELOAD_CEILING, WatchPolicy};
 
-    /// How often the driver below asks the policy anything, in milliseconds:
-    /// finer than the real event loop's 100ms poll, so a test asserting *when* a
-    /// reload happened is not really asserting where the tick boundaries fell.
+    // Finer than the real event loop's 100ms poll, so a test asserting *when* a
+    // reload happened is not really asserting where the tick boundaries fell.
     const TICK_MS: u64 = 10;
 
-    /// The slack a tick-driven assertion is allowed: a deadline is noticed on
-    /// the first tick after it passes, never on the instant itself.
+    // A deadline is noticed on the first tick after it passes, never on the
+    // instant itself, so tick-driven assertions need this much slack.
     const SLACK: Duration = Duration::from_millis(TICK_MS * 2);
 
-    /// Long enough after everything a test does that no deadline of any kind is
-    /// still ahead: what "and then nothing more is owed" is asserted at.
     const LONG_AFTER: Duration = Duration::from_secs(30);
 
-    /// One simulated filesystem event: how many milliseconds after the start it
-    /// arrived, and the path it was about.
+    // Milliseconds after the start, and the path the event was about.
     type Event = (u64, &'static str);
 
-    /// A tree shaped like a repository that has been walked once: a root, a
-    /// directory of crates and one crate under it. `target/` and `.git/` are
-    /// deliberately absent — a walk never produces them, and their absence is
-    /// the whole of the filter.
+    // `target/` and `.git/` are deliberately absent: a walk never produces them,
+    // and their absence is the whole of the filter.
     fn walked() -> Tree {
         Tree::new(
             Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale).with_children([
@@ -586,14 +409,10 @@ mod tests {
         )
     }
 
-    /// The event loop, minus the loop: ticks from a base instant to `until_ms`,
-    /// hands the policy every event due by each tick, and reloads whenever the
-    /// policy says the tree is owed one. A reload occupies `reload_ms` of
-    /// simulated time, during which events keep arriving — which is how the
-    /// coalescing rule gets exercised with no thread, no watcher and no
-    /// sleeping.
-    ///
-    /// Returns when it reloaded, in milliseconds from the base instant.
+    // The event loop minus the loop, returning the millisecond offsets it
+    // reloaded at. A reload occupies `reload_ms` of simulated time and events
+    // keep arriving through it, which is how the coalescing rule is exercised
+    // with no thread, no watcher and no sleeping.
     fn drive(
         policy: &mut WatchPolicy,
         events: &[Event],
@@ -636,9 +455,8 @@ mod tests {
         reloads
     }
 
-    /// A gap in milliseconds as a duration, so an assertion about timing can be
-    /// written against the constants themselves rather than against a number
-    /// copied out of them.
+    // So a timing assertion can be written against the constants themselves
+    // rather than against a number copied out of them.
     fn gap(from_ms: u64, to_ms: u64) -> Duration {
         Duration::from_millis(to_ms - from_ms)
     }
@@ -746,7 +564,7 @@ mod tests {
 
     #[test]
     fn a_continuous_stream_reloads_at_the_ceiling_rather_than_every_quarter_second() {
-        /// How far apart the stream's events are.
+        // How far apart the stream's events are.
         const SPACING: Duration = Duration::from_millis(50);
 
         let mut policy = WatchPolicy::new(&walked());
@@ -898,23 +716,18 @@ mod tests {
         assert!(policy.due(base + QUIET_PERIOD));
     }
 
-    /// The two tests that touch a real watcher, and the only ones in this file
-    /// that touch a disk at all.
-    ///
-    /// Neither waits for an event. Whether the operating system reports a save
-    /// in ten milliseconds or three hundred is not this module's business — the
-    /// timing rules above are tested against instants nobody had to wait for —
-    /// so what is asserted here is only what is true the instant a watcher is
-    /// asked for: that it started, or that not starting came back as a value.
+    // The only tests in this file that touch a disk. Neither waits for an
+    // event: how fast the operating system reports a save is not this module's
+    // business, so all that is asserted is what holds the instant a watcher is
+    // asked for — that it started, or that not starting came back as a value.
     mod live {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::{env, fs, process};
 
         use super::super::{Watch, Watching};
 
-        /// A directory of this test's own, removed at the end of the test that
-        /// made it. Hand-rolled in the style `claude.rs` already uses here,
-        /// rather than adding this crate's first dev-dependency for two tests.
+        // Hand-rolled in the style `claude.rs` already uses here, rather than
+        // adding this crate's first dev-dependency for two tests.
         fn scratch(name: &str) -> std::path::PathBuf {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
 

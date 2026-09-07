@@ -1,168 +1,73 @@
 //! Where a brief goes, and the writing of it: the reply unwrapped, its title
 //! slugged, the next number in the directory, and then the bytes on disk.
 //!
-//! Two halves, and the seam between them is the field. [`proposed_path`] is the
-//! arithmetic behind the path the `/write` prompt opens holding —
-//! `docs/warlock-brief-13-scopes-and-sigils.md` — and it writes nothing;
+//! Two halves with the field between them. [`proposed_path`] is the arithmetic
+//! behind the path the `/write` prompt opens holding, and it writes nothing;
 //! [`write_submit`] is what Enter in that field comes to, and it is the one
-//! thing in warlock that puts a document somebody asked for on disk. Everything
-//! between the two is the reader's: the field is editable, so the path that is
-//! written is the path on screen when Enter was pressed and never the proposal
-//! unless they left it alone.
+//! thing in warlock that puts a document somebody asked for on disk. The path
+//! written is the path on screen when Enter was pressed, never the proposal
+//! unless the reader left it alone.
 //!
-//! ## The proposal is only a proposal
+//! Every rule in the first half is a guess at what somebody would have typed
+//! into an editable field, which is what makes the guesses cheap: none of them
+//! refuses anything, and nothing in that half returns a [`Result`].
 //!
-//! Every rule below is a guess at what somebody would have typed, and the field
-//! it lands in is editable, which is what makes the guesses cheap. So none of
-//! them refuses anything: a reply with no title still gets a path, a title made
-//! entirely of punctuation still gets a path, and a directory holding a file
-//! with `2026` in its name still gets a path. The reader reads the line and
-//! changes it or presses Enter. Nothing in that half can fail, which is why none
-//! of it returns a [`Result`].
+//! `directory` is a parameter of both halves rather than a constant, because the
+//! event loop settles it once when brief mode is entered and holds it for the
+//! life of that mode. Nothing in here reads a config file or can fail for want
+//! of one.
 //!
-//! ## The directory is handed in
+//! [`unfenced`] runs before the title is looked for, so a fenced reply's heading
+//! still supplies the slug, and it is the same function the write itself uses,
+//! so the path proposed and the bytes written cannot disagree about what the
+//! document is. It unwraps only a reply that is *entirely* one block; a document
+//! that merely contains code blocks is left alone, because stripping its first
+//! and last lines would be warlock editing prose it promised to copy.
 //!
-//! Where a brief goes is a parameter of both halves rather than a constant of
-//! this module: the event loop holds it as a local, settled once when brief mode
-//! is entered and held for the life of that mode, and hands it down with the
-//! reply. Nothing in here reads a config file, and nothing in here can fail for
-//! want of one — by the time `/write` asks for a path the directory is a string
-//! somebody else has already got hold of. It is joined onto the repository root
-//! exactly as the built-in `docs/` was, and the proposal is still spelled
-//! relative to that root.
+//! The slug is the title lower-cased with runs of non-alphanumerics collapsed,
+//! and nothing before a colon is stripped: a title's first word is usually the
+//! subject, and a filename that throws it away is a filename nobody can find.
+//! No stop-word list, no transliteration and no dictionary — each would be
+//! warlock having opinions about English in a string the reader can retype. The
+//! cap is broken at a hyphen so the slug ends on a whole word, and a single word
+//! longer than the cap is kept whole, which is why the cap is "about".
 //!
-//! ## The unwrap comes before the title
+//! Every digit run in every name in the directory counts towards the number,
+//! rather than only names matching warlock's own shape: `docs/` holds
+//! `red-brief-12-…` written by another hand, and a rule that counted only
+//! `warlock-brief-NN-…` would propose `01` into a directory whose next brief is
+//! plainly the thirteenth. The cost is that a name carrying a year proposes a
+//! number nobody expected, one keystroke from being fixed. Past ninety-nine the
+//! number simply gets wider — the padding exists to make `01` sort before `10`.
 //!
-//! A model asked for a document sometimes hands back the document inside one
-//! fenced block, which is why the written file is unwrapped before it is
-//! written. The heading is looked for *after* that same unwrap, so a fenced
-//! reply's title still supplies the slug rather than the slug being `untitled`
-//! for a document whose first line is a fence. [`unfenced`] is that one
-//! transformation, and it is the same function the write itself will use, so the
-//! path proposed and the bytes written can never disagree about what the
-//! document is.
+//! Everything is spelled from the repository root: not the tree's root, which
+//! may be a subdirectory somebody started warlock in, and not the working
+//! directory, which nothing on screen names. One rule for three things at once —
+//! where the bytes land, how the path is spelled on the line announcing it, and
+//! which entries of `.warlock/pacts.toml` count as above it.
 //!
-//! It unwraps only a reply that is *entirely* one block: an opening fence on the
-//! first line, a closing fence on the last, and no closing fence in between. A
-//! document that merely *contains* code blocks is left exactly as it stands,
-//! because that is a document, and stripping its first and last lines would be
-//! warlock editing prose it promised to copy.
+//! The reply is written as it stands but for two things: the fence taken off,
+//! and one trailing newline ensured. Nothing is reformatted, re-indented,
+//! spell-checked or repaired. The one exception is a check rather than a
+//! transformation — a document missing a section the shape asked for is refused
+//! and nothing is written — because that failure is the silent one: a brief with
+//! a section missing reads perfectly well, and nobody finds out until somebody
+//! goes looking for the slices days later. [`missing_sections`] never adds a
+//! heading, reorders one or edits a byte.
 //!
-//! ## The slug is the title, folded, and no cleverer than that
+//! The shape is read here rather than remembered from when brief mode was
+//! entered, on [`brief_template`]'s own "read every time, cached never", so a
+//! template edited during the conversation is the one the document is held to.
 //!
-//! Lower-cased, runs of non-alphanumerics collapsed to a single hyphen, leading
-//! and trailing hyphens trimmed. Nothing before a colon is stripped:
-//! `# Scopes: the boundary problem` becomes `scopes-the-boundary-problem`,
-//! because a title's first word is usually the subject and a filename that
-//! throws it away is a filename nobody can find. There is no stop-word list, no
-//! transliteration and no dictionary — every one of those would be warlock
-//! having opinions about English in a string the reader is looking at and can
-//! retype.
+//! The bytes come off the card: [`write_submit`] writes the newest turn's
+//! answer, so what lands in the file is what the reader was looking at, and
+//! there is no second copy of the document for the two to disagree about.
 //!
-//! The cap is *about* sixty characters and is broken at a hyphen, so the slug
-//! ends on a whole word rather than mid-word. A single word longer than the cap
-//! has nowhere to break and is kept whole, which is why the cap is "about": a
-//! name cut into nonsense is worse than a name a few characters over.
-//!
-//! A reply with no `# ` line, and a title that leaves nothing behind once it is
-//! folded, both come out as [`UNTITLED`]. A literal word rather than an empty
-//! string, because `docs/warlock-brief-13-.md` reads as a bug and
-//! `docs/warlock-brief-13-untitled.md` reads as an invitation to type.
-//!
-//! ## The number is one above the highest one there, wherever it is in the name
-//!
-//! Every digit run in every name in the directory counts, rather than only those
-//! matching warlock's own filename shape. `docs/` today holds
-//! `red-brief-12-…`, written before warlock existed and by another hand, and a
-//! rule that only counted `warlock-brief-NN-…` would propose `01` into a
-//! directory whose next brief is plainly the thirteenth. The cost is that a name
-//! carrying a year proposes a number nobody expected — and that is a line in an
-//! editable field, on screen, one keystroke from being fixed.
-//!
-//! Two digits with a leading zero below ten, so the directory sorts the way it
-//! reads. Past ninety-nine the number simply gets wider — `100`, not `00` and
-//! not a hundred pretending to be `99` — because the padding exists to make
-//! `01` sort before `10`, and a wider number keeps that true for as long as the
-//! widths agree.
-//!
-//! # The write
-//!
-//! ## Everything is spelled from the repository root
-//!
-//! Decided once, here: whatever is typed into the field resolves against the
-//! repository root — the directory `.warlock/` and the manifest live under —
-//! and not against the tree's root, which may be a subdirectory somebody
-//! started warlock in, and not against the process's working directory, which
-//! nothing on screen names. That is one rule for three things at once: where
-//! the bytes land, how the written path is spelled on the line that announces
-//! it, and which entries of `.warlock/pacts.toml` count as above it. A path
-//! that climbs out of the repository is refused rather than followed, because
-//! the artifact belongs to the repository the ledger is about.
-//!
-//! ## Two transformations, and warlock is not a markdown editor
-//!
-//! The reply is written as it stands but for exactly two things: [`unfenced`]
-//! takes off a fence wrapped around the whole document, and a single trailing
-//! newline is ensured so the file ends the way a text file does. Nothing else is
-//! reformatted, re-indented, spell-checked or repaired — not the headings, not
-//! the links, not the width of a line — because the document is the model's and
-//! the reader's, and every further rule would be warlock editing prose it
-//! promised to copy.
-//!
-//! ## The headings are read, and only ever to refuse
-//!
-//! The one exception, and it is a check rather than a transformation: a document
-//! that has not got every section the shape asked for is refused, and warlock
-//! writes nothing rather than writing it. See [`missing_sections`], which
-//! decides that, and note what it does *not* do — it never adds a heading, never
-//! reorders one, and never edits a byte of the reply. A document either goes to
-//! disk exactly as the model wrote it or does not go at all.
-//!
-//! The reason is that this failure is the silent one. A brief with a section
-//! missing reads perfectly well; a model that has spent twenty turns arguing
-//! about a change writes what it has been thinking about and drops what it
-//! stopped thinking about, and nobody finds out until somebody goes looking for
-//! the slices days later. Every other thing a write can get wrong is visible on
-//! the card the moment it happens.
-//!
-//! The shape is read from `.warlock/brief-template.md` here rather than
-//! remembered from when brief mode was entered — [`brief_template`]'s own "read
-//! every time, cached never" — so a template edited during the conversation is
-//! the template the document is held to. A template that asks for no sections
-//! holds a document to none, which is what an empty one already meant
-//! everywhere else.
-//!
-//! The bytes come off the card. The reply is on the conversation as an ordinary
-//! answer, and [`write_submit`] writes the newest turn's answer, so what lands
-//! in the file is what the reader was looking at when they pressed Enter —
-//! there is no second copy of the document anywhere for the two to disagree
-//! about, and nothing is kept on disk between the answer and the write.
-//!
-//! ## A path that exists is refused, never overwritten
-//!
-//! There is one destructive thing a write can do, and this is it. So a target
-//! that exists at all — file, directory or anything else — writes nothing and
-//! comes back through [`ScopeField::refused`] with the rule under the field and
-//! the typed path still in it, one keystroke from being changed. No `.bak`, no
-//! suffix warlock invents, no prompt asking a second time.
-//!
-//! ## Two lines, both facts
-//!
-//! A write that lands says the path and the size, in the panel's own spelling
-//! through [`size`], and then — when one exists — names the nearest directory
-//! above the new file that has a pact in the manifest, because that directory's
-//! document now describes a subtree with a file in it that the document has
-//! never seen. Both are facts rather than narration: the first is what is now on
-//! disk, the second is what the ledger now says. A file written where nothing
-//! above it is pacted says only the first line, since there is no ledger entry
-//! to have gone stale.
-//!
-//! ## A failed write is a line, not an error
-//!
-//! [`scope_submit`](crate::scoping::scope_submit)'s rule exactly: a disk that
-//! will not take the file puts its reason on
-//! [`App::message`](warlock_tui::App::message) and the prompt comes down.
-//! Nothing here returns out of the event loop, because a write that did not
+//! A target that exists — file, directory or anything else — writes nothing and
+//! reopens the field with the typed path still in it. No `.bak`, no suffix
+//! warlock invents, no prompt asking a second time. A disk that will not take
+//! the file puts its reason on the footer and takes the prompt down, on
+//! [`scope_submit`](crate::scoping::scope_submit)'s rule: a write that did not
 //! happen is news for the footer and not a reason to tear the screen down.
 
 use std::path::Path;
@@ -176,112 +81,45 @@ use warlock_tui::{
 
 use crate::error::{Error, one_line};
 
-/// What the write prompt's window is headed with.
-///
-/// Carried in [`ScopeField::directory`] — which this window never reads as a
-/// directory, only prints — because that is the one string the field already
-/// has for saying what it is asking about. The scope prompt puts a module path
-/// there and the window heads itself "Scope for <module>"; this one puts the
-/// whole heading there, because what a path prompt is about is not a directory
-/// but the question itself.
 pub(crate) const WRITE_HEADING: &str = "Write the brief to";
 
-/// What every brief's filename begins with, before its number and its slug.
 const BRIEF_PREFIX: &str = "warlock-brief";
 
-/// The slug for a document that gave nothing to make one out of.
 const UNTITLED: &str = "untitled";
 
-/// About how many characters of the title survive into the slug, before the
-/// last whole word that fits.
 const SLUG_MAX: usize = 60;
 
-/// How the manifest spells the repository root.
-///
-/// The engine's own `ROOT_MODULE`, which is not exported, written down again
-/// here because the ancestor walk below has to be able to arrive at it. One
-/// character, fixed by the file format, and if it ever moved the manifest would
-/// stop parsing long before this line was noticed.
 const ROOT_MODULE: &str = ".";
 
-/// What the field says when Enter is pressed on nothing.
-///
-/// Not a write and not a close: an empty field is a reader who has cleared the
-/// line and is about to type, so the prompt stays up over the rule rather than
-/// answering a question they have not finished asking.
 const NO_PATH: &str = "type a path for the document, or press Esc to write nothing";
 
-/// What the footer says when there is no reply to write.
-///
-/// Unreachable in the loop — the prompt opens over an answer that has landed —
-/// and answered anyway, because a window whose Enter did nothing at all is the
-/// one outcome a reader cannot tell from success.
 const NOTHING_TO_WRITE: &str =
     "there is no answer on the conversation to write, so nothing was written";
 
-/// The path the write prompt opens holding, spelled relative to the repository
-/// root: `<directory>/warlock-brief-NN-slug.md`.
-///
-/// The three rules in one line, in the order they depend on each other: the
-/// reply is unwrapped, the slug comes off the unwrapped document's first `# `
-/// line, and the number comes off the names in the directory the file would
-/// land in. Relative rather than absolute because it is going into a field
-/// somebody reads and edits, and because it is the spelling the thread names
-/// the written file by afterwards.
-///
-/// `directory` is the caller's — see the module docs — and it is the one answer
-/// to two questions: where the file is proposed to go, and which directory's
-/// names the number is counted from. Reads `repo_root/directory` and nothing
-/// else, creates nothing, and is as happy with a directory that is not there as
-/// with an empty one.
+// The three rules in the order they depend on each other: the reply is
+// unwrapped, the slug comes off the unwrapped document's first `# ` line, and
+// the number comes off the names in the directory the file would land in.
+// Relative rather than absolute because it is going into a field somebody reads
+// and edits, and because it is the spelling the thread names the file by
+// afterwards.
+//
+// Reads `repo_root/directory` and nothing else, creates nothing, and is as happy
+// with a directory that is not there as with an empty one.
 pub(crate) fn proposed_path(repo_root: &Path, directory: &str, reply: &str) -> String {
     let number = spelled(next_number(&repo_root.join(directory)));
     let slug = slug_of(unfenced(reply));
     format!("{directory}/{BRIEF_PREFIX}-{number}-{slug}.md")
 }
 
-/// The write prompt as it opens over `reply`: up, headed [`WRITE_HEADING`], and
-/// holding [`proposed_path`]'s guess at where the document goes.
-///
-/// The counterpart of [`scope_press`](crate::scoping::scope_press) for a window
-/// no keystroke opens. Nothing presses a key to get here — the prompt opens
-/// because a `/write` turn answered, and the answer is what it opens over — so
-/// this takes the reply rather than the app: the document handed back by the
-/// drain is what the proposal is made of, which is what keeps the path on screen
-/// about the very turn that just landed.
-///
-/// `directory` comes the same way, off the loop, and is the value the mode was
-/// entered holding: nothing is read here to find it, which is what makes a
-/// window that opens over a finished document a window that cannot fail to open.
-///
-/// It refuses nothing and cannot fail. The path is a proposal in an editable
-/// field (see the module docs), so a reply with no title, a directory full of
-/// years, and a repository with no output directory at all each open a window
-/// with a line in it and no complaint anywhere.
+// Nothing presses a key to get here — the prompt opens because a `/write` turn
+// answered — so this takes the reply rather than the app, which keeps the path
+// on screen about the very turn that just landed. `directory` comes the same
+// way, off the loop, so nothing is read here to find it and a window that opens
+// over a finished document cannot fail to open.
 pub(crate) fn write_opened(repo_root: &Path, directory: &str, reply: &str) -> ScopePrompt {
     ScopePrompt::open(WRITE_HEADING, proposed_path(repo_root, directory, reply))
 }
 
-/// What one keystroke *inside* the write prompt comes to: the prompt the event
-/// loop holds from here on.
-///
-/// [`scope_edit`](crate::scoping::scope_edit)'s twin, over the other window and
-/// with the other submit at the end of it — the same three answers from the same
-/// [`edit_for`](warlock_tui::edit_for), because it is the same field type and
-/// the same editor.
-///
-/// Typing moves the field and nothing else. Esc takes the window down and
-/// writes nothing: the app was never told the question was asked, so the reply
-/// is still on the card, the register is still whatever it was, and there is
-/// nothing to put back. Enter is [`write_submit`] and only [`write_submit`],
-/// which either writes the file and closes, or reopens this window over the rule
-/// the path broke.
-///
-/// A closed prompt cannot submit: [`press_for`](crate::input::press_for) only
-/// consults `edit_for` while one is up, so the `None` road below is unreachable
-/// rather than silent. It answers with a closed prompt for the reason
-/// `scope_edit` does — a submit that found no field to write is not a window
-/// anybody can still be typing into.
 pub(crate) fn write_edit(
     app: &mut App,
     manifest: &Manifest,
@@ -300,31 +138,17 @@ pub(crate) fn write_edit(
     }
 }
 
-/// What Enter in the write prompt comes to: the document on disk and two lines
-/// on the conversation, or the prompt still up over the reason it is not.
-///
-/// [`scope_submit`](crate::scoping::scope_submit)'s shape, and deliberately the
-/// same one — this runs on the event loop's own thread between two frames,
-/// spawns nothing, and hands back the prompt the loop holds next:
-/// [`ScopePrompt::Closed`] for a submit that was answered one way or another,
-/// and an open prompt over the same text for one that was refused.
-///
-/// The path is what is in the field, trimmed of the whitespace an editable line
-/// collects, and it resolves against `repo_root` — see the module docs, where
-/// that is decided once. `field.directory()` is not consulted at all: in this
-/// window it carries the heading the prompt is drawn under, and the answer is
-/// the line the reader typed.
-///
-/// The order is judge, then write, and every refusal happens before a byte
-/// moves. A path that climbs out of the repository, and a path that is already
-/// taken, both reopen the field with the rule under it and the typed text
-/// exactly where it was. Only then is the reply taken off the card, the parent
-/// directory made if it is missing, and the bytes written — after which the
-/// thread gains the line naming what was written and, if a pact sits above it,
-/// the line naming what that made stale.
-///
-/// `now` is the caller's instant, as every line on the conversation is timed by
-/// the loop's clock rather than by one this function reads for itself.
+// `scope_submit`'s shape, and deliberately the same one: it runs on the event
+// loop's own thread between two frames, spawns nothing, and hands back the
+// prompt the loop holds next.
+//
+// `field.directory()` is not consulted at all: in this window it carries the
+// heading the prompt is drawn under, and the answer is the line the reader
+// typed.
+//
+// Judge, then write, and every refusal happens before a byte moves. A path that
+// climbs out of the repository and a path already taken both reopen the field
+// with the rule under it and the typed text exactly where it was.
 pub(crate) fn write_submit(
     app: &mut App,
     manifest: &Manifest,
@@ -389,28 +213,10 @@ pub(crate) fn write_submit(
     ScopePrompt::Closed
 }
 
-/// The prompt still up over `rule`, with the text and the cursor exactly where
-/// they were.
-///
-/// The one road back to the field, so every refusal in [`write_submit`] leaves
-/// the window in the same state: the reader's own line, one keystroke from being
-/// fixed, and the reason for the last Enter under it.
 fn refused(field: &ScopeField, rule: impl Into<String>) -> ScopePrompt {
     ScopePrompt::Open(field.clone().refused(rule))
 }
 
-/// The bytes to write for `reply`: the fence off, and a trailing newline on.
-///
-/// The whole of what warlock does to a document, in one function so that the
-/// promise in the module docs is a thing that can be read rather than a
-/// discipline spread over a write. [`unfenced`] is the same call
-/// [`proposed_path`] made, so the document the slug came from is the document
-/// that lands.
-///
-/// The newline is *ensured*, not normalised: a reply already ending in one is
-/// copied byte for byte, and a reply ending in three keeps all three. Trimming
-/// them back would be a third transformation, and the one this makes exists only
-/// so the file ends the way a text file ends.
 fn document(reply: &str) -> String {
     let body = unfenced(reply);
     if body.ends_with('\n') {
@@ -419,26 +225,12 @@ fn document(reply: &str) -> String {
     format!("{body}\n")
 }
 
-/// The document to write, taken off the conversation's newest turn, or `None`
-/// when there is no answer there to write.
-///
-/// The reply is on the card as an ordinary answer and this is warlock reading
-/// it back off there — the newest turn, which is the `/write` turn whose answer
-/// the prompt opened over, since nothing can be asked while the field holds the
-/// keyboard. One copy of the document, on the card the reader is looking at.
 fn document_on(app: &App) -> Option<String> {
     let thread = app.panel().thread()?;
     let reply = thread.turns().last().copied()?.answer()?;
     Some(document(reply))
 }
 
-/// `bytes` at `path`, with the directory above it made first if it is not there.
-///
-/// The whole of the disk work, and the only two calls in warlock that create a
-/// directory and a file for a document somebody asked for. `create_dir_all` is
-/// happy with a directory that already exists, so there is nothing to check
-/// first, and the write refuses nothing — [`write_submit`] has already settled
-/// that this path is free.
 fn put(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -446,30 +238,20 @@ fn put(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::write(path, bytes)
 }
 
-/// The nearest directory at or above the one `stored` lands in that has an entry
-/// in the manifest, or `None` when nothing above it is pacted.
-///
-/// The walk starts at the file's own directory rather than at the file, because
-/// a pact is on a directory and the file itself has just been created. Segments
-/// are cut at `/` exactly as `warlock_engine::scope`'s own ancestor walk cuts
-/// them, so the ancestors of `docs/adr/x.md` are `docs/adr`, `docs` and `.`, and
-/// a `docs-old` entry is never among them however much of a prefix it looks
-/// like.
-///
-/// Nearest wins and the walk stops there: the directory that has to be described
-/// again is the one whose document is closest to the new file, and naming every
-/// pact above it would be a list of work nobody asked for.
-///
-/// The name comes back off the entry rather than out of the walk, which is what
-/// makes the line say the module exactly as `.warlock/pacts.toml` spells it —
-/// including `.` for a repository pacted at its root.
+// The walk starts at the file's own directory rather than at the file, because a
+// pact is on a directory and the file itself has just been created. Nearest wins
+// and the walk stops there: the directory that has to be described again is the
+// one whose document is closest to the new file, and naming every pact above it
+// would be a list of work nobody asked for.
+//
+// The name comes back off the entry rather than out of the walk, so the line
+// says the module exactly as `.warlock/pacts.toml` spells it — including `.` for
+// a repository pacted at its root.
 fn pacted_above<'manifest>(manifest: &'manifest Manifest, stored: &str) -> Option<&'manifest str> {
     at_or_above(directory_of(stored))
         .find_map(|module| manifest.entry(module).map(PactEntry::module))
 }
 
-/// The stored path of the directory `stored` sits in: `docs` for
-/// `docs/x.md`, and the root for a file written beside it.
 fn directory_of(stored: &str) -> &str {
     match stored.rsplit_once('/') {
         Some((parent, _)) => parent,
@@ -477,15 +259,12 @@ fn directory_of(stored: &str) -> &str {
     }
 }
 
-/// The stored path `stored` and every stored path above it, nearest first,
-/// ending at [`ROOT_MODULE`].
-///
-/// `warlock_engine::scope`'s own walk, which is private to that module: the
-/// engine decides what a scope covers, and this decides which pact a written
-/// file staled. Copying eight lines is the cost of not opening a door in the
-/// engine for the TUI to reach through — and it is the shape rather than the
-/// judgement that is shared, so nothing about scopes, sigils or manifests is
-/// duplicated by it.
+// `warlock_engine::scope`'s own walk, which is private to that module: the
+// engine decides what a scope covers, and this decides which pact a written file
+// staled. Copying eight lines is the cost of not opening a door in the engine
+// for the TUI to reach through, and it is the shape rather than the judgement
+// that is shared. Segments are cut at `/`, so a `docs-old` entry is never an
+// ancestor of `docs/adr/x.md` however much of a prefix it looks like.
 fn at_or_above(stored: &str) -> impl Iterator<Item = &str> {
     let mut next = Some(stored);
     std::iter::from_fn(move || {
@@ -502,49 +281,18 @@ fn at_or_above(stored: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// The line the conversation gains when a document lands: what was written and
-/// how big it is.
-///
-/// The path as the field spelled it, relative to the repository root, because
-/// that is the path the reader typed and the one they will go looking for. The
-/// size through [`size`], which is the account's own spelling, shared rather
-/// than restated — see its doc comment.
 fn wrote_line(stored: &str, bytes: u64) -> String {
     format!("wrote {stored} — {}", size(bytes))
 }
 
-/// The second line: the pact the new file has just made stale.
-///
-/// Present tense and no advice. The ledger says a directory's document no longer
-/// describes it, and which key puts that right is the footer's business and the
-/// reader's — a sentence telling them to press `r` here would be warlock
-/// narrating rather than stating.
 fn stale_line(module: &str) -> String {
     format!("{module} is now stale")
 }
 
-/// The rule under the field when the path is already taken.
-///
-/// It names the path rather than saying "that file exists", because the field
-/// may hold a path several directories deep and the reader is looking at what
-/// they typed rather than at what is on disk. Overwriting is the one destructive
-/// thing this key could do, so it is refused rather than confirmed.
 fn taken_rule(stored: &str) -> String {
     format!("{stored} already exists — nothing was written; change the path or press Esc")
 }
 
-/// The footer line when the document has not got every section the shape asked
-/// for.
-///
-/// Names the sections rather than counting them, because "one section is
-/// missing" is a line a reader has to go and diff the template to act on, and
-/// `## Scope` is one they can read and ask for in the same breath. Spelled back
-/// with the `## ` the template wrote them with, which is how they appear in
-/// both documents the reader has in front of them.
-///
-/// [`NOTHING_TO_WRITE`]'s shape — the fact, then what it cost — and no advice
-/// after it. Which turn puts this right is the reader's business, and a sentence
-/// telling them to ask the model again would be warlock narrating.
 fn missing_line(missing: &[&str]) -> String {
     let named: Vec<String> = missing
         .iter()
@@ -559,14 +307,6 @@ fn missing_line(missing: &[&str]) -> String {
     format!("the document is missing {sections}, so nothing was written")
 }
 
-/// The footer line when the shape itself could not be read.
-///
-/// The one case where warlock knows it cannot tell whether the document is whole
-/// and refuses rather than guessing. `template.rs` never quietly puts the
-/// built-in shape in place of a file somebody wrote, and neither does this: a
-/// write let through on a shape that could not be read is a check that silently
-/// stopped checking, which is worse than one that says so. Nothing is lost —
-/// the document is still on the card, and the file is one edit from readable.
 fn unreadable_shape_line(error: &TemplateError) -> String {
     format!(
         "could not read the brief shape, so nothing was written: {}",
@@ -574,36 +314,25 @@ fn unreadable_shape_line(error: &TemplateError) -> String {
     )
 }
 
-/// The footer line when the disk would not take the file.
-///
-/// One line, naming the path warlock tried and the reason it came back with, in
-/// the operating system's own words flattened the way every other non-fatal
-/// failure in this binary is.
 fn failure_line(stored: &str, error: &io::Error) -> String {
     format!("could not write {stored}: {}", one_line(&error.to_string()))
 }
 
-/// The document inside a reply that is entirely one fenced code block, or the
-/// reply exactly as it stands.
-///
-/// The one transformation warlock makes to a reply besides ensuring a trailing
-/// newline, and it is deliberately narrow. All three of these have to hold, or
-/// the reply is handed back untouched: the first line of the trimmed reply
-/// opens a fence, the last line closes it, and no line between them closes it.
-/// The third is what tells a document wrapped in a fence from a document
-/// containing fenced examples — the second kind is far more common in the
-/// briefs this writes — and getting it wrong would silently eat the first and
-/// last lines of somebody's document.
-///
-/// Both of the fence characters markdown defines are understood, since which one a
-/// model reaches for is not warlock's decision to have a preference about, and a
-/// closing fence must be at least as long as the one that opened it, so a
-/// document whose own examples are three backticks long survives being handed
-/// back inside a four-backtick fence.
-///
-/// A slice of the input rather than a new [`String`]: whoever writes the file
-/// writes these bytes, and copying them would be a second place for them to
-/// change.
+// Deliberately narrow: all three of these have to hold, or the reply is handed
+// back untouched — the first line of the trimmed reply opens a fence, the last
+// closes it, and no line between them closes it. The third is what tells a
+// document wrapped in a fence from a document containing fenced examples, which
+// is far more common in the briefs this writes, and getting it wrong would
+// silently eat the first and last lines of somebody's document.
+//
+// Both fence characters markdown defines are understood, and a closing fence
+// must be at least as long as the one that opened it, so a document whose own
+// examples are three backticks long survives being handed back inside a
+// four-backtick fence.
+//
+// A slice of the input rather than a new `String`: whoever writes the file
+// writes these bytes, and copying them would be a second place for them to
+// change.
 pub(crate) fn unfenced(reply: &str) -> &str {
     let block = reply.trim();
     let Some((first, rest)) = block.split_once('\n') else {
@@ -621,16 +350,12 @@ pub(crate) fn unfenced(reply: &str) -> &str {
     body
 }
 
-/// The slug for a document: its first `# ` line folded into a filename, or
-/// [`UNTITLED`] when there is nothing to fold.
-///
-/// The first such line and not the longest, the outermost or the one the model
-/// meant — a document's title is its first heading, and looking for anything
-/// cleverer would mean parsing markdown to propose a filename. The line must
-/// begin with `# ` exactly: an indented heading, a `#Title` with no space and a
-/// `## Section` are all not it, and a reply that has only those is `untitled`,
-/// which is a field the reader can type into rather than a guess they have to
-/// undo.
+// The first `# ` line and not the longest, the outermost or the one the model
+// meant: a document's title is its first heading, and anything cleverer would
+// mean parsing markdown to propose a filename. The prefix must be `# ` exactly,
+// so an indented heading, a `#Title` with no space and a `## Section` are all
+// not it — and a reply with only those is `untitled`, which is a field the
+// reader can type into rather than a guess they have to undo.
 pub(crate) fn slug_of(document: &str) -> String {
     let title = document
         .lines()
@@ -643,18 +368,15 @@ pub(crate) fn slug_of(document: &str) -> String {
     slug
 }
 
-/// One above the highest number appearing anywhere in any name in `directory` —
-/// or `1` for a directory that is empty, unreadable or not there at all.
-///
-/// A directory that cannot be read proposes the same number as an empty one on
-/// purpose. The alternatives are refusing to propose a path, which costs the
-/// reader the prompt, or saying so on a line, which says nothing they can act on
-/// — the directory is about to be created by the write, and the field in front
-/// of them is where a number they disagree with gets fixed.
-///
-/// Every entry counts, files and directories alike, because "the highest number
-/// already there" is a fact about the names in front of a reader rather than
-/// about which of them warlock recognises.
+// A directory that cannot be read proposes the same number as an empty one on
+// purpose. Refusing to propose a path costs the reader the prompt, and saying so
+// on a line says nothing they can act on — the directory is about to be created
+// by the write, and the field in front of them is where a number they disagree
+// with gets fixed.
+//
+// Every entry counts, files and directories alike, because "the highest number
+// already there" is a fact about the names in front of a reader rather than
+// about which of them warlock recognises.
 fn next_number(directory: &Path) -> u32 {
     let Ok(entries) = fs::read_dir(directory) else {
         return 1;
@@ -670,34 +392,16 @@ fn next_number(directory: &Path) -> u32 {
     highest.saturating_add(1)
 }
 
-/// A number as a filename spells it: `01`, `13`, `100`.
-///
-/// Two digits so the directory sorts the way it reads, and no ceiling, because
-/// the padding is there to keep `01` ahead of `10` rather than to promise a
-/// width. A hundredth brief is `100`.
 fn spelled(number: u32) -> String {
     format!("{number:02}")
 }
 
-/// The highest number any run of digits in `name` spells, or `None` for a name
-/// with no digits in it.
-///
-/// A run too long to be a [`u32`] is not a number anybody meant, and is ignored
-/// rather than clamped: a checksum in a filename should not decide what the next
-/// brief is called.
 fn highest_number_in(name: &str) -> Option<u32> {
     name.split(|character: char| !character.is_ascii_digit())
         .filter_map(|run| run.parse::<u32>().ok())
         .max()
 }
 
-/// `title` as a filename spells it: lower-cased, runs of non-alphanumerics
-/// collapsed to one hyphen, hyphens trimmed off both ends, and capped.
-///
-/// [`char::is_alphanumeric`] rather than an ASCII test, so a title in a script
-/// warlock has never heard of keeps its own letters instead of folding away to
-/// nothing. What is left is empty only when the title held no letter or digit at
-/// all, and [`slug_of`] answers that with [`UNTITLED`].
 fn slugged(title: &str) -> String {
     let mut slug = String::new();
     for character in title.chars() {
@@ -710,13 +414,11 @@ fn slugged(title: &str) -> String {
     capped(slug.trim_matches('-')).to_string()
 }
 
-/// `slug` cut to about [`SLUG_MAX`] characters at a hyphen.
-///
-/// Three cases, and the third is the reason the cap is "about". A slug that fits
-/// is returned whole; a slug that does not is cut back to the last hyphen inside
-/// the cap; and a slug whose first word is itself longer than the cap is cut
-/// after that word, however long it is, because there is nowhere to break it and
-/// half a word is not a name.
+// Three cases, and the third is why the cap is "about". A slug that fits comes
+// back whole; one that does not is cut back to the last hyphen inside the cap;
+// and one whose first word is itself longer than the cap is cut after that word,
+// however long it is, because there is nowhere to break it and half a word is
+// not a name.
 fn capped(slug: &str) -> &str {
     let Some((cut, _)) = slug.char_indices().nth(SLUG_MAX) else {
         return slug;
@@ -735,20 +437,16 @@ fn capped(slug: &str) -> &str {
     }
 }
 
-/// A fence as the line that opened it defines it: which character it is made of,
-/// and how many of them the fence that closes it needs.
 #[derive(Clone, Copy)]
 struct Fence {
     marker: char,
     width: usize,
 }
 
-/// The fence `line` opens, or `None` for a line that opens none.
-///
-/// The markdown rule, less the indentation it allows: three or more backticks or
-/// tildes, then an info string, which for a backtick fence may not itself
-/// contain a backtick — that last is what keeps a first line that merely quotes
-/// some backticks at each other from being read as a fence somebody opened.
+// The markdown rule, less the indentation it allows: three or more backticks or
+// tildes, then an info string, which for a backtick fence may not itself contain
+// a backtick — that last is what keeps a first line merely quoting some
+// backticks at each other from being read as a fence somebody opened.
 fn opening_fence(line: &str) -> Option<Fence> {
     let line = line.trim_end();
     let marker = line
@@ -769,20 +467,14 @@ fn opening_fence(line: &str) -> Option<Fence> {
     Some(Fence { marker, width })
 }
 
-/// Whether `line` closes `fence`: that character and nothing else, at least as
-/// many of them as opened it.
 fn closes(line: &str, fence: Fence) -> bool {
     let line = line.trim();
     line.chars().count() >= fence.width && line.chars().all(|character| character == fence.marker)
 }
 
-/// What a `/write` proposes to call the file: the fence taken off, the title
-/// folded, the number counted, and the whole path assembled out of the three.
-///
-/// Every rule is a function of a string and at most one directory of the test's
-/// own, so the whole suite runs with no terminal, no network, no `claude` and
-/// nothing written anywhere but a temporary directory that goes away with the
-/// test that made it.
+// Every rule is a function of a string and at most one directory of the test's
+// own, so the whole suite runs with no terminal, no network, no `claude` and
+// nothing written anywhere but a temporary directory.
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -792,19 +484,12 @@ mod tests {
 
     use super::{SLUG_MAX, next_number, proposed_path, slug_of, unfenced};
 
-    /// A repository of this test's own, removed when the test that made it
-    /// ends.
     fn a_repo() -> TempDir {
         tempfile::tempdir().expect("a temporary directory")
     }
 
-    /// The default output directory, which is the caller's answer everywhere
-    /// below but the one test about a repository that keeps its briefs
-    /// elsewhere.
     const DOCS: &str = "docs";
 
-    /// `directory` under `root` holding an empty file of each of `names`, which
-    /// is all the numbering ever looks at.
     fn holding(root: &Path, directory: &str, names: &[&str]) {
         let output = root.join(directory);
         fs::create_dir_all(&output).expect("makes the output directory");
@@ -813,13 +498,10 @@ mod tests {
         }
     }
 
-    /// [`holding`] over the default directory, which is where all but one of
-    /// these tests put their names.
     fn docs_holding(root: &Path, names: &[&str]) {
         holding(root, DOCS, names);
     }
 
-    /// The whole of a reply that is one document with one title line.
     fn titled(title: &str) -> String {
         format!("{title}\n\nSome prose about it.\n")
     }
@@ -1131,15 +813,6 @@ mod tests {
     }
 }
 
-/// What Enter in the write prompt actually does: the bytes that end up on disk,
-/// the two lines that end up on the conversation, what a refusal leaves behind,
-/// and what — deliberately — is never written at all.
-///
-/// The whole path is driven over a repository of the test's own under the
-/// temporary directory, with the field built by hand as the loop would be
-/// holding it. No terminal, no network, no `claude` and no worker thread: a
-/// write is a function of an app, a manifest, a root and a field, which is what
-/// makes every rule below one assertion.
 #[cfg(test)]
 mod writes {
     use std::fs;
@@ -1154,33 +827,20 @@ mod writes {
 
     use super::{NO_PATH, write_submit};
 
-    /// The path the field holds in most of the tests below: the proposal, left
-    /// exactly as it opened.
     const BRIEF: &str = "docs/warlock-brief-13-scopes-and-sigils.md";
 
-    /// The line the last keystroke left on the footer, which a write that lands
-    /// is not allowed to spend.
     const LAST_KEY: &str = "something the last key said";
 
-    /// A repository of this test's own, removed when the test that made it
-    /// ends.
     fn a_repo() -> TempDir {
         tempfile::tempdir().expect("a temporary directory")
     }
 
-    /// The instant every line below is timed by: one clock, handed in, so the
-    /// whole of this suite runs in whatever time it takes and nothing depends on
-    /// how long that was.
     fn now() -> Instant {
         Instant::now()
     }
 
-    /// The app the loop is holding when the prompt is up: a tree over `root`,
-    /// a `/write` turn, and `reply` landed on it as an ordinary answer.
-    ///
-    /// The reply goes on the card and nowhere else, because the card is where
-    /// the write reads it back from — which is the whole of the arrangement the
-    /// module docs describe.
+    // The reply goes on the card and nowhere else, because the card is where the
+    // write reads it back from.
     fn app_answering(root: &Path, reply: &str) -> App {
         let mut app = App::from_tree(&Tree::new(Node::new(
             root,
@@ -1193,13 +853,10 @@ mod writes {
         app
     }
 
-    /// The field as the window would be by the time Enter is pressed: the
-    /// heading it is drawn under, and the path typed into it.
     fn field(path: &str) -> ScopeField {
         ScopeField::new("Write to", path)
     }
 
-    /// A granted entry for `module`, as a pacted directory has one.
     fn entry(module: &str) -> PactEntry {
         let document = if module == "." {
             "WARLOCK.md".to_owned()
@@ -1211,13 +868,10 @@ mod writes {
             .with_grant("d0f5a1", "2026-08-19T07:32:00Z")
     }
 
-    /// The manifest the loop holds, pacting each of `modules`.
     fn pacts(modules: &[&str]) -> Manifest {
         Manifest::with_entries(modules.iter().map(|module| entry(module)))
     }
 
-    /// Warlock's own lines on the conversation, in order — which is what a
-    /// write says for itself, as against the turn it was asked in.
     fn notes(app: &App) -> Vec<String> {
         app.panel()
             .thread()
@@ -1231,9 +885,6 @@ mod writes {
             .collect()
     }
 
-    /// Everything under `root`, spelled the way the manifest spells a path and
-    /// sorted, so "nothing but the artifact was written" is one assertion about
-    /// the whole repository.
     fn everything_under(root: &Path) -> Vec<String> {
         let mut found = Vec::new();
         let mut directories = vec![root.to_path_buf()];
@@ -1253,13 +904,9 @@ mod writes {
         found
     }
 
-    /// A document of exactly `bytes` bytes, title and trailing newline included,
-    /// so a test can assert the size the line spells it with.
-    ///
-    /// Carries every section the built-in shape asks for, because a document
-    /// that does not is refused before it ever reaches the disk — see
-    /// [`missing_sections`]. The padding is the problem prose, which is where a
-    /// brief's unheaded text belongs anyway.
+    // Carries every section the built-in shape asks for, because a document that
+    // does not is refused before it reaches the disk. The padding is the problem
+    // prose, which is where a brief's unheaded text belongs anyway.
     fn document_of(bytes: usize) -> String {
         let opening = "# Scopes and sigils\n\n";
         let shape = "\n\n## Outcome\n\n## Success criteria\n\n## Constraints\n\n\
@@ -1268,23 +915,13 @@ mod writes {
         format!("{opening}{}{shape}", "x".repeat(prose))
     }
 
-    /// The smallest reply that is a whole document: a title, the problem stated
-    /// in prose, and every section the built-in shape asks for.
-    ///
-    /// What most of these tests want is "a document that will be written", and
-    /// since the shape is checked before the disk is touched, that now means one
-    /// carrying its headings. The words under them are beside the point here and
-    /// there are none.
     const WHOLE: &str = "# Freshness\n\nProse.\n\n## Outcome\n\n## Success criteria\n\n\
                          ## Constraints\n\n## Out of scope\n\n## Scope\n";
 
-    /// A repository that asks a document for no shape at all, by writing the
-    /// empty template an emptied `.warlock/brief-template.md` already means.
-    ///
-    /// For the tests whose subject is not the shape — what the bytes come to,
-    /// where they land, what the lines say — so that adding five headings to
-    /// every literal reply below does not bury what each one is actually about.
-    /// The check itself has its own tests, against the built-in shape.
+    // For the tests whose subject is not the shape — what the bytes come to,
+    // where they land, what the lines say — so adding five headings to every
+    // literal reply below does not bury what each one is about. The check itself
+    // has its own tests, against the built-in shape.
     fn shapeless(root: &Path) {
         let template = manifest_path(root).with_file_name("brief-template.md");
         fs::create_dir_all(template.parent().expect("the template sits in a directory"))
@@ -1770,15 +1407,10 @@ mod writes {
         assert_eq!(everything_under(repo.path()), Vec::<String>::new());
     }
 
-    /// The event loop's own round over this window, one key at a time.
-    ///
-    /// `scoping.rs`'s counterpart for the other prompt, and driven exactly as it
-    /// drives that one: the window is opened the way the loop opens it, every
-    /// key goes through [`edit_for`] as `press_for` would send it, and what
-    /// comes back goes through [`write_edit`], which is the loop's arm. Nothing
-    /// here is a terminal, a `claude` or a worker thread — what is asserted is
-    /// the path from a turn's answer to the bytes on disk, over a repository of
-    /// the test's own.
+    // `scoping.rs`'s counterpart for the other prompt, driven exactly as it
+    // drives that one: the window is opened the way the loop opens it, every key
+    // goes through `edit_for` as `press_for` would send it, and what comes back
+    // goes through `write_edit`, which is the loop's arm.
     mod rounds {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use warlock_engine::DEFAULT_BRIEF_DIRECTORY;
@@ -1790,32 +1422,18 @@ mod writes {
             now, pacts,
         };
 
-        /// The reply the `/write` turn answered with in every round below: one
-        /// document, with a title the slug is plainly made of.
         const REPLY: &str = "# Scopes and sigils\n\nA boundary somebody drew.\n\n\
                              ## Outcome\n\n## Success criteria\n\n## Constraints\n\n\
                              ## Out of scope\n\n## Scope\n";
 
-        /// Where the loop is holding briefs when it opens the window below: the
-        /// engine's default, which is what a session that has entered brief mode
-        /// and read nothing else is carrying. The value is handed down, never
-        /// looked up here — which is what these rounds are driving.
         const DIRECTORY: &str = DEFAULT_BRIEF_DIRECTORY;
 
-        /// Where that reply proposes to go in an empty repository: nothing is in
-        /// `docs/` yet, so the number is the first one.
         const PROPOSED: &str = "docs/warlock-brief-01-scopes-and-sigils.md";
 
-        /// A plain press of `code`, as crossterm reports one.
         fn press(code: KeyCode) -> KeyEvent {
             KeyEvent::new(code, KeyModifiers::NONE)
         }
 
-        /// One round of the loop with `code` pressed into `prompt`: the key
-        /// answered by [`edit_for`], and the answer applied by [`write_edit`].
-        ///
-        /// The loop's two lines and nothing else, so a test below cannot swallow
-        /// a key through a kinder version of the loop written beside it.
         fn round(
             app: &mut App,
             manifest: &Manifest,
@@ -1995,22 +1613,16 @@ mod writes {
         }
     }
 
-    /// The whole of `/write`, from the word typed at the composer to the bytes
-    /// on disk, in one test.
-    ///
-    /// Every other test in this file is about one joint of it. This one is about
-    /// the joints being joined: the composer's own `apply_compose` starts the
-    /// turn, the turn is really run — on a worker thread, through the very agent
-    /// the loop holds — the loop's own drain hands the answer back, the prompt
-    /// opens over it through `write_opened`, and Enter goes through `edit_for`
-    /// into `write_edit` exactly as the event loop's arm does. Nothing in the
-    /// middle is stood in for.
-    ///
-    /// What *is* stood in for is the model, and it is `/bin/sh` printing one
-    /// result line — `chatting.rs`'s arrangement, for its reason, which is why
-    /// this module is Unix-only. So the whole path runs with no terminal, no
-    /// network and no `claude`, over a repository of the test's own that goes
-    /// away with the test.
+    // Every other test in this file is about one joint. This one is about the
+    // joints being joined: `apply_compose` starts the turn, the turn is really
+    // run on a worker thread through the very agent the loop holds, the loop's
+    // own drain hands the answer back, the prompt opens through `write_opened`,
+    // and Enter goes through `edit_for` into `write_edit`. Nothing in the middle
+    // is stood in for.
+    //
+    // What *is* stood in for is the model, and it is `/bin/sh` printing one
+    // result line — `chatting.rs`'s arrangement, which is why this module is
+    // Unix-only.
     mod whole {
 
         use std::thread;
@@ -2030,34 +1642,22 @@ mod writes {
         use crate::chatting::Chat;
         use crate::stubs::Saying;
 
-        /// How long the rounds below go on before giving up on a turn that is
-        /// never going to end. `chatting.rs`'s number and its reason: it is only
-        /// ever reached when something is already wrong, and every wait ends the
-        /// moment the turn does.
         const AT_MOST: Duration = Duration::from_secs(5);
 
-        /// What the stand-in answers with: one document, with the title the slug
-        /// is plainly made of and the trailing newline a document has.
         const DOCUMENT: &str = "# Scopes and sigils\n\nA boundary somebody drew, and the reason \
                                 it is there.\n\n## Outcome\n\n## Success criteria\n\n\
                                 ## Constraints\n\n## Out of scope\n\n## Scope\n";
 
-        /// Where that document proposes to go in a repository that has never had
-        /// a brief written into it.
         const PROPOSED: &str = "docs/warlock-brief-01-scopes-and-sigils.md";
 
-        /// The loop's bottom end, round after round, until the turn has ended.
-        ///
-        /// [`Chat::keep_up`] and nothing else, which is exactly what the event
-        /// loop's own `keep_up` calls: nothing here waits on the worker, joins a
-        /// thread or receives from a channel — the round polls and comes back,
-        /// and the turn ending is the drain taking it down.
-        ///
-        /// Nothing comes back and nothing is opened here. This used to build the
-        /// window itself, calling `write_opened` over whatever the drain handed
-        /// up — a second spelling of a line the event loop also had, living in a
-        /// test. The conversation owns the window now, so the round is the one
-        /// call, and what opened is read off the conversation afterwards.
+        // `Chat::keep_up` and nothing else, which is what the event loop's own
+        // `keep_up` calls: nothing here waits on the worker, joins a thread or
+        // receives from a channel.
+        //
+        // Nothing is opened here. This used to build the window itself, calling
+        // `write_opened` over whatever the drain handed up — a second spelling
+        // of a line the event loop also had, living in a test. The conversation
+        // owns the window now, so what opened is read off it afterwards.
         fn rounds_until_answered<C: Converses>(chat: &mut Chat<C>, app: &mut App, now: Instant) {
             let waited = Instant::now();
             while chat.answering() && waited.elapsed() < AT_MOST {

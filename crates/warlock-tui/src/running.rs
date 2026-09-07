@@ -1,175 +1,65 @@
-//! The headless run: `warlock pact <path>` and `warlock refresh <path>`.
+//! The headless run: `warlock pact <path>` and `warlock refresh <path>` — the
+//! first two subcommands that spend anything. Everything before them is
+//! arithmetic, over before the reader's hand leaves the keyboard; these descend
+//! a subtree, hand one `claude --print` per directory to a model, write a
+//! `WARLOCK.md` beside each and rewrite somebody's prose. That is why this is
+//! its own file rather than two more arms of [`mod@crate::edits`].
 //!
-//! The seventh and eighth subcommands, and the first two that spend anything.
-//! Everything before them is arithmetic — a listing walks a tree, a check walks
-//! up a manifest, an un-pact and a scope write rewrite one file — and all of it
-//! is over before the reader's hand leaves the keyboard. These two descend a
-//! subtree, hand one `claude --print` per directory to a model, write a
-//! `WARLOCK.md` beside each of them and save the manifest once at the end. A run
-//! is minutes long, it costs tokens, and what it leaves behind is somebody's
-//! prose rewritten.
+//! No operation is invented here. `pact` and `refresh` reach
+//! [`descend`] with the arguments the `p` and `r` keys
+//! use and the agent they use. Which directories a refresh describes is the
+//! engine's judgement and is not re-decided: a front end holding a second
+//! opinion about staleness would be a second answer waiting to disagree with the
+//! colour the tree is drawn in. What is left is four things — the boundary, an
+//! observer that prints, the exit status, and where the environment is read.
 //!
-//! That is the whole reason this module exists as its own file rather than as
-//! two more arms of [`mod@crate::edits`]. It is not that the work is bigger; it
-//! is that the work is *spent*. Every rule below follows from it.
+//! The boundary is asked first, and here the ordering is the money. [`Opened`]
+//! is the gate, borrowed whole from [`mod@crate::edits`], and [`ran`] takes one,
+//! so there is no other road to the engine call. Asked after the walk it would
+//! have listed somebody else's directories before refusing; asked after the
+//! first directory it would have spent a pass and overwritten a `WARLOCK.md`
+//! that was not this machine's to touch, and no exit status puts that back.
 //!
-//! # Nothing new happens here
+//! Progress is lines on stdout rather than a screen: no terminal is entered, no
+//! raw mode, no alternate screen. Directories are named relative to the
+//! repository root the way the manifest spells them, so a line of output and a
+//! line of `.warlock/pacts.toml` say the same word. The announcements the engine
+//! makes *inside* a directory are left silent — they are the TUI's, where there
+//! is a footer to overwrite ten times a second, and on a pipe they would be
+//! several lines per directory competing with the two saying where the run has
+//! got to. The default bodies on [`Observer`](warlock_engine::pact::Observer)
+//! are what makes not writing them the same as saying nothing.
 //!
-//! This module invents no operation. `pact` is
-//! [`pact_subtree`](warlock_engine::pact_subtree) and `refresh` is
-//! [`refresh_subtree`](warlock_engine::refresh_subtree), called with exactly the
-//! arguments the `p` and `r` keys call them with, through exactly the agent the
-//! `p` and `r` keys use — [`ClaudeAgent`], which is the one place in this crate
-//! that spawns a process. Which directories a refresh describes is the engine's
-//! judgement and is not re-decided, narrowed or widened here: it describes the
-//! directories that are not fresh, and a front end holding a second opinion
-//! about staleness would be a second answer waiting to disagree with the colour
-//! the tree is drawn in.
+//! Failures are named on stderr, one line each, then counted. Not the footer's
+//! shape: [`pact_message`](crate::pacting) quotes one failure and counts the
+//! rest because a footer is one line tall and the reader has a panel with the
+//! others; a shell has as many lines as it likes, the reader is often a script
+//! or a log read tomorrow, and a run that says "and 99 more" has thrown away the
+//! only list of what to go and look at. The count is what stops that list being
+//! illegible in the case that produces it most often — no `claude` on this
+//! machine, so every directory fails the same way.
 //!
-//! What this module *is*, then, is four things: the boundary, an observer that
-//! prints, one save, and an exit status.
+//! Ctrl-C is the only key a run has. The signal handler spends the press on the
+//! run's [`Cancel`], which is the same handle the agent was built with and the
+//! observer reads: latching kills the pass in flight, and `starting` then answers
+//! [`Pacting::Stop`] so the engine leaves at the next directory boundary, the
+//! only place a descent can stop without abandoning a half-written document. A
+//! second press is the other question, answered with [`process::exit`] from
+//! inside the handler; nothing is saved on that road, and because every file is
+//! written beside and renamed over, what is on disk is whole either way.
 //!
-//! # The boundary is asked first, and here that ordering is the money
+//! A cancelled run does not report. The killed pass comes back in
+//! [`PactedSubtree::failures`] like any other failure and nothing in that list
+//! says which entries the reader caused, so naming them would put directories on
+//! stderr as though somebody had to go and look at them.
 //!
-//! [`Opened`] is the gate, borrowed whole from [`mod@crate::edits`] rather than
-//! written again — [`opened`] resolves the working directory, the repository
-//! root, the manifest and this machine's sigils, and refuses at the covering
-//! scope before it hands anything back. A run cannot begin without one, because
-//! [`ran`] takes one and there is no other road to the engine call.
-//!
-//! The cheap writes ask the boundary first so that a refusal discloses nothing
-//! about the inside of a manifest. This asks it first for that reason *and* for
-//! a blunter one: past the gate, the next thing that happens is a model pass.
-//! A boundary asked after the walk would have listed somebody else's directories
-//! before refusing; asked after the first directory it would have spent a pass
-//! and overwritten a `WARLOCK.md` that was not this machine's to touch, and no
-//! exit status puts that back. So the refusal is one line on stderr, **exit
-//! status 3**, no `claude` spawned, and `.warlock/pacts.toml` byte-identical to
-//! what was read.
-//!
-//! The sentence is [`closed_scope_message`](crate::session::closed_scope_message)'s,
-//! reached through [`Error::ClosedScope`] exactly as the un-pact reaches it, so
-//! the footer, `warlock unpact` and `warlock pact` refuse one boundary in one
-//! wording. There is no `--force`, no environment variable and no per-run flag
-//! past it: `warlock config` is the one road, here as everywhere.
-//!
-//! # Progress is on stdout, and it is lines rather than a screen
-//!
-//! No terminal is entered, no raw mode, no alternate screen and no panic hook —
-//! the hook exists to restore a terminal this path never takes. What a reader
-//! watching a five-minute descent gets instead is [`Progress`]: one line as each
-//! directory is entered, naming it and saying which of how many it is, and one
-//! as it comes out documented. Directories are named relative to the repository
-//! root, the way the manifest spells them, so a line of output and a line of
-//! `.warlock/pacts.toml` say the same word about the same directory.
-//!
-//! The announcements the engine makes *inside* a directory — the request handed
-//! over, and every answer the schema turns down — are deliberately left silent.
-//! They are the TUI's, where there is a footer to overwrite ten times a second
-//! and a panel to keep the history in; on a pipe they would be several lines
-//! per directory competing with the two that say where the run has got to. The default bodies on
-//! [`Observer`](warlock_engine::pact::Observer) are what makes not writing them
-//! the same thing as saying nothing.
-//!
-//! # Failures are named on stderr, one line each, and then counted
-//!
-//! A run is N directories and each of them fails on its own: a pass refused, a
-//! document that would not write, a directory that could not be hashed. None of
-//! them ends the run — the engine carries on and hands them back in
-//! [`PactedSubtree::failures`] beside the manifest the rest of the subtree
-//! earned — so what is owed at the end is a report rather than an error.
-//!
-//! [`report`] builds it, and the shape is deliberate: **every** failing
-//! directory is named, on its own line, in the order the run reached them, and
-//! then one line says how many of how many directories failed. Not the footer's
-//! shape. [`pact_message`](crate::pacting) quotes one failure and counts the
-//! rest because a footer is one line tall and the reader is sitting in front of
-//! a panel that has the others; a shell has as many lines as it likes, the
-//! reader is often a script or a log read tomorrow, and a run that says
-//! "and 99 more" has thrown away the only list of what to go and look at. The
-//! count is what stops that list being illegible in the case that produces it
-//! most often — no `claude` on this machine, so every directory fails the same
-//! way — because a hundred identical sentences say nothing about how big the
-//! run was, and `3 of 100` says it in one line.
-//!
-//! Each line is the directory as the manifest spells it, then the engine's own
-//! sentence about it, flattened. The engine's sentence names the directory too,
-//! absolutely, and that repetition is left alone on purpose: the root-relative
-//! name at the front is the word a reader can hold against
-//! `.warlock/pacts.toml` and against the progress lines on stdout, and editing
-//! somebody else's error text to cut a prefix out of it is how a sentence ends
-//! up mangled by a case nobody anticipated.
-//!
-//! All of it goes to stderr, and the summary is [`Error::Failures`] rather than
-//! a line printed here — so `main` prints it in the one place every other
-//! refusal is printed, and the run leaves **exit status 4**: completed, with
-//! failures, and the manifest saved. `warlock pact . > run.log` therefore shows
-//! on the terminal exactly what went wrong while the progress goes to the file.
-//!
-//! # Ctrl-C is the only key a run has
-//!
-//! A pact is minutes of somebody's tokens, and the panel's answer to "enough"
-//! is Esc. There is no panel here and no keys are read, so the say-when is the
-//! signal the shell already sends: SIGINT, delivered to [`listening`]'s handler
-//! and spent on the run's [`Cancel`] — the same handle the `p` key's Esc
-//! latches, attached to this run's [`ClaudeAgent`] and read by [`Progress`].
-//!
-//! The pair is what makes a stop quick rather than polite. Latching kills the
-//! `claude` in flight, so the pass being paid for right now ends in
-//! milliseconds instead of at the end of its five minutes; the observer's
-//! `starting` then answers [`Pacting::Stop`] and the engine leaves at the next
-//! directory boundary, which is the only place a descent can be stopped without
-//! abandoning a document half-written. Nothing else about the run changes: the
-//! directories that finished are hashed, granted and saved by the same single
-//! write at the end, and the process leaves with **status 130** — 128 plus
-//! SIGINT, which shells, `make` and CI already read as interrupted.
-//!
-//! A second Ctrl-C is not patience running out — it is the other question, and
-//! it is answered with [`process::exit`] from inside the handler. Nothing is
-//! saved on that road: the descent's own thread is abandoned wherever it stood,
-//! and because the manifest is written beside and renamed over, what is on disk
-//! is either the file the run read or the file it earned and never a half of
-//! either.
-//!
-//! What a cancelled run does *not* do is report. The killed pass comes back in
-//! [`PactedSubtree::failures`] like any other failure, and there is nothing in
-//! that list saying which entries the reader caused, so naming them would put
-//! directories on stderr as though somebody had to go and look at them when the
-//! only thing that happened is that they pressed Ctrl-C. So a cancel prints one
-//! line and nothing else — [`Error::Cancelled`], through the one line of `main`
-//! that prints everything — and stdout has already said which directories
-//! finished. It is the footer's decision about the same event, made again for
-//! the same reason.
-//!
-//! None of it is `unsafe`, and none of it needs to be: the crate in the manifest
-//! does the registration and hands the press to a thread of its own, where
-//! latching a flag and killing a child are ordinary. The handler goes in after
-//! the boundary is asked and before the first pass, so a machine that will not
-//! take one refuses the run with [`Error::Signal`] and a 1 rather than starting
-//! a descent nobody could stop.
-//!
-//! # One save, at the end
-//!
-//! The engine saves nothing: [`pact_subtree`](warlock_engine::pact_subtree)
-//! hands back the manifest that *should* be written and leaves the writing to
-//! whoever asked. So [`ran`] writes it once, after the descent, through
-//! [`Manifest::save`](warlock_engine::Manifest::save) — the same single write
-//! the worker thread behind the `p` key performs. Once rather than per directory
-//! because the file is written beside and renamed over: a save between every
-//! pass would be N renames to record one event, and a reader watching the file
-//! would see a manifest that claims a run finished while it is still going.
-//!
-//! # What the environment touches, and where
-//!
-//! In exactly one place, [`started`], which resolves the [`Opened`], installs
-//! the signal handler and builds the [`ClaudeAgent`] and the [`Progress`]
-//! writing to stdout. Everything under it — [`ran`], [`report`] and [`ending`] —
-//! takes the repository, the agent, the observer and the say-when as
-//! parameters, which is the seam the tests below run through: a scratch
-//! repository, a throwaway home, a fake agent, a [`Cancel`] latched from inside
-//! a pass in place of a keypress, and a `Vec<u8>` for stdout, so nothing reads
-//! the developer's real home, nothing spawns `claude` and no test sends itself
-//! a signal.
+//! The environment is read in exactly one place, [`started`], which resolves the
+//! [`Opened`], installs the handler and builds the agent and the [`Progress`]
+//! writing to stdout. Everything under it takes the repository, the agent, the
+//! observer and the say-when as parameters, which is the seam the tests run
+//! through: a scratch repository, a throwaway home, a fake agent, a [`Cancel`]
+//! latched from inside a pass in place of a keypress, and a `Vec<u8>` for
+//! stdout.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -184,65 +74,43 @@ use crate::descent::{Descent, carry_on, descend};
 use crate::edits::{Opened, opened};
 use crate::error::{Error, one_line};
 
-/// Which of the two descents this is.
-///
-/// The engine's progress port, writing lines.
-///
-/// The headless counterpart of [`Reporting`](crate::pacting), and a much smaller
-/// thing than it: there is no channel, no thread and no screen, so where that
-/// one forwards five kinds of event to an event loop that decides what to draw,
-/// this one writes the two that a person watching a pipe can act on.
-///
-/// The other direction of the port is the same one that one has, reached by a
-/// different key: the answer to `starting` comes off a [`Cancel`] somebody else
-/// holds, and here that somebody is [`listening`]'s handler rather than a reader
-/// pressing Esc. Both are the same handle the run's [`ClaudeAgent`] was built
-/// with, so the pass in flight is already dead by the time the engine asks this.
-///
-/// Generic over the writer rather than reaching for [`io::stdout`] itself, for
-/// the reason every other seam in this crate is a parameter: the tests below
-/// assert on the exact lines a run produces, in order, and a function that
-/// printed could only be tested by spawning a process to read the output of.
-///
-/// A write that fails is ignored — the same shrug [`Reporting`](crate::pacting)
-/// gives a send into a closed channel, for a stronger reason. A closed stdout is
-/// `warlock pact . | head -1`, and failing a run of model passes because the
-/// thing reading its progress went away would be spending minutes of somebody's
-/// tokens on the state of a pipe. What the run leaves behind is the manifest and
-/// the documents; the lines are a courtesy.
+// The headless counterpart of [`Reporting`](crate::pacting), and much smaller:
+// no channel, no thread and no screen, so where that one forwards five kinds of
+// event to an event loop, this writes the two a person watching a pipe can act
+// on.
+//
+// Generic over the writer rather than reaching for `io::stdout` itself, for the
+// reason every other seam in this crate is a parameter: the tests assert on the
+// exact lines a run produces, in order, and a function that printed could only
+// be tested by spawning a process to read the output of.
+//
+// A write that fails is ignored — the same shrug `Reporting` gives a send into a
+// closed channel, for a stronger reason. A closed stdout is
+// `warlock pact . | head -1`, and failing a run of model passes because the
+// thing reading its progress went away would be spending minutes of somebody's
+// tokens on the state of a pipe.
 struct Progress<W: Write> {
-    /// The repository root every directory is named against, so a line of
-    /// output spells a directory the way `.warlock/pacts.toml` spells it.
     root: PathBuf,
-    /// Where the lines go: stdout on the real road, a `Vec<u8>` under test.
     out: W,
-    /// Whether anybody has said stop, cloned from the handle the run's agent
-    /// answers to and the signal handler latches.
-    ///
-    /// Read rather than written here: this port has no opinion about when a run
-    /// should end, it only carries somebody else's to the one place the engine
-    /// asks.
+    // Read rather than written here: this port has no opinion about when a run
+    // should end, it only carries somebody else's to the one place the engine
+    // asks.
     cancel: Cancel,
-    /// How many directories the run said it would describe, as last told, and
-    /// `0` before it has said anything.
-    ///
-    /// Kept because the failure report needs it and nothing else has it: the
-    /// [`PactedSubtree`] carries the failures but not the size of the run they
-    /// happened in, and "3 failed" without "of 100" is the illegible half of
-    /// the report. The engine's own denominator, unaltered, and it does not
-    /// move for the length of a run — see [`pact::Observer::starting`], which is
-    /// handed `directories.len()` every time — so reading it after the descent
-    /// is reading the number every progress line was counting against.
-    ///
-    /// A field rather than a count of the lines written, because the run's size
-    /// is a thing the engine states and this port's arithmetic about it would
-    /// be a second opinion waiting to disagree.
+    // Kept because the failure report needs it and nothing else has it: the
+    // `PactedSubtree` carries the failures but not the size of the run they
+    // happened in, and "3 failed" without "of 100" is the illegible half of the
+    // report. The engine's own denominator, unaltered, and it does not move for
+    // the length of a run — `starting` is handed `directories.len()` every time
+    // — so reading it after the descent reads the number every progress line was
+    // counting against.
+    //
+    // A field rather than a count of the lines written, because the run's size
+    // is a thing the engine states and this port's arithmetic about it would be
+    // a second opinion waiting to disagree.
     total: usize,
 }
 
 impl<W: Write> Progress<W> {
-    /// A port naming directories against `root`, writing to `out` and stopping
-    /// when `cancel` says so.
     const fn new(root: PathBuf, out: W, cancel: Cancel) -> Self {
         Self {
             root,
@@ -252,14 +120,10 @@ impl<W: Write> Progress<W> {
         }
     }
 
-    /// How many directories the run offered, or `0` for a run that offered
-    /// none.
     const fn total(&self) -> usize {
         self.total
     }
 
-    /// One line, in the shape every subcommand prints on stdout: `warlock: `
-    /// and then the fact.
     fn say(&mut self, fact: &str) {
         // Ignored on purpose; see the type's doc.
         let _ = writeln!(self.out, "warlock: {fact}");
@@ -267,24 +131,16 @@ impl<W: Write> Progress<W> {
 }
 
 impl<W: Write> pact::Observer for Progress<W> {
-    /// Say which directory is being entered and where it sits in the run, and
-    /// let it go ahead — unless somebody has pressed Ctrl-C, in which case say
-    /// nothing and end the descent here.
-    ///
-    /// The say-when is read before anything is printed, so a cancelled run
-    /// neither announces a directory it will not describe nor describes it.
-    /// This is the only question the engine asks that a run can be stopped at,
-    /// and it is asked between directories, which is what makes a stop leave
-    /// whole documents behind rather than half of one; the pass being paid for
-    /// when the key was pressed was killed by the same latch, so the wait to
-    /// get here is milliseconds rather than the rest of a pass.
-    ///
-    /// The fraction is the engine's own, unaltered and one-based, and its
-    /// denominator does not move for the length of the run — so `[3/12]` is a
-    /// thing a reader can watch rather than a running total that redefines
-    /// itself. It is on this line and not the completion line because this is
-    /// where it means something: it counts the directories offered, and the one
-    /// being offered is the one it is about.
+    // The say-when is read before anything is printed, so a cancelled run
+    // neither announces a directory it will not describe nor describes it. This
+    // is the only question the engine asks that a run can be stopped at, which
+    // is what makes a stop leave whole documents behind rather than half of one.
+    //
+    // The fraction is the engine's own, unaltered and one-based, and its
+    // denominator does not move for the length of the run — so `[3/12]` is a
+    // thing a reader can watch rather than a running total that redefines
+    // itself. It is on this line and not the completion line because this is
+    // where it means something: it counts the directories offered.
     fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
         if carry_on(&self.cancel) == Pacting::Stop {
             return Pacting::Stop;
@@ -299,86 +155,37 @@ impl<W: Write> pact::Observer for Progress<W> {
         Pacting::Continue
     }
 
-    /// Say that the directory came out documented.
-    ///
-    /// The engine's own word and the engine's own moment: this is announced when
-    /// the directory's document *and* every document below it are written, which
-    /// is the point at which nothing phase one can still do will take its grant
-    /// away. A directory whose pass failed is never announced here, so the
-    /// absence of a completion line under an entry line is itself the news —
-    /// and naming that failure properly is the run's report rather than this
-    /// port's.
     fn documented(&mut self, directory: &Path) {
         let named = named(&self.root, directory);
         self.say(&format!("documented {named}"));
     }
 
-    /// The engine's other word for a finished directory, and the one that says
-    /// no pass was paid for: the document that was there is the document that
-    /// stands, and the grant is being carried rather than re-earned.
     fn unchanged(&mut self, directory: &Path) {
         let named = named(&self.root, directory);
         self.say(&format!("unchanged {named}"));
     }
 }
 
-/// `directory` as the manifest spells it: relative to `root`, forward slashes,
-/// and `.` for the root itself.
-///
-/// [`spelled`](crate::query::spelled)'s rule without its refusal. A query
-/// refuses a path it cannot spell, because an answer with a directory quietly
-/// left out would be a lie about that directory; a progress line is not an
-/// answer, and a run that stopped part way through because one directory under
-/// the root has a non-UTF-8 component in its name would be a run refused over
-/// its own cosmetics. So an unspellable directory is named as it stands, which
-/// is [`section_label`](crate::pacting)'s decision in the panel and is taken
-/// here for the same reason: a line that says something odd beats one that says
-/// nothing.
 fn named(root: &Path, directory: &Path) -> String {
     to_manifest_path(root, directory).unwrap_or_else(|_| directory.display().to_string())
 }
 
-/// What a run's failures come to: a line naming each directory that failed, and
-/// the count that goes under them.
-///
-/// A value rather than a printing function, for the reason
-/// [`Opened::unpacted`](crate::edits) hands its success line back instead of
-/// printing it: the report is the interesting half of this module and a test
-/// that could only read it by spawning a process would be a test of the shell
-/// rather than of the report. Built by [`report`], written by [`Report::onto`],
-/// and finished by [`Report::status`], which is the sentence `main` prints and
-/// the exit status a script reads.
-///
-/// Only ever built for a run that had failures: [`report`] answers `None` for
-/// the whole-subtree success, so there is no empty report to be printed as a
-/// row of nothing and no `0 of 12 directories failed` line on a run that went
-/// perfectly.
+// A value rather than a printing function, for the reason `Opened::unpacted`
+// hands its success line back instead of printing it: the report is the
+// interesting half of this module, and a test that could only read it by
+// spawning a process would be a test of the shell.
+//
+// Only ever built for a run that had failures — [`report`] answers `None` for a
+// clean run — so there is no empty report to be printed as a row of nothing and
+// no `0 of 12 directories failed` line.
 #[derive(Debug)]
 struct Report {
-    /// One line per failing directory, in the order the run reached them:
-    /// the directory as the manifest spells it, then the engine's own sentence
-    /// about it. Never empty.
     lines: Vec<String>,
-    /// How many directories failed — the number of `lines`, named so the
-    /// summary does not have to explain itself.
     failed: usize,
-    /// How many directories the run offered, which is [`Progress::total`] and
-    /// therefore the engine's own denominator.
     total: usize,
 }
 
 impl Report {
-    /// Write the per-directory lines to `err`, in the shape every other line
-    /// warlock prints has: `warlock: ` and then the fact.
-    ///
-    /// The lines only. The count is [`Report::status`]'s, so that it is printed
-    /// by the one line of `main` that prints every refusal warlock has —
-    /// otherwise a run's summary would be the single sentence in warlock going
-    /// to stderr by a road of its own.
-    ///
-    /// A write that fails is ignored, for [`Progress`]'s reason and more
-    /// bluntly: the documents are written and the manifest is saved by the time
-    /// this runs, so there is nothing left for a broken pipe to save.
     fn onto<W: Write>(&self, err: &mut W) {
         for line in &self.lines {
             // Ignored on purpose; see above.
@@ -386,8 +193,6 @@ impl Report {
         }
     }
 
-    /// The run's ending: the summary line to print and the 4 to exit with,
-    /// as the one value `main` already knows how to do both with.
     fn status(&self) -> Error {
         Error::Failures {
             failed: self.failed,
@@ -396,22 +201,17 @@ impl Report {
     }
 }
 
-/// The report `failures` deserve in a run of `total` directories, or `None`
-/// when nothing failed.
-///
-/// One line per failing directory and no line for any other, which is the whole
-/// rule. Directories are named against `root` the way [`Progress`] names them,
-/// so the failure line for a directory and the progress line that entered it
-/// say the same word; the engine's sentence is flattened by [`one_line`]
-/// because a report is read a line at a time and a TOML diagnostic wrapping
-/// over four of them would be four directories' worth of screen for one.
-///
-/// A directory is named once however many ways it went wrong. Today it can only
-/// go wrong once — a directory phase one failed to document is skipped by phase
-/// two, and being unrecordable and being unhashable are exclusive — so this is
-/// a promise about the report rather than a filter that fires: `failed` counts
-/// directories, `total` counts directories, and the two have to be countable
-/// against each other.
+// One line per failing directory and no line for any other. Directories are
+// named against `root` the way [`Progress`] names them, so the failure line for
+// a directory and the progress line that entered it say the same word; the
+// engine's sentence is flattened because a report is read a line at a time and a
+// TOML diagnostic wrapping over four of them would be four directories' worth of
+// screen for one.
+//
+// A directory is named once however many ways it went wrong. Today it can only
+// go wrong once, so this is a promise about the report rather than a filter that
+// fires: `failed` counts directories, `total` counts directories, and the two
+// have to be countable against each other.
 fn report(root: &Path, failures: &[pact::Failure], total: usize) -> Option<Report> {
     let mut named_already: Vec<String> = Vec::new();
     let mut lines: Vec<String> = Vec::new();
@@ -434,36 +234,17 @@ fn report(root: &Path, failures: &[pact::Failure], total: usize) -> Option<Repor
     })
 }
 
-/// Descend the subtree past an open boundary, save the manifest once, and hand
-/// back what happened.
-///
-/// The whole of `warlock pact` and `warlock refresh` below the gate, and it is
-/// two engine calls and a save. `opened` is the proof the boundary was asked —
-/// it cannot be built any other way — so this function does not ask it again and
-/// there is no arrangement of the arguments in which it could be skipped.
-///
-/// The agent and the observer are parameters rather than reached for, which is
-/// the seam this crate is built on: the tests below drive the real engine
-/// operations over a real scratch repository with a hand-written fake in place
-/// of the model, so what they assert is what a run does rather than what a mock
-/// was told to say.
-///
-/// The manifest is saved once, here, after the descent, and it is saved whatever
-/// the descent came to: a run in which some directories failed still earned the
-/// grants of the ones that did not, and throwing them away would mean paying for
-/// them again. What comes back is the [`PactedSubtree`] whole — the saved
-/// manifest, the failures and the byte caps' problems — as a value rather than
-/// as something printed, so that the report a run's failures deserve is a thing
-/// a test can hold up rather than something only a subprocess could observe.
-///
-/// # Errors
-///
-/// [`Error::Pact`] when the subtree cannot be walked, which is the one thing
-/// that fails a run as a whole and happens before any pass is spent; and
-/// [`Error::Manifest`] when the manifest will not save, which happens after
-/// every document is already on disk. Nothing else: everything else that goes
-/// wrong goes wrong for one directory and comes back in
-/// [`PactedSubtree::failures`].
+// The whole of `warlock pact` and `warlock refresh` below the gate. `opened` is
+// the proof the boundary was asked — it cannot be built any other way — so this
+// does not ask it again, and there is no arrangement of the arguments in which
+// it could be skipped.
+//
+// The manifest is saved inside `descend`, once, after the descent and whatever
+// it came to: a run in which some directories failed still earned the grants of
+// the ones that did not, and throwing them away would mean paying for them
+// again. What comes back is the `PactedSubtree` whole, as a value rather than as
+// something printed, so the report a run's failures deserve is a thing a test
+// can hold up.
 fn ran(
     opened: &Opened,
     descent: Descent,
@@ -480,42 +261,27 @@ fn ran(
     )
 }
 
-/// Listen for Ctrl-C for the rest of the process, and hand back the say-when it
-/// latches.
-///
-/// The whole of the signal handling, and it is a flag and two lines: the first
-/// press latches the [`Cancel`] this run's agent and observer were built with,
-/// which kills the pass in flight and ends the descent at the next directory;
-/// the second leaves at once with [`CANCELLED`], the status the first press was
-/// heading for anyway.
-///
-/// Two presses rather than one because they are two different questions. The
-/// first is "stop when you can", and what it buys is the manifest: the
-/// directories already documented are hashed, granted and saved by the save at
-/// the end of [`ran`], which cannot happen if the process dies here. The second
-/// is "stop now", asked by somebody who has decided that whatever the run is
-/// still doing is not worth waiting for — and it is honoured literally, with
-/// nothing saved and nothing printed. Nothing is corrupted by taking it: each
-/// document and the manifest are written beside and renamed over, so what is on
-/// disk is always a whole file, and the descent's own thread is simply
-/// abandoned. It is the panel's Esc-then-quit split, at a shell prompt.
-///
-/// No `unsafe`, and none is needed: [`ctrlc::set_handler`] does the registration
-/// itself and calls this closure on an ordinary thread of its own, where
-/// latching an [`AtomicBool`], taking a mutex and killing a child process are
-/// ordinary things to do rather than the undefined behaviour they would be in
-/// signal context. That is the whole reason the dependency is in the manifest.
-///
-/// `pressed` is this function's own flag and not [`Cancel::is_cancelled`],
-/// because the two say different things: a handle can be latched by the run
-/// itself, and "has anybody pressed Ctrl-C" is a question about the keyboard.
-///
-/// # Errors
-///
-/// [`Error::Signal`] when the handler cannot be installed, which is a handler
-/// already registered in this process or the system refusing one. Called once
-/// per process, after the boundary is asked and before the first pass, so a run
-/// refused here has spent nothing and written nothing.
+// The whole of the signal handling, and it is a flag and two lines. Two presses
+// rather than one because they are two different questions. The first is "stop
+// when you can", and what it buys is the manifest: the directories already
+// documented are hashed, granted and saved by the save at the end of the
+// descent, which cannot happen if the process dies here. The second is "stop
+// now", honoured literally with nothing saved and nothing printed — nothing is
+// corrupted by taking it, because every file is written beside and renamed over
+// and the descent's thread is simply abandoned.
+//
+// No `unsafe`, and none is needed: `ctrlc::set_handler` does the registration
+// and calls this closure on an ordinary thread of its own, where latching an
+// `AtomicBool`, taking a mutex and killing a child are ordinary rather than the
+// undefined behaviour they would be in signal context. That is the whole reason
+// the dependency is in the manifest.
+//
+// `pressed` is this function's own flag and not `Cancel::is_cancelled`, because
+// the two say different things: a handle can be latched by the run itself, and
+// "has anybody pressed Ctrl-C" is a question about the keyboard.
+//
+// Called once per process, after the boundary is asked and before the first
+// pass, so a run refused here has spent nothing and written nothing.
 fn listening() -> Result<Cancel, Error> {
     let cancel = Cancel::new();
     let latch = cancel.clone();
@@ -532,31 +298,17 @@ fn listening() -> Result<Cancel, Error> {
     Ok(cancel)
 }
 
-/// What a descent that finished comes to: nothing, a report, or a cancel.
-///
-/// The three endings a run can have, decided in one place and in this order,
-/// which is the whole of the function. `cancelled` wins because a stopped run's
-/// failures are the stopping — the killed pass comes back in
-/// [`PactedSubtree::failures`] like any other, and nothing in that list says
-/// which entries the reader caused — so a cancelled run prints no per-directory
-/// lines at all and leaves with [`Error::Cancelled`] and its 130. What finished
-/// is on stdout, where it has been all along.
-///
-/// Otherwise it is [`report`]'s answer: `None` is the run with nothing wrong
-/// with it and exit 0, and a report is every failing directory written to `err`
-/// with [`Error::Failures`] behind it, which `main` prints as the count and
-/// exits 4 for.
-///
-/// A function taking the stderr to write to rather than three lines inside
-/// [`started`], for the reason [`Progress`] is generic over its writer: this is
-/// the decision the endings of a run are made by, and a test that could only
-/// read it by spawning a process would be a test of the shell.
-///
-/// # Errors
-///
-/// [`Error::Cancelled`] for a run somebody stopped, and [`Error::Failures`] for
-/// a run some of whose directories failed. Both are runs that happened, with the
-/// manifest already saved.
+// The three endings a run can have, decided in one place and in this order.
+// `cancelled` wins because a stopped run's failures are the stopping — the
+// killed pass comes back in `PactedSubtree::failures` like any other, and
+// nothing in that list says which entries the reader caused — so a cancelled run
+// prints no per-directory lines at all. What finished is on stdout, where it has
+// been all along.
+//
+// Takes the stderr to write to rather than being three lines inside [`started`],
+// for the reason [`Progress`] is generic over its writer: this is the decision
+// the endings of a run are made by, and a test that could only read it by
+// spawning a process would be a test of the shell.
 fn ending<W: Write>(cancelled: bool, report: Option<&Report>, err: &mut W) -> Result<(), Error> {
     if cancelled {
         return Err(Error::Cancelled);
@@ -570,38 +322,15 @@ fn ending<W: Write>(cancelled: bool, report: Option<&Report>, err: &mut W) -> Re
     }
 }
 
-/// The subcommand: resolve the environment, ask the boundary, run, and print as
-/// it goes.
-///
-/// The one place in this module that reads the working directory, the home
-/// directory, stdout or the keyboard, kept to five lines so that everything
-/// worth testing is underneath it in [`ran`] and [`ending`]. [`opened`] is the
-/// resolution and the gate together — see [`mod@crate::edits`] for why those are
-/// one step and not two — and a closed boundary leaves through the `?` with
-/// nothing spawned, nothing written and no handler installed.
-///
-/// [`ClaudeAgent::new`] is built here and nowhere else in this module: one
-/// `claude --print` per directory, on the terms a pass is always asked on, from
-/// the one file in this crate that spawns a process. It is given the same
-/// [`Cancel`] the observer reads and [`listening`]'s handler latches, and that
-/// one handle is the whole of the cancellation: one call kills the pass in
-/// flight and stops the descent at the next directory.
-///
-/// What the run came to is read at the end, and only then, by [`ending`]. The
-/// manifest is saved before any of that — in [`ran`], before this function has
-/// an opinion about anything — which is what makes 4 "completed with failures"
-/// rather than a failure, and what makes 130 a run that recorded what it
-/// finished.
-///
-/// # Errors
-///
-/// Everything [`opened`], [`listening`] and [`ran`] refuse, unchanged and
-/// unwrapped, plus [`ending`]'s [`Error::Cancelled`] and [`Error::Failures`].
-/// The order is the load-bearing part: a manifest that would not save leaves
-/// through [`ran`] as [`Error::Manifest`] and a 1, failures or cancel or
-/// neither, because a run whose record never reached the disk is warlock unable
-/// to do the thing rather than a run that completed imperfectly, and the 1 is
-/// the news.
+// The one place in this module that reads the working directory, the home
+// directory, stdout or the keyboard, kept to five lines so everything worth
+// testing is underneath it. A closed boundary leaves through the `?` with
+// nothing spawned, nothing written and no handler installed.
+//
+// The order is the load-bearing part: a manifest that would not save leaves
+// through `descended` as `Error::Manifest` and a 1, failures or cancel or
+// neither, because a run whose record never reached the disk is warlock unable
+// to do the thing rather than a run that completed imperfectly.
 fn started(descent: Descent, path: &Path) -> Result<(), Error> {
     let opened = opened(descent.wanted(), path)?;
     let cancel = listening()?;
@@ -618,67 +347,38 @@ fn started(descent: Descent, path: &Path) -> Result<(), Error> {
     .outcome
 }
 
-/// What a descent produced, and what it came to.
-///
-/// The observer is handed back still holding what it wrote and the denominator
-/// it counted against, because a caller that gave it a `Vec<u8>` wants both. On
-/// the real road the writer is stdout and nobody reads either again.
-///
-/// No `Debug`, because [`Progress`] has none: a writer is not a value to print.
-///
-/// `dead_code` is allowed because the fields are the point: [`started`] reads
-/// only `outcome` — the run is over and stdout already has the lines — while the
-/// suite reads all four off the same value. Dropping the three would make the
-/// composition untestable again, which is the thing this type exists to fix.
+// The observer is handed back still holding what it wrote and the denominator it
+// counted against, because a caller that gave it a `Vec<u8>` wants both. On the
+// real road the writer is stdout and nobody reads either again. No `Debug`,
+// because [`Progress`] has none: a writer is not a value to print.
+//
+// The fields are the point: [`started`] reads only `outcome`, while the suite
+// reads all four off the same value. Dropping the three would make the
+// composition untestable again, which is the thing this type exists to fix.
 #[allow(dead_code, reason = "read by the tests that drive this composition")]
 struct Descended<W: Write> {
-    /// The subtree the engine handed back, already saved by [`ran`].
     subtree: PactedSubtree,
-    /// The observer, with its lines and its total still in it.
     progress: Progress<W>,
-    /// What failed, counted against the run's own denominator, or `None` for a
-    /// run with nothing wrong with it. Kept rather than consumed by [`ending`]
-    /// because it is a product of the descent in its own right: it is what a
-    /// reader is shown, and the one place the count and the lines agree.
     report: Option<Report>,
-    /// What the run came to once its failures and its cancel were read:
-    /// [`ending`]'s answer, which is `Ok` for a clean run, [`Error::Cancelled`]
-    /// for an interrupted one and [`Error::Failures`] for one that finished
-    /// imperfectly.
     outcome: Result<(), Error>,
 }
 
-/// The whole of a run past the environment: observe it, descend it, count what
-/// failed, and say how it ended.
-///
-/// This is the composition, and it is one function rather than four lines in
-/// [`started`] because the order is the load-bearing part and every fact in it
-/// used to be asserted by a test that re-assembled the same four calls by hand.
-/// Four things have to be true together, and are true here:
-///
-/// * **The observer and the agent answer to one [`Cancel`].** The handle handed
-///   in is cloned into [`Progress`], and the caller has already given the same
-///   one to the agent — so a single Ctrl-C kills the pass in flight *and* stops
-///   the descent at the next directory, rather than doing one and not the other.
-/// * **The manifest is saved before anything has an opinion.** That happens
-///   inside [`ran`], which is what makes [`Error::Failures`] "completed with
-///   failures" rather than a failure, and what makes a cancel a run that
-///   recorded what it finished.
-/// * **The denominator is read after the descent.** [`Progress::total`] is `0`
-///   until the engine states the run's size, so the report has to count against
-///   it afterwards; counting before would report every failure out of nothing.
-/// * **[`ending`] is last.** A manifest that would not save leaves through the
-///   `?` above as [`Error::Manifest`] and a 1 — failures or cancel or neither —
-///   because a run whose record never reached the disk is the bigger news.
-///
-/// # Errors
-///
-/// Only the two ways a run fails as a whole, both from [`ran`]:
-/// [`Error::Pact`] for a subtree that cannot be walked, before any pass is
-/// spent, and [`Error::Manifest`] for one that will not save, after every
-/// document is already on disk. How an otherwise-complete run *ended* is
-/// [`Descended::outcome`] and not an error here, because there is a descent to
-/// report about either way.
+// The composition, and one function rather than four lines in [`started`]
+// because the order is the load-bearing part. Four things have to be true
+// together, and are true here:
+//
+// * The observer and the agent answer to one `Cancel`. The handle handed in is
+//   cloned into `Progress`, and the caller has already given the same one to the
+//   agent — so a single Ctrl-C kills the pass in flight *and* stops the descent
+//   at the next directory, rather than doing one and not the other.
+// * The manifest is saved before anything has an opinion. That happens inside
+//   `descend`, which is what makes `Error::Failures` "completed with failures"
+//   rather than a failure, and a cancel a run that recorded what it finished.
+// * The denominator is read after the descent. `Progress::total` is `0` until
+//   the engine states the run's size, so the report has to count against it
+//   afterwards; counting before would report every failure out of nothing.
+// * `ending` is last, so a manifest that would not save leaves through the `?`
+//   above as the bigger news.
 fn descended<O: Write, E: Write>(
     opened: &Opened,
     descent: Descent,
@@ -701,26 +401,12 @@ fn descended<O: Write, E: Write>(
     })
 }
 
-/// `warlock pact <path>`: describe every directory at or below that one, and
-/// save the manifest it earned.
-///
-/// One line, for the reason [`unpact`](crate::edits::unpact) is two: the whole
-/// of the command is [`started`], and what tells it from the refresh below is
-/// the tag it is handed.
-///
-/// # Errors
-///
-/// Everything [`started`] refuses, unchanged.
+// One line, for the reason `edits::unpact` is two: the whole of the command is
+// [`started`], and what tells it from the refresh below is the tag it is handed.
 pub(crate) fn pact(path: &Path) -> Result<(), Error> {
     started(Descent::Pact, path)
 }
 
-/// `warlock refresh <path>`: describe the stale directories at or below that
-/// one, leave the fresh ones alone, and save the manifest it earned.
-///
-/// # Errors
-///
-/// Everything [`started`] refuses, unchanged.
 pub(crate) fn refresh(path: &Path) -> Result<(), Error> {
     started(Descent::Refresh, path)
 }
@@ -748,19 +434,13 @@ mod tests {
     use crate::boundary::closed_scope_message;
     use crate::status_for;
 
-    /// A throwaway directory. Every test below builds both its repository and
-    /// its home out of these, so nothing reads the developer's real home and no
-    /// leftover outlives the test.
     fn a_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("a temporary directory")
     }
 
-    /// A repository with two directories of source under the root, and the
-    /// `.git/` that makes it one.
-    ///
-    /// Three pactable directories, then: the root, `alpha` and `beta`. Small
-    /// enough that a run over it is three passes of a fake, and shaped enough
-    /// that "only the stale one" is a claim about a real sibling.
+    // Three pactable directories — the root, `alpha` and `beta`. Small enough
+    // that a run over it is three passes of a fake, and shaped enough that "only
+    // the stale one" is a claim about a real sibling.
     fn a_repository() -> tempfile::TempDir {
         let repo = a_dir();
         write(repo.path(), ".git/HEAD", "ref: refs/heads/main\n");
@@ -769,9 +449,6 @@ mod tests {
         repo
     }
 
-    /// Write `contents` at `relative` under `root`, making every directory above
-    /// it. Directories are made by writing files into them, because a directory
-    /// with nothing in it is not a thing this repository has.
     fn write(root: &Path, relative: &str, contents: &str) {
         let path = root.join(relative);
         fs::create_dir_all(path.parent().expect("a file has a parent"))
@@ -779,20 +456,11 @@ mod tests {
         fs::write(&path, contents).expect("a file");
     }
 
-    /// Write `sigils` as what this machine holds for the repository at
-    /// `repo_root`, under `home`.
     fn holding(home: &Path, repo_root: &Path, sigils: &[&str]) {
         let sigils: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
         save_sigils(home, repo_root, &sigils).expect("a config that writes");
     }
 
-    /// Put a boundary on `module` and save it, so the tests below have one to
-    /// be inside and outside of.
-    ///
-    /// An entry with a scope and no grant, which is the state
-    /// `warlock scope add` leaves a directory nobody has pacted in: the
-    /// boundary is a property of the entry, and a run's business with it is
-    /// settled before anything is described.
     fn scoped(repo_root: &Path, module: &str, scope: &str) {
         Manifest::with_entries([PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
             .expect("a relative module path is inside the root")
@@ -801,55 +469,31 @@ mod tests {
         .expect("a manifest that saves");
     }
 
-    /// The bytes of the manifest on disk, or `None` when there is none.
-    ///
-    /// Bytes rather than a parsed [`Manifest`], because what a refusal promises
-    /// is that the file did not change — not that it still parses to something
-    /// equal.
     fn manifest_bytes(repo_root: &Path) -> Option<Vec<u8>> {
         fs::read(manifest_path(repo_root)).ok()
     }
 
-    /// The program a machine with no model on it is missing, as the fake below
-    /// names it and as [`ClaudeAgent`](warlock_tui::ClaudeAgent) would.
     const CLAUDE: &str = "claude";
 
-    /// A model that answers with a document long enough to be accepted — unless
-    /// the directory is one it was told to refuse — and remembers what it was
-    /// asked.
-    ///
-    /// [`pacting`](crate::pacting)'s `Canned` with everything this module does
-    /// not test taken out: no activities, because there is no panel. What is
-    /// kept is the pair of facts these tests turn on — which directories were
-    /// offered a pass, in order, and whether a manifest was on disk while the
-    /// passes were running, which is how "saved once, at the end" is asked of a
-    /// run rather than of a mock — and the say-when, because a cancel arrives
-    /// during a pass and this is the only thing here that is inside one.
-    ///
-    /// The refusal it can be given is
-    /// [`agent::Error::NotFound`](warlock_engine::agent::Error::NotFound), which is not an
-    /// arbitrary choice of failure: it is what every directory of every run gets
-    /// on a machine with no `claude` on `PATH`, which is the case the failure
-    /// report is shaped around.
     #[derive(Debug)]
+    // `pacting`'s `Canned` with everything this module does not test taken out:
+    // no activities, because there is no panel. What is kept is the pair of
+    // facts these tests turn on — which directories were offered a pass, in
+    // order, and whether a manifest was on disk while the passes were running,
+    // which is how "saved once, at the end" is asked of a run rather than of a
+    // mock — and the say-when, because a cancel arrives during a pass.
+    //
+    // The refusal it can be given is `agent::Error::NotFound`, which is what
+    // every directory of every run gets on a machine with no `claude` on `PATH`:
+    // the case the failure report is shaped around.
     struct Canned {
-        /// The root each remembered directory is named against.
         root: PathBuf,
-        /// The directories to refuse a pass, as the manifest spells them.
-        /// Empty is the model that answers everything.
         refused: Vec<String>,
-        /// The directory during whose pass somebody presses Ctrl-C, and the
-        /// handle their press latches, or `None` for a run nobody stops.
         cancel_at: Option<(String, Cancel)>,
-        /// One entry per pass: the directory, and whether the manifest existed
-        /// on disk at the moment the pass ran.
         seen: RefCell<Vec<(PathBuf, bool)>>,
     }
 
     impl Canned {
-        /// A model that answers every pass but the ones over `refused`, which
-        /// fail the way a missing `claude` fails. An empty `refused` is the
-        /// model that answers everything.
         fn refusing(root: &Path, refused: &[&str]) -> Self {
             Self {
                 root: root.to_path_buf(),
@@ -859,22 +503,14 @@ mod tests {
             }
         }
 
-        /// The same model, with somebody pressing Ctrl-C while `directory` is
-        /// being described.
-        ///
-        /// [`pacting`](crate::pacting)'s `cancelling_at`, for the same reason
-        /// and with the same shape: latching from inside a pass is where a
-        /// press really lands, and it is the one way to have one arrive in the
-        /// middle of a run without a test sending its own process a signal. On
-        /// the real road the handler in [`listening`](super::listening) does
-        /// this, and the [`Cancel`] it latches is the same handle the agent was
-        /// built with, so the pass in flight is killed too.
+        // Latching from inside a pass is where a press really lands, and it is
+        // the one way to have one arrive mid-run without a test sending its own
+        // process a signal.
         fn cancelling_at(mut self, directory: &str, cancel: Cancel) -> Self {
             self.cancel_at = Some((directory.to_owned(), cancel));
             self
         }
 
-        /// The directories a pass ran for, in call order, named from the root.
         fn directories(&self) -> Vec<String> {
             self.seen
                 .borrow()
@@ -883,7 +519,6 @@ mod tests {
                 .collect()
         }
 
-        /// Whether a manifest was on disk while any pass was running.
         fn saw_a_manifest(&self) -> bool {
             self.seen.borrow().iter().any(|(_, saved)| *saved)
         }
@@ -914,50 +549,29 @@ mod tests {
         }
     }
 
-    /// `directory` as the manifest spells it, for the assertions. The
-    /// production spelling, asked of the production function.
     fn named(root: &Path, directory: &Path) -> String {
         super::named(root, directory)
     }
 
-    /// What a run left behind: what the model was asked, and what the observer
-    /// printed.
     #[derive(Debug)]
     struct Run {
-        /// The subtree the engine handed back, saved.
         subtree: PactedSubtree,
-        /// The model, with every pass it was given still in it.
         agent: Canned,
-        /// The lines that went to stdout, in order and without their newlines.
         lines: Vec<String>,
-        /// The lines that went to stderr, in order and without their newlines:
-        /// whatever [`ending`](super::ending) wrote while the composition ran.
         err: Vec<String>,
-        /// What failed and how it was counted, as the composition worked it out.
         report: Option<Report>,
-        /// What the run came to, as the subcommand would hand it to `main`.
         outcome: Result<(), Error>,
     }
 
     impl Run {
-        /// How this run ended, and what it wrote to stderr getting there.
-        ///
-        /// Both read off the one composition rather than worked out again here:
-        /// [`descended`](super::descended) counted the failures against its own
-        /// denominator and called [`ending`](super::ending) itself, so what this
-        /// hands back is what the subcommand hands `main`.
         fn ended(&self) -> (&Result<(), Error>, Vec<String>) {
             (&self.outcome, self.err.clone())
         }
 
-        /// What this run's failures came to, as the composition counted them.
         const fn report(&self) -> Option<&Report> {
             self.report.as_ref()
         }
 
-        /// The stderr this run produced in full: whatever
-        /// [`ending`](super::ending) wrote, and then the one line `main` prints
-        /// for what it came to, without their newlines.
         fn stderr(&self) -> Vec<String> {
             let (outcome, mut lines) = self.ended();
             if let Err(error) = outcome {
@@ -967,24 +581,12 @@ mod tests {
         }
     }
 
-    /// `warlock pact <path>` or `warlock refresh <path>` in the repository at
-    /// `repo_root`, run by a machine whose sigils are under `home`, with
-    /// everything the environment would have settled handed in instead.
-    ///
-    /// [`driven`] with a model that answers everything and a say-when nobody
-    /// pulls, which is the ordinary run. What [`started`](super::started) adds
-    /// on top of it is four lines — the working directory, the real home,
-    /// [`ClaudeAgent`](warlock_tui::ClaudeAgent) and the signal handler — and
-    /// they are exactly the things a test must not have.
+    // [`driven`] with a model that answers everything and a say-when nobody
+    // pulls, which is the ordinary run.
     fn run(repo_root: &Path, home: &Path, descent: Descent, path: &str) -> Result<Run, Error> {
         run_refusing(repo_root, home, descent, path, &[])
     }
 
-    /// The same run, by a machine whose model refuses every pass over `refused`.
-    ///
-    /// One directory named is a run that half-worked; every directory named is
-    /// a machine with no `claude` on it, which is the case the failure report
-    /// exists for.
     fn run_refusing(
         repo_root: &Path,
         home: &Path,
@@ -997,16 +599,6 @@ mod tests {
         driven(repo_root, home, descent, path, agent, &cancel)
     }
 
-    /// The same run again, with somebody pressing Ctrl-C during the pass over
-    /// `at` — and their model refusing `refused` besides.
-    ///
-    /// The signal itself is not sent: what the handler does is latch the run's
-    /// [`Cancel`], and a test that latched it by raising SIGINT at its own
-    /// process would be testing the operating system's delivery of a signal to
-    /// a test binary running beside a hundred others. So the latch is pulled
-    /// where a press really lands, from inside a pass, and everything below it
-    /// — the descent stopping, the manifest holding what finished, the 130 — is
-    /// the production code being asked what it does about that.
     fn run_cancelling(
         repo_root: &Path,
         home: &Path,
@@ -1020,21 +612,15 @@ mod tests {
         driven(repo_root, home, descent, path, agent, &cancel)
     }
 
-    /// The run itself, whatever the model was told to do and whoever holds the
-    /// say-when.
-    ///
-    /// The production road exactly: the boundary through [`Opened::new`], then
-    /// [`descended`](super::descended) — the same call
-    /// [`started`](super::started) makes, with the same arguments in the same
-    /// order. This used to re-assemble that composition by hand, which meant
-    /// the suite proved that *a* correct order worked rather than that the
-    /// subcommand used it; the four ordering facts are asserted against the
-    /// real function now.
-    ///
-    /// What `started` still has that this does not is the environment and
-    /// nothing else: the working directory, the real home, a real
-    /// [`ClaudeAgent`](warlock_tui::ClaudeAgent), the signal handler, and
-    /// stdout and stderr in place of these two `Vec<u8>`s.
+    // The production road exactly: the boundary through `Opened::new`, then the
+    // same `descended` call `started` makes, with the same arguments in the same
+    // order. This used to re-assemble that composition by hand, which meant the
+    // suite proved that *a* correct order worked rather than that the subcommand
+    // used it.
+    //
+    // What `started` still has that this does not is the environment and nothing
+    // else: the working directory, the real home, a real `ClaudeAgent`, the
+    // signal handler, and stdout and stderr in place of two `Vec<u8>`s.
     fn driven(
         repo_root: &Path,
         home: &Path,
@@ -1065,7 +651,6 @@ mod tests {
         })
     }
 
-    /// The lines a writer took, in order and without their newlines.
     fn written(bytes: Vec<u8>) -> Vec<String> {
         String::from_utf8(bytes)
             .expect("the lines warlock writes are its own text")
@@ -1074,7 +659,6 @@ mod tests {
             .collect()
     }
 
-    /// The modules the manifest on disk holds, in its own order.
     fn stored_modules(repo_root: &Path) -> Vec<String> {
         load_manifest(repo_root)
             .expect("a manifest that reads")
@@ -1475,8 +1059,6 @@ mod tests {
         assert_eq!(stored_modules(repo.path()), ["beta"]);
     }
 
-    /// Chmod cannot deny root anything, so this checks the fixture really is
-    /// unwritable before asserting on it and steps aside when it is not.
     #[cfg(unix)]
     #[test]
     fn a_manifest_that_will_not_save_is_the_one_warlock_could_not_do_rather_than_a_four() {
