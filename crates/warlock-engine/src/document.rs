@@ -1,65 +1,3 @@
-//! The shape of a `WARLOCK.md`: what a pass fills in, how its answer is
-//! checked, and how the document is laid out from it.
-//!
-//! A pass does not write the document. It fills a [`Fill`] — a fixed set of
-//! slots derived from the request in front of it — and warlock does the rest:
-//! decides which slots exist, checks that every one of them was filled and
-//! nothing else was, and lays the result out in one layout that is the same in
-//! every directory of every repository. The prose in a document is the
-//! model's; everything about its *shape* is this module's, and the shape is
-//! what a reader learns once and then relies on.
-//!
-//! # Why the model is not asked for the document
-//!
-//! Because the failures of a free-text document are all failures of shape, and
-//! none of them can be checked. A pass that writes prose decides for itself
-//! which files to mention, how long to go on, whether to keep the last pass's
-//! sentences, and whether to think out loud on the page — and every pass
-//! decides differently, like a new employee handed the same job each morning.
-//! Warlock's own documents were found carrying a pass's deliberation
-//! (*"Wait — `boundary.rs` was shown above…"*), sentences about the request
-//! rather than the directory, and claims copied forward from a document that
-//! the files no longer supported. No wording of the instructions fixed that
-//! for long, because instructions about shape are followed only as far as a
-//! model happens to follow them on the day.
-//!
-//! A slot is different. Whether every file has an entry is a set comparison.
-//! Whether an entry is one line is a search for a newline. Whether a symbol a
-//! lookup names is real is a substring test against the file it points at.
-//! Those checks are made here, in code, on every answer, and an answer that
-//! fails them is sent back once with the defects listed ([`ATTEMPTS`]) before
-//! the directory is given up on. What a model is good at — saying in a line
-//! what a file is for — is the whole of what it is asked for.
-//!
-//! # What the document is for
-//!
-//! Routing. A `WARLOCK.md` is read by a model before any source file is
-//! opened, and the one thing the evidence says such a document is good for is
-//! narrowing: which subdirectory, then which file, then which name in it. So
-//! the layout is a heading, a purpose, one line per file, one line per child
-//! directory, and three short lists — how the parts fit together, what rules
-//! the files themselves state, and where to look for a given question. There
-//! is no free section, no target length, and nothing a reader has to parse
-//! past to find the line about the file they came for.
-//!
-//! # What is checked, and what is not
-//!
-//! Everything about shape, and nothing about truth. The keys of `files` and
-//! `directories` must be exactly the files and child documents the pass was
-//! shown; every value must be one line of at least [`ENTRY_MINIMUM`] and under
-//! [`ENTRY_CHARS`] characters; the
-//! three lists are capped at [`LIST_CAP`]; a lookup must open a file or
-//! directory that is here, and a symbol it names must occur verbatim in the
-//! text the pass was shown for that target; and no value may name warlock
-//! itself unless the files do. Whether the line *about* a file is
-//! right is not checked and cannot be from here — a document is a map to be
-//! checked against the source, and the git diff is where a wrong line is
-//! caught, as it is for any other change.
-//!
-//! Files the pass was not shown the text of — over the size cap, or not text —
-//! are not slots at all. Warlock writes their line itself, as a name, a size
-//! and the reason, so nothing can be invented about a file nobody read.
-
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write as _;
@@ -68,131 +6,62 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{File, Request};
 
-/// The most characters one slot may hold: an entry for a file or directory, a
-/// structure or rules line, or either half of a lookup.
-///
-/// A line, and a short one. The point of a slot is that it is a line a reader
-/// scans past or stops at, and an entry that runs to a paragraph has stopped
-/// being a map and started being the specification a `WARLOCK.md` says it is
-/// not. Over this is a defect, not a truncation: cutting a sentence in the
-/// middle makes a document that says something its author did not.
 pub const ENTRY_CHARS: usize = 280;
 
-/// The fewest characters an entry for a file or directory, a structure line
-/// or a rule may hold.
-///
-/// Measured, not guessed: a pass over this repository's own engine answered
-/// `"duplicate"` for `clock.rs` — one word, no fact, and every check passed.
-/// A line that says what a file is cannot be said in under twenty characters,
-/// and a value under that is a slot the pass skipped. The floor is deliberately
-/// low; it catches the skipped slot and not the terse one.
 pub const ENTRY_MINIMUM: usize = 20;
 
-/// The most characters the purpose may hold: a few sentences.
 pub const PURPOSE_CHARS: usize = 700;
 
-/// The most lines any of the three lists — structure, rules, lookups — may
-/// hold.
 pub const LIST_CAP: usize = 12;
 
-/// The most declared names rendered beside a file's line.
 pub const DECLARED_SHOWN: usize = 8;
 
-/// How many passes a directory may cost before its answer is given up on.
-///
-/// Two: the first, and one more with the first's defects listed at the top of
-/// the request. A model shown "you left out `lib.rs`" fixes it; a model shown
-/// the same request a third time is a model that cannot, and the third pass
-/// buys a third failure at full price. What an accepted answer costs on the
-/// common path is still one pass.
+// Two, not three: the second pass is the first one with its own defects listed
+// at the top of the request, and a model shown that either fixes the slot or
+// cannot. A third buys a third failure at full price.
 pub const ATTEMPTS: usize = 2;
 
-/// The line every document opens with, saying what kind of thing it is.
-///
-/// Warlock writes this; no pass is asked for it. It is the same in every
-/// document in every repository, it costs no tokens, and it carries no date:
-/// `granted_at` in `.warlock/pacts.toml` already records when the document was
-/// granted, and a date here would make every re-pact a diff.
+// No date in here, though every instinct says to put one: `granted_at` in
+// `.warlock/pacts.toml` already records when the document was granted, and a
+// date in the stamp would make a re-pact that changed no prose a diff.
 pub const STAMP: &str = "<!-- warlock -->\n\
 > Written by a model pass over this directory alone, to be read before its \
 source and to say which source to read. A map, not a specification: check \
 anything you are about to rely on against the files themselves, and where this \
 document and the code disagree, the code is right.\n";
 
-/// What a pass is asked to fill in: every slot of one directory's document
-/// that no earlier pass has filled.
-///
-/// The keys of `files` and `directories` are not the model's to choose. They
-/// are the files it was shown the text of and the child directories whose
-/// documents it was handed, and [`accept`] turns an answer down whose keys are
-/// any other set. A file it was shown only an account of is not among them:
-/// its line was written by the pass that read the directory. The three lists may be empty, and an empty list is left out
-/// of the document rather than rendered as a heading over nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fill {
-    /// What the directory is and does, in a few sentences.
     #[serde(default)]
     pub purpose: String,
-    /// One line per file the pass was shown, keyed by the file's path as the
-    /// request spelled it.
     #[serde(default)]
     pub files: BTreeMap<String, String>,
-    /// One line per child directory whose document the pass was handed, keyed
-    /// by the directory's name.
     #[serde(default)]
     pub directories: BTreeMap<String, String>,
-    /// How the files fit together: what calls what, which way a dependency
-    /// runs, what happens in what order.
     #[serde(default)]
     pub structure: Vec<String>,
-    /// Constraints this directory's own files state as rules.
     #[serde(default)]
     pub rules: Vec<String>,
-    /// Where to look for a given question.
     #[serde(default)]
     pub lookups: Vec<Lookup>,
 }
 
-/// One route into the directory: a question a reader might arrive with, and
-/// the file or child directory — and optionally the name inside it — to open.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lookup {
-    /// The question or topic, in plain words.
     #[serde(rename = "for", default)]
     pub topic: String,
-    /// Exactly one key of [`Fill::files`] or [`Fill::directories`].
     #[serde(default)]
     pub open: String,
-    /// A name that occurs verbatim in that file — or in that directory's
-    /// document — where one narrows the route further.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
 }
 
-/// What the fitting measured about a directory's files that no pass is asked
-/// for: the names each text file declares, read off the file by the language
-/// table.
-///
-/// It used to carry lines and routes written by a pass over each big file.
-/// Those are gone: a file too big to send now arrives as its own declaration
-/// lines ([`languages::skeleton`](crate::languages)), so the directory pass
-/// writes its entry from real code and there is nothing for an earlier pass to
-/// hand forward.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Described {
-    /// The names each text file declares, keyed by path, as the language table
-    /// reads them off the file — a fact warlock measured, not a claim.
     pub declared: BTreeMap<String, Vec<String>>,
 }
 
 impl Fill {
-    /// The answer a stand-in model gives to `request`: every slot filled with
-    /// a line that says it is a stand-in, and nothing else.
-    ///
-    /// For test doubles, in this crate and in any crate implementing [`Agent`](crate::Agent)
-    /// against a fake: the slots are derived from the request exactly as
-    /// [`accept`] will derive them, so what comes back is accepted for any
-    /// request at all. Nothing production-side calls this.
     #[must_use]
     pub fn stub(request: &Request) -> Self {
         let expected = Expected::of(request);
@@ -228,26 +97,12 @@ impl Fill {
         }
     }
 
-    /// This fill as the JSON a pass would answer with.
-    ///
-    /// # Panics
-    ///
-    /// Never in practice: a `Fill` is strings, maps of strings and vectors of
-    /// them, none of which serde can refuse to serialise.
     #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("a fill is plain strings and serialises")
     }
 }
 
-/// The answer a stand-in model gives `request`, in whichever shape the pass
-/// that sent it checks for: a [`Fill`] as JSON where the prompt is this
-/// module's, and plain prose for anything else.
-///
-/// For test doubles in any crate, so a fake need not know what the engine is
-/// asking for to be accepted by it. The prose branch is what a caller with its
-/// own prompt gets — the engine itself now runs only the document pass and its
-/// repair, both of which want a [`Fill`]. Nothing production-side calls this.
 #[must_use]
 pub fn stub_answer(request: &Request) -> String {
     const PROSE: &str = "A stand-in account of some contents, written by a test double that read \
@@ -260,33 +115,20 @@ pub fn stub_answer(request: &Request) -> String {
     }
 }
 
-/// What the pass was shown of one file, as far as checking an answer goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shown<'a> {
-    /// The file's own text: whole, or reduced to its declaration lines.
     Text(&'a str),
-    /// Bytes that are not UTF-8: a name and a size, and nothing to fill.
     NotText,
-    /// Left out for size: a name and a size, and nothing to fill.
     Unsent,
 }
 
-/// The slots one request defines, read off it once.
-///
-/// Built by [`Expected::of`] from the request the pass was actually sent, so
-/// what an answer is checked against is what the model saw and not what is on
-/// disk — the two differ for every file the budget demoted.
 #[derive(Debug)]
 pub struct Expected<'a> {
-    /// Every file in the request, by path, with its size and what was shown
-    /// of it.
     files: BTreeMap<&'a str, (u64, Shown<'a>)>,
-    /// Every child document in the request, by directory name, with its text.
     directories: BTreeMap<&'a str, &'a str>,
 }
 
 impl<'a> Expected<'a> {
-    /// The slots `request` defines.
     #[must_use]
     pub fn of(request: &'a Request) -> Self {
         let files = request
@@ -302,9 +144,6 @@ impl<'a> Expected<'a> {
         Self { files, directories }
     }
 
-    /// The files the pass is asked to write a line for: the ones it was shown
-    /// the text of, in path order. A file it was shown an account of already
-    /// has its line, written by the pass that read the file.
     fn asked(&self) -> impl Iterator<Item = &'a str> + '_ {
         self.files
             .iter()
@@ -312,8 +151,6 @@ impl<'a> Expected<'a> {
             .map(|(path, _)| *path)
     }
 
-    /// The text a symbol in a lookup opening `target` is checked against:
-    /// the file's own text or summary, or the child directory's document.
     fn checkable(&self, target: &str) -> Option<&'a str> {
         if let Some((_, shown)) = self.files.get(target) {
             return match shown {
@@ -324,8 +161,6 @@ impl<'a> Expected<'a> {
         self.directories.get(target).copied()
     }
 
-    /// Whether anything the pass was shown mentions warlock by name — a
-    /// child's document counted without the stamp warlock itself put on it.
     fn mentions_tool(&self) -> bool {
         let in_files = self.files.values().any(|(_, shown)| match shown {
             Shown::Text(text) => names_tool(text),
@@ -338,18 +173,15 @@ impl<'a> Expected<'a> {
                 .any(|text| names_tool(text.strip_prefix(STAMP).unwrap_or(text)))
     }
 
-    /// Whether `target` is a file or child directory of this request.
     fn holds(&self, target: &str) -> bool {
         self.files.contains_key(target) || self.directories.contains_key(target)
     }
 }
 
-/// Whether `text` names the tool, in any case.
 fn names_tool(text: &str) -> bool {
     text.to_ascii_lowercase().contains("warlock")
 }
 
-/// What the pass was shown of `file`.
 fn shown(file: &File) -> Shown<'_> {
     if let Some(kept) = file.kept() {
         return Shown::Text(kept);
@@ -361,84 +193,46 @@ fn shown(file: &File) -> Shown<'_> {
     }
 }
 
-/// One way an answer failed to be a fill for its request.
-///
-/// Each names the slot it is about in the answer's own terms — `files["lib.rs"]`,
-/// `lookups[2].symbol` — because the list of these is what the next pass is
-/// shown, and a defect a model cannot locate is a defect it repeats.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Defect {
-    /// The answer was not a JSON object of the expected shape.
     NotJson {
-        /// What the parser said.
         detail: String,
     },
-    /// A slot the request defines has no entry.
     Missing {
-        /// The slot, as `files["path"]` or `directories["name"]`.
         field: String,
     },
-    /// A slot is empty, or whitespace.
     Empty {
-        /// The slot.
         field: String,
     },
-    /// A slot runs to more than one line.
     Multiline {
-        /// The slot.
         field: String,
     },
-    /// A slot is under its character floor: the account of a file, which has
-    /// to say more than a name and a size did.
     TooShort {
-        /// The slot.
         field: String,
-        /// How many characters it came to.
         chars: usize,
-        /// How many it has to reach.
         minimum: usize,
     },
-    /// A slot is over its character cap.
     TooLong {
-        /// The slot.
         field: String,
-        /// How many characters it came to.
         chars: usize,
-        /// How many it may hold.
         cap: usize,
     },
-    /// A list has more entries than [`LIST_CAP`].
     TooMany {
-        /// The list.
         field: String,
-        /// How many entries it came to.
         count: usize,
-        /// How many it may hold.
         cap: usize,
     },
-    /// A lookup opens something that is neither a file nor a child directory
-    /// of this request.
     UnknownTarget {
-        /// The slot, as `lookups[n].open`.
         field: String,
-        /// What it named.
         open: String,
     },
-    /// A value names warlock — the tool writing the document — when nothing
-    /// the pass was shown does.
     ToolNamed {
-        /// The slot.
         field: String,
     },
-    /// A lookup names a symbol that does not occur in what the pass was shown
-    /// of its target.
     UnverifiedSymbol {
-        /// The slot, as `lookups[n].symbol`.
         field: String,
-        /// The symbol.
         symbol: String,
-        /// The file or directory it was said to be in.
         open: String,
     },
 }
@@ -487,11 +281,6 @@ impl fmt::Display for Defect {
 
 impl std::error::Error for Defect {}
 
-/// The instruction a pass is given, ahead of the skeleton it is to fill.
-///
-/// Short on purpose. Everything about *shape* is enforced by [`accept`] rather
-/// than asked for here, so this says what each slot is for and what the
-/// document is for, and leaves the rest to the checks.
 pub(crate) const PROMPT: &str = "\
 Fill in the JSON object at the end of these instructions, describing the \
 directory whose contents follow them, and output the filled object and nothing \
@@ -541,13 +330,6 @@ An answer is turned down and asked for again when a key is missing or \
 invented, a value is empty or spans lines or runs long, a list is over its cap, \
 or a lookup names a file or symbol that is not here.";
 
-/// The whole prompt for a pass over the request `expected` was read from,
-/// with `rejected` — the defects of the previous attempt, if there was one —
-/// listed ahead of the skeleton.
-///
-/// The skeleton is the object [`accept`] will check the answer against, with
-/// every slot present and empty, so the set of keys is handed to the pass
-/// rather than described to it.
 #[must_use]
 pub fn instructions(expected: &Expected<'_>, rejected: &[Defect]) -> String {
     let mut text = PROMPT.to_owned();
@@ -571,7 +353,6 @@ pub fn instructions(expected: &Expected<'_>, rejected: &[Defect]) -> String {
     text
 }
 
-/// The object a pass is asked to return, with every slot present and empty.
 #[must_use]
 pub fn skeleton(expected: &Expected<'_>) -> String {
     let blank = Fill {
@@ -592,49 +373,17 @@ pub fn skeleton(expected: &Expected<'_>) -> String {
     blank.to_json()
 }
 
-/// What one pass's answer amounts to: the whole of [`accept`]'s reply.
-///
-/// Three cases and not two, because a caller with a pass left to spend wants
-/// something a yes-or-no cannot carry — the fill a *defective* answer amounts
-/// to, which is what the repair pass is shown and asked to mend. Losing it
-/// would mean asking for the whole object again, which is how a pass that left
-/// out one file of eighteen comes back having left out a different one.
-///
-/// [`Accepted::settled`] reads it as the yes-or-no instead, for a caller with
-/// no second pass to spend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Accepted {
-    /// The answer is the document: nothing was wrong with it.
     Filled(Fill),
-    /// The answer is an object, and not the one that was asked for: what it
-    /// amounts to once any patch is written over what came before, and every
-    /// way it still falls short. `defects` is never empty.
     Defective {
-        /// The fill as it stands, entries for files that are not here already
-        /// dropped. What a repair pass is shown.
         fill: Fill,
-        /// Every way it is not what was asked for — all of them, not the
-        /// first, because the list is what the next pass is shown and a pass
-        /// told about one defect at a time is two passes short of being told
-        /// about three.
         defects: Vec<Defect>,
     },
-    /// The answer is not an object of the shape at all, so there is nothing to
-    /// mend and nothing to repair from: the next pass is asked cold.
     Unparsed(Defect),
 }
 
 impl Accepted {
-    /// The document this answer amounts to, or every way it is not one.
-    ///
-    /// The yes-or-no reading, for a caller with no second pass to spend: the
-    /// mended fill of a [`Accepted::Defective`] answer is of no use to
-    /// somebody who is not about to ask for a repair, and an
-    /// [`Accepted::Unparsed`] one is its single defect as a list of one.
-    ///
-    /// # Errors
-    ///
-    /// A non-empty list of [`Defect`]s, for either of the other two cases.
     pub fn settled(self) -> Result<Fill, Vec<Defect>> {
         match self {
             Self::Filled(fill) => Ok(fill),
@@ -644,21 +393,6 @@ impl Accepted {
     }
 }
 
-/// `answer` as a [`Fill`] for `expected`: parsed, written over what `carried`
-/// says came before, and checked.
-///
-/// The one road from a pass's text to a document, and the whole of it. A first
-/// pass carries nothing: `answer` is read as the whole object, entries for
-/// files that are not in `expected` are dropped, and what is left is checked.
-/// A repair pass carries the fill it is mending and the [`Repair`] it was
-/// asked for: `answer` is read as a patch over those slots alone, written onto
-/// that fill, and the result checked exactly as a first answer is. Both roads
-/// end at one [`check`], so a repaired document is held to the same shape as a
-/// document that never needed one.
-///
-/// Dropping an entry for a file that is not here is deliberately not a defect:
-/// no answer could make it right, so it is taken out without spending a pass
-/// on it. That is the one thing done to an answer rather than judged about it.
 #[must_use]
 pub fn accept(
     carried: Option<(&Fill, &Repair)>,
@@ -684,32 +418,15 @@ pub fn accept(
     }
 }
 
-/// The slots a second pass is asked to do again, read off the first pass's
-/// defects: the whole object is not asked for twice.
-///
-/// A first answer that parsed and failed on a slot or two is mostly right,
-/// and asking for all of it again is how a pass that left out one file of
-/// eighteen comes back having left out a different one. So the second pass is
-/// a repair: it is told what was wrong, shown what it wrote for those slots,
-/// and asked for an object holding only them. A keyed slot is re-asked by
-/// key; a list is re-asked whole, because its entries are positional. An entry
-/// for a file that is not in the directory is not re-asked at all — it is
-/// dropped by [`Repair::apply`], since no answer could make it right.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Repair {
-    /// Whether the purpose is asked for again.
     pub purpose: bool,
-    /// The file entries asked for again, by key.
     pub files: Vec<String>,
-    /// The directory entries asked for again, by key.
     pub directories: Vec<String>,
-    /// The lists asked for again, whole: any of `structure`, `rules` and
-    /// `lookups`, in the order their defects were found.
     pub lists: Vec<String>,
 }
 
 impl Repair {
-    /// The repair `defects` call for.
     #[must_use]
     pub fn of(defects: &[Defect]) -> Self {
         let mut repair = Self::default();
@@ -733,8 +450,6 @@ impl Repair {
         repair
     }
 
-    /// Record that the slot `field` names — `purpose`, `files["a"]`,
-    /// `structure[2]`, `lookups[0].symbol` — is to be asked for again.
     fn note(&mut self, field: &str) {
         let (slot, rest) = field.split_once('[').unwrap_or((field, ""));
         match slot {
@@ -760,8 +475,6 @@ impl Repair {
         }
     }
 
-    /// Whether there is anything to repair: a first answer whose only
-    /// defects were entries for files that are not here needs no second pass.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         !self.purpose
@@ -770,17 +483,10 @@ impl Repair {
             && self.lists.is_empty()
     }
 
-    /// Whether the list called `name` is asked for again.
     fn asks_list(&self, name: &str) -> bool {
         self.lists.iter().any(|list| list == name)
     }
 
-    /// The object the repair pass is asked to return: only the slots being
-    /// asked for again, each empty.
-    ///
-    /// # Panics
-    ///
-    /// Never in practice: a map of strings and empty arrays serialises.
     #[must_use]
     pub fn skeleton(&self) -> String {
         let mut object = serde_json::Map::new();
@@ -808,8 +514,6 @@ impl Repair {
             .expect("a map of strings and arrays serialises")
     }
 
-    /// What `previous` held in the slots being asked for again, as JSON, so
-    /// the repair pass can see what it is correcting.
     fn previously(&self, previous: &Fill) -> String {
         let patch = Fill {
             purpose: if self.purpose {
@@ -848,9 +552,6 @@ impl Repair {
         patch.to_json()
     }
 
-    /// `previous` with `patch` written over the slots being asked for again,
-    /// and every entry for a file or directory `expected` does not hold
-    /// dropped.
     #[must_use]
     pub fn apply(&self, previous: &Fill, patch: &Fill, expected: &Expected<'_>) -> Fill {
         let mut fill = previous.clone();
@@ -886,9 +587,6 @@ impl Repair {
     }
 }
 
-/// The whole prompt for a repair pass over the request `expected` was read
-/// from: the defects of `previous`, what it wrote in the slots at fault, and
-/// the skeleton of those slots alone.
 #[must_use]
 pub fn repair_instructions(
     expected: &Expected<'_>,
@@ -920,17 +618,10 @@ pub fn repair_instructions(
     text
 }
 
-/// `answer` parsed as a [`Fill`], from the outermost braces in it.
-///
-/// A pass told to return bare JSON still sometimes wraps it in a code fence or
-/// a sentence, and neither is worth a second pass: the object is found between
-/// the first `{` and the last `}` and read from there. Anything that is not an
-/// object, or is one of the wrong shape, is the one parse defect.
 fn parse(answer: &str) -> Result<Fill, Defect> {
     parse_object(answer)
 }
 
-/// `answer` parsed as a `T`, from the outermost braces in it — see [`parse`].
 fn parse_object<T: serde::de::DeserializeOwned>(answer: &str) -> Result<T, Defect> {
     let start = answer.find('{');
     let end = answer.rfind('}');
@@ -949,7 +640,6 @@ fn parse_object<T: serde::de::DeserializeOwned>(answer: &str) -> Result<T, Defec
     })
 }
 
-/// Every shape check `fill` fails against `expected`.
 fn check(fill: &Fill, expected: &Expected<'_>) -> Vec<Defect> {
     let mut defects = Vec::new();
 
@@ -996,7 +686,6 @@ fn check(fill: &Fill, expected: &Expected<'_>) -> Vec<Defect> {
     defects
 }
 
-/// Every value of `fill` with the slot it sits in, in document order.
 fn values(fill: &Fill) -> Vec<(String, String)> {
     let mut all = vec![("purpose".to_owned(), fill.purpose.clone())];
     all.extend(
@@ -1022,8 +711,6 @@ fn values(fill: &Fill) -> Vec<(String, String)> {
     all
 }
 
-/// The checks on one value: non-empty, one line, at least `minimum` and
-/// under `cap` characters.
 fn line(field: &str, value: &str, minimum: usize, cap: usize, defects: &mut Vec<Defect>) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1054,7 +741,6 @@ fn line(field: &str, value: &str, minimum: usize, cap: usize, defects: &mut Vec<
     }
 }
 
-/// The checks on a keyed slot: exactly the keys in `wanted`, each a line.
 fn keyed(name: &str, given: &BTreeMap<String, String>, wanted: &[&str], defects: &mut Vec<Defect>) {
     for key in wanted {
         if !given.contains_key(*key) {
@@ -1077,7 +763,6 @@ fn keyed(name: &str, given: &BTreeMap<String, String>, wanted: &[&str], defects:
     }
 }
 
-/// The checks on a list slot: under the cap, each entry a line.
 fn listed(name: &str, given: &[String], defects: &mut Vec<Defect>) {
     if given.len() > LIST_CAP {
         defects.push(Defect::TooMany {
@@ -1097,8 +782,6 @@ fn listed(name: &str, given: &[String], defects: &mut Vec<Defect>) {
     }
 }
 
-/// The checks on one lookup: both halves lines, the target here, the symbol
-/// — if there is one — in what was shown of the target.
 fn route(index: usize, lookup: &Lookup, expected: &Expected<'_>, defects: &mut Vec<Defect>) {
     line(
         &format!("lookups[{index}].for"),
@@ -1141,17 +824,6 @@ fn route(index: usize, lookup: &Lookup, expected: &Expected<'_>, defects: &mut V
     }
 }
 
-/// The document for a directory named `name`, laid out from an accepted
-/// `fill`, the request it was accepted against, and what the fitting
-/// `described` on the way — [`STAMP`] first.
-///
-/// One layout, in code: heading, purpose, `## Files` in path order with the
-/// size warlock measured beside each name and the names it declares,
-/// `## Directories`, then whichever of `## Structure`, `## Rules` and
-/// `## Where to look` have anything in them. A file nobody could read gets the
-/// line warlock writes for it, not one a model guessed at — and that is now
-/// only ever a file whose bytes are not text, since anything readable reaches
-/// the pass as at least a sample of itself.
 #[must_use]
 pub fn render(name: &str, fill: &Fill, expected: &Expected<'_>, described: &Described) -> String {
     let mut text = format!("{STAMP}\n# {name}\n\n{}\n", fill.purpose.trim());
@@ -1209,8 +881,6 @@ pub fn render(name: &str, fill: &Fill, expected: &Expected<'_>, described: &Desc
     text
 }
 
-/// A `## {heading}` section of one line per entry, or nothing for an empty
-/// list.
 fn list(text: &mut String, heading: &str, entries: &[String]) {
     if entries.is_empty() {
         return;
@@ -1221,11 +891,6 @@ fn list(text: &mut String, heading: &str, entries: &[String]) {
     }
 }
 
-/// `bytes` as a person reads a size: bytes under a kibibyte, then KB and MB to
-/// one decimal place.
-///
-/// Integer arithmetic throughout, so there is no cast to lose precision in and
-/// the same size prints the same way on every machine.
 fn human(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * KB;
@@ -1248,9 +913,6 @@ mod tests {
 
     use crate::agent::{ChildDocument, File, Request};
 
-    /// A request of the shape a real one has: two files sent whole, one
-    /// reduced to its declaration lines, one over the cap, one that is not
-    /// text, and a child that has described itself.
     fn request() -> Request {
         Request::new("describe", "/repo/crates/engine")
             .with_files([
@@ -1270,7 +932,6 @@ mod tests {
             )])
     }
 
-    /// A fill every check passes.
     fn good() -> Fill {
         let mut fill = Fill::stub(&request());
         fill.purpose = "The engine crate: pacts, hashes and the manifest.".to_owned();

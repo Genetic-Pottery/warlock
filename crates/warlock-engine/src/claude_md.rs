@@ -1,132 +1,29 @@
-//! `CLAUDE.md`: what warlock leaves at a repository root for the agent that
-//! reads it.
-//!
-//! A repository that uses warlock has `WARLOCK.md` files committed beside its
-//! code and a three-colour freshness model, and an agent that wanders in knows
-//! neither. So the fastest route into the codebase — read the documents, then
-//! the source — goes unused, and a stale document gets quoted as if it were
-//! current. This module writes the one file that fixes that: a short account of
-//! what warlock is, what a `WARLOCK.md` is, what the colours mean, and the
-//! instruction to read the documents first.
-//!
-//! **Warlock owns a block in that file, not the file.** A `CLAUDE.md` is where
-//! a repository keeps its own standing instructions, and warlock is not the
-//! only thing with something to say there, so everything here is bracketed by
-//! [`BEGIN`] and [`END`] and [`splice`] is the only thing that touches it: an
-//! absent block is added, a present block is replaced where it stands, and
-//! every byte outside the two markers survives byte for byte. That
-//! is also what makes a second run a no-op — the replacement is the same
-//! bytes as the block already there — so `warlock init` is safe to run again
-//! without a reader having to remember whether they ran it before.
-//!
-//! The write is the crate's one write idiom, [`temp_file_name`] +
-//! [`write_and_sync`] + [`fs::rename`], for the reason `Manifest::save` and
-//! `write_document` use it: the file being replaced is somebody's own, so it
-//! must be the whole old file or the whole new one and never a prefix of
-//! either, and no temporary may be left behind on either way out.
-//!
-//! Nothing else happens here. No `.warlock/`, no manifest, no
-//! `.warlockignore`, no `WARLOCK.md`, and no model pass: this is scaffolding a
-//! reader can run in a repository that has never been pacted, and it must not
-//! quietly enrol them in anything.
-
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{temp_file_name, write_and_sync};
 
-/// The file warlock writes its orientation into, at the repository root.
-///
-/// The name is not a warlock invention, which is the whole reason this module
-/// splices rather than writes: the file may well already be there with
-/// somebody else's words in it.
-///
-/// `CLAUDE.md` and not `AGENTS.md`, which this was, for one mechanical reason:
-/// `CLAUDE.md` is loaded at the start of every session, and `AGENTS.md` is not
-/// read at all. Orientation nothing loads is not orientation, and warlock is
-/// not in a position to argue the point — a repository that wants the
-/// cross-tool file too can keep one and reference this from it. That makes the
-/// name a fact about what reads the file rather than a preference, and it is
-/// the thing to check first if it ever needs changing again.
+// `CLAUDE.md` and not `AGENTS.md`, which this was, for one mechanical reason:
+// `CLAUDE.md` is loaded at the start of every session and `AGENTS.md` is not
+// read at all. Orientation nothing loads is not orientation. The name is a fact
+// about what reads the file rather than a preference, so that is the thing to
+// re-check before changing it again.
 const FILE: &str = "CLAUDE.md";
 
-/// The opening marker of warlock's block.
-///
-/// An HTML comment because that is the one thing every Markdown renderer
-/// agrees to swallow: the marker is invisible to a human reading the rendered
-/// file and plain to anything reading the source, which is what a delimiter
-/// somebody else's file has to carry has to be.
 const BEGIN: &str = "<!-- warlock:begin -->";
 
-/// The closing marker of warlock's block. See [`BEGIN`].
 const END: &str = "<!-- warlock:end -->";
 
-/// Everything warlock has to say about itself to somebody else's agent, and
-/// the only thing this crate ever writes into a `CLAUDE.md`.
-///
-/// Text is code here, exactly as the prompts in [`pact`](crate::pact) are code:
-/// no template file, no configuration key, no per-project override. Changing
-/// what warlock tells a reader's agents is a change to this string, reviewed in
-/// a diff like everything else.
-///
-/// # Why there is no guidance here on *writing* a `WARLOCK.md`
-///
-/// The obvious next section — how to author a document, what a good one
-/// contains — is deliberately absent, and the reason is mechanical rather than
-/// stylistic. A pacting pass runs headless with no tools, its own system prompt
-/// in place of the CLI's, and its whole request on stdin: it cannot read this
-/// file, and is never asked to. Guidance here would therefore be a second
-/// prompt that no pass ever obeys, free to drift away from the real one in
-/// [`pact`](crate::pact) with nothing to catch the drift. The prompts stay
-/// code, and this file stays orientation for the reader's own agents.
-///
-/// # What it has to cover
-///
-/// What warlock is; that a `WARLOCK.md` is a per-directory document written by
-/// a model and committed beside the code; that the three colours are unpacted,
-/// stale and fresh, with stale mechanical and fresh only ever granted; that the
-/// subtree hash is the trigger and not a judgement; and the load-bearing
-/// instruction, which is to read the documents first and to treat a stale one
-/// as possibly behind the code it describes.
-///
-/// Then what editing one of those documents costs, because an agent that fixes
-/// a `WARLOCK.md` in passing will otherwise be surprised by the consequence: a
-/// document is an ordinary file in the directory it describes, so it is inside
-/// that directory's [`subtree_hash`](crate::subtree_hash), and saving an edit
-/// restales the directory there and then. The road back is a pass and nothing
-/// else — `r` in warlock's tree — because fresh is only ever granted, and an
-/// agent that knows this can say the directory is owed a pass instead of
-/// treating the yellow row it just caused as a fault.
-///
-/// Then scopes and sigils, the vocabulary of who a piece of work belongs to: a
-/// pacted directory may carry one scope, recorded in `.warlock/pacts.toml`
-/// beside the grant and shown in the tree; a scope covers everything beneath it
-/// until a nearer one overrides it, so an outer scope is a default rather than
-/// a second gate, and a directory with no scope over it is open to anyone; the
-/// operator may hold several sigils and any one of them opens a matching scope,
-/// which makes access a membership test rather than an expression to evaluate;
-/// `warlock config` prints what is held, and holding nothing means
-/// unrestricted; a scope is a term of the pact, so an unpacted directory cannot
-/// carry one and un-pacting removes one. Its own load-bearing instruction is to
-/// look at the scopes of what a change would touch before making it and to say
-/// plainly when the work crosses a scope the operator does not hold — narrowing
-/// it or naming the sigil it wants, never refusing, blocking or editing around
-/// it.
-///
-/// Nothing here claims that warlock enforces any of that, or that the agent
-/// should: nothing in this workspace matches a sigil against a scope, and a
-/// file that promises a wall warlock does not build is worse than no file,
-/// because the first person to sail through it learns the document lies.
-///
-/// It opens at heading level two: warlock owns a section of a file whose title,
-/// if it has one, belongs to whoever created it.
-///
-/// It is hard wrapped, unlike the prompts, and the source lines below are the
-/// lines that land on disk. A prompt is one stream to a model and wraps
-/// wherever the literal is convenient; this is a file somebody commits, reviews
-/// and diffs, so a changed sentence should be a changed line rather than a
-/// changed paragraph.
+// The obvious next section — how to author a good `WARLOCK.md` — is missing on
+// purpose. A pacting pass runs headless with its own system prompt and its whole
+// request on stdin: it never reads this file. Guidance here would be a second
+// prompt no pass obeys, free to drift from the real one in `pact` with nothing
+// to catch the drift.
+//
+// Hard wrapped, unlike the prompts, and these source lines are the lines that
+// land on disk: this is a file somebody commits and reviews, so a changed
+// sentence should be a changed line and not a reflowed paragraph.
 const BODY: &str = "\
 ## Warlock
 
@@ -255,44 +152,10 @@ the work to what they hold or name the sigil the work wants. Never refuse the
 work, never block it, and never quietly edit around the boundary: saying what is
 being crossed is the whole of the job here.";
 
-/// Warlock's block, markers and all, as it is written into a `CLAUDE.md`.
-///
-/// One place assembles it so that what is appended to a file without a block
-/// and what replaces the block in a file that has one cannot differ — that
-/// equality is exactly why running twice changes nothing.
-///
-/// A blank line inside each marker, because a Markdown heading on the line
-/// straight after an HTML comment is not a heading to every renderer.
 fn section() -> String {
     format!("{BEGIN}\n\n{BODY}\n\n{END}")
 }
 
-/// `existing`, with warlock's block added or brought up to date.
-///
-/// Pure, and the whole of the file-editing policy. Two cases:
-///
-/// * **No block.** The block is appended, after a blank line, with the file's
-///   own text left exactly as it was in front of it. Empty text becomes the
-///   block alone.
-/// * **A block.** Everything from [`BEGIN`] to [`END`] inclusive is replaced,
-///   in place. Not appended a second time: the point of the markers is that a
-///   file gains warlock's section once, however many times `warlock init` is
-///   run.
-///
-/// Every byte outside the markers is carried through untouched — leading text,
-/// trailing text, whitespace, line endings and all. This is somebody else's
-/// file and warlock is a guest in it.
-///
-/// Splicing twice is splicing once: the second call finds the block the first
-/// one wrote and replaces it with [`section`] again, which is the same bytes,
-/// and touches nothing else. Tests pin that from both starting points.
-///
-/// A [`BEGIN`] with no [`END`] after it is treated as a block that runs to the
-/// end of the file, which is what a save interrupted half way through leaves.
-/// Appending in that case would put a second [`BEGIN`] in the file, and the run
-/// after *that* would take the first marker with the second's [`END`] and
-/// swallow whatever the reader had written in between — a worse failure than
-/// re-ending a section warlock itself wrote.
 fn splice(existing: &str) -> String {
     let section = section();
 
@@ -323,27 +186,6 @@ fn splice(existing: &str) -> String {
     spliced
 }
 
-/// Write `<root>/CLAUDE.md`, creating it or bringing warlock's section in it up
-/// to date.
-///
-/// `root` is the repository root — [`repository_root`](crate::repository_root)
-/// is what finds it, and it is passed in rather than resolved here so that this
-/// function writes where it is told and nowhere else, and so its tests need no
-/// `.git/`.
-///
-/// Exactly one file is written. No `.warlock/`, no manifest, no
-/// `.warlockignore`, no `WARLOCK.md`, and no model pass: a reader running this
-/// in a repository that has never been pacted gets a `CLAUDE.md` and no
-/// enrolment in anything.
-///
-/// What happens to a file that is already there is [`splice`]'s policy in full:
-/// warlock's block is replaced where it stands and every other byte survives,
-/// so a second run leaves the file byte-identical to the first.
-///
-/// The write goes through a temporary in the same directory and a rename over
-/// the target, so a reader's own `CLAUDE.md` is never seen half-replaced and no
-/// temporary is left behind on either the success or the failure path.
-///
 /// ```
 /// use warlock_engine::{Written, write_claude_md};
 ///
@@ -361,15 +203,6 @@ fn splice(existing: &str) -> String {
 /// assert_eq!(std::fs::read_to_string(second.path())?, text);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-///
-/// # Errors
-///
-/// * [`Error::Read`] if a `CLAUDE.md` is there but cannot be read. A missing
-///   file is not an error; it is the create case.
-/// * [`Error::NotText`] if it is there and is not UTF-8. Nothing is written:
-///   bytes this crate cannot reason about are not bytes to rewrite blind.
-/// * [`Error::Write`] if the temporary cannot be written or the rename fails,
-///   naming `<root>/CLAUDE.md` rather than the temporary.
 pub fn write_claude_md(root: impl AsRef<Path>) -> Result<Written, Error> {
     let root = root.as_ref();
     let target = root.join(FILE);
@@ -421,35 +254,18 @@ pub fn write_claude_md(root: impl AsRef<Path>) -> Result<Written, Error> {
     })
 }
 
-/// What a write of `CLAUDE.md` did, and to which file.
-///
-/// The distinction is worth a type because it is the whole of what a front end
-/// has to tell a reader afterwards: a file appeared, or a file they already had
-/// gained warlock's section. Both carry the path, since the caller passed a
-/// root and should not have to know the file name to name what happened.
-///
-/// No [`Display`](fmt::Display) impl on purpose: the wording of "created" or
-/// "updated" is the front end's, and this is the fact underneath it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Written {
-    /// There was no `CLAUDE.md`, and now there is one.
     Created {
-        /// The file that was written.
         path: PathBuf,
     },
-    /// There was one already, and warlock's section in it is now current.
-    /// Everything outside warlock's markers is exactly as it was — which
-    /// includes the case where the section was already current and the file is
-    /// byte-identical.
     Updated {
-        /// The file that was written.
         path: PathBuf,
     },
 }
 
 impl Written {
-    /// The `CLAUDE.md` that was written, either way.
     #[must_use]
     pub fn path(&self) -> &Path {
         match self {
@@ -458,37 +274,18 @@ impl Written {
     }
 }
 
-/// Everything that can stop a `CLAUDE.md` being written, each one naming the
-/// file.
-///
-/// Hand-rolled like the rest of this crate's errors, and every variant prints
-/// as one line including its cause, because the front end that shows these has
-/// one line to show them in.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// A `CLAUDE.md` is there but could not be read. A missing file is not in
-    /// here: that is the create case, not a failure.
     Read {
-        /// The file that could not be read.
         path: PathBuf,
-        /// What the filesystem said.
         source: std::io::Error,
     },
-    /// A `CLAUDE.md` is there and is not UTF-8, so warlock's section cannot be
-    /// spliced into it without guessing at bytes it cannot read. Nothing is
-    /// written.
     NotText {
-        /// The file that is not text.
         path: PathBuf,
     },
-    /// The file could not be written: the temporary failed, or the rename over
-    /// the target did. Nothing is left half-written and no temporary is left
-    /// behind.
     Write {
-        /// The file that was being written — the target, never the temporary.
         path: PathBuf,
-        /// What the filesystem said.
         source: std::io::Error,
     },
 }
@@ -527,19 +324,6 @@ mod tests {
 
     use super::{BEGIN, BODY, END, Error, FILE, Written, splice, write_claude_md};
 
-    /// This repository's own `CLAUDE.md` carries the very block [`BODY`]
-    /// writes, and this is what keeps the two the same.
-    ///
-    /// Warlock writes a project's `CLAUDE.md`, and this project is one of them:
-    /// the file at the workspace root has warlock's markers in it and warlock's
-    /// text between them. Nothing but a test can hold that true, because the
-    /// two copies are edited by hand in different files and a change to either
-    /// alone is invisible — the constant compiles, the markdown renders, and
-    /// the repository quietly starts telling its readers something its own tool
-    /// no longer says. Failing here is the reminder to change both.
-    ///
-    /// The root is reached from `CARGO_MANIFEST_DIR` rather than discovered,
-    /// which is exact for a workspace member and needs no git.
     #[test]
     fn this_repositorys_own_claude_md_holds_exactly_what_warlock_writes() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -561,8 +345,6 @@ mod tests {
         );
     }
 
-    /// The entries of a directory, sorted, as strings: what a test asserting
-    /// "one file and nothing else" compares against.
     fn listing(dir: &Path) -> Vec<String> {
         let mut names = fs::read_dir(dir)
             .expect("lists the directory")
@@ -625,13 +407,6 @@ mod tests {
         }
     }
 
-    /// `text` with every run of whitespace flattened to one space.
-    ///
-    /// Every phrase test below goes through this. What they assert is that a
-    /// claim is in the body, and a claim does not stop being there because the
-    /// paragraph around it was rewrapped — but a `contains` over the raw
-    /// constant fails on exactly that, which made a handful of these tests
-    /// break on edits that changed no words at all.
     fn flat(text: &str) -> String {
         text.split_whitespace().collect::<Vec<_>>().join(" ")
     }
@@ -848,10 +623,6 @@ mod tests {
         assert_eq!(listing(repo.path()), [FILE], "and no temporary behind");
     }
 
-    /// The body as brief 08 shipped it: documents and the three colours, and
-    /// nothing about scopes. Kept verbatim rather than derived from [`BODY`],
-    /// because the point of the test below is that a file written by the *old*
-    /// warlock is brought forward by the new one.
     const BRIEF_08_BODY: &str = "\
 ## Warlock
 
@@ -967,8 +738,6 @@ There is deliberately no fourth colour.";
         assert!(error.to_string().contains(FILE), "{error}");
     }
 
-    /// Chmod cannot deny root anything, so the test checks the fixture really
-    /// is unwritable before asserting on it and steps aside when it is not.
     #[cfg(unix)]
     #[test]
     fn an_unwritable_directory_is_an_error_naming_the_file_and_leaves_nothing() {

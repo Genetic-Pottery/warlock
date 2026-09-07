@@ -1,78 +1,13 @@
-//! The staleness decision: manifest entry plus computed hash, in; colour, out.
-//!
-//! Section 6 of the design doc splits the job in two — the hash is the trigger,
-//! an AI is the judge — and this module is the whole of the trigger's verdict.
-//! It has no filesystem in it, no clock and no I/O: it takes what the manifest
-//! said about a node ([`PactEntry`], or its absence) and what the content at
-//! that node hashes to *now* ([`subtree_hash`](crate::subtree_hash)), and
-//! answers with one of the three colours. That is why it is a function of two
-//! values rather than a method on anything: the two inputs come from different
-//! places, on different schedules, and the rule that combines them is small
-//! enough to read in one sitting and to test exhaustively.
-//!
-//! The rule, in full:
-//!
-//! | manifest entry | granted hash | verdict |
-//! | -------------- | ------------ | ------- |
-//! | absent | — | [`Unpacted`] |
-//! | present | none recorded | [`PactedStale`] |
-//! | present | differs from the computed hash | [`PactedStale`] |
-//! | present | equals the computed hash | [`PactedFresh`] |
-//!
-//! Two of those rows collapse into one idea, and it is the one worth stating
-//! out loud: **never judged and judged-against-something-else are the same
-//! answer.** Section 5 leaves no room for a fourth "unknown" colour, because
-//! unjudged *is* stale — staleness is mechanical and needs nobody's opinion,
-//! whereas freshness has to be granted. Hence the asymmetry here: every path
-//! through this function returns stale except the single one where a hash
-//! somebody recorded matches a hash just computed.
-//!
-//! Freshness is granted where a pass has just run, and nowhere else. Once a
-//! subtree operation has written every document it was going to, it hashes each
-//! directory it described and records that hash, which is the only code in this
-//! workspace that writes a `granted_hash`. Two operations reach it —
-//! [`pact_subtree`], which describes every directory at and below the selected
-//! one, and [`refresh_subtree`], which describes only the stale ones — and
-//! neither re-grants a node without describing it first, so a directory edited
-//! after its pact stays [`PactedStale`] until something runs a pass on it again.
-//!
-//! [`refresh_subtree`] is where this verdict does work of its own rather than
-//! colouring a tree on screen: it asks this function about every directory in
-//! the subtree, and the answer is stale-or-skip. [`PactedFresh`] is passed over,
-//! entry and grant carried through untouched; anything else — unpacted, never
-//! judged, judged against other content — is described and granted afresh. A
-//! directory whose hash fails there has nothing to compare a grant against, and
-//! by the paragraph above that is the stale side of the same rule, so it is
-//! described too; see [`refresh_subtree`] for what that costs when the hash goes
-//! on failing.
-//!
-//! The tests below reach [`PactedFresh`] a third way, by writing a hash into an
-//! entry by hand, because this function's job is the comparison and not where
-//! either side of it came from.
-//!
-//! [`pact_subtree`]: crate::pact_subtree
-//! [`refresh_subtree`]: crate::refresh_subtree
-//!
-//! [`Unpacted`]: NodeState::Unpacted
-//! [`PactedStale`]: NodeState::PactedStale
-//! [`PactedFresh`]: NodeState::PactedFresh
+//! The trigger half of the freshness decision: no filesystem, no clock, no I/O,
+//! so the rule that combines a manifest entry with a computed hash can be read
+//! and tested on its own.
 
 use crate::{NodeState, PactEntry};
 
-/// The colour of a node, from its manifest entry and the hash of its content.
-///
-/// `entry` is the node's `[[pact]]` table, or `None` if the manifest has no
-/// entry for it. `computed_hash` is what everything at and below the node
-/// hashes to right now, in the same spelling
-/// [`subtree_hash`](crate::subtree_hash) returns and
-/// [`PactEntry::granted_hash`] stores — the comparison is a plain string
-/// equality, and this function neither computes nor validates either side.
-///
 /// Total and infallible on purpose. Hashing can fail; deciding cannot. A caller
-/// whose hash failed already knows what to do — the content it would have
-/// compared against is unknown, so the node is [`PactedStale`] — and pushing
-/// that case in here as a `Result` would only let it be forgotten somewhere
-/// else. See the [module docs](self) for the four-case table this implements.
+/// whose hash failed already knows the answer — the content it would compare
+/// against is unknown, which is the stale side of this rule — and taking a
+/// `Result` here would only let that case be forgotten somewhere else.
 ///
 /// ```
 /// use warlock_engine::{NodeState, PactEntry, decide_state};
@@ -90,17 +25,14 @@ use crate::{NodeState, PactEntry};
 /// assert_eq!(decide_state(Some(&granted), "abc123"), NodeState::PactedFresh);
 /// # Ok::<(), warlock_engine::manifest::Error>(())
 /// ```
-///
-/// [`PactedStale`]: NodeState::PactedStale
 #[must_use]
 pub fn decide_state(entry: Option<&PactEntry>, computed_hash: &str) -> NodeState {
     let Some(entry) = entry else {
         return NodeState::Unpacted;
     };
-    // `None` and `Some(other)` land on the same arm deliberately: an entry with
-    // no grant is not a special case to be handled elsewhere, it is just an
-    // entry whose grant does not match, and there is no colour for it beyond
-    // stale.
+    // `None` and `Some(other)` share an arm deliberately: never judged and
+    // judged against other content are the same answer, and there is no fourth
+    // colour for the first of them.
     match entry.granted_hash() {
         Some(granted) if granted == computed_hash => NodeState::PactedFresh,
         Some(_) | None => NodeState::PactedStale,
@@ -115,18 +47,14 @@ mod tests {
     use super::decide_state;
     use crate::{Manifest, NodeState, PactEntry, manifest_path};
 
-    /// A plausible computed hash: the shape [`subtree_hash`] returns, though
-    /// nothing here parses it — the comparison is string equality and the value
-    /// is opaque.
-    ///
-    /// [`subtree_hash`]: crate::subtree_hash
+    /// The shape [`subtree_hash`](crate::subtree_hash) returns, though nothing
+    /// here parses it: the comparison is string equality and the value is
+    /// opaque.
     const COMPUTED: &str = "9f2c0e1a4b6d8f0213456789abcdef0123456789abcdef0123456789abcdef01";
 
-    /// The same length and alphabet, different content: what a node hashes to
-    /// after somebody edited a file under it.
+    /// The same length and alphabet, different content.
     const OTHER: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    /// An entry for a module that has never been judged.
     fn unjudged() -> PactEntry {
         PactEntry::new(
             ".",
@@ -142,8 +70,8 @@ mod tests {
         let judged_differing = unjudged().with_grant(OTHER, "2026-08-19T07:32:00Z");
         let never_judged = unjudged();
 
-        // Written as a table so the rule is visible as a whole: the one fresh
-        // row is the only one where a recorded hash equals a computed one.
+        // A table so the rule is visible as a whole: the one fresh row is the
+        // only one where a recorded hash equals a computed one.
         let cases = [
             (None, NodeState::Unpacted, "no entry at all"),
             (
@@ -244,8 +172,8 @@ mod tests {
         );
     }
 
-    /// Write `text` to `<root>/.warlock/pacts.toml` directly, the way a person
-    /// with an editor would.
+    /// Directly, the way a person with an editor would: not through
+    /// `Manifest::save`.
     fn hand_write(root: &Path, text: &str) {
         let path = manifest_path(root);
         fs::create_dir_all(path.parent().expect("the manifest has a directory"))

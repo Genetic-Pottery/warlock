@@ -1,52 +1,6 @@
-//! The subtree hash: what "changed" means, mechanically.
-//!
-//! Section 6 of the design doc puts a hash at the trigger and a human (or an
-//! AI) at the judgement: Warlock never decides whether a document is *right*,
-//! it only decides whether the content it was granted against is still the
-//! content on disk. [`subtree_hash`] is that mechanical half — one digest over
-//! everything at and below a directory, to be compared against the
-//! `granted_hash` a pact recorded.
-//!
-//! Everything about it is chosen so that two clones of the same commit, on two
-//! machines, at two absolute paths, agree:
-//!
-//! * **The input is the files, and only the files.** For each file, its path
-//!   relative to the hashed directory — forward slashes, the same spelling the
-//!   manifest stores paths in — followed by that file's bytes. Nothing else
-//!   goes in: no mtime, no permissions, no inode or device number, no absolute
-//!   path, no directory entry the filesystem happened to hand back first.
-//! * **Order is the sorted relative paths**, not the order the walk produced
-//!   them in, so the digest cannot depend on how a filesystem enumerates a
-//!   directory.
-//! * **The same rules as the walk in [`load`](crate::load)**: the [`ignore`]
-//!   crate, so `.gitignore` at every level, hidden entries and global excludes
-//!   are honoured as git honours them, `.warlock/` is pruned by name, and
-//!   symlinks are never followed, so a symlinked directory cycle terminates
-//!   instead of hanging.
-//! * **And the repository's own `.warlockignore`**, read by
-//!   that same crate as one more ignore file, so a directory of images or a
-//!   notebook the repository excluded contributes no path and no byte. A
-//!   directory that is itself excluded hashes as an empty directory does —
-//!   selecting it directly is not a way round the rules, which is why the
-//!   digest starts with a check the walker cannot make for its own root.
-//!
-//! `.warlockignore` is not otherwise special: it is an ordinary file in the
-//! walk, hashed like any other, at whatever level it sits. So editing the
-//! rules restales twice over — the set of covered files changed, and the bytes
-//! of a covered file changed — and adopting or removing one restales every
-//! directory whose covered content it moves, all at once. That is the intended
-//! consequence rather than a bug: the content a document was granted against
-//! is not the content on disk any more.
-//!
-//! And one rule that is a decision rather than a detail: **a file that cannot
-//! be read is an error, never a skip.** A file contributing nothing when
-//! unreadable would hash exactly as it would if it had been deleted, so a
-//! subtree granted while that file was absent could come back fresh on a run
-//! where it merely could not be opened — a false green, the one outcome the
-//! design says must be earned. Hashing the error text instead would make the
-//! digest depend on the operating system's wording and break the property that
-//! a fresh clone hashes the same. So the whole call fails, and it is the
-//! caller's business what to do about it.
+//! Two clones of one commit, on two machines, at two absolute paths, must
+//! agree: nothing but the sorted relative paths and the file bytes goes into
+//! the digest.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -59,45 +13,19 @@ use ignore::WalkBuilder;
 use crate::ignores;
 use crate::{manifest, to_manifest_path};
 
-/// The directory holding Warlock's own bookkeeping, never part of a hash.
 const MANIFEST_DIR: &str = ".warlock";
 
-/// Domain separation for the digest, via blake3's key derivation.
-///
-/// It costs nothing in the input and buys two things: this hash can never
-/// collide with a plain `blake3` of the same bytes computed for some other
-/// purpose, and the `v1` is where a future change to what goes into the digest
-/// announces itself, instead of silently making every recorded grant wrong in
-/// a way that still looks like a hash.
-///
-/// The rule that governs it: **the version moves when a repository that
-/// changed nothing would hash differently.** Not when this file changes, and
-/// not when the rules gain a source — teaching the walk to read
-/// `.warlockignore` is inert for a repository that has none, since no rules
-/// are added, the walk yields the same files and the digest is byte-identical,
-/// so it does not move. Bumping it there would restale every repository in the
-/// world for a feature none of them opted into.
+// The rule for the `v1` below: the version moves when a repository that changed
+// nothing would hash differently, and not otherwise. Not when this file
+// changes, and not when the walk gains a source of rules — teaching it to read
+// `.warlockignore` adds no rules to a repository that has none, so the same
+// files go in and the digest is byte-identical. Moving it there would restale
+// every repository in the world over a feature none of them opted into.
+//
+// The key derivation is domain separation: this digest cannot collide with a
+// plain blake3 of the same bytes taken for some other purpose.
 const HASH_CONTEXT: &str = "warlock subtree hash v1 2026-08-19";
 
-/// The hash of everything at and below `dir`, as lowercase hex.
-///
-/// The digest covers every file the ignore rules keep, at any depth, including
-/// `dir`'s own `WARLOCK.md` — so editing any file at or below `dir`, adding
-/// one, deleting one or renaming one changes the result, and editing a file
-/// inside a gitignored, `.warlockignore`d or `.warlock/` directory does not.
-/// Directories themselves are not part of the input, so an empty directory is
-/// invisible to the hash.
-///
-/// `dir` itself is checked against `.warlockignore` before anything is read.
-/// A directory the repository excluded hashes as an empty one does, whoever
-/// asked and however they got here: being handed to this function directly is
-/// not a way past the rules.
-///
-/// The returned string is what a [`PactEntry::granted_hash`] holds: 64 hex
-/// characters, opaque to everything else, compared only for equality.
-///
-/// [`PactEntry::granted_hash`]: crate::PactEntry::granted_hash
-///
 /// ```
 /// use std::fs;
 /// use warlock_engine::subtree_hash;
@@ -112,27 +40,13 @@ const HASH_CONTEXT: &str = "warlock subtree hash v1 2026-08-19";
 /// assert_ne!(before, subtree_hash(dir.path())?);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-///
-/// # Errors
-///
-/// * [`Error::Walk`] if the tree cannot be walked — `dir` is not there, or a
-///   directory in it cannot be listed, or an entry vanished mid-walk, or a
-///   `.warlockignore` governing it cannot be parsed. An unusable rule file is
-///   never read as "no rules": content the reader excluded is not hashed on
-///   the strength of a file this could not understand.
-/// * [`Error::Read`] if a file the walk found cannot be read, naming that file.
-/// * [`Error::Path`] if a file's path has no relative, forward-slash, UTF-8
-///   form, and so cannot be part of a portable digest.
-///
-/// Any of them means no hash at all. A partial digest is never returned.
 pub fn subtree_hash(dir: impl AsRef<Path>) -> Result<String, Error> {
     let dir = dir.as_ref();
     let mut hasher = blake3::Hasher::new_derive_key(HASH_CONTEXT);
 
-    // The walker will not apply the rules to the root it is given, so ask
-    // separately, first, and hash nothing at all if the answer is yes. An
-    // excluded directory then hashes exactly as an empty one does, which is
-    // what it is as far as Warlock is concerned.
+    // A walker never applies the rules to the root it was handed, so ask
+    // separately: without this, selecting an excluded directory directly would
+    // hash the very content the repository asked Warlock to keep out.
     if ignores::is_ignored(dir).map_err(|source| Error::Walk { source })? {
         return Ok(hasher.finalize().to_hex().to_string());
     }
@@ -144,10 +58,16 @@ pub fn subtree_hash(dir: impl AsRef<Path>) -> Result<String, Error> {
         hasher.update(&length(relative.len()).to_le_bytes());
         hasher.update(relative.as_bytes());
 
-        // Read whole rather than streamed: the length has to go in ahead of
-        // the bytes, and a length taken from metadata is a length that can
-        // disagree with what is then read. Source trees are the scale this
-        // works at.
+        // Read whole rather than streamed: the length goes in ahead of the
+        // bytes, and a length taken from metadata can disagree with what is
+        // then read.
+        //
+        // An unreadable file fails the whole hash rather than being skipped. A
+        // skipped file contributes exactly what a deleted one does, so a
+        // subtree granted while it was absent would come back fresh on a run
+        // where it merely could not be opened — a false green. Hashing the
+        // error text instead would make the digest depend on the operating
+        // system's wording.
         let bytes = fs::read(&path).map_err(|source| Error::Read {
             path: path.clone(),
             source,
@@ -159,24 +79,18 @@ pub fn subtree_hash(dir: impl AsRef<Path>) -> Result<String, Error> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-/// Every file at or below `dir` that survives the ignore rules, keyed by its
-/// path relative to `dir` in the manifest's forward-slash spelling.
-///
 /// A [`BTreeMap`] because the key order *is* the hash order: whatever sequence
-/// the walker produced is thrown away here, and that is what keeps the digest
+/// the walker produced is thrown away here, which is what keeps the digest
 /// independent of the filesystem.
 fn files_under(dir: &Path) -> Result<BTreeMap<String, PathBuf>, Error> {
     let walker = WalkBuilder::new(dir)
-        // The same three rules the loader walks by, for the same reasons: a
-        // symlinked cycle has to terminate, a fixture with a `.gitignore` and
-        // no `.git` still has to be ignored properly, and `.warlock/` is
-        // Warlock's own bookkeeping rather than content of the module.
+        // The same three settings the loader walks by, for the same reasons: a
+        // symlinked cycle has to terminate, a fixture carrying a `.gitignore`
+        // and no `.git` still has to be ignored, and `.warlock/` is Warlock's
+        // own bookkeeping rather than content of the module.
         .follow_links(false)
         .require_git(false)
         .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR))
-        // The repository's own exclusions, read by the same crate that reads
-        // `.gitignore` and with the same semantics — nesting, negation,
-        // anchoring, directory-only — because it is the same matcher.
         .add_custom_ignore_filename(ignores::FILENAME)
         .build();
 
@@ -184,18 +98,17 @@ fn files_under(dir: &Path) -> Result<BTreeMap<String, PathBuf>, Error> {
     for entry in walker {
         let entry = entry.map_err(|source| Error::Walk { source })?;
         // An ignore file the walker could not use is reported beside the
-        // directory it sits in rather than in place of it, and taking that as
-        // "no rules" would hash the very content the repository excluded. So
-        // it is promoted to the failure it is, naming the file and the line.
+        // directory it sits in rather than in place of it. Taking that as "no
+        // rules" would hash the content the repository excluded, so it is
+        // promoted to the failure it is.
         if let Some(source) = entry.error() {
             return Err(Error::Walk {
                 source: source.clone(),
             });
         }
-        // Regular files only. With `follow_links(false)` a symlink reports as
-        // a symlink, so links are neither followed nor hashed as whatever they
-        // point at — a link's target is already hashed if it is inside the
-        // subtree, and is not the subtree's content if it is not.
+        // With `follow_links(false)` a symlink reports as a symlink, so this
+        // drops it: its target is already hashed if it is inside the subtree,
+        // and is not the subtree's content if it is not.
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
         }
@@ -209,47 +122,29 @@ fn files_under(dir: &Path) -> Result<BTreeMap<String, PathBuf>, Error> {
     Ok(files)
 }
 
-/// A byte count as it goes into the digest.
-///
-/// Saturating rather than fallible or panicking: `usize` is at most 64 bits on
-/// every target this builds for, so the clamp is unreachable, and a hash
-/// function is the last place to introduce a panic over a case that cannot
-/// happen.
+/// Saturating rather than fallible or panicking: the clamp is unreachable on
+/// every target this builds for, and a hash function is the last place to
+/// introduce a panic over a case that cannot happen.
 pub(crate) fn length(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
-/// Everything that can stop a subtree being hashed.
-///
-/// Hand-rolled like [`manifest::Error`] and [`load::Error`](crate::load::Error):
-/// three variants do not pay for an error-handling dependency, and each one
-/// names the path it happened to so a caller can say which file to go and look
-/// at.
+/// Hand-rolled like [`manifest::Error`] rather than pulling in an
+/// error-handling dependency for three variants.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// The tree could not be walked: the directory is not there, cannot be
-    /// listed, or something vanished from under the walk.
     Walk {
-        /// What the walker said, including which path it was on.
         source: ignore::Error,
     },
-    /// A file was found but could not be read. Deliberately fatal: skipping it
-    /// would hash exactly like deleting it.
     Read {
-        /// The file that could not be read.
         path: PathBuf,
-        /// What the filesystem said.
         source: std::io::Error,
     },
-    /// A file's path has no relative, forward-slash, UTF-8 form, so it cannot
-    /// contribute a portable name to the digest.
     Path {
-        /// The path that could not be named.
         path: PathBuf,
-        /// Why it could not be. Boxed because a manifest error carries a
-        /// parser error inside it, and every other variant here is a path and
-        /// an errno — there is no reason for all of them to pay for that.
+        // Boxed: a manifest error carries a parser error inside it, and the
+        // other variants are a path and an errno.
         source: Box<manifest::Error>,
     },
 }
@@ -289,15 +184,8 @@ mod tests {
 
     use super::{Error, subtree_hash};
 
-    /// A small repository: a root document, two modules, a nested one, a plain
-    /// `README.md` that is nobody's document and an ordinary file here, a
-    /// `.gitignore` that ignores `target/`, something inside `target/`, a
-    /// `.warlockignore` excluding the author's `notes/` with a note in it, and
-    /// a `.warlock/` directory with a manifest in it.
-    ///
-    /// Everything the hashing tests assert on is built here, in a temporary
-    /// directory, so no test says anything about the warlock repository
-    /// itself.
+    /// Built in a temporary directory, so no test here says anything about the
+    /// warlock repository itself.
     fn fixture() -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("a temporary directory");
         write(repo.path(), "WARLOCK.md", "# repo\n");
@@ -314,14 +202,12 @@ mod tests {
         repo
     }
 
-    /// Write `contents` at `relative` under `root`, creating parents.
     fn write(root: &Path, relative: &str, contents: &str) {
         let path = root.join(relative);
         fs::create_dir_all(path.parent().expect("a file has a parent")).expect("creates parents");
         fs::write(path, contents).expect("writes a file");
     }
 
-    /// Copy the whole of `from` into `to`, files, hidden files and all.
     fn copy_dir(from: &Path, to: &Path) {
         fs::create_dir_all(to).expect("creates the destination");
         for entry in fs::read_dir(from).expect("reads a directory") {
@@ -335,12 +221,10 @@ mod tests {
         }
     }
 
-    /// The hash of `relative` under `root`, or a panic naming what failed.
     fn hash(root: &Path, relative: &str) -> String {
         subtree_hash(root.join(relative)).expect("hashes")
     }
 
-    /// The four nodes on the spine of the fixture, root first.
     const SPINE: [&str; 4] = ["", "crates", "crates/engine", "crates/engine/src"];
 
     #[test]
@@ -418,8 +302,7 @@ mod tests {
             "version = 1\n\n[[pact]]\n",
         );
         write(repo.path(), ".warlock/WARLOCK.md", "# not a module\n");
-        // And the third exclusion, the repository's own: a note rewritten, and
-        // a new one written, in the `notes/` the `.warlockignore` names.
+        // The third exclusion, the repository's own `.warlockignore`.
         write(repo.path(), "notes/scratch.md", "thought better of it\n");
         write(repo.path(), "notes/plan.md", "a whole new note\n");
         fs::remove_file(repo.path().join("notes/plan.md")).expect("removes");
@@ -700,9 +583,8 @@ mod tests {
         );
     }
 
-    /// Only on unix, because the fixture needs `std::os::unix::fs::symlink` to
-    /// build the cycle at all. What is under test — that the walk does not
-    /// follow links, so hashing terminates — is not platform-specific.
+    /// Unix-only because the fixture needs `std::os::unix::fs::symlink` to
+    /// build the cycle; what it covers is not platform-specific.
     #[cfg(unix)]
     #[test]
     fn a_symlinked_directory_cycle_terminates() {
@@ -725,8 +607,8 @@ mod tests {
         );
     }
 
-    /// Chmod cannot deny root anything, so the test checks the fixture really
-    /// is unreadable before asserting on it and steps aside when it is not.
+    /// Unix-only: it needs `chmod`, which cannot deny root anything, so the
+    /// test checks the file really is unreadable before asserting on it.
     #[cfg(unix)]
     #[test]
     fn an_unreadable_file_is_an_error_not_a_hash() {
@@ -748,9 +630,6 @@ mod tests {
         assert!(matches!(error, Error::Read { .. }), "{error:?}");
         assert!(error.to_string().contains("lib.rs"), "{error}");
 
-        // The point of failing: neither skipping the file nor hashing the
-        // error text may produce a digest, least of all one that could match a
-        // grant.
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmods back");
         assert_eq!(hash(repo.path(), "crates/engine"), good);
 

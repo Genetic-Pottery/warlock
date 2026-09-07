@@ -1,42 +1,7 @@
-//! Machine-local sigils: `<home>/.warlock/<project>/config.toml`.
-//!
-//! A scope is a fact about a directory, committed in `.warlock/pacts.toml` and
-//! read by everybody who clones the repository. A **sigil** is the other half
-//! of that vocabulary and it goes the other way: it is what one person on one
-//! machine holds, and it is never written inside a repository. Reversing either
-//! home — a scope on a machine, a sigil in a checkout — is the mistake this
-//! design is arranged to prevent, so the two live in two modules that share no
-//! file, no directory and no writer.
-//!
-//! This module is the file. It derives the per-repository directory the file
-//! sits in ([`project_directory`]), says where the file is
-//! ([`sigils_path`]), reads it ([`load_sigils`]) and writes it
-//! ([`save_sigils`]). Three properties are worth stating up front:
-//!
-//! * **The home directory is a parameter, never an environment variable.**
-//!   Nothing here reads `HOME`, `USERPROFILE` or anything else: the caller that
-//!   knows what a home is resolves one and hands it over. That is what lets
-//!   every test in this crate point at a temporary directory, so no test can
-//!   read or write the developer's real home, and it keeps the engine's promise
-//!   that it does what it was asked and nothing beside.
-//! * **Nothing here validates a sigil.** What strings qualify is
-//!   [`validate_sigil`](crate::validate_sigil)'s question, asked by whoever
-//!   takes the string from a person. This is the store, not the gate: what was
-//!   written is read back exactly as written, the way a hand-edited manifest is.
-//! * **Absent is not empty.** A missing file is [`Error::NotFound`], following
-//!   [`Manifest::load`](crate::Manifest::load)'s precedent, rather than an empty
-//!   set invented here — see [`load_sigils`] for why the two are different
-//!   facts. A file that exists but cannot be read or parsed is a named error
-//!   again, so "broken" is never indistinguishable from "holds nothing".
-//!
-//! # Two checkouts hold sigils separately
-//!
-//! `<project>` is derived from the repository root's *path*, so the same
-//! repository cloned twice into two directories gets two config files and two
-//! sets of sigils. That is the intended behaviour rather than a defect: a sigil
-//! is a fact about this checkout on this machine, and recognising "the same
-//! repository" across clones would need git remotes, which this crate neither
-//! reads nor wants to.
+// The home directory is a parameter here and is never read from the
+// environment. Resolving `HOME` inside this module was rejected: it would let a
+// test in this crate read or write the developer's real home, and the caller
+// that resolved a home is the one that knows which home it means.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -47,53 +12,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::manifest::{temp_file_name, write_and_sync};
 
-/// The directory warlock keeps its machine-local bookkeeping in, directly under
-/// the home directory. The same name as the repository-side `.warlock/`, which
-/// is deliberate: one name for warlock's own files wherever they sit.
 const SIGIL_DIR: &str = ".warlock";
 
-/// The file name inside `<home>/.warlock/<project>/`.
 const SIGIL_FILE: &str = "config.toml";
 
-/// Domain separation for the project digest, via blake3's key derivation, for
-/// the same two reasons [`HASH_CONTEXT`](crate::hash) has one: this digest can
-/// never collide with a plain `blake3` of the same bytes computed for something
-/// else, and the `v1` is where a change to what goes into it announces itself.
-///
-/// The rule that governs it: **the version moves when a repository that moved
-/// nowhere would derive a different directory**, because that is the day
-/// everybody's sigils appear to vanish. There is no migration for it and there
-/// is not meant to be one — moving it is re-entering the sigils.
+// These four decide the derived directory name, so changing any of them is the
+// day everybody's sigils appear to vanish. Move `PROJECT_CONTEXT` only when a
+// repository that moved nowhere would derive a different directory anyway;
+// there is no migration and there is not meant to be one.
 const PROJECT_CONTEXT: &str = "warlock project directory v1 2026-08-28";
 
-/// How many hex characters of the digest go into the directory name.
-///
-/// Sixteen is 64 bits, which is far more than enough to keep one person's
-/// checkouts apart, and short enough that the name still reads as a name in a
-/// directory listing rather than as a hash with a word in front of it.
 const DIGEST_CHARACTERS: usize = 16;
 
-/// The most characters of the repository's own directory name to keep.
-///
-/// The name is only there so a person can recognise the directory; the digest
-/// is what makes it unique. Capping it keeps the whole segment comfortably
-/// inside every filesystem's name limit, which a 255-character repository name
-/// plus a digest would not be.
 const MAXIMUM_NAME_CHARACTERS: usize = 32;
 
-/// The name used for a root with no file name of its own — `/` and nothing
-/// else, in practice. The digest still separates it from anything else.
 const UNNAMED_ROOT: &str = "root";
 
-/// The directory name holding one repository's machine-local config: the
-/// repository root's own name, a `-`, and a short digest of its canonical
-/// absolute path.
-///
-/// Deterministic: the same root derives the same name on every run, which is
-/// what makes the sigils entered on Monday the sigils read on Tuesday. The name
-/// alone would collide across two checkouts of the same repository, and the
-/// digest alone would be unreadable in a directory listing, so it is both.
-///
 /// ```
 /// use warlock_engine::project_directory;
 ///
@@ -101,28 +35,13 @@ const UNNAMED_ROOT: &str = "root";
 /// assert_eq!(project_directory(root.path()), project_directory(root.path()));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-///
-/// # What goes into the digest
-///
-/// The canonical absolute path, as text. Canonical, so `/repo`, `/repo/.` and
-/// a path reached through a symlink are one checkout rather than three.
-/// **Canonicalisation can fail** — the root was deleted while warlock was
-/// running, or a component cannot be resolved — and rather than panic or
-/// invent, the path as handed over is digested instead. That keeps the answer
-/// deterministic for a given input, at the cost of a root that later becomes
-/// canonicalisable deriving a different directory than it did while it was
-/// gone; the failure that matters, reading somebody else's sigils, cannot
-/// happen either way.
-///
-/// The text is the path's lossy UTF-8 form rather than its platform bytes,
-/// because this string becomes a directory name on disk and has to mean the
-/// same thing after a toolchain upgrade. The trade is that two paths differing
-/// only in bytes that are not valid UTF-8 derive the same directory, which is
-/// a pair of checkouts sharing sigils in a case that does not arise in
-/// practice — and never a pair that read each other's.
 #[must_use]
 pub fn project_directory(root: impl AsRef<Path>) -> String {
     let root = root.as_ref();
+    // Canonicalisation fails on a root deleted mid-run. Panicking or inventing
+    // a name were both rejected: digesting the path as handed over keeps this
+    // deterministic for a given input, and neither branch can ever derive
+    // another checkout's directory.
     let canonical = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
     let mut hasher = blake3::Hasher::new_derive_key(PROJECT_CONTEXT);
@@ -136,13 +55,6 @@ pub fn project_directory(root: impl AsRef<Path>) -> String {
     )
 }
 
-/// Where one repository's machine-local config lives under `home`:
-/// `<home>/.warlock/<project>/config.toml`.
-///
-/// `home` is the home directory the caller resolved, and `root` the repository
-/// root. There is no search and no environment lookup: this is a join and a
-/// derivation, and the caller is the one that knows both ends.
-///
 /// ```
 /// use warlock_engine::{project_directory, sigils_path};
 ///
@@ -161,30 +73,10 @@ pub fn sigils_path(home: impl AsRef<Path>, root: impl AsRef<Path>) -> PathBuf {
     project_dir(home.as_ref(), root.as_ref()).join(SIGIL_FILE)
 }
 
-/// The directory the config file sits in: `<home>/.warlock/<project>`.
-///
-/// Spelled once, here, so [`sigils_path`] and [`save_sigils`] cannot disagree
-/// about where the file goes — and so the saver has the directory to create
-/// without taking the parent of a path it just built and having to say what it
-/// would do if there were none.
 fn project_dir(home: &Path, root: &Path) -> PathBuf {
     home.join(SIGIL_DIR).join(project_directory(root))
 }
 
-/// Read the sigils held for `root` on this machine, from under `home`.
-///
-/// The strings come back in file order and exactly as stored: this neither
-/// validates them, lower-cases them nor de-duplicates them, so a hand-edited
-/// config reads back as what it says. A caller that needs well-formed sigils
-/// asks [`validate_sigil`](crate::validate_sigil) about what it gets.
-///
-/// **A missing file is [`Error::NotFound`], not an empty set.** The precedent
-/// is [`Manifest::load`](crate::Manifest::load) and so is the reasoning: "this
-/// machine has never been configured for this checkout" and "this machine holds
-/// no sigils here" are different facts, and only the caller knows which of them
-/// it is acting on. Both read as *no sigils held* for the two callers there are
-/// today, and both are one line to write:
-///
 /// ```
 /// use warlock_engine::{sigils, load_sigils};
 ///
@@ -197,18 +89,11 @@ fn project_dir(home: &Path, root: &Path) -> PathBuf {
 /// assert!(held.is_empty());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-///
-/// # Errors
-///
-/// * [`Error::NotFound`] if there is no config file for this repository.
-/// * [`Error::Io`] if there is one and it cannot be read.
-/// * [`Error::Syntax`] if it can be read but is not a config: not TOML, a
-///   `sigils` key of the wrong type, or a key this build does not know, which
-///   is refused rather than ignored so that a misspelled `sigil = [...]` is a
-///   line to go and fix instead of a silently empty set.
-///
-/// A file that is readable TOML and simply has no `sigils` key holds no
-/// sigils — that is a config, not a broken one, and it reads as an empty set.
+// Absent is `NotFound`, following `Manifest::load`. Returning an empty set for
+// a missing file was rejected: "never configured for this checkout" and "holds
+// no sigils" are different facts, and only the caller knows which it is acting
+// on. Unreadable and unparseable stay named for the same reason — broken must
+// never be indistinguishable from holds-nothing.
 pub fn load_sigils(home: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<Vec<String>, Error> {
     let path = sigils_path(home, root);
     match fs::read_to_string(&path) {
@@ -223,22 +108,6 @@ pub fn load_sigils(home: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<Vec
     }
 }
 
-/// Write `sigils` as the set held for `root` on this machine, under `home`,
-/// atomically.
-///
-/// The set is replaced, not added to: what is passed is what the file says
-/// afterwards, and an empty slice writes `sigils = []` rather than deleting
-/// anything. The directory is created if it is not there.
-///
-/// Atomic in the manifest's sense, and by the manifest's idiom: the text goes
-/// to a temporary file *in the same directory* as the target, is flushed to the
-/// disk, and is then renamed over it, so a reader sees either the whole old
-/// file or the whole new one. On success no temporary is left behind; on
-/// failure it is cleaned up on a best-effort basis.
-///
-/// This writes one file under `home` and touches nothing else. Nothing here
-/// writes, or offers to write, anything inside the repository.
-///
 /// ```
 /// use warlock_engine::{load_sigils, save_sigils};
 ///
@@ -248,12 +117,6 @@ pub fn load_sigils(home: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<Vec
 /// assert_eq!(load_sigils(home.path(), root.path())?, ["data-plane"]);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-///
-/// # Errors
-///
-/// [`Error::Serialize`] if the set cannot be written as TOML, or [`Error::Io`]
-/// naming the path that failed if the directory cannot be created, the
-/// temporary cannot be written, or the rename fails.
 pub fn save_sigils(
     home: impl AsRef<Path>,
     root: impl AsRef<Path>,
@@ -273,6 +136,8 @@ pub fn save_sigils(
     })?;
 
     let target = dir.join(SIGIL_FILE);
+    // The temporary must sit in the same directory as the target, so the rename
+    // below cannot cross a filesystem and stops being atomic.
     let temp = dir.join(temp_file_name(SIGIL_FILE));
     if let Err(source) = write_and_sync(&temp, text.as_bytes()) {
         drop(fs::remove_file(&temp));
@@ -289,14 +154,6 @@ pub fn save_sigils(
     Ok(())
 }
 
-/// The repository root's own name, as one portable path segment.
-///
-/// Recognisability is the whole job — the digest beside it is what makes the
-/// directory unique — so anything that is not an ASCII letter, digit, `-`, `_`
-/// or `.` becomes a `-` rather than reaching a filesystem, and the result is
-/// capped at [`MAXIMUM_NAME_CHARACTERS`]. Substituting rather than dropping
-/// keeps it deterministic and keeps the name the same length as what it stands
-/// for.
 fn readable_name(canonical: &Path) -> String {
     let name = canonical.file_name().map_or_else(
         || UNNAMED_ROOT.to_owned(),
@@ -315,54 +172,31 @@ fn readable_name(canonical: &Path) -> String {
         .collect()
 }
 
-/// The file's shape: a list of sigils and nothing else.
-///
-/// `deny_unknown_fields` because the alternative is worse than strictness here.
-/// This file is short, hand-editable and has no version key, so a misspelled
-/// `sigil = [...]` would otherwise read as a valid config holding nothing —
-/// exactly the "false empty" the three-state read is arranged to avoid.
+// `deny_unknown_fields` rather than a lenient read: this file is short,
+// hand-editable and has no version key, so a misspelled `sigil = [...]` would
+// otherwise parse as a valid config holding nothing.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
-    /// The sigils held, in file order and exactly as written. Absent means an
-    /// empty set: a config that says nothing about sigils holds none.
     #[serde(default)]
     sigils: Vec<String>,
 }
 
-/// Everything that can stop the machine-local sigils being read or written.
-///
-/// Hand-rolled like [`manifest::Error`](crate::manifest::Error) and
-/// [`hash::Error`](crate::hash::Error): four variants do not pay for an
-/// error-handling dependency, and each one names the path it happened to, so a
-/// caller has one line to print and a file to go and look at.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// There is no config file for this repository on this machine.
-    /// Distinguishes a checkout that was never configured from one whose
-    /// config is corrupt.
     NotFound {
-        /// The path that was looked for.
         path: PathBuf,
     },
-    /// The config file could not be read or written.
     Io {
-        /// The path being read or written.
         path: PathBuf,
-        /// What the filesystem said.
         source: std::io::Error,
     },
-    /// The file is there but is not a config: not TOML, or not this shape.
     Syntax {
-        /// The file that could not be understood.
         path: PathBuf,
-        /// What the TOML parser said, including where.
         source: toml::de::Error,
     },
-    /// The sigils could not be turned into TOML.
     Serialize {
-        /// What the TOML serialiser said.
         source: toml::ser::Error,
     },
 }
@@ -409,29 +243,20 @@ mod tests {
         project_directory, save_sigils, sigils_path,
     };
 
-    /// A throwaway directory. Every test builds both its home *and* its
-    /// repository root out of these, so nothing in this module reads or writes
-    /// the developer's real home — which is the whole reason the home is a
-    /// parameter rather than an environment variable.
     fn a_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("a temporary directory")
     }
 
-    /// A directory called `name` inside `parent`, so a test can say something
-    /// about the derived name rather than about whatever `tempfile` picked.
     fn named(parent: &Path, name: &str) -> PathBuf {
         let path = parent.join(name);
         fs::create_dir_all(&path).expect("creates the directory");
         path
     }
 
-    /// Sigils as a caller of [`save_sigils`] holds them.
     fn owned(sigils: &[&str]) -> Vec<String> {
         sigils.iter().map(|sigil| (*sigil).to_owned()).collect()
     }
 
-    /// Write `text` as the config for `root` under `home` without going through
-    /// [`save_sigils`], the way a person with an editor would.
     fn hand_write(home: &Path, root: &Path, text: &str) {
         let path = sigils_path(home, root);
         fs::create_dir_all(path.parent().expect("the config has a directory"))
@@ -439,7 +264,6 @@ mod tests {
         fs::write(&path, text).expect("writes the config");
     }
 
-    /// The file names directly inside the project directory, sorted.
     fn project_dir_listing(home: &Path, root: &Path) -> Vec<String> {
         let dir = sigils_path(home, root);
         let dir = dir.parent().expect("the config has a directory");
@@ -766,8 +590,6 @@ mod tests {
         );
     }
 
-    /// Only on unix, because the fixture needs `std::os::unix::fs::symlink` to
-    /// reach one directory by two paths at all.
     #[cfg(unix)]
     #[test]
     fn two_paths_to_one_checkout_derive_one_directory() {
@@ -783,8 +605,6 @@ mod tests {
         );
     }
 
-    /// Chmod cannot deny root anything, so the test checks the directory really
-    /// is unwritable before asserting on it and steps aside when it is not.
     #[cfg(unix)]
     #[test]
     fn a_save_that_fails_leaves_no_temporary_and_no_half_written_file() {

@@ -1,132 +1,23 @@
-//! The shape of the tree.
-//!
-//! Section 5 of the design doc makes the project tree the interface: a tree of
-//! module documents, each coloured by its [`NodeState`]. This module gives
-//! that tree a type. It is pure shape and nothing else — building a tree from
-//! a real directory belongs to [`load_tree`](crate::load_tree), and the state
-//! on a node is a plain stored field, never computed here.
-//!
-//! [`Node::ignored`] is the same kind of thing: a plain stored fact, put there
-//! by whoever built the node. It says the repository's own `.warlockignore`
-//! excludes that directory — content Warlock is not about. It is deliberately
-//! *not* a [`NodeState`] and not a colour: gray already means "outside
-//! Warlock's management", an excluded directory is gray like any other unpacted
-//! one, and there is no fourth colour. The flag exists so that a front end can
-//! refuse to pact such a directory without asking the filesystem, since every
-//! other fact about a node — its state, its document, its files — comes from
-//! the load and this one should too.
-//!
-//! [`Node::scope`] is a third such fact: the boundary written on *this*
-//! directory's own manifest entry, and never one inherited from an ancestor. A
-//! renderer draws the directory that owns a scope, so the node has to know
-//! whether the scope is its own; the question "which scope covers this path"
-//! is a different one, and [`scope_covering`](crate::scope_covering) answers
-//! it by walking upwards. Storing the inherited answer here would make the two
-//! indistinguishable and put one boundary's name on every row below it.
-
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::NodeState;
 
-/// One node of the project tree: a directory, the `WARLOCK.md` documenting it,
-/// and whatever Warlock currently knows about it.
-///
-/// The fields are public on purpose. A renderer walks this structure with each
-/// node's depth and state in hand, and hiding `children` behind an accessor
-/// would make that walk awkward for no gain — there is no invariant between
-/// the fields to protect.
-///
-/// `state` is stored, not derived. Nothing in this crate computes staleness;
-/// whoever builds the node decides what it says.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Node {
-    /// The directory this node stands for.
     pub path: PathBuf,
-    /// Warlock's document for this node, or `None` when the node has none of
-    /// its own — an ordinary directory that has no documentation yet, which is
-    /// a node like any other. Held separately from `path` because the file
-    /// name is not Warlock's to assume.
     pub document: Option<PathBuf>,
-    /// What Warlock knows about this node right now.
     pub state: NodeState,
-    /// Whether the repository's own `.warlockignore` rules exclude this
-    /// directory.
-    ///
-    /// A fact about the node, not a state and not a colour: an excluded
-    /// directory is [`NodeState::Unpacted`] and draws gray like any other
-    /// directory nobody has pacted. What it adds is *why* — this one cannot be
-    /// pacted at all, because the repository said Warlock is not about it — so
-    /// a front end can say so instead of starting a run that would produce
-    /// nothing.
-    ///
-    /// Stored rather than derived, like [`state`](Node::state): asking the
-    /// filesystem is the loader's job, and a tree is just values by the time
-    /// anyone renders it. Defaulted on deserialisation, so a tree written
-    /// before this field existed still reads back.
     #[serde(default)]
     pub ignored: bool,
-    /// The scope written on this directory's own pact entry, or `None` where it
-    /// has none — which includes every directory nobody pacted, since a scope
-    /// is stored on an entry and a directory with no entry has nowhere to hold
-    /// one.
-    ///
-    /// Its own and never an inherited one. A renderer draws the directory that
-    /// carries a scope, so a row has to be able to say "this boundary starts
-    /// here"; the different question — which scope covers a given path — is
-    /// [`scope_covering`](crate::scope_covering)'s, and it walks upwards to
-    /// answer it. Filling this in with an ancestor's scope would answer the
-    /// second question badly in the place the first one is asked.
-    ///
-    /// A scope the validator refuses reads as `None`: it is reported as a
-    /// problem by the loader and left on disk exactly as somebody wrote it, but
-    /// for as long as it is not a scope the directory is unscoped. Stored
-    /// rather than derived, like [`state`](Node::state), and defaulted on
-    /// deserialisation so a tree written before this field existed still reads
-    /// back.
     #[serde(default)]
     pub scope: Option<String>,
-    /// Child nodes, in the order they should be rendered. Empty for a leaf.
     pub children: Vec<Node>,
-    /// The files sitting directly in this directory, in path order.
-    ///
-    /// A listing and nothing more. A file is not a node: it has no state, no
-    /// document and no children, it is no part of [`is_leaf`](Node::is_leaf)
-    /// — a node with files and no subdirectories is still a leaf — and nothing
-    /// here is hashed, since a pacted subtree's digest is taken from disk
-    /// rather than from this list. Subdirectories are not listed here either;
-    /// they are `children`.
-    ///
-    /// A loaded node lists what the walk saw directly inside the directory,
-    /// its own `WARLOCK.md` included: this is a faithful listing rather than a
-    /// listing minus one special name, and a view that would rather not draw
-    /// the document twice can leave it out on the way to the screen. Only what
-    /// the walk yielded appears, so ignored and hidden files are absent
-    /// exactly as ignored and hidden directories are — and, the same fact seen
-    /// from the other side, a `WARLOCK.md` an ignore rule covers still
-    /// documents its node through `document` while not appearing here.
     pub files: Vec<PathBuf>,
 }
 
 impl Node {
-    /// A childless node at `path`, documented by `document`, in `state`,
-    /// holding no files.
-    ///
-    /// `document` is anything path-like for a node that has one, or `None`
-    /// for a node that does not — see [`IntoDocument`].
-    ///
-    /// Add children with [`Node::with_children`] and files with
-    /// [`Node::with_files`], or by pushing onto [`Node::children`] and
-    /// [`Node::files`] directly.
-    ///
-    /// The node is not [`ignored`](Node::ignored): a directory is content
-    /// Warlock covers unless a rule says otherwise, and only a loader that
-    /// consulted the rules can say otherwise — see [`Node::with_ignored`]. It
-    /// carries no [`scope`](Node::scope) either, for the same reason: a scope
-    /// lives on a manifest entry, and only a loader that read the manifest can
-    /// put one here — see [`Node::with_scope`].
-    ///
     /// ```
     /// use warlock_engine::{Node, NodeState};
     ///
@@ -150,23 +41,12 @@ impl Node {
         }
     }
 
-    /// The same node with `children` attached, for building literals in one
-    /// expression instead of a pile of `push` statements.
     #[must_use]
     pub fn with_children(mut self, children: impl IntoIterator<Item = Node>) -> Self {
         self.children = children.into_iter().collect();
         self
     }
 
-    /// The same node with `files` attached, the companion to
-    /// [`with_children`](Node::with_children) for the paths that are a listing
-    /// rather than nodes of their own.
-    ///
-    /// The files are stored in the order given and are not sorted here, for
-    /// the same reason children are not reordered: this is a constructor, not
-    /// a policy. Whoever builds the node decides the order — the loader hands
-    /// them over in path order.
-    ///
     /// ```
     /// use warlock_engine::{Node, NodeState};
     ///
@@ -182,16 +62,6 @@ impl Node {
         self
     }
 
-    /// The same node marked — or unmarked — as excluded by the repository's
-    /// `.warlockignore`, the companion to [`with_children`](Node::with_children)
-    /// and [`with_files`](Node::with_files) for the fact only a loader can
-    /// know.
-    ///
-    /// Nothing else about the node moves: it keeps its state, its document and
-    /// its children, because being excluded is not a state and an excluded
-    /// directory is a row in the tree like any other. Hiding it is not on
-    /// offer — the reader is meant to see what the repository excluded.
-    ///
     /// ```
     /// use warlock_engine::{Node, NodeState};
     ///
@@ -206,27 +76,11 @@ impl Node {
         self
     }
 
-    /// Whether the repository's `.warlockignore` excludes this directory.
-    ///
-    /// Reads [`ignored`](Node::ignored) and touches no filesystem, so a caller
-    /// that must stay pure — an event loop deciding whether a keypress can pact
-    /// this row — can ask it.
     #[must_use]
     pub fn is_ignored(&self) -> bool {
         self.ignored
     }
 
-    /// The same node carrying — or no longer carrying — the scope written on
-    /// its own manifest entry, the companion to
-    /// [`with_ignored`](Node::with_ignored) for the other fact only a loader
-    /// that read the manifest can know.
-    ///
-    /// This directory's scope and never an ancestor's: see
-    /// [`scope`](Node::scope). Nothing else about the node moves — a scope is a
-    /// label on a row, not a state, not a colour and not a gate — and `None`
-    /// clears it rather than leaving what was there, so the setter sets rather
-    /// than latches.
-    ///
     /// ```
     /// use warlock_engine::{Node, NodeState};
     ///
@@ -243,29 +97,13 @@ impl Node {
         self
     }
 
-    /// Whether this node has no children.
-    ///
-    /// Child *nodes*, that is: [`files`](Node::files) do not count, so a
-    /// directory full of files and no subdirectories is a leaf.
     #[must_use]
     pub fn is_leaf(&self) -> bool {
         self.children.is_empty()
     }
 }
 
-/// What [`Node::new`] accepts for a node's document.
-///
-/// A node's document is optional, but most nodes have one and saying `Some`
-/// at every such call site would be noise. This trait takes both forms:
-/// anything path-like means that document, and `None` means the node has none.
-///
-/// The impls are written out one type at a time rather than blanketed over
-/// `Into<PathBuf>`, because a blanket impl plus one for `Option` overlap as
-/// far as coherence is concerned. Listing them also keeps `None` on its own
-/// inferring to `Option<PathBuf>`, since that is the only impl it can match.
 pub trait IntoDocument {
-    /// This value as a node stores it: the document's path, or `None` for a
-    /// node without one.
     fn into_document(self) -> Option<PathBuf>;
 }
 
@@ -299,45 +137,22 @@ impl IntoDocument for String {
     }
 }
 
-/// A whole project tree, owning its root node.
-///
-/// A tree is a root and nothing more; every node below it hangs off
-/// [`Tree::root`]. Callers outside the crate build one with [`Tree::new`], so
-/// a test or another front end can hand the engine a tree without going
-/// through any loader.
-///
-/// A loaded tree holds a node per directory, documented or not: one whose
-/// [`document`](Node::document) is `None` is an ordinary directory that has no
-/// documentation yet, not a lesser kind of node. Rendering fewer of them than
-/// the tree holds is a view's decision, taken on the way to the screen.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Tree {
-    /// The node every other node descends from.
     pub root: Node,
 }
 
 impl Tree {
-    /// A tree rooted at `root`.
     #[must_use]
     pub fn new(root: Node) -> Self {
         Self { root }
     }
 
-    /// The path of the root node, which is the path the whole tree is scoped
-    /// to.
     #[must_use]
     pub fn root_path(&self) -> &Path {
         &self.root.path
     }
 
-    /// Every node, depth first and parents before children, each paired with
-    /// how deep it sits. The root is depth `0`, its children depth `1`, and so
-    /// on.
-    ///
-    /// The depth is yielded rather than left implicit because the renderer
-    /// indents by it: walking the tree and knowing where you are in it should
-    /// be one pass, not two. Siblings come in the order they are stored.
-    ///
     /// ```
     /// use warlock_engine::{Node, NodeState, Tree};
     ///
@@ -361,11 +176,6 @@ impl Tree {
         DepthFirst::new(&self.root)
     }
 
-    /// How many nodes sit in each state.
-    ///
-    /// The result is a fixed struct with one field per state, so a state can
-    /// neither be missed nor invented; a state with no nodes counts zero.
-    ///
     /// ```
     /// use warlock_engine::{Node, NodeState, Tree};
     ///
@@ -393,12 +203,6 @@ impl Tree {
         counts
     }
 
-    /// The node at `path`, or `None` if the tree holds no such node.
-    ///
-    /// Paths are compared as stored, with no normalisation and no filesystem
-    /// access: a tree is just values, and whoever built it — a loader, a test,
-    /// a deserialiser — decided what those paths say.
-    ///
     /// ```
     /// use warlock_engine::{Node, NodeState, Tree};
     ///
@@ -423,20 +227,12 @@ impl Tree {
     }
 }
 
-/// A depth-first walk over a tree, yielding each node with its depth.
-///
-/// Built by [`Tree::walk`]. Parents come before their children and siblings
-/// keep the order they are stored in, so the sequence is exactly what a
-/// renderer draws top to bottom.
 #[derive(Debug, Clone)]
 pub struct DepthFirst<'a> {
-    /// Nodes still owed, with their depth, nearest first. Children are pushed
-    /// in reverse so the leftmost sibling comes off the stack first.
     stack: Vec<(&'a Node, usize)>,
 }
 
 impl<'a> DepthFirst<'a> {
-    /// A walk starting at `root`, which is reported at depth `0`.
     fn new(root: &'a Node) -> Self {
         Self {
             stack: vec![(root, 0)],
@@ -445,7 +241,6 @@ impl<'a> DepthFirst<'a> {
 }
 
 impl<'a> Iterator for DepthFirst<'a> {
-    /// A node and how deep it sits below the root.
     type Item = (&'a Node, usize);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -456,24 +251,14 @@ impl<'a> Iterator for DepthFirst<'a> {
     }
 }
 
-/// How many nodes sit in each state.
-///
-/// One field per [`NodeState`] variant, so no state can be missing from a
-/// tally and no fourth state can appear in one. A state with no nodes is zero,
-/// which is what [`Default`] gives.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct StateCounts {
-    /// Nodes outside Warlock's management.
     pub unpacted: usize,
-    /// Pacted nodes owing a freshness pass.
     pub pacted_stale: usize,
-    /// Pacted nodes that have been granted freshness.
     pub pacted_fresh: usize,
 }
 
 impl StateCounts {
-    /// The count for one state, for callers that hold a state rather than a
-    /// field name (a legend, say, iterating [`NodeState::ALL`]).
     #[must_use]
     pub const fn get(&self, state: NodeState) -> usize {
         match state {
@@ -483,14 +268,11 @@ impl StateCounts {
         }
     }
 
-    /// How many nodes were counted in total.
     #[must_use]
     pub const fn total(&self) -> usize {
         self.unpacted + self.pacted_stale + self.pacted_fresh
     }
 
-    /// The field for `state`, so counting stays a match on the enum and
-    /// cannot silently skip a variant.
     fn get_mut(&mut self, state: NodeState) -> &mut usize {
         match state {
             NodeState::Unpacted => &mut self.unpacted,
@@ -507,8 +289,6 @@ mod tests {
     use super::{Node, Tree};
     use crate::NodeState;
 
-    /// A hand-written fixture: a root with one leaf child and one child that
-    /// has a leaf of its own, so nesting is more than one level deep.
     fn fixture() -> Tree {
         Tree::new(
             Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale).with_children([
@@ -525,8 +305,6 @@ mod tests {
         )
     }
 
-    /// The same fixture with two files listed on every node, so a test can ask
-    /// what difference files make by holding the two trees side by side.
     fn fixture_with_files() -> Tree {
         fn listing(node: &Node) -> Node {
             Node::new(&node.path, node.document.clone(), node.state)
