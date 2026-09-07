@@ -1,133 +1,65 @@
-//! What one pact did, in the order it did it.
+//! What one pact did, in the order it did it: an [`Account`] of ordered
+//! [`Section`]s, one per directory, each an ordered [`Log`] of clocked lines.
 //!
-//! A subtree pact is minutes of work happening somewhere else, and the only
-//! honest way to show that it is work rather than a hang is to say what it has
-//! been doing since it started. This module is that account: an ordered list of
-//! sections, one per directory the run reaches, each holding an ordered list of
-//! lines, each line one thing a pass was seen doing. It is the state behind the
-//! panel, and it is plain data — no terminal, no channel, no clock of its own.
+//! Plain data. [`Instant::now`] is never called in this file — every entry
+//! point takes the instant it happened at, and every read takes the `now` its
+//! clocks are measured against — which is what lets a test drive a whole run
+//! off `base + Duration::from_secs` and assert on exact text. Adding a clock
+//! read here would make those tests race.
 //!
-//! # The clock is the point
+//! The clock rule is `Log::shown_at`: a line shows the instant the line beneath
+//! it arrived, or, when it is the newest, `now` while the log is live and the
+//! instant it froze once it is not. So the newest clock counts up while a pass
+//! is silent and stops where it got to instead of snapping back — which is the
+//! only thing on screen distinguishing a slow pass from a hung one.
 //!
-//! Every line carries an elapsed time measured from the start of the section it
-//! sits in, so a run reads as a sequence of passes rather than one undivided
-//! stream, and a section that has just opened starts again at `0:00` instead of
-//! carrying the whole run's total into a directory that has done nothing yet.
-//!
-//! The newest line's clock *moves*. A stretch of thinking is one event followed
-//! by a minute of nothing at all, and a still screen is exactly what a hang
-//! looks like; a line whose clock counts up is the difference between the two.
-//! So the newest line's clock is a function of the `now` a caller hands in — the
-//! event loop already redraws on a tick, and asking it for the instant on every
-//! frame is all the ticking that is needed — and the moment a newer line arrives
-//! beneath it, it freezes at the instant that newer line arrived. That is what
-//! makes the number continuous: it counts up while the thing is happening and
-//! stops at the value it had reached, rather than snapping backwards to the
-//! moment the line was first printed.
-//!
-//! A section that has opened but heard nothing yet has no line to put a clock
-//! on, and a bare heading is the still screen all over again — the first thing
-//! a pass does is often a minute of silence before its first word arrives. So
-//! an empty section shows one placeholder line, `waiting`, clocked like any
-//! other: it ticks from the moment the section opens and is replaced by the
-//! first real line the pass reports. It is drawn rather than stored, so nothing
-//! has to arrive to create it and nothing has to be deleted when it goes.
-//!
-//! Nothing here reads a clock. [`Instant::now`] is never called in this file,
-//! which is what lets a test drive a whole run off `base + Duration::from_secs`
-//! and assert on exact text.
-//!
-//! # What is not here
-//!
-//! No file contents, no model prose, no tool results, no thought — [`Activity`]
-//! has already made those choices and this module only words what it is given.
-//! No tokens, no cache statistics, no turn counts, no API durations: the panel
-//! is a freshness ledger, not a dashboard. And no truncation — a line is stored
-//! whole and cut to the panel's width by whoever is drawing it, because the
-//! width is a fact about a terminal and this is not.
+//! Text is stored whole. Cutting a line to a width belongs to whoever knows the
+//! width, and wrapping to [`Line::Wrapped`] happens in [`mod@crate::wrap`] on
+//! the way to the screen.
+
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::claude::Activity;
 
-/// The whole of what a stretch of thinking is worth saying.
-///
-/// The bare fact, exactly as [`Activity::Thinking`] carries it: that thinking
-/// happened, never what was thought.
 pub(crate) const THINKING: &str = "thinking";
 
 /// The placeholder line of a section that has heard nothing yet.
 ///
-/// The pass is running and has not said anything — which, over a stream that
-/// reports an assistant message only when it is whole, is most of the first
-/// minute of every pass. The word is about warlock rather than the model on
-/// purpose: `thinking` would claim to know what the silence is, and this file
-/// only words what it is given.
+/// Drawn by [`Log::rows`] rather than stored, so nothing has to arrive to
+/// create it and nothing has to be deleted when the first real line lands.
 pub(crate) const WAITING: &str = "waiting";
 
-/// The whole of what "the pass is producing its answer" is worth saying.
-///
-/// The counterpart of [`THINKING`], and on a toolless pass the longer of the
-/// two: a pass thinks for a few seconds and then spends the rest of its time
-/// writing. The word is about the pass, not about the document — what it is
-/// writing is the document, and the document is the outcome line's business.
-///
-/// The word alone is the start of the line rather than the whole of it: a pact
-/// section adds how much of the answer has arrived, per [`writing_line`].
 pub(crate) const WRITING: &str = "writing";
 
-/// The word a line opens with when the engine turned a pass's answer down:
-/// the answer came back, and it was not the object the pass was asked to fill.
-/// What follows is the attempt it was and the first of what was wrong, so a
-/// reader can see why a directory is costing a second pass — or why it is
-/// about to fail — without reading the footer.
+/// Opens the line [`Account::record_rejected`] files: the engine turned an
+/// answer down, so the wait that follows is a second one.
 const REJECTED: &str = "rejected";
 
-/// One line of a section, and the instant it arrived.
-///
-/// The instant is kept even though a line's *displayed* clock is usually the one
-/// belonging to the line beneath it: a line's arrival is what freezes the line
-/// above, so every line has to remember its own.
-///
-/// Private, because the account decides what a line says. Handing these out
-/// would be a second place the wording could be decided.
+/// One line and the instant it arrived. Its own arrival is what freezes the
+/// line above it, so every entry has to remember it even though a line usually
+/// displays the instant belonging to the entry beneath it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
-    /// When this line arrived, in the caller's clock.
     at: Instant,
-    /// What it says, whole and untruncated.
     text: String,
 }
 
-/// A run of clocked lines under one heading, and the whole rule their clocks
-/// follow.
+/// A run of clocked lines under one heading, and the whole of the clock rule.
 ///
-/// Everything the module docs above say about the ticking clock lives in here:
-/// where a line's number is measured from, which line is the one that moves,
-/// what freezes it, and what an empty one shows in the meantime. It is the
-/// mechanism rather than the meaning — it holds no directory, no outcome and no
-/// money, and it words nothing except the [`WAITING`] placeholder, which is
-/// about the silence rather than about whatever is being waited for.
-///
-/// Crate-private and shared, because there are two things in warlock that are a
-/// list of things a model was seen doing with a clock on each: a [`Section`] of
-/// a pact's account, and a turn of the panel's thread. They differ in what
-/// surrounds the lines, not in how the lines tick, and a second copy of this
-/// rule would be a second clock to keep in step.
+/// Shared rather than copied because there are two of these in warlock — a
+/// [`Section`] of an account and a turn of the panel's thread — which differ in
+/// what surrounds the lines, not in how the lines tick. It holds no directory,
+/// no outcome and no money, and the only wording it does is [`WAITING`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Log {
-    /// When this stretch of work began, which is where its clocks count from.
     started: Instant,
-    /// The lines, in arrival order.
     entries: Vec<Entry>,
-    /// When this stopped being the live one, if it has. A frozen log's last
-    /// line stops here instead of ticking.
     closed: Option<Instant>,
 }
 
 impl Log {
-    /// A log of work that began at `at` and has heard nothing yet.
     pub(crate) const fn opened_at(at: Instant) -> Self {
         Self {
             started: at,
@@ -136,41 +68,35 @@ impl Log {
         }
     }
 
-    /// When this stretch of work began.
     pub(crate) const fn started(&self) -> Instant {
         self.started
     }
 
-    /// When it stopped moving, or `None` while it is still the live one.
     pub(crate) const fn closed_at(&self) -> Option<Instant> {
         self.closed
     }
 
-    /// Whether it has stopped moving.
     pub(crate) const fn is_closed(&self) -> bool {
         self.closed.is_some()
     }
 
-    /// How many rows it draws as: one per line, and one for the [`WAITING`]
-    /// placeholder where there are none.
+    /// How many rows this draws as, placeholder included.
     ///
-    /// Counted here as well as drawn, because this number is what a scroll
-    /// offset is clamped against: a row that is drawn but not counted would be
-    /// one the panel can never scroll to the edge of.
+    /// The `max(1)` is the drawn [`WAITING`] line. Scroll offsets are clamped
+    /// against this, so a row that is drawn but not counted is one the panel
+    /// can never scroll to the edge of.
     pub(crate) fn row_count(&self) -> usize {
         self.entries.len().max(1)
     }
 
-    /// Stop this log moving as of `at`, if it has not stopped already.
-    ///
-    /// Idempotent on purpose: work can be frozen by its own ending, by the next
-    /// stretch starting, or by the run ending, and whichever happens first is
-    /// the honest instant to freeze at.
+    /// Idempotent: work can be frozen by its own ending, by the next stretch
+    /// starting or by the run ending, and the first of those is the honest
+    /// instant. A plain assignment would let the end of a run re-date a pass
+    /// that stopped nine minutes earlier.
     pub(crate) fn freeze(&mut self, at: Instant) {
         self.closed.get_or_insert(at);
     }
 
-    /// File `text` as a line of its own, arriving at `at`.
     pub(crate) fn push(&mut self, text: impl Into<String>, at: Instant) {
         self.entries.push(Entry {
             at,
@@ -178,38 +104,19 @@ impl Log {
         });
     }
 
-    /// Let the stretch of `text` go on if it is already the newest line, or
-    /// open one for it at `at` if it is not.
-    ///
-    /// What makes a repeated report read as one continuing thing rather than as
-    /// a column of identical lines: the entry that is already there keeps the
-    /// instant it opened at, so its clock counts the whole stretch rather than
-    /// restarting on every report the stream happens to send.
+    /// Let a repeated report go on as one line instead of filing a column of
+    /// identical ones. The entry already there keeps its own instant, so its
+    /// clock counts the whole stretch rather than restarting per report.
     pub(crate) fn extend_or_open(&mut self, text: &str, at: Instant) {
         if self.entries.last().is_none_or(|entry| entry.text != text) {
             self.push(text, at);
         }
     }
 
-    /// Reword the newest line to `text` if it is already a line of the `word`
-    /// stretch, or open one for it at `at` if it is not.
-    ///
-    /// [`Log::extend_or_open`] for a stretch whose wording *changes* while it
-    /// goes on: a running count of what has arrived so far. Comparing whole
-    /// texts, as that one does, would read every new count as a new stretch and
-    /// leave a column of lines one byte apart, each with a clock starting from
-    /// nothing; comparing the word in front of the count reads them as the one
-    /// thing they are. The entry that is already there keeps the instant it
-    /// opened at — so its clock still counts the whole stretch, and the line
-    /// above it, frozen by this line's arrival, does not re-freeze later.
-    ///
-    /// A line belongs to the stretch when it is the bare `word` or the `word`
-    /// followed by this file's ` · ` separator, which is exactly the shape
-    /// [`writing_line`] gives its two cases and no shape any other line in the
-    /// panel has. So a stretch that ends and begins again — anything else
-    /// having been filed in between — opens a fresh line and counts its own
-    /// bytes from its own instant, by the same rule that gives thinking one
-    /// line per stretch.
+    /// [`Log::extend_or_open`] for a stretch whose wording changes as it goes
+    /// on. Matching on `word` through [`continues`] rather than on the whole
+    /// text is what makes a running byte count one stretch; comparing texts
+    /// would read every new count as a new line with a clock starting at zero.
     pub(crate) fn rewrite_or_open(&mut self, word: &str, text: &str, at: Instant) {
         match self.entries.last_mut() {
             Some(entry) if continues(&entry.text, word) => text.clone_into(&mut entry.text),
@@ -217,14 +124,10 @@ impl Log {
         }
     }
 
-    /// Every line as a drawable row, with clocks measured against `now`.
-    ///
-    /// A log with nothing in it yields the [`WAITING`] placeholder, clocked as
-    /// entry zero, which gives it the right instant by the ordinary rule: no
-    /// entry follows it, so it ticks with `now` while the log is live and
-    /// freezes where the log froze. The first real entry takes its place — same
-    /// rule, nothing special to remove.
     pub(crate) fn rows(&self, now: Instant) -> impl Iterator<Item = Line> + '_ {
+        // Clocked as entry zero, which gives it the ordinary rule with nothing
+        // special added: no entry follows it, so it ticks while the log is live
+        // and freezes where the log froze.
         let waiting = self.entries.is_empty().then(|| Line::Clocked {
             clock: self.clock(0, now),
             text: WAITING.to_owned(),
@@ -242,21 +145,14 @@ impl Log {
             )
     }
 
-    /// The instant the line at `index` shows on its clock, against a caller's
-    /// `now`.
-    ///
-    /// The whole rule of the ticking clock, in one expression. A line with
-    /// another beneath it shows the instant that one arrived, so it reads as how
-    /// long the thing took. The last line of a live log shows `now`, so it
-    /// counts up between events. The last line of a frozen log shows the instant
-    /// it froze, so it stops.
+    /// The clock rule, in one expression: the next line's arrival, else the
+    /// instant this log froze, else the caller's `now`.
     fn shown_at(&self, index: usize, now: Instant) -> Instant {
         self.entries
             .get(index + 1)
             .map_or_else(|| self.closed.unwrap_or(now), |next| next.at)
     }
 
-    /// The clock text for the line at `index`, against a caller's `now`.
     fn clock(&self, index: usize, now: Instant) -> String {
         clock(
             self.shown_at(index, now)
@@ -265,59 +161,29 @@ impl Log {
     }
 }
 
-/// How a directory's pass ended, in the words it ends its section with.
+/// How a directory's pass ended.
 ///
-/// Three ways a pass stops and no fourth: it wrote the document, it was refused,
-/// or somebody stopped the run. The cost is not in here — it arrives over the
-/// activity port during the pass, is accumulated by the section, and is put into
-/// the wording at the moment the section closes, so a caller closing a section
-/// never has to know what the pass spent.
+/// Carries no cost. The spend arrives over the activity port during the pass
+/// and is accumulated by the [`Section`], so a caller closing one never has to
+/// know what it cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// The pass wrote a document.
     Wrote {
-        /// The document that was written, named however the caller names it —
-        /// relative to the tree on screen for preference, since an absolute path
-        /// spends the line on the part the reader already knows.
         document: PathBuf,
-        /// How big it is, in bytes. Bytes rather than lines or words because
-        /// bytes are what a caller can stat without reading the file, and this
-        /// module refuses to hold file contents.
         bytes: u64,
     },
-    /// The pass was refused, and this is why.
     Refused {
-        /// The reason, carried out of whatever refused rather than invented
-        /// here.
         reason: String,
     },
-    /// This directory needed no pass: its document was carried forward and
-    /// granted as it stood.
-    ///
-    /// A separate outcome from [`Outcome::Wrote`] rather than a cheaper wording
-    /// of it, because the two are different facts and only one of them involved
-    /// a model. Naming the document anyway, because a reader looking at a
-    /// section that cost nothing still wants to know which file is being
-    /// vouched for.
     Unchanged {
-        /// The document that was kept, relative to the repository root.
         document: PathBuf,
     },
-    /// The run was stopped while this directory was being worked.
-    ///
-    /// Carries nothing: what a reader wants to know is what it had spent by
-    /// then, and the section already knows that.
     Cancelled,
 }
 
 impl Outcome {
-    /// The line this outcome closes a section with, given what that section
-    /// cost.
-    ///
-    /// `cost` is `None` when no cost ever arrived for the pass, which is said
-    /// out loud rather than printed as `$0.00`: a pass that reported nothing and
-    /// a pass that was free are different facts, and only one of them is good
-    /// news.
+    /// `cost` of `None` is said in words rather than printed as `$0.00`: a
+    /// pass that reported nothing and a pass that was free are different facts.
     fn line(&self, cost: Option<f64>) -> String {
         match self {
             Self::Wrote { document, bytes } => {
@@ -341,81 +207,46 @@ impl Outcome {
     }
 }
 
-/// One directory's pass: what it is, when it started, what it has been seen
-/// doing, and what it cost.
-///
-/// Opened by [`Account::open_section`] and closed by
-/// [`Account::close_section`]. Between the two it is the live section, which is
-/// the one whose newest line ticks; a section that has been closed — or that has
-/// had another opened beneath it — is frozen and never moves again, however long
-/// the run goes on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Section {
-    /// The directory being worked, named however the caller named it.
     directory: PathBuf,
-    /// When this section opened, what has been filed under it in arrival order
-    /// — with the outcome line, if it was closed with one, last — and whether
-    /// its clock is still moving.
     log: Log,
-    /// What the pass reported spending, summed over however many times it said
-    /// so. `None` means it never said, which is not the same as zero.
     cost: Option<f64>,
-    /// Whether the outcome line is already under it.
+    /// Whether the outcome line is already under this section.
     ///
-    /// Not the same question as [`Section::is_closed`], and the difference is
-    /// the whole reason both are here: a section stops moving the moment the
-    /// next directory opens, which is long before the run says how that
-    /// directory went. So a section spends most of a run frozen and unworded,
-    /// and this is what [`Account::close_open_sections`] reads to find the ones
-    /// still owed an ending.
+    /// Not the same question as [`Section::is_closed`]: a section stops moving
+    /// the moment the next directory opens, which is long before the run says
+    /// how it went, so most sections spend a run frozen and unworded.
+    /// [`Account::close_open_sections`] reads this to find the ones still owed
+    /// an ending.
     has_outcome: bool,
 }
 
 impl Section {
-    /// The directory this section is about.
     #[must_use]
     pub fn directory(&self) -> &Path {
         &self.directory
     }
 
-    /// What this pass reported spending, or `None` if it never reported.
-    ///
-    /// `None` and `Some(0.0)` are deliberately different answers: see
-    /// [`Account::finish`], where the difference decides whether the run's total
-    /// is a total or an understatement.
     #[must_use]
     pub const fn cost(&self) -> Option<f64> {
         self.cost
     }
 
-    /// Whether this section has stopped moving.
-    ///
-    /// True once it has been closed with an outcome, once another section has
-    /// opened beneath it, or once the run has ended — all three of which mean
-    /// the same thing to a reader: nothing further will appear here.
     #[must_use]
     pub const fn is_closed(&self) -> bool {
         self.log.is_closed()
     }
 
-    /// How many drawable rows this section is: its heading plus its lines,
-    /// where a section with no lines yet draws the one [`WAITING`] placeholder.
     fn line_count(&self) -> usize {
         self.log.row_count() + 1
     }
 
-    /// Put `outcome`'s line under this section, and stop it moving.
-    ///
-    /// The outcome line is a line like any other and takes a clock like any
-    /// other, so a reader can see how long the pass took as well as how it went.
-    /// The instant it takes is the instant this section *stopped* rather than
-    /// the instant somebody got round to wording it: a section frozen when the
-    /// next directory opened ended there, and dating its last line at the end of
-    /// the whole run would say that a pass which took thirty seconds took nine
-    /// minutes. Only a section still live when it is worded takes `at`.
-    ///
-    /// Does nothing to a section that has an outcome already. The first ending
-    /// wins, because it is the one already on screen.
+    /// The outcome takes the instant the section *stopped*, not the instant
+    /// somebody got round to wording it — otherwise a pass that took thirty
+    /// seconds ends up dated at the end of the whole run. Only a section still
+    /// live when it is worded takes `at`. The first ending wins, because it is
+    /// the one already on screen.
     fn word(&mut self, outcome: &Outcome, at: Instant) {
         if self.has_outcome {
             return;
@@ -427,137 +258,57 @@ impl Section {
     }
 }
 
-/// One drawable row of the panel: of an account, or of a file somebody asked to
-/// read.
+/// One drawable row of the panel.
 ///
-/// Flat rather than nested, because the panel is a list and scrolling it is
-/// counting: a section heading takes a row like anything else, so the number of
-/// rows above and below a window is arithmetic rather than a walk.
+/// Flat rather than nested: the panel is a list and scrolling it is counting,
+/// so a heading takes a row like anything else and the rows above and below a
+/// window are arithmetic rather than a walk. All three cards — account, thread
+/// and document — yield this one type, so one window rule covers them.
 ///
-/// The panel's cards — the account, the thread and the document — draw one card
-/// at a time and draw it the same way, so the rows of all three are this one
-/// type and the window rule over them is one rule, whichever card the reader is
-/// looking at. [`Line::Text`] is the document's only shape, because a file's
-/// line is a file's line and nothing here knows what any of it means.
-///
-/// The text is whole. Cutting it to a width belongs to whoever knows the width.
+/// What goes in *front* of a row is the renderer's: no marker for a question,
+/// no bullet for a note. Baking one in here would be a second answer to that
+/// question sitting in the value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Line {
-    /// A section heading, naming the directory whose pass follows.
     Directory {
-        /// The directory, as the caller named it.
         path: PathBuf,
     },
-    /// One thing that happened under a heading — an activity, or the outcome the
-    /// section closed with — and the elapsed time it shows.
     Clocked {
-        /// Elapsed since that section started, as `m:ss`. The newest line of the
-        /// live section is the only one of these that ever changes.
         clock: String,
-        /// What happened, in the fewest words it can be said in.
         text: String,
     },
-    /// The one line the whole run ends with.
     Summary {
-        /// Directories, wall clock and money — see [`Account::finish`].
         text: String,
     },
-    /// One line of a file somebody asked to read, or the one line said about
-    /// that reading — that the file was cut at the cap, which is the only thing
-    /// ever added to a document.
-    ///
-    /// No clock: a file did not happen at a time. No path either — which file
-    /// this is was answered by the keystroke that asked for it, and repeating it
-    /// on every row would spend the panel's width saying the same thing.
     Text {
-        /// The line, exactly as the file has it, or the sentence about the cut.
         text: String,
     },
-    /// What the reader typed: the message one turn of the thread was asked in,
-    /// in their own words.
-    ///
-    /// Its own variant rather than a [`Line::Text`] with a marker in front of
-    /// it, because who said a line is a fact about the line and not a character
-    /// somebody decided to store: the renderer is the one place that knows how
-    /// the reader's half of a conversation should look, and a `>` baked in here
-    /// would be a second answer to that question sitting in the value.
-    ///
-    /// No clock — a question is not a thing that took time; the work under it is
-    /// what has a clock — and no name in front of it, because the panel has one
-    /// reader and one model and there is nobody else it could have been. Only a
-    /// thread ever yields one.
     Said {
-        /// The message, exactly as it was typed, and wrapped by whoever knows
-        /// the width.
         text: String,
     },
-    /// What warlock itself has to say, in one line of its own voice.
-    ///
-    /// The third party on the thread's card. A [`Line::Said`] is the reader's
-    /// words and a [`Line::Text`] is the model's answer; this is neither — it is
-    /// the program saying something about the conversation rather than taking
-    /// part in it, which is what a refused command, a file written or a warning
-    /// about a stale document is. Only a [`Thread`](crate::Thread) ever yields
-    /// one: nothing an [`Account`] holds is warlock talking.
-    ///
-    /// Unclocked, like [`Line::Said`] and unlike [`Line::Clocked`]: a note is
-    /// not work that took time, it is one thing said at one moment, and a `0:00`
-    /// beside it would claim a pass had started. It draws distinctly from both
-    /// of its neighbours — its own marker rather than the question's, and not
-    /// bold — so warlock's own voice is not read as something the model did or
-    /// something the reader typed. Which marker that is belongs to the renderer,
-    /// for the reason written out at [`Line::Said`]: what is put in front of a
-    /// line is not a character stored in it.
-    ///
-    /// One line, whole. A note that had paragraphs in it would be prose, and
-    /// prose on this card is the model's.
     Note {
-        /// What warlock says, wrapped by whoever knows the width.
         text: String,
     },
-    /// One row of a line too long to draw in one — the whole of it that did not
-    /// fit on the row above, already carrying whatever indent keeps it under the
-    /// text it continues.
-    ///
-    /// Nothing here ever makes one: an [`Account`] and a [`Thread`](crate::Thread)
-    /// hold what happened, and how many rows that takes is a question about a
-    /// terminal. They are made on the way to the screen, by whoever knows the
-    /// width (see [`mod@crate::wrap`]), which is why a panel dragged narrower
-    /// re-flows the line a reader is looking at rather than cutting its tail
-    /// off.
-    ///
-    /// A line that fits is itself and never one of these, and a line that does
-    /// not keeps its own variant on its first row wherever that variant can hold
-    /// a piece of it — a question keeps its marker, a clocked line keeps its
-    /// clock — so what a row *is* still reads off the value.
+    /// Nothing in this module ever makes one. An [`Account`] holds what
+    /// happened; how many rows that takes is a question about a terminal, so
+    /// these are made in `crate::wrap`. A line that fits keeps its own
+    /// variant, and a broken line keeps it on its first row, so what a row is
+    /// still reads off the value.
     Wrapped {
-        /// The row, composed: the prefix on the first row of a broken line, or
-        /// blanks the width of it on the rows after, and then the text.
         text: String,
-        /// Whether the line this continues is drawn bold — a heading, a summary
-        /// or a question — so that one line broken over two rows is not bold on
-        /// one of them and plain on the other.
+        /// Whether the line this continues is drawn bold, so one line broken
+        /// over two rows is not bold on one and plain on the other.
         heading: bool,
     },
 }
 
 /// Everything one pact did, from the key press to the summary line.
 ///
-/// One pact, one account: a second run starts a new one rather than appending,
-/// because a log is a thing you have to search to find the current thing in.
-/// Nothing here is discarded or trimmed while the run it describes is the
-/// current one — a finished account stays whole so it can be read afterwards.
+/// One pact, one account: a second run starts a new one rather than appending.
+/// Nothing is trimmed while the run is the current one.
 ///
-/// Built by four calls, all of which take the instant they happened at:
-/// [`Account::new`] when the run starts, [`Account::open_section`] as each
-/// directory comes up, [`Account::record`] for every activity the pass reports,
-/// and [`Account::close_section`], [`Account::close_open_sections`] and
-/// [`Account::finish`] at the ends. Read back
-/// as rows with [`Account::lines`] or [`Account::window`], which take the `now`
-/// the newest clock is measured against.
-///
-/// Holds an `f64` cost, so it is [`PartialEq`] and not [`Eq`] — as is everything
-/// that comes to hold one of these.
+/// Holds an `f64` cost, so it is [`PartialEq`] and not [`Eq`] — as is
+/// everything that comes to hold one.
 ///
 /// ```
 /// use std::time::{Duration, Instant};
@@ -581,20 +332,12 @@ pub enum Line {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Account {
-    /// When the run started, which is what the summary's duration counts from.
     started: Instant,
-    /// The sections, in the order the run reached them.
     sections: Vec<Section>,
-    /// The run's closing line, once it has one.
     summary: Option<String>,
 }
 
 impl Account {
-    /// An account of a run that has just started at `at` and done nothing yet.
-    ///
-    /// Empty means empty: no sections, no lines, nothing to draw. The panel
-    /// showing nothing at all before the first pact is the same fact said one
-    /// level up, where the app has no account rather than an empty one.
     #[must_use]
     pub const fn new(at: Instant) -> Self {
         Self {
@@ -604,14 +347,9 @@ impl Account {
         }
     }
 
-    /// Open a section for `directory` at `at`, and freeze the one above it.
-    ///
-    /// The clock under this heading counts from `at`, so every directory starts
-    /// again at `0:00` — and it is on screen from this call, as the [`WAITING`]
-    /// placeholder, rather than from whenever the pass first says something.
-    /// Whatever section was live stops there and then — the pass that was
-    /// running it is over, whether or not the caller closed it with an outcome,
-    /// so its newest line has no business still counting up.
+    /// Freezing the section above is what stops two clocks running at once:
+    /// the pass that was running it is over whether or not the caller closed it
+    /// with an outcome.
     pub fn open_section(&mut self, directory: impl Into<PathBuf>, at: Instant) {
         if let Some(previous) = self.sections.last_mut() {
             previous.log.freeze(at);
@@ -624,18 +362,13 @@ impl Account {
         });
     }
 
-    /// Record what the live pass was seen doing at `at`.
+    /// A cost becomes no line at all — it is a fact about the pass rather than
+    /// something the pass did, and it reaches the reader through the outcome
+    /// line and the summary instead.
     ///
-    /// A tool becomes its name plus the one detail [`Activity`] chose to carry,
-    /// or its bare name where there is none. Thinking becomes the word
-    /// `thinking` and nothing else. A cost becomes no line at all: it is a fact
-    /// about the pass rather than a thing the pass did, so it is added to this
-    /// section's spend and appears in the outcome line and the summary instead.
-    ///
-    /// Does nothing when there is no live section — before the first directory
-    /// opens, or after the current one has been closed. A line cannot be filed
-    /// under a section that has been worded and frozen without contradicting a
-    /// line already on screen, and dropping it is the honest way to fail.
+    /// Silently drops everything when there is no live section, or when the
+    /// newest one is frozen: a line filed under a worded section would
+    /// contradict a line already on screen.
     pub fn record(&mut self, activity: &Activity, at: Instant) {
         let Some(section) = self.sections.last_mut() else {
             return;
@@ -671,46 +404,13 @@ impl Account {
         }
     }
 
-    /// Record that the live directory's request — `files` files, `bytes` bytes
-    /// of them — was handed to a pass at `at`.
+    /// `waiting · 11 files, 1.6 MB`, filed at the handover to the pass. Both
+    /// numbers are already known there, so nothing is measured for this line.
     ///
-    /// One line, `waiting · 11 files, 1.6 MB`, and it is filed at the handover:
-    /// the pass has the request and has said nothing about it yet, and this is
-    /// the silence a reader spends most of a directory looking at. The two
-    /// numbers are the only thing in warlock that can explain why one directory
-    /// is slower than the next, and both are already known at the handover —
-    /// nothing is measured for this line.
-    ///
-    /// # Why this is an entry and not the placeholder
-    ///
-    /// The drawn [`WAITING`] placeholder is only there while the section has
-    /// heard nothing at all, and it carries no numbers, because it is about the
-    /// silence rather than about whatever is being waited for. An entry does
-    /// both. It is also filed at the handover rather than at the section
-    /// opening, so the stretch it covers, from its arrival to whatever arrives
-    /// next, is the pass's own silence and not the disk read that came before
-    /// it; the placeholder covers that earlier stretch and stops being drawn
-    /// once this lands, nothing having been stored for it and nothing deleted.
-    /// Its clock is the module's ordinary one — elapsed since the section
-    /// opened, moving until something newer arrives.
-    ///
-    /// Its text is deliberately not the bare [`WAITING`] constant, so
-    /// [`Log::extend_or_open`] cannot fold it into the line above or a later
-    /// one into it.
-    ///
-    /// # What the two numbers count
-    ///
-    /// `files` is how many files the request carries; `bytes` is everything it
-    /// carries counted the way the budget counts it, which includes each child
-    /// directory's document. The two do not cover the same set, and that is the
-    /// caller's arithmetic rather than this module's — `bytes` is what was sent,
-    /// and it is the number the caps are checked against.
-    ///
-    /// Pushed rather than run through [`Log::extend_or_open`], which the
-    /// repeated-report activities use: the two differ only for an event that
-    /// repeats *identically*, and a handover happens once per pass. Does
-    /// nothing when there is no live section, or when the newest one is frozen
-    /// — the same silence [`Account::record`] keeps, and for the same reason.
+    /// The text is deliberately not the bare `waiting` constant, so
+    /// `Log::extend_or_open` cannot fold it into a neighbouring line. Pushed
+    /// rather than extended because a handover happens once per pass. Same
+    /// silence as [`Account::record`] when there is no live section.
     pub fn record_waiting(&mut self, files: usize, bytes: u64, at: Instant) {
         let Some(section) = self.sections.last_mut() else {
             return;
@@ -725,17 +425,9 @@ impl Account {
             .push(format!("{WAITING} · {files}, {}", size(bytes)), at);
     }
 
-    /// The engine turned this directory's answer down: attempt `attempt` of
-    /// `attempts`, for `defects`, each already rendered to one line.
-    ///
-    /// One line, filed like [`Account::record_waiting`]'s and for the same
-    /// reason: it is why the wait that follows is a second one, or why the
-    /// directory is about to fail. Not an [`Activity`]: the stream reported an
-    /// answer, and it was warlock that refused it.
-    ///
-    /// Pushed rather than extended, and silent when there is no live section or
-    /// the newest one is frozen, for the reasons [`Account::record_waiting`]
-    /// gives.
+    /// Not an [`Activity`]: the stream reported an answer and it was warlock
+    /// that refused it. Same silence as [`Account::record`] when there is no
+    /// live section.
     pub fn record_rejected(
         &mut self,
         defects: &[String],
@@ -764,63 +456,26 @@ impl Account {
         );
     }
 
-    /// Stop whatever section is still live moving as of `at`, without ending
-    /// the run.
-    ///
-    /// The half of [`Account::finish`] that is about clocks rather than about
-    /// money: nothing is worded, no summary is written, and a run frozen this
-    /// way can still be looked at — it simply stops counting up. Idempotent for
-    /// [`Log::freeze`]'s reason, so freezing a run that has already stopped
-    /// leaves its last line where it stopped.
-    ///
-    /// Crate-private, because the caller is `finish` — a run saying what it came
-    /// to — and because stopping a run's clocks from anywhere else would be
-    /// somebody other than the run deciding it is over.
+    /// [`Account::finish`] without the wording or the money. Crate-private
+    /// because the caller is `finish`; stopping a run's clocks from anywhere
+    /// else would be somebody other than the run deciding it is over.
     pub(crate) fn freeze(&mut self, at: Instant) {
         if let Some(section) = self.sections.last_mut() {
             section.log.freeze(at);
         }
     }
 
-    /// Close the newest section at `at` with the line `outcome` makes.
-    ///
-    /// The outcome line is a line like any other and takes a clock like any
-    /// other, so a reader can see how long the pass took as well as how it went.
-    /// Closing also stops the section moving: this is the instant its last
-    /// activity line freezes at.
-    ///
-    /// The newest section rather than any section, because it is the one a
-    /// caller can name without naming it — what stopped is what was running.
-    /// Every other section is closed by [`Account::close_open_sections`], which
-    /// is where a run that only learns per-directory outcomes at the end does
-    /// its wording.
-    ///
-    /// Does nothing when there is no section to close, or when the newest one
-    /// has an outcome already.
     pub fn close_section(&mut self, outcome: &Outcome, at: Instant) {
         if let Some(section) = self.sections.last_mut() {
             section.word(outcome, at);
         }
     }
 
-    /// Close every section still owed an outcome, wording each with what
-    /// `outcome` says about it.
-    ///
-    /// A run does not report itself a directory at a time. The pass for one
-    /// directory is over the moment the next one starts, but *how* it went
-    /// arrives once, at the end, in a list of failures naming the directories
-    /// they are about — so at the end of a run every section is frozen and none
-    /// of them has an ending, and this is where they get one. Each is worded at
-    /// the instant it stopped rather than at `at`, so the clocks say how long
-    /// the passes took; `at` is what the section still live at the end takes.
-    ///
-    /// The outcome is a caller's judgement, per section, rather than anything
-    /// worked out here: what a directory's pass wrote, how big it is and why one
-    /// was refused are all facts about a filesystem and a run, and this module
-    /// holds neither.
-    ///
-    /// Sections closed already — the one a cancel worded, say — keep the ending
-    /// they have, and `outcome` is never asked about them.
+    /// A run does not report itself a directory at a time: a pass is over when
+    /// the next one starts, but *how* it went arrives once at the end, so by
+    /// then every section is frozen and none has an ending. Each is worded at
+    /// the instant it stopped rather than at `at`; sections closed already keep
+    /// the ending they have and `outcome` is never asked about them.
     pub fn close_open_sections(
         &mut self,
         at: Instant,
@@ -835,19 +490,13 @@ impl Account {
         }
     }
 
-    /// End the run at `at` with the one line that describes the whole of it.
+    /// `pact finished — 9 directories, 4:12, $1.87`, measured from
+    /// [`Account::new`] rather than from the first section, because a run
+    /// starts when the key is pressed.
     ///
-    /// Directories, wall clock and money: `pact finished — 9 directories, 4:12,
-    /// $1.87`. The duration is measured from [`Account::new`] rather than from
-    /// the first section, because a run starts when the key is pressed.
-    ///
-    /// A pass whose cost never arrived is not worth zero. Where any section is
-    /// missing one, the line says so — `$1.65 (incomplete: 2 passes reported no
-    /// cost)` — rather than quietly under-reporting a number somebody is going to
-    /// take at face value.
-    ///
-    /// Freezes whatever section was still live, since nothing is running any
-    /// more.
+    /// A pass whose cost never arrived is not worth zero, so a run missing any
+    /// says `(incomplete: 2 passes reported no cost)` rather than quietly
+    /// under-reporting a number somebody will take at face value.
     pub fn finish(&mut self, at: Instant) {
         self.freeze(at);
 
@@ -865,36 +514,18 @@ impl Account {
         self.summary = Some(format!("pact finished — {directories}, {elapsed}, {total}"));
     }
 
-    /// The sections, in the order the run reached them.
     #[must_use]
     pub fn sections(&self) -> &[Section] {
         &self.sections
     }
 
-    /// When the run started, which is what its summary's duration counts from.
-    ///
-    /// Crate-private, and there for one reason: a run drawn into the thread is
-    /// a turn, and every turn of a thread has to be able to say when it began —
-    /// see [`Turn::started`](crate::Turn). A run began when the key was pressed,
-    /// which is the instant [`Account::new`] took.
     pub(crate) const fn started(&self) -> Instant {
         self.started
     }
 
-    /// When the section that is still being worked started, or `None` when none
-    /// is.
-    ///
-    /// The open section is the last one, and only while it is un-frozen: a
-    /// section stops being live the moment the next one opens or the run ends
-    /// (see [`Section::is_closed`]), so a finished run has no open section even
-    /// though its last section still remembers when it started.
-    ///
-    /// This is the one instant a caller needs to say how long the directory
-    /// being worked right now has been going — a renderer measuring `now -
-    /// started` for something that has to move while the pass runs. It is an
-    /// instant and not a duration on purpose: this file reads no clock, and
-    /// handing back a duration would mean picking a `now` here rather than
-    /// taking the caller's.
+    /// An instant and not a duration: this file reads no clock, and answering
+    /// with a duration would mean picking a `now` here rather than taking the
+    /// caller's.
     #[must_use]
     pub fn open_section_started(&self) -> Option<Instant> {
         self.sections
@@ -903,49 +534,29 @@ impl Account {
             .map(|section| section.log.started())
     }
 
-    /// How many rows the whole account draws as.
-    ///
-    /// A heading per section, a line per thing that happened under it, and the
-    /// summary once there is one. What a scroll offset is clamped against, and
-    /// what a "how far below the view am I" count is taken from.
     #[must_use]
     pub fn line_count(&self) -> usize {
         self.sections.iter().map(Section::line_count).sum::<usize>()
             + usize::from(self.summary.is_some())
     }
 
-    /// Every row of the account, with clocks measured against `now`.
-    ///
-    /// `now` is the caller's: this reads no clock, so the same account and the
-    /// same instant give the same rows every time. Only the newest line of a
-    /// live section depends on it.
     #[must_use]
     pub fn lines(&self, now: Instant) -> Vec<Line> {
         self.window(0, self.line_count(), now)
     }
 
-    /// The `height` rows starting at `offset`, with clocks measured against
-    /// `now`.
-    ///
-    /// What a panel actually draws. Asking for more rows than there are, or
-    /// starting past the end, gives back what is there rather than failing:
-    /// a viewport is a request, not an assertion about the account's length.
+    /// Asking for more rows than there are, or starting past the end, gives
+    /// back what is there: a viewport is a request, not an assertion about the
+    /// account's length.
     #[must_use]
     pub fn window(&self, offset: usize, height: usize, now: Instant) -> Vec<Line> {
         self.rows(now).skip(offset).take(height).collect()
     }
 
-    /// Every row, lazily, so a window costs only the rows it takes.
-    ///
-    /// A heading and then whatever its [`Log`] draws as, which for a section
-    /// that has heard nothing yet is the [`WAITING`] placeholder: a pass that
-    /// has not said anything still has a clock on screen counting up from the
-    /// moment its section opened.
-    ///
-    /// Crate-private rather than private, because the panel reads a run's rows
+    /// Crate-private rather than private because the panel draws a run's rows
     /// out of exactly this iterator: one function words what a run did, so
-    /// there is no second spelling of a directory heading or an outcome line
-    /// anywhere in warlock to keep in step with this one.
+    /// there is no second spelling of a heading or an outcome line to keep in
+    /// step with this one.
     pub(crate) fn rows(&self, now: Instant) -> impl Iterator<Item = Line> + '_ {
         self.sections
             .iter()
@@ -962,9 +573,7 @@ impl Account {
             )
     }
 
-    /// What the run is known to have spent: the sections that reported, summed.
-    ///
-    /// Folded from a positive zero rather than summed, because [`f64`]'s own
+    /// Folded from `0.0` rather than `sum()`, because [`f64`]'s own
     /// [`Sum`](std::iter::Sum) starts at `-0.0` to keep signed zeroes exact and
     /// a run that spent nothing would print as `$-0.00`.
     fn spent(&self) -> f64 {
@@ -974,8 +583,6 @@ impl Account {
             .fold(0.0, |total, usd| total + usd)
     }
 
-    /// How many sections never reported a cost, which is how many the total is
-    /// short by.
     fn unpriced(&self) -> usize {
         self.sections
             .iter()
@@ -984,60 +591,38 @@ impl Account {
     }
 }
 
-/// An elapsed span as the panel spells it: `m:ss`, counting from `0:00`.
+/// `m:ss`, counting from `0:00`.
 ///
-/// Minutes are not padded and are allowed to grow past sixty rather than
-/// rolling into an hours field: a pact is minutes of work, `73:04` is
-/// unambiguous, and an `h:mm:ss` that appears once an hour in is a second format
-/// for a reader to parse.
-///
-/// Sub-second precision is dropped, not rounded. A clock that reads `0:04` and
-/// then `0:04` again is a clock; one that jumps forward when a pass is nearly at
-/// the next second is a distraction.
+/// Minutes are unpadded and allowed to grow past sixty rather than rolling into
+/// an hours field, which would be a second format appearing once an hour in.
+/// Sub-second precision is dropped, not rounded: a clock that reads `0:04`
+/// twice is a clock, one that jumps ahead near the next second is a
+/// distraction.
 fn clock(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
-/// A cost as the panel spells it: two decimal places behind a dollar sign.
-///
-/// Two places because that is what money looks like, even where a pass costs
-/// less than a cent — `$0.00` for a pass that reported almost nothing is a
-/// truer statement about the run's total than four decimal places of noise on
-/// every line.
-///
-/// The one place a number becomes money in this crate. What a *line* then says
-/// around it is the caller's, and the panel's two ledgers deliberately say very
-/// different things: see [`Outcome::line`] and [`Turn`](crate::Turn).
+/// The one place a number becomes money in this crate. Two decimals even where
+/// a pass cost less than a cent — four places of noise on every line says less
+/// about the run's total than `$0.00` does.
 pub(crate) fn money(usd: f64) -> String {
     format!("${usd:.2}")
 }
 
-/// A tool call as one line: its name, and the one detail [`Activity`] chose to
-/// carry, or its bare name where there is none.
-///
-/// Shared with the thread, because a `Grep` is a `Grep` whichever card it turns
-/// up on and a reader who has learnt to read one of them has learnt to read
-/// both. What is *not* shared is anything around it — a pact's line sits under
-/// a directory and a turn's under a question.
+/// Shared with the thread, because a `Grep` is a `Grep` whichever card it
+/// turns up on. What is not shared is anything around it.
 pub(crate) fn tool_line(name: &str, detail: Option<&String>) -> String {
     detail.map_or_else(|| name.to_owned(), |detail| format!("{name} {detail}"))
 }
 
-/// The [`WRITING`] line as it stands, given how much of the answer has arrived.
+/// `writing · 1.8 KB`. A count and nothing else: no denominator, because
+/// nothing knows how long an answer will be until it ends, and no spinner,
+/// because the clock the line already carries is the honest thing that moves.
 ///
-/// `writing · 1.8 KB`, and `writing · 934 bytes` under a kilobyte, per
-/// [`size`]. A count and nothing else: no denominator, because nothing knows
-/// how long the answer will be until it ends; no percentage and no bar, which
-/// are that denominator wearing a hat; no spinner, because the clock the line
-/// already carries is the honest thing that moves. What it says is what has
-/// happened, and a reader watching it climb knows the pass is alive without
-/// being told a guess about when it will stop.
-///
-/// Zero bytes reads as the bare word. That is the case the block's opening
-/// reports, before a single delta has landed, and the bare word is what the
-/// panel has always shown at the first token; `writing · 0 bytes` would be a
-/// count of nothing, worded as though something had been measured.
+/// Zero bytes is the bare word — the case the block's opening reports, before a
+/// single delta has landed. `writing · 0 bytes` would word a measurement that
+/// had not happened.
 fn writing_line(bytes: u64) -> String {
     if bytes == 0 {
         WRITING.to_owned()
@@ -1046,62 +631,35 @@ fn writing_line(bytes: u64) -> String {
     }
 }
 
-/// Whether `text` is a line of the `word` stretch: the bare word, or the word
-/// in front of a ` · ` detail.
-///
-/// The half of [`Log::rewrite_or_open`] that decides what "the same stretch"
-/// means. Split out so the shape it looks for sits next to [`writing_line`],
-/// which is what produces it — the two have to agree, and agreeing at a
-/// distance is how they would stop.
+/// What "the same stretch" means to [`Log::rewrite_or_open`]. It has to agree
+/// with the shape [`writing_line`] produces, which is why it sits next to it.
 fn continues(text: &str, word: &str) -> bool {
     text.strip_prefix(word)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(" · "))
 }
 
-/// What an outcome line says about a pass's cost, including when there is none.
-///
-/// A pass that never reported is said in words rather than as a number, because
-/// every number here would be a lie about a thing that was never measured.
 fn spend(cost: Option<f64>) -> String {
     cost.map_or_else(|| "no cost reported".to_owned(), money)
 }
 
-/// A number of bytes as the panel spells it: `934 bytes`, `1.8 KB`, `403 KB`,
-/// `1.6 MB`, `12 MB`.
+/// `934 bytes`, `1.8 KB`, `403 KB`, `1.6 MB`, `12 MB`.
 ///
 /// Base 1024, spelled `KB` rather than `KiB`, which is the spelling the panel
-/// is specified in. The engine's own prose writes `KiB` for the same
-/// arithmetic, so the two disagree in spelling while agreeing in the number;
+/// is specified in; the engine writes `KiB` for the same arithmetic and
 /// settling that is not this module's call.
 ///
-/// # The tiers
+/// The unit is chosen by magnitude *before* the rounding happens inside it, so
+/// nothing is promoted across a boundary by being rounded: 1048575 bytes is
+/// `1024 KB` and not `1.0 MB`, which would claim a megabyte had been reached.
+/// `MB` is the largest unit because the request cap is measured in megabytes.
 ///
-/// Under a kilobyte the count is exact, because a small request is a fact worth
-/// stating precisely and `0.9 KB` says less than `934 bytes` does. Above it,
-/// one decimal while the number is under ten — `1.8 KB` and `1.6 MB`, where the
-/// first digit alone would throw away most of what the reader wanted — and
-/// whole units from ten up, where that digit is noise on a number nobody reads
-/// to three significant figures.
-///
-/// The unit is chosen by magnitude first and the rounding happens inside it, so
-/// nothing is ever promoted across a boundary by being rounded: 1048575 bytes
-/// is `1024 KB` and not `1.0 MB`, which would claim the request had reached a
-/// megabyte when it had not. `MB` is the largest unit, since the request cap is
-/// measured in megabytes and a `GB` here would be a unit for a number that
-/// cannot occur.
-///
-/// Integer arithmetic throughout: these are exact counts, and the halfway cases
-/// are the ones the tests pin.
-///
-/// Public because it is the panel's spelling of a size and there is now more
-/// than one line that needs it — the account's request lines, and the line the
-/// thread says when `/write` puts a file on disk. Shared rather than copied: two
-/// formatters would be two spellings the day either of them changed.
+/// Public because two ledgers need the panel's spelling of a size — the
+/// account's request lines and the line the thread says when `/write` puts a
+/// file on disk — and two formatters would be two spellings the day either
+/// changed.
 #[must_use]
 pub fn size(bytes: u64) -> String {
-    /// One kilobyte, as this file counts them.
     const KB: u64 = 1024;
-    /// One megabyte, likewise.
     const MB: u64 = KB * KB;
 
     if bytes < KB {
@@ -1117,12 +675,9 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
-/// `bytes` in units of `unit`, spelled with the digits that unit deserves.
-///
-/// The half of [`size`] that is arithmetic rather than choice: one decimal
-/// below ten of the unit, whole units at ten and above, rounding half up in
-/// both. The multiplication by ten only happens on the tenths branch, where
-/// the value is under ten units and so nowhere near overflowing.
+/// One decimal below ten of the unit, whole units at ten and above, rounding
+/// half up in both. The multiply by ten is only on the tenths branch, where the
+/// value is under ten units and nowhere near overflowing.
 fn scaled(bytes: u64, unit: u64, name: &str) -> String {
     if bytes < 10 * unit {
         let tenths = (bytes * 10 + unit / 2) / unit;
@@ -1132,10 +687,8 @@ fn scaled(bytes: u64, unit: u64, name: &str) -> String {
     }
 }
 
-/// `count` with the right noun after it: `1 directory`, `9 directories`.
-///
-/// English, in the one place these lines need it, so no line has to be worded
-/// twice or read as `1 directories`.
+/// `1 directory`, `9 directories`, so no line has to be worded twice or read
+/// as `1 directories`.
 fn plural(count: usize, one: &str, many: &str) -> String {
     let noun = if count == 1 { one } else { many };
     format!("{count} {noun}")
@@ -1149,13 +702,10 @@ mod tests {
     use super::{Account, Line, Outcome, Section, clock, size};
     use crate::claude::Activity;
 
-    /// The instant `seconds` after `base`, so a whole run can be driven without
-    /// anything ever reading a clock.
     fn at(base: Instant, seconds: u64) -> Instant {
         base + Duration::from_secs(seconds)
     }
 
-    /// The activity a pass reports for a tool call with one detail worth saying.
     fn tool(name: &str, detail: &str) -> Activity {
         Activity::Tool {
             name: name.to_owned(),
@@ -1163,8 +713,6 @@ mod tests {
         }
     }
 
-    /// What a run's rows say, as plain text, for the tests that care about the
-    /// wording rather than the shape.
     fn said(account: &Account, now: Instant) -> Vec<String> {
         account
             .lines(now)

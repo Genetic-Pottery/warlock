@@ -1,241 +1,69 @@
-//! The composer: the several-line draft at the foot of the panel's column, and
-//! the two pure functions saying what a key and what a paste do to it.
+//! The multi-line draft at the foot of the panel's column, and the two pure
+//! functions saying what a keystroke and what a pasted block do to it.
 //!
-//! Every warlock command is a single letter — `p` pacts, `r` refreshes, `s`
-//! scopes, `v` views — so the moment a field is on screen and holding the
-//! keyboard, `p` has to be able to mean the letter p. This module is the field
-//! that makes that true. It is [`prompt`](crate::prompt)'s shape grown to
-//! several lines: a value holding what has been typed, and
-//! [`compose_for`], which takes a key event and that value and comes back with
-//! one of three consequences.
+//! Keys and pastes are two functions with two return types on purpose.
+//! [`Pasted`] has one variant, so no block of text the terminal hands over —
+//! however many newlines are in it — can come back saying "submit" or "leave";
+//! folded into [`compose_for`] that would be a rule every call site has to
+//! remember rather than one the type keeps.
 //!
-//! ## A buffer, an insertion point, and deliberately nothing more
-//!
-//! A printable character goes in where the insertion point is, Alt+Enter puts a
-//! newline in the same place, Backspace takes back the character before it and
-//! Delete the one after it, Enter offers the whole draft up and Esc hands the
-//! keyboard back. That is the entire editor. There is no history, no selection
-//! and no completion.
-//!
-//! The insertion point is [`Composer::cursor`], a byte offset into the draft,
-//! and six keys move it. Left and Right step a character, Home and End go to the
-//! ends of the display row, and Up and Down step the rows as they are drawn — so
-//! a wrapped paragraph is walked visually rather than by line. None of the six
-//! changes a byte; every key that does change one changes it where those six
-//! left the cursor, which is the whole of what moving it is for. Insert and
-//! `BackTab` go on doing nothing at all, exactly as
-//! [`edit_for`](crate::edit_for) has it, because every key a mover or an editor
-//! claims is a key that cannot be one of the characters being typed.
-//!
-//! Both edges are `char` edges and never byte edges: a character goes in whole
-//! and comes out whole, so a draft with an accent or an emoji in it stays a
-//! `String` and the cursor stays somewhere the draft actually has. Where that
-//! offset is *drawn* is this module's answer as well: [`Composer::window`] comes
-//! back with the rows on screen and the cell the caret goes in among them, so
-//! the place the keys move the cursor to and the place a reader sees it are one
-//! piece of arithmetic rather than two.
-//!
-//! Because four of those six are row-wise, the value carries the width it was
-//! last drawn at ([`Composer::set_width`]), told to it once a round the way its
-//! muting is. That keeps [`compose_for`] a function of a key and a composer and
-//! nothing else.
-//!
-//! A paste is the fourth road in, and it is deliberately the narrowest.
-//! [`paste_for`] takes a block of text the terminal handed over whole and puts
-//! it at the end of the draft, and what comes back is a [`Pasted`], which has
-//! one variant and cannot say "submit" or "leave" however many newlines the
-//! block carries. That is the whole of why it is a second function rather than
-//! another arm of [`compose_for`]: a pasted `\n` is a character of somebody's
-//! paragraph, and without bracketed paste it arrives as `KeyCode::Enter` and
-//! sends the first line as a question nobody finished asking. Appending is the
-//! one place a paste and a keystroke now disagree: a keystroke goes in at the
-//! cursor and a paste goes on the end, snapping the cursor there behind it
-//! wherever it was before. Pasting *at* the cursor is a slice of its own, and
-//! [`paste_for`] is left exactly as it was until it lands.
-//!
-//! Enter and Alt+Enter are the pair, and Shift+Enter is deliberately not a third
-//! keystroke: terminals disagree about whether they report it at all, so binding
-//! it would be binding a key half the readers of warlock do not have. A draft
-//! that is empty or nothing but whitespace is not offered up — Enter on it
-//! changes nothing rather than sending a message with no message in it — which
-//! is the one judgement this module does make, and it makes it because "is there
-//! anything here" is a question about the buffer rather than about what the
-//! buffer is for.
-//!
-//! ## Why the value knows its own height, and where its window starts
-//!
-//! The composer is one row tall when it is empty and grows a row at a time as
-//! the draft wraps or a newline is inserted, up to [`COMPOSER_MAX_ROWS`], and
-//! the panel above it loses exactly the rows it takes. That arithmetic has to be
-//! done before the frame is cut, so it lives here rather than in the drawing:
-//! [`Composer::height`] is the number the layout asks for, and
-//! [`Composer::window`] is the rows that number has room for, together with the
-//! cell the caret goes in ([`ComposerWindow`]).
-//!
-//! Past the cap the draft scrolls within the rows it has, and what the window
-//! follows is the *cursor*: it starts [`MARGIN`] rows above the row the cursor
-//! is on, as far as there are rows to start at. So a draft being written at its
-//! end shows its end — the tail the field drew before any of this, since a
-//! cursor on the last row leaves no rows below to keep — and a cursor moved back
-//! into the middle of a long draft brings the window to it rather than being
-//! moved somewhere nobody can see. It is derived from the draft, the cursor, the
-//! width and the height every time it is asked for, and nothing about a window
-//! is stored: there is no scroll offset to reset when a long draft is
-//! backspaced short again.
-//!
-//! Rows are counted with [`folded`](crate::wrap::folded), which breaks where the
-//! panel's own wrapper breaks, so a row counted here is a row the frame agrees
-//! with and the composer never asks for a height the drawing then disagrees
-//! with. It is the byte-preserving wrapper rather than
-//! [`wrapped`](crate::wrap::wrapped) because a draft is text somebody is still
-//! typing: the space a row broke at stays on that row, so the rows join back up
-//! to the draft byte for byte and nothing typed goes missing between the buffer
-//! and the screen. The row keeping its break character is one column wider than
-//! the width, and the drawing truncates at the pane edge.
-//!
-//! ## What this deliberately does not answer
-//!
-//! Ctrl-C. It is a key event and not a signal — raw mode is exactly the mode in
-//! which the terminal stops turning it into `SIGINT` — so the event loop answers
-//! it before it consults this module, with the composer focused and without.
-//! Through here it is one of the keys that change nothing, because a character
-//! carrying Ctrl is not text somebody typed; if it were, the one keystroke every
-//! reader trusts to get them out would put a `c` in the draft.
-//!
-//! Muting, too — as a fact. A field is muted for as long as the answer to the
-//! last question is on its way, and for no other reason — one question at a
-//! time. Setting it is somewhere else: the loop owns the turn, so it owns the
-//! flag ([`Composer::set_muted`]), and the keyboard's gate is what declines to
-//! ask [`compose_for`] anything while the flag is up. So [`compose_for`] behaves
-//! identically either way and simply carries the flag through, which is what
-//! keeps "what a key does to a draft" one set of rules rather than two.
-//! [`paste_for`] carries the flag through in exactly the same way and adds one
-//! thing the keys do not need: a muted field takes no paste, because a block of
-//! bytes the terminal delivered while an answer is in flight is not something
-//! anybody typed at this field, and it is one arrival rather than a key at a
-//! time — a gate missed at a call site would land the lot.
-//!
-//! Where the draft is kept between keystrokes, which pane has the focus, and
-//! what a submitted draft is *for* are all somebody else's business. Nothing
-//! here reads a terminal, draws anything, or takes an [`App`](crate::App): a key
-//! event or a pasted block goes in with the current draft, one consequence comes
-//! out, and every rule below is one assertion with nothing attached to stdout.
+//! Every warlock command is a single letter, so while this field holds the
+//! keyboard the loop consults it *instead of* `input::action_for` rather than as
+//! well: `p` is the letter p. Nothing here reads a terminal or a clock — the
+//! width and the muting are facts about the session, told in from outside once a
+//! round, which is what keeps both functions pure functions of a key and a
+//! composer.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::ui::display_width;
 use crate::wrap::folded;
 
-/// The most rows the composer is ever drawn in, however long the draft gets.
-///
-/// A cap rather than a field, because the number is a judgement about the screen
-/// and not about the draft: the panel above is where warlock says what it did,
-/// and a composer allowed to grow without limit would eat the record it is being
-/// typed next to. Six rows is enough to see a paragraph while writing it and
-/// little enough that the account keeps most of the column; past it the composer
-/// scrolls within itself and the newest row stays at the bottom.
+/// A cap rather than a field, because the panel above loses exactly the rows the
+/// composer takes: a draft allowed to grow without limit would eat the account
+/// it is being typed next to. Past it the draft scrolls within the rows it has.
 pub const COMPOSER_MAX_ROWS: u16 = 6;
 
-/// How many rows of draft the window keeps above the cursor's row while it can:
-/// vim's `scrolloff`, at the one end that a field this short has room for.
-///
-/// The whole of the field's scrolling rule (see [`Composer::window`]). Two
-/// rather than none, because a window that started at the cursor's row would
-/// scroll the draft at every Down and one that ended there would do it at every
-/// Up: a margin treats the two directions alike, and it needs no memory of where
-/// the window was last frame — which is what lets the window stay derived and
-/// keeps a scroll offset off [`Composer`]. Two rather than three in a six-row
-/// field, so that a cursor moved into a long draft still has rows of it in front
-/// of the cursor as well as behind.
+// How many rows the window keeps above the cursor's row while it can. Two rather
+// than none, because a window that started at the cursor's row would scroll at
+// every Down and one that ended there at every Up. A fixed margin rather than
+// the least scroll that would do, because `window` keeps no previous window to
+// be least against — it is recomputed from scratch every frame.
 const MARGIN: usize = 2;
 
-/// The modifiers that mean a character is a command rather than something
-/// somebody typed.
-///
-/// The same set [`prompt`](crate::prompt) keeps, for the same reason and stated
-/// again rather than shared: a field's idea of what is text is part of that
-/// field. Shift is deliberately absent — an upper-case letter arrives with it on
-/// some terminals and without it on others, and either way it is text.
-/// Everything here is a chord, Ctrl-C first among them, and a chord is left to
-/// the loop above rather than put in the draft.
+// The modifiers that make a character a command rather than something somebody
+// typed. Shift is deliberately absent: an upper-case letter arrives with it on
+// some terminals and without it on others, and either way it is text. Ctrl-C is
+// in here, and the loop above has already had its chance at it.
 const CHORD: KeyModifiers = KeyModifiers::CONTROL
     .union(KeyModifiers::ALT)
     .union(KeyModifiers::SUPER)
     .union(KeyModifiers::HYPER)
     .union(KeyModifiers::META);
 
-/// What has been typed into the composer, and where the insertion point is in
-/// it.
+/// The invariant every value in this module holds by construction: `cursor` is
+/// a `char` boundary of `draft` and at most its length. [`Composer::at`] is the
+/// only road in from outside and it panics rather than clamps.
 ///
-/// One string, one offset, one width and one flag. No scroll offset, because the
-/// window is worked out from the cursor every time it is asked for (see
-/// [`Composer::window`]).
-///
-/// The offset is [`Composer::cursor`], and it is where the editing keys act:
-/// what is typed goes in there, Backspace takes the character before it and
-/// Delete the character after it. It is a byte index into the draft rather than
-/// a row and a column, so that it goes on meaning the same place when the
-/// terminal is resized and the draft re-flows underneath it. It is
-/// always on a `char` boundary and never past the end of the draft: every value
-/// built in this module holds that by construction, and the one way to set it
-/// from outside — [`Composer::at`] — panics rather than clamp.
-///
-/// The width is [`Composer::width`], and it is the width the field was last
-/// *drawn* at rather than a width the draft has an opinion about. It is here for
-/// one reason: Home, End, Up and Down move by display row, and which row an
-/// offset is on is a question only a width can answer (see [`compose_for`]).
-/// [`Composer::height`], [`Composer::window`] and the maps go on taking a width
-/// as an argument, so a composer can still be driven through every width a
-/// terminal has in one test without a terminal; this is the one the *keys* are
-/// answered at, told once a round by whoever is about to draw
-/// ([`Composer::set_width`]), exactly as the muting is.
-///
-/// The flag is [`Composer::is_muted`], and it is a fact about the session rather
-/// than about the draft: one question at a time, so while an answer is on its
-/// way the field takes no keys and is drawn to say so. Which is also why it is
-/// carried here rather than worked out where it is read — the loop knows whether
-/// a turn is in flight, and it tells the field once a round, exactly as it tells
-/// the app what the terminal is doing with the pointer.
-///
-/// Every field takes part in `PartialEq` and `Hash` — this is a whole value and
-/// is compared as one — so two composers holding the same characters at
-/// different insertion points are two different values, and so are two last
-/// drawn at different widths. Which is why every value built here carries the
-/// incoming width through untouched: a keystroke is not a redraw.
+/// `width` and `muted` are facts about the session rather than about the draft,
+/// told in once a round by whoever is about to draw. Both take part in
+/// [`PartialEq`] and [`Hash`] with everything else, so every value built here
+/// must carry the incoming pair through untouched — a keystroke that dropped
+/// one would read as a redraw to any whole-value comparison.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Composer {
-    /// What has been typed. Newlines are in it as `\n`.
     draft: String,
-    /// Where the next character goes: a byte offset into `draft`, on a `char`
-    /// boundary, at most `draft.len()`. Every key that edits edits here and
-    /// leaves it here — after what was typed, or where what was deleted began —
-    /// so it is `draft.len()` only when that is where somebody left it. A paste
-    /// is the exception and snaps it to the end (see [`paste_for`]).
+    /// A byte offset rather than a row and a column, so it goes on meaning the
+    /// same place when the terminal is resized and the draft re-flows under it.
     cursor: usize,
-    /// How many columns the field was last drawn in, as last set by
-    /// [`Composer::set_width`]. Zero until somebody draws, which is a column
-    /// nobody has measured and folds every line to one row.
+    /// Zero until something draws — a column nobody has measured, which folds
+    /// every line to one row. The loop draws before it waits for a key, so no
+    /// keystroke is answered in that state.
     width: u16,
-    /// Whether the field is taking keys at all. `false` for the whole of a
-    /// session that never asks anything and never runs a pact; `true` only for
-    /// as long as a turn is being answered, or a run writing documents,
-    /// somewhere else.
     muted: bool,
 }
 
 impl Composer {
-    /// A composer holding `draft`, live, with the cursor at the end of it.
-    ///
-    /// [`Composer::default`] is the empty one a session starts on — empty draft,
-    /// cursor at zero. This is for putting a composer back where it was — and
-    /// for tests, which is most of what a value this small wants a constructor
-    /// for. The end rather than the start because the end is where somebody who
-    /// has just typed `draft` would be, so every whole-value comparison written
-    /// against a draft alone goes on saying what it said. Somewhere else in the
-    /// draft is [`Composer::at`]. Neither the muting nor the width is a
-    /// constructor's business: both are told to the field from outside as the
-    /// session goes on, by [`Composer::set_muted`] and [`Composer::set_width`],
-    /// and a composer nobody has drawn yet is a composer nobody has measured.
     #[must_use]
     pub fn new(draft: impl Into<String>) -> Self {
         let draft = draft.into();
@@ -249,22 +77,13 @@ impl Composer {
         }
     }
 
-    /// The same composer with the cursor at `offset` instead.
-    ///
-    /// A consuming builder, so `Composer::new("hello").at(3)` is one expression
-    /// and there is no half-built composer to leave lying around:
-    /// `Composer::new` puts the cursor where typing would have left it, and this
-    /// is how a test says somewhere else.
-    ///
     /// # Panics
     ///
-    /// If `offset` is past the end of the draft, or falls inside a character
-    /// rather than on a `char` boundary. A panic rather than a clamp, because
-    /// there is no production path here — the values this module builds itself
-    /// hold the invariant by construction and do not come through here — so
-    /// every caller is a test, and a test asking for an offset the draft does
-    /// not have is a wrong expectation that should be loud rather than quietly
-    /// answered with the nearest offset that does exist.
+    /// If `offset` is past the end of the draft or falls inside a character. A
+    /// panic rather than a clamp because there is no production caller: the
+    /// values this module builds hold the invariant by construction and do not
+    /// come through here, so everything reaching it is a test with a wrong
+    /// expectation, which should be loud rather than quietly moved.
     #[must_use]
     pub fn at(mut self, offset: usize) -> Self {
         assert!(
@@ -282,123 +101,53 @@ impl Composer {
         self
     }
 
-    /// Where the insertion point is: a byte offset into [`Composer::draft`], on
-    /// a `char` boundary, at most the draft's length.
-    ///
-    /// A byte offset rather than a row and a column so that it survives a
-    /// resize: the rows the draft draws as depend on the width the frame hands
-    /// in, and this does not.
     #[must_use]
     pub const fn cursor(&self) -> usize {
         self.cursor
     }
 
-    /// Tell the field how many columns it is being drawn in.
+    /// Told rather than measured, because the frame is cut somewhere else. It is
+    /// on the value at all because Home, End, Up and Down move by *display* row,
+    /// and which row an offset is on has no answer until something has said how
+    /// wide the field is — carrying it here is what leaves [`compose_for`] a
+    /// function of a key and a composer.
     ///
-    /// Told rather than worked out, for [`Composer::set_muted`]'s reason and in
-    /// its shape: the frame is cut somewhere else, so the width is somewhere
-    /// else's fact, and it is handed over once a round by whoever is about to
-    /// draw — [`panel_width`](crate::panel_width), which is the width the
-    /// composer's own pane is drawn at.
-    ///
-    /// It is here because four of the keys are row-wise. Home and End are the
-    /// ends of the *display* row, and Up and Down step the rows as they are
-    /// drawn, so a wrapped paragraph is stepped through visually — and which row
-    /// an offset is on is a question that has no answer until something has said
-    /// how wide the field is. Carrying it on the value rather than passing it to
-    /// [`compose_for`] keeps that function a pure function of a key and a
-    /// composer, which is the shape every keyboard function in warlock has.
-    ///
-    /// Nothing about the draft or the cursor moves here. A width is a fact about
-    /// the screen: the same bytes re-flow into different rows, and the cursor
-    /// goes on being the byte offset it was, which is the whole reason it is a
-    /// byte offset (see [`Composer::cursor`]).
-    ///
-    /// Zero until the first frame, and zero again for a composer built fresh
-    /// after a submission — a column nobody has measured, which folds every line
-    /// to one row, so the row-wise keys fall back to working line-wise until the
-    /// next frame. The loop draws before it waits for a key, so that is a state
-    /// no keystroke is ever answered in.
+    /// Nothing about the draft or the cursor moves: the same bytes re-flow into
+    /// different rows and the offset goes on meaning the byte it always meant.
     pub const fn set_width(&mut self, width: u16) {
         self.width = width;
     }
 
-    /// How many columns the field was last drawn in, and the width the keys are
-    /// answered at.
-    ///
-    /// Zero for a composer nobody has drawn. Not the width [`Composer::height`],
-    /// [`Composer::window`] and the maps take — those are asked by the frame,
-    /// which knows its own width and hands it in.
     #[must_use]
     pub const fn width(&self) -> u16 {
         self.width
     }
 
-    /// Say whether the field is taking keys.
+    /// Told every round rather than at the keystrokes that change it, so a turn
+    /// that ended in any of its ways, or a run that ended in any of its, leaves
+    /// a live field behind without each of those ways having to say so.
     ///
-    /// Told rather than worked out, and told by the one thread that knows: the
-    /// event loop holds the turn and the run in flight, so it holds this fact,
-    /// and it hands it over once a round the way it hands the app what the
-    /// terminal is doing with the pointer (see
-    /// [`App::set_mouse_captured`](crate::App::set_mouse_captured)).
-    /// Every round rather than at the keystrokes that change it, so a turn that
-    /// ended in any of its five ways, or a run that ended in any of its four,
-    /// leaves a live field behind it without each of those ways having to
-    /// remember to say so.
-    ///
-    /// Nothing about the draft moves here. A muted field is the same characters
-    /// in the same order, still there when the answer lands — muting is about
-    /// which keys it hears, not about what somebody has written.
+    /// The draft does not move: muting is about which keys the field hears, not
+    /// about what somebody has written.
     pub const fn set_muted(&mut self, muted: bool) {
         self.muted = muted;
     }
 
-    /// Whether the field is muted: `true` while a turn is being answered or a
-    /// pact or refresh is in flight.
-    ///
-    /// Asked twice a round and nowhere else. The keyboard asks so that a key
-    /// pressed at a muted field neither types nor acts (see `press_for` in the
-    /// binary), and the drawing asks so that the field is visibly dim while it
-    /// is not listening — a border lit over a field that swallows keys would be
-    /// warlock pointing at somewhere nothing happens.
     #[must_use]
     pub const fn is_muted(&self) -> bool {
         self.muted
     }
 
-    /// What has been typed so far, newlines included, in the order it is drawn
-    /// in rather than the order it was typed in — characters go in at
-    /// [`Composer::cursor`], so a reader who moved back can have written the
-    /// middle of this last.
-    ///
-    /// What a submit hands on, and the only text there is: [`Composed::Submit`]
-    /// carries none of its own, so there is no way for a submission to disagree
-    /// with the composer it came from. The whole of it goes, wherever the cursor
-    /// happens to be sitting — the insertion point says where the next character
-    /// would land and nothing more.
     #[must_use]
     pub fn draft(&self) -> &str {
         &self.draft
     }
 
-    /// Whether the draft would be offered up if Enter were pressed now.
-    ///
-    /// `false` for an empty draft and for one that is nothing but spaces,
-    /// newlines and tabs. The drawing asks so it can say whether Enter means
-    /// anything; [`compose_for`] asks so that it does not.
     #[must_use]
     pub fn is_submittable(&self) -> bool {
         !self.draft.trim().is_empty()
     }
 
-    /// How many rows the composer needs at `width`.
-    ///
-    /// One when the draft is empty — the field is always on screen and always
-    /// has a row for the cursor to sit on — and one more for every newline and
-    /// every wrap, up to [`COMPOSER_MAX_ROWS`], past which the draft scrolls
-    /// within the rows it has. This is the number the layout takes off the panel
-    /// above, so it is asked for before the frame is cut and answered against
-    /// the width that frame will draw at.
     #[must_use]
     pub fn height(&self, width: u16) -> u16 {
         // At most `COMPOSER_MAX_ROWS`, and the row count is at least one, so
@@ -408,18 +157,10 @@ impl Composer {
             .min(COMPOSER_MAX_ROWS)
     }
 
-    /// The `height` rows of the draft that the cursor is in, top row first,
-    /// with the cell the caret is drawn at among them.
-    ///
-    /// The window the drawing draws, whole: the rows and the caret come back
-    /// together as one [`ComposerWindow`], so [`Composer::place`] is applied in
-    /// exactly one place and a set of rows that disagrees with the caret drawn
-    /// on them cannot be built. `height` is the rows the border actually left,
-    /// which is at most [`Composer::height`] and can be fewer when the terminal
-    /// is squeezed; the width is the frame's, exactly as it is for
-    /// [`Composer::height`] and the maps.
-    ///
-    /// # Where it starts
+    /// The rows and the caret come back together as one [`ComposerWindow`], so
+    /// `Composer::place` is applied once and a set of rows that disagrees with
+    /// the caret drawn on them cannot be built. `height` is the rows the border
+    /// actually left, which can be fewer than [`Composer::height`] asked for.
     ///
     /// The first row on screen is a pure function of the draft, the cursor, the
     /// width and the height, with nothing remembered between frames:
@@ -428,32 +169,10 @@ impl Composer {
     /// first = clamp(cursor row - MARGIN, 0, rows - height)
     /// ```
     ///
-    /// So there is no scroll offset on the value, and nothing has to be reset
-    /// when a long draft is backspaced short again — a draft inside the height
-    /// is every row of it, and a cursor moved anywhere in a draft past it brings
-    /// the window along. A fixed [`MARGIN`] rather than the least scroll that
-    /// would do, because there is no previous window to be least against: this
-    /// is computed from scratch every time it is asked. A window ending at the
-    /// cursor's row would scroll the content at every Up, and one starting there
-    /// would do the same at every Down; a margin treats the two directions
-    /// alike. With the margin and a six-row field the cursor travels three rows
-    /// before the content moves at all, and then the window follows a row at a
-    /// time.
-    ///
-    /// The common case degenerates to the tail the field used to draw: a cursor
-    /// on the last row of a draft past the height is `rows - height` — the last
-    /// `height` rows — which is where a draft being typed at the end always
-    /// leaves it.
-    ///
-    /// # The edges
-    ///
-    /// A `height` past the number of rows is every row and no scrolling, since
-    /// the ceiling is zero. A `height` of zero — a border with nothing inside it
-    /// — is no rows at all, and the caret's row is zero, which no row exists at:
-    /// there is nothing to draw, and it is the one window whose caret is not a
-    /// row of its own rows. A `height` under [`MARGIN`] + 1 keeps the caret on
-    /// screen rather than the margin, since a caret off the window would be a
-    /// cursor the reader cannot see, which is the whole of what this is for.
+    /// So there is no scroll offset on the value and nothing to reset when a
+    /// long draft is backspaced short again. A `height` of zero is no rows and a
+    /// caret row of zero, which is the one window whose caret is not a row of
+    /// its own rows.
     #[must_use]
     pub fn window(&self, width: u16, height: u16) -> ComposerWindow {
         let (row, column) = self.place(self.cursor, width);
@@ -486,24 +205,6 @@ impl Composer {
         }
     }
 
-    /// Every row the draft draws as at `width`, however many that is.
-    ///
-    /// Each line of the draft — the pieces between its newlines — broken by
-    /// [`folded`], which never comes back empty, so a draft of nothing is one
-    /// blank row and a draft ending in a newline has a blank row under it for
-    /// the cursor to sit on. A `width` of zero is a column nobody has measured
-    /// and wraps nothing, exactly as it does for a document.
-    ///
-    /// [`folded`] rather than [`wrapped`](crate::wrap::wrapped) because a space
-    /// the reader typed is a character of the draft: the space a row breaks at
-    /// stays on that row, so the rows join back up to the draft byte for byte
-    /// and every byte typed has a cell of its own on screen. The row that keeps
-    /// its break character is a column wider than `width`, which the drawing
-    /// truncates at the pane edge.
-    ///
-    /// The rows of [`Composer::placed_rows`] without the offsets they start at,
-    /// so there is one account of what the draft breaks into and the maps below
-    /// cannot come to break it somewhere else.
     fn rows(&self, width: u16) -> Vec<String> {
         self.placed_rows(width)
             .into_iter()
@@ -511,19 +212,12 @@ impl Composer {
             .collect()
     }
 
-    /// Every row the draft draws as at `width`, each with the byte offset of the
-    /// draft its first character is at.
-    ///
-    /// What the two maps are built on, and the only place the arithmetic between
-    /// bytes and rows is done. It works because [`folded`] keeps every byte: the
-    /// rows of one line join back up to that line, so a row's offset is the row
-    /// before it plus that row's length. The only bytes not on any row are the
-    /// `\n`s [`str::split`] took out — one between the last row of a line and
-    /// the first row of the next — which is what the extra byte at the end of
-    /// each line is.
-    ///
-    /// Never empty, because [`folded`] never comes back empty and a draft always
-    /// has at least one line: there is always a row for the cursor to be on.
+    // Every row the draft draws as, each with the byte offset its first
+    // character is at, and the only place the arithmetic between bytes and rows
+    // is done. It works because `folded` keeps every byte: the rows of one line
+    // join back up to that line, so a row starts where the row before it ended.
+    // `wrapped` drops the character it breaks at, and every offset past the
+    // first wrap would then be wrong by one byte per wrap.
     fn placed_rows(&self, width: u16) -> Vec<(usize, String)> {
         let mut placed = Vec::new();
         let mut offset = 0;
@@ -542,49 +236,15 @@ impl Composer {
         placed
     }
 
-    /// Where the byte `offset` is drawn at `width`: the row of
-    /// [`Composer::rows`] it is on, and the column of that row it is at.
-    ///
-    /// Columns are cells rather than characters — [`display_width`] of the row
-    /// up to the offset — so a wide character is two columns along and a row of
-    /// CJK is twice as far across as it is long. The inverse is
-    /// [`Composer::offset_at`], and every offset the draft has round-trips
-    /// through the pair.
-    ///
-    /// # The row-break rule
-    ///
-    /// A soft wrap is one offset with two places it could be drawn: the cell
-    /// after the last character of the row above, and column zero of the row
-    /// below. It is always the lower one. So an offset at a row break resolves
-    /// to `(row + 1, 0)` and never to a cell past the end of the row above —
-    /// which is what makes the row a cursor is on the row its next character
-    /// would be drawn on, and stops End on a wrapped row parking the cursor in
-    /// a cell the next keystroke would not appear in.
-    ///
-    /// This map keeps the rule by taking the *last* row starting at or before
-    /// the offset, and [`Composer::offset_at`] keeps the same one: the cell past
-    /// the end of a soft-wrapped row is the one (row, column) pair this map
-    /// never comes back with, and asking the inverse for it gives the break
-    /// offset, which is that same lower place.
-    ///
-    /// A newline is not a row break in this sense. Its own byte lies between the
-    /// two rows, so the cell after the last character of the row above is the
-    /// offset of the `\n` itself and belongs to that upper row — which is where
-    /// a cursor before a newline should be, and where End on such a row puts it.
-    ///
-    /// A character that draws in no cells of its own — a combining accent — puts
-    /// two offsets in one column, and this module has no grapheme segmentation
-    /// to join it to the character it sits on. The pair still answers, and the
-    /// inverse answers such a column with the offset after the whole run, so the
-    /// offset *inside* it is the one offset that does not come back from a
-    /// round trip.
-    ///
-    /// # Panics
-    ///
-    /// If `offset` is past the end of the draft or is not on a `char` boundary,
-    /// which is the same thing [`Composer::at`] refuses: the cursor holds that
-    /// invariant by construction, so an offset without it is a caller's mistake
-    /// rather than a place on the screen.
+    // Where a byte offset is drawn: its row, and the column of that row in cells
+    // rather than characters, so a wide character is two columns along.
+    //
+    // An offset at a soft wrap has two cells it could be drawn in — past the end
+    // of the row above, and column zero of the row below — and `rfind` takes the
+    // lower one. `offset_at` keeps the same choice, which is what makes the pair
+    // round-trip and stops End on a wrapped row parking the cursor in a cell the
+    // next character typed would not appear in. A newline is not a wrap in this
+    // sense: its own byte lies between the two rows and belongs to the upper one.
     fn place(&self, offset: usize, width: u16) -> (usize, usize) {
         let placed = self.placed_rows(width);
         let (row, start, text) = placed
@@ -597,18 +257,10 @@ impl Composer {
         (row, display_width(&text[..offset - start]))
     }
 
-    /// Which byte offset of the draft is drawn at `column` of `row` at `width`:
-    /// the inverse of [`Composer::place`], and it keeps that map's row-break
-    /// rule.
-    ///
-    /// Total, so that a caller stepping rows never has to check its arithmetic
-    /// twice: a `row` past the last row is answered by the last row, and a
-    /// `column` past the end of a row is answered by the offset at the end of
-    /// that row — which is where End lands, and on a soft-wrapped row is the
-    /// break offset. A column that falls *inside* a wide character is that
-    /// character's own offset, since the cells it draws in are its.
-    ///
-    /// Always a `char` boundary of the draft, and never past its end.
+    // The inverse of `place`, and total on purpose: a `row` past the last is
+    // answered by the last row and a `column` past the end of a row by the
+    // offset at its end. That is what lets End hand in `usize::MAX` and lets the
+    // row-wise keys hand in a row they have not range-checked.
     fn offset_at(&self, row: usize, column: usize, width: u16) -> usize {
         let placed = self.placed_rows(width);
         let row = row.min(placed.len().saturating_sub(1));
@@ -634,171 +286,58 @@ impl Composer {
     }
 }
 
-/// What the composer is drawn as at one width and one height: the rows on
-/// screen, and the cell the caret goes in among them.
-///
-/// One value rather than a pair of calls, because the rows and the caret are
-/// answers to the same question and have to be answered against the same window:
-/// a caret worked out beside a set of rows could be a row that was scrolled off
-/// them, and there would be two places [`Composer::place`] was applied and two
-/// chances to disagree. Coming back together, the disagreement is
-/// unrepresentable — [`Composer::window`] is the only thing that builds one.
-///
-/// A plain struct of three public fields and no methods: it is a frame's worth
-/// of arithmetic on its way to the drawing, and it holds nothing the drawing
-/// then has to ask it about.
+/// The rows and the caret come back together because they are answers to the
+/// same window: worked out separately, a caret could name a row that had been
+/// scrolled off the rows beside it. [`Composer::window`] is the only thing that
+/// builds one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComposerWindow {
-    /// The rows on screen, top row first, at most the height asked for and
-    /// exactly the rows the drawing draws.
-    ///
-    /// Empty only for a height of zero. Otherwise never empty, because a draft
-    /// always has at least one row for the cursor to sit on.
     pub rows: Vec<String>,
-    /// Which row of [`ComposerWindow::rows`] the caret is on — an index into
-    /// *these* rows and not into the draft's, so the drawing adds nothing to it
-    /// and cannot add the scroll twice.
-    ///
-    /// A row of `rows` for every height but zero, where it is zero and there is
-    /// nothing to draw it on.
+    /// An index into *these* rows and not into the draft's, so the drawing adds
+    /// nothing to it and cannot add the scroll twice.
     pub row: usize,
-    /// Which column of that row the caret is drawn at, in cells rather than
-    /// characters — [`display_width`] of the row up to the cursor — so the caret
-    /// on a row of wide characters lands on the cell the character under it
-    /// draws in.
-    ///
-    /// Straight from [`Composer::place`], and so it keeps that map's row-break
-    /// rule: an offset at a soft wrap is column zero of the row below and never
-    /// a cell past the end of the row above. It can be the cell one past the end
-    /// of its row, which is where a cursor at the end of the draft sits and what
-    /// the drawing draws its blank caret in.
+    /// In cells rather than characters, and straight from `Composer::place`,
+    /// so it keeps that map's row-break rule. It can be one cell past the end of
+    /// its row, which is where a cursor at the end of the draft sits.
     pub column: usize,
 }
 
-/// What a keystroke comes to while the composer holds the keyboard.
-///
-/// Named apart from the keys that produce it for the reason [`Edited`](crate::Edited)
-/// is: it keeps [`compose_for`] a pure function of a key event and leaves the
-/// loop above reading as a list of consequences. Three variants is the whole of
-/// what can happen to a draft *at a keystroke* — it goes on being typed into,
-/// the keyboard is handed back, or the draft is offered up — and there is
-/// deliberately no variant for "the key meant nothing", because a key that means
-/// nothing here leaves the composer exactly where it was, which is
+/// There is deliberately no variant for "the key meant nothing": a key that
+/// means nothing leaves the composer exactly where it was, which is
 /// [`Composed::Typing`] with the same draft in it.
 ///
-/// A paste is the fourth thing that can reach the draft and it does not come
-/// through here: it has [`Pasted`] of its own, which can only say the first of
-/// these three, so a block of text can never start a turn or hand the keyboard
-/// back whatever is in it.
+/// [`Composed::Submit`] carries no text of its own, so there is one copy of what
+/// was typed and no way for a submission to disagree with the field it came
+/// from.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Composed {
-    /// Still being typed into: the composer keeps the keyboard, holding `.0`,
-    /// which is either the draft as it was or the draft with one character more
-    /// or less at [`Composer::cursor`] — and, when the key was one of the six
-    /// that move the cursor, the draft exactly as it was at a different offset.
     Typing(Composer),
-    /// The keyboard is handed back: focus moves off the composer and the draft
-    /// is left exactly as it is. Esc here is not an abandonment — nothing is
-    /// thrown away, because what was typed is worth more than the keystroke that
-    /// stopped typing it.
     Leave,
-    /// Offered up: the caller takes [`Composer::draft`] from the composer it is
-    /// holding and does whatever a submitted draft is for.
-    ///
-    /// It carries no text of its own, so there is one copy of what was typed and
-    /// no way for a submission to disagree with the field it came from. It
-    /// arrives only for a draft with something in it: see
-    /// [`Composer::is_submittable`].
     Submit,
 }
 
-/// What `key` does to a composer holding `composer`.
+/// Only presses count. Crossterm reports releases and auto-repeats on some
+/// platforms and not on others, and a release acted on here would type the
+/// release of the very key that moved the focus into the field.
 ///
-/// The counterpart of [`edit_for`](crate::edit_for) and of the binary's
-/// `action_for`, and the same shape: a key and a situation in, one intention
-/// out, no terminal and no [`App`](crate::App).
-///
-/// Six things a key can be. A printable character goes in at
-/// [`Composer::cursor`] and leaves the cursor immediately after itself, so
-/// typing runs on from wherever the reader put the insertion point. Alt+Enter
-/// puts a newline in the same way and in the same place, which is why a
-/// multi-line draft can be broken open in the middle rather than only grown at
-/// the end. Backspace takes back the character before the cursor and Delete the
-/// one after it, by character rather than by byte, so a draft with an accent or
-/// an emoji in it is edited one keypress at a time and stays valid text; where
-/// there is no character on that side — Backspace at the start of the draft,
-/// Delete at the end — nothing changes, and Backspace in particular does not
-/// hand the keyboard back, because one press past the start is a typo and not a
-/// departure. Enter offers up the whole draft when it has something in it,
-/// wherever the cursor sits in it, and does nothing at all to a draft that is
-/// empty or nothing but whitespace. Esc hands the keyboard back and leaves both
-/// the draft and the cursor where they are.
-///
-/// # The six keys that move the cursor
-///
-/// Left, Right, Home, End, Up and Down change no byte of the draft. Every one of
-/// them comes back with the same string carrying a different
-/// [`Composer::cursor`], which is why they are a group rather than six rules:
-/// what they move is where the *next* thing typed will go, and nothing here
-/// types anything.
-///
-/// Left and Right step one `char` — not one byte, since a byte of an accent is
-/// not a place in the draft — and stop dead at offset 0 and at the end rather
-/// than wrapping round to the other end of the draft.
-///
-/// The other four are row-wise, and a row is a row *as drawn*: they are answered
-/// at [`Composer::width`], the width the field was last drawn in, over
-/// [`Composer::place`] and [`Composer::offset_at`]. So a paragraph that soft-wraps
-/// into three rows is stepped through in three, which is what somebody pressing
-/// Down at a wrapped paragraph is asking for; and because the cursor is a byte
-/// offset, the same keystroke at a resized terminal steps the rows that terminal
-/// has. Home and End go to the two ends of the row the cursor is on. Up and Down
-/// go one row, holding the column where the destination row is long enough for
-/// it and landing at the end of that row where it is not — and on the first row
-/// Up does nothing, as Down does on the last, because there is no row past the
-/// draft to sit on.
-///
-/// Both ends of a row obey [`Composer::place`]'s row-break rule, which is the
-/// one place this can surprise: the end of a *soft-wrapped* row is the break
-/// offset, and the break offset is drawn at column zero of the row below. So End
-/// on such a row leaves the cursor looking like it moved down one, and Home
-/// straight after it comes back to the same offset — End then Home is a no-op
-/// there. That is the rule holding rather than failing: the cursor sits where
-/// the next character it types would be drawn, and on a wrapped row that cell is
-/// on the row below.
-///
-/// Every other key leaves the composer exactly as it was, the tree's own
-/// bindings included — while this has the keyboard, `j`, `k`, `g`, `G`, `f`,
-/// `p`, `r`, `s`, `v` and `e` are letters somebody is typing, and Insert,
-/// `BackTab` and the page keys are nothing at all, because the loop consults
-/// this instead of the app rather than as well as it. No movement or editing key
-/// can submit or leave: Enter is the one key that offers the draft up and Esc
-/// the one that hands the keyboard back.
-///
-/// Only presses count, exactly as `action_for` and [`edit_for`](crate::edit_for)
-/// have it. Crossterm reports releases and auto-repeats on some platforms and
-/// not on others, and a release acted on here would type the release of the very
-/// key that moved the focus into the field.
+/// Every key not named below leaves the composer as it was, the tree's own
+/// bindings included: the loop consults this *instead of* `action_for` rather
+/// than as well, so while the field has the keyboard `j`, `p` and `r` are
+/// letters somebody is typing.
 #[must_use]
 pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
     if key.kind != KeyEventKind::Press {
         return Composed::Typing(composer.clone());
     }
 
-    // The incoming cursor comes through untouched, along with the draft and the
-    // flag: a key that changes nothing moves nothing.
     let unchanged = || Composed::Typing(composer.clone());
-    // A character put in where the cursor is — the one way anything is typed
-    // into this field, Alt+Enter's `\n` included, so that a newline goes in
-    // wherever every other character does. Muted or not comes through with the
-    // width: this function is not where a turn starts or ends, and it is not a
-    // redraw. The cursor lands immediately after what was inserted, which is
-    // where somebody who has just typed it is.
-    //
-    // Built literally rather than through `Composer::at`, and it holds that
-    // constructor's invariant by construction: `composer.cursor` is a boundary
-    // of the draft, so the two halves it splits into are whole strings, and the
-    // offset after a whole character of the new draft is a boundary of it.
+    // The three builders below are written literally rather than through
+    // `Composer::at`, and each holds that constructor's invariant by
+    // construction: `composer.cursor` is a boundary of the draft, so the halves
+    // it splits into are whole strings and the offset after a whole character of
+    // the result is a boundary of the result. Every one of them carries `width`
+    // and `muted` through untouched — this function is neither a redraw nor
+    // where a turn starts or ends.
     let inserted = |character: char| {
         let cursor = composer.cursor;
         let mut draft = String::with_capacity(composer.draft.len() + character.len_utf8());
@@ -813,18 +352,10 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
             muted: composer.muted,
         })
     };
-    // A character taken back out, given the whole `char` it occupies: the one
-    // way anything is deleted here, Backspace's and Delete's alike, since which
-    // character goes is the only thing those two disagree about. The cursor
-    // lands where the character began, which for Backspace is one character
-    // back and for Delete is exactly where it already was — the insertion point
-    // does not move when what was in front of it goes.
-    //
-    // Built literally rather than through `Composer::at`, and it holds that
-    // constructor's invariant by construction: `start` and `end` are the two
-    // ends of a whole character of the draft, so both are boundaries, the two
-    // halves either side of it are whole strings, and `start` is a boundary of
-    // what they join into.
+    // `start` and `end` are the two ends of a whole `char`, which is what makes
+    // this deletion by character rather than by byte: half a character left
+    // behind would not be a `String` at all. Which character goes is the only
+    // thing Backspace and Delete disagree about.
     let removed = |start: usize, end: usize| {
         let mut draft = String::with_capacity(composer.draft.len() - (end - start));
         draft.push_str(&composer.draft[..start]);
@@ -837,11 +368,8 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
             muted: composer.muted,
         })
     };
-    // The other way round for the movement keys: the draft, the width and the
-    // flag come through and only the offset is new. Every offset handed to this
-    // comes off `char_indices`, `Composer::place` or `Composer::offset_at`, all
-    // three of which answer with boundaries of this draft, so the invariant
-    // holds by construction here too.
+    // Every offset handed to this comes off `char_indices`, `place` or
+    // `offset_at`, all three of which answer with boundaries of this draft.
     let moved = |cursor: usize| {
         Composed::Typing(Composer {
             draft: composer.draft.clone(),
@@ -850,10 +378,8 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
             muted: composer.muted,
         })
     };
-    // Where the cursor is on screen, at the width the field was last drawn in:
-    // what the four row-wise keys work from. A closure rather than a value
-    // because working it out folds the whole draft into rows, and the other
-    // keys — every character typed among them — do not ask.
+    // A closure rather than a value because working it out folds the whole draft
+    // into rows, and every key but the four row-wise ones never asks.
     let placed = || composer.place(composer.cursor, composer.width);
 
     match key.code {
@@ -870,12 +396,9 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
             }
         }
         KeyCode::Esc => Composed::Leave,
-        // The pair that delete, either side of the insertion point. Both take a
-        // whole `char` and never a byte — half a character left in the buffer
-        // would not be a `String` at all — and both leave the draft alone when
-        // there is no character on their side of the cursor. Backspace at
-        // offset zero in particular is still `Typing`: one press past the start
-        // is a typo, and Esc is the only key that hands the keyboard back.
+        // Backspace at offset zero is still `Typing`: one press past the start
+        // of the draft is a typo, and Esc is the only key that hands the
+        // keyboard back.
         KeyCode::Backspace => composer.draft[..composer.cursor]
             .chars()
             .next_back()
@@ -888,9 +411,9 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
             .map_or_else(unchanged, |character| {
                 removed(composer.cursor, composer.cursor + character.len_utf8())
             }),
-        // The six that move the cursor and change no byte. Left and Right by
-        // `char`: the offset before the one the cursor is at, and the offset
-        // after it, or the end they are already at.
+        // The six below move the cursor and change no byte. Left and Right step
+        // one `char`, not one byte — a byte of an accent is not a place in the
+        // draft — and stop dead at the ends rather than wrapping round.
         KeyCode::Left => moved(
             composer.draft[..composer.cursor]
                 .char_indices()
@@ -905,17 +428,16 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
                     composer.cursor + character.len_utf8()
                 }),
         ),
-        // The two ends of the row the cursor is on. `offset_at` is total, so the
-        // column past every column there is answers with the end of the row —
-        // which on a soft-wrapped row is the break offset, drawn at column zero
-        // of the row below, so End then Home there comes back here.
+        // The ends of the *display* row. On a soft-wrapped row the end is the
+        // break offset, which `place` draws at column zero of the row below, so
+        // End there looks like a move down and Home straight after comes back to
+        // the same offset. That is the row-break rule holding, not failing.
         KeyCode::Home => moved(composer.offset_at(placed().0, 0, composer.width)),
         KeyCode::End => moved(composer.offset_at(placed().0, usize::MAX, composer.width)),
-        // One display row, holding the column: `offset_at` lands at the end of
-        // the destination row when that row is not long enough to hold it. The
-        // row past the ends is not a row, so the first row's Up and the last
-        // row's Down leave the cursor exactly where it is rather than clamping
-        // to the row it is already on.
+        // One display row, holding the column where the destination row is long
+        // enough for it. There is no row past either end to sit on, so Up on the
+        // first row and Down on the last leave the cursor where it is rather
+        // than clamping it to the row it is already on.
         KeyCode::Up => {
             let (row, column) = placed();
             match row.checked_sub(1) {
@@ -942,53 +464,24 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
     }
 }
 
-/// What a pasted block comes to at the composer: the one thing it can be.
-///
-/// A type rather than a third [`Composed`] variant, and one variant rather than
-/// three, because the promise being kept is a negative one — a paste cannot
-/// submit and cannot hand the keyboard back, however many newlines are in it —
-/// and a negative promise held by the return type is one nobody at a call site
-/// can forget. Pasting a three-line block used to send line one as a question
-/// and lose the other two behind the mute that turn put up; there is now no
-/// value [`paste_for`] could return that would say "send".
-///
-/// It reads as a `match` with a single arm, or as a `let`, since one variant is
-/// an irrefutable pattern.
+/// One variant, and that is the promise being kept: a paste cannot submit and
+/// cannot hand the keyboard back, however many newlines the block carries.
+/// Pasting three lines used to send the first as a question and lose the other
+/// two behind the mute that turn put up, and a negative promise held by a return
+/// type is one no call site can forget.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Pasted {
-    /// Still being typed into: the composer keeps the keyboard, holding `.0`,
-    /// which is the draft with the pasted text in it, or the draft exactly as it
-    /// was if the field was muted or the paste was empty.
     Typing(Composer),
 }
 
-/// What pasting `text` does to a composer holding `composer`.
+/// The block is appended at the end of the draft rather than going in at
+/// [`Composer::cursor`] where a keystroke does, and the cursor snaps after it.
+/// That is the one place a paste and a keystroke disagree; pasting at the cursor
+/// is a slice of its own and this is left as it was until that lands.
 ///
-/// [`compose_for`]'s counterpart for the other way text arrives, and the same
-/// shape: what came in and the situation go in, one intention comes out, no
-/// terminal and no [`App`](crate::App). The block is appended — at the end of
-/// the draft, and not at [`Composer::cursor`] where a keystroke goes — byte for
-/// byte, newlines and all, so a paragraph pasted in is the paragraph that was
-/// copied and every line of it is still there to be read before Enter is
-/// pressed. Pasting text with no newline into a draft nobody has moved the
-/// cursor back into leaves the same draft behind as typing those characters one
-/// at a time would.
-///
-/// A muted field takes nothing: the draft comes back the string it was and the
-/// flag comes back up. That is the one rule [`compose_for`] leaves to the gate
-/// above it and this does not, because a paste is one arrival carrying however
-/// much was copied rather than a key somebody can stop pressing, and because
-/// bytes the terminal delivered while an answer is in flight are not somebody
-/// typing at this field. Muting itself is still set nowhere near here — one
-/// question at a time is the loop's fact, and it stays the loop's fact.
-///
-/// Nothing else moves. No turn starts, no focus changes, and an empty paste is
-/// a paste that changes nothing rather than an error anybody has to hear about.
-/// The cursor ends up at the end of the draft the paste left behind, and it goes
-/// there even from a cursor somebody had moved into the middle of the draft.
-/// That is the one place a paste and a keystroke disagree now that typing goes
-/// in at the insertion point: pasting *at* the cursor is a slice of its own, and
-/// this function is deliberately left as it was until it lands.
+/// A muted field takes nothing, which is the one gate [`compose_for`] leaves to
+/// its caller and this does not: a paste is a single arrival carrying however
+/// much was copied, so a gate missed at a call site would land the lot.
 #[must_use]
 pub fn paste_for(text: &str, composer: &Composer) -> Pasted {
     if composer.muted {
@@ -998,10 +491,7 @@ pub fn paste_for(text: &str, composer: &Composer) -> Pasted {
     let mut draft = composer.draft.clone();
     draft.push_str(text);
 
-    // Muted or not comes through with the draft, and so does the width, exactly
-    // as a keystroke has it: this function is not where a turn starts or ends,
-    // and it is not a redraw. The cursor snaps to the end of what the paste left
-    // behind, exactly as typing the same characters would leave it.
+    // The width and the flag come through untouched, as they do at a keystroke.
     Pasted::Typing(Composer {
         cursor: draft.len(),
         draft,
@@ -1016,26 +506,18 @@ mod tests {
 
     use super::{COMPOSER_MAX_ROWS, Composed, Composer, Pasted, compose_for, paste_for};
 
-    /// A plain press of `code`, as crossterm reports one with no modifiers.
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    /// The newline keystroke: Enter wearing Alt.
     fn alt_enter() -> KeyEvent {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)
     }
 
-    /// A composer holding `draft`.
     fn composer(draft: &str) -> Composer {
         Composer::new(draft)
     }
 
-    /// A composer holding `draft`, last drawn `width` columns wide.
-    ///
-    /// What the four row-wise keys are answered against: a row is only a row
-    /// once something has said how wide the field is, and in the binary that is
-    /// the frame, once a round. Here it is one line, and no terminal.
     fn drawn(draft: &str, width: u16) -> Composer {
         let mut composer = Composer::new(draft);
         composer.set_width(width);
@@ -1043,24 +525,10 @@ mod tests {
         composer
     }
 
-    /// The rows a composer is drawn as at `width` in a field of the full
-    /// [`COMPOSER_MAX_ROWS`] — the height the layout gives any draft that wants
-    /// it, and the one the field is drawn at whenever the terminal is not
-    /// squeezed.
-    ///
-    /// The part of [`Composer::window`] the rules below are about, without the
-    /// caret they are not about. The window at other heights, and where the
-    /// caret lands in it, is asserted whole a few tests further down.
     fn window_rows(composer: &Composer, width: u16) -> Vec<String> {
         composer.window(width, COMPOSER_MAX_ROWS).rows
     }
 
-    /// A draft of `rows` lines, each naming its own row number, so a window over
-    /// it says where it starts by what is in it.
-    ///
-    /// One row per line at every width these tests use, and no wrapping in it:
-    /// the scrolling rules are about which rows are on screen, and a draft that
-    /// re-flowed would put a second question in the same assertion.
     fn numbered(rows: usize) -> String {
         (0..rows)
             .map(|row| format!("row {row}"))
@@ -1068,8 +536,6 @@ mod tests {
             .join("\n")
     }
 
-    /// [`numbered`]'s `draft` with the cursor at the start of row `row`, last
-    /// drawn forty columns wide.
     fn at_row(draft: &str, row: usize) -> Composer {
         let offset = draft
             .split('\n')
@@ -1081,14 +547,6 @@ mod tests {
         drawn(draft, 40).at(offset)
     }
 
-    /// Where a window over [`numbered`]'s draft sits: the row of the *draft* it
-    /// starts at, and the row of the draft the caret is on.
-    ///
-    /// Both as rows of the draft rather than of the window, because scrolling is
-    /// about which part of the draft is on screen — and the caret's own row
-    /// comes back from [`Composer::window`] as an index into the rows it came
-    /// with, which is what the drawing wants and not what these rules are
-    /// written in.
     fn scrolled(composer: &Composer, height: u16) -> (usize, usize) {
         let window = composer.window(40, height);
         let first: usize = window
@@ -1103,12 +561,6 @@ mod tests {
         (first, first + window.row)
     }
 
-    /// Where `key` leaves the cursor, having first insisted that it left every
-    /// byte of the draft, the width and the muting exactly as they were.
-    ///
-    /// The movement keys are asserted through this rather than by comparing
-    /// whole values, because the offset is the only thing they are allowed to
-    /// change and this is the assertion that says so at every one of them.
     fn cursor_after(key: KeyEvent, composer: &Composer) -> usize {
         let next = after(key, composer);
 
@@ -1127,8 +579,6 @@ mod tests {
         next.cursor()
     }
 
-    /// The composer `key` leaves behind, or a panic naming what came out
-    /// instead: most rules here are about what is still in the draft afterwards.
     fn after(key: KeyEvent, composer: &Composer) -> Composer {
         match compose_for(key, composer) {
             Composed::Typing(next) => next,
@@ -1136,18 +586,12 @@ mod tests {
         }
     }
 
-    /// The composer a paste of `text` leaves behind. One arm, because
-    /// [`Pasted`] has one variant — which is the rule being kept rather than a
-    /// convenience.
     fn pasted(text: &str, composer: &Composer) -> Composer {
         let Pasted::Typing(next) = paste_for(text, composer);
 
         next
     }
 
-    /// Every key the tree answers to, plus a character bound to nothing
-    /// anywhere: the list the composer has to swallow whole, so no keystroke
-    /// reaches the app underneath while the field has the keyboard.
     const BINDINGS: [KeyCode; 18] = [
         KeyCode::Char('j'),
         KeyCode::Char('k'),
@@ -1169,8 +613,6 @@ mod tests {
         KeyCode::Down,
     ];
 
-    /// The six keys that move the cursor: they change no byte of the draft, and
-    /// none of them submits or leaves.
     const MOVERS: [KeyCode; 6] = [
         KeyCode::Left,
         KeyCode::Right,
@@ -1180,8 +622,6 @@ mod tests {
         KeyCode::End,
     ];
 
-    /// The ones of [`BINDINGS`] that are characters, i.e. the ones that have to
-    /// come out as text rather than as nothing.
     fn character(code: KeyCode) -> Option<char> {
         match code {
             KeyCode::Char(character) => Some(character),
@@ -2538,16 +1978,6 @@ mod tests {
         }
     }
 
-    /// The drafts the two maps are driven over: a draft with a newline in it, a
-    /// draft long enough to soft-wrap at every width tested, drafts of
-    /// multi-byte characters wide and narrow, and the two edges — nothing at
-    /// all, and a draft ending in a newline.
-    ///
-    /// The accent is precomposed (`U+00E9`) rather than an `e` and a combining
-    /// mark: a combining mark draws in no cells of its own, so it would put two
-    /// offsets in one column, and joining it to the character it sits on would
-    /// need grapheme segmentation this module deliberately does not have — see
-    /// [`Composer::place`].
     const DRAFTS: [&str; 7] = [
         "one\ntwo",
         "It walks the tree and writes what it finds.",
