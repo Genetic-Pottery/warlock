@@ -1095,9 +1095,10 @@ fn route(index: usize, lookup: &Lookup, expected: &Expected<'_>, defects: &mut V
 /// One layout, in code: heading, purpose, `## Files` in path order with the
 /// size warlock measured beside each name and the names it declares,
 /// `## Directories`, then whichever of `## Structure`, `## Rules` and
-/// `## Where to look` have anything in them. A file the directory pass saw
-/// only an account of gets the line the file pass wrote; a file nobody read
-/// gets the line warlock writes for it, not one a model guessed at.
+/// `## Where to look` have anything in them. A file nobody could read gets the
+/// line warlock writes for it, not one a model guessed at — and that is now
+/// only ever a file whose bytes are not text, since anything readable reaches
+/// the pass as at least a sample of itself.
 #[must_use]
 pub fn render(name: &str, fill: &Fill, expected: &Expected<'_>, described: &Described) -> String {
     let mut text = format!("{STAMP}\n# {name}\n\n{}\n", fill.purpose.trim());
@@ -1108,7 +1109,7 @@ pub fn render(name: &str, fill: &Fill, expected: &Expected<'_>, described: &Desc
             let entry = match shown {
                 Shown::Text(_) => fill.files.get(*path).map_or("", |line| line.trim()),
                 Shown::NotText => "not text; name and size only",
-                Shown::Unsent => "not read by the pass, over the size cap; name and size only",
+                Shown::Unsent => "not read by the pass; name and size only",
             };
             let _ = write!(text, "- `{path}` ({}) — {entry}", human(*size));
             if let Some(names) = described
@@ -1538,7 +1539,7 @@ mod tests {
             "\n# engine\n\n\
              The engine crate: pacts, hashes and the manifest.\n\
              \n## Files\n\n\
-             - `Cargo.lock` (4.0 MB) — not read by the pass, over the size cap; name and size only\n\
+             - `Cargo.lock` (4.0 MB) — not read by the pass; name and size only\n\
              - `Cargo.toml` (26 B) — a stand-in entry, filled by a test double\n\
              - `app.rs` (878.9 KB) — a stand-in entry, filled by a test double · declares `draw0`, `draw1`, `draw2`, `draw3`, `draw4`, `draw5`, `draw6`, `draw7` (+2)\n\
              - `lib.rs` (39 B) — a stand-in entry, filled by a test double · declares `pact`, `subtree_hash`\n\

@@ -155,6 +155,7 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -392,7 +393,14 @@ const RESERVED_TOKENS: u64 = 40_000;
 /// Nothing is decided by it in any case: [`lift_from_the_cliff`] measures each
 /// account against the real budget before committing to it, so this only sets
 /// how much room is kept back, never whether an account fits.
-const ESTIMATED_ACCOUNT_BYTES: u64 = 6 * 1024;
+const SAMPLE_BYTE_CAP: u64 = 6 * 1024;
+
+/// The most lines of a file a sample carries, whatever they weigh.
+///
+/// A byte cap alone would send one line of a minified bundle and call it a
+/// sample; a line cap alone would send six megabytes of a wide CSV. The two
+/// together mean a sample is always both short and shaped like the file.
+const SAMPLE_LINE_CAP: usize = 60;
 
 /// The smallest budget any window may produce, however little is left after
 /// [`RESERVED_TOKENS`].
@@ -561,10 +569,7 @@ fn trim_to_budget(
         //
         // Charging per file rather than reserving a flat share of the budget is
         // what keeps a directory that cliffs one file from paying for twenty.
-        let Some(freed) = spent
-            .checked_sub(ESTIMATED_ACCOUNT_BYTES)
-            .filter(|&f| f > 0)
-        else {
+        let Some(freed) = spent.checked_sub(SAMPLE_BYTE_CAP).filter(|&f| f > 0) else {
             // Its account would cost about what the file costs. Naming it would
             // buy nothing and lose its text, so it stays as it is and the next
             // file down is asked instead.
@@ -573,7 +578,12 @@ fn trim_to_budget(
 
         let size = files[index].size();
         let path = files[index].path().to_owned();
-        files[index] = agent::File::omitted(path, size);
+        // A sample of its own text rather than a bare name. The room for one
+        // was reserved a few lines up — `freed` is what is given up *after*
+        // `SAMPLE_BYTE_CAP` is kept back — so the arithmetic below is the same
+        // arithmetic it always was, and what the reserve buys is now sitting in
+        // the request instead of being owed to it.
+        files[index] = sampled(&files[index]).unwrap_or_else(|| agent::File::omitted(path, size));
         carried = carried.saturating_sub(freed);
         problems.push(Problem {
             path: on_disk[index].clone(),
@@ -686,7 +696,25 @@ fn lift_over_cap(
                 settled.push(index);
                 replaced = true;
             }
-            Err(cause) => problems[index].cause = cause,
+            Err(cause) => {
+                // The table cannot reduce it — no row for the extension, or a
+                // file that is already all declarations. Its own first lines
+                // are still better than its name, so it falls to a sample
+                // rather than the rest of the way to nothing.
+                //
+                // The problem stays on the list either way: most of the file
+                // really is missing, and the entry is what says so. What
+                // changes is that it now sits beside a sample of the file
+                // instead of instead of one.
+                problems[index].cause = cause;
+                if let Ok(text) = std::str::from_utf8(&bytes)
+                    && let Some(head) = sample_of(text)
+                {
+                    let (path, size) = (file.path().to_owned(), file.size());
+                    *file = agent::File::elided(path, size, head);
+                    replaced = true;
+                }
+            }
         }
     }
 
@@ -925,9 +953,20 @@ fn demote_whole_files(
             }
             Ok(_) => {}
             Err(cause) => {
-                carried = carried.saturating_sub(spent);
-                files[index] = agent::File::omitted(path.clone(), size);
-                report(problems, passes.directory.join(path), cause);
+                // No row in the table, or nothing in the file the table would
+                // drop. Its own first lines are still better than its name.
+                if let Some(sample) = sampled(&files[index]) {
+                    carried = carried
+                        .saturating_sub(spent)
+                        .saturating_add(file_bytes(&sample));
+                    files[index] = sample;
+                } else {
+                    carried = carried.saturating_sub(spent);
+                    files[index] = agent::File::omitted(path.clone(), size);
+                }
+                // Reported either way. A sample is better than a name and it is
+                // still most of a file missing, and the entry is what says so.
+                report(problems, passes.directory.join(path.clone()), cause);
             }
         }
     }
@@ -1041,13 +1080,29 @@ fn list_over_budget(
             continue;
         }
         let (path, size) = (files[index].path().to_owned(), files[index].size());
-        files[index] = agent::File::omitted(path.clone(), size);
-        carried = carried.saturating_sub(spent);
-        report(
-            problems,
-            directory.join(path),
-            Omission::OverBudget { size },
-        );
+        // The last rung, and it is a sample rather than a name: a file the
+        // whole-request cap could not afford whole is still a file whose first
+        // lines cost almost nothing. Only text that cannot be sampled at all
+        // falls the rest of the way, and only that is a `Problem`.
+        if let Some(sample) = sampled(&files[index]).filter(|s| file_bytes(s) < spent) {
+            carried = carried
+                .saturating_sub(spent)
+                .saturating_add(file_bytes(&sample));
+            files[index] = sample;
+            report(
+                problems,
+                directory.join(path),
+                Omission::OverBudget { size },
+            );
+        } else {
+            files[index] = agent::File::omitted(path.clone(), size);
+            carried = carried.saturating_sub(spent);
+            report(
+                problems,
+                directory.join(path),
+                Omission::OverBudget { size },
+            );
+        }
     }
 }
 
@@ -1173,7 +1228,13 @@ pub(crate) fn gather_request(
             }
         };
 
-        let file = if size > PER_FILE_BYTE_CAP {
+        // The per-file cap, but never above the budget for the whole request.
+        // The two used to disagree: 1 MiB against a 400 KB request meant a
+        // 900 KB file passed this gate, was read whole, and then single-handedly
+        // blew the budget by more than twice over — guaranteeing a demotion the
+        // read had already been paid for. A gate that admits what the next gate
+        // must reject is not a gate, so this one is clamped to it.
+        let file = if size > PER_FILE_BYTE_CAP.min(cap) {
             problems.push(Problem {
                 path: path.clone(),
                 cause: Omission::TooLarge { size },
@@ -1462,6 +1523,98 @@ pub(crate) fn byte_count(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
+/// The first [`SAMPLE_LINE_CAP`] lines of `text`, or the first
+/// [`SAMPLE_BYTE_CAP`] bytes of it, whichever comes first, with a line saying
+/// what was left off. `None` where the whole of it already fits.
+///
+/// # Why a file is never reduced below its own bytes
+///
+/// The floor under every rung of the ladder used to be a name and a size. That
+/// is honest and it is nearly useless: a document could say a directory holds a
+/// 1.5 MB `inventory.json` and nothing whatever about what is in it, and the
+/// pass was not even asked to try — which is right, because a line written from
+/// a filename is a guess. But the choice was never between a guess and a name.
+/// The first forty lines of that file say it holds `{id, sku, qty}` records,
+/// and those lines are the file's own text: evidence, free, and exactly the
+/// kind of thing a map exists to carry.
+///
+/// So no readable file is reduced below a sample of itself. The marker is what
+/// makes that honest rather than a truncation — the same device
+/// [`languages`](crate::languages) uses for an elided body, and the reason a
+/// reader can tell a part of a file from the whole of one.
+///
+/// Bytes that are not UTF-8 have no lines to cut on and no honest sample, and
+/// they are the one thing still reduced to a name and a size.
+fn sample_of(text: &str) -> Option<String> {
+    let mut head = String::new();
+    let mut taken = 0usize;
+    for line in text.lines().take(SAMPLE_LINE_CAP) {
+        // One over-long line — a minified bundle is one line — is cut at a
+        // character boundary rather than dropped, so a sample of it is still a
+        // sample rather than nothing.
+        let cap = usize::try_from(SAMPLE_BYTE_CAP).unwrap_or(usize::MAX);
+        let room = cap.saturating_sub(head.len());
+        if room == 0 {
+            break;
+        }
+        let cut = if line.len() <= room {
+            line
+        } else {
+            let mut end = room;
+            while end > 0 && !line.is_char_boundary(end) {
+                end -= 1;
+            }
+            &line[..end]
+        };
+        head.push_str(cut);
+        head.push('\n');
+        taken += 1;
+        if head.len() >= cap {
+            break;
+        }
+    }
+
+    let total = text.lines().count();
+    if taken >= total && head.len() >= text.len() {
+        // The whole file fits, so there is no sample to take: the caller keeps
+        // what it has rather than swapping it for a copy of itself.
+        return None;
+    }
+    if head.is_empty() {
+        return None;
+    }
+    // What was left off, said in whichever unit is true. Lines, where lines
+    // were dropped; bytes, where the file is one long line and what happened to
+    // it was a cut rather than a drop. Saying "0 further lines" about a
+    // minified bundle would be the truncation this marker exists to rule out.
+    let left = total.saturating_sub(taken);
+    if left > 0 {
+        let _ = write!(head, "… {left} further lines not shown …");
+    } else {
+        let bytes = text.len().saturating_sub(head.len());
+        let _ = write!(head, "… {bytes} further bytes not shown …");
+    }
+    Some(head)
+}
+
+/// `file` reduced to a sample of its own text, or `None` where it has no text
+/// to sample — bytes that are not UTF-8, or a file already down to a name.
+fn sampled(file: &agent::File) -> Option<agent::File> {
+    let owned;
+    let text = if let Some(bytes) = file.bytes() {
+        owned = std::str::from_utf8(bytes).ok()?;
+        owned
+    } else {
+        file.kept()?
+    };
+    let head = sample_of(text)?;
+    Some(agent::File::elided(
+        file.path().to_owned(),
+        file.size(),
+        head,
+    ))
+}
+
 /// How much of [`request_byte_cap`] one file spends: what the request carries
 /// for it, never what it weighs on disk.
 ///
@@ -1577,10 +1730,18 @@ pub struct Problem {
 /// no row and a file that is already all declarations, and both of those leave
 /// the file exactly where it was rather than anywhere new to report.
 ///
-/// Every variant is a file whose contents the pass never saw, and every one of
-/// them leaves the same thing in the request: a name and a size. A file that
-/// reached the pass as its declaration lines has no variant here and never will
-/// — see [`Problem`].
+/// Every variant is a file the pass did not see the whole of. What it left in
+/// the request is no longer the same for all of them, and that is the point of
+/// [`sample_of`]: a readable file gives up its middle, not its text, so what
+/// stands in for it is its own first lines under a marker saying what was left
+/// off. Only bytes that are not UTF-8 fall the whole way to a name and a size,
+/// because there is no honest sample of them to take.
+///
+/// They stay reported all the same. Most of a sampled file really is missing,
+/// and a reader deciding whether to go and look wants to know that — the entry
+/// now sits beside a sample rather than instead of one. A file that reached the
+/// pass as its declaration lines has no variant here and never will, because
+/// nothing structural was left out of it — see [`Problem`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Omission {
@@ -1707,9 +1868,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        BYTES_PER_TOKEN_DENOMINATOR, BYTES_PER_TOKEN_NUMERATOR, ESTIMATED_ACCOUNT_BYTES, Gathered,
-        MINIMUM_REQUEST_BYTES, Omission, PER_FILE_BYTE_CAP, Problem, REQUEST_BYTE_CAP,
-        RESERVED_TOKENS, carried_bytes, gather_request, request_byte_cap,
+        BYTES_PER_TOKEN_DENOMINATOR, BYTES_PER_TOKEN_NUMERATOR, Gathered, MINIMUM_REQUEST_BYTES,
+        Omission, PER_FILE_BYTE_CAP, Problem, REQUEST_BYTE_CAP, RESERVED_TOKENS, SAMPLE_BYTE_CAP,
+        carried_bytes, gather_request, request_byte_cap,
     };
 
     use crate::agent;
@@ -1985,7 +2146,7 @@ mod tests {
         let cliffed = problems.len() as u64;
         assert!(cliffed > 0, "the fixture is over the cap");
         assert!(
-            cap - carried >= cliffed * ESTIMATED_ACCOUNT_BYTES,
+            cap - carried >= cliffed * SAMPLE_BYTE_CAP,
             "every cliffed file has room left for an account of it: {} spare for \
              {cliffed} files",
             cap - carried,
@@ -2415,6 +2576,73 @@ mod tests {
     }
 
     #[test]
+    fn a_sample_is_the_files_own_lines_and_says_what_it_left_off() {
+        let lines: String = (0..500)
+            .map(|n: u32| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let sample = super::sample_of(&lines).expect("a long file is sampled");
+
+        for line in sample.lines().filter(|line| !line.starts_with('…')) {
+            assert!(
+                lines.lines().any(|original| original == line),
+                "every line is one the file really has: {line}",
+            );
+        }
+        assert!(
+            sample.starts_with("0\n1\n2\n"),
+            "and they are its first lines, in order: {sample}",
+        );
+        assert!(
+            sample.contains("further lines not shown"),
+            "with a marker saying what was left off, which is what makes it a \
+             sample rather than a truncation: {sample}",
+        );
+        assert!(
+            super::byte_count(sample.len()) <= SAMPLE_BYTE_CAP + 64,
+            "inside the cap the trim reserves for it",
+        );
+    }
+
+    #[test]
+    fn one_enormous_line_is_cut_and_reports_bytes_rather_than_lines() {
+        // A minified bundle is one line. Lines are the wrong unit to report
+        // what was left off it, and "0 further lines" would be a truncation
+        // dressed as a sample.
+        let minified = "x".repeat(200_000);
+        let sample = super::sample_of(&minified).expect("one long line is still sampled");
+
+        assert!(
+            sample.contains("further bytes not shown"),
+            "the unit has to be the one that is true: {}",
+            &sample[sample.len().saturating_sub(60)..],
+        );
+        assert!(
+            !sample.contains("0 further"),
+            "and it must not claim nothing was left off",
+        );
+        assert!(super::byte_count(sample.len()) <= SAMPLE_BYTE_CAP + 64);
+    }
+
+    #[test]
+    fn a_file_that_already_fits_is_not_swapped_for_a_copy_of_itself() {
+        assert!(
+            super::sample_of("fn small() {}\n").is_none(),
+            "there is no sample to take of a file that is already whole",
+        );
+    }
+
+    #[test]
+    fn bytes_that_are_not_text_are_the_one_thing_still_reduced_to_a_name() {
+        let not_text = agent::File::present("logo.png", vec![0xff, 0xfe, 0x00, 0x01]);
+        assert!(
+            super::sampled(&not_text).is_none(),
+            "there is no honest sample of bytes with no lines to cut on",
+        );
+    }
+
+    #[test]
     fn a_directory_over_the_request_cap_gives_up_its_largest_files_first() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         // Named so that alphabetical order is the reverse of size order: a
@@ -2447,10 +2675,32 @@ mod tests {
                 .filter(|file| !file.is_omitted())
                 .map(agent::File::path)
                 .collect::<Vec<_>>(),
-            ["a.bin", "b.bin"],
-            "the two smallest survive: the biggest are given up first, so the \
-             fewest files are lost",
+            ["a.bin", "b.bin", "c.bin", "d.bin", "e.bin"],
+            "not one of them is reduced to a bare name: the biggest are still \
+             given up first, but what they are given up to is a sample of \
+             their own text",
         );
+        assert_eq!(
+            request
+                .files()
+                .iter()
+                .filter(|file| file.kept().is_some())
+                .map(agent::File::path)
+                .collect::<Vec<_>>(),
+            ["c.bin", "d.bin", "e.bin"],
+            "and the three given up are exactly the three carrying a sample",
+        );
+        for name in ["c.bin", "d.bin", "e.bin"] {
+            let kept = file(&request, name).kept().expect("sampled");
+            assert!(
+                kept.contains("not shown"),
+                "a sample says what it left off, or it is a truncation: {kept}",
+            );
+            assert!(
+                super::byte_count(kept.len()) <= SAMPLE_BYTE_CAP + 64,
+                "and it stays inside the room the trim reserved for it",
+            );
+        }
         assert!(
             carried(&request) <= REQUEST_BYTE_CAP,
             "{} bytes is still over the {REQUEST_BYTE_CAP}-byte cap",
@@ -2470,6 +2720,15 @@ mod tests {
                 .iter()
                 .all(|problem| matches!(problem.cause, Omission::OverBudget { .. })),
             "over budget is its own cause, not the per-file one: {problems:?}",
+        );
+        assert!(
+            problems.iter().all(|problem| {
+                let name = problem.path.file_name().expect("a file name");
+                file(&request, &name.to_string_lossy()).kept().is_some()
+            }),
+            "a file the budget gave up is still reported — most of it really \
+             is missing — but it is reported alongside a sample of itself \
+             rather than instead of one",
         );
     }
 

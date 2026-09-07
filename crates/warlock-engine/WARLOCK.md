@@ -3,25 +3,23 @@
 
 # warlock-engine
 
-Crate root for warlock-engine: the core domain logic for pacting a codebase's directories with model-written WARLOCK.md documents, deciding staleness by content hash, and enforcing scope/sigil boundaries, with no dependency on any TUI, terminal, HTTP or subprocess.
+Core engine crate for warlock: the domain logic for pacting directories into WARLOCK.md documents, tracking a three-colour freshness ledger over a pact manifest, scoping who may change what, and fitting a directory's files into a model request.
 
 ## Files
 
-- `Cargo.toml` (1.1 KB) — Manifest: declares dependencies (blake3, ignore, serde, serde_json, toml), dev-dependencies (serde_test, tempfile), and pins the dependency edge to run TUI -> engine and never back.
+- `Cargo.toml` (1.1 KB) — Crate manifest: no TUI/terminal/HTTP/Anthropic deps allowed here (dependency edge runs TUI -> engine); blake3, ignore, serde, serde_json, toml deps; serde_test/tempfile dev-deps; lints from workspace.
 
 ## Directories
 
-- `src/` — All engine source: agent/document/pact/manifest/scope/hash modules; open for the domain vocabulary, staleness decisions, and boundary enforcement.
+- `src/` — The engine's source: agent port, document schema/validation, fitting ladder, hash/tree/manifest, scope/sigil boundary logic, and pact operations.
 
 ## Rules
 
 - No TUI, terminal, HTTP or Anthropic dependency belongs in this crate: the dependency edge runs TUI -> engine and never back
-- The JSON shape a pass fills in (`document`) is owned by this crate, including its parser, even though the TUI and CLI use the same serde_json dependency for other streams
-- serde_test and tempfile are dev-dependencies only, used to round-trip serde derives and to give manifest tests a throwaway directory
-- Lint configuration is not set here; it is inherited from `[workspace.lints]` in the root manifest
+- The engine owns the parser for the pass-fill JSON contract (document), since it owns that shape
+- Lint configuration is inherited from the root manifest's [workspace.lints] so every crate is held to the same bar
 
 ## Where to look
 
-- what dependencies this crate is allowed and forbidden to have → `Cargo.toml` `dependencies`
-- the core domain logic and module layout → `src` `pact_subtree`
-- why serde_json is a dependency here → `Cargo.toml` `serde_json`
+- what dependencies the engine crate uses → `Cargo.toml` `serde_json`
+- the actual engine source code and logic → `src` `Agent`

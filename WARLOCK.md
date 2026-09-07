@@ -3,37 +3,39 @@
 
 # warlock
 
-Root of the warlock workspace: the Rust project that pacts directories with WARLOCK.md documents and enforces scope/sigil boundaries, split into an engine crate and a TUI front end.
+The workspace root of warlock, a Rust project split into an engine crate and a terminal-UI crate, defining shared lints, dependency versions and formatting rules for both.
 
 ## Files
 
-- `Cargo.lock` (56.8 KB) — Generated lockfile pinning exact versions of every dependency for warlock-engine and warlock-tui, including ratatui, clap, notify, blake3, ignore, toml, serde_json.
-- `Cargo.toml` (6.9 KB) — Workspace manifest: two member crates, shared package metadata (edition 2024, rust-version 1.97.1, Apache-2.0), workspace lints, and workspace.dependencies with per-crate justifying comments.
-- `LICENSE` (11.0 KB) — Full text of the Apache License, Version 2.0 under which warlock is licensed.
-- `rustfmt.toml` (1.3 KB) — Formatting config: edition/style_edition 2024, newline_style Unix, use_field_init_shorthand true, kept close to rustfmt defaults.
+- `Cargo.lock` (56.8 KB) — Generated lockfile pinning exact versions and checksums of every dependency, including warlock-engine and warlock-tui themselves.
+- `Cargo.toml` (6.9 KB) — Workspace manifest declaring members warlock-engine and warlock-tui, shared package metadata, workspace lints (unsafe_code deny, missing_docs, pedantic clippy) and workspace.dependencies with rationale comments.
+- `LICENSE` (11.0 KB) — Apache License, Version 2.0 full text.
+- `rustfmt.toml` (1.3 KB) — Formatting config pinning edition 2024, style_edition 2024, Unix newlines and use_field_init_shorthand, kept close to rustfmt defaults.
 
 ## Directories
 
-- `crates/` — Holds warlock-engine (domain logic, no UI/network deps) and warlock-tui (terminal front end and binary); open for how the two crates split and depend on each other.
+- `crates/` — Holds the two member crates warlock-engine and warlock-tui; go here for engine domain logic or TUI/CLI behaviour.
 
 ## Structure
 
-- workspace.dependencies in Cargo.toml are inherited by both member crates listed in [workspace] members
-- workspace.lints in Cargo.toml apply wherever a crate opts in with [lints] workspace = true
-- rustfmt.toml edition/style_edition mirrors workspace.package.edition in Cargo.toml
+- Cargo.toml declares workspace members under crates/ and defines workspace.lints and workspace.dependencies inherited by both crates
+- rustfmt.toml and Cargo.toml's edition/rust-version settings apply uniformly across all workspace members
 
 ## Rules
 
-- unsafe_code is denied workspace-wide; any future use requires an explicit #[allow] visible in the diff
-- any workspace.dependencies or lint entry set to allow must carry a comment above it explaining why
-- CI runs cargo clippy --workspace --all-targets -- -D warnings, so every warn-level lint here fails the build
-- rustfmt always emits LF (newline_style = Unix), never CRLF
-- clippy::nursery and clippy::cargo are deliberately left off, per the comment explaining the cost/benefit
+- unsafe_code is denied workspace-wide; no unsafe in warlock
+- CI runs cargo clippy --workspace --all-targets -- -D warnings, so any warning here fails the build
+- any lint set to allow must carry a comment directly above it explaining why
+- clippy::nursery and clippy::cargo groups are deliberately not enabled
+- Rust from nixpkgs, not rustup: rust-toolchain.toml is inert, rust-version in Cargo.toml is authoritative
+- rustfmt.toml deviates from defaults only where a comment states a reason, and nothing nightly-only
 
 ## Where to look
 
-- why a given crate dependency was chosen → `Cargo.toml` `workspace.dependencies`
-- what lints are enforced and why → `Cargo.toml` `workspace.lints`
-- which crates make up the project and how they depend on each other → `crates` `warlock-engine`
-- code formatting rules → `rustfmt.toml` `style_edition`
+- what dependencies does the project use and why → `Cargo.toml` `workspace.dependencies`
+- what lints are enforced and which are banned → `Cargo.toml` `unsafe_code`
+- engine domain logic like pacting or freshness → `crates` `warlock-engine`
+- terminal UI, panel, or CLI subcommand behaviour → `crates` `warlock-tui`
+- exact pinned dependency versions → `Cargo.lock` `warlock-engine`
+- code formatting conventions → `rustfmt.toml` `style_edition`
 - license terms → `LICENSE` `Apache License`

@@ -3,18 +3,18 @@
 
 # crates
 
-Workspace directory holding warlock's two crates: warlock-engine, the domain logic for pacting directories with WARLOCK.md documents and enforcing scope/sigil boundaries, and warlock-tui, the terminal front end that depends on it.
+The crates workspace directory for warlock, holding the two member crates: warlock-engine, the domain logic core, and warlock-tui, the terminal front end and binary.
 
 ## Directories
 
-- `warlock-engine/` — Core domain logic — document/pact/manifest/scope/hash modules — with no TUI, terminal, HTTP or subprocess dependency; open for staleness decisions or boundary rules.
-- `warlock-tui/` — The terminal front end and warlock binary — tree/panel UI, model seams, headless subcommands; open for any question about the app's behaviour or CLI.
+- `warlock-engine/` — Core domain crate — pacting, freshness ledger, scope/sigil boundary logic, fitting; go here for engine questions, never TUI/HTTP.
+- `warlock-tui/` — Terminal front end crate producing the warlock binary — panel UI, headless subcommands; go here for CLI or display behaviour.
 
 ## Structure
 
-- warlock-tui depends on warlock-engine; the dependency edge runs TUI -> engine and never back
+- warlock-tui depends on warlock-engine; the dependency edge runs TUI -> engine and never the reverse
 
 ## Where to look
 
-- what dependencies the domain crate is allowed to have → `warlock-engine` `dependencies`
-- where the actual TUI and subcommand logic lives → `warlock-tui` `App`
+- where the domain/document logic lives → `warlock-engine` `Agent`
+- where the terminal UI and binary logic lives → `warlock-tui` `App`

@@ -2867,7 +2867,7 @@ mod tests {
     }
 
     #[test]
-    fn an_account_that_does_not_fit_leaves_the_file_on_the_cliff_it_was_taken_to() {
+    fn a_file_the_budget_gives_up_reaches_the_pass_as_a_sample_of_itself() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         // Three files of one size: the budget takes one of them, and which one
         // is decided by path because the sizes cannot decide it. Sized against
@@ -2893,10 +2893,10 @@ mod tests {
             ["b.bin", "c.bin"],
             "ties are broken by path, so the file given up is a value and not a race",
         );
-        assert_eq!(
-            listed(pass),
-            ["a.bin"],
-            "and it stays given up: an account that does not fit is not carried",
+        assert!(
+            listed(pass).is_empty(),
+            "nothing reaches the pass as a bare name any more: the file the \
+             budget gave up carries a sample of its own text instead",
         );
         assert!(
             carried(pass) <= REQUEST_BYTE_CAP,
@@ -2906,8 +2906,13 @@ mod tests {
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_eq!(problems[0].path, dir.path().join("a.bin"));
         assert!(
-            matches!(problems[0].cause, Omission::Unreducible { size } if size == share(35)),
-            "filler has no declarations to lift, so there is nothing to send but its name: {:?}",
+            matches!(
+                problems[0].cause,
+                Omission::Unreducible { size } | Omission::OverBudget { size } if size == share(35)
+            ),
+            "filler has no declarations to lift, so it is still reported as \
+             unreducible — most of it really is missing — but it is reported \
+             beside a sample rather than instead of one: {:?}",
             problems[0],
         );
     }
