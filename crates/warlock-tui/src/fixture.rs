@@ -1,41 +1,14 @@
-//! The tree the front end's own tests are written against.
-//!
-//! The app and draw tests need a tree with a known shape: they assert the
-//! exact lines that end up on screen, the order rows come out in, and the
-//! tally under them. Loading one from disk would make those assertions depend
-//! on whatever repository the test happened to run in, so the tree is written
-//! out here by hand instead — no directory is read, no file is opened and no
-//! staleness is computed, which is why `cargo test` needs neither a terminal
-//! nor a filesystem.
-//!
-//! This is a fixture and nothing else. It is not a loader, it is not a
-//! fallback for a failed load, and nothing outside `#[cfg(test)]` can reach
-//! it: building a real tree is [`warlock_engine::load_tree`]'s job, and the
-//! front end learns about trees only through [`Tree`].
-//!
-//! There are two of them, and the second exists for one reason: a view that is
-//! re-seated on a freshly loaded tree can only be shown carrying anything if
-//! there are two trees to carry it between. [`tree_after_a_run`] is
-//! [`tree`] one load later, differing where a finished pact makes a directory
-//! differ and nowhere else, so a test that re-seats between them is asserting
-//! about the carrying rather than about two unrelated shapes.
-//!
-//! The shapes below are load-bearing — change them and the line-by-line
+//! Written out by hand rather than loaded: no directory is read, no file is
+//! opened and no staleness is computed, so the app and draw tests can assert
+//! exact lines without depending on whichever repository the test ran in. This
+//! is a fixture and nothing else — not a loader, not a fallback for a failed
+//! load. The shapes below are load-bearing: change them and the line-by-line
 //! assertions in `ui.rs` and the counts in `app.rs` change with them.
 
 use std::path::{Path, PathBuf};
 
 use warlock_engine::{Node, NodeState, Tree};
 
-/// A small hand-written tree covering everything the renderer has to handle.
-///
-/// Chosen to exercise, in one value: more than one level of nesting, a node in
-/// each of the three [`NodeState`]s, an ordinary directory that has no
-/// documentation yet — a node like any other, carrying no document of its own —
-/// and files listed on more than one directory, under a pacted node and under
-/// an unpacted one, so that a view drawing them in their module's colour has
-/// more than one colour to get right.
-///
 /// ```text
 /// warlock                          document, pacted, stale
 /// │   README.md, WARLOCK.md
@@ -48,19 +21,12 @@ use warlock_engine::{Node, NodeState, Tree};
 ///             WARLOCK.md, logo.svg
 /// ```
 ///
-/// The listings follow the loader's own rules, so that a view tested against
-/// this fixture is tested against something a real load could produce: they are
-/// in path order, they hold no subdirectory — those are children — and a
-/// directory's own `WARLOCK.md` is among them, since the loader lists what the
-/// walk saw rather than what the walk saw minus one special name. `crates/`
-/// lists nothing, because a directory holding only directories is a real case
-/// too. The root's `README.md` is in there for the same reason and is nothing
-/// more than an ordinary file: Warlock's document is `WARLOCK.md`, and a README
-/// beside it documents nothing as far as the tree is concerned.
-///
-/// The paths are literals, related to this repository's layout only so that a
-/// failing assertion reads like something recognisable; nothing here is read
-/// off disk.
+/// The listings follow the loader's own rules, so a view tested against this is
+/// tested against something a real load could produce: path order, no
+/// subdirectory — those are children — and a directory's own `WARLOCK.md` among
+/// them, since the loader lists what the walk saw rather than what the walk saw
+/// minus one special name. The paths are literals, related to this repository's
+/// layout only so a failing assertion reads like something recognisable.
 pub(crate) fn tree() -> Tree {
     Tree::new(
         Node::new("warlock", "warlock/WARLOCK.md", NodeState::PactedStale)
@@ -92,17 +58,6 @@ pub(crate) fn tree() -> Tree {
     )
 }
 
-/// The same tree as [`tree`], as a second load would find it after a pact run
-/// over `warlock/crates` — the tree the front end is re-seated on.
-///
-/// One directory differs, and it differs the way a finished run makes a
-/// directory differ: `warlock/crates` had no `WARLOCK.md` and now has one, so it
-/// carries a document, it is pacted and fresh, and the file the run wrote is in
-/// its listing. Everything else — the shape, the order, the other four nodes and
-/// their files — is [`tree`]'s, because a re-seat has to be shown carrying a
-/// view across a tree that has changed *somewhere*, not across a tree that has
-/// been replaced.
-///
 /// ```text
 /// warlock                          document, pacted, stale
 /// │   README.md, WARLOCK.md
@@ -116,9 +71,12 @@ pub(crate) fn tree() -> Tree {
 ///             WARLOCK.md, logo.svg
 /// ```
 ///
-/// Written out rather than derived from [`tree`] by mutation: a fixture whose
-/// shape has to be worked out by reading a patch is a fixture the assertions
-/// against it cannot be read beside.
+/// One directory differs, and only in the way a finished run makes one differ:
+/// a re-seat has to be shown carrying a view across a tree that has changed
+/// *somewhere*, not across a tree that has been replaced. Written out rather
+/// than derived from [`tree`] by mutation, because a fixture whose shape has to
+/// be worked out by reading a patch is one the assertions against it cannot be
+/// read beside.
 pub(crate) fn tree_after_a_run() -> Tree {
     Tree::new(
         Node::new("warlock", "warlock/WARLOCK.md", NodeState::PactedStale)
@@ -156,8 +114,7 @@ pub(crate) fn tree_after_a_run() -> Tree {
     )
 }
 
-/// The `names` as paths inside `directory`, which is how the loader spells a
-/// directory's file listing: whole paths, not bare names.
+// Whole paths, not bare names: that is how the loader spells a listing.
 fn files<'a>(
     directory: &'a str,
     names: impl IntoIterator<Item = &'a str> + 'a,

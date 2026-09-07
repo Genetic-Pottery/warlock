@@ -1,107 +1,64 @@
-//! The gate on the way out: is the quit confirmation up, and which answer is lit.
+//! The accident that costs a session is the reflex second Esc — the first
+//! cancels a pact, the run is still tidying up, and the next press lands in a
+//! shell nobody meant to be in. Which is why Esc answers No here: the key that
+//! means "not this" cannot also be the key that leaves.
 //!
-//! Esc and `q` used to leave outright, and the accident that costs a session is
-//! the reflex second Esc — the first one cancels a pact, the run is still
-//! tidying up, and the next press lands in a shell nobody meant to be in. This
-//! module is the whole of what stands between a twitch and the end of the
-//! session: a mode with two answers, and one pure function saying what a key
-//! does to it.
+//! The mode is a value of its own and *not* a field on `App`. Answering No has
+//! to leave the app exactly as it was, and the cheapest way to be sure of that
+//! is for the app never to have heard of the dialog — an `App` compared before
+//! opening and after closing is equal because nothing about it was touched,
+//! rather than because every field was carefully put back.
 //!
-//! ## The shape, because the drawing and the loop both depend on it
-//!
-//! The mode is a value of its own — [`QuitConfirm`] — and *not* a field on
-//! [`App`](crate::App). Two reasons, and both are about what stays true
-//! elsewhere. Answering No has to leave the app exactly as it was, and the
-//! cheapest way to be sure of that is for the app never to have heard of the
-//! dialog: an `App` compared before opening and after closing is equal because
-//! nothing about it was touched, rather than because every field was carefully
-//! put back. And a confirmation is not state about the tree — it is state about
-//! this keystroke and the next one — so keeping it out of `App` keeps `App` the
-//! answer to "what is warlock showing" rather than "what is warlock in the
-//! middle of asking".
-//!
-//! Yes is drawn on the left and No on the right, in that reading order, which is
-//! what makes [`KeyCode::Left`] and [`KeyCode::Right`] positional here rather
-//! than a toggle: Left lights Yes, Right lights No, and pressing the same arrow
-//! twice does nothing the second time. A toggle would read as an arrow that
-//! moves the highlight *away* from the side it points at as soon as it is
+//! Yes is drawn on the left and No on the right, which is what makes Left and
+//! Right positional here rather than a toggle: a toggle would read as an arrow
+//! that moves the highlight *away* from the side it points at as soon as it is
 //! already there. Whoever draws the two answers draws them in that order.
 //!
-//! ## What this deliberately does not answer
-//!
-//! Ctrl-C. It is a key event and not a signal — raw mode is exactly the mode in
-//! which the terminal stops turning it into `SIGINT` — so it has to be answered
-//! by the event loop *before* the loop consults this mode, both with the
-//! confirmation closed and with it open. If it came through here it would be an
-//! ordinary character with a modifier riding along, i.e. one of the keys that
-//! change nothing, and the one keystroke every reader trusts to get them out
-//! would be the one keystroke the dialog swallowed.
-//!
-//! Nothing here reads a terminal, draws anything, or takes an
-//! [`App`](crate::App): a key event and the lit answer go in, and one of three
-//! consequences comes out, so every rule below is one assertion with nothing
-//! attached to stdout.
+//! Ctrl-C is deliberately not answered here. It is a key event and not a signal
+//! — raw mode is exactly the mode in which the terminal stops turning it into
+//! `SIGINT` — so the loop answers it before consulting this mode, open or
+//! closed. Coming through here it would be an ordinary character with a
+//! modifier riding along, and the one keystroke every reader trusts to get them
+//! out would be the one the dialog swallowed.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-/// One of the two answers the confirmation offers.
-///
-/// Named variants rather than a boolean, for the reason [`Focus`](crate::Focus)
-/// is an enum: "which answer is lit" is the thing the type says, the renderer
-/// matches on it exhaustively, and a `bool` would need a comment at every use
-/// saying which way round it reads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Answer {
-    /// Leave warlock, by the path a quit already takes.
     Yes,
-    /// Stay, and change nothing: what the confirmation opens on, so the
-    /// keystroke that opens it and an Enter straight after it come to nothing at
-    /// all. The dangerous answer is never the one under the reader's finger.
+    // The default, so the keystroke that opens the dialog and an Enter straight
+    // after it come to nothing at all: the dangerous answer is never the one
+    // already under the reader's finger.
     #[default]
     No,
 }
 
-/// Whether the confirmation is up, and which answer is lit while it is.
-///
-/// The lit answer lives inside [`QuitConfirm::Open`] rather than beside a
-/// `bool`, so "closed, with Yes highlighted" is not a state that can be written
-/// down: there is one place the highlight can be, and it exists exactly as long
-/// as the question does.
+// The lit answer lives inside `Open` rather than beside a `bool`, so "closed,
+// with Yes highlighted" is not a state that can be written down: the highlight
+// exists exactly as long as the question does.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum QuitConfirm {
-    /// No question is being asked. Keys mean what they have always meant, and
-    /// there is nothing over the frame.
     #[default]
     Closed,
-    /// The question is on screen, with `.0` lit.
     Open(Answer),
 }
 
 impl QuitConfirm {
-    /// The confirmation as it opens: up, with No lit.
-    ///
-    /// A named constructor rather than `Open(Answer::No)` written at the call
-    /// site, so which answer a fresh dialog starts on is decided here — in the
-    /// module that will still be right about it after the drawing changes —
-    /// rather than wherever Esc happens to be handled.
+    // A named constructor rather than `Open(Answer::No)` at the call site, so
+    // which answer a fresh dialog starts on is decided here rather than wherever
+    // Esc happens to be handled.
     #[must_use]
     pub const fn open() -> Self {
         Self::Open(Answer::No)
     }
 
-    /// Whether a question is being asked right now.
-    ///
-    /// What the event loop branches on before it consults [`answer_for`], and
-    /// what the renderer branches on before it draws anything over the frame.
     #[must_use]
     pub const fn is_open(self) -> bool {
         matches!(self, Self::Open(_))
     }
 
-    /// The lit answer, or `None` when nothing is being asked.
-    ///
-    /// The one way into [`answer_for`]: an `Option` here is what keeps the key
-    /// handler from having to invent an answer for a dialog that is not up.
+    // The one way into `answer_for`: the `Option` is what keeps the key handler
+    // from having to invent an answer for a dialog that is not up.
     #[must_use]
     pub const fn highlighted(self) -> Option<Answer> {
         match self {
@@ -111,54 +68,27 @@ impl QuitConfirm {
     }
 }
 
-/// What a keystroke comes to while the confirmation is open.
-///
-/// Named apart from the keys that produce it for the reason the binary's
-/// `Action` is: it keeps [`answer_for`] a pure function of a key event, and
-/// leaves the loop above reading as a list of consequences. Three variants is
-/// the whole of what can happen to a two-answer question — it moves on, it is
-/// answered No, or it is answered Yes — and there is deliberately no variant for
-/// "the key meant nothing", because a key that means nothing here leaves the
-/// question exactly where it was, which is [`Answered::Open`] with the same
-/// answer in it.
+// Three variants is the whole of what can happen to a two-answer question, and
+// there is deliberately no variant for "the key meant nothing": a key that means
+// nothing here leaves the question where it was, which is `Open` with the same
+// answer in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Answered {
-    /// Not answered: the question stays up with `.0` lit, which is either where
-    /// the highlight already was or the one place an arrow key moved it to.
     Open(Answer),
-    /// Answered No: take the question down and change nothing else. The app was
-    /// never touched, so there is nothing to put back.
     Close,
-    /// Answered Yes: leave warlock, by the path a quit already takes, so the
-    /// terminal is restored through the guard that already exists.
     Leave,
 }
 
-/// What `key` does to a confirmation with `highlighted` lit.
-///
-/// The counterpart of the binary's `action_for`, and the same shape: a key and a
-/// situation in, one intention out, no terminal and no [`App`](crate::App).
-///
-/// Four keys answer the question and two move it. Enter takes whichever answer
-/// is lit, which is what Enter means in every dialog anyone has used. `y` and
-/// `n` answer outright, whichever is lit, because a reader who knows the answer
-/// should not have to look at the screen to give it — and they are matched by
-/// character in either case, so caps lock does not take the way out away. Esc
-/// answers No: the key that means "not this" cannot be the key that leaves, or
-/// the reflex second press this whole gate exists for would go straight through
-/// it. Left lights Yes and Right lights No, positionally, per the order recorded
-/// in the module docs.
-///
-/// Every other key leaves the question byte-for-byte as it was, including the
-/// tree's own bindings: while this is up, `j`, `k`, `g`, `G`, space, `o`, `f`,
-/// `p`, `m` and Tab reach nothing underneath, because the loop consults this
-/// instead of the app rather than as well as it.
-///
-/// Only presses count, exactly as `action_for` has it. Crossterm reports
-/// releases and auto-repeats on some platforms and not on others, and a release
-/// acted on here would answer the question with the release of the very key that
-/// opened it — Esc pressed once would open the dialog and immediately close it
-/// again, which is a gate that is not there.
+// Every key not matched below leaves the question byte-for-byte as it was,
+// including the tree's own bindings: while this is up the loop consults this
+// instead of the app rather than as well as it, so `j`, `k`, `p`, Tab and the
+// rest reach nothing underneath.
+//
+// Only presses count. Crossterm reports releases and auto-repeats on some
+// platforms and not others, and a release acted on here would answer the
+// question with the release of the very key that opened it — Esc pressed once
+// would open the dialog and immediately close it again, which is a gate that is
+// not there.
 #[must_use]
 pub fn answer_for(key: KeyEvent, highlighted: Answer) -> Answered {
     if key.kind != KeyEventKind::Press {
@@ -187,14 +117,12 @@ mod tests {
 
     use super::{Answer, Answered, QuitConfirm, answer_for};
 
-    /// A plain press of `code`, as crossterm reports one with no modifiers.
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    /// Every key the tree answers to, plus a character bound to nothing
-    /// anywhere: the list the confirmation has to swallow whole, so no
-    /// keystroke reaches the app underneath while the question is up.
+    // Every key the tree answers to, plus a character bound to nothing anywhere:
+    // the list the confirmation has to swallow whole.
     const INERT: [KeyCode; 15] = [
         KeyCode::Char('j'),
         KeyCode::Char('k'),

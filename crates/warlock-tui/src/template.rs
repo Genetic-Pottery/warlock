@@ -1,80 +1,36 @@
-//! The shape a brief takes: warlock's own skeleton, and the repository's if it
-//! has written one down.
+//! Absent, empty and unreadable are three different answers. Absent is the
+//! built-in `DEFAULT_TEMPLATE`; empty is an empty template, used as it stands,
+//! because a file somebody deliberately emptied says the model is to be given
+//! no shape; unreadable is an `Error` naming the file and never the default,
+//! because quietly substituting warlock's own shape would put the wrong
+//! document at the end of twenty turns of conversation. That last is
+//! `ignores.rs`'s "never degraded to no rules" said a third time.
 //!
-//! One function, [`brief_template`], and one fact behind it — the shape a brief
-//! mode conversation is aimed at is either the built-in [`DEFAULT_TEMPLATE`] or
-//! whatever `<root>/.warlock/brief-template.md` says instead. Nothing has to be
-//! configured to get a shape, and nothing has to be configured to change one:
-//! the override is a markdown file somebody writes with `e` like any other file
-//! in the repository, committed with it, and there is no setting anywhere that
-//! points at it or turns it on.
-//!
-//! ## The default is this project's own skeleton
-//!
-//! Twelve briefs in `docs/` converged on the same six moves — the problem,
-//! `## Outcome`, `## Success criteria`, `## Constraints`, `## Out of scope`,
-//! `## Scope` — so that is what is compiled in, written as the instructions for
-//! filling each section rather than as an example of one filled in. It is a
-//! shape to aim at, and it is the only place in warlock where that shape is
-//! written down.
-//!
-//! ## Read every time, cached never
-//!
-//! This reads the file on every call, and the accessor is the whole of the
-//! mechanism: no cache, no watcher, no copy taken at startup. A template edited
-//! between one `/brief` and the next is a template that took effect, which is
-//! what makes editing it worth doing while warlock is running.
-//!
-//! ## Absent, empty and unreadable are three different answers
-//!
-//! * **Absent** is the built-in default. A repository that has said nothing
-//!   about the shape gets warlock's.
-//! * **Empty** is an empty template, used as it stands. A file somebody
-//!   deliberately emptied is a statement that the model is to be given no
-//!   shape, and nothing here validates or lints what a template *says* — a
-//!   template full of nonsense is the same kind of user's business. Its `## `
-//!   lines are read back out of it by [`missing_sections`], which is a
-//!   different thing from judging them: whatever a template asks for is what a
-//!   document is held to, and a template asking for nothing holds a document to
-//!   nothing.
-//! * **Unreadable** — permissions, a directory in the file's place, bytes that
-//!   are not UTF-8 — is an [`Error`] naming the file, and never the default. A
-//!   file that exists is a file somebody meant, and quietly using warlock's own
-//!   shape in its place would put the wrong document at the end of twenty turns
-//!   of conversation. This is `ignores.rs`'s "never degraded to no rules" and
-//!   `sigils.rs`'s refusal to read an unreadable config as an unrestricted one,
-//!   said a third time about the same kind of file.
+//! Read on every call, with no cache, no watcher and no copy taken at startup,
+//! so a template edited between one `/brief` and the next is one that took
+//! effect. There is no setting that points at the file or turns it on: it is a
+//! markdown file somebody writes with `e` and commits.
 
 use std::path::{Path, PathBuf};
 use std::{fmt, fs, io};
 
 use warlock_engine::manifest_path;
 
-/// The file a repository states its own brief shape in, inside `.warlock/`.
-///
-/// Only the file name: where `.warlock/` is, is the engine's fact rather than
-/// this crate's, and [`template_path`] takes it from the one path the engine
-/// already builds instead of spelling the directory a second time here.
+// Only the file name: where `.warlock/` is, is the engine's fact rather than
+// this crate's, and `template_path` takes it from the one path the engine
+// already builds instead of spelling the directory a second time here.
 const TEMPLATE_FILE: &str = "brief-template.md";
 
-/// The shape a brief takes when the repository has not said otherwise.
+/// The shape this project's own twelve briefs in `docs/` converged on, and the
+/// only place it is written down. The order is the argument: a document that
+/// says what is wrong before it says what to build, and what it will not do
+/// before it says how the work is cut, is one somebody can disagree with in the
+/// right place.
 ///
-/// This project's own skeleton, because twelve briefs in `docs/` arrived at it:
-/// a `# ` title, prose stating the problem, and then `## Outcome`,
-/// `## Success criteria`, `## Constraints`, `## Out of scope` and `## Scope` in
-/// that order. The order is the argument — a document that says what is wrong
-/// before it says what to build, and what it will not do before it says how the
-/// work is cut, is a document somebody can disagree with in the right place.
-///
-/// Written as instructions rather than as a filled-in example. An example gets
-/// copied: a model handed one produces a brief about the example's subject in
-/// the example's words, and the sections stop being questions the conversation
-/// has to answer. So each heading here is followed by what belongs under it and
-/// nothing that could be mistaken for content.
-///
-/// Public because a caller that has no repository root in its hand still has to
-/// be able to state a shape — [`brief_template`] is how a repository's own is
-/// reached, and this is the answer that function gives when there is none.
+/// Written as instructions rather than as a filled-in example, because an
+/// example gets copied — a model handed one produces a brief about the example's
+/// subject in the example's words, and the sections stop being questions the
+/// conversation has to answer.
 pub const DEFAULT_TEMPLATE: &str = "# A title line naming the change\n\n\
 Open with the problem, in prose and before any heading: what is wrong now, in \
 this repository, naming the files and the behaviour. Say what it costs to \
@@ -102,29 +58,15 @@ line reading `depends_on: [<the numbers it needs first>]`, then what that slice 
 decides and why. A slice is a piece of work that lands on its own; the \
 dependencies say what order they can land in.";
 
-/// Where the brief template would be under `root`:
-/// `<root>/.warlock/brief-template.md`.
-///
-/// Built from [`manifest_path`] rather than by joining `.warlock` here, because
-/// the name of that directory is the engine's to spell — it is the engine that
-/// creates it, and a second copy of the string in this crate is a second place
-/// to change it. `with_file_name` rather than a parent and a join: the manifest
-/// path always has a file name, so there is no absent case to invent an answer
-/// for.
+// Built from `manifest_path` rather than by joining `.warlock` here, because the
+// name of that directory is the engine's to spell and a second copy of the
+// string in this crate is a second place to change it. `with_file_name` rather
+// than a parent and a join: the manifest path always has a file name, so there
+// is no absent case to invent an answer for.
 fn template_path(root: &Path) -> PathBuf {
     manifest_path(root).with_file_name(TEMPLATE_FILE)
 }
 
-/// The shape a brief for the repository at `root` has to take: the file at
-/// `<root>/.warlock/brief-template.md`, or the built-in default when there is
-/// none.
-///
-/// Read from disk on every call, so a template edited while warlock is running
-/// takes effect on the next brief without a restart. The file's contents come
-/// back verbatim — not trimmed, not parsed, not checked for headings — and an
-/// empty file is an empty template, which is a repository saying the model is
-/// to be given no shape.
-///
 /// ```no_run
 /// use warlock_tui::brief_template;
 ///
@@ -137,10 +79,9 @@ fn template_path(root: &Path) -> PathBuf {
 ///
 /// # Errors
 ///
-/// [`Error`] if the file is there and cannot be read or decoded: no permission,
-/// a directory in its place, or bytes that are not UTF-8. A template that
-/// exists is never quietly replaced by the built-in default — the caller says
-/// so and asks for nothing.
+/// [`Error`] if the file is there and cannot be read or decoded. A template that
+/// exists is never quietly replaced by the built-in default — the caller says so
+/// and asks for nothing.
 pub fn brief_template(root: impl AsRef<Path>) -> Result<String, Error> {
     let path = template_path(root.as_ref());
     match fs::read_to_string(&path) {
@@ -152,23 +93,13 @@ pub fn brief_template(root: impl AsRef<Path>) -> Result<String, Error> {
     }
 }
 
-/// A brief template that is there and cannot be had: the file, and what the
-/// filesystem said about it.
-///
-/// A struct rather than an enum, because there is exactly one way this fails
-/// and there is no second case to grow into: absent is not an error, and the
-/// contents are never parsed, so there is no missing file, no syntax and no
-/// wrong shape to report. Non-UTF-8 arrives here too — the read that decodes is
-/// the read that fails — which is why the reason is worth printing rather than
-/// summarising.
-///
-/// One line, like everything the binary prints: the file that was found and, in
-/// the filesystem's own words, why it could not be read.
+// A struct rather than an enum, because there is exactly one way this fails and
+// no second case to grow into: absent is not an error and the contents are never
+// parsed, so there is no syntax and no wrong shape to report. Non-UTF-8 arrives
+// here too, since the read that decodes is the read that fails.
 #[derive(Debug)]
 pub struct Error {
-    /// The template file that was found and could not be read.
     pub path: PathBuf,
-    /// What the read said — permission denied, is a directory, not UTF-8.
     pub source: io::Error,
 }
 
@@ -189,39 +120,24 @@ impl std::error::Error for Error {
     }
 }
 
-/// Which of `template`'s sections `document` has not got, in the order the
-/// template asks for them.
+/// The one place in warlock the brief shape is *checked*, and it is here because
+/// a model that has been arguing about a change for twenty turns writes the
+/// document it has been thinking about and quietly drops a section it stopped
+/// thinking about — a brief missing its `## Scope` reads perfectly well right up
+/// until somebody goes looking for the slices, days later.
 ///
-/// The shape is a shape to aim at everywhere else in warlock — written into the
-/// instruction, argued over for twenty turns, and then not looked at again. This
-/// is the one place it is *checked*, and it exists because a model that has been
-/// arguing about a change for twenty turns writes the document it has been
-/// thinking about and quietly drops a section it stopped thinking about. That
-/// failure is silent: a brief missing its `## Scope` reads perfectly well right
-/// up until somebody goes looking for the slices, which is days later and in
-/// another conversation.
+/// A section is a `## ` line of the template and only that level: the `# ` line
+/// is an instruction about the title rather than a heading to reproduce, and a
+/// `### ` line is inside a section rather than one of them, which is what the
+/// numbered slices under `## Scope` are.
 ///
-/// # What counts as a section, and what counts as having one
-///
-/// A section is a `## ` line of the template. Only that level: the `# ` line is
-/// an *instruction* about the title rather than a heading to reproduce — a
-/// document is supposed to name its own change there — and a `### ` line is
-/// inside a section rather than one of them, which is what the numbered slices
-/// under `## Scope` are.
-///
-/// A document has a section when some heading line of it, at any level, carries
-/// that text. Deliberately generous in both directions that a strict reading
-/// would refuse, because every false refusal here throws away a document that
-/// took twenty turns to arrive at, and neither of them is the failure this
-/// guards: a `### Outcome` is not a dropped outcome, and neither is an
-/// `## OUTCOME`. What is not generous is presence itself — a section that is not
-/// there in any spelling is a section the document has not got.
-///
-/// Order is not checked, though the template's own docs argue the order is the
-/// argument. Sections in an odd order is a document a reader can see is odd and
-/// fix by asking; a section that is not there is the one they cannot see.
-/// Folding is ASCII-only, which is the whole of what the built-in shape and any
-/// heading a model writes in English needs.
+/// Matching is generous in both directions a strict reading would refuse — a
+/// `### Outcome` is not a dropped outcome, and neither is an `## OUTCOME` —
+/// because every false refusal throws away a document that took twenty turns to
+/// arrive at, and neither is the failure this guards. Order is not checked for
+/// the same reason: sections in an odd order is a document a reader can see is
+/// odd and fix by asking, while a section that is not there is the one they
+/// cannot see.
 ///
 /// ```
 /// use warlock_tui::{DEFAULT_TEMPLATE, missing_sections};
@@ -241,12 +157,9 @@ pub fn missing_sections<'a>(template: &'a str, document: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// The `## ` lines of `template`, trimmed, in the order they appear.
-///
-/// Leading whitespace is trimmed before the prefix is looked for, so an indented
-/// heading counts; `### ` does not match `"## "` at all, since its third byte is
-/// a `#` where the prefix wants a space. A heading with nothing after it is
-/// dropped rather than becoming a section no document could ever have.
+// `### ` does not match `"## "` at all, since its third byte is a `#` where the
+// prefix wants a space. A heading with nothing after it is dropped rather than
+// becoming a section no document could ever have.
 fn sections_of(template: &str) -> Vec<&str> {
     template
         .lines()
@@ -256,13 +169,10 @@ fn sections_of(template: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Whether any heading line of `document` carries `section`.
-///
-/// The level is thrown away before the comparison — see
-/// [`missing_sections`], where that generosity is argued — so `#`, `##` and
-/// `###` all count, and a line that is not a heading at all never does. A
-/// document merely *mentioning* `## Scope` in its prose is not a document with a
-/// scope section, which is why this asks the line and not the text.
+// Asks the line and not the text: a document merely *mentioning* `## Scope` in
+// its prose is not a document with a scope section. The level is thrown away
+// before the comparison, so `#`, `##` and `###` all count — the generosity
+// argued at `missing_sections`.
 fn carries(document: &str, section: &str) -> bool {
     document.lines().any(|line| {
         let line = line.trim();
@@ -287,8 +197,6 @@ mod tests {
         DEFAULT_TEMPLATE, Error, brief_template, missing_sections, sections_of, template_path,
     };
 
-    /// A document carrying `sections` as `## ` headings, with the title and the
-    /// problem prose every brief opens with.
     fn document_with(sections: &[&str]) -> String {
         let mut document = String::from("# A change\n\nWhat is wrong now.\n");
         for section in sections {
@@ -297,7 +205,6 @@ mod tests {
         document
     }
 
-    /// Every section the built-in shape asks for, spelled as its headings.
     const BUILT_IN: [&str; 5] = [
         "## Outcome",
         "## Success criteria",
@@ -420,14 +327,10 @@ mod tests {
         );
     }
 
-    /// A throwaway repository root. Nothing in this module reads or writes a
-    /// path the developer has anything in.
     fn a_root() -> tempfile::TempDir {
         tempfile::tempdir().expect("a temporary directory")
     }
 
-    /// Put `text` at `<root>/.warlock/brief-template.md`, creating the
-    /// directory the way anything writing under `.warlock/` has to.
     fn write_template(root: &Path, text: &str) -> PathBuf {
         let path = template_path(root);
         fs::create_dir_all(path.parent().expect("a `.warlock` directory"))

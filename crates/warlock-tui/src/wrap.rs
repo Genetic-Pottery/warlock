@@ -1,90 +1,30 @@
-//! Breaking one line of a card into the rows a panel of some width can draw it
-//! in.
+//! Wrapping rather than a horizontal scroll, which would be a mode, a key pair
+//! and an offset so a reader could shunt a sentence left and right to read it.
+//! What that costs is worth saying out loud: one thing that happened is no
+//! longer always one row, so the count of rows on screen is no longer the count
+//! of things the pass was seen doing. The clock in front of each of them is what
+//! now says where one thing ends and the next begins — a row with no clock on it
+//! is the row above it, still going.
 //!
-//! Every line of every card, and that is the rule: nothing the panel draws runs
-//! off the right-hand edge. A document's line is the obvious case — nothing
-//! about a file's line numbers is on screen, nothing is counting them, and the
-//! far end of a sentence is the half that says what the sentence was about — but
-//! an account's is the same case wearing different words. `the turn failed —
-//! exit status 1: Error: Session ID … is already in` is a row that tells the
-//! reader something went wrong and then takes away what it was, and a line the
-//! panel cannot finish is a line the panel did not say.
-//!
-//! That is the whole of the choice: the alternative to wrapping is a horizontal
-//! scroll — a mode, a key pair and an offset, all so a reader can shunt a
-//! sentence left and right to read it. Warlock shows a document so the reader
-//! can judge it against the directory it describes and an account so they can
-//! see what a pass did; neither survives having to be steered.
-//!
-//! What is lost is worth saying out loud: one thing that happened is no longer
-//! always one row, so the count of rows on screen is no longer the count of
-//! things the pass was seen doing. The clock in front of each of them is what
-//! now says where one thing ends and the next begins, and it is enough — a row
-//! with no clock on it is the row above it, still going.
-//!
-//! ## What a break costs, and where it is put
-//!
-//! [`wrapped`] breaks at a space where there is one inside the width and mid-word
-//! where there is not, so a long path or an unbroken run of `x`s still gets
-//! across rather than stopping the wrap dead. Columns are counted the way
-//! [`truncated`](crate::ui) counts them and the way the backend will lay the row
-//! out, so a row that fits here fits there.
-//!
-//! [`folded`] is the rule for a caller that cannot afford to lose a byte: it
-//! fills each row to the width and cuts there, so its rows join back up to the
-//! text byte for byte. Nothing in this module's account of the panel changes —
-//! the panel draws [`wrapped`]'s rows.
-//!
-//! What [`folded`] does not do is break at words, and that is the difference
-//! rather than an oversight. A row of the panel is read; a row of a field is
-//! cells a caret sits in, and a word break leaves the end of one standing for no
-//! offset at all — `test` alone on a row with the whole width beside it
-//! belonging to nothing, and the run of `h`s after it re-flowing the draft from
-//! the top the moment it outgrows the row it had to itself. Filling has no such
-//! step in it: what is typed goes in the next cell along, every time. Reading
-//! wants the word whole; typing wants the row full.
-//!
-//! Continuation rows carry no marker and no ellipsis — a row of a wrapped
-//! document line is the file's own text and nothing else, exactly as an
-//! unwrapped one is. What they do carry is the blank width of whatever the
-//! renderer puts in front of the line's first row ([`shape`]): the clock column
-//! of an account line, the marker of a question. That is not decoration, it is
-//! the column the text is already in, and a continuation that jumped back to
-//! the left margin would read as a new thing that happened rather than as the
-//! rest of the last one.
-//!
-//! ## Who wraps, and when
-//!
-//! [`rows`] is the whole of the answer, and it is called on the way to the
-//! screen rather than when a line is made. A card holds what happened; how many
-//! rows that takes is a question about a terminal, and the terminal changes
-//! size. So a panel dragged narrower re-flows what is on it, and nothing a card
-//! holds is ever cut down to a width it happened to have once.
+//! Two wrappers, and the difference is not an oversight. `wrapped` breaks at
+//! words and is what the panel is drawn from; `folded` fills each row to the
+//! width and keeps every byte, because a row of a field is cells a caret sits
+//! in. Reading wants the word whole; typing wants the row full.
 
 use crate::account::Line;
 use crate::ui::{NOTE_MARKER, PANEL_INDENT, SAID_MARKER, display_width};
 
-/// How the renderer draws one line: what it puts in front of it, the line's own
-/// text, and whether the row is bold.
-///
-/// The one description of a row's shape, read by the two halves that have to
-/// agree about it — [`rows`] wraps at the width the prefix leaves, and
-/// `panel_row` draws the prefix that width was measured against. Two answers
-/// would be a line broken at one width and drawn at another, which is a row over
-/// the border.
+// The one description of a row's shape, read by the two halves that have to
+// agree about it: `rows` wraps at the width the prefix leaves, and `panel_row`
+// draws the prefix that width was measured against. Two answers would be a line
+// broken at one width and drawn at another, which is a row over the border.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Shape {
-    /// What is drawn in front of the line's own text: the indent and clock of an
-    /// account line, the marker of a question, nothing at all for a heading, a
-    /// summary, a line of prose or a row that is already composed.
     pub(crate) prefix: String,
-    /// The line's own text, as the card holds it.
     pub(crate) text: String,
-    /// Whether the row is drawn bold: a heading, a summary or a question.
     pub(crate) heading: bool,
 }
 
-/// How `line` is drawn, before any width is taken into account.
 #[must_use]
 pub(crate) fn shape(line: &Line) -> Shape {
     match line {
@@ -128,21 +68,6 @@ pub(crate) fn shape(line: &Line) -> Shape {
     }
 }
 
-/// The rows `line` draws as in a panel `width` columns wide.
-///
-/// One row, and `line` itself, whenever it fits — which is every line of a
-/// panel nobody has measured yet, since a width of zero is not a width to break
-/// at (see [`wrapped`]). A line that does not fit comes back as the rows it
-/// needs, in order, and what each of them *is* follows one rule: the first row
-/// keeps the line's own variant wherever that variant can hold a piece of the
-/// text — a question keeps its marker, a clocked line keeps its clock, so the
-/// row still says what it is — and every other row is a [`Line::Wrapped`],
-/// indented under the text it continues and bold or not with the line it belongs
-/// to.
-///
-/// A [`Line::Directory`] is the exception, and only because a piece of a path is
-/// not a path: a heading too long for the panel comes back as wrapped rows
-/// throughout rather than as a `Directory` holding a fragment.
 #[must_use]
 pub(crate) fn rows(line: &Line, width: usize) -> Vec<Line> {
     let shape = shape(line);
@@ -164,12 +89,6 @@ pub(crate) fn rows(line: &Line, width: usize) -> Vec<Line> {
     rows
 }
 
-/// `line` with `first` in place of its text: the first row of a line that had to
-/// be broken.
-///
-/// The variant is kept where it can hold a piece of the text, because what the
-/// renderer puts in front of that first row is the line's own — a clock, a
-/// marker — and the wrap was measured against it.
 fn continued(line: &Line, first: &str, shape: &Shape) -> Line {
     match line {
         Line::Clocked { clock, .. } => Line::Clocked {
@@ -197,23 +116,11 @@ fn continued(line: &Line, first: &str, shape: &Shape) -> Line {
     }
 }
 
-/// `text` in as many rows of `width` columns as it takes, in order.
-///
-/// Never empty: a line with nothing on it is one blank row, because a blank line
-/// in a file is a paragraph break and swallowing it would re-flow the document
-/// into one long block.
-///
-/// A `width` of zero is a panel nobody has measured yet — the height field's
-/// zero means the same thing — and is not a width to break at: the text comes
-/// back as the one row it went in as, and the frame that measures the panel is
-/// the one that wraps it.
-///
-/// Breaks are put at the last space that fits and mid-character-boundary where
-/// no space does, which is what keeps a line of `x`s a thousand long from
-/// wrapping to nothing. The space a row was broken at is not drawn — it would be
-/// a trailing blank on one row and a leading one on the next — but a break made
-/// mid-word takes nothing away, so the rows of a wrapped line always join back
-/// up to the line, give or take the spaces broken at.
+// Never empty: a line with nothing on it is one blank row, because a blank line
+// in a file is a paragraph break and swallowing it would re-flow the document
+// into one long block. A `width` of zero is a panel nobody has measured yet and
+// is not a width to break at — the frame that measures the panel is the one that
+// wraps it.
 pub(crate) fn wrapped(text: &str, width: usize) -> Vec<String> {
     if width == 0 || display_width(text) <= width {
         return vec![text.to_owned()];
@@ -240,30 +147,15 @@ pub(crate) fn wrapped(text: &str, width: usize) -> Vec<String> {
     }
 }
 
-/// `text` in as many rows of `width` columns as it takes, keeping every byte.
-///
-/// Every row is filled: the cut is the width itself ([`filled`]), wherever in a
-/// word that lands, and no byte is trimmed off either side of it. So the rows
-/// concatenate back to `text` byte for byte, which is what a caller that counts
-/// an offset through them needs — a space the reader typed has a cell of its own
-/// to put a cursor in, and a byte that vanished at a word break would be a cell
-/// that is not there to aim at.
-///
-/// It does not break at words, and that is the difference from [`wrapped`]
-/// rather than an omission. The rows of a field are cells a caret sits in, and a
-/// word break leaves the end of a row standing for no offset at all: a draft of
-/// `test` and then a run of `h`s puts `test` alone on a row with the whole width
-/// beside it belonging to nothing, and one more `h` — the one that outgrows the
-/// row the run had to itself — re-flows the draft from the top and takes the
-/// cursor with it. Filling has no such step in it: what is typed goes in the
-/// next cell along, every time, and a row breaks only where the field ends.
-/// Prose pays for that in words cut in half, which is a field being a field. The
-/// panel is read rather than typed into and still breaks at spaces.
-///
-/// A `width` of zero is a field nobody has measured yet and is not a width to
-/// break at: the text comes back as the one row it went in as. A text with
-/// nothing in it is one empty row, as it is in [`wrapped`], so a caller always
-/// has a row to sit a cursor on.
+// Keeps every byte: the cut is the width itself, wherever in a word that lands,
+// and nothing is trimmed off either side of it, so the rows concatenate back to
+// `text` exactly. That is what a caller counting an offset through them needs —
+// a byte that vanished at a word break would be a cell the cursor cannot aim at.
+//
+// Breaking at words instead would leave the end of a row standing for no offset
+// at all: `test` alone on a row with the whole width beside it belonging to
+// nothing, and one more character re-flowing the draft from the top and taking
+// the cursor with it.
 pub(crate) fn folded(text: &str, width: usize) -> Vec<String> {
     if width == 0 || display_width(text) <= width {
         return vec![text.to_owned()];
@@ -288,19 +180,10 @@ pub(crate) fn folded(text: &str, width: usize) -> Vec<String> {
     }
 }
 
-/// Where to cut `text` so the row before the cut is as much of it as `width`
-/// columns hold.
-///
-/// [`folded`]'s whole rule, and there is nothing in it about words: as many
-/// characters as fit, cut on a `char` boundary so no character is halved and
-/// none is dropped. What is on either side of the cut is whatever the reader
-/// typed there.
-///
-/// Never zero for a text with anything in it, which is where [`folded`]'s loop
-/// gets its promise of making progress: it has no `trim_start` to fall back on,
-/// so the cut alone has to advance it. A character wider than the whole field
-/// overhangs its row rather than stopping the fold, exactly as one wider than
-/// the panel overhangs in [`break_at`].
+// Never zero for a text with anything in it, which is where `folded`'s loop gets
+// its promise of making progress: it has no `trim_start` to fall back on, so the
+// cut alone has to advance it. A character wider than the whole field overhangs
+// its row rather than stopping the fold.
 fn filled(text: &str, width: usize) -> usize {
     let mut taken = 0;
     let mut fits = 0;
@@ -317,22 +200,13 @@ fn filled(text: &str, width: usize) -> usize {
     fits.max(first_character(text))
 }
 
-/// Where to cut `text` so the row before the cut fits in `width` columns.
-///
-/// Three answers in order of preference: the width itself, when the character
-/// that did not fit is a space and the rows either side of the cut are whole
-/// words already; the last space inside the widest prefix that fits, which is
-/// the ordinary word break; and failing both, as many characters as fit, which
-/// is the mid-word break a long path gets.
-///
-/// A space is only a candidate once a word has been seen, so a line's own
-/// indentation is never what it breaks at — an indented line breaking at its
-/// indent would put an empty row above itself and say nothing.
-///
-/// Always past the first character, whatever the width: a cut at zero would be a
-/// row with nothing on it and a loop that never reached the end of the line, so
-/// a character wider than the whole panel overhangs rather than stopping the
-/// wrap.
+// A space is only a candidate once a word has been seen, so a line's own
+// indentation is never what it breaks at: an indented line breaking at its
+// indent would put an empty row above itself and say nothing.
+//
+// Always past the first character, whatever the width. A cut at zero would be a
+// row with nothing on it and a loop that never reached the end of the line, so a
+// character wider than the whole panel overhangs rather than stopping the wrap.
 fn break_at(text: &str, width: usize) -> usize {
     let mut taken = 0;
     let mut fits = 0;
@@ -366,14 +240,10 @@ fn break_at(text: &str, width: usize) -> usize {
     space.unwrap_or_else(|| fits.max(first_character(text)))
 }
 
-/// How many bytes the first character of `text` takes, and zero for a text with
-/// no first character.
 fn first_character(text: &str) -> usize {
     text.chars().next().map_or(0, char::len_utf8)
 }
 
-/// What a line comes back as at a width: how many rows, what is on them, and
-/// what is deliberately not.
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -381,13 +251,12 @@ mod tests {
     use super::{Line, first_character, folded, rows, shape, wrapped};
     use crate::ui::display_width;
 
-    /// A width every line below is too long for, and narrow enough that the
-    /// clock column is a visible share of it.
+    // Narrow enough that the clock column is a visible share of it.
     const NARROW: usize = 18;
 
-    /// Everything a byte-keeping wrapper has to survive: several words, a path
-    /// with nowhere to break in it, whitespace at each end, two spaces in a row,
-    /// and characters two columns wide.
+    // Everything a byte-keeping wrapper has to survive: several words, a path
+    // with nowhere to break in it, whitespace at each end, two spaces in a row,
+    // and characters two columns wide.
     const DRAFTS: [&str; 6] = [
         "It walks the tree and writes what it finds.",
         "crates/warlock-engine/src/pact.rs",
@@ -609,15 +478,12 @@ mod tests {
         assert_eq!(twice, once);
     }
 
-    /// A line that fits is the one row it was, byte for byte.
     #[test]
     fn a_line_inside_the_width_is_one_row() {
         assert_eq!(wrapped("# The engine", 20), ["# The engine"]);
         assert_eq!(wrapped("exactly twelve", 14), ["exactly twelve"]);
     }
 
-    /// The blank line survives: it is what a paragraph break in a document is
-    /// made of.
     #[test]
     fn an_empty_line_is_one_empty_row() {
         assert_eq!(wrapped("", 20), [""]);
@@ -705,10 +571,6 @@ mod tests {
         assert_eq!(rows.concat().replace(' ', ""), "indentedtexthere");
     }
 
-    /// The whole of the reason `folded` exists: whatever the width and whatever
-    /// is in the text, the rows are the text again, byte for byte. A caller
-    /// counting an offset through them counts every byte the reader typed,
-    /// including the spaces the rows were broken at.
     #[test]
     fn folded_rows_join_back_up_to_the_text_byte_for_byte() {
         for draft in DRAFTS {
@@ -722,10 +584,6 @@ mod tests {
         }
     }
 
-    /// The field fills where the panel breaks at words, whatever is in the draft
-    /// and whatever the width: the two answers are the same text, cut in
-    /// different places. Every row of the field is as full as the width allows,
-    /// which is the property the panel's rows do not have and a caret needs.
     #[test]
     fn the_field_fills_every_row_where_the_panel_breaks_at_words() {
         for draft in [
@@ -749,11 +607,6 @@ mod tests {
         }
     }
 
-    /// The draft that put the rule here, a word and then a run of `h`s, at the
-    /// two lengths that matter: one that fits a row of its own and one that does
-    /// not. The panel pushes the run down in the first case and only there,
-    /// which is the step the field must not have — the field fills both, so the
-    /// row the run outgrows is the row it goes on filling.
     #[test]
     fn a_run_of_one_word_fills_the_row_rather_than_being_pushed_down() {
         let inside = format!("test {}", "h".repeat(10));
@@ -777,17 +630,11 @@ mod tests {
         assert_eq!(folded(&past, 12).concat(), past);
     }
 
-    /// Columns, not characters: eight characters of `日本語 and` would fit a
-    /// width of eight if they were counted one apiece, but they draw in eleven
-    /// cells, so the row is the three that draw in six, the space, and the one
-    /// letter the last column has room for.
     #[test]
     fn folded_counts_the_columns_a_character_draws_in() {
         assert_eq!(folded("日本語 and more", 8), ["日本語 a", "nd more"]);
     }
 
-    /// A field nobody has measured yet wraps nothing, and a draft with nothing
-    /// in it is still one row — there has to be a row for the cursor to sit on.
     #[test]
     fn folded_at_a_width_of_zero_is_the_row_it_went_in_as() {
         let long = "It walks the tree and writes what it finds.";
@@ -797,9 +644,6 @@ mod tests {
         assert_eq!(folded("", 20), [""]);
     }
 
-    /// No row holds half a character, at any width: the narrow widths are where
-    /// a wrapper slicing by bytes would panic, and the rows still add back up to
-    /// the text.
     #[test]
     fn folded_splits_only_on_character_boundaries() {
         for draft in DRAFTS {
@@ -818,10 +662,6 @@ mod tests {
         }
     }
 
-    /// A filled row is a row that fits: the cut is the width itself, so no row of
-    /// a folded draft is ever wider than the field it was folded to — including
-    /// the rows that end in the space between two words, which is a cell of the
-    /// draft like any other rather than something to hang over the edge.
     #[test]
     fn no_row_of_a_folded_draft_is_wider_than_the_field() {
         assert_eq!(
@@ -841,18 +681,12 @@ mod tests {
         }
     }
 
-    /// A run of spaces is kept whole, wherever the breaks fall in it: this is
-    /// the case `wrapped` throws away, and a draft that lost one of two spaces
-    /// would put the cursor a cell out for the rest of the line.
     #[test]
     fn folded_keeps_a_run_of_spaces_that_the_panels_wrapper_swallows() {
         assert_eq!(folded("a  b", 2), ["a ", " b"]);
         assert_eq!(wrapped("a  b", 2), ["a", "b"]);
     }
 
-    /// The degenerate width, which the loop has to terminate at rather than
-    /// breaking off empty rows for ever — and with no `trim_start` to fall back
-    /// on, the cut is the only thing moving it along.
     #[test]
     fn folded_at_a_width_of_one_still_gets_to_the_end_of_the_draft() {
         assert_eq!(folded("ab cd", 1), ["a", "b", " ", "c", "d"]);
