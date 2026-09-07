@@ -1,28 +1,18 @@
-//! What a keystroke or a mouse event asks the app to do.
+//! Events turned into intentions, with nothing attached to stdout:
+//! [`action_for`] for a key, [`press_for`] for a key once the windows have had
+//! their say, and [`mouse_action`] for a pointer event.
 //!
-//! Pure translations, one per device, and no terminal in any of them.
-//! [`action_for`] turns a key event and a situation — is a pact in flight —
-//! into an [`Action`]; [`mouse_action`] turns a mouse event, the size the
-//! frame was drawn at, the app and the gate on the way out into a
-//! [`MouseAction`]. Naming the intent apart from the event that produced it is
-//! what keeps both testable with nothing attached to stdout, and leaves the
-//! event loop in `main.rs` reading as a list of consequences.
+//! Everything about the situation arrives as a parameter rather than being
+//! looked up, which is what keeps each of the three a pure function and every
+//! rule below one assertion. Two of those parameters are read in exactly one
+//! arm each: `in_flight` re-reads Esc in [`action_for`] and `q` in
+//! [`press_for`], and `answered` re-reads Ctrl-C — which [`press_for`] takes at
+//! the top, before [`action_for`] is ever asked. No other key means anything
+//! different while a run or a turn is out.
 //!
-//! [`press_for`] is the keyboard's second half and the newer one: it is where
-//! the windows drawn over the frame are decided, so that the loop above has one
-//! arm that returns, one that moves the question, one that types into the scope
-//! prompt, one that types into the write prompt, one that types into the
-//! composer and one that hands the key on. Esc
-//! and `q` no longer leave by themselves — with nothing running they open the
-//! question instead — and while any window is up, or while the composer holds
-//! the keyboard, every key goes to its own pure function,
-//! [`answer_for`](warlock_tui::answer_for),
-//! [`edit_for`](warlock_tui::edit_for) or
-//! [`compose_for`](warlock_tui::compose_for), rather than to [`action_for`],
-//! which is what keeps a stray `j` from moving a selection nobody can see behind
-//! the window and a typed `p` from pacting a directory. Ctrl-C is answered before
-//! any of them, and a run in flight suppresses the quit gate; both are argued for
-//! on [`press_for`] itself.
+//! Nothing here decides what a window *is* — [`answer_for`], [`edit_for`] and
+//! [`compose_for`] own their own keys. [`press_for`] only decides which of them
+//! is asked, and the order it asks in is the precedence.
 
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -33,186 +23,35 @@ use warlock_tui::{
     compose_for, edit_for, hit_test,
 };
 
-/// What a keystroke asks the app to do.
-///
-/// Naming the intent separately from the key that produced it keeps
-/// [`action_for`] a pure function of a key event, testable with no terminal
-/// attached, and leaves the loop above reading as a list of consequences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {
-    /// Leave the app.
     Quit,
-    /// Stop the pact that is running, and stay.
     CancelPact,
-    /// Move the keys one place round the cycle: the tree column, the panel
-    /// beside it, and the composer under the panel take it in turns to be lit
-    /// and to be what the movement keys drive.
-    ///
-    /// One action rather than a focus-the-tree, a focus-the-panel and a
-    /// focus-the-composer, because there is one key: "go to the next one" is the
-    /// whole of what a reader can mean by pressing it, and a set of actions
-    /// would be three names for the same keystroke read three times. Which
-    /// places the cycle can stop at is the app's, not this function's — the
-    /// composer is skipped while the document card hides it, see
-    /// [`App::toggle_focus`](warlock_tui::App::toggle_focus).
     ToggleFocus,
-    /// Move the selection one row up.
     SelectPrevious,
-    /// Move the selection one row down.
     SelectNext,
-    /// Move the selection one screenful up.
     SelectPageUp,
-    /// Move the selection one screenful down.
     SelectPageDown,
-    /// Select the first row of the tree.
     SelectFirst,
-    /// Select the last row of the tree.
     SelectLast,
-    /// Hide the selected directory's descendants, or show them again if they
-    /// are hidden already.
     ToggleCollapsed,
-    /// Draw only the pacted nodes and the ancestors that reach them, or the
-    /// whole tree again if that is what is on screen already.
     TogglePactedOnly,
-    /// Draw the files inside each directory as well as the directories, or go
-    /// back to directories alone if the files are on screen already.
     ToggleFiles,
-    /// Pact the selected node, or unpact it if it is pacted already.
     TogglePact,
-    /// Re-describe the stale directories under the selected node, and only
-    /// those.
-    ///
-    /// A pact says "describe all of this"; this says "describe the part of it
-    /// that has gone yellow". One edited file in a large repository leaves a
-    /// handful of directories stale and the rest green, and getting back to
-    /// green through [`Action::TogglePact`] would pay for a pass over every
-    /// directory in the subtree to re-describe the few that need it.
     Refresh,
-    /// Ask what scope the selected directory carries.
-    ///
-    /// The only action here that opens a window rather than changing the tree,
-    /// and the only one whose whole answer is somewhere else: what the loop does
-    /// with it is read the directory's scope out of the manifest and put the
-    /// prompt up over it, and from that keystroke on the keys belong to
-    /// [`edit_for`](warlock_tui::edit_for) rather than to this file.
-    ///
-    /// It is not a run. Nothing is spawned, no `claude` is started and no
-    /// progress line appears — a scope is a fact somebody types, and the whole
-    /// of writing one is a manifest saved on the loop's own thread.
-    ///
-    /// The two refusals a press can come to — a row that cannot be scoped, and a
-    /// run already in flight — are the app's answer and the loop's, exactly as
-    /// they are for [`Action::TogglePact`] and [`Action::Refresh`]. This
-    /// function's business is that the key was pressed.
     OpenScope,
-    /// Read the selected file and put its lines in the panel.
-    ///
-    /// The first action here that shows a file rather than describing one: every
-    /// colour in the tree is a claim about a `WARLOCK.md`, and this is how the
-    /// document behind a claim gets on screen without leaving warlock.
-    ///
-    /// It writes nothing and starts nothing. A capped read is over inside a
-    /// frame, so there is no thread, no channel and no progress line — which is
-    /// also why a run in flight is no reason to refuse it, and why this key,
-    /// like every one but Esc, means the same thing during a pact as outside
-    /// one.
-    ///
-    /// What a row that is not a file comes to is the app's answer, exactly as it
-    /// is for [`Action::TogglePact`] and [`Action::OpenScope`]: a directory is
-    /// refused in the terms its own row makes available. This function's
-    /// business is that the key was pressed.
     ViewFile,
-    /// Hand the selected file to `$EDITOR`, and take the terminal back when the
-    /// editor is done with it.
-    ///
-    /// [`Action::ViewFile`]'s other half, and section 9's escape hatch given a
-    /// keystroke: a reader who sees a `WARLOCK.md` that is wrong should not have
-    /// to leave warlock, find the path again and come back. Warlock still writes
-    /// no byte of it — the editor does, and the workspace's writers are still
-    /// the pact, the refresh, the manifest, the scope key and `warlock init`.
-    ///
-    /// The only action here that gives the screen away. What the loop does with
-    /// it is put the terminal back the way it found it, run the editor as a
-    /// foreground child, wait for it, and re-enter raw mode, the alternate
-    /// screen and mouse reporting afterwards — so it is also the only one whose
-    /// answer is measured in whole minutes rather than in frames.
-    ///
-    /// And it has a cost worth saying out loud: a `WARLOCK.md` is an ordinary
-    /// file in its own directory's walk, so saving one restales the very
-    /// directory it describes, and the only road back to green is `r` and a
-    /// pass.
-    ///
-    /// The refusals a press can come to are the app's answer and the loop's,
-    /// exactly as they are for [`Action::TogglePact`] and [`Action::OpenScope`]:
-    /// a row that is not a file is refused in the same words [`Action::ViewFile`]
-    /// refuses it in, and a run in flight is refused where every other mid-run
-    /// refusal is. This function's business is that the key was pressed, which
-    /// is why the key means the same thing during a pact as outside one.
     EditFile,
-    /// Show the panel's other card: the account if the document is up, the
-    /// document if the account is.
-    ///
-    /// One action rather than a show-the-account and a show-the-document, for
-    /// [`Action::ToggleFocus`]'s reason: the panel is one slot holding two
-    /// cards, so "show the other one" is the whole of what a reader can mean by
-    /// pressing the key, and a pair of actions would be two names for the same
-    /// keystroke read twice.
-    ///
-    /// It is the only thing besides [`Action::ViewFile`] that decides which card
-    /// is on screen, which is what makes a document survive a pact starting,
-    /// finishing, failing or being cancelled underneath it. It reads nothing,
-    /// writes nothing and starts nothing — the cards are already in hand — so a
-    /// run in flight is no reason to refuse it, and it means the same thing
-    /// during a pact as outside one.
-    ///
-    /// The one refusal it can come to — no document read yet this session, so
-    /// there is no second card to swap to — is the app's answer, exactly as a
-    /// directory row is for [`Action::ViewFile`]. This function's business is
-    /// that the key was pressed.
     SwapCard,
-    /// Stop the terminal reporting its mouse, or ask it to start again if it has
-    /// been stopped.
-    ///
-    /// The one action here that is not about the app at all: what it changes is
-    /// what the terminal sends, which is why the loop answers it with an escape
-    /// sequence rather than with a method on [`App`]. With capture off the
-    /// terminal keeps its own selection — dragging over the screen copies text,
-    /// the way it does in any other program — and warlock hears no pointer at
-    /// all until the next press.
     ToggleMouseCapture,
 }
 
-/// The action `key` asks for with a pact `in_flight` or without one, or `None`
-/// for a key that means nothing here.
-///
-/// One key reads two ways, and it is Esc. With nothing running it quits, which
-/// is what it has always done and what the footer has always said. With a pact
-/// running it cancels *that* — because the run is the thing in front of the
-/// reader, because stopping it is the only thing they can want from a key that
-/// means "not this", and because quitting outright on the key nearest to hand
-/// would be the one keystroke that costs minutes of somebody else's model time
-/// by mistake. Quitting during a run is still one keystroke away, spelled `q` or
-/// Ctrl-C, which say what they mean and are not what a hand reaches for to stop
-/// something.
-///
-/// The mode is a parameter rather than something looked up, so this stays a pure
-/// function of a key and a situation and both readings are one assertion each.
-/// Nothing else in here consults it: every other key means exactly what it meant
-/// before, mid-pact included, which is what keeps the tree usable while a run
-/// works.
-///
-/// Only presses count. Crossterm reports key releases and auto-repeats on some
-/// platforms (Windows, and on terminals that speak the Kitty keyboard
-/// protocol) and not on others, so acting on anything but a press would move
-/// the selection twice per keystroke on those platforms and once on the rest —
-/// and, since `p` writes the manifest, would toggle a pact straight back off
-/// again on the release of the key that turned it on.
-///
-/// Ctrl-C is a key event, not a signal: raw mode is exactly the mode in which
-/// the terminal stops turning it into `SIGINT`, so if this function does not
-/// handle it, nothing does — including during a pact, where it is one of the two
-/// ways out that also has to take the running `claude` with it.
 pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
+    // Presses only. Crossterm reports releases and auto-repeats on Windows and
+    // on terminals speaking the Kitty protocol, and not on the rest, so a
+    // release acted on would move the selection twice per keystroke on some
+    // machines and once on others — and would toggle `p`'s pact straight back
+    // off again on the way up.
     if key.kind != KeyEventKind::Press {
         return None;
     }
@@ -224,336 +63,105 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
         KeyCode::Char('c' | 'C') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(Action::Quit)
         }
-        // Before the quit arm below, and the only thing in here the mode
-        // touches: `q` and Ctrl-C keep meaning quit while a pact runs, and Esc
-        // stops being a way out for as long as there is a run to stop.
+        // Before the quit arm below, and the only arm the mode touches: Esc
+        // stops being a way out for as long as there is a run to stop, while
+        // `q` and Ctrl-C — the keys a reader reaches for deliberately — go on
+        // meaning quit.
         KeyCode::Esc if in_flight => Some(Action::CancelPact),
         KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
-        // Tab is the key every split-screen program moves focus with: it takes
-        // no argument and asks no question, so it means the same thing whether
-        // or not a pact is in flight, exactly like every key below it.
         KeyCode::Tab => Some(Action::ToggleFocus),
-        // Shift-Tab is a different keystroke, and crossterm spells it
-        // `BackTab` — the terminal sends its own code for it, so there is no
-        // shift riding along on a `Tab` to match against and nothing here that
-        // could confuse the two. It is the panel's key rather than focus's:
-        // focus's cycle is short enough to get anywhere by pressing Tab again,
-        // and with two cards in one slot there is exactly one other thing a
-        // reader can be asking for. Like every key but Esc it reads the same
-        // way with a run in flight
-        // as without one — the cards are already in hand, so there is nothing
-        // for a run to race — and what a session with no document read yet comes
-        // to is the app's answer, exactly as a directory row is for `v`.
+        // Shift-Tab is a keystroke of its own: the terminal sends a code for it
+        // that crossterm spells `BackTab`, so there is no shift riding along on
+        // a `Tab` here to tell the two apart by.
         KeyCode::BackTab => Some(Action::SwapCard),
         KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectPrevious),
         KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
         KeyCode::PageUp => Some(Action::SelectPageUp),
         KeyCode::PageDown => Some(Action::SelectPageDown),
-        // `g` and `G` are the pair every pager and vi-like editor has trained
-        // hands for, and they are told apart by case alone: matching on the
-        // character rather than on `SHIFT` keeps a terminal that reports the
-        // upper-case letter without the modifier — or with it, or with caps
-        // lock instead — landing on the same action, exactly as Ctrl-C above
-        // does not care which of those it is handed.
+        // The one pair told apart by case, and matched on the character rather
+        // than on `SHIFT`: terminals disagree about whether the modifier rides
+        // along with an upper-case letter, and about caps lock, so a `G` is a
+        // `G` however it is reported.
         KeyCode::Char('g') => Some(Action::SelectFirst),
         KeyCode::Char('G') => Some(Action::SelectLast),
-        // Space is the file-tree key everywhere, and crossterm spells it as an
-        // ordinary character: there is no `KeyCode::Space`, so `Char(' ')` is
-        // the whole of it. Nothing rides along that needs matching — a modifier
-        // held with space is a different keystroke, not this one badly spelled.
+        // Crossterm has no `KeyCode::Space`; the space bar arrives as an
+        // ordinary character.
         KeyCode::Char(' ') => Some(Action::ToggleCollapsed),
-        // Lower case only, like `p` below: the upper-case letter is a
-        // different keystroke and means nothing here, and a filter that also
-        // answered to `O` would take a key that a later binding may want. The
-        // mnemonic is "only": what stays on screen is the pacted nodes only.
+        // The letters are lower case only, `g`/`G` above excepted: `O`, `F`,
+        // `P`, `R`, `S`, `V`, `E` and `M` are keystrokes of their own that mean
+        // nothing here rather than second spellings of these, which leaves them
+        // free for later bindings.
         KeyCode::Char('o') => Some(Action::TogglePactedOnly),
-        // Lower case only, like `o` above and `p` below. The mnemonic is
-        // "files": what the key adds to the screen is the files inside each
-        // module. It writes nothing and reads nothing — the files came with the
-        // tree — so, unlike `p`, there is nothing here that a stray press could
-        // cost anybody.
         KeyCode::Char('f') => Some(Action::ToggleFiles),
-        // Lower case only, and with no confirmation: the mnemonic is the
-        // product's own word (pact, §15), and the action is its own undo —
-        // pressing it again removes what it wrote.
         KeyCode::Char('p') => Some(Action::TogglePact),
-        // Lower case only, like `p` above: the mnemonic is "refresh", and `R`
-        // is a different keystroke that means nothing here. Like every key but
-        // Esc it reads the same way with a run in flight as without one —
-        // what a refresh does about a run already working is the app's answer
-        // to give, not this function's, exactly as a second `p` is.
         KeyCode::Char('r') => Some(Action::Refresh),
-        // Lower case only, like `p` and `r` above: the mnemonic is "scope", and
-        // `S` is a different keystroke that means nothing here. Like every key
-        // but Esc it reads the same way with a run in flight as without one —
-        // a run is a reason to refuse the prompt, and refusing is the loop's
-        // answer to give, exactly as it is for a second `p`.
         KeyCode::Char('s') => Some(Action::OpenScope),
-        // Lower case only, like the four above it: the mnemonic is "view", and
-        // `V` is a different keystroke that means nothing here. Like every key
-        // but Esc it reads the same way with a run in flight as without one, and
-        // here there is nothing for the mode to change even in principle: a read
-        // is not a run — it writes nothing, starts nothing and is over inside a
-        // frame — so there is no second run for it to be refused as.
         KeyCode::Char('v') => Some(Action::ViewFile),
-        // Lower case only, like the five above it: the mnemonic is "edit", and
-        // `E` is a different keystroke that means nothing here. Like every key
-        // but Esc it reads the same way with a run in flight as without one — a
-        // run is a reason to refuse the editor, because the terminal cannot be
-        // handed away from under a pass that is still drawing its account on it,
-        // and refusing is the loop's answer to give, exactly as it is for a
-        // second `p`.
         KeyCode::Char('e') => Some(Action::EditFile),
-        // Lower case only, like the five above it. The mnemonic is "mouse",
-        // and the key means the same thing whether or not a pact is in flight:
-        // giving the terminal its own text selection back is exactly the thing a
-        // reader wants during a long run, when there is output on screen worth
-        // copying. It moves nothing, selects nothing and writes nothing.
         KeyCode::Char('m') => Some(Action::ToggleMouseCapture),
         _ => None,
     }
 }
 
-/// What a keystroke comes to once the gate on the way out has had it.
-///
-/// [`Action`] says what a key asks the *app* for; this says what it asks the
-/// *loop* for, and the gap between the two is the whole of the gate. Leaving is
-/// no longer something a key does to the app — it is one of three things that
-/// can happen to a session — so it is named here, beside the question that now
-/// stands in front of it, rather than left as an [`Action`] the loop has to
-/// remember to treat differently.
-///
-/// Eight variants, and the useful part is that they are exclusive: a keystroke
-/// either ends the session, or stops the turn, or moves the question, or goes
-/// into the scope prompt, or goes into the write prompt, or goes into the
-/// composer, or reaches the app, or comes to nothing.
-/// While any window is up the [`Pressed::Act`] road is unreachable, which is
-/// the plain statement of "nothing leaks through to the tree underneath"; while
-/// the composer holds the keyboard it is reachable by exactly one key, and that
-/// key is Tab (see [`press_for`]).
+// `Act` never carries `Action::Quit`: every way out is `Leave`, which is what
+// makes "the gate cannot be bypassed" a property of this type rather than a
+// rule the event loop is trusted to keep. `Scope` and `Write` are two variants
+// over one `Edited` from one `edit_for` because the loop does different things
+// with a submit from each, and an `Edited` arriving with no way to say which
+// window it came from is exactly the confusion this type exists to prevent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Pressed {
-    /// Leave warlock now, by the path a quit has always taken: the loop returns,
-    /// the run's handle drops and takes a running `claude` with it, and the
-    /// terminal guard puts the screen back.
     Leave,
-    /// Stop the chat turn that is being answered, and stay.
-    ///
-    /// Ctrl-C with a turn in flight, and the one situation in which that key
-    /// does not end the session. It is [`Action::CancelPact`]'s opposite number
-    /// for the conversation and works the same way — the turn's own handle,
-    /// latched and its `claude` killed — but it is a [`Pressed`] rather than an
-    /// [`Action`] because a turn is not something the app is running: the loop
-    /// holds it, the way it holds the run, and the app hears about it when the
-    /// cancelled turn's last line lands on the thread.
-    ///
-    /// Never produced with nothing in flight. The keystroke is one key with one
-    /// meaning either way — stop what I asked for — and with nothing to stop
-    /// that is the session itself, which is [`Pressed::Leave`] above.
     CancelTurn,
-    /// The gate had the key: the confirmation is `.0` from here on, and nothing
-    /// else happened. It covers opening the question, moving its highlight,
-    /// closing it again, and the keys that leave it exactly where it was.
     Confirm(QuitConfirm),
-    /// The scope prompt had the key, and `.0` is what it made of it: the field
-    /// with one character more or less in it, the prompt abandoned, or the text
-    /// offered up for the engine to judge.
-    ///
-    /// The prompt's own outcome is carried through rather than translated,
-    /// because two of its three answers are the loop's to act on and none of
-    /// them is a state this file can name better than
-    /// [`edit_for`](warlock_tui::edit_for) already does. Like
-    /// [`Pressed::Confirm`], it says the app was not consulted: while the prompt
-    /// is up every key that is not Ctrl-C comes back through here.
     Scope(Edited),
-    /// The write prompt had the key, and `.0` is what it made of it: the same
-    /// three answers, from the same [`edit_for`](warlock_tui::edit_for), over
-    /// the field holding the path a brief is about to be written to.
-    ///
-    /// A variant of its own rather than a second use of [`Pressed::Scope`],
-    /// because the two windows answer to different halves of the loop: a submit
-    /// here writes a document, and a submit there writes the manifest. One
-    /// [`Edited`] arriving at the loop with no way to say which window it came
-    /// from would be exactly the disagreement this type exists to prevent.
     Write(Edited),
-    /// The composer had the key, and `.0` is what it made of it: the draft with
-    /// one character more or less in it, the keyboard handed back, or the draft
-    /// offered up.
-    ///
-    /// [`Pressed::Scope`]'s counterpart for the field that is not a window. The
-    /// composer's own outcome is carried through rather than translated, for the
-    /// reason the prompt's is: two of its three answers are the loop's to act on,
-    /// and none of them is a state this file can name better than
-    /// [`compose_for`](warlock_tui::compose_for) already does. Like the two arms
-    /// above it, it says the app was not consulted — while the composer holds the
-    /// keyboard every key but Ctrl-C and Tab comes back through here, which is
-    /// what makes `p` the letter p.
     Compose(Composed),
-    /// The app's key: do `.0`.
-    ///
-    /// Never [`Action::Quit`]. Every way out is [`Pressed::Leave`] above, which
-    /// is what makes "the gate cannot be bypassed" a fact about this type rather
-    /// than a rule the loop is trusted to keep.
     Act(Action),
-    /// A key nothing is bound to, or one already answered where it was decided.
     Nothing,
 }
 
-/// Whether `key` is the keystroke every reader trusts to get them out.
-///
-/// Split out of [`action_for`]'s first arm because [`press_for`] has to answer
-/// it *before* it consults anything else, and answering it in two places with
-/// two different spellings is how the one keystroke that must always work stops
-/// working in one of them. `contains` rather than equality for the reason the
-/// arm below has it: shift or caps lock can ride along, and Ctrl-C is still
-/// Ctrl-C.
+// Spelled here rather than reached for through `action_for`, because
+// `press_for` has to answer Ctrl-C before it consults anything else: two
+// spellings of the one keystroke that must always work is how it stops working
+// in one of them.
 fn is_ctrl_c(key: KeyEvent) -> bool {
     key.kind == KeyEventKind::Press
         && matches!(key.code, KeyCode::Char('c' | 'C'))
         && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// Whether `key` is the keystroke that moves the keyboard on.
-///
-/// Split out for [`is_ctrl_c`]'s reason, one layer down: [`press_for`] has to
-/// answer it *before* it offers the key to the composer, because a field that
-/// swallowed Tab would be a field with no way out but Esc — and Esc is the key
-/// that hands the keyboard back without moving it anywhere, which is a different
-/// thing to want. The code alone, with no modifier compared, exactly as
-/// [`action_for`] matches it: Shift-Tab is a keystroke of its own that crossterm
-/// spells `BackTab`, so there is no shift riding along here to tell apart.
-///
-/// Every kind of event, presses included and releases with them, because what
-/// this decides is not what Tab *does* but which function is asked: a release
-/// handed on comes to nothing in [`action_for`], which is where every release
-/// already comes to nothing.
+// Every kind of event, releases included, because what this decides is not what
+// Tab does but which function is asked: a release handed past the composer
+// comes to nothing in `action_for`, where every release already comes to
+// nothing.
 fn is_tab(key: KeyEvent) -> bool {
     key.code == KeyCode::Tab
 }
 
-/// What `key` comes to with the confirmation at `confirm`, the scope prompt at
-/// `prompt`, the write prompt at `write`, the composer at `composer`, a run
-/// `in_flight` and a turn being `answered`.
-///
-/// The gate itself, and it is a function of a key and six situations so that
-/// every rule below is one assertion with no terminal attached. Seven roads out
-/// of it, in the order they are decided.
-///
-/// **Ctrl-C first, always.** It is a key event and not a signal — raw mode is
-/// exactly the mode in which the terminal stops turning it into `SIGINT` — so if
-/// nothing here answers it, nothing does. Routed through the question it would
-/// arrive at [`answer_for`] as an ordinary `c` with a modifier riding along,
-/// i.e. one of the keys that change nothing, and the last resort of a reader
-/// who wants out would be the one keystroke the dialog swallowed. So it is
-/// answered with the question up and with it closed, and during a run as well as
-/// outside one, exactly as it always has been.
-///
-/// What it *means* is the one thing about it that now reads two ways, and
-/// `answered` is what decides it. With a turn in flight it stops that turn and
-/// nothing else; with none it leaves, as it always did. One key, one meaning —
-/// stop what I asked for — and the difference is only whether there is anything
-/// to stop short of the session. A turn is one `claude` and seconds of waiting,
-/// so the reader who presses it twice gets the cancel and then the way out; a
-/// turn that could only be escaped by leaving warlock would be a question the
-/// reader cannot take back. It is deliberately answered before the confirmation
-/// is consulted, for the reason the key is answered first at all: a Ctrl-C that
-/// meant one thing with a window up and another with it down would be the
-/// keystroke of last resort behaving differently depending on what is on screen.
-/// Esc is *not* this key — with a run in flight it cancels the run, and while a
-/// field has the keyboard it belongs to that field — because a turn and a run
-/// are two things and the key that stops one must not stop the other by
-/// accident.
-///
-/// **Then the question, if it is up.** Every other key goes to [`answer_for`]
-/// and *only* to it: this is where "nothing reaches the app underneath" is
-/// true, because [`action_for`] is not called at all on that road. The tree's
-/// own bindings — `j`, `k`, `g`, `G`, space, `o`, `f`, `p`, `r`, `s`, `m`, Tab,
-/// the page keys — are inert for as long as the question stands, without any of
-/// them needing to know the question exists.
-///
-/// **Then the scope prompt, if that is up.** The same road again, to
-/// [`edit_for`] and only to it, and for the same reason: while somebody is
-/// typing a scope, the tree's bindings are letters going into a field or
-/// keystrokes that mean nothing, and [`action_for`] is not consulted at all.
-/// The two windows are asked in this order rather than the other because a key
-/// answered twice is a key answered wrongly once; in practice they cannot both
-/// be up, since `q` and Esc are text and an abandonment while the prompt has the
-/// keyboard and so never reach the gate that opens the question.
-///
-/// **Then the write prompt, if that is up.** The third window and the third
-/// time down the same road: while a path is being typed, every key that is not
-/// Ctrl-C goes to [`edit_for`] and [`action_for`] is not consulted at all. It is
-/// the same field type and the same editor as the scope prompt — what differs is
-/// only what the loop does with a submit — so it is asked here, one step after
-/// the scope prompt, and the answer is [`Pressed::Write`] so the loop cannot
-/// mistake one submit for the other.
-///
-/// The order between the two prompts is the precedence, and it is stated once
-/// here: the scope prompt is asked first, so with both up the keys belong to the
-/// scope prompt and the write prompt waits underneath with its path intact.
-/// Both *can* be up, unlike the confirmation and the scope prompt — `s` opens
-/// one from the tree while a `/write` turn is still out, and the answer to that
-/// turn opens the other with no keystroke at all — so a precedence is owed
-/// rather than assumed. The scope prompt wins because it is the window somebody
-/// is typing in *now*: the write prompt opened underneath it while their hands
-/// were elsewhere, and a window that stole the keyboard from a half-typed scope
-/// would type the rest of that scope into a path.
-///
-/// **Then the composer, if it has the keyboard.** `composer` is `Some` only when
-/// focus is on the field, which is the shape [`ScopePrompt::field`] already has:
-/// the situation is offered rather than looked up, so "the composer is consulted
-/// exactly when the reader is pointed at it" is the caller's one line and every
-/// rule here is one assertion. The road is the same as the two above it, to
-/// [`compose_for`](warlock_tui::compose_for) and only to it, and it is the whole
-/// reason this file's single-letter bindings can go on being single letters:
-/// while somebody is typing, `p`, `r`, `s`, `v`, `e`, `f`, `g`, `G`, `j` and `k`
-/// are characters going into a draft and [`action_for`] is not consulted at all.
-/// It is asked last of the three because a window is drawn *over* the composer:
-/// a key cannot be both typed into a field on the frame and answered by the
-/// dialog covering it.
-///
-/// One key is not the composer's, and it is Tab. It is the key every split-screen
-/// program moves the keyboard with, it is not text on any terminal, and a field
-/// that ate it would be a field whose only exit is Esc — so it goes past the
-/// composer to [`action_for`]'s cycle, which is where the composer was arrived
-/// at in the first place. Esc is the other way out and means something else: it
-/// hands the keyboard back and leaves the draft where it is, which is why a run
-/// in flight is *not* cancelled by an Esc typed at the composer — that Esc is
-/// answered by the field the reader is in, exactly as it is while the scope
-/// prompt is up, and the next one cancels the run.
-///
-/// A muted composer is the same road with nothing at the end of it. While the
-/// last question is being answered the field takes no keys — one question at a
-/// time — and that is the whole of the rule: a pact running somewhere else is
-/// not a reason, since the run has a card of its own and the two never wait on
-/// each other. A key aimed at a muted field comes to [`Pressed::Nothing`]: not
-/// typed, and
-/// not passed down to [`action_for`] either, since a letter that fell through a
-/// dead field would arrive at the tree's bindings as the pact key or the refresh
-/// key. Muting is read off the field ([`Composer::is_muted`]) rather than passed
-/// in beside `answered` or worked out from `in_flight`, because it is the
-/// *field* that is muted and the loop is what says so, from the turn and the run
-/// together: a turn asked from the tree leaves an unfocused field, which is
-/// already `None` here. Tab is outside it for the reason it is outside the
-/// composer at all — it is the key that moves the keyboard, it is not text on
-/// any terminal, and a field that ate it while it was refusing to be typed in
-/// would be a field with no way out until the model answered.
-///
-/// **Then the keys, as they have always been read.** [`action_for`] answers,
-/// and the one answer this function re-reads is [`Action::Quit`]: with nothing
-/// running it opens the question instead of leaving, and with a run in flight it
-/// leaves outright. That last part is the whole reason `in_flight` is here.
-/// Esc during a run already means cancel (see [`action_for`]), and the press
-/// after it is the reflex second Esc this gate exists for — but `q` and Ctrl-C
-/// during a run are keys a reader reaches for deliberately, often to get out of
-/// a run that is going nowhere, and a question in front of them would be a
-/// question in front of somebody who has already decided. The gate is for the
-/// twitch, not for the decision; the twitch only happens when there is a run to
-/// have cancelled, and by then Esc means cancel anyway.
-///
-/// Nothing here changes what cancel means, what Ctrl-C does, or what any other
-/// key is bound to: [`action_for`] is untouched and is still the one place a key
-/// is turned into an [`Action`].
+// The order of the tests below is the precedence, and it is the whole of what
+// this function decides.
+//
+// Ctrl-C first, before the windows: raw mode is exactly the mode in which the
+// terminal stops turning it into `SIGINT`, so if nothing here answers it
+// nothing does, and routed through the question it would arrive at `answer_for`
+// as an ordinary `c` with a modifier riding along — the last resort of a reader
+// who wants out, swallowed by the dialog. `answered` is the one thing that
+// changes what it means: with a turn out it stops that turn, with none it
+// leaves. Esc is deliberately not this key, because a turn and a run are two
+// things and the key that stops one must not stop the other.
+//
+// Then each window, and on those roads `action_for` is not called at all, which
+// is the plain statement of "nothing leaks through to the tree underneath". The
+// scope prompt is asked before the write prompt because both can be up at once
+// — `s` opens one from the tree while a `/write` turn is still out, and the
+// answer to that turn opens the other with no keystroke — and the scope prompt
+// is the one somebody is typing in now.
+//
+// The composer is asked last of the four, because a window is drawn over it: a
+// key cannot be both typed into a field on the frame and answered by the dialog
+// covering it. `composer` is `Some` only when the focus is on the field, which
+// is the caller's line, not a lookup here.
 pub(crate) fn press_for(
     key: KeyEvent,
     confirm: QuitConfirm,
@@ -583,22 +191,21 @@ pub(crate) fn press_for(
         return Pressed::Scope(edit_for(key, field));
     }
 
-    // The second window, asked after the first: the precedence between them, in
-    // the one place a key can be answered by either.
     if let Some(field) = write.field() {
         return Pressed::Write(edit_for(key, field));
     }
 
+    // Tab goes past the field rather than into it: it is not text on any
+    // terminal, and a field that ate it would be a field whose only exit is
+    // Esc, which means something else — hand the keyboard back and leave the
+    // draft where it is.
     if let Some(draft) = composer
         && !is_tab(key)
     {
-        // A muted field is one whose last question is still being answered, and
-        // the key that arrives at it does nothing at all: it is not typed, and
-        // it is emphatically not handed on to `action_for` underneath, because
-        // a `p` swallowed by a dead field and re-read as the pact key would be
-        // the worst possible answer to a keystroke aimed at a draft. Nothing is
-        // said about it either — the dim border says it, once, rather than the
-        // footer saying it again per keystroke.
+        // A muted field takes no keys and hands none on either: a `p` that fell
+        // through a dead field to `action_for` would arrive at the tree as the
+        // pact key. Nothing is said about it — the dim border says it once,
+        // rather than the footer saying it per keystroke.
         if draft.is_muted() {
             return Pressed::Nothing;
         }
@@ -606,7 +213,12 @@ pub(crate) fn press_for(
     }
 
     match action_for(key, in_flight) {
-        // The gate, in one arm: the key that used to leave now asks first.
+        // The gate, in two arms, and the only use `in_flight` is put to here.
+        // With a run out, `q` leaves outright rather than asking: the confirm
+        // is for the reflex second Esc after a cancel, not for a reader who has
+        // decided, and Esc during a run is the cancel anyway (see
+        // `action_for`). Ctrl-C never reaches this arm — it is taken at the top
+        // of this function, where `answered` decides what it means.
         Some(Action::Quit) if !in_flight => Pressed::Confirm(QuitConfirm::open()),
         Some(Action::Quit) => Pressed::Leave,
         Some(action) => Pressed::Act(action),
@@ -614,96 +226,36 @@ pub(crate) fn press_for(
     }
 }
 
-/// How far one notch of the wheel moves a pane: three rows of the tree, or
-/// three lines of the panel.
-///
-/// One number for both panes, so the two answer at the same speed — the pointer
-/// crosses from one to the other and a hand does not expect the gearing to
-/// change under it. Three is what terminal programs have settled on: a row a
-/// notch is a wheel that has to be spun to get anywhere, and a screenful a notch
-/// is a wheel that loses the reader's place on the way.
+// One number for both panes, so the gearing does not change under a hand that
+// crosses from one to the other.
 const WHEEL_NOTCH: usize = 3;
 
-/// What a mouse event asks the app to do.
-///
-/// [`Action`]'s counterpart for the pointer, and separate from the event for the
-/// same reason: naming the intent apart from what produced it keeps
-/// [`mouse_action`] a pure function of an event, a terminal size and the app —
-/// testable with nothing attached to stdout — and leaves the loop above reading
-/// as a list of consequences.
-///
-/// There is no variant for hovering, for dragging, or for a button other than
-/// the left one. Those events are read and dropped ([`mouse_action`]), and a
-/// name here for any of them would be an invitation to behaviour warlock has
-/// decided against: a highlight that follows the pointer costs a redraw per
-/// pointer move to say what the selection already says.
+// No variant for a hover, a drag, or a button other than the left one. Those
+// events are read and dropped in `mouse_action`, and a name for one here would
+// be an invitation to behaviour warlock has decided against — a highlight
+// following the pointer costs a redraw per pointer move to say what the
+// selection already says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MouseAction {
-    /// Move the tree's selection `.0` rows down, whichever pane has the focus.
     SelectNextBy(usize),
-    /// Move the tree's selection `.0` rows up, whichever pane has the focus.
     SelectPreviousBy(usize),
-    /// Scroll the panel's window `.0` lines towards the newest line, whichever
-    /// pane has the focus.
     ScrollPanelDown(usize),
-    /// Scroll the panel's window `.0` lines back, whichever pane has the focus.
     ScrollPanelUp(usize),
-    /// Select the row at `.0` in [`App::rows`](warlock_tui::App::rows), and give
-    /// the tree the keys.
     SelectRow(usize),
-    /// Expand or collapse the selected row, and give the tree the keys: what a
-    /// click on the row that is already selected comes to, which is what space
-    /// comes to.
     ToggleCollapsed,
-    /// Give the named pane the keys, and do nothing else.
     Focus(Focus),
 }
 
-/// What `mouse` over a terminal of `size` asks `app` to do with the
-/// confirmation at `confirm`, the scope prompt at `prompt` and the write prompt
-/// at `write`, or `None` for an event that means nothing here.
-///
-/// [`action_for`]'s counterpart, and the same shape: everything in, one
-/// intention out, no terminal read and nothing drawn. The size is the one the
-/// round measured before it drew, so the hit test agrees with the frame the
-/// reader is pointing at rather than with a second opinion about the layout; the
-/// app is here because a screen point alone cannot say which row it landed on —
-/// [`Hit::TreeRow`] counts from the top of the tree's window, and only the app
-/// knows where that window is and how many rows are under it.
-///
-/// Two events count and the rest do not. The wheel drives whichever pane the
-/// pointer is *over*, focus notwithstanding — that is the whole convention of a
-/// pointer, and a wheel that scrolled the focused pane instead would scroll the
-/// half of the screen the reader is not looking at. The left button selects and
-/// focuses. Drags, moves, releases, the other buttons and the horizontal wheel
-/// are read and dropped: they are out of scope by decision, not by omission,
-/// and dropping them here is what keeps a pointer swept across the screen from
-/// changing anything at all.
-///
-/// While any window is up the pointer means nothing anywhere: every event is
-/// read and dropped, wheel and click alike. None of the three has anything
-/// clickable in it — the confirmation has no clickable Yes and no clickable No,
-/// and the scope prompt and the write prompt are fields that are typed into,
-/// with no buttons — all of them are answered from the keyboard, and a click
-/// that landed on the tree behind one would select a row the reader cannot see,
-/// under a window that is about to close. The write prompt is the third and it
-/// is gated exactly as the second is, in the same line, so a pointer swept over
-/// a half-typed path changes nothing. The gate lives here rather than in the loop's
-/// arm for the same reason [`press_for`]'s does: it is a decision, and decisions
-/// are testable with nothing attached to stdout.
-///
-/// `composer` is the draft the frame was drawn with — `None` on a frame that had
-/// no composer on it, which is every frame while the document card has the panel
-/// — and it is here for the layout and nothing else: the rows the field takes
-/// are rows the panel gave up, so a hit test that had not been told about the
-/// draft would answer [`Hit::PanelLine`] for a point drawn on a field and scroll
-/// a window the pointer is not over. See [`hit_test`].
-///
-/// The run's header is the same again, and comes off the app rather than off a
-/// parameter: the frame drew whatever [`App::run_header`](warlock_tui::App::run_header)
-/// said, and the app is already here for the window the pointer is over. While a
-/// run is in flight the header holds the panel's top row, so the line offsets
-/// are counted from under it.
+// `size` is the size the round measured before it drew, and `composer` the
+// draft that frame was drawn with, because the hit test has to agree with the
+// frame the reader is pointing at: a second opinion about the layout — or one
+// that had not been told the field took rows from the panel — answers
+// `PanelLine` for a point on the composer and scrolls a window the pointer is
+// not over.
+//
+// None of the three windows has anything clickable in it, so while any is up
+// every event is dropped, wheel and click alike: a click that reached the tree
+// behind one would select a row the reader cannot see.
 pub(crate) fn mouse_action(
     mouse: MouseEvent,
     size: Size,
@@ -739,25 +291,12 @@ pub(crate) fn mouse_action(
     }
 }
 
-/// One notch of the wheel at `hit`: `tree` when the pointer is over the tree
-/// column, `panel` when it is over the panel, and nothing anywhere else.
-///
-/// Which way the notch went is the caller's, because that is the only thing
-/// that differs between the two directions; what this owns is the rule that the
-/// pointer picks the pane. Every part of a pane's inside answers for that pane,
-/// the tree's header and the run's included: a wheel is aimed at a column rather
-/// than at a row, and a notch that did nothing because the pointer happened to
-/// be on the one line naming the tree — or the one line naming the run — would
-/// read as a wheel that sticks.
-///
-/// The footer, the composer and the borders answer nothing, and they are the
-/// whole of what does not: the footer is nobody's pane, a border is the line
-/// between two of them rather than a place a reader means to scroll, and the
-/// composer has nothing to scroll — it is a handful of rows showing the end of a
-/// draft, and it scrolls itself as somebody types. A notch over it is emphatically
-/// not a notch over the panel above it: scrolling the account because the pointer
-/// was resting on the field would move the half of the screen the reader is not
-/// pointing at, which is the one thing this function exists to prevent.
+// The wheel drives whichever pane the pointer is over, focus notwithstanding,
+// and every part of a pane's inside answers for it — headers included, because
+// a notch that did nothing on the one line naming the tree reads as a wheel
+// that sticks. The composer answers nothing: it scrolls itself as somebody
+// types, and scrolling the account because the pointer was resting on the field
+// would move the half of the screen the reader is not pointing at.
 fn wheel(hit: Hit, tree: MouseAction, panel: MouseAction) -> Option<MouseAction> {
     match hit {
         Hit::TreeHeader | Hit::TreeRow { .. } | Hit::TreeBelowRows => Some(tree),
@@ -766,27 +305,18 @@ fn wheel(hit: Hit, tree: MouseAction, panel: MouseAction) -> Option<MouseAction>
     }
 }
 
-/// One press of the left button at `hit`, given where `app` has its window and
-/// its selection.
-///
-/// A click inside a pane always gives that pane the keys, and on the tree it may
-/// do one thing more. The window offset the hit carries is turned into a row of
-/// [`App::rows`](warlock_tui::App::rows) by adding
-/// [`App::scroll_offset`](warlock_tui::App::scroll_offset), which is the only
-/// arithmetic in here, and an offset past the last row is a point on nothing:
-/// the window can be taller than the tree in it, and a click on the blank part
-/// of a half-full pane is a click in the pane and no more.
-///
-/// A click on the row that is already selected is the reader asking for
-/// something other than the selection they already have, and the thing a file
-/// tree does with a second click is open or close the row. So it goes through
-/// [`App::toggle_collapsed`](warlock_tui::App::toggle_collapsed) — the very
-/// method space goes through, so a directory opens and closes and a row with
-/// nothing under it does nothing at all, without this file having to know which
-/// is which.
 fn click(hit: Hit, app: &App) -> Option<MouseAction> {
     match hit {
         Hit::TreeRow { offset } => {
+            // The hit counts from the top of the tree's window, so only the
+            // app's scroll offset turns it into a row. The window can be taller
+            // than the tree in it: an index past the last row is a click on the
+            // blank part of a half-full pane, which is a click in the pane and
+            // no more. A second click on the row already selected is the reader
+            // asking for something other than the selection they have, and what
+            // a file tree does then is open or close it — through the very
+            // method space goes through, so a row with nothing under it does
+            // nothing at all.
             let index = app.scroll_offset().saturating_add(usize::from(offset));
             if index >= app.rows().len() {
                 Some(MouseAction::Focus(Focus::Tree))
@@ -798,9 +328,8 @@ fn click(hit: Hit, app: &App) -> Option<MouseAction> {
         }
         Hit::TreeHeader | Hit::TreeBelowRows => Some(MouseAction::Focus(Focus::Tree)),
         Hit::PanelHeader | Hit::PanelLine { .. } => Some(MouseAction::Focus(Focus::Panel)),
-        // A click inside a pane gives that pane the keys, and the composer is a
-        // pane: it is only ever hit-tested when it is on screen, so a press on
-        // it is somebody pointing at the field they mean to type in.
+        // The composer is hit-tested only when it is on screen, so a press on it
+        // is somebody pointing at the field they mean to type in.
         Hit::Composer => Some(MouseAction::Focus(Focus::Composer)),
         Hit::Footer | Hit::Border | Hit::Offscreen => None,
     }
@@ -812,7 +341,6 @@ mod tests {
 
     use super::{Action, action_for};
 
-    /// A plain press of `code`, as crossterm reports one with no modifiers.
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -1719,21 +1247,6 @@ mod tests {
         }
     }
 
-    /// The gate on the way out: what Esc and `q` come to now that a question
-    /// stands in front of them, and what the question does with everything else.
-    ///
-    /// Two layers again, as in [`pointer`] below. [`press_for`] is asked what a
-    /// key *means*, which is the pure part and the only place a variant is
-    /// named; [`round`] — the loop's key arms written out a second time — is
-    /// asked what it *does*, so that "answering No changes nothing" is one
-    /// comparison of an app against a copy of itself rather than a list of
-    /// fields. No terminal is entered and no frame is drawn: the whole gate is a
-    /// function of a key, a mode and a flag.
-    ///
-    /// The composer is decided here too, and after both windows — see
-    /// [`press_for`] for why that order — so [`round_composing`] below is the
-    /// loop's arms once more with the draft in them, and [`composing`] is where
-    /// the rules that are about a field rather than about a way out are asserted.
     mod gate {
         use std::time::Instant;
 
@@ -1749,15 +1262,6 @@ mod tests {
 
         use super::super::{Action, Pressed, action_for, press_for as gate_for};
 
-        /// [`gate_for`] with the write prompt closed.
-        ///
-        /// Every test in this module but the write prompt's own is about a
-        /// session with no document waiting to be written, which is every
-        /// session until a `/write` turn answers — so the sixth situation is
-        /// fixed in one place rather than repeated at every call below, exactly
-        /// as [`round`] fixes the scope prompt for the tests that are not about
-        /// it. The tests that *are* about that window call [`gate_for`] and hand
-        /// it in.
         fn press_for(
             key: KeyEvent,
             confirm: QuitConfirm,
@@ -1777,20 +1281,13 @@ mod tests {
             )
         }
 
-        /// The terminal these tests measure their app against: the same eighty
-        /// by twenty-four every other test here uses.
         const SIZE: Size = Size {
             width: 80,
             height: 24,
         };
 
-        /// The directory the scope prompt is opened over below, so a test that
-        /// meant to assert about the text cannot pass by asserting about this.
         const DIRECTORY: &str = "crates/warlock-engine";
 
-        /// Every key the tree answers to, plus a character bound to nothing:
-        /// the list either window has to swallow whole, so that no keystroke
-        /// reaches the app behind it.
         const INERT: [KeyCode; 19] = [
             KeyCode::Char('j'),
             KeyCode::Char('k'),
@@ -1813,37 +1310,20 @@ mod tests {
             KeyCode::Char('x'),
         ];
 
-        /// Whether a round of the loop ended the session: the loop's
-        /// `return Ok(())` written down as a value, so a test can assert that
-        /// warlock stayed as flatly as it asserts that it left.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         enum Round {
-            /// The loop went round again.
             Stayed,
-            /// The loop returned, which is the whole of quitting.
             Left,
         }
 
-        /// A plain press of `code`, as crossterm reports one with no modifiers.
         fn press(code: KeyCode) -> KeyEvent {
             KeyEvent::new(code, KeyModifiers::NONE)
         }
 
-        /// Ctrl-C, as crossterm reports it in raw mode: a key event like any
-        /// other, which is exactly why the gate has to answer it first.
         fn ctrl_c() -> KeyEvent {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
         }
 
-        /// A tree with more rows than the screen holds, told how big that
-        /// screen is — which is what the top of the event loop does every round.
-        ///
-        /// Half the directories are pacted and half are not, so that the
-        /// pacted-only filter has something to hide and something to keep: with
-        /// it on there are still rows to select, collapse and scroll past, which
-        /// is what lets [`app_in_use`] hold both filters off their defaults at
-        /// once. Each file is in the state of the directory listing it, as the
-        /// loader has it.
         fn app_on_screen() -> App {
             let mut rows = vec![
                 Row::new(0, "/repo", "/repo/WARLOCK.md", NodeState::PactedStale)
@@ -1865,15 +1345,6 @@ mod tests {
             app
         }
 
-        /// That app, moved off its defaults in every way the confirmation
-        /// promises to leave alone.
-        ///
-        /// Selection, scroll offset, panel offset, focus, both filters, the
-        /// collapsed set and the message: a copy of this is what the No answer
-        /// is compared against, so each of them is somewhere it would not be if
-        /// a key had leaked through. The counts come with the rows and are
-        /// compared along with everything else, because the comparison is
-        /// [`App`]'s own — every field, named or not.
         fn app_in_use() -> App {
             let mut app = app_on_screen();
             app.toggle_files();
@@ -1898,44 +1369,14 @@ mod tests {
             app
         }
 
-        /// One round of the event loop with `key` arriving in it and the gate at
-        /// `confirm`: the answer worked out, then done, then said.
-        ///
-        /// The loop's key arms written out a second time, as [`pointer`]'s
-        /// `round` is for the pointer, so the tests below are about an app and a
-        /// mode rather than about the name of a variant. Nothing is in flight
-        /// here, which is the only situation the question can be up in at all —
-        /// the gate does not open during a run, and no key that reaches the app
-        /// while it is up could start one.
-        ///
-        /// What it does with each answer, and which four arms panic, is
-        /// [`round_composing`] below: this is that round with no window and an
-        /// empty draft nobody is pointed at.
         fn round(app: &mut App, confirm: &mut QuitConfirm, key: KeyEvent) -> Round {
             round_under(app, confirm, &mut ScopePrompt::Closed, key)
         }
 
-        /// The composer the loop offers [`press_for`] with the keys where `app`
-        /// has them: `Some` only while the focus is on the field.
-        ///
-        /// The one line the event loop has, written once here so that every test
-        /// below asks the question the loop asks. A test that handed the field
-        /// over regardless would be asserting that a draft catches keystrokes
-        /// aimed at the tree.
         fn offered<'a>(app: &App, composer: &'a Composer) -> Option<&'a Composer> {
             (app.focus() == Focus::Composer).then_some(composer)
         }
 
-        /// The same round with the scope prompt at `prompt` as well: the other
-        /// window the tree's bindings go inert under.
-        ///
-        /// A parameter rather than a second copy of the arms below, exactly as
-        /// in [`pointer`]: a test that swallowed keys through a kinder version
-        /// of the loop written beside it would be testing the version it wrote.
-        /// The prompt's own answer is applied here the way the loop applies it
-        /// — the field replaced, or the prompt taken down — and a submit does
-        /// nothing to the app, because writing a manifest is not something an
-        /// [`App`] hears about.
         fn round_under(
             app: &mut App,
             confirm: &mut QuitConfirm,
@@ -1945,22 +1386,6 @@ mod tests {
             round_composing(app, confirm, prompt, &mut Composer::default(), key)
         }
 
-        /// The same round again with the draft at `composer`: the whole of the
-        /// loop's key handling, and the version the other two call.
-        ///
-        /// A parameter for [`round_under`]'s reason, and the composer is offered
-        /// to [`press_for`] through [`offered`] rather than by the test saying
-        /// so — which is the loop's own line, so a test cannot type into a field
-        /// the app is not pointed at. The three arms it adds are the loop's:
-        /// the draft replaced, the keyboard handed back to the panel, and a
-        /// submit that does nothing whatever.
-        ///
-        /// The four arms the loop answers with a worker thread, a window or an
-        /// escape sequence — the pact key, the refresh key, the scope key and
-        /// the mouse key — panic rather than doing nothing quietly: a key that
-        /// reached one of those from behind a window, or from a composer that
-        /// was supposed to be typing it, is precisely the accident these tests
-        /// exist to catch.
         fn round_composing(
             app: &mut App,
             confirm: &mut QuitConfirm,
@@ -1975,17 +1400,6 @@ mod tests {
             round_running(app, confirm, prompt, composer, key, false)
         }
 
-        /// The same round again with a run `in_flight` or without one: the
-        /// version [`round_composing`] calls, and the one the tests about a run
-        /// call for themselves.
-        ///
-        /// A parameter for the reason the prompt and the draft are parameters —
-        /// a kinder loop written beside the tests would be the loop the tests
-        /// tested — and it is the one thing about the round a run changes:
-        /// `press_for` reads `q` and Ctrl-C as leaving outright rather than as a
-        /// question, and reads Esc as the cancel. Neither reaches a muted field,
-        /// which is what the tests that hand `true` in are about, and a cancel
-        /// that did get through would land on the panicking arm below.
         fn round_running(
             app: &mut App,
             confirm: &mut QuitConfirm,
@@ -2755,53 +2169,24 @@ mod tests {
             );
         }
 
-        /// The third window: what a key comes to while the path a brief is
-        /// about to be written to is on screen.
-        ///
-        /// The scope prompt's tests one window along, and deliberately the same
-        /// assertions, because it is the same field and the same editor: every
-        /// binding is swallowed, Ctrl-C is still answered first, and
-        /// [`action_for`] is not consulted at all. What is new is the one thing
-        /// two windows need and one did not — an order between them — which is
-        /// asserted here rather than left to whichever of the two the loop
-        /// happens to ask about first.
-        ///
-        /// Nothing here draws the window: where it sits on the frame and what it
-        /// says are `ui.rs`'s, and what a key does to the field itself is
-        /// `prompt.rs`'s.
         mod writing {
             use super::{
                 Action, Composer, Edited, INERT, KeyCode, KeyEvent, Pressed, QuitConfirm,
                 ScopeField, ScopePrompt, action_for, ctrl_c, edit_for, gate_for, press,
             };
 
-            /// The path the field below opens holding: what a `/write` turn's
-            /// answer proposes, and long enough that a key typed into it is
-            /// plainly a character on the end rather than the whole line.
             const PROPOSED: &str = "docs/warlock-brief-13-scopes-and-sigils.md";
 
-            /// What the write prompt's field carries where the scope prompt
-            /// carries a module: the heading the window is drawn under, which
-            /// this file never reads and only passes through.
             const HEADING: &str = "Write the brief to";
 
-            /// The write prompt as the loop holds it once a `/write` turn has
-            /// answered.
             fn open() -> ScopePrompt {
                 ScopePrompt::open(HEADING, PROPOSED)
             }
 
-            /// The field inside it, for the expected answers below.
             fn field() -> ScopeField {
                 open().field().expect("the prompt is up").clone()
             }
 
-            /// What the gate makes of `key` with the write prompt at `write`,
-            /// nothing else up, no run and no turn.
-            ///
-            /// The real [`press_for`](super::super::super::press_for) rather
-            /// than the module's wrapper, because the whole of what these tests
-            /// are about is the situation the wrapper fixes.
             fn asked(key: KeyEvent, write: &ScopePrompt) -> Pressed {
                 gate_for(
                     key,
@@ -2957,22 +2342,6 @@ mod tests {
             }
         }
 
-        /// The keyboard in the composer: what the tree's own bindings come to
-        /// while somebody is typing, and what they come to again once the field
-        /// has let go.
-        ///
-        /// The same two layers as the module above, and the same road: every
-        /// test here asks [`press_for`] what a key *means* and then puts it
-        /// through [`round_composing`], which is the loop's arms with the draft
-        /// in them. Nothing is drawn and no terminal is entered — where the
-        /// composer sits on the frame is `ui.rs`'s, what a key does to the draft
-        /// itself is `composer.rs`'s, and what is asserted here is only which of
-        /// the two functions a key reaches.
-        ///
-        /// The pairs are the point. Each key is asserted twice — once as a
-        /// letter with the focus on the field, once as the command it has always
-        /// been with the focus off it — because either half alone is a field that
-        /// works or a tree that works, and the ticket is both at once.
         mod composing {
             use std::time::Instant;
 
@@ -2982,23 +2351,8 @@ mod tests {
                 round_composing,
             };
 
-            /// What is in the draft before each test types anything.
-            ///
-            /// Something rather than nothing, so a key that appended nothing is
-            /// told apart from a key that replaced everything, and short enough
-            /// that the expected draft can be read at a glance.
             const TYPED: &str = "web";
 
-            /// The app with the keyboard in the composer: [`app_in_use`] showing
-            /// the conversation, with focus moved on one place — which is where
-            /// Tab from the panel puts it.
-            ///
-            /// The card matters. The field is drawn under the conversation and
-            /// under nothing else (see [`Panel::composer_showable`](warlock_tui::Panel::composer_showable)), so an app
-            /// showing the run cannot have the keyboard in a field it is not
-            /// drawing. The turn is answered at length for [`app_in_use`]'s
-            /// reason: a panel with more in it than its window holds is one
-            /// where a key that scrolled it would show.
             fn app_composing() -> App {
                 let mut app = app_in_use();
                 let asked = Instant::now();
@@ -3016,16 +2370,6 @@ mod tests {
                 app
             }
 
-            /// `code` pressed with the composer holding [`TYPED`]: it is the
-            /// letter, it goes into the draft, and no [`Action`] comes of it.
-            ///
-            /// Both layers, because they are different claims. The first is that
-            /// [`press_for`] answers with the composer's own outcome, which is
-            /// the plain statement that `action_for` was not consulted; the
-            /// second is that a round of the loop leaves the app it was holding
-            /// byte for byte — and [`round_composing`] panics on the four keys
-            /// that start a run or open a window, so a `p` that leaked through
-            /// would not be a quiet failure.
             fn types(code: char) {
                 let key = press(KeyCode::Char(code));
                 let before = Composer::new(TYPED);
@@ -3061,14 +2405,6 @@ mod tests {
                 assert_eq!(prompt, ScopePrompt::Closed, "and no prompt");
             }
 
-            /// `code` pressed with the keys anywhere but the composer: the
-            /// action it has always meant, and a draft nobody typed into.
-            ///
-            /// Asserted at both of the other two places focus can be, because
-            /// what makes the key a command is that the field does not have the
-            /// keyboard rather than which pane does. The situation goes in
-            /// through [`offered`], the loop's own line, so the test cannot
-            /// arrange something the loop would not.
             fn acts(code: char, action: Action) {
                 let key = press(KeyCode::Char(code));
                 let composer = Composer::new(TYPED);
@@ -3777,24 +3113,6 @@ mod tests {
         }
     }
 
-    /// What the pointer comes to: which move a notch of the wheel or a press of
-    /// the left button at a named point on a named screen asks the app for.
-    ///
-    /// Every test here builds its own event, names its own [`Size`] and builds
-    /// its app out of rows written down in this file. No terminal is entered, no
-    /// frame is drawn and nothing is attached to stdout — which is the whole
-    /// reason the pointer's answer is a function of an event, a size and an app
-    /// rather than something the event loop does inline.
-    ///
-    /// Two layers are asserted, and they are different things. Most tests ask
-    /// [`asks`] — that is [`mouse_action`] over the screen below, with the gate
-    /// on the way out closed — what a point *means*, which is the pure part. The
-    /// few that care what the reader would see also go through [`round`], which
-    /// is the event loop's arms written out a second time, so
-    /// that "three rows a notch, clamped" and "a click on the row already
-    /// selected opens it" are asserted about an app rather than about a variant
-    /// name. What each of those moves does on its own is `app.rs`'s to test, and
-    /// is not restated here.
     mod pointer {
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Size;
@@ -3803,74 +3121,53 @@ mod tests {
 
         use super::super::{MouseAction, mouse_action};
 
-        /// The terminal every test here points at, and the layout it comes to.
-        ///
-        /// Eighty by twenty-four is the terminal every other program's defaults
-        /// assume, and it is wide enough that the tree takes its floor of thirty
-        /// columns rather than its share — the even-split branch of the layout is
-        /// `ui.rs`'s to test, and what is being tested here is what a point
-        /// means, not where the panes are.
-        ///
-        /// ```text
-        /// columns  0        panel        49 50       tree        79
-        /// row  0   ┌───────────────────────┐┌───────────────────────┐
-        /// row  1   │ panel line 0          ││ tree header           │
-        /// row  2   │ panel line 1          ││ tree row 0            │
-        ///  ...     │  ...                  ││  ...                  │
-        /// row 19   │ panel line 18         ││ tree row 17           │
-        /// row 20   └───────────────────────┘└───────────────────────┘
-        /// rows 21-23                     the footer
-        /// ```
+        // The one terminal every test below points at, and the layout it comes
+        // to. Eighty columns is wide enough that the tree takes its floor of
+        // thirty rather than an even split, which is what puts the panes where
+        // the columns and rows underneath say they are — narrow this and every
+        // constant below moves:
+        //
+        //   columns  0        panel        49 50       tree        79
+        //   row  0   ┌───────────────────────┐┌───────────────────────┐
+        //   row  1   │ panel line 0          ││ tree header           │
+        //   row  2   │ panel line 1          ││ tree row 0            │
+        //    ...     │  ...                  ││  ...                  │
+        //   row 19   │ panel line 18         ││ tree row 17           │
+        //   row 20   └───────────────────────┘└───────────────────────┘
+        //   rows 21-23                     the footer
         const SIZE: Size = Size {
             width: 80,
             height: 24,
         };
 
-        /// A column inside the tree pane, well clear of either border.
         const IN_TREE: u16 = 65;
 
-        /// A column inside the panel, likewise.
         const IN_PANEL: u16 = 10;
 
-        /// The screen row the tree's first drawn row is on: the pane's top
-        /// border, then its header.
         const FIRST_TREE_ROW: u16 = 2;
 
-        /// The screen row the panel's first drawn line is on: the pane's top
-        /// border and no header, because the panel has none.
         const FIRST_PANEL_LINE: u16 = 1;
 
-        /// The one line inside the tree pane's border that names the tree.
         const TREE_HEADER: u16 = 1;
 
-        /// A row of the footer — the middle of its three.
         const FOOTER: u16 = 22;
 
-        /// How many rows of tree this screen has room for, which is what the
-        /// event loop tells the app before it draws. Asserted rather than
-        /// assumed, so a layout that ever changed shape says so here.
         fn viewport() -> usize {
             usize::from(tree_height(SIZE))
         }
 
-        /// One notch of the wheel towards the newest line, at a point.
         fn wheel_down(column: u16, row: u16) -> MouseEvent {
             event(MouseEventKind::ScrollDown, column, row)
         }
 
-        /// One notch of the wheel back, at a point.
         fn wheel_up(column: u16, row: u16) -> MouseEvent {
             event(MouseEventKind::ScrollUp, column, row)
         }
 
-        /// The left button going down at a point, which is the half of a click
-        /// warlock answers.
         fn left_click(column: u16, row: u16) -> MouseEvent {
             event(MouseEventKind::Down(MouseButton::Left), column, row)
         }
 
-        /// A mouse event of `kind` at a point, as crossterm reports one with no
-        /// modifiers held.
         fn event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
             MouseEvent {
                 kind,
@@ -3880,15 +3177,6 @@ mod tests {
             }
         }
 
-        /// Twenty-five rows: a root, then twenty-four directories with a file
-        /// apiece.
-        ///
-        /// More rows than the screen above has room for, so a window that has
-        /// been scrolled is a state these tests can get into; and each directory
-        /// claims the one child it is given, because a row with no children is a
-        /// row [`App::toggle_collapsed`] refuses, and a click on the selected
-        /// row has to be tested against a row it does not refuse as well as
-        /// against one it does.
         fn rows() -> Vec<Row> {
             let mut rows = vec![
                 Row::new(0, "/repo", "/repo/WARLOCK.md", NodeState::PactedStale)
@@ -3910,12 +3198,6 @@ mod tests {
             rows
         }
 
-        /// Those rows, in an app told how big the screen above is — which is
-        /// what the top of the event loop does every round, and what the hit
-        /// test's answers have to agree with.
-        ///
-        /// The file rows are hidden, as the file toggle starts, so the drawn
-        /// list is the root and its twenty-four directories.
         fn app_on_screen() -> App {
             let mut app = App::from_rows(rows());
             app.set_viewport_height(tree_height(SIZE));
@@ -3923,12 +3205,6 @@ mod tests {
             app
         }
 
-        /// What `mouse` over [`SIZE`] asks `app` for with every window down,
-        /// which is the situation every test here but the last three is about.
-        ///
-        /// Named so the question the pointer tests ask stays one line long now
-        /// that the confirmation, the scope prompt and the write prompt are
-        /// things a pointer event is read against.
         fn asks(mouse: MouseEvent, app: &App) -> Option<MouseAction> {
             mouse_action(
                 mouse,
@@ -3941,14 +3217,6 @@ mod tests {
             )
         }
 
-        /// One round of the event loop with `mouse` arriving in it and the gate
-        /// at `confirm`: the answer worked out and then done, which is the
-        /// loop's arms written out again.
-        ///
-        /// Here so that a test can assert about a selection and a focus rather
-        /// than about the name of a variant. It is the pointer's whole road, and
-        /// a change to the loop that this stopped matching would be a change one
-        /// of the tests below is asserting the old shape of.
         fn round(app: &mut App, confirm: QuitConfirm, mouse: MouseEvent) {
             round_under(
                 app,
@@ -3959,14 +3227,6 @@ mod tests {
             );
         }
 
-        /// The same round with the scope prompt at `prompt` and the write prompt
-        /// at `write` as well: the other two windows the pointer goes inert
-        /// under.
-        ///
-        /// Parameters rather than a second copy of the arms below, so all three
-        /// windows are asserted against the one road out of [`mouse_action`] —
-        /// a test that dropped events through a second, kinder version of the
-        /// loop would be testing the version it wrote.
         fn round_under(
             app: &mut App,
             confirm: QuitConfirm,

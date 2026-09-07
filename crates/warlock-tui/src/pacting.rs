@@ -1,35 +1,42 @@
-//! A pact run on a worker thread, from the keystroke to the saved manifest.
+//! The two long keystrokes — `p` and `r` — as a worker thread, a channel of
+//! [`PactEvent`], and one reload at the end.
 //!
-//! The pact key is the one keystroke that writes to disk and the one that
-//! takes longer than a frame, so it is the one that is not done on the event
-//! loop's thread. [`Pact`] is what the loop keeps about it — the agent runs are
-//! made with, and the run in flight when there is one — and it is the whole of
-//! this module's surface: [`Pact::press`] decides what a press comes to and
-//! starts the worker, [`Pact::keep_up`] is the loop's other half, and
-//! [`Pact::stop`] and [`Pact::running`] are the two questions the rest of the
-//! loop asks. Everything the worker says — which directory it is on, what its
-//! pass is doing, and finally how it went — lands on the app in `keep_up`, and
-//! the run ends with the one reload that puts the documents it wrote on screen.
+//! [`Pact`] is everything the event loop keeps about work it is not doing: the
+//! agent every pass is made with, and the [`Running`] there is at most one of.
+//! Four entry points and no other surface — [`Pact::press`] decides what a
+//! press comes to and starts a worker, [`Pact::keep_up`] drains what the worker
+//! has said since the last frame, and [`Pact::stop`] and [`Pact::running`] are
+//! the two questions `main.rs` asks.
+//!
+//! A pact and a refresh are one machine, not two. [`Work`] is the single value
+//! that says which a run is; the worker, the channel, the account, the say-when
+//! and the reload are shared, and the difference comes down to one call in
+//! [`apply_toggle`] and one verb on the footer. One run at a time falls out of
+//! [`Pact::press`] reading the `run` field before it decides anything, so
+//! neither key has to be told about the other.
 //!
 //! [`Chat`](crate::chatting::Chat) is the same four parts over a much smaller
-//! job, and the two are meant to be read together: a turn and a run are both
-//! work happening on another thread that a frame must never wait for.
+//! job and reuses [`CancelGuard`] from here. The asymmetry is the ending: a
+//! turn writes nothing, while a run writes documents and saves the manifest, so
+//! only this module owes the caller a [`Reloaded`].
 //!
-//! The refresh key is the same machinery over a shorter list. It is the same
-//! [`Pact::press`] with the other [`Run`], [`Work`] is the one value that says
-//! which of the two a run is, and everything below that — the worker, the
-//! channel, the account, the say-when, the single save, the reload — is shared
-//! rather than written twice: the difference between the two runs is one engine
-//! call in [`apply_toggle`] and one verb on the footer.
+//! # Stopping
 //!
-//! One run at a time is a property of [`Pact`] rather than a rule the keys
-//! remember: both presses read the one run it holds before deciding anything.
+//! Two spellings, kept apart on purpose. Esc *cancels* — [`Pact::stop`] trips
+//! the flag, the pass in flight gives up, and the worker still saves and
+//! reports what it finished. Quitting drops the [`Pact`], and with it the
+//! guard, whose `Drop` kills the `claude` in flight and leaves the manifest as
+//! it was. An un-pact spends no model time and so is not reworded on cancel;
+//! see `Work::is_cancellable`.
 //!
-//! Stopping a run has two spellings kept deliberately apart: Esc *cancels*
-//! through [`CancelGuard`], and the worker still hashes, saves and reports
-//! what it finished; quitting drops the guard, which kills the `claude` in
-//! flight and leaves the manifest as it was. Either way no half-state exists
-//! for an abandoned worker to leave — see [`spawn_pact`] for the bargain.
+//! # The one reload, and why nothing reloads before it
+//!
+//! [`descend`] saves the manifest once, after the whole descent. Until that
+//! save lands, disk still holds the pre-run manifest, so re-reading the tree
+//! mid-run would re-derive every row from a stale record and wipe the green
+//! that `Documented` has been painting a directory at a time. The single
+//! `reload_tree` at the foot of [`drain`] is therefore not an optimisation: it
+//! is the only point at which disk is the honest account.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -50,113 +57,33 @@ use crate::descent::{Descent, carry_on, descend};
 use crate::error::one_line;
 use crate::session::{Scope, closed_scope, reload_tree};
 
-/// What the footer says when the worker thread stopped without reporting
-/// anything — which, since it reports on every path it takes itself, means it
-/// panicked.
-///
-/// The panic hook has already printed the panic where it can be read, so this
-/// exists to say that the run is over and that Warlock's own record of what is
-/// pacted did not move. Documents the worker had already written are still on
-/// disk, and the next load will find them.
+// The worker reports on every path it takes itself, so the only way the channel
+// closes without a `Finished` is a panic. The hook has already printed it; what
+// is left to say on the footer is that the record did not move.
 const PACT_LOST: &str = "the pact stopped without saying how it went; nothing new was recorded";
 
-/// What the footer says about a run the reader stopped with Esc.
-///
-/// It replaces whatever [`pact_message`] would have said, and that is the point
-/// of it. A cancel kills the pass in flight, so the directory it was working
-/// comes back as a failure, and every directory after it was never offered a
-/// pass at all; reporting any of that as something that *went wrong* would put a
-/// directory's name on the footer as if the reader had to go and look at it,
-/// when the only thing that happened is that they pressed Esc. What did get
-/// written is on disk and recorded, and the tree says which parts those are the
-/// next time it is loaded.
 const PACT_CANCELLED: &str = "the pact was cancelled; what it finished first is recorded";
 
-/// The pact key's whole business: who runs a pass, and the run in flight when
-/// there is one.
-///
-/// [`Chat`](crate::chatting::Chat)'s opposite number, and deliberately the same
-/// four parts in the same order — [`Pact::press`] starts a run,
-/// [`Pact::keep_up`] drains it, [`Pact::stop`] says when, and
-/// [`Pact::running`] is the one fact the rest of the loop asks for. The agent
-/// and the run live together because neither is any use without the other: an
-/// agent nothing has asked to run is a command line and a timeout, and a run
-/// needs the very agent the session was started with.
-///
-/// **One run at a time is a property of this type rather than a rule two keys
-/// remember.** Both long keystrokes come through [`Pact::press`], which reads
-/// the one `Option<Running>` below before it decides anything, so neither key
-/// can start a second run and neither key has to be told not to. Before this
-/// existed the check was a `bool` the event loop worked out and handed down,
-/// which is the caller knowing something this module owns.
-///
-/// **What a run ends in is deliberately not symmetric with a turn.** A turn
-/// writes nothing, saves nothing and reloads nothing, so [`Chat`] answers to
-/// nobody when one finishes; a run writes documents, saves the manifest and
-/// leaves the tree on screen a load out of date, so [`Pact::keep_up`] re-reads
-/// it and says so with a [`Reloaded`]. Making the two look alike there would be
-/// the false symmetry — a run *is* the one that changes the disk, and this is
-/// the impure twin.
-///
-/// **The manifest is not here on purpose.** The scope key writes it
-/// ([`scope_submit`](crate::scoping::scope_submit)) and the write prompt reads
-/// it ([`write_edit`](crate::writing::write_edit)), as well as a run saving it
-/// at the end, so it stays the loop's and is handed in. A field here would be a
-/// third owner lending it back out through an accessor, which is the openness
-/// this type exists to close rather than to re-spell.
 pub(crate) struct Pact<P> {
-    /// The agent every pass of every run is made with, built once because it is
-    /// a command line and a timeout rather than a connection: nothing is
-    /// spawned until a run actually asks for a pass.
-    ///
-    /// The seam rather than the child process: warlock runs on a
-    /// [`ClaudeAgent`], and a test runs on a value that answers out of memory.
-    /// See [`Wired`].
     agent: P,
-    /// The run happening somewhere else, if one is. `None` is the ordinary
-    /// state and the state a session starts and ends in.
     run: Option<Running>,
 }
 
-/// A run that ended this round, and the tree the reload at the end of it
-/// produced.
-///
-/// The one round in a run's life where something is owed outside this module:
-/// the watcher has to be told that the walk it is following has been replaced,
-/// and told *once*, on the round the run finished rather than on every round it
-/// was going. See [`Watched::caught_up`](crate::session::Watched::caught_up).
-///
-/// A value rather than something the caller works out, because working it out
-/// is what the loop used to do — reading `is_some()` either side of the drain
-/// and comparing the two answers, which is an edge detector kept by hand over a
-/// fact this module already had. The tree rides along because it is the only
-/// thing the caller does with the answer; `None` inside is a reload that failed,
-/// which keeps the tree already drawn and is not an error.
+// Returned only on the round a run ends, because the watcher must be told once
+// that the walk it was following has been replaced — see
+// `Watched::caught_up`. The caller working the same fact out by comparing
+// `running()` either side of the drain is an edge detector kept by hand over
+// something this module already knows. `None` inside is a reload that failed,
+// which leaves the tree already drawn and is not an error.
 pub(crate) struct Reloaded(pub(crate) Option<Tree>);
 
 impl Pact<ClaudeAgent> {
-    /// A session with nothing running yet.
-    ///
-    /// The agent is made here, once, for the reason [`Chat::new`] makes its
-    /// own: it is a command line and a timeout, so building it costs nothing
-    /// and no `claude` exists until a key asks for one.
+    // Building the agent costs nothing — it is a command line and a timeout,
+    // not a connection — so no `claude` exists until a key asks for a pass.
     pub(crate) fn new() -> Self {
         Self::with_agent(ClaudeAgent::new())
     }
 
-    /// A session with nothing running yet, over `agent`.
-    ///
-    /// [`Chat::with_agent`](crate::chatting::Chat::with_agent)'s twin and for
-    /// its reason: a test can drive the very value the loop keeps against a
-    /// stand-in program, rather than assembling the pieces underneath it and
-    /// proving something about an arrangement the loop never has.
-    /// A session with `run` already in flight, for a test that is about the
-    /// draining rather than the starting.
-    ///
-    /// The run's fields are what those tests are *about* — the channel it
-    /// reports on, the say-when, the work it covers and the app to put back —
-    /// so this hands the whole value in rather than taking a receiver and
-    /// building one, which would hide the thing under test.
     #[cfg(test)]
     pub(crate) fn with_run(run: Running) -> Self {
         Self {
@@ -167,82 +94,23 @@ impl Pact<ClaudeAgent> {
 }
 
 impl<P: Wired + Agent> Pact<P> {
-    /// A session with nothing running yet, over `agent`.
-    ///
-    /// [`Chat::with_agent`](crate::chatting::Chat::with_agent)'s twin and for
-    /// its reason: a test can drive the very value the loop keeps against a
-    /// stand-in, rather than assembling the pieces underneath it and proving
-    /// something about an arrangement the loop never has.
+    // The seam a test drives the real value over a stand-in agent through,
+    // rather than assembling the pieces underneath and proving something about
+    // an arrangement the event loop never has.
     pub(crate) fn with_agent(agent: P) -> Self {
         Self { agent, run: None }
     }
 
-    /// Whether a run is happening somewhere else.
-    ///
-    /// [`Chat::answering`](crate::chatting::Chat::answering)'s twin, and the one
-    /// fact the rest of the loop asks for: Esc cancels the run rather than
-    /// asking about quitting for exactly as long as this is true, and the
-    /// watcher holds its reloads back for exactly as long as well. Both
-    /// readings come from here, so the key and the watcher cannot disagree
-    /// about whether anything is running.
     pub(crate) const fn running(&self) -> bool {
         self.run.is_some()
     }
 
-    /// Say when, if there is anything to say it to.
-    ///
-    /// Both halves at once, through the run's own handle: it latches, so the
-    /// descent stops at the next directory instead of starting a pass for it,
-    /// and it kills the `claude` running right now, so that stop happens in
-    /// milliseconds rather than at the end of a five-minute pass.
-    ///
-    /// The run is deliberately *not* taken down here. The worker is still going
-    /// to hash what it wrote, save the manifest and report, and all of that
-    /// arrives at the next [`Pact::keep_up`] like any other outcome; forgetting
-    /// about it now would leave the footer's progress line up for a run nobody
-    /// was listening to any more.
-    ///
-    /// Silent with nothing running, which is Esc pressed with no run in flight —
-    /// a keystroke the gate answers a different way entirely, and one this can
-    /// afford to do nothing about.
     pub(crate) fn stop(&self) {
         if let Some(run) = self.run.as_ref() {
             run.cancel.cancel();
         }
     }
 
-    /// Start the run one of the two long keystrokes is asking for, if it is
-    /// asking for one.
-    ///
-    /// The pact key and the refresh key, in one place because they were already
-    /// one arm with one word changed: a refresh is a run like a pact — one
-    /// worker, one channel, one account, one say-when — over the stale
-    /// directories of a subtree rather than all of them, and which those are is
-    /// the engine's judgement and not this loop's. The word that changes is
-    /// which press decides; everything either side of it is the same three
-    /// statements.
-    ///
-    /// The copy is taken before the press paints anything, because the toggle is
-    /// not its own undo: it puts a whole subtree into one state, and the states
-    /// it painted over were not all the same one. The copy is a list of rows and
-    /// a tally, and it is taken once per press of one key.
-    ///
-    /// `now` is the instant the key was pressed, and the account counts its
-    /// clocks from it: a run is as old as the keystroke that asked for it, not
-    /// as old as the first thing the model got round to saying.
-    ///
-    /// Nothing comes back, and two different presses need nothing done about
-    /// them for the same reason: both have already said their piece on the app,
-    /// and the next frame draws it. A refused toggle put its sentence in
-    /// [`App::message`](warlock_tui::App::message); a press while a run is in
-    /// flight started nothing — a second run over a tree the first is still
-    /// writing to would be two of them racing for the same documents and the
-    /// same manifest — and said so by setting the flag that words
-    /// `App::pact_line` as already running.
-    ///
-    /// `kind` is the run the key asked for, which is the *only* thing the two
-    /// keys differ by all the way down. It is [`Run`], the app's own kind, so
-    /// nothing here has to know what a keystroke is.
     pub(crate) fn press(
         &mut self,
         kind: Run,
@@ -289,17 +157,6 @@ impl<P: Wired + Agent> Pact<P> {
         }
     }
 
-    /// Everything the run has said since the last round, and whether it ended.
-    ///
-    /// [`Chat::keep_up`](crate::chatting::Chat::keep_up)'s twin over the longer
-    /// job, drained with `try_recv` so a frame is never spent waiting on a
-    /// worker. Almost every round of warlock's life this returns `None` having
-    /// done nothing, which is the ordinary state of a program with no run in it.
-    ///
-    /// A [`Reloaded`] means the run ended on *this* round — the outcome applied,
-    /// the manifest saved, the account closed and the tree re-read — and it is
-    /// the only round the caller has anything left to do. See [`Reloaded`] for
-    /// why the edge is a value rather than something the caller reconstructs.
     pub(crate) fn keep_up(
         &mut self,
         app: &mut App,
@@ -311,78 +168,21 @@ impl<P: Wired + Agent> Pact<P> {
     }
 }
 
-/// A pact being run by a worker thread, from the point of view of the thread
-/// drawing the screen.
-///
-/// Four things, and no handle to join: what the worker has to say, how to tell
-/// it to stop, what it was asked to do, and what the tree looked like before the
-/// keystroke painted that subtree yellow.
-///
-/// The work is kept here rather than read back off the app because the subtree
-/// it names is the one the *run* covers, which is a fact about the run and not
-/// about whatever is selected by the time it ends — the reader is free to move
-/// the selection anywhere while a run works, and does. It is also what says
-/// whether the footer's line reads as pacting or as refreshing, for the length
-/// of the run and not just at the press.
-///
-/// The copy of the app is the undo for a run that comes back with nothing
-/// recorded. It is taken before the toggle paints, so it is also older than any
-/// scrolling done during the run; putting it back costs the reader their place
-/// in the tree on a path that only a failed walk or an unwritable manifest
-/// reaches. That is the same restoration the blocking version did, kept as one
-/// code path rather than split into "the rows, but not the selection".
-///
-/// The say-when is a [`CancelGuard`] rather than a bare handle, so that every
-/// way out of the event loop takes the running `claude` with it whether or not
-/// it remembered to; see that type for the bargain.
 pub(crate) struct Running {
-    /// Progress and, once, the outcome. Closed by the worker dropping its end,
-    /// which is how a panicked worker is noticed.
     pub(crate) events: Receiver<PactEvent>,
-    /// Say-when for the worker: the flag its observer reads between directories
-    /// and the kill switch for the `claude` it is waiting on.
     pub(crate) cancel: CancelGuard,
-    /// What the key that started this run asked for, which names the subtree it
-    /// covers and says which of the two runs it is.
     pub(crate) work: Work,
-    /// The app as it stood before the toggle painted the subtree.
     pub(crate) before: App,
-    /// Every directory the run carried forward rather than describing, as its
-    /// [`PactEvent::Unchanged`] arrived.
-    ///
-    /// Kept here rather than derived at the end because it cannot be derived:
-    /// a carried document and a freshly written one are the same bytes in the
-    /// same place, and only the run knows which happened.
     pub(crate) unchanged: Vec<PathBuf>,
 }
 
-/// What a worker thread was asked to do: carry a pact toggle out, or refresh a
-/// subtree.
-///
-/// One value rather than two of everything, because below the keystroke there
-/// is nothing to tell the two runs apart. A refresh is the same worker on the
-/// same channel reporting through the same observer into the same account,
-/// stoppable by the same handle and ending in the same single save and the same
-/// reload; the whole of the difference is which engine entry point
-/// [`apply_toggle`] calls — [`pact_subtree`](warlock_engine::pact_subtree) describes every directory of the
-/// subtree, [`refresh_subtree`](warlock_engine::refresh_subtree) only the stale ones — and which verb the
-/// footer's progress line is worded with.
-///
-/// A refresh carries a bare directory where a pact carries a [`PactToggle`],
-/// and that is the whole of the shape difference: a pact goes two ways and has
-/// to say which, while there is no such thing as an un-refresh.
 #[derive(Debug, Clone)]
 pub(crate) enum Work {
-    /// The pact key's press: describe the whole subtree, or take it out of the
-    /// manifest, as [`PactToggle::pacted`] says.
     Pact(PactToggle),
-    /// The refresh key's press: describe the stale directories under this one
-    /// and leave the fresh ones exactly as they are.
     Refresh(PathBuf),
 }
 
 impl Work {
-    /// The root of the subtree the run covers, whichever key asked for it.
     pub(crate) fn path(&self) -> &Path {
         match self {
             Self::Pact(toggle) => &toggle.path,
@@ -390,13 +190,6 @@ impl Work {
         }
     }
 
-    /// Which run over a subtree this press means, for
-    /// [`descend`].
-    ///
-    /// The pact key goes two ways and this is where the app's
-    /// [`PactToggle::pacted`] becomes the engine's third entry point: a press on
-    /// a pacted row is an un-pact. The refresh key has only one direction —
-    /// there is no such thing as an un-refresh.
     pub(crate) const fn descent(&self) -> Descent {
         match self {
             Self::Pact(toggle) if toggle.pacted => Descent::Pact,
@@ -405,9 +198,6 @@ impl Work {
         }
     }
 
-    /// Which of the two runs this is, for the one line the app words about a
-    /// run in flight: see [`Run`] and
-    /// [`App::set_run_in_flight`](warlock_tui::App::set_run_in_flight).
     pub(crate) const fn kind(&self) -> Run {
         match self {
             Self::Pact(_) => Run::Pact,
@@ -415,13 +205,10 @@ impl Work {
         }
     }
 
-    /// Whether Esc can stop this run part way through.
-    ///
-    /// Anything that runs model passes can: a pact and a refresh are both a
-    /// descent of minutes, and both hash and save whatever they finished before
-    /// the key landed. An un-pact cannot — it is manifest arithmetic that is
-    /// over before a key can be read, so a handle latched while one ran would be
-    /// describing something else entirely.
+    // Whether a cancel is worth rewording the outcome for. An un-pact spends no
+    // model time — it rewrites the manifest and returns — so a cancel that
+    // arrives during one is a cancel of something already over, and saying so
+    // would report a run that did everything asked of it as stopped.
     const fn is_cancellable(&self) -> bool {
         match self {
             Self::Pact(toggle) => toggle.pacted,
@@ -430,192 +217,66 @@ impl Work {
     }
 }
 
-/// A [`Cancel`] that is spent when it goes out of scope.
-///
-/// The same bargain [`TerminalGuard`] strikes with the terminal, for the same
-/// reason: a quit, an error bubbling up through a `?` in the middle of a frame
-/// and a panic unwinding past here are all ways out of the event loop, and each
-/// of them would otherwise have to remember to stop the run — which is to say,
-/// one of them eventually would not, and would leave a `claude` burning the
-/// user's subscription with nobody left to read what it says.
-///
-/// A type of its own rather than a `Drop` on [`Running`], so that the outcome
-/// path can still move the app it kept out of it: a struct that implements
-/// `Drop` cannot be taken apart, and this one has nothing anybody wants to take.
 pub(crate) struct CancelGuard {
-    /// The handle every clone of which speaks for this run.
     cancel: Cancel,
 }
 
 impl CancelGuard {
-    /// A handle nobody has said stop to yet.
     pub(crate) fn new() -> Self {
         Self {
             cancel: Cancel::new(),
         }
     }
 
-    /// A clone for the worker to give its agent and its observer.
     pub(crate) fn handle(&self) -> Cancel {
         self.cancel.clone()
     }
 
-    /// Stop the run: latch the flag the descent reads, and kill the `claude`
-    /// in flight.
     pub(crate) fn cancel(&self) {
         self.cancel.cancel();
     }
 
-    /// Whether somebody said stop to this run.
-    ///
-    /// Asked once, when the run's outcome comes back, and only so that the
-    /// panel's last section can say the run was stopped rather than that its
-    /// pass went wrong. The footer already has this fact by another road — the
-    /// worker rewords a cancelled outcome before sending it ([`cancelled`]) —
-    /// but that wording is one line about the whole run, and what the panel
-    /// needs is which directory it happened in, which only the thread holding
-    /// the sections knows.
     fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
 }
 
+// Dropping the guard is what makes quitting kill the `claude` in flight: no
+// exit path has to remember to stop the run, because losing the `Pact` loses
+// the `Running` and losing the `Running` cancels. Esc is the other spelling and
+// goes through `cancel()` directly, leaving the run alive to save what it has.
 impl Drop for CancelGuard {
-    /// Whatever ended the run, no child outlives it.
-    ///
-    /// Idempotent, and on the ordinary path a no-op: a run that reported its
-    /// outcome has no pass left to kill, and the latched flag dies here with the
-    /// last handle holding it.
     fn drop(&mut self) {
         self.cancel();
     }
 }
 
-/// What a worker thread has to say for itself.
-///
-/// Six things, and the order of two of them is fixed: one
-/// [`PactEvent::Starting`] per directory as the run reaches it, at most one
-/// [`PactEvent::Requesting`] as that directory's own request is handed over,
-/// any number of [`PactEvent::Doing`] from the pass that then runs, any number
-/// of [`PactEvent::Rejected`] for an answer the schema turns down, at most one
-/// [`PactEvent::Documented`] per directory as its pass delivers, and then
-/// exactly one [`PactEvent::Finished`]. Nothing else is sent, and nothing
-/// is sent after the outcome — the worker drops its end of the channel and
-/// stops.
-///
-/// Activities ride this channel rather than one of their own because there is
-/// nothing to gain from a second: they come from the same worker, they are read
-/// by the same thread, and a second receiver would be a second thing the event
-/// loop has to poll and a second way for the two streams to arrive out of the
-/// order the run produced them in.
 #[derive(Debug)]
 pub(crate) enum PactEvent {
-    /// The pass for `directory` is about to run: directory `position` of
-    /// `total`, counting from one, in the order the engine works them.
     Starting {
-        /// The directory being worked, as an absolute path; the footer spells
-        /// it relative to the tree on screen.
         directory: PathBuf,
-        /// Which directory of the run this is, counting from one.
         position: usize,
-        /// How many directories the whole run covers.
         total: usize,
     },
-    /// The pass running now was seen doing something: a tool call, a stretch of
-    /// thinking, or what it cost.
-    ///
-    /// Carries no directory, because it needs none to be delivered — the
-    /// [`Starting`](PactEvent::Starting) before it says which directory is being
-    /// worked, and anything more is the business of whoever draws these rather
-    /// than of the channel that carries them.
     Doing(Activity),
-    /// The directory's own request has been handed to the pass: `files` files
-    /// in it, `bytes` bytes counted the way the budget counts them.
-    ///
-    /// What the silence that follows is made of. Every other event on this
-    /// channel is something happening; this one is the last thing said before
-    /// nothing is said, and the two numbers are the whole of what a reader can
-    /// use to explain why this directory is slow.
-    ///
-    /// Carries no directory, for [`Doing`](PactEvent::Doing)'s reason: the
-    /// [`Starting`](PactEvent::Starting) before it already named the one whose
-    /// request this is. It is deliberately not folded into that `Starting`
-    /// either, because neither number is true when `Starting` is sent — see
-    /// [`pact::Observer::requesting`], whose numbers these are, unaltered.
     Requesting {
-        /// How many files the request carries.
         files: usize,
-        /// What it weighs: the files plus each child directory's document,
-        /// which is the total the caps are checked against.
         bytes: u64,
     },
-    /// The pass running now answered and the engine turned the answer down:
-    /// attempt `attempt` of `attempts`, for the defects listed. When there is
-    /// an attempt left a second [`Requesting`](PactEvent::Requesting) follows
-    /// for it; when there is not, the directory is about to fail. See
-    /// [`pact::Observer::rejected`], whose report this is, rendered to lines.
-    ///
-    /// Carries no directory, for [`Doing`](PactEvent::Doing)'s reason: the
-    /// [`Starting`](PactEvent::Starting) before it already named the one whose
-    /// pass this is.
     Rejected {
-        /// What was wrong with the answer, one line each, in the order the
-        /// engine found it.
         defects: Vec<String>,
-        /// Which attempt this was, counting from one.
         attempt: usize,
-        /// How many attempts a directory gets.
         attempts: usize,
     },
-    /// `directory` and everything under it is documented: its pass delivered,
-    /// and no pass below it failed. The engine's own word, sent the moment it
-    /// becomes true — see [`pact::Observer::documented`] — and the one event that
-    /// recolours rows while a run is still going: a finished directory turns
-    /// green there and then instead of staying yellow until the whole batch is
-    /// over.
     Documented {
-        /// The directory, as an absolute path.
         directory: PathBuf,
     },
-    /// `directory` needed no pass and its document was carried forward — the
-    /// engine's own word, from [`pact::Observer::unchanged`].
-    ///
-    /// Recolours rows exactly as [`PactEvent::Documented`] does, because it
-    /// means the same thing about the tree. What it does not mean is that
-    /// anything was written, which is why it is a variant of its own rather
-    /// than the same one sent twice.
     Unchanged {
-        /// The directory, as an absolute path.
         directory: PathBuf,
     },
-    /// The run is over, however it went: exactly what [`apply_toggle`] returned.
     Finished(Result<Toggled, String>),
 }
 
-/// An activity port that forwards to `events`, for the agent of one run.
-///
-/// The other half of the shape [`spawn_pact`] already gives [`Cancel`]: a
-/// handle made per run, attached to that run's own copy of the agent, and
-/// spent when the run ends. That is not decoration. The event loop's long-lived
-/// [`ClaudeAgent`] keeps the port it was built with, which is one nobody
-/// listens to, so a pass that outlives the run that started it — a `claude`
-/// still writing to a pipe while the worker is being torn down — has no way to
-/// report into the run after it.
-///
-/// The closure is called on the worker's thread, from inside the pass, while
-/// the pass is still going, so it does the least it can: one send and back.
-/// A send that fails is ignored for the same reason [`Reporting`]'s are — a
-/// receiver that has gone away is an application that is quitting — and here
-/// there is the additional reason that this one is called from inside a model
-/// pass, where the only thing an error could do is fail work that is otherwise
-/// going fine for the sake of a screen nobody is looking at.
-///
-/// The port holds a clone of the sender, so this run's agent is one of the
-/// things keeping the channel open. That costs nothing on the real path — the
-/// agent lives in the worker's closure and dies when the worker's body returns,
-/// which is after the outcome has been sent — but it is why the loop's own
-/// long-lived agent must never be given one of these: a port on it would hold
-/// the channel of whichever run made it open for as long as warlock runs.
 fn activity_port(events: &Sender<PactEvent>) -> Activities {
     let events = events.clone();
     Activities::new(move |activity| {
@@ -623,37 +284,16 @@ fn activity_port(events: &Sender<PactEvent>) -> Activities {
     })
 }
 
-/// The engine's progress port, wired to a channel and to the reader's Esc.
-///
-/// The one adapter between an operation that knows which directory it is on and
-/// a thread that can draw. Both directions of the port go through it: the
-/// directory about to be worked goes out over the channel, and the answer comes
-/// back off the cancel handle the event loop kept a clone of, which is the only
-/// place a stop can come from — nobody but a person at a keyboard decides that a
-/// pact has gone on long enough.
-///
-/// The announcements inside a directory go out the same way and ask nothing:
-/// they say what is being paid for while it is being paid for, and the port
-/// answers them with a send and nothing else.
-///
-/// The handle is read before anything is sent, so a cancelled run neither
-/// announces a directory it will not work nor works it. The engine's rule that
-/// the answer is asked for between directories is what bounds how long a cancel
-/// takes; killing the pass in flight, which [`Cancel`] does in the same breath
-/// as latching, is what makes that bound milliseconds rather than a pass.
-///
-/// A send that fails means the event loop has dropped its receiver, which means
-/// warlock is on its way out. It is deliberately ignored rather than turned into
-/// a stop: the process is ending, the work in flight is about to end with it,
-/// and there is nothing here worth reporting to a screen that is already gone.
 struct Reporting<'a> {
-    /// The event loop's end of the channel.
     events: &'a Sender<PactEvent>,
-    /// The reader's say-when, cloned from the one the event loop holds.
     cancel: &'a Cancel,
 }
 
 impl pact::Observer for Reporting<'_> {
+    // The one place a run is asked to stop between passes, and the reason the
+    // cancel is read here rather than in the loop below: the engine offers this
+    // hook before each directory, and a pass that has already started is the
+    // agent's own to give up on.
     fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
         if carry_on(self.cancel) == Pacting::Stop {
             return Pacting::Stop;
@@ -666,19 +306,10 @@ impl pact::Observer for Reporting<'_> {
         Pacting::Continue
     }
 
-    /// Pass the two numbers on, with a shrug at a send that fails.
-    ///
-    /// No cancellation check of its own: the request is handed to the pass in
-    /// the next breath, the engine asks nothing here, and the one place a pact
-    /// stops is still the question asked between directories above.
     fn requesting(&mut self, files: usize, bytes: u64) {
         let _ = self.events.send(PactEvent::Requesting { files, bytes });
     }
 
-    /// Pass the refusal on as text, exactly as `requesting` is passed on and
-    /// with the same shrug at a send that fails. The defects travel as their
-    /// one-line renderings rather than as the engine's type, because a line is
-    /// all the panel will ever do with one.
     fn rejected(&mut self, _directory: &Path, defects: &[Defect], attempt: usize, attempts: usize) {
         let _ = self.events.send(PactEvent::Rejected {
             defects: defects.iter().map(ToString::to_string).collect(),
@@ -687,16 +318,12 @@ impl pact::Observer for Reporting<'_> {
         });
     }
 
-    /// Pass the announcement on, exactly as `requesting` is passed on and
-    /// with the same shrug at a send that fails.
     fn documented(&mut self, directory: &Path) {
         let _ = self.events.send(PactEvent::Documented {
             directory: directory.to_path_buf(),
         });
     }
 
-    /// Passed on the same way, and for the same reason the engine sends it
-    /// separately: the row goes green either way, and only the wording differs.
     fn unchanged(&mut self, directory: &Path) {
         let _ = self.events.send(PactEvent::Unchanged {
             directory: directory.to_path_buf(),
@@ -704,32 +331,6 @@ impl pact::Observer for Reporting<'_> {
     }
 }
 
-/// Run `work` on a thread of its own, and hand back the channel it reports on.
-///
-/// A pact and a refresh come through here alike, because from here down they
-/// are the same run: what tells them apart is inside [`Work`] and is spent in
-/// one `match` at the bottom of [`apply_toggle`].
-///
-/// The worker owns everything it touches — its own manifest, its own root, its
-/// own copy of the work, its own [`ClaudeAgent`], which is a command line and a
-/// timeout and so is cheap to clone — so nothing is shared with the event loop but the
-/// channel and `cancel`. The handle is the exception that proves the rule: it is
-/// a flag and a slot for one child, written by whoever says stop and read
-/// between directories, and it is what the agent given to this run answers to,
-/// so the pass in flight is killed by the same call that ends the descent.
-///
-/// That ownership is what makes the thread safe to abandon: the loop can return
-/// and the process exit at any moment without waiting for it, because there is
-/// no state the two of them are half way through agreeing on. Each `WARLOCK.md`
-/// is written beside and renamed over (WAR-21.01), so an abandoned worker leaves
-/// whole documents or none, never half of one, and the manifest is written once
-/// at the very end or not at all.
-///
-/// The [`JoinHandle`](std::thread::JoinHandle) is dropped on purpose: joining is
-/// waiting, and this thread is started precisely so that nobody waits for it.
-/// The worker reports on every path it takes itself, so the only way the channel
-/// closes without an outcome is a panic in the worker — which the caller reads
-/// as the run being over ([`Pact::keep_up`]) rather than as a reason to hang.
 pub(crate) fn spawn_pact<P: Wired + Agent>(
     manifest: &Manifest,
     repo_root: &Path,
@@ -751,19 +352,6 @@ pub(crate) fn spawn_pact<P: Wired + Agent>(
     received
 }
 
-/// Everything a press that really starts a run comes to, once the press itself
-/// has decided there is one.
-///
-/// The three things the event loop has to keep about work it is not doing,
-/// gathered where they belong together: the worker and the channel it reports
-/// on ([`spawn_pact`]), the say-when the reader's Esc latches, and the copy of
-/// the app taken before the keystroke painted anything.
-///
-/// One function for both keys, and that is the point of it rather than a saving
-/// of lines: a pact and a refresh are the same run, so they are started by the
-/// same code and the loop holds the same one value for either. The handle is
-/// made here and never reused — a cancel is final, so the run after a cancelled
-/// one has to start with a handle nobody has said stop to.
 fn start_run<P: Wired + Agent>(
     work: Work,
     before: App,
@@ -781,21 +369,6 @@ fn start_run<P: Wired + Agent>(
     }
 }
 
-/// The worker thread's whole body: carry the work out, saying where it has got
-/// to, and report how it went.
-///
-/// Written as a function of its channel rather than inside the closure so that
-/// it can be driven straight from a test — with a fake agent over a scratch
-/// repository, on the test's own thread — and the sequence of events a real run
-/// produces asserted without a terminal, a thread or a `claude`.
-///
-/// Exactly one [`PactEvent::Finished`] is sent, always, and it is the last thing
-/// this function does. A failure is an outcome like any other: the footer's line
-/// about a manifest that would not save travels down the same channel as the
-/// news that everything worked. So is a cancel — a run the reader stopped still
-/// hashes what it wrote, still saves, and still reports, which is what puts the
-/// completed part of the subtree in `.warlock/pacts.toml` instead of losing it.
-/// The one thing a cancel changes is how that outcome reads: see [`cancelled`].
 fn run_pact(
     manifest: &Manifest,
     repo_root: &Path,
@@ -823,22 +396,6 @@ fn run_pact(
     let _ = events.send(PactEvent::Finished(outcome));
 }
 
-/// `toggled` as the outcome of a run the reader stopped.
-///
-/// Two changes, and the manifest is not one of them: what the run recorded is
-/// what it finished, and it is already on disk.
-///
-/// Nothing is granted, whatever the failures say. A cancel usually lands between
-/// directories, where no pass has failed at all, and the subtree is still full of
-/// directories that were never offered one — so the run's own "nothing went
-/// wrong" would otherwise paint a subtree green that is mostly undocumented. The
-/// manifest is the honest account: the parts that finished have grants and draw
-/// green from the next load, the rest do not.
-///
-/// And the line is [`PACT_CANCELLED`] rather than the first thing that went
-/// wrong, because after a cancel there is nothing here that went *wrong* in a
-/// sense the reader can act on — the killed pass and the directories after it are
-/// all the same fact, which is that they pressed Esc.
 fn cancelled(toggled: Toggled) -> Toggled {
     Toggled {
         granted: false,
@@ -847,91 +404,6 @@ fn cancelled(toggled: Toggled) -> Toggled {
     }
 }
 
-/// What one press of the pact key comes to, given whether a pact is running
-/// already.
-///
-/// Two refusals, neither of them silent, and each said in its own place. A press
-/// while a pact is in flight *starts* nothing — no toggle, no colour, no run,
-/// and the panel keeps the account already on it — because the run in flight is
-/// already writing to the tree the second one would write to; what it does do is
-/// say so, by setting the flag that adds `— already running` to the end of the
-/// line the reader is already watching (see
-/// [`App::set_pact_refused`](warlock_tui::App::set_pact_refused) and
-/// [`App::pact_line`](warlock_tui::App::pact_line)). Deliberately not a message:
-/// the message line is the one a pact in flight has taken, so a sentence left
-/// there would be the one sentence the reader could not see, and it would turn
-/// up minutes later when the run ended. A press the app itself turns down — a
-/// file row, or a directory the repository's `.warlockignore` keeps out — has no
-/// run over it and so has its say the ordinary way, in
-/// [`App::message`](warlock_tui::App::message), which `App::toggle_pact` has
-/// already written by the time this returns. Every such refusal comes back from
-/// `App::toggle_pact` as `None` and leaves through the `?` below, so nothing
-/// here starts a run or opens an account for one: there is one place that
-/// decides what a press means, and this is not it.
-///
-/// A function rather than a guard in the match arm so that "a second press
-/// changes nothing" is a property a test can hold the app up against, rather
-/// than something only an event loop with a terminal attached could show.
-///
-/// A press that really does start a run is also where the panel's account
-/// begins, at `at`: one pact, one account, so a new run clears whatever the last
-/// one left rather than appending to it. It happens here rather than in the
-/// event loop so that "the account a press starts is empty" is a property of the
-/// same function, and it happens on this path only — a press the app turned
-/// down, and a press while a run is in flight, leave the last run's account on
-/// screen because neither of them started anything.
-///
-/// An un-pact does not start one either, and that is the one case where the
-/// keystroke does something and the panel does not move. Un-pacting is manifest
-/// arithmetic that is over before the next frame: it runs no pass, reports no
-/// activity and has nothing to account for, so wiping the record of the run that
-/// wrote those documents would be spending the panel on a keystroke with nothing
-/// to say.
-///
-/// # The third refusal, and why it comes before the app is asked
-///
-/// A directory under a scope this machine does not hold turns the press down
-/// through [`closed_scope`], which words it. That check runs *before*
-/// `App::toggle_pact`, and it has to: the toggle is not a question, it paints a
-/// whole subtree and hands back what it painted, so there is no asking it what
-/// the press would mean and then declining. Ordering it first also states the
-/// rule the right way round — whether this operator may act here at all is a
-/// fact about the directory, settled before what the key would have done to it.
-///
-/// Both directions are refused, and the un-pact direction is the one this is
-/// really for. Un-pacting drops the entries, the scope among them, so a fumbled
-/// `p` on somebody else's subtree does not merely undo — it costs a full model
-/// pass to put back and does not bring the boundary back with it. That is the
-/// hazard the sigil is a guard against, and it is why the doc on
-/// [`action_for`](crate::input::action_for) calling `p` "its own undo" holds
-/// pacting-ward and not the other way.
-///
-/// This refusal is only half of that guard, and it is the half that asks about
-/// the row: coverage walks up, so a boundary held by a directory *underneath*
-/// the cursor has never been in its answer. The other half is the fourth
-/// refusal below, and the two together are the rule argued in
-/// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md` — the same
-/// rule `warlock unpact` is refused by, in the same words, so a key press and a
-/// shell prompt over one path cannot come to two answers.
-///
-/// # The fourth refusal, which is the third one aimed downwards
-///
-/// [`closed_scope`] asks whether this operator may act *here*, and coverage
-/// walks up, so it has never looked below the row. An un-pact is the one act
-/// that needs it to: `unpact_subtree` drops every entry underneath as well, and
-/// an entry is the only home a scope has, so a boundary can be lost by standing
-/// above it and pressing `p` on its parent. [`blocked_unpact`] is that second
-/// question, and it turns the press down for the same reason as the third and in
-/// the same place — before the toggle, which paints rather than asks. The
-/// decision is argued in
-/// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
-///
-/// It binds this key un-pacting-ward and nothing else. A pact and a refresh
-/// provably leave every scope where they found it, and `r` at the repository
-/// root is the ordinary gesture — gating it on holding every sigil in a
-/// monorepo would make the feature worst for the teams that adopted it hardest.
-/// So [`closed_scope`] itself is untouched and this check is asked only where
-/// the direction of the press is already known.
 fn pact_press(
     app: &mut App,
     manifest: &Manifest,
@@ -976,41 +448,6 @@ fn pact_press(
     Some(toggle)
 }
 
-/// Whether the press [`pact_press`] is about to make would un-pact a boundary
-/// this machine does not hold, worded onto the message line when it would.
-///
-/// `true` means refused, and the sentence is already on the app by the time this
-/// returns — [`closed_scope`]'s shape, for the same reason: the wording of a
-/// row-level refusal belongs beside the row it is about, and a caller translating
-/// an outcome into a sentence would be a second place deciding what a refused
-/// press means.
-///
-/// # The direction is asked of the app, not worked out again
-///
-/// `p` is one key with two meanings, and which one it has is a fact about the
-/// selected row. [`App::pact_reach`] is the one place that says which — it
-/// takes `&self` and paints nothing, so it can be asked before the press is
-/// allowed to happen — and this asks it rather than reading the row and
-/// deriving the direction a second time. A press that is pacting-ward is
-/// passed through: `p` that way writes documents and leaves every scope exactly
-/// as it found it.
-///
-/// # A file row is not this function's business either
-///
-/// For [`closed_scope`]'s reason: `App::pact_intent` refuses a file on better
-/// grounds — a file is part of a module rather than being one — and that
-/// refusal names the row for what it is, so [`App::pact_reach`] answers `None`
-/// for one and this passes it through. An *ignored* directory is not passed
-/// through, which is deliberate and matches [`closed_scope`]: whether a
-/// boundary would be lost is settled before what the repository's own rules
-/// would have made of the press, so `pact_reach` answers for an excluded row
-/// like any other.
-///
-/// # A path the manifest cannot spell is open
-///
-/// [`closed_scope`]'s answer again, for the third time and for its reasons: a
-/// boundary nobody could have drawn is not one anybody is crossing, and the
-/// press's own answer is the better sentence than a refusal on a technicality.
 fn blocked_unpact(app: &mut App, manifest: &Manifest, repo_root: &Path, sigils: &Sigils) -> bool {
     // Which directory the press reaches and which way it goes, both off one
     // answer: a press that would pact rather than un-pact loses no boundary.
@@ -1044,19 +481,9 @@ fn blocked_unpact(app: &mut App, manifest: &Manifest, repo_root: &Path, sigils: 
     true
 }
 
-/// One press of `p`, for the test in [`mod@crate::edits`] that holds this door
-/// and `warlock unpact` to one answer.
-///
-/// The un-pact rule has two doors, and the only way to show they agree is to
-/// press both over one repository — so the shell's tests need the key handler,
-/// which is private to this module and stays private in every build that is not
-/// a test. A named seam rather than a widened visibility, so production cannot
-/// grow a second caller through the hole a test wanted.
-///
-/// The two arguments filled in are the two a boundary question has no opinion
-/// about: nothing is in flight, because a press refused by a running pact is
-/// refused before either door is asked, and the account's clock is whenever the
-/// press happened.
+// `edits.rs` drives the real `p` rather than a copy of its rules; the two
+// booleans it does not care about are pinned here so a test cannot pin them
+// differently.
 #[cfg(test)]
 pub(crate) fn pressed_p(
     app: &mut App,
@@ -1067,36 +494,6 @@ pub(crate) fn pressed_p(
     pact_press(app, manifest, repo_root, sigils, false, Instant::now())
 }
 
-/// What one press of the refresh key comes to, given whether a run is going
-/// already.
-///
-/// [`pact_press`] for the other key, and deliberately the same two refusals in
-/// the same two places. A press while *any* run is in flight — a pact or
-/// another refresh — starts nothing and says so on the progress line the reader
-/// is already watching, leaving the account that run opened where it is; that
-/// is the one in-flight check both keys go through, so a pact refused during a
-/// refresh and a refresh refused during a pact read alike. A press the app
-/// itself turns down — a file row, a fresh directory, an unpacted one — has no
-/// run over it and has its say the ordinary way, in
-/// [`App::message`](warlock_tui::App::message), which
-/// [`App::refresh`](warlock_tui::App::refresh) has already written by the time
-/// this returns.
-///
-/// What comes back is the directory to refresh: the run covers it and
-/// everything under it, and which of the directories in there are stale enough
-/// to be worth a pass is the engine's judgement rather than this file's.
-///
-/// Every press that starts a run starts the panel's account, at `at`, for
-/// [`pact_press`]'s reason — one run, one account — and there is no second case
-/// here as there is there: a refresh always runs passes when it runs at all, so
-/// there is nothing that changes the manifest without having anything to
-/// account for.
-///
-/// A directory under a scope this machine does not hold is refused here as it is
-/// there, through the same [`closed_scope`], in the same place and the same
-/// words. What a refresh spends is model time inside somebody else's boundary,
-/// on documents that are theirs to have an opinion about, which is the same
-/// crossing a pact makes and is refused on the same grounds.
 fn refresh_press(
     app: &mut App,
     manifest: &Manifest,
@@ -1114,69 +511,13 @@ fn refresh_press(
     if closed_scope(app, manifest, repo_root, sigils).is_some() {
         return None;
     }
+    // No downward question here, unlike `pact_press`: a refresh never drops a
+    // pact, so there is no boundary below the row for it to lose.
     let directory = app.refresh()?;
     app.start_account(at);
     Some(directory)
 }
 
-/// Apply everything the worker has said since the last frame, and take the pact
-/// down once it has said how it went.
-///
-/// Drained rather than received: the worker is not waiting for this thread, so
-/// several directories can go by between two frames, and only the last of them
-/// is worth drawing. The loop ends the moment there is nothing left to read,
-/// which is the ordinary case — a pass is seconds, a frame is a tenth of one.
-///
-/// The outcome is applied exactly as the blocking version applied it, because it
-/// is the same value computed by the same function: a granted subtree goes
-/// green, a partial one keeps the yellow the keystroke painted and puts a line
-/// on the footer, and a run that recorded nothing puts the app back as it was.
-/// The progress line goes in every case — it describes work happening now, and
-/// there is none.
-///
-/// A channel that closes without an outcome is a worker that panicked. It is
-/// treated as the pact having ended, because it has: the panic hook has already
-/// restored the terminal and printed what happened, this loop is still drawing,
-/// and the alternative — waiting for a message from a thread that no longer
-/// exists — would hang warlock on the one path where it can least afford to.
-///
-/// However the run ended, the panel's account is then closed off
-/// ([`close_account`]): every section gets the ending belonging to its own
-/// directory and the run gets its one summary line. Outside the arms rather than
-/// inside them, because an account that is never closed is a finished run whose
-/// newest line goes on counting up for as long as warlock is open.
-///
-/// Everything that lands here lands on the account card and nowhere else. A pact
-/// or a refresh started while the thread or a document was on screen fills its
-/// own card behind them ([`App::start_account`], [`Panel::write_run`](warlock_tui::Panel::write_run)) and changes
-/// neither which card is showing nor a line of what is on it: the run is where
-/// the reader left it when they swap to it, and what they were reading is what
-/// they go on reading.
-///
-/// The tree is then re-read from disk and the view put
-/// back on top of it ([`reload_tree`]). One reload, at the bottom, for all four
-/// endings and for an un-pact as much as for a pact: a run writes `WARLOCK.md`
-/// files that no amount of recolouring rows in place can conjure into the tree,
-/// and the only honest source for what is now on disk is disk. It runs *after*
-/// each arm has done its own work — after the manifest is saved and after the
-/// two restoring arms have put `running.before` back — so what the reload reads
-/// lands on top of the arm's result rather than under it, and a reload that
-/// fails leaves that result standing.
-///
-/// What comes back is a [`Reloaded`] on the round a run ended, holding the tree
-/// that reload read — or holding `None` where the load itself failed, which
-/// keeps the tree already drawn. Every other round comes back `None`, meaning
-/// the run is still going or there was never one. That is the whole of what the
-/// caller needs to keep the watcher's filter on the tree now on screen, since
-/// this is one of the two places the tree is ever re-read. See
-/// [`Watched::caught_up`].
-///
-/// `now` is the caller's clock, and this function reads none of its own: every
-/// event drained here is filed under it, so a run is drivable from a base
-/// instant in a test exactly as the account below it is. All the events of one
-/// frame share it, which is the truth to a tenth of a second — the loop is the
-/// only thing that hears the worker, so an event's arrival is when the loop got
-/// round to it.
 fn drain(
     run: &mut Option<Running>,
     app: &mut App,
@@ -1393,48 +734,8 @@ fn drain(
     Some(Reloaded(reload_tree(app, scope)))
 }
 
-/// The file each pacted directory's document is written to, as the engine writes
-/// it (WAR-21.01): beside the directory, and renamed over.
-///
-/// Spelled out here because the engine's observer port says only which directory
-/// is starting — nothing on the way back names the document — so the one thing
-/// the panel can do is look for it where it is always written. Reading it is a
-/// `stat` on the event loop's own thread, which is a filesystem call this file
-/// already makes several of.
 const DOCUMENT_FILE: &str = "WARLOCK.md";
 
-/// Close every section of the panel's account and end it with the run's summary.
-///
-/// Where the panel stops describing work and starts describing what came of it,
-/// and it happens here, once, when the run's outcome lands — because that is
-/// when the run says how each directory went. The engine's failures name their
-/// own directories, so each section is closed with the reason belonging to *its*
-/// directory rather than with the one line the footer took.
-///
-/// A section no failure mentions wrote a document, and the two things worth
-/// saying about that document — what it is and how big it is — are read off disk
-/// here, on this thread, at `<directory>/WARLOCK.md`. There is nowhere else to
-/// read them from: the port the run reports over says only which directory is
-/// starting.
-///
-/// `cancelled` closes the section the run was stopped in before anything else is
-/// worded, so it says the reader stopped it rather than that its pass failed —
-/// which is what a killed `claude` otherwise comes back as. The sections above
-/// it are worded exactly as they would have been, because they finished.
-///
-/// The endings go to the run through the one call every other event goes through
-/// ([`Panel::write_run`](warlock_tui::Panel::write_run)), on all four endings — the run that wrote its documents,
-/// the one whose engine call failed, the one whose worker was lost, and the one
-/// the reader stopped — because all four leave a run that is over, and an
-/// account left open would go on ticking under whatever happens next.
-///
-/// Each section's ending is worded once, here, and `section_outcome` `stat`s the
-/// document it reports the size of: one look at disk per section, so the byte
-/// count on the card is the file as it was when the run ended.
-///
-/// Writes nothing where there is no run to write to, which is a run nobody
-/// started through the pact key: a test driving the events straight down the
-/// channel.
 fn close_account(
     app: &mut App,
     scope: &Scope,
@@ -1454,22 +755,6 @@ fn close_account(
     });
 }
 
-/// How the section for one directory ends: the document it wrote, or the reason
-/// it has none.
-///
-/// The refusal is looked for by name, and the name it is looked for under is the
-/// one [`section_label`] gave the heading — the same function on both sides, so a
-/// failure and a section agree about which directory they are about by
-/// construction rather than by two spellings happening to match.
-///
-/// Failing that, the document is `stat`ed where the engine writes it. It is named
-/// relative to the tree on screen, like the heading above it, because a panel
-/// column is narrow and the absolute prefix is the part the reader already knows.
-///
-/// A directory with neither a failure nor a document is the odd case, and it is
-/// said rather than smoothed over: a run whose worker died half way through a
-/// pass leaves exactly this, and `wrote … — 0 bytes` would be a claim about a
-/// file that is not there.
 fn section_outcome(
     section: &Section,
     refusals: &[Refusal],
@@ -1514,33 +799,11 @@ fn section_outcome(
     }
 }
 
-/// Put the view back to `before` and say `message`, keeping the account of the
-/// run that is ending.
-///
-/// The copy taken when the key was pressed is the tree as it stood before the
-/// toggle painted it, and that is all it is good for: it was taken before the
-/// run started, so it has none of what the run then did. The account does not go
-/// back with the rows, because it is not a claim about the tree — it is the
-/// record of a run that really happened, and a reader whose pact died half way
-/// through wants to see where it got to more than a reader of any other run
-/// does. So the rows, the colours and the selection go back to what the manifest
-/// on disk still says, and the panel keeps its account.
 fn restore(app: &mut App, before: App, message: impl Into<String>) {
     app.restore_from(before);
     app.set_message(message);
 }
 
-/// How the panel names `directory`: relative to `root`, which is the root of the
-/// tree on screen.
-///
-/// The same spelling the footer's progress line uses, for the same reason. A
-/// heading that begins with the part of the path every row on screen shares
-/// spends a narrow panel on what the reader already knows, and the truncation
-/// that follows then eats the part they do not — the panel cuts a long line at
-/// its right-hand end. A directory that cannot be spelled relative to the root —
-/// including the root itself, whose relative spelling is `"."` — is named as it
-/// stands, because a heading that says something odd beats one that says
-/// nothing.
 fn section_label(root: &Path, directory: &Path) -> String {
     match to_manifest_path(root, directory) {
         Ok(relative) if relative != "." => relative,
@@ -1548,46 +811,17 @@ fn section_label(root: &Path, directory: &Path) -> String {
     }
 }
 
-/// What one press of the pact key came to, once the manifest it produced is on
-/// disk.
 #[derive(Debug)]
 pub(crate) struct Toggled {
-    /// The manifest as it now stands in `.warlock/pacts.toml`, to keep as the
-    /// one the *next* keystroke edits.
     manifest: Manifest,
-    /// Whether every directory in the subtree came out documented, hashed and
-    /// granted — the only case in which the subtree on screen is fresh rather
-    /// than merely pacted. Always `false` for an un-pact, which grants nothing.
     granted: bool,
-    /// One line about what went wrong on the way, or `None` when nothing did.
-    /// Never a reason to throw the manifest away: everything it can say is
-    /// about part of a subtree, and the rest of it earned what it got.
     message: Option<String>,
-    /// The directories that came back with no document, and why, one entry per
-    /// directory.
-    ///
-    /// The same failures `message` says one of, kept apart from it because they
-    /// are read at two different widths: the footer is one line about the run
-    /// and the panel is a section per directory, and a section can only say why
-    /// *its* pass was refused if the reason arrives attached to a directory.
-    /// A run where nothing was refused carries none.
     refusals: Vec<Refusal>,
 }
 
-/// Why one directory's pass produced no document.
-///
-/// A [`pact::Failure`] flattened to the two things the panel needs: which
-/// directory it is about, which the engine's failures already name, and the
-/// sentence the failure worded itself as. Flattened at the point the failures
-/// are in hand rather than carried whole, so that what travels back to the event
-/// loop is a plain pair of a path and a line — and so that the panel's wording
-/// is the engine's own rather than a second opinion about what went wrong.
 #[derive(Debug)]
 struct Refusal {
-    /// The directory that got no document, as the engine named it: absolute,
-    /// and spelled relative to the tree on screen by whoever draws it.
     directory: PathBuf,
-    /// The failure's own sentence, on one line.
     reason: String,
 }
 
@@ -1603,41 +837,6 @@ impl From<&pact::Failure> for Refusal {
     }
 }
 
-/// Carry `work` out — pact the subtree, refresh its stale parts, or take it out
-/// of the manifest — and write the result to disk.
-///
-/// Every half is the engine's ([`pact_subtree`](warlock_engine::pact_subtree), [`refresh_subtree`](warlock_engine::refresh_subtree),
-/// [`unpact_subtree`](warlock_engine::unpact_subtree)); what this function owns is the order the front end needs
-/// them in and the single [`Manifest::save`] at the end of it. Once, at the end,
-/// is the whole point: a save per directory would leave `.warlock/pacts.toml`
-/// recording a pact that was still running, and one that died half way through
-/// would be indexed as finished. A refresh saves nothing of its own for exactly
-/// that reason, and so belongs under the same one write as everything else here.
-///
-/// This is the one place the two runs part company, and they part in a single
-/// `match` arm: [`refresh_subtree`](warlock_engine::refresh_subtree) takes [`pact_subtree`](warlock_engine::pact_subtree)'s arguments and hands
-/// back [`pact_subtree`](warlock_engine::pact_subtree)'s [`PactedSubtree`], so what the front end makes of it
-/// is the same in both cases — see [`described`].
-///
-/// The agent is passed in as the engine's port rather than reached for here, so
-/// that the tests of this file drive it with a fake and never run `claude`.
-/// `observer` is the engine's other port and is passed in for the same reason:
-/// this runs on a worker thread and says where it has got to over a channel
-/// ([`Reporting`]), and a test says it over a `Vec`.
-///
-/// Called from the worker thread and from nowhere else, which is why it can take
-/// as long as it takes. Nothing about it is thread-aware: it is the same
-/// sequence of engine calls it always was, and the thread is
-/// [`spawn_pact`]'s idea.
-///
-/// # Errors
-///
-/// A line for the footer, not an error type: the only two things that stop this
-/// getting as far as a saved manifest are a subtree that cannot be walked and a
-/// manifest that cannot be written, and the single thing the caller does with
-/// either is show it. Anything richer would be a vocabulary invented for one
-/// `match` arm that puts a string on the screen. Both cases leave the previous
-/// `.warlock/pacts.toml` exactly as it was.
 fn apply_toggle(
     manifest: &Manifest,
     repo_root: &Path,
@@ -1671,12 +870,6 @@ fn apply_toggle(
     })
 }
 
-/// What a run that described directories came to, whichever run described them.
-///
-/// The half a pact and a refresh share, which is all of it below the engine
-/// call: the two entry points hand back the same [`PactedSubtree`], and reading
-/// one is the same job twice over. The manifest inside is the one the caller is
-/// about to save.
 fn described(subtree: PactedSubtree) -> Toggled {
     let PactedSubtree {
         manifest,
@@ -1700,17 +893,6 @@ fn described(subtree: PactedSubtree) -> Toggled {
     }
 }
 
-/// The footer's one line about a pact that did not go perfectly, or `None` for
-/// one that did.
-///
-/// A pact is N directories and each of them can go wrong on its own, so this is
-/// the same shape as [`Error::from_problems`] and for the same reason: one
-/// failure quoted in full, because it is the one worth acting on, and a count
-/// of everything else, because a line per directory would push the useful one
-/// off a footer that is one line tall. Failures come first — a directory with
-/// no document is worse news than a file left out of a request that worked —
-/// and the count covers both piles, which is why it does not claim the rest are
-/// "like it".
 fn pact_message(failures: &[pact::Failure], problems: &[fitting::Problem]) -> Option<String> {
     let (first, rest) = match (failures.split_first(), problems.split_first()) {
         (Some((first, others)), _) => (first.to_string(), others.len() + problems.len()),
@@ -1725,23 +907,8 @@ fn pact_message(failures: &[pact::Failure], problems: &[fitting::Problem]) -> Op
     })
 }
 
-/// What one press of the pact key actually does: the manifest that ends up
-/// on disk, how many times it is written, what the footer is told, whether
-/// the subtree comes out fresh, and what the worker thread says on its way
-/// through all of that.
-///
-/// Every test here drives the real engine operations over a repository of
-/// its own under the temporary directory, with a hand-written fake in place
-/// of the model. No `claude`, no network, no terminal, no mocking
-/// framework — the agent seam is what makes that possible, and this is what
-/// it was for. The worker's body is driven directly, on the test's own
-/// thread, so what is asserted is the sequence of events a real run sends
-/// rather than the timing of one.
 #[cfg(test)]
 mod tests {
-    /// A root no test touches on disk: every path below is made relative to it
-    /// by string surgery, so the tests using it need no repository, no
-    /// temporary directory and no filesystem at all.
     const ROOT: &str = "/repo";
 
     use std::cell::RefCell;
@@ -1769,15 +936,6 @@ mod tests {
     use crate::chatting::Chat;
     use crate::session::{NOT_REFRESHED, Scope};
 
-    /// [`super::pact_press`] with no boundary in the way.
-    ///
-    /// An empty manifest scopes nothing, so
-    /// [`closed_scope`](crate::session::closed_scope) answers `None` and the
-    /// press behaves exactly as it did before boundaries existed — which is what
-    /// every test below this line is about. The tests that *are* about the
-    /// boundary build a scoped manifest and call `super::pact_press` directly, so
-    /// this shadow makes the ordinary case short rather than hiding the new
-    /// argument from the suite.
     fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PactToggle> {
         super::pact_press(
             app,
@@ -1789,7 +947,6 @@ mod tests {
         )
     }
 
-    /// [`super::refresh_press`] with no boundary in the way. See [`pact_press`].
     fn refresh_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PathBuf> {
         super::refresh_press(
             app,
@@ -1801,41 +958,17 @@ mod tests {
         )
     }
 
-    /// The file every pacted directory is documented in, as the engine
-    /// writes it. Spelled out here so a test can go and look for it.
     const DOCUMENT_FILE: &str = "WARLOCK.md";
 
-    /// A model pass that never happens: it answers with the same markdown
-    /// every time, turns down whatever it was told to turn down, and notes
-    /// what the manifest looked like when each request arrived.
     struct Canned {
-        /// The repository root, so a request can be recorded by its
-        /// directory's relative path and the manifest can be looked for.
         root: PathBuf,
-        /// Directories, relative to the root, whose pass comes back with an
-        /// answer too short for the engine to accept.
         refused: Vec<&'static str>,
-        /// The directory whose pass the reader presses Esc during, and the
-        /// handle they press it with, or `None` for a run nobody stops.
         cancel_at: Option<(&'static str, Cancel)>,
-        /// Where each pass says what it is doing. A handle nobody listens
-        /// to unless a test attached one, exactly as a real
-        /// [`ClaudeAgent`]'s is.
         activities: Activities,
-        /// One entry per request in call order: the request itself, exactly
-        /// as the engine built it, and whether `.warlock/pacts.toml` existed
-        /// at that moment.
-        ///
-        /// The whole request rather than the directory it names, because
-        /// what a run asks a model for is the thing one of the tests below
-        /// holds two runs up against — see
-        /// [`Canned::requests`].
         seen: RefCell<Vec<(agent::Request, bool)>>,
     }
 
     impl Canned {
-        /// A fake over `scratch` that refuses the directories in `refused`
-        /// and answers everything else.
         fn new(scratch: &Scratch, refused: impl IntoIterator<Item = &'static str>) -> Self {
             Self {
                 root: scratch.root.clone(),
@@ -1846,33 +979,16 @@ mod tests {
             }
         }
 
-        /// The same fake, saying what each pass is doing to `activities`.
-        ///
-        /// What it says is canned, like everything else here, and it is the
-        /// three kinds of thing a real pass reports: a tool call with a
-        /// detail, a stretch of thinking, and what the pass cost. The detail
-        /// is the directory being worked, so a test can tell one pass's
-        /// activities from the next one's.
         fn reporting(mut self, activities: Activities) -> Self {
             self.activities = activities;
             self
         }
 
-        /// The same fake, with somebody pressing Esc while `directory` is
-        /// being worked.
-        ///
-        /// The pass still answers, which is the ordinary way a cancel lands:
-        /// the reader's key beats the engine to the *next* directory rather
-        /// than to this one's answer. The pass that is killed under a real
-        /// cancel comes back as a failure instead, and a failure is what
-        /// `refused` already produces — see the test that uses both.
         fn cancelling_at(mut self, directory: &'static str, cancel: Cancel) -> Self {
             self.cancel_at = Some((directory, cancel));
             self
         }
 
-        /// The directories a pass ran for, in call order, relative to the
-        /// root.
         fn directories(&self) -> Vec<PathBuf> {
             self.seen
                 .borrow()
@@ -1881,11 +997,6 @@ mod tests {
                 .collect()
         }
 
-        /// Every request a pass was handed, whole and in call order.
-        ///
-        /// What the engine decided to send: the prompt, the files with their
-        /// bytes, the children's documents, in the engine's own order. Two
-        /// runs over the same directory are the same run when these are equal.
         fn requests(&self) -> Vec<agent::Request> {
             self.seen
                 .borrow()
@@ -1894,8 +1005,6 @@ mod tests {
                 .collect()
         }
 
-        /// `directory` named from the root, so a test can say
-        /// `crates/engine` rather than a temporary directory's whole path.
         fn relative(&self, directory: &Path) -> PathBuf {
             directory
                 .strip_prefix(&self.root)
@@ -1903,7 +1012,6 @@ mod tests {
                 .to_path_buf()
         }
 
-        /// Whether a manifest was on disk while the passes were running.
         fn saw_a_manifest(&self) -> bool {
             self.seen.borrow().iter().any(|(_, saved)| *saved)
         }
@@ -1942,26 +1050,15 @@ mod tests {
         }
     }
 
-    /// The manifest as it sits on disk under `root`, or `None` when there
-    /// is none.
     fn saved(root: &Path) -> Option<Manifest> {
         Manifest::load(root).ok()
     }
 
-    /// A repository of this test's own under the temporary directory,
-    /// removed when the test that made it ends.
-    ///
-    /// Hand-rolled the way `claude.rs`'s tests do it: this crate's manifest
-    /// gains nothing for a `mkdir` and an `rm -r`.
     struct Scratch {
-        /// The root every path below is built from, and the root the
-        /// manifest is saved under.
         root: PathBuf,
     }
 
     impl Scratch {
-        /// An empty repository, named after the test using it so a leftover
-        /// says where it came from.
         fn new(name: &str) -> Self {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -1972,8 +1069,6 @@ mod tests {
             Self { root }
         }
 
-        /// Write `contents` at `relative`, creating every directory above
-        /// it.
         fn write(&self, relative: &str, contents: &str) {
             let path = self.root.join(relative);
             fs::create_dir_all(path.parent().expect("a file has a parent"))
@@ -1981,22 +1076,17 @@ mod tests {
             fs::write(&path, contents).expect("writes a file");
         }
 
-        /// The path at `relative`, as the app would name it.
         fn path(&self, relative: &str) -> PathBuf {
             self.root.join(relative)
         }
     }
 
     impl Drop for Scratch {
-        /// Best effort: a leftover under the temporary directory is untidy,
-        /// not a test failure.
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
     }
 
-    /// The work a press of the pact key over the directory at `relative` hands
-    /// to a worker.
     fn toggle(scratch: &Scratch, relative: &str, pacted: bool) -> Work {
         Work::Pact(PactToggle {
             path: scratch.path(relative),
@@ -2004,15 +1094,10 @@ mod tests {
         })
     }
 
-    /// The work a press of the refresh key over the directory at `relative`
-    /// hands to a worker: the same run, over whichever directories under it the
-    /// engine finds stale.
     fn refreshing(scratch: &Scratch, relative: &str) -> Work {
         Work::Refresh(scratch.path(relative))
     }
 
-    /// The same for a pact of the subtree at `path`, for the tests that build a
-    /// [`Running`] straight rather than through a scratch repository.
     fn pact_of(path: impl Into<PathBuf>) -> Work {
         Work::Pact(PactToggle {
             path: path.into(),
@@ -2020,29 +1105,22 @@ mod tests {
         })
     }
 
-    /// A repository with one crate of two directories in it.
     fn one_crate(name: &str) -> Scratch {
         let scratch = Scratch::new(name);
         scratch.write("crates/engine/src/lib.rs", "//! Core engine.\n");
         scratch
     }
 
-    /// The same repository, with the `.git/` that makes the loader agree it
-    /// is one.
-    ///
-    /// [`one_crate`] is enough for the engine operations, which are given a
-    /// root; a *load* walks up looking for `.git/` and refuses without one.
-    /// The file inside it is neither read nor walked — hidden directories
-    /// are skipped, `.git/` among them — and is written only because
-    /// [`Scratch`] makes directories by writing files into them.
+    // A load walks up looking for `.git/` and refuses without one, so the file
+    // below is what makes `load` work at all. It is never read or walked —
+    // hidden directories are skipped — and exists only because `Scratch` makes
+    // directories by writing files into them.
     fn one_crate_to_load(name: &str) -> Scratch {
         let scratch = one_crate(name);
         scratch.write(".git/HEAD", "ref: refs/heads/main\n");
         scratch
     }
 
-    /// The app and the [`Scope`] the event loop would hold for `scratch`,
-    /// built the way `load_app` builds them.
     fn load(scratch: &Scratch) -> (App, Scope) {
         let Loaded { tree, .. } =
             load_tree(&scratch.root).expect("a scratch repository with a `.git/` loads");
@@ -2057,19 +1135,10 @@ mod tests {
         (app, scope)
     }
 
-    /// `base` plus `seconds`, so a run's whole timeline is one instant and
-    /// some arithmetic rather than a sleep.
     fn at(base: Instant, seconds: u64) -> Instant {
         base + Duration::from_secs(seconds)
     }
 
-    /// What the panel would draw for `app` at `now`, as plain strings: a
-    /// heading is its path, a clocked line is its clock and its text, and
-    /// the summary is its own line.
-    ///
-    /// The whole account rather than the window onto it, because what these
-    /// tests are about is what the run put into the panel and not how much
-    /// of it fits.
     fn panel_text(app: &App, now: Instant) -> Vec<String> {
         as_text(
             &app.panel()
@@ -2079,9 +1148,6 @@ mod tests {
         )
     }
 
-    /// The same reading of `lines`, whichever card they came off: what the
-    /// panel draws is one list of [`Line`]s and one way of putting it into
-    /// words, and the two callers differ only in where they got the list.
     fn as_text(lines: &[Line]) -> Vec<String> {
         lines
             .iter()
@@ -2099,22 +1165,12 @@ mod tests {
             .collect()
     }
 
-    /// The window the reader is actually looking at, as plain strings: whichever
-    /// of the panel's two cards is showing, cut to the panel's height.
-    ///
-    /// [`panel_text`] answers what the run wrote; this answers what is on
-    /// screen, which is the whole question of the tests below. The panel these
-    /// tests give the app is [`WHOLE_PANEL`] lines tall, so the two agree
-    /// exactly whenever the account is the card showing.
     fn shown(app: &App, now: Instant) -> Vec<String> {
         as_text(&app.panel().window(now))
     }
 
-    /// A scope for a tree that is not on disk anywhere.
-    ///
-    /// What the tests built around synthetic paths hand to
-    /// [`Pact::keep_up`]: a load from here fails, which is the case where
-    /// the tree already on screen is kept.
+    // Paths that are on no disk, so the reload at the foot of a run fails —
+    // which is the case where the tree already on screen is kept.
     fn nowhere() -> Scope {
         Scope {
             root: PathBuf::from("/repo/crates"),
@@ -2123,8 +1179,6 @@ mod tests {
         }
     }
 
-    /// The state the app is showing for the node at `path`, or `None` when
-    /// no row stands for it.
     fn state_of(app: &App, path: &Path) -> Option<NodeState> {
         app.rows()
             .iter()
@@ -2132,7 +1186,6 @@ mod tests {
             .map(|row| row.state)
     }
 
-    /// Every document row on screen, as paths relative to `scratch`.
     fn documents(app: &App, scratch: &Scratch) -> Vec<PathBuf> {
         app.rows()
             .iter()
@@ -2150,12 +1203,6 @@ mod tests {
             .collect()
     }
 
-    /// Run the worker's body for `toggle` over `scratch` on this thread, and
-    /// let the event loop take everything it said off the channel.
-    ///
-    /// The two halves of a real run, joined by the real channel and with
-    /// nothing faked but the model: [`run_pact`] is what the worker thread
-    /// runs, and [`Pact::keep_up`] is what the frame after it does.
     fn run_and_apply(
         scratch: &Scratch,
         app: &mut App,
@@ -2456,10 +1503,6 @@ mod tests {
         );
     }
 
-    /// The one failure that needs a directory nobody can write to, and
-    /// making one is Unix-only: `chmod` has no portable stand-in, and the
-    /// alternative — a second binary, or a dependency — costs more than the
-    /// coverage.
     #[cfg(unix)]
     #[test]
     fn a_manifest_that_cannot_be_saved_leaves_the_previous_one_alone() {
@@ -2507,16 +1550,6 @@ mod tests {
         );
     }
 
-    /// Everything the worker had to say about a run of `toggle` over
-    /// `scratch` with `agent`, answering to `cancel`, in the order the event
-    /// loop would have drained it.
-    ///
-    /// The worker's body runs here, on the test's own thread, and its end of
-    /// the channel is dropped before anything is read: what comes back is
-    /// the whole sequence a real run sends, with none of the timing of one.
-    /// The handle stands in for the one the event loop keeps: a fresh one
-    /// nobody touches is a run nobody stops, and a fake that latches it
-    /// half way through is somebody pressing Esc.
     fn events_of(
         scratch: &Scratch,
         work: &Work,
@@ -2526,11 +1559,6 @@ mod tests {
         events_from(scratch, &Manifest::new(), work, agent, cancel)
     }
 
-    /// The same, starting from `manifest` rather than from nothing.
-    ///
-    /// What a refresh needs and a first pact does not: which directories are
-    /// stale is decided against the manifest the run is handed, so a refresh
-    /// over an empty one would find everything stale and prove nothing.
     fn events_from(
         scratch: &Scratch,
         manifest: &Manifest,
@@ -2540,12 +1568,15 @@ mod tests {
     ) -> Vec<PactEvent> {
         let (events, received) = mpsc::channel();
         run_pact(manifest, &scratch.root, work, agent, cancel, &events);
+        // The worker's body runs on this thread, so the sender has to be
+        // dropped before anything is read or the iterator below never ends.
+        // The handle stands in for the one the event loop keeps: a fresh one
+        // nobody touches is a run nobody stops, and a fake that latches it part
+        // way through is somebody pressing Esc.
         drop(events);
         received.into_iter().collect()
     }
 
-    /// What each directory a run announced said it was: its position and the
-    /// total the observer reported alongside it.
     fn fractions(events: &[PactEvent]) -> Vec<(usize, usize)> {
         events
             .iter()
@@ -2563,8 +1594,6 @@ mod tests {
             .collect()
     }
 
-    /// The directories a run announced, in the order it announced them,
-    /// spelled relative to `scratch`'s root.
     fn announced(events: &[PactEvent], scratch: &Scratch) -> Vec<PathBuf> {
         events
             .iter()
@@ -2585,7 +1614,6 @@ mod tests {
             .collect()
     }
 
-    /// The one outcome a run ends with.
     fn outcome_of(events: &[PactEvent]) -> &Result<Toggled, String> {
         match events.last() {
             Some(PactEvent::Finished(outcome)) => outcome,
@@ -2593,8 +1621,6 @@ mod tests {
         }
     }
 
-    /// A repository with two crates in it, so a cancel can land with one
-    /// subtree finished and the other not.
     fn two_crates(name: &str) -> Scratch {
         let scratch = Scratch::new(name);
         scratch.write("crates/alpha/src/lib.rs", "//! Alpha.\n");
@@ -2602,14 +1628,6 @@ mod tests {
         scratch
     }
 
-    /// Pact the subtree at `relative` for real, and hand back the manifest it
-    /// earned.
-    ///
-    /// Where every refresh test starts, because a refresh is only a question
-    /// about a subtree that was pacted once: the grants this leaves are what
-    /// staleness is later decided against, and the documents it writes are what
-    /// a skipped directory keeps. Saved to disk as a real pact saves it, so the
-    /// refresh that follows runs against the repository a reader would have.
     fn pacted(scratch: &Scratch, relative: &str) -> Manifest {
         let Toggled {
             manifest, granted, ..
@@ -2787,13 +1805,10 @@ mod tests {
         );
     }
 
-    /// A `claude` that prints one tool use and then a result line carrying
-    /// `document`, and exits.
-    ///
-    /// Quoting is single quotes around JSON that contains none, as in
-    /// `claude.rs`'s stand-ins, and `printf '%s\n' a b` is one process and
-    /// no loop, so every line arrives whole.
     #[cfg(unix)]
+    // Single quotes around JSON that contains none, as in `claude.rs`'s
+    // stand-ins, and `printf '%s\n' a b` is one process and no loop, so every
+    // line arrives whole.
     fn stand_in(document: &str) -> String {
         let tool = concat!(
             r#"{"type":"assistant","message":{"role":"assistant","content":"#,
@@ -3077,8 +2092,6 @@ mod tests {
         assert_eq!(app, refused, "the press did more than say so");
     }
 
-    /// A manifest scoping `<ROOT>/crates` to `data-plane`, granted the way a
-    /// pact grants one.
     fn scoped() -> Manifest {
         Manifest::with_entries([PactEntry::new(
             ROOT,
@@ -3089,17 +2102,9 @@ mod tests {
         .with_scope("data-plane")])
     }
 
-    /// What the footer says when the boundary turns a key down over that
-    /// directory.
-    ///
-    /// Named absolutely, because the directory the boundary refuses is the root
-    /// row of this fixture's tree: [`App::label_for`] spells a path relative to
-    /// that root and prints the root itself as it stands, rather than as the
-    /// `"."` it would otherwise come to.
     const CLOSED: &str =
         "/repo/crates is scoped `data-plane` — hold that sigil to work here, with `warlock config`";
 
-    /// An app over one directory in `state`, with the root row selected.
     fn app_over(state: NodeState) -> App {
         App::from_tree(&Tree::new(Node::new(
             format!("{ROOT}/crates"),
@@ -3167,13 +2172,6 @@ mod tests {
         }
     }
 
-    /// A manifest scoping only a directory *below* the row this fixture selects:
-    /// `<ROOT>/crates` carries no scope at all, and `<ROOT>/crates/engine`
-    /// carries `data-plane`.
-    ///
-    /// The shape the whole descendant rule is about — coverage walks up, so the
-    /// selected row's own boundary opens to everybody, and an un-pact of it
-    /// takes the entry below with it and the scope written on that entry.
     fn scoped_below() -> Manifest {
         let entry = |module: &str| {
             PactEntry::new(
@@ -3189,7 +2187,6 @@ mod tests {
         ])
     }
 
-    /// What the footer says when the un-pact would take that boundary with it.
     const CLOSED_BELOW: &str = "un-pacting /repo/crates would drop pacts scoped `data-plane` — \
                                 hold that sigil with `warlock config`, or un-pact the parts you \
                                 hold";
@@ -4146,16 +3143,6 @@ mod tests {
         );
     }
 
-    /// Everything the event loop holds one moment after the pact key
-    /// started a run over `/repo/crates` at `base`: the app with the account
-    /// that press opened, the copy of it taken before the toggle painted,
-    /// the manifest on disk, the end of the channel a worker would talk
-    /// down, and the run itself.
-    ///
-    /// The copy comes back because the footer's wording is asserted against
-    /// it: what the progress line says during a run is what it has always
-    /// said, and the way to show that is to say it on an app this slice
-    /// never touched.
     fn a_run_in_flight(base: Instant) -> (App, App, Manifest, mpsc::Sender<PactEvent>, Running) {
         let tree = Tree::new(Node::new(
             "/repo/crates",
@@ -4176,21 +3163,6 @@ mod tests {
         (app, before, Manifest::new(), events, running)
     }
 
-    /// The edge, on its own: a run says it ended on exactly one round.
-    ///
-    /// The property [`Reloaded`] exists for, asserted directly rather than
-    /// through what a caller does with it. Before the value existed the event
-    /// loop worked this out by reading `is_some()` either side of the drain and
-    /// comparing the two answers, which is a detector kept by hand over a fact
-    /// this module already had — and a detector nothing could test without
-    /// standing up the loop around it.
-    ///
-    /// Three rounds, and the middle one is the whole of it: a round with the
-    /// run still talking, the round its outcome lands on, and a round after it
-    /// is over. Only the middle round comes back with anything, and the round
-    /// *after* the end is what would catch a value that latched — a watcher
-    /// told twice would re-follow a tree it is already following and hold its
-    /// next reload back for a quiet period nobody is owed.
     #[test]
     fn a_run_says_it_ended_on_one_round_and_no_other() {
         let base = Instant::now();
@@ -4553,14 +3525,6 @@ mod tests {
         }
     }
 
-    /// A subtree whose middle directory has a listing, for the tests about the
-    /// document row a run writes into the tree as it goes.
-    ///
-    /// The listing is what makes the position assertable: `WARLOCK.md` sorts
-    /// between `Cargo.toml` and `build.rs` — paths compare component by
-    /// component, and a capital sorts before a lowercase — so a row spliced in
-    /// where a fresh load would put it lands *between* the two rather than at
-    /// either end of the run.
     fn one_directory_with_files(state: NodeState) -> Tree {
         Tree::new(
             Node::new("/repo/crates", None::<PathBuf>, state).with_children([
@@ -4578,8 +3542,6 @@ mod tests {
         )
     }
 
-    /// A run of `work` over `app` that nobody has said anything to yet, and the
-    /// end of the channel a test sends its events down.
     fn running_over(app: &App, work: Work) -> (Sender<PactEvent>, Pact<ClaudeAgent>) {
         let (events, received) = mpsc::channel();
         let running = Running {
@@ -4592,7 +3554,6 @@ mod tests {
         (events, Pact::with_run(running))
     }
 
-    /// Every row the app is drawing, as a path and the state it is drawn in.
     fn drawn(app: &App) -> Vec<(PathBuf, NodeState)> {
         app.rows()
             .iter()
@@ -4924,20 +3885,8 @@ mod tests {
         );
     }
 
-    /// How long a frame lasts in the replayed runs below, in seconds.
-    ///
-    /// Ten rather than one so the clocks read as something a reader of the
-    /// test can check by counting frames, and so a section's lines are told
-    /// apart by their clocks rather than all reading `0:00`.
     const FRAME: u64 = 10;
 
-    /// Everything one whole run has to say, from the worker's own body run
-    /// on this thread over `scratch`.
-    ///
-    /// The announcements, whatever the passes report, and the outcome, in
-    /// the order a real run produces them: `agent` is handed the very sender
-    /// the run reports on, so the port it puts on its fake is the one
-    /// [`spawn_pact`] would put on a real agent, over the one channel.
     fn recorded(
         scratch: &Scratch,
         relative: &str,
@@ -4953,8 +3902,6 @@ mod tests {
         )
     }
 
-    /// The same, for a run that starts from a manifest rather than from
-    /// nothing: what a refresh needs, since staleness is decided against it.
     fn recorded_from(
         scratch: &Scratch,
         manifest: &Manifest,
@@ -4972,15 +3919,6 @@ mod tests {
         received.into_iter().collect()
     }
 
-    /// Play `said` back at the event loop a frame at a time, ten seconds a
-    /// frame, and leave the app holding what the run put in the panel.
-    ///
-    /// One event per frame because a run collected in a millisecond and
-    /// drained in a single call would be one instant with every clock
-    /// reading `0:00`, and what each section's clock says is half of what
-    /// the panel is for. The other half is the outcome under each section,
-    /// which lands in the last frame of all — the one carrying
-    /// [`PactEvent::Finished`].
     fn replay(
         app: &mut App,
         manifest: &mut Manifest,
@@ -5000,12 +3938,6 @@ mod tests {
         );
     }
 
-    /// The same, for a run that is not a pact of the whole tree, keeping what
-    /// the footer's progress line said as it went.
-    ///
-    /// The line comes back with consecutive repeats dropped, because it is
-    /// re-worded every frame and says the same thing until the next directory
-    /// starts: what a test of it is about is what the reader saw change.
     fn replay_work(
         app: &mut App,
         manifest: &mut Manifest,
@@ -5038,8 +3970,6 @@ mod tests {
         progress
     }
 
-    /// How big the document under `relative` is, read the way the panel
-    /// reads it: off disk, where the engine wrote it.
     fn document_bytes(scratch: &Scratch, relative: &str) -> u64 {
         fs::metadata(scratch.path(relative).join(DOCUMENT_FILE))
             .expect("the pass wrote a document")
@@ -5309,43 +4239,17 @@ mod tests {
         assert_eq!(app.message(), Some(PACT_CANCELLED));
     }
 
-    /// A panel tall enough to draw the whole of either card in the tests below,
-    /// so what is on screen is what the card holds and no assertion here is
-    /// really about a window.
     const WHOLE_PANEL: u16 = 40;
 
-    /// The lines of a small file, as whoever pressed the view key would hand
-    /// them over: text and nothing else, since nothing about a file that has
-    /// been read is clocked.
     fn document_lines() -> Vec<String> {
         (0..4).map(|line| format!("line {line}")).collect()
     }
 
-    /// Put a file somebody read on the panel of `app`, with room to draw the
-    /// whole of either card.
-    ///
-    /// The state every test below drives a run from: the reader is reading, and
-    /// the run reports into the card behind what they are reading. Some of them
-    /// read before the pact starts and some during it, since the reader's card
-    /// is theirs either way round.
     fn reading_a_file(app: &mut App) {
         app.panel_mut().set_height(WHOLE_PANEL);
         app.show_document(document_lines(), false);
     }
 
-    /// Assert that the run that has just ended left the reader's document on
-    /// screen and the account of that run on the card behind it. What the
-    /// account says, for the caller to go on and assert on.
-    ///
-    /// The whole of "a run never changes which card is showing", written once
-    /// because four different endings are held to it: a run that finished, one
-    /// the reader stopped, one a pass failed in, and one whose end put the view
-    /// back. Every one of them fills the account and none of them may take the
-    /// slot.
-    ///
-    /// Swaps round the cycle, which is how the card behind is reached at all,
-    /// and leaves `app` showing the document again — so an assertion after this
-    /// one is about the same screen as the assertions inside it.
     fn document_survived(app: &mut App, now: Instant) -> Vec<String> {
         assert_eq!(
             shown(app, now),
@@ -5580,21 +4484,9 @@ mod tests {
         }
     }
 
-    /// What the conversation the runs below happen during asked, and what came
-    /// back.
-    ///
-    /// Prose, because that is what a chat turn holds and what an account never
-    /// does: a pact says what it did and never what it thinks.
     const QUESTION: &str = "what does the engine do?";
     const ANSWER: &str = "It walks the tree and writes what it finds.";
 
-    /// Put one whole answered turn on `app`'s thread, with room to draw the
-    /// whole of any card.
-    ///
-    /// The state the runs below start from: somebody has asked something, the
-    /// conversation is the card on screen because asking brought it there, and
-    /// the run they then start has to arrive inside it rather than in place of
-    /// it.
     fn a_conversation(app: &mut App, base: Instant) {
         app.panel_mut().set_height(WHOLE_PANEL);
         app.panel_mut().start_turn(QUESTION, base);
@@ -5612,20 +4504,6 @@ mod tests {
         );
     }
 
-    /// Assert that the run that has just ended left the conversation exactly as
-    /// it was, and give back what the run's own card says for the caller to go
-    /// on and assert on.
-    ///
-    /// The whole of "a run happens beside a conversation and never inside it",
-    /// written once because four endings are held to it: a run that finished,
-    /// one the reader stopped, one whose outcome recorded nothing, and one whose
-    /// worker was lost. Every one of them fills the account card and only that,
-    /// and none of them may take the card the reader was on, add a row to the
-    /// conversation, or mute the field under it.
-    ///
-    /// Swaps twice, which is how the account card is reached at all, and leaves
-    /// `app` showing the conversation again — so an assertion after this one is
-    /// about the same screen as the assertions inside it.
     fn conversation_untouched(app: &mut App, now: Instant) -> Vec<String> {
         assert!(
             app.panel().showing_thread(),
@@ -5952,13 +4830,6 @@ mod tests {
         }
     }
 
-    /// A run under way during a conversation, over a tree that is not on disk:
-    /// the app, the copy taken when the key was pressed, the manifest, the
-    /// worker's end of the channel and the run itself.
-    ///
-    /// [`a_run_in_flight`] with a question asked first: the conversation exists
-    /// before the account starts, which is the case where a run could reach it
-    /// and must not.
     fn a_run_in_flight_during_a_conversation(
         base: Instant,
     ) -> (App, App, Manifest, mpsc::Sender<PactEvent>, Running) {
@@ -6046,15 +4917,6 @@ mod tests {
         }
     }
 
-    /// Every request one whole run over `scratch` handed a model, in call
-    /// order, with `talked_first` deciding whether somebody asked something
-    /// before pressing the key.
-    ///
-    /// The real chain from the keystroke down: [`pact_press`] on the row the
-    /// app has selected decides the [`Work`], [`run_pact`] is the worker's own
-    /// body over that work, and the fake agent in the middle writes down what
-    /// the engine asked it for. Nothing about the run is short-circuited, so a
-    /// conversation that reached the engine would reach it here.
     fn requests_of_a_run(scratch: &Scratch, talked_first: bool) -> Vec<agent::Request> {
         let (mut app, scope) = load(scratch);
         let mut manifest = Manifest::new();
@@ -6082,14 +4944,6 @@ mod tests {
         agent.requests()
     }
 
-    /// Put `scratch` back the way the first run found it: the documents that
-    /// run wrote taken away, and warlock's record of them with them.
-    ///
-    /// So that the two runs compared below happen over one directory rather
-    /// than over two that merely look alike. A request names the directory it
-    /// is for by its whole path and carries the children's documents as they
-    /// sit on disk, so a second scratch repository would differ in every
-    /// request before a conversation could make any difference at all.
     fn undo_the_run(scratch: &Scratch) {
         fs::remove_dir_all(scratch.root.join(".warlock")).expect("the run saved a manifest");
         remove_documents(&scratch.root);
@@ -6099,7 +4953,6 @@ mod tests {
         );
     }
 
-    /// Remove every `WARLOCK.md` at or under `directory`.
     fn remove_documents(directory: &Path) {
         for entry in fs::read_dir(directory).expect("a directory the run walked") {
             let path = entry
@@ -6166,12 +5019,6 @@ mod tests {
         }
     }
 
-    /// A repository of eight crates, sixteen directories under the one they
-    /// sit in.
-    ///
-    /// Big enough for a refresh to be visibly a run over part of it: the
-    /// fraction the reader is shown has to be able to disagree with the size
-    /// of the subtree for the test of it to say anything.
     fn eight_crates(name: &str) -> Scratch {
         let scratch = Scratch::new(name);
         for crate_name in CRATES {
@@ -6184,9 +5031,6 @@ mod tests {
         scratch
     }
 
-    /// The crates [`eight_crates`] writes, named so that reverse path order —
-    /// which is the order the engine descends in — is `c8` first and `c1`
-    /// last.
     const CRATES: [&str; 8] = ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"];
 
     #[test]
@@ -6710,9 +5554,6 @@ mod tests {
         );
     }
 
-    /// Only on unix, because the only way to make a load report problems
-    /// rather than fail outright is a file the process may not read, and
-    /// `chmod` is how that is arranged.
     #[cfg(unix)]
     #[test]
     fn a_reload_with_problems_takes_the_new_tree_and_counts_them() {
@@ -6793,19 +5634,6 @@ mod tests {
         );
     }
 
-    /// What the loop does when the disk moves under it: the reload a
-    /// watcher earns, the one it holds back while a pact is running, and
-    /// the one line it says when there is no watcher at all.
-    ///
-    /// No real watcher in any of these, and nothing waits on one. Which
-    /// paths are Warlock's business and when a burst has settled are
-    /// `watch.rs`'s two questions, answered there against instants nobody
-    /// had to live through; what is left for here is the loop's own half —
-    /// that a reload really happens, that it leaves the reader where they
-    /// were, and that a run in flight defers it. So the policy is told an
-    /// event was accepted rather than being handed one by an operating
-    /// system, and [`Watching::Off`] stands in for the half that talks to
-    /// one.
     mod watching {
         use std::time::{Duration, Instant};
 
@@ -6820,13 +5648,6 @@ mod tests {
         use crate::POLL_INTERVAL;
         use crate::session::{NOT_WATCHING, Watched, note, start_watching};
 
-        /// A [`Watched`] with no watcher behind it, filtering against the
-        /// tree that is on disk at `scope`.
-        ///
-        /// [`Watching::Off`] rather than a real watcher, so nothing here
-        /// turns on an operating system deciding when to mention a write:
-        /// what a drain would have handed the policy is handed to it
-        /// directly instead, which is the same call the drain makes.
         fn unwatched(scope: &Scope) -> Watched {
             let Loaded { tree, .. } =
                 load_tree(&scope.root).expect("a scratch repository with a `.git/` loads");
@@ -6931,9 +5752,6 @@ mod tests {
             // one during the run and another after it — and none at all
             // over a tree the run is still writing into.
 
-            /// How many quiet periods of rounds the run is given: enough
-            /// that the last of them is past the ceiling as well, so what
-            /// they prove is that neither deadline fires under a run.
             const ROUNDS: u32 = 12;
 
             let scratch = one_crate_to_load("watch-in-flight");
