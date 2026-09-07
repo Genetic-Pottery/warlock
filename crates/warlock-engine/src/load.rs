@@ -1,88 +1,3 @@
-//! Building a [`Tree`] from a real directory.
-//!
-//! Section 5 of the design doc makes the tree of module documents the
-//! interface, and section 12's modular invocation rule says the scope of a run
-//! is wherever it was invoked — there is no privileged root. Both fall out of
-//! one function, [`load_tree`]: the tree it returns is rooted at the working
-//! directory it was given, while the single manifest that colours the nodes is
-//! read from the repository root found by walking *up* from there — the
-//! nearest ancestor holding a `.git/` directory, whose manifest, if it has one
-//! at all, is at `<root>/.warlock/pacts.toml`.
-//!
-//! What makes a node:
-//!
-//! * Every directory the walk reaches is a node, the directory it starts at
-//!   included. Nothing is pruned for being undocumented.
-//! * A directory that directly contains a `WARLOCK.md` is a module node, and
-//!   carries it as [`Node::document`]. Nothing here reads that file — Warlock
-//!   cares only that one exists.
-//! * A directory with no document of its own is a node with `document: None`:
-//!   an ordinary directory that has no documentation yet. Showing fewer nodes
-//!   than the walk found is a view's business, not the loader's. A `README.md`
-//!   makes no difference to any of this: it is the project's file, not
-//!   Warlock's, so it documents no node and is listed like any other file.
-//! * The files sitting directly in a directory come back on that node as
-//!   [`Node::files`], in path order, gathered as the same single pass meets
-//!   them — including the directory's own `WARLOCK.md`. They are a listing and
-//!   nothing else: a file is not a node, has no state of its own, and is no
-//!   input to any hash.
-//!
-//! What the walk skips is not a list kept in this file: traversal is the
-//! [`ignore`] crate, so `.gitignore` at every level, hidden files and
-//! directories (`.git/` among them) and global excludes are all honoured as git
-//! honours them — and files inherit every one of those rules by coming out of
-//! the same walk, so an ignored file is as absent from a node's listing as an
-//! ignored directory is from the tree. `.warlock/` is pruned unconditionally on
-//! top of that, symlinks are never followed and never listed, and both
-//! directories and files come out in name order so two loads of an unchanged
-//! tree are equal values.
-//!
-//! # Why `.warlockignore` prunes nothing here
-//!
-//! The repository's own `.warlockignore` is the one rule this walk deliberately
-//! does not obey. Everywhere else it removes content — nothing it covers is
-//! pacted, requested or hashed — but removing it from *this* walk would delete
-//! the directory from the screen, and a reader who cannot see the folder of
-//! images cannot see that Warlock is right not to cover it. Silence would look
-//! like a bug. So every excluded directory keeps its row, keeps its files, and
-//! loads [`NodeState::Unpacted`] like any other directory nobody pacted; it is
-//! simply marked [`Node::ignored`], which says *why* it is gray and lets a
-//! front end refuse to pact it without asking the filesystem. No state, no
-//! colour and no shade is added.
-//!
-//! The mark is made of the same matcher rather than a second one: the walk
-//! above runs again over the same root with `.warlockignore` registered, and a
-//! directory the first pass found and the second did not is exactly a directory
-//! the rules exclude. The root the load was handed is asked about separately,
-//! because a walker does not apply the rules to its own root.
-//!
-//! State is not presence in the manifest: presence only decides whether the
-//! question is worth asking. A node the manifest names is hashed over its own
-//! subtree with [`subtree_hash`], and its colour is [`decide_state`]'s verdict
-//! on that pair — so a granted hash somebody wrote by hand, still matching what
-//! is on disk, comes back [`NodeState::PactedFresh`]. A node with no entry is
-//! [`NodeState::Unpacted`] and is never hashed at all: unmanaged directories
-//! cost a load nothing.
-//!
-//! Hashing can fail — a file that cannot be read is deliberately fatal to a
-//! digest rather than skipped, see [`hash`] — and one such file is
-//! one node's problem, not the tree's. So a node whose hash failed is coloured
-//! [`NodeState::PactedStale`] (its content is unknown, and unknown is stale),
-//! the failure is recorded in [`Loaded::problems`] with the node it happened at,
-//! and the walk carries on colouring everything else correctly. No error text
-//! and no partial read ever reaches a hash: the failed digest is simply not
-//! there.
-//!
-//! A node's scope arrives the same way its state does: read off the entry the
-//! manifest holds for that directory, and put on [`Node::scope`] as its own —
-//! never an ancestor's, which is [`scope_covering`](crate::scope_covering)'s
-//! question and not a node's. A scope [`validate_scope`] refuses is the other
-//! non-fatal thing a load can report: the node keeps its state, its document,
-//! its files and its children, reads as unscoped, and the string is named in a
-//! [`Problem`] along with the rule it broke. Nothing is corrected — a scope
-//! gates nothing, and taking a whole tree gray over one typo in a label would
-//! cost far more than the label is worth.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt;
@@ -95,34 +10,12 @@ use crate::{
     to_manifest_path, validate_scope,
 };
 
-/// The directory whose presence marks a repository root. Git's own, read as a
-/// name on disk and nothing more.
 const GIT_DIR: &str = ".git";
 
-/// The directory Warlock keeps its manifest in, and which is itself never part
-/// of the tree.
 const MANIFEST_DIR: &str = ".warlock";
 
-/// The file whose presence in a directory makes that directory a module node:
-/// Warlock's own document, and the one place in the workspace where its name
-/// is spelled. No other name is special — a `README.md` belongs to the project
-/// and is an ordinary file here.
 const DOCUMENT_FILE: &str = "WARLOCK.md";
 
-/// Build the tree rooted at `working_dir`, coloured by the manifest above it.
-///
-/// The returned tree's [`root_path`](Tree::root_path) is `working_dir` itself,
-/// made absolute; the manifest is loaded from `.warlock/pacts.toml` under the
-/// nearest ancestor holding a `.git/` directory (see [`repository_root`]). A
-/// repository that has no manifest yet, or an empty one, loads with every node
-/// [`NodeState::Unpacted`]; a manifest that exists but cannot be understood is
-/// an error rather than a silent empty one.
-///
-/// Alongside the tree comes a list of [`Problem`]s: everything that went wrong
-/// without stopping the load. It is empty on a healthy repository, and a caller
-/// that ignores it gets a tree where each affected node is stale — which is
-/// safe, just unexplained.
-///
 /// ```
 /// use std::fs;
 /// use warlock_engine::{Loaded, NodeState, load_tree};
@@ -154,17 +47,6 @@ const DOCUMENT_FILE: &str = "WARLOCK.md";
 /// assert!(problems.is_empty());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-///
-/// # Errors
-///
-/// The fatal cases, and only these: a load that could not be trusted at all,
-/// as against a node that could not be coloured (which is a [`Problem`]).
-///
-/// * [`Error::NoRepositoryRoot`] if neither `working_dir` nor any of its
-///   ancestors contains a `.git/` directory.
-/// * [`Error::Io`] if `working_dir` cannot be made absolute.
-/// * [`Error::Manifest`] if a manifest is there but cannot be read or parsed.
-/// * [`Error::Walk`] if the directory tree cannot be walked.
 pub fn load_tree(working_dir: impl AsRef<Path>) -> Result<Loaded, Error> {
     let working_dir = absolute(working_dir.as_ref())?;
     let repo_root = repository_root(&working_dir).ok_or_else(|| Error::NoRepositoryRoot {
@@ -192,67 +74,24 @@ pub fn load_tree(working_dir: impl AsRef<Path>) -> Result<Loaded, Error> {
     })
 }
 
-/// What a load produced: the coloured tree, and everything that went wrong on
-/// the way without being bad enough to stop it.
-///
-/// A plain pair rather than a `Tree` with problems hung off it, because they
-/// are answers to different questions and have different lifetimes: the tree is
-/// the thing to render, the problems are the thing to report once. [`Node`]
-/// gains no field for this — a node that could not be hashed is stale like any
-/// other stale node, and a renderer needs to know nothing more.
 #[derive(Debug)]
 pub struct Loaded {
-    /// The tree, every node coloured.
     pub tree: Tree,
-    /// Everything non-fatal that went wrong, in the order the walk met it:
-    /// children before their parents, siblings in name order. Empty is the
-    /// normal case.
     pub problems: Vec<Problem>,
 }
 
-/// One thing that went wrong during a load without stopping it.
-///
-/// Two ways to get here, both of them a fact about one node that the load went
-/// on around: a pacted node whose subtree could not be hashed, and a directory
-/// whose manifest entry carries a string that is not a scope. Silence is the
-/// thing being avoided in both cases — an unreadable file that simply dropped
-/// out of a digest would hash exactly like a deleted one and could hand back a
-/// green nobody earned, and a scope quietly ignored would leave somebody
-/// believing they had written a boundary they had not.
 #[derive(Debug)]
 pub struct Problem {
-    /// The node the problem happened at: the directory whose subtree hash was
-    /// wanted, or the directory whose entry holds the bad scope. What exactly
-    /// went wrong — the offending file, which is usually somewhere below it, or
-    /// the rule the scope broke — is in `cause`.
     pub path: PathBuf,
-    /// What went wrong there.
     pub cause: ProblemCause,
 }
 
-/// Why a node is in [`Loaded::problems`].
-///
-/// An enum rather than a bare [`hash::Error`], because the two things a load can
-/// have to report about a node are not the same kind of failure: one is a
-/// digest that could not be taken, the other a label that is not one. Each
-/// keeps its own wording, and neither is dressed up as the other.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ProblemCause {
-    /// The node's subtree could not be hashed, so it is coloured
-    /// [`NodeState::PactedStale`]: content that cannot be read is content that
-    /// cannot be vouched for.
     Hash(hash::Error),
-    /// The node's manifest entry carries a string that is not a scope. The node
-    /// keeps its state, its document, its files and its children, and reads as
-    /// unscoped — [`Node::scope`] is `None` — for as long as the string is
-    /// invalid. Nothing is corrected: the bytes stay in the manifest exactly as
-    /// they were written, because rewriting somebody's committed line on the
-    /// next save would put a change in a diff nobody authored.
     Scope {
-        /// The string as the manifest holds it, unfolded and untrimmed.
         scope: String,
-        /// The one rule it broke.
         rule: scope::Rule,
     },
 }
@@ -285,50 +124,21 @@ impl std::error::Error for Problem {
     }
 }
 
-/// The nearest ancestor of `start` — `start` itself included — that contains a
-/// `.git/` directory, or `None` if there is no such directory anywhere above
-/// it.
-///
-/// This is the repository root in Warlock's sense: the one place a manifest
-/// lives, at `<root>/.warlock/pacts.toml`. The anchor is `.git/` and not that
-/// manifest, because a repository nobody has pacted yet is the normal way to
-/// meet Warlock — it opens as a tree of unpacted modules, and the manifest
-/// appears under the same root the first time something is pacted.
-///
-/// A filesystem check and nothing more: `.git` counts when it is a directory,
-/// so a checkout where it is a *file* (a worktree, a submodule) is not a root
-/// here.
-///
-/// `start` is used as given; [`load_tree`] makes its working directory absolute
-/// before calling this, which is what a relative path needs for the walk
-/// upwards to reach anything.
+// The anchor is `.git/` rather than `.warlock/`, because a repository nobody has
+// pacted yet is the normal way to meet warlock: it opens as a tree of unpacted
+// modules and the manifest appears under this root the first time something is
+// pacted.
 #[must_use]
 pub fn repository_root(start: impl AsRef<Path>) -> Option<PathBuf> {
     start
         .as_ref()
         .ancestors()
+        // `is_dir`, so a checkout where `.git` is a *file* — a worktree, a
+        // submodule — is deliberately not a root here.
         .find(|dir| dir.join(GIT_DIR).is_dir())
         .map(Path::to_path_buf)
 }
 
-/// Every directory at or below `root` that survives the ignore rules, each
-/// mapped to what the walk found in it: whether it holds a `WARLOCK.md`, and
-/// the files sitting directly inside it.
-///
-/// One pass over the filesystem answers both questions. The walker yields
-/// directories and files interleaved, so a file is filed under its parent as it
-/// arrives — which means no second walk, no [`read_dir`](std::fs::read_dir), and
-/// files that obey the ignore rules because they came through them.
-///
-/// A [`BTreeMap`] rather than a `Vec` because [`Path`] orders by component:
-/// iterating it yields parents before children and siblings in name order,
-/// which is the whole of this loader's determinism. The files under each key are
-/// sorted before the map is handed back, for the same reason: the order the
-/// filesystem offers them in is nobody's guarantee.
-///
-/// `.warlockignore` removes nothing from what this yields; it only decides
-/// which of the directories are marked excluded. See the module docs for why
-/// the one walk in the crate that keeps that content is this one.
 fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
     let mut directories: BTreeMap<PathBuf, Directory> = BTreeMap::new();
     for entry in builder(root).build() {
@@ -345,9 +155,10 @@ fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
             // it here would drop the listing.
             directories.entry(path).or_default().has_document = has_document;
         } else if file_type.is_some_and(|kind| kind.is_file()) {
-            // Anything that is neither a directory nor a regular file — a
-            // symlink above all, which this walk declines to follow — is
-            // neither descended into nor listed.
+            // Regular files only, so a symlink is neither descended into nor
+            // listed. Widening this to "not a directory" would put links back in
+            // the listing that `follow_links(false)` above keeps out of the
+            // tree.
             if let Some(parent) = path.parent().map(Path::to_path_buf) {
                 directories.entry(parent).or_default().files.push(path);
             }
@@ -360,50 +171,43 @@ fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
     Ok(directories)
 }
 
-/// The walk this module makes, in the one place it is configured.
-///
-/// Shared so that the pass which finds the directories and the pass which
-/// decides which of them the repository excluded differ in exactly one setting
-/// — the custom ignore filename — and cannot drift into differing in another.
+// One builder for both passes so that the pass which finds the directories and
+// the pass which decides which of them are excluded differ in exactly one
+// setting — the custom ignore filename — and cannot drift into differing in
+// another.
 fn builder(root: &Path) -> WalkBuilder {
     let mut builder = WalkBuilder::new(root);
     builder
-        // A symlinked directory is walked as a symlink, i.e. not descended
-        // into, so a cycle of them terminates instead of recursing.
+        // Not merely the crate's default: a symlinked directory walked as a
+        // symlink is never descended into, which is what makes a cycle of them
+        // terminate.
         .follow_links(false)
-        // Fixtures and freshly-unpacked source trees have a `.gitignore` and
-        // no `.git`; honouring the file either way is what keeps the skip list
-        // out of this crate.
+        // Fixtures and freshly-unpacked source trees have a `.gitignore` and no
+        // `.git`; honouring the file either way is what keeps a skip list out
+        // of this crate.
         .require_git(false)
-        // `.warlock/` is Warlock's own bookkeeping, never a module of the
-        // project. Pruned by name so it stays out even if it holds a document
-        // and even if hidden directories are ever let back in.
+        // By name rather than by relying on the hidden-file rule, so `.warlock/`
+        // stays out even if it holds a document and even if hidden directories
+        // are ever let back in.
         .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR));
     builder
 }
 
-/// Mark every directory in `directories` the repository's `.warlockignore`
-/// excludes, removing none of them.
-///
-/// The same walk again, with `.warlockignore` registered on top: whatever it
-/// yields is what the rules keep, so a directory the first pass found and this
-/// one did not is excluded — and so is everything below it, which falls out for
-/// free because the walker never descends into it. One matcher used twice, not
-/// a second matcher: this file still keeps no skip list.
-///
-/// `root` is asked about on its own first, because a walker applies no rule to
-/// the root it is handed — a load rooted inside excluded content would
-/// otherwise mark nothing at all. When it is excluded, so is everything under
-/// it: gitignore semantics do not let a rule re-include content below an
-/// excluded directory.
-///
-/// A `.warlockignore` that cannot be *used* is not silently read as "no rules"
-/// where the answer is a verdict — [`subtree_hash`] and the pact walks fail
-/// loudly, and a failed hash still reaches the caller as a [`Problem`] against
-/// the node it happened at. Here the walker's own soft errors are left where
-/// the pass above leaves them, since this mark is a hint for the front end and
-/// not the thing that keeps excluded content out of a pact.
+// `.warlockignore` marks directories here and prunes none of them, which is the
+// one place in the crate where those rules do not remove content. Registering
+// the file on the walk above — the obvious simplification — was rejected: it
+// would take the excluded directory off the screen, and a reader who cannot see
+// the folder of images cannot see that warlock is right not to cover it.
+// Silence would look like a bug.
+//
+// The mark comes from running the same walk again with the file registered,
+// rather than from a second matcher, so this file still keeps no skip list of
+// its own: a directory the first pass found and this one did not is excluded.
 fn mark_excluded(root: &Path, directories: &mut BTreeMap<PathBuf, Directory>) -> Result<(), Error> {
+    // A walker applies no rule to the root it is handed, so a load rooted
+    // inside excluded content would otherwise mark nothing at all. Everything
+    // under it goes with it: gitignore semantics do not let a rule re-include
+    // content below an excluded directory.
     if ignores::is_ignored(root).map_err(|source| Error::Walk { source })? {
         for directory in directories.values_mut() {
             directory.ignored = true;
@@ -427,47 +231,21 @@ fn mark_excluded(root: &Path, directories: &mut BTreeMap<PathBuf, Directory>) ->
     Ok(())
 }
 
-/// What one pass of the walk learned about a single directory.
-///
-/// Widened from the bare `bool` it used to be so that files could ride along
-/// with the directory that holds them: the map is keyed by directory either
-/// way, which is what lets [`Builder::children_of`] treat every key as one.
 #[derive(Debug, Default)]
 struct Directory {
-    /// Whether the directory directly contains a `WARLOCK.md`.
     has_document: bool,
-    /// The files directly inside it, in path order, its `WARLOCK.md` among
-    /// them. See [`Node::files`] for what a listing is and is not.
     files: Vec<PathBuf>,
-    /// Whether the repository's `.warlockignore` excludes it. Filled in by
-    /// [`mark_excluded`] after the walk, and carried onto [`Node::ignored`].
     ignored: bool,
 }
 
-/// The directories a walk found, plus everything needed to turn one into a
-/// [`Node`].
 #[derive(Debug)]
 struct Builder {
-    /// What the walk found in each directory, in path order.
     directories: BTreeMap<PathBuf, Directory>,
-    /// The manifest's own directory, which its paths are relative to.
     repo_root: PathBuf,
-    /// The manifest, or an empty one where the repository has none.
     manifest: Manifest,
 }
 
 impl Builder {
-    /// The node for `dir`, with every directory below it hanging off it.
-    ///
-    /// Nothing is dropped: a directory the walk reached is a node whether or
-    /// not it is documented, so the tree is the shape of the working directory
-    /// and not an opinion about which parts of it are interesting. A view that
-    /// wants only the documented ones filters what it renders. The files the
-    /// walk met in `dir` are copied onto the node as a listing; they make no
-    /// difference to its children, its state or its document.
-    ///
-    /// Anything that went wrong colouring a node, without being worth failing
-    /// the load over, is pushed onto `problems`.
     fn node(&self, dir: &Path, problems: &mut Vec<Problem>) -> Node {
         let children: Vec<Node> = self
             .children_of(dir)
@@ -481,8 +259,6 @@ impl Builder {
         let files = found
             .map(|directory| directory.files.clone())
             .unwrap_or_default();
-        // A mark and nothing else: the node keeps its row, its files and its
-        // colour, and only gains the reason it can never be pacted.
         let ignored = found.is_some_and(|directory| directory.ignored);
 
         let state = self.state_of(dir, problems);
@@ -495,7 +271,6 @@ impl Builder {
             .with_scope(scope)
     }
 
-    /// The directories directly inside `dir`, in name order.
     fn children_of<'a>(&'a self, dir: &'a Path) -> impl Iterator<Item = &'a Path> {
         // Every walked directory sorts after its own parent and before that
         // parent's next sibling, so the descendants of `dir` are one contiguous
@@ -508,21 +283,14 @@ impl Builder {
             .filter(move |path| path.parent() == Some(dir))
     }
 
-    /// The colour of `dir`: what the manifest granted it, against what it
-    /// hashes to now.
-    ///
-    /// The manifest is consulted first and the hash is only computed when there
-    /// is an entry to compare it against. That ordering is the whole of the
-    /// "hash only pacted subtrees" rule: an unpacted node is [`Unpacted`]
-    /// whatever is under it, so reading those bytes would buy nothing.
-    ///
-    /// A path with no manifest form — one that is not valid UTF-8, say — can
-    /// match no entry, so it is unpacted rather than an error: an oddly named
-    /// directory somewhere in the tree should not fail the whole load, and it
-    /// is not a problem to report either, because nobody pacted it.
-    ///
-    /// [`Unpacted`]: NodeState::Unpacted
+    // The manifest is consulted before anything is hashed, and that ordering is
+    // the whole of the "hash only pacted subtrees" rule: an unpacted node is
+    // unpacted whatever is under it, so reading those bytes would buy nothing.
     fn state_of(&self, dir: &Path, problems: &mut Vec<Problem>) -> NodeState {
+        // A path with no manifest form — not valid UTF-8, say — can match no
+        // entry, so it is unpacted rather than an error: an oddly named
+        // directory should not fail the load, and it is nobody's problem to
+        // report because nobody pacted it.
         let Ok(key) = to_manifest_path(&self.repo_root, dir) else {
             return NodeState::Unpacted;
         };
@@ -536,9 +304,11 @@ impl Builder {
         match subtree_hash(dir) {
             Ok(hash) => decide_state(Some(entry), &hash),
             Err(cause) => {
-                // No hash at all is the point: nothing partial and no error
-                // text goes anywhere near `decide_state`, so this cannot be
-                // mistaken for a comparison that happened and failed to match.
+                // Stale, and no digest of any kind reaches `decide_state`:
+                // hashing the error text or the bytes that were read would give
+                // a comparison that looks like it happened, and one that could
+                // match. Content that cannot be read cannot be vouched for, and
+                // one such file is one node's problem rather than the tree's.
                 problems.push(Problem {
                     path: dir.to_path_buf(),
                     cause: ProblemCause::Hash(cause),
@@ -548,29 +318,21 @@ impl Builder {
         }
     }
 
-    /// The scope written on `dir`'s own manifest entry, or `None` where there
-    /// is no entry, no scope on it, or no scope worth the name.
-    ///
-    /// `dir`'s own and never an ancestor's: a node says which boundary starts
-    /// at it, and [`scope_covering`](crate::scope_covering) answers the other
-    /// question by walking up. A directory nobody pacted therefore has no scope
-    /// here whatever sits above it, which is the same invariant seen from the
-    /// tree: no pact, no scope.
-    ///
-    /// A string the validator refuses is reported as a [`Problem`] and left out
-    /// of the node. Not fatal, not corrected and not silently kept: the load
-    /// finishes, the node keeps its state, document, files and children, the
-    /// manifest keeps the bytes somebody wrote, and the directory reads as
-    /// unscoped for as long as they are not a scope.
+    // `dir`'s own scope and never an ancestor's: a node says which boundary
+    // starts at it, and `scope_covering` answers the other question by walking
+    // up. So a directory nobody pacted has no scope here whatever sits above it.
     fn scope_of(&self, dir: &Path, problems: &mut Vec<Problem>) -> Option<String> {
-        // As in `state_of`: a path with no manifest form matches no entry, so
-        // it carries no scope and is nobody's problem.
         let key = to_manifest_path(&self.repo_root, dir).ok()?;
         let stored = self.manifest.entry(&key)?.scope()?;
 
         match validate_scope(stored) {
             Ok(()) => Some(stored.to_owned()),
             Err(rule) => {
+                // Reported, not corrected and not fatal. Rewriting the string
+                // into something valid was rejected: those bytes are committed,
+                // so the next save would put a line in a diff nobody authored.
+                // Failing the load was too, since a scope gates nothing on its
+                // own and one typo would take a whole tree gray.
                 problems.push(Problem {
                     path: dir.to_path_buf(),
                     cause: ProblemCause::Scope {
@@ -584,14 +346,10 @@ impl Builder {
     }
 }
 
-/// `path` as an absolute path, with `.` and `..` components resolved away.
-///
-/// Absolute because the walk upwards for a repository root has to be able to
-/// leave the working directory, and normalised because `ancestors` would
-/// otherwise hand back paths ending in `..`. This is lexical: unlike
-/// [`fs::canonicalize`](std::fs::canonicalize) it touches no filesystem and
-/// resolves no symlink, so the tree comes back rooted at the path the caller
-/// actually named.
+// Lexical, and `fs::canonicalize` was rejected: it resolves symlinks, so the
+// tree would come back rooted somewhere other than the path the caller named.
+// Normalising is still needed because `ancestors` would otherwise hand the
+// repository-root search paths ending in `..`.
 fn absolute(path: &Path) -> Result<PathBuf, Error> {
     let absolute = std::path::absolute(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
@@ -611,37 +369,20 @@ fn absolute(path: &Path) -> Result<PathBuf, Error> {
     Ok(normalised)
 }
 
-/// Everything that can stop a directory becoming a [`Tree`].
-///
-/// Hand-rolled for the same reason as [`manifest::Error`]: four variants do not
-/// pay for an error-handling dependency, and these are the sentences a front
-/// end shows a user.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Neither the working directory nor any ancestor holds a `.git/`
-    /// directory, so there is no repository to load and nowhere a manifest
-    /// could live.
     NoRepositoryRoot {
-        /// The working directory the search started from.
         start: PathBuf,
     },
-    /// The working directory could not be resolved to an absolute path.
     Io {
-        /// The path that could not be resolved.
         path: PathBuf,
-        /// What the filesystem said.
         source: std::io::Error,
     },
-    /// A manifest is there but could not be read or understood. A *missing*
-    /// manifest is not an error: it loads as an empty one.
     Manifest {
-        /// What reading the manifest said.
         source: manifest::Error,
     },
-    /// The directory tree could not be walked.
     Walk {
-        /// What the walker said, including which path it was on.
         source: ignore::Error,
     },
 }
@@ -685,13 +426,6 @@ mod tests {
         validate_scope,
     };
 
-    /// A repository with a `.git/` directory — what makes it a repository — and
-    /// a `.warlock/` one beside it, `dirs` created under them, and a
-    /// `WARLOCK.md` written into each of `documents`.
-    ///
-    /// `.warlock/` is not needed to find the root any more, but it is where the
-    /// manifest goes and it is pruned from the walk, so the fixture keeps
-    /// making one: every test below sees the same tree shape either way.
     fn fixture(dirs: &[&str], documents: &[&str]) -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("a temporary directory");
         fs::create_dir_all(repo.path().join(".git")).expect("creates .git");
@@ -707,14 +441,6 @@ mod tests {
         repo
     }
 
-    /// A repository nobody has pacted: a `.git/` directory, no `.warlock/`
-    /// anywhere, and a `WARLOCK.md` in each of `documents`.
-    ///
-    /// Separate from [`fixture`] rather than a weakening of it, because the two
-    /// answer different questions. Most tests want a repository with somewhere
-    /// to put a manifest; the cold-open tests below want the state a repository
-    /// is in the very first time Warlock is pointed at it, which is precisely
-    /// the absence [`fixture`] fills in.
     fn git_only_fixture(documents: &[&str]) -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("a temporary directory");
         fs::create_dir_all(repo.path().join(".git")).expect("creates .git");
@@ -730,20 +456,12 @@ mod tests {
         repo
     }
 
-    /// The tree for `dir`, insisting the load found nothing to complain about.
-    ///
-    /// Most of these fixtures are healthy, so an empty problem list is part of
-    /// what they assert: a load that quietly started reporting problems would
-    /// fail here rather than pass unnoticed.
     fn tree_of(dir: impl AsRef<Path>) -> Tree {
         let Loaded { tree, problems } = load_tree(dir).expect("loads");
         assert!(problems.is_empty(), "{problems:?}");
         tree
     }
 
-    /// Pact the modules at `modules` (paths relative to `root`), through the
-    /// manifest API — which writes no grant, so every one of them is stale
-    /// unless a test hand-writes one.
     fn pact(root: &Path, modules: &[&str]) {
         Manifest::with_entries(modules.iter().map(|module| {
             let module = root.join(module);
@@ -753,19 +471,14 @@ mod tests {
         .expect("saves");
     }
 
-    /// Write `contents` at `path`, creating whatever directories it needs.
     fn write_file(path: &Path, contents: &str) {
         fs::create_dir_all(path.parent().expect("a file has a parent")).expect("creates parents");
         fs::write(path, contents).expect("writes a file");
     }
 
-    /// A manifest written to `<root>/.warlock/pacts.toml` as text, the way a
-    /// person with an editor would.
-    ///
-    /// The long way round on purpose: a `granted_hash` cannot be produced by
-    /// this workspace at all — nothing in it grants freshness — so a test that
-    /// needs a fresh node has to write one by hand, exactly as the only human
-    /// who can grant one would.
+    // The long way round on purpose: a `granted_hash` cannot be produced by this
+    // workspace at all — nothing in it grants freshness — so a test that needs a
+    // fresh node writes one the way the only human who can grant one would.
     fn hand_write_manifest(root: &Path, pacts: &[(&str, Option<&str>)]) {
         use std::fmt::Write as _;
 
@@ -787,11 +500,6 @@ mod tests {
         fs::write(manifest_path(root), text).expect("writes the manifest");
     }
 
-    /// The file names the node at `dir` lists, in the order it lists them.
-    ///
-    /// Names rather than whole paths, because what is under test is which
-    /// files a node claims and in what order; that they sit under the node is
-    /// the loader's business and is asserted where it belongs.
     fn file_names(tree: &Tree, dir: impl AsRef<Path>) -> Vec<String> {
         tree.find(dir.as_ref())
             .unwrap_or_else(|| panic!("`{}` is a node", dir.as_ref().display()))
@@ -806,7 +514,6 @@ mod tests {
             .collect()
     }
 
-    /// Every node path in the tree, relative to `root`, depth first.
     fn relative_paths(tree: &crate::Tree, root: &Path) -> Vec<String> {
         tree.walk()
             .map(|(node, _)| {
@@ -1049,8 +756,6 @@ mod tests {
         );
     }
 
-    /// Every node in the tree as `(path relative to `root`, state)`, in walk
-    /// order — the whole of what a colour-blind reload has to reproduce.
     fn states(tree: &Tree, root: &Path) -> Vec<(String, NodeState)> {
         relative_paths(tree, root)
             .into_iter()
@@ -1058,9 +763,6 @@ mod tests {
             .collect()
     }
 
-    /// A repository whose `.warlockignore` excludes every directory named
-    /// `notes/`, with one such directory inside the pacted module `docs/` and
-    /// an ordinary `docs/src/` beside it.
     fn excluding_fixture() -> tempfile::TempDir {
         let repo = fixture(&[], &["docs"]);
         write_file(&repo.path().join(".warlockignore"), "notes/\n");
@@ -1395,9 +1097,6 @@ mod tests {
         );
     }
 
-    /// Only on unix, because there is no portable way to make a file
-    /// unreadable. What is under test — a hash that fails colours one node and
-    /// is reported, rather than failing the load — is not platform-specific.
     #[cfg(unix)]
     #[test]
     fn an_unreadable_file_makes_one_node_stale_and_leaves_the_rest_coloured() {
@@ -1483,9 +1182,6 @@ mod tests {
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).expect("chmods back");
     }
 
-    /// Only on unix, because the fixture needs `std::os::unix::fs::symlink` to
-    /// build the cycle at all. The behaviour under test — that the walk does
-    /// not follow links — is not platform-specific.
     #[cfg(unix)]
     #[test]
     fn a_symlinked_directory_cycle_loads_and_terminates() {
@@ -1515,12 +1211,6 @@ mod tests {
         );
     }
 
-    /// A cargo workspace shaped like this one — two crates under `crates/`, a
-    /// gitignored `target/`, a `.git/` and Warlock's own `.warlock/` — built in
-    /// a temporary directory rather than read off disk. Nothing in this crate's
-    /// test suite asserts on the contents of the warlock repository itself: a
-    /// test that did would change its verdict whenever the repository it lives
-    /// in gained a directory.
     #[test]
     fn a_workspace_shaped_repository_loads_with_its_crates_and_nothing_ignored() {
         let repo = fixture(
@@ -1612,13 +1302,6 @@ mod tests {
         ));
     }
 
-    /// A manifest written as text, the way somebody with an editor would, with
-    /// a scope on each entry — including one nobody would call a scope.
-    ///
-    /// Hand-written rather than built through [`PactEntry::with_scope`] for the
-    /// same reason [`hand_write_manifest`] is: the invalid cases below cannot
-    /// be produced by any prompt in this workspace, and a person with an editor
-    /// is exactly who produces them.
     fn hand_write_scoped_manifest(root: &Path, pacts: &[(&str, &str)]) {
         use std::fmt::Write as _;
 
@@ -1680,9 +1363,6 @@ mod tests {
         );
     }
 
-    /// Every string this repository's tests insist is not a scope, each one a
-    /// different rule broken. Written as a manifest a person edited by hand,
-    /// since nothing in this workspace would store them.
     const NOT_SCOPES: [&str; 7] = [
         "",
         "1data",

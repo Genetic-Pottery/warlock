@@ -1,127 +1,34 @@
-//! Which bytes of a source file a documenter does not need: the per-language
-//! table behind the elision rung of [`fitting`](crate::fitting)'s ladder.
-//!
-//! A pass writing a `WARLOCK.md` is asked what a directory is, what its parts
-//! do together, and what a reader has to know before changing anything. Test
-//! bodies answer none of that, and in a well-tested repository they are most of
-//! the bytes — in this one, 57% of everything under the two `src/` directories.
-//! Test *names* are the opposite: `refuses_when_scope_closed` is a sentence
-//! about behaviour in three words, and dropping it would lose exactly the thing
-//! the prompt asks for. So the rung this module serves keeps the names and
-//! gives up the bodies, and buys back the room the budget was otherwise going
-//! to take out of the source.
-//!
-//! # This is a table, not a parser
-//!
-//! Warlock documents whatever a person points it at, and that is not going to
-//! be Rust. Zig, Go, TypeScript, Python and assembly all have to work, so the
-//! knowledge here is arranged as rows to add rather than a language to teach:
-//! one [`Language`] per row, found by file extension, saying the two things
-//! that vary between languages and nothing else.
-//!
-//! * **Where the tests are.** Most languages put them in files of their own —
-//!   Go's `_test.go`, TypeScript's `.test.ts`, Python's `test_*.py` — and for
-//!   those the answer is a predicate over the file name ([`Language::is_test_file`]).
-//!   A few put them inline in the file they test — Rust's `#[cfg(test)] mod
-//!   tests`, Zig's `test "..." { }` — and for those the answer is a pair of
-//!   anchored delimiters ([`Block`]).
-//! * **What a declaration looks like**, so the names survive the body
-//!   ([`Language::declares`]).
-//!
-//! **An extension with no row is left completely alone.** Not a guess, not a
-//! brace-counting heuristic applied hopefully to a language nobody described:
-//! the file goes to the pass whole, exactly as it does today, and the rungs
-//! below the elision one — summarise, then name and size — are still there to
-//! meet the budget. Adding a language makes warlock cheaper on that language
-//! and can never make it wrong on another, which is the property that lets the
-//! table grow one row at a time from real repositories instead of having to be
-//! complete before it is useful.
-//!
-//! # Why the delimiters are anchored to column zero
-//!
-//! [`Block`] finds an inline test region by matching an opening line and then
-//! the next line equal to its closer, both at the start of a line with no
-//! indentation. That is not brace matching and deliberately not: a real matcher
-//! has to know the language's strings, character literals, raw strings and
-//! comment forms, or it counts a `{` inside `"a { b"` and runs off the end of
-//! the file. Getting that wrong silently deletes real code.
-//!
-//! The anchor sidesteps all of it. A top-level item's closing brace sits in
-//! column zero in every formatted file, and a brace *inside* a string or a
-//! nested body is indented, so the first unindented closer after an unindented
-//! opener is the end of the item — with no lexer, and wrong only in a file no
-//! formatter has ever seen. That is a real limitation and it is the reason
-//! [`elide`] answers `None` rather than guessing when it cannot find the
-//! closer: an unterminated block is a file this module does not understand, and
-//! the honest response is to hand the pass the whole thing.
-//!
-//! # What elision is, next to the rungs around it
-//!
-//! Every line the pass receives is a line the file really contains, in the
-//! order it contains it, with a marker standing where the dropped lines were.
-//! Nothing is rewritten, nothing is paraphrased, and nothing is cut mid-way
-//! through a line — so this is not the truncation `fitting` forbids, which is a
-//! file stopped at an arbitrary byte with no notice that anything is missing.
-//! An elided file says what it dropped and how much of it there was, which is
-//! the same bargain a listed file makes about its contents and a summarised one
-//! makes about its prose.
-
 use std::path::Path;
 
-/// A region of a file that is opened and closed by whole lines at column zero.
-///
-/// The inline half of the table: Rust's `#[cfg(test)] mod tests { … }` and
-/// Zig's `test "name" { … }` are both "a line that starts it, a line that ends
-/// it, neither indented". See the [module docs](self) for why the anchoring is
-/// the whole trick and what it costs.
+// An inline test region, matched by whole lines at column zero rather than by
+// counting braces. A real matcher would have to know each language's strings,
+// character literals, raw strings and comment forms, or it counts the `{` in
+// `"a { b"` and runs off the end of the file — silently deleting real code. A
+// top-level closer sits in column zero in every formatted file and every brace
+// inside a string or a nested body is indented, so the anchor answers the same
+// question with no lexer. It is wrong only in a file no formatter has seen,
+// which is why an unfound closer gives up the elision instead of guessing.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Block {
-    /// A line at column zero that may open the region — Rust's `#[cfg(test)]`.
-    /// Matched exactly, after trailing whitespace is trimmed.
     opener: &'static str,
-    /// What the line *after* the opener must begin with for the region to be
-    /// real, or `None` where the opener is the whole of it.
-    ///
-    /// Rust needs this and it is the reason the field exists: `#[cfg(test)]`
-    /// sits on `mod stubs;` and on test-only helper functions as well as on the
-    /// test module, and eliding to the next unindented `}` from one of those
-    /// would take a working chunk of the file with it.
+    // The line *after* the opener must contain this for the region to be real.
+    // Rust is why the field exists: `#[cfg(test)]` also sits on `mod stubs;` and
+    // on test-only helpers, and eliding from one of those to the next unindented
+    // `}` would take a working chunk of the file with it.
     confirms: Option<&'static str>,
-    /// The line at column zero that ends the region, matched exactly.
     closer: &'static str,
 }
 
-/// One language's answer to where its tests are and what a declaration in it
-/// looks like.
-///
-/// Rows live in [`TABLE`] and are found by [`language_of`]. Every field is data
-/// rather than code on purpose: a new language is a new row, reviewable at a
-/// glance, and nothing in this module has to be understood to add one.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Language {
-    /// The file extensions this row claims, lowercase and without the dot.
     extensions: &'static [&'static str],
-    /// Filename suffixes that make a file a test file whole — Go's `_test.go`,
-    /// TypeScript's `.test.ts`. Empty where the language has no such
-    /// convention.
     test_suffixes: &'static [&'static str],
-    /// Filename prefixes that do the same — Python's `test_`. Empty where the
-    /// language has no such convention.
     test_prefixes: &'static [&'static str],
-    /// Inline test regions, for the languages that put tests in the file they
-    /// test. Empty for the many that do not.
     blocks: &'static [Block],
-    /// Line prefixes, after indentation is trimmed, that introduce something
-    /// worth keeping when the body around them is dropped.
     declarations: &'static [&'static str],
 }
 
 impl Language {
-    /// Whether this file is a test file entire, judged by its name alone.
-    ///
-    /// The name and not the contents, because that is what the convention
-    /// actually is: Go does not look inside `foo_test.go` to decide it is a
-    /// test, and neither does any runner for the other languages here.
     fn is_test_file(&self, name: &str) -> bool {
         self.test_suffixes
             .iter()
@@ -132,8 +39,6 @@ impl Language {
                 .any(|prefix| name.starts_with(prefix))
     }
 
-    /// Whether `line` — already trimmed of its indentation — introduces
-    /// something whose name is worth keeping.
     fn declares(&self, line: &str) -> bool {
         // Both the line as written and the line with its modifiers stripped,
         // because one word is a modifier in one language and the declaration
@@ -154,14 +59,15 @@ impl Language {
     }
 }
 
-/// Every language warlock knows how to make cheaper.
-///
-/// Ordered by nothing in particular; [`language_of`] matches on extension, so
-/// no two rows may claim the same one. Adding a row is the whole of adding a
-/// language — see the [module docs](self).
+// Rows to add rather than a language to teach: warlock documents whatever a
+// person points it at, so a new language is a new row and never new code. An
+// extension no row claims is left completely alone — the file goes to the pass
+// whole and the cheaper rungs of `fitting` meet the budget instead. A
+// brace-counting fallback applied hopefully to a language nobody described was
+// rejected: adding a row can then only make warlock cheaper on that language and
+// never wrong on another, which is what lets this table grow one row at a time
+// out of real repositories instead of having to be complete before it is useful.
 static TABLE: &[Language] = &[
-    // Rust. Tests live inline, under `#[cfg(test)]`, and the attribute also
-    // appears on `mod stubs;` and on test-only helpers — hence `confirms`.
     Language {
         extensions: &["rs"],
         test_suffixes: &[],
@@ -314,10 +220,6 @@ static TABLE: &[Language] = &[
     },
 ];
 
-/// Words that may stand in front of a declaration without being part of it:
-/// visibility and the like, in any of the languages in [`TABLE`]. Stripped
-/// from the front of a line before the table is asked whether it declares
-/// anything, so `pub(crate) fn` is a declaration wherever `fn` is.
 const VISIBILITY: &[&str] = &[
     "pub",
     "pub(crate)",
@@ -339,8 +241,6 @@ const VISIBILITY: &[&str] = &[
     "open",
 ];
 
-/// The keywords that introduce a declaration and sit between any visibility
-/// and the name: skipped on the way to the first identifier.
 const KEYWORDS: &[&str] = &[
     "fn",
     "struct",
@@ -368,21 +268,6 @@ const KEYWORDS: &[&str] = &[
     "module",
 ];
 
-/// The names `text` declares, in file order, as the table understands
-/// declarations: the first identifier on each line that
-/// [`Language::declares`] once its visibility is stripped, after the keyword.
-///
-/// A table lookup, not a parser, on the same terms as [`elide`]: an extension
-/// with no row declares nothing, a line the row does not recognise declares
-/// nothing, and what comes back is only ever a word that is really on a line
-/// of the file. Comment and attribute prefixes in the table (`//`, `@`,
-/// `#[test]`) introduce no name and are skipped. Deduplicated, and capped so
-/// a generated file of ten thousand functions does not become ten thousand
-/// names in a document.
-///
-/// Free, in the sense that matters here: no model pass, no network, the same
-/// answer on every machine. It is the part of a file's account that cannot be
-/// invented, and the first thing a lookup's symbol is checked against.
 pub(crate) fn declared_names(path: &Path, text: &str) -> Vec<String> {
     const CAP: usize = 64;
     let Some(language) = language_of(path) else {
@@ -433,9 +318,6 @@ pub(crate) fn declared_names(path: &Path, text: &str) -> Vec<String> {
     public
 }
 
-/// The lines of `lines` that are not inside an inline test block, as
-/// [`keep_outside_blocks`] finds them — and every line where the language has
-/// no inline blocks, or a block never closes.
 fn outside_blocks<'a>(language: &Language, lines: &'a [&'a str]) -> Vec<&'a str> {
     let mut outside = Vec::with_capacity(lines.len());
     let mut index = 0usize;
@@ -460,7 +342,6 @@ fn outside_blocks<'a>(language: &Language, lines: &'a [&'a str]) -> Vec<&'a str>
     outside
 }
 
-/// `line` with every leading word in [`VISIBILITY`] removed.
 fn without_visibility(line: &str) -> &str {
     let mut rest = line;
     loop {
@@ -472,8 +353,6 @@ fn without_visibility(line: &str) -> &str {
     }
 }
 
-/// The first word of `line` that is an identifier and neither a keyword nor a
-/// visibility, or `None` where the first candidate is not an identifier.
 fn first_identifier(line: &str) -> Option<&str> {
     let separators =
         |c: char| c.is_whitespace() || matches!(c, '(' | '<' | '{' | ':' | '=' | ';' | ',' | '!');
@@ -491,10 +370,6 @@ fn first_identifier(line: &str) -> Option<&str> {
     None
 }
 
-/// The row claiming `path`'s extension, or `None` where nothing does.
-///
-/// `None` is the ordinary answer and not a failure: it means warlock has
-/// nothing to say about this kind of file and will send it whole.
 fn language_of(path: &Path) -> Option<&'static Language> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     TABLE
@@ -502,27 +377,6 @@ fn language_of(path: &Path) -> Option<&'static Language> {
         .find(|language| language.extensions.contains(&extension.as_str()))
 }
 
-/// `text` reduced to the lines that declare something: every signature the
-/// file states, verbatim and in order, with a marker where each run of dropped
-/// lines was.
-///
-/// [`elide`]'s move applied to the whole file rather than to its test blocks,
-/// and the reason the summarising passes this crate used to run are gone.
-/// Measured on this repository: `crates/warlock-tui/src` is 3.0 MB of source
-/// and 153 KB of declaration lines, so a directory that could never fit in a
-/// request fits five times over once the bodies go — and what a documenter
-/// needs from `app.rs` is what `app.rs` declares, not its four hundred
-/// kilobytes of statements.
-///
-/// The point is that **every line of the answer is a line of the file.** Prose
-/// about a file is a claim that has to be checked and cannot be; a signature
-/// lifted out of the file is evidence, so a route naming a symbol found here
-/// is anchored in real code rather than in something a pass wrote about code.
-///
-/// `None` where there is nothing to do: an extension with no row in
-/// [`TABLE`], or a file whose declarations are no smaller than the file. A
-/// lockfile, a minified bundle and a PNG all answer `None`, and the caller
-/// leaves them as a name and a size.
 pub(crate) fn skeleton(path: &Path, text: &str) -> Option<Elided> {
     let language = language_of(path)?;
     let lines: Vec<&str> = text.lines().collect();
@@ -539,53 +393,16 @@ pub(crate) fn skeleton(path: &Path, text: &str) -> Option<Elided> {
     })
 }
 
-/// What [`elide`] managed to leave out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Elided {
-    /// The file as the pass will see it: every surviving line verbatim, with a
-    /// marker where each dropped region was.
     pub(crate) text: String,
-    /// How many bytes of the original are not in `text`. Reported to the pass
-    /// and to the observer, so the saving is a stated fact rather than a
-    /// silent one.
     pub(crate) dropped: u64,
 }
 
-/// The marker left standing where a dropped region was.
-///
-/// Written into the text rather than reported only alongside it, because the
-/// pass reads the text and the point is that it can see the hole: a file that
-/// simply stopped having a test module would look like a file that never had
-/// one, which is the false silence the prompt spends a paragraph forbidding.
-///
-/// Lines rather than bytes, because the request already tells the pass the
-/// file's real size on disk and a second number in the middle of the text
-/// would only invite arithmetic against it.
-/// The marker, saying what kind of lines were dropped.
-///
-/// The wording is load-bearing and was measured wrong once: a whole-file
-/// skeleton reused [`marker`]'s text, so a generated file of a thousand plain
-/// functions arrived saying "test bodies elided", and the pass dutifully wrote
-/// that the file was "mostly elided test bodies" — a false claim about the
-/// file, made from a true statement about the request. What was dropped is
-/// what the marker has to name.
 fn marker_for(lines: usize, dropped: &str) -> String {
     format!("… {lines} lines of {dropped} elided …")
 }
 
-/// Drop what a documenter does not need from `text`, or answer `None` if there
-/// is nothing this module knows how to drop.
-///
-/// `None` covers every case where the file is best sent as it is: an extension
-/// with no row, a language whose tests live elsewhere, a file with no test
-/// region in it, and — deliberately — a block whose closer never arrives, which
-/// is a file no formatter has touched and not one to guess at.
-///
-/// A **test file entire** keeps only its declaration lines, which for a test
-/// file is very nearly its list of test names. A file with **inline test
-/// blocks** keeps everything outside them untouched and, inside them, the same
-/// declaration lines. Either way the answer is `Some` only when it is really
-/// smaller than what came in.
 pub(crate) fn elide(path: &Path, text: &str) -> Option<Elided> {
     let language = language_of(path)?;
     let name = path.file_name()?.to_str()?;
@@ -609,20 +426,15 @@ pub(crate) fn elide(path: &Path, text: &str) -> Option<Elided> {
     })
 }
 
-/// What a slice of lines costs once rejoined with newlines, counted the same
-/// way on both sides of an elision so the saving is a real comparison.
 fn byte_length(lines: &[&str]) -> u64 {
     let content: usize = lines.iter().map(|line| line.len()).sum();
     let separators = lines.len().saturating_sub(1);
     (content + separators) as u64
 }
 
-/// Every line of `lines[from..to]` that introduces something, plus one marker
-/// standing for everything dropped.
 fn keep_declarations(language: &Language, lines: &[&str], from: usize, to: usize) -> Vec<String> {
     keep_declarations_marked(language, lines, from, to, "test bodies")
 }
-/// [`keep_declarations`], saying in the marker what kind of lines went.
 fn keep_declarations_marked(
     language: &Language,
     lines: &[&str],
@@ -646,12 +458,6 @@ fn keep_declarations_marked(
     kept
 }
 
-/// Keep the file whole except inside its inline test blocks, where only
-/// declaration lines survive.
-///
-/// Answers `None` when the file has no block at all — nothing to do — and when
-/// a block opens and never closes, which is the unformatted file the module
-/// docs decline to guess at.
 fn keep_outside_blocks(language: &Language, lines: &[&str]) -> Option<Vec<String>> {
     if language.blocks.is_empty() {
         return None;
@@ -694,11 +500,6 @@ fn keep_outside_blocks(language: &Language, lines: &[&str]) -> Option<Vec<String
     found.then_some(kept)
 }
 
-/// The block opening at `lines[index]`, if one does.
-///
-/// Both halves are checked here rather than at the call site so the confirming
-/// line — the thing that tells `#[cfg(test)] mod tests {` apart from
-/// `#[cfg(test)] mod stubs;` — can never be forgotten by a future caller.
 fn opens_here(language: &Language, lines: &[&str], index: usize) -> Option<&'static Block> {
     let line = lines[index].trim_end();
     language.blocks.iter().find(|block| {
