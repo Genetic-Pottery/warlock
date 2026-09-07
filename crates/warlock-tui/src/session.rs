@@ -1,34 +1,19 @@
 //! Where the tree on screen came from, and how it is kept true to disk.
 //!
-//! [`Scope`] is the two paths everything else is resolved against — the root
-//! the load came back rooted at, and the repository root above it — settled
-//! once by [`load_app`] and kept for as long as warlock runs. [`reload_tree`]
-//! is the one way the tree is ever read again, on the event loop's thread and
-//! no other, and [`Watched`] is what decides when the disk moving under the
-//! loop makes that re-read owed. [`note`] is the footer's precedence in one
-//! place: housekeeping lines give way to whatever a run had to say.
+//! [`Scope`] is the two paths everything else is resolved against, settled once
+//! by [`load_app`] and kept for as long as warlock runs, and it carries the
+//! [`Chrome`] for the same reason: neither the roots nor what this machine holds
+//! can change under a running warlock, so an app rebuilt on every reload has no
+//! business carrying them. That is also why the sigil config is read once, on
+//! the way in, and why that read cannot fail — a home that will not resolve or a
+//! config that will not parse is a state on the header rather than a reason not
+//! to draw a tree. The three cases it can come back as are turned into a
+//! [`Sigils`] by [`sigils_under`], which `warlock check` and the headless writes
+//! borrow rather than reading the file a second way.
 //!
-//! [`sigils_held`] is the last thing settled once and kept: what this machine
-//! holds for the repository, read from the config `warlock config` writes and
-//! stated on the header beside the scope. It is read here and nowhere else, it
-//! cannot fail — a home that will not resolve or a config that will not parse is
-//! a state on that line rather than a reason not to draw a tree — and no reload
-//! re-reads it, because nothing a running warlock does can change it.
-//!
-//! [`closed_scope`] is what those sigils are then *for*, and it lives here for
-//! that reason: it is the one place the boundary question is asked, by all three
-//! keys that can be refused over it, so a pact, a refresh and a scope write are
-//! turned down on the same grounds in the same words.
-//!
-//! There is a second boundary question, asked by an un-pact alone — whether the
-//! subtree about to go carries a scope this machine does not hold — and it is
-//! decided by the engine
-//! ([`closed_scopes_at_or_below`](warlock_engine::closed_scopes_at_or_below))
-//! and worded here, by
-//! [`blocking_scopes_message`], for [`closed_scope_message`]'s reason: the two
-//! doors onto that rule are a keystroke in `pacting.rs` and a shell prompt in
-//! `edits.rs`, and one rule refused in two registers must not be refused in two
-//! wordings.
+//! [`closed_scope`] is the one place the boundary question is asked, by all
+//! three keys that can be refused over it, so a pact, a refresh and a scope
+//! write are turned down on the same grounds in the same words.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -43,71 +28,40 @@ use crate::boundary::{Reach, Verdict, closed_scope_message, verdict};
 use crate::error::{Error, one_line};
 use crate::standing::Standing;
 
-/// What the footer says when the reload after a run could not read the tree,
-/// ahead of the load's own reason for it.
-///
-/// It says what the reader lost, which is the refresh and nothing else: the run
-/// is over, its documents are on disk and its manifest is saved, and the rows
-/// under this line are the ones that were there before — true, only older than
-/// disk. Worded as a fact about the view rather than as a failure of the run,
-/// because the run did not fail.
+// Says what the reader lost, which is the refresh and nothing else: the run is
+// over, its documents are on disk, its manifest is saved, and the rows under
+// this line are the ones that were there before — true, only older than disk. A
+// fact about the view rather than a failure of the run, because the run did not
+// fail.
 pub(crate) const NOT_REFRESHED: &str = "the view could not be refreshed and is the tree as it was";
 
-/// What the footer says when no watcher could be started, ahead of the
-/// operating system's own reason for it.
-///
-/// It says what the reader lost, which is the noticing and nothing else: every
-/// key still works, a pact still re-reads the tree when its run ends, and the
-/// rows under this line are the ones the load produced — true, and true for as
-/// long as nothing else writes to the repository. What will not happen is a row
-/// appearing because somebody saved a file in another window.
-///
-/// Worded as a fact about this session rather than as a failure, because
-/// nothing the reader asked for failed, and said once when the watcher is asked
-/// for rather than on every frame: a line that is re-set ten times a second is a
-/// line that talks over everything else the footer has to say.
+// Says what the reader lost, which is the noticing: every key still works and a
+// pact still re-reads the tree when its run ends. What will not happen is a row
+// appearing because somebody saved a file in another window. Said once, when the
+// watcher is asked for, rather than on every frame — a line re-set ten times a
+// second talks over everything else the footer has to say.
 pub(crate) const NOT_WATCHING: &str = "live updates are off; the tree is the one loaded at startup";
 
-/// Re-read the tree at `scope` from disk and put the view back on top of it.
-///
-/// Two calls and no judgement of its own: [`load_tree`] for what is on disk now,
-/// and [`reseat_on`] to carry the reader's viewpoint, footer and panel across to
-/// it. The header is not among them and is not re-derived either — it is the
-/// [`Chrome`] on the [`Scope`] this function was handed, resolved once at
-/// startup from a pair of roots that cannot change while warlock runs, and
-/// nothing here touches it. It used to be carried by [`reseat_on`] and then
-/// immediately overwritten by the line below, which is two ways of moving a fact
-/// that never moves.
-///
-/// Called on the event loop's thread and on no other. A worker thread must never
-/// reach in here: it would be reading a tree while the thread that draws it is
-/// drawing one, for a result only the drawing thread can use.
-///
-/// A load that fails is not an error out of the event loop, and this is the
-/// deliberate difference from [`load_app`], where the same failure is fatal.
-/// Warlock is up, the documents the run wrote are whole on disk and the manifest
-/// that records them is saved; quitting here would throw away a run that cost
-/// minutes and money, over nothing worse than a stale screen. So the tree
-/// already drawn is kept and the reader carries on with it — the one thing they
-/// lose is the refresh. Problems that did not stop the load are a different
-/// matter: the engine has already coloured each affected node conservatively, so
-/// a tree that has the new documents in it beats the stale one it would replace,
-/// and it is taken.
-///
-/// Either way there is a line to write — [`NOT_REFRESHED`] and the load's reason
-/// for one that failed, the problems' own wording and their count for one that
-/// did not — and it goes on the footer only when the run left the footer empty.
-/// The pact's message wins because it is the news: what a run made of the
-/// subtree the reader asked for is worth more than how the redraw after it went,
-/// and the footer is one line. Precedence, not merging: two sentences joined by
-/// a semicolon would be a line nobody reads to the end of.
-///
-/// The tree that was read comes back with it, and `None` when none was. It is
-/// what the watcher's filter is rebuilt from — the directories of the walk that
-/// produced what is now on screen — and it is handed back rather than looked up
-/// again because this function is the only thing that has it. Nothing else about
-/// the view is in it: the re-seating above is the whole of the restoration, here
-/// as it is after a pact.
+// Called on the event loop's thread and on no other. A worker thread must never
+// reach in here: it would be reading a tree while the thread that draws it is
+// drawing one, for a result only the drawing thread can use.
+//
+// A load that fails is not an error out of the loop, which is the deliberate
+// difference from `load_app`, where the same failure is fatal. Warlock is up,
+// the documents a run wrote are whole on disk and the manifest recording them is
+// saved; quitting here would throw away a run that cost minutes and money over
+// nothing worse than a stale screen. Problems that did not stop the load are a
+// different matter and the tree is taken: the engine has already coloured each
+// affected node conservatively, and a tree with the new documents in it beats
+// the stale one it would replace.
+//
+// The header is neither carried nor re-derived — it is the `Chrome` on the
+// `Scope` handed in. It used to be carried by `reseat_on` and then immediately
+// overwritten here, which is two ways of moving a fact that never moves.
+//
+// The tree that was read comes back because this function is the only thing that
+// has it, and the watcher's filter has to be rebuilt from the walk that produced
+// what is now on screen.
 pub(crate) fn reload_tree(app: &mut App, scope: &Scope) -> Option<Tree> {
     match load_tree(&scope.root) {
         Ok(Loaded { tree, problems }) => {
@@ -135,82 +89,50 @@ pub(crate) fn reload_tree(app: &mut App, scope: &Scope) -> Option<Tree> {
     }
 }
 
-/// Say `line` on the footer, unless something is already saying something
-/// there.
-///
-/// The footer's precedence in one place, because there are now two lines that
-/// have it: how the redraw went ([`reload_tree`]) and whether the disk is being
-/// watched at all ([`NOT_WATCHING`]). Both give way to whatever else is on the
-/// line, which in practice means a pact's own message: what a run made of the
-/// subtree the reader asked for is the news, and how warlock is keeping itself
-/// up to date is housekeeping. Precedence, not merging — two sentences joined by
-/// a semicolon would be a line nobody reads to the end of.
+// The footer's precedence in one place, because two lines have it: how the
+// redraw went and whether the disk is being watched at all. Both give way to
+// whatever else is on the line, which in practice is a pact's own message —
+// what a run made of the subtree the reader asked for is the news, and how
+// warlock keeps itself up to date is housekeeping. Precedence, not merging: two
+// sentences joined by a semicolon would be a line nobody reads to the end of.
 pub(crate) fn note(app: &mut App, line: impl Into<String>) {
     if app.message().is_none() {
         app.set_message(line);
     }
 }
 
-/// Where the tree on screen came from: the directory it is rooted at, and the
-/// repository root above that directory.
-///
-/// Both are resolved once, by [`load_app`], and kept for as long as warlock
-/// runs. The root is where a re-read starts, and the repository root is what the
-/// manifest is written under and what the header spells the root relative to —
-/// which is why they travel together rather than being guessed at again from a
-/// working directory that has since had a pact run over it.
+// The root is where a re-read starts and the repository root is what the
+// manifest is written under, which is why they travel together rather than being
+// guessed at again from a working directory that has since had a pact run over
+// it.
 pub(crate) struct Scope {
-    /// The directory the tree is rooted at, as the load that built it came back
-    /// rooted — not the working directory as typed.
+    // As the load came back rooted, not the working directory as typed.
     pub(crate) root: PathBuf,
-    /// The repository root above `root`: the nearest ancestor with a `.git/`.
     pub(crate) repo_root: PathBuf,
-    /// What the header line states about the pair above: the tree's identity,
-    /// and what this machine holds for the repository it came out of.
-    ///
-    /// Here rather than on the [`App`] for the reason the two paths are here:
-    /// it is resolved once and cannot change while warlock runs, so an app that
-    /// is rebuilt on every reload has no business carrying it. The renderer is
-    /// handed it directly — see [`warlock_tui::draw`].
     pub(crate) chrome: Chrome,
 }
 
-/// Everything the loop keeps about the disk moving under it.
-///
-/// Three things, and no thread of its own: a [`Watching`] — which is a watcher
-/// or the reason there is none — the [`WatchPolicy`] that decides what the paths
-/// it reports are worth, and the manifest's path, which is the one path that
-/// counts without any walk ever having produced it.
-///
-/// Nothing here decides *which* paths matter or *when* to act on them; both of
-/// those are the library's questions — [`WatchPolicy`] answers them as values,
-/// with no clock and no disk. What this type adds is the one thing that has to
-/// happen on
-/// this thread: reading the tree again, through the same [`reload_tree`] a pact
-/// ends with, and handing the tree it read back to the policy so the next
-/// round's filter is the walk that produced what is on screen.
+// Nothing here decides *which* paths matter or *when* to act on them; both are
+// `WatchPolicy`'s, answered as values with no clock and no disk. What this type
+// adds is the one thing that has to happen on the loop's thread: reading the tree
+// again, and handing the tree it read back to the policy so the next round's
+// filter is the walk that produced what is on screen.
 pub(crate) struct Watched {
-    /// The watcher, or the reason the operating system would not start one.
     pub(crate) watching: Watching,
-    /// The filter and the timing rules, over the last successful load's walk.
     pub(crate) policy: WatchPolicy,
-    /// `.warlock/pacts.toml`, resolved once. It is hidden, so no walk produces
-    /// it and [`NodeSet`](warlock_tui::NodeSet) rejects it — and yet a pact
-    /// granted or dropped in another window changes the colour of every row on
-    /// screen while nothing inside the tree has moved. So it is compared for by
-    /// name here, which is the only rule of this file's own about a path, and it
-    /// is a path rather than a pattern.
+    // `.warlock/pacts.toml` is hidden, so no walk produces it and the policy's
+    // filter rejects it — and yet a pact granted or dropped in another window
+    // changes the colour of every row on screen while nothing inside the tree has
+    // moved. So it is compared for by name, which is the one rule of this file's
+    // own about a path.
     pub(crate) manifest: PathBuf,
 }
 
 impl Watched {
-    /// Start watching `scope`, filtering against the walk `tree` came from.
-    ///
-    /// The watcher is over [`Scope::root`] — the path the load came back rooted
-    /// at, so warlock run in a subdirectory hears about that subdirectory and
-    /// not about a build in a sibling crate — and over the manifest under
-    /// [`Scope::repo_root`]. Whether it started is not asked here: the answer is
-    /// kept as a value and said once, on the footer, by whoever is drawing.
+    // The watcher is over `Scope::root` — the path the load came back rooted at,
+    // so warlock run in a subdirectory hears about that subdirectory and not
+    // about a build in a sibling crate. Whether it started is not asked here: the
+    // answer is kept as a value and said once, by whoever is drawing.
     pub(crate) fn start(scope: &Scope, tree: &Tree) -> Self {
         Self {
             watching: Watch::start(&scope.root, &scope.repo_root),
@@ -219,13 +141,9 @@ impl Watched {
         }
     }
 
-    /// The one line the footer owes when nothing is being watched, or `None`
-    /// when something is.
-    ///
-    /// Asked once, before the loop starts. It is a question about how warlock
-    /// was started rather than about anything happening now, so asking it every
-    /// frame would be re-answering a fact that cannot change and re-writing a
-    /// line the reader has already read past.
+    // Asked once, before the loop starts: it is a question about how warlock was
+    // started rather than about anything happening now, so asking every frame
+    // would re-answer a fact that cannot change.
     pub(crate) fn off_note(&self) -> Option<String> {
         match &self.watching {
             Watching::Live(_) => None,
@@ -236,20 +154,11 @@ impl Watched {
         }
     }
 
-    /// One round of the event loop's watching: hear what the disk did, and read
-    /// the tree again if that is now owed. Answers whether it read it.
-    ///
-    /// Every path drained is offered to the policy, which rejects the ones no
-    /// walk produced — the whole of the cost of a `cargo build` under a watched
-    /// root, thousands of paths compared against a set and dropped. The manifest
-    /// is the exception it cannot see for itself, and it is the only one.
-    ///
-    /// `in_flight` is a pact running somewhere else, and it does not stop the
-    /// draining, only the reloading: the events a run's own documents set off
-    /// are remembered by the policy and answered by the reload at the end of the
-    /// run ([`caught_up`](Watched::caught_up)), so a run whose documents moved
-    /// the disk reads the tree once, at the end, rather than twice. Reloading
-    /// under a run would also be reloading a tree the run is still writing to.
+    // `in_flight` is a pact running somewhere else, and it stops the reloading
+    // and not the draining: the events a run's own documents set off are
+    // remembered by the policy and answered by the reload at the end of the run,
+    // so a run whose documents moved the disk reads the tree once rather than
+    // twice — and never while the run is still writing to it.
     pub(crate) fn round(
         &mut self,
         app: &mut App,
@@ -280,17 +189,12 @@ impl Watched {
         true
     }
 
-    /// Somebody else read the tree, at `at`: the reload at the end of a run.
-    ///
-    /// Two things, and the second is why this exists at all. The policy is told
-    /// that a reload happened, which discharges whatever it was owed — an event
-    /// from a pact's own documents is answered by the reload that came after it
-    /// — and it is re-seated on the tree that reload produced, so the next
-    /// round's filter is the walk behind what is on screen rather than the walk
-    /// behind what used to be. A load that failed hands over `None`: the burst
-    /// is still discharged, because the tree was read and this is as fresh as
-    /// the view is going to get, and the filter stays on the last walk that
-    /// worked, which is the one the rows still come from.
+    // Two things, and the second is why this exists: the policy is told a reload
+    // happened, which discharges what it was owed, and it is re-seated on the tree
+    // that reload produced, so the next round's filter is the walk behind what is
+    // on screen. A load that failed hands over `None` — the burst is still
+    // discharged, because the tree was read and this is as fresh as the view is
+    // going to get, and the filter stays on the last walk that worked.
     pub(crate) fn caught_up(&mut self, tree: Option<&Tree>, at: Instant) {
         self.policy.reload_started();
         if let Some(tree) = tree {
@@ -300,17 +204,10 @@ impl Watched {
     }
 }
 
-/// Start watching `scope`, and say on the footer if nothing is being watched.
-///
-/// The two halves of starting a watch, in one call because they are one thing
-/// the loop does before it begins: the watcher is asked for over the walk `tree`
-/// came from ([`Watched::start`]), and whether the operating system granted one
-/// is a line and not an error ([`Watched::off_note`]) — warlock with no live
-/// updates is warlock as it was, so a refusal is reported and never returned.
-///
-/// Said here rather than in the loop, so it is one line said once and not a line
-/// re-set ten times a second, and said through [`note`] so it gives way to
-/// anything the app already has to say.
+// Whether the operating system granted a watcher is a line and never an error:
+// warlock with no live updates is warlock as it was. Said here rather than in the
+// loop so it is said once, and through `note` so it gives way to anything the app
+// already has to say.
 pub(crate) fn start_watching(app: &mut App, scope: &Scope, tree: &Tree) -> Watched {
     let watched = Watched::start(scope, tree);
     if let Some(line) = watched.off_note() {
@@ -320,53 +217,24 @@ pub(crate) fn start_watching(app: &mut App, scope: &Scope, tree: &Tree) -> Watch
     watched
 }
 
-/// The scope closed to this machine over the row `app` has selected, or `None`
-/// when the press may go ahead.
-///
-/// The one place the boundary question is asked, so `p`, `r` and `s` are refused
-/// on the same grounds in the same words. `Some` means refused, and the string
-/// is the scope that refused it — already worded onto the app's message line by
-/// the time this returns, exactly as [`App::scope_target`] and `App::toggle_pact`
-/// word their own row-level refusals before answering `None`.
-///
-/// # It asks "here", and an un-pact asks a second question elsewhere
-///
-/// [`scope_covering`](warlock_engine::scope_covering) walks *up*, so what this answers is whether the operator
-/// may act at the selected row — never what the act would reach below it.
-/// Un-pacting reaches the whole subtree and takes the scopes on it, so it is
-/// refused by a second, downward question, asked in `pacting.rs` on the un-pact
-/// path and by `warlock unpact` in `edits.rs`, and worded by
-/// [`blocking_scopes_message`]. This function is deliberately *not* widened to
-/// cover it: it is `r`'s and `s`'s too, a pact and a refresh provably leave
-/// every scope where they found it, and gating a root refresh on holding every
-/// sigil in a monorepo would refuse the ordinary gesture. The reasoning is
-/// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
-///
-/// # Why the check is here and not on the app
-///
-/// [`Chrome`] carries the sigils and is deliberately not a field on [`App`] —
-/// it is resolved once and cannot change under a running warlock, so an app
-/// rebuilt on every reload has no business holding it. That decision is what
-/// puts this function outside the app, and it is why the app cannot word this
-/// particular refusal itself even though it words every other one. What it lends
-/// is [`App::label_for`], so the row is named here the way it is named there.
-///
-/// # A file row is not this function's business
-///
-/// Coverage would happily answer for a file — [`scope_covering`](warlock_engine::scope_covering) walks up from
-/// whatever it is handed — but `p`, `r` and `s` all refuse a file row on better
-/// grounds than this, and those refusals name the row for what it is. So a file
-/// is passed through as open and the key's own answer stands: the boundary has
-/// nothing to say about a press that was never going to happen.
-///
-/// # A path the manifest cannot spell is open
-///
-/// It takes a tree rooted outside its own repository to reach, which warlock
-/// cannot currently be started in, and the two ways to answer it are to refuse
-/// every scoped key on a technicality or to let the key give its own answer. The
-/// second is chosen for the reason the permissive defaults are chosen throughout:
-/// a boundary nobody could have drawn is not a boundary somebody is crossing, and
-/// `s` already has its own wording for exactly this path.
+// The one place the boundary question is asked, so `p`, `r` and `s` are refused
+// on the same grounds in the same words. `Some` means refused, and the sentence
+// is already on the app's message line by the time it returns.
+//
+// `scope_covering` walks *up*, so what this answers is whether the operator may
+// act at the selected row — never what the act would reach below it. Un-pacting
+// reaches the whole subtree and takes the scopes on it, so it is refused by a
+// second, downward question, asked in `pacting.rs` and by `warlock unpact` in
+// `edits.rs`. This function is deliberately not widened to cover that: it is
+// `r`'s and `s`'s too, a pact and a refresh provably leave every scope where they
+// found it, and gating a root refresh on holding every sigil in a monorepo would
+// refuse the ordinary gesture. See
+// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
+//
+// A file row passes through as open even though coverage would happily answer for
+// one: `p`, `r` and `s` all refuse a file on better grounds, and those refusals
+// name the row for what it is. So does a path the manifest cannot spell — a
+// boundary nobody could have drawn is not a boundary somebody is crossing.
 pub(crate) fn closed_scope(
     app: &mut App,
     manifest: &Manifest,
@@ -394,50 +262,29 @@ pub(crate) fn closed_scope(
     Some(scope)
 }
 
-/// What this machine holds for the repository at `repo_root`, for the header to
-/// state.
-///
-/// The one place a running warlock reads the sigil config, and it reads it once
-/// — from [`load_app`], before the loop starts. A sigil is written by `warlock
-/// config`, on the ordinary screen with warlock not running, so there is nothing
-/// for a reload to find that this did not; re-reading it every round would be a
-/// file opened ten times a second to answer a question that cannot have changed.
-///
-/// The home directory is resolved here and handed down as a path — see
-/// [`Standing::home`], the single point in warlock where the environment becomes
-/// one — which is what lets [`sigils_under`] be tested against a temporary
-/// directory rather than the developer's own.
-///
-/// A home that cannot be resolved reads as nothing held rather than as a config
-/// that would not read. There is no file in that case and no path to name one
-/// by, so [`Sigils::Unknown`](warlock_tui::Sigils::Unknown) would be claiming that something on disk is broken
-/// when nothing on disk was ever looked at.
+// Read once, from `load_app`, before the loop starts. A sigil is written by
+// `warlock config` with warlock not running, so there is nothing for a reload to
+// find that this did not, and re-reading it every round would be a file opened
+// ten times a second to answer a question that cannot have changed.
+//
+// A home that cannot be resolved reads as nothing held rather than as a config
+// that would not read: there is no file in that case and no path to name one by,
+// so `Sigils::Unknown` would be claiming something on disk is broken when nothing
+// on disk was ever looked at.
 fn sigils_held(repo_root: &Path) -> Sigils {
     Standing::home().map_or(Sigils::Nothing, |home| sigils_under(&home, repo_root))
 }
 
-/// What is held for `repo_root` under `home`, as one of the header's three
-/// states.
-///
-/// Never an error, and this is the whole of the reason it is a function of its
-/// own: what a machine holds is a line on a header, and warlock is a way of
-/// reading a tree. A config that will not parse must not keep the tree off the
-/// screen, so it becomes [`Sigils::Unknown`](warlock_tui::Sigils::Unknown) — said out loud, so that broken is
-/// never drawn as absent — and nothing here can return upwards to end the event
-/// loop.
-///
-/// The engine's "not found" is the one error that is not a problem (see
-/// [`load_sigils`]) and joins the empty set as [`Sigils::Nothing`](warlock_tui::Sigils::Nothing): a machine
-/// that has never run `warlock config` and one that cleared its sigils hold the
-/// same nothing, and the header says nothing about either.
-///
-/// Shared with `warlock check`, which asks the same question with nothing on
-/// screen: what a machine holds is one resolution of one file, and a second
-/// reading of these three cases somewhere else would be a second answer waiting
-/// to disagree with the header. It takes `home` rather than looking one up for
-/// the reason [`sigils_held`] resolves one and hands it down — see
-/// [`Standing::home`], the single point where the environment becomes a home
-/// path, which is what keeps every test off the developer's own.
+// Never an error, and that is the whole reason it is a function of its own: what
+// a machine holds is a line on a header, and warlock is a way of reading a tree.
+// A config that will not parse becomes `Sigils::Unknown` — said out loud, so that
+// broken is never drawn as absent — and nothing here can return upwards to end
+// the event loop.
+//
+// Shared with `warlock check`, which asks the same question with nothing on
+// screen: a second reading of these three cases elsewhere would be a second
+// answer waiting to disagree with the header. It takes `home` rather than looking
+// one up, which is what keeps every test off the developer's own.
 pub(crate) fn sigils_under(home: &Path, repo_root: &Path) -> Sigils {
     match load_sigils(home, repo_root) {
         Ok(sigils) => Sigils::held(sigils),
@@ -446,52 +293,27 @@ pub(crate) fn sigils_under(home: &Path, repo_root: &Path) -> Sigils {
     }
 }
 
-/// The repository's manifest, or an empty one if it has never pacted anything.
-///
-/// [`Standing::manifest`]'s reading, reached from a bare root: the loop holds
-/// two paths rather than a [`Standing`], so this is the one line that stands the
-/// front end where the subcommands already stand.
+// The loop holds two paths rather than a `Standing`, so this is the one line
+// that stands the front end where the subcommands already stand.
 pub(crate) fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
     Standing::at(repo_root.to_path_buf(), repo_root.to_path_buf()).manifest()
 }
 
-/// The app state for the directory warlock was invoked from, the [`Scope`] it
-/// was loaded at, and the tree it was built from.
-///
-/// The tree comes back as well as the app because the app is not a tree: its
-/// rows are filtered by what the reader has toggled, and the directories one
-/// walk produced are what the watcher's filter is ([`Watched`]). Handing it over
-/// here is what keeps that filter and the rows on screen born of the same walk.
-///
-/// The two paths are handed back rather than dropped once the header is built.
-/// The repository root is where the manifest lives: every pact written during
-/// the run is written relative to it, and finding it is a walk up the
-/// filesystem that should happen once. The tree's own root is where a re-read
-/// starts, and it is kept for the same reason — it is the path the engine came
-/// back rooted at, which is the one thing a later load must be given rather than
-/// guess.
-///
-/// This is the whole of the front end's knowledge about scope, and it is
-/// section 12's modular invocation rule spelled out: the tree is rooted at the
-/// working directory, and the manifest that colours it comes from the single
-/// repository root above that directory — which is why the header needs both.
-/// The root is taken from the loaded tree rather than from the working
-/// directory as typed, so the header names the same path the engine walked.
-///
-/// The sigil config is read here too, once, and for the same reason the two
-/// paths are resolved here: it is a fact about the machine and the repository
-/// rather than about the frame, and the header states it from the first one on.
-/// It is read through [`sigils_held`], which cannot fail — a missing home or an
-/// unreadable config is a state on that line, never a way out of a function
-/// whose failures end the session before the tree is drawn.
-///
-/// A load that reported problems is refused rather than drawn. The problems
-/// are files Warlock could not read, so the nodes above them are coloured
-/// stale on no evidence; showing that as an ordinary tree would put a colour
-/// on screen that nothing on disk backs up. That is a startup rule and stays
-/// one: mid-session, with a tree already on screen and a run's documents
-/// already on disk, the same problems are taken rather than fatal — see
-/// [`reload_tree`].
+// The tree comes back as well as the app because the app is not a tree: its rows
+// are filtered by what the reader has toggled, while the directories one walk
+// produced are what the watcher's filter is. Handing it over here is what keeps
+// that filter and the rows on screen born of the same walk. The two paths come
+// back for the same reason they are resolved here — finding the repository root
+// is a walk up the filesystem that should happen once, and the tree's root is the
+// path the engine came back rooted at, which a later load must be given rather
+// than guess.
+//
+// A load that reported problems is refused rather than drawn: the problems are
+// files warlock could not read, so the nodes above them are coloured stale on no
+// evidence, and drawing that would put a colour on screen nothing on disk backs
+// up. That is a startup rule and stays one — mid-session, with a tree already
+// showing and a run's documents already written, `reload_tree` takes the same
+// problems.
 pub(crate) fn load_app() -> Result<(App, Scope, Tree), Error> {
     let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
     let Loaded { tree, problems } =
@@ -566,17 +388,14 @@ mod tests {
         );
     }
 
-    /// A scratch repository root of this module's own, deleted when the test
-    /// drops it. `load_manifest` is entirely about what is and is not on
-    /// disk, so each test gets a directory nobody else writes to.
+    // `load_manifest` is entirely about what is and is not on disk, so each test
+    // gets a directory nobody else writes to.
     struct Scratch {
-        /// The root the manifest is looked for under.
         root: PathBuf,
     }
 
     impl Scratch {
-        /// An empty directory, named after the test using it so a leftover
-        /// says where it came from.
+        // Named after the test using it, so a leftover says where it came from.
         fn new(name: &str) -> Self {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -700,9 +519,8 @@ mod tests {
         assert_eq!(sigils_under(home.path(), repo.path()), Sigils::Unknown);
     }
 
-    /// A throwaway directory: every test here builds both its home *and* its
-    /// repository root out of these, so nothing in this module reads or writes
-    /// the developer's real home.
+    // Every test here builds both its home *and* its repository root out of
+    // these, so nothing in this module goes near the developer's real home.
     fn a_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("a temporary directory")
     }

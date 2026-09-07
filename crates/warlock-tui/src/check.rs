@@ -1,60 +1,23 @@
 //! `warlock check <path>`: which boundary a path sits inside, what this machine
-//! holds, and whether the two meet — on the ordinary screen, with nothing
-//! written anywhere.
+//! holds, and whether the two meet — printed, and nothing written anywhere.
 //!
-//! The fifth subcommand, in the shape the four before it gave: dispatched
-//! before anything touches the terminal, no alternate screen, no raw mode, no
-//! panic hook, and a failure is an [`Error`] returned to `main`, which prints it
-//! in the same place and the same shape as a tree that would not load. Nothing
-//! here writes a file, spawns a process or runs a model pass — this is a
-//! question, and the whole of what it does is read a manifest, read a config and
-//! print the answer.
+//! Both halves of the answer are the engine's [`scope_covering`] and
+//! [`scope_opens_to`], called once each and neither re-implemented here. That is
+//! the point of the subcommand: the alternative for a script is walking
+//! `.warlock/pacts.toml` upwards by hand, which is the boundary rule written a
+//! second time somewhere it will drift from the first. It is the same pair the
+//! TUI's run keys are refused by, asked here with nothing on screen — and this
+//! only reports. There is nothing to refuse.
 //!
-//! # Nothing here decides what a boundary means
-//!
-//! The two halves of the answer are the engine's own
-//! [`scope_covering`] and [`scope_opens_to`], called once each and neither
-//! re-implemented: nearest-scope-wins, an invalid scope read as no scope, an
-//! unscoped path open to anyone, and holding nothing opening nothing that is
-//! scoped are all decided in `crates/warlock-engine/src/scope.rs` and nowhere
-//! else. That is the point of the subcommand existing: the alternative for a
-//! script is walking `.warlock/pacts.toml` upwards by hand, which is the
-//! boundary rule written a second time somewhere it will drift from the first.
-//!
-//! It is the same pair the TUI's run keys are refused by
-//! ([`closed_scope`](crate::session::closed_scope)), asked here with nothing on
-//! screen — and this asks only. A check reports; it refuses nothing, because
-//! there is nothing here to refuse.
-//!
-//! # What this machine holds is resolved once, in the header's own words
-//!
-//! [`sigils_under`] is the resolution, borrowed from the session rather than
-//! copied: the same three states the header states, from the same file, with the
-//! same reading of a missing one. `--json` keeps all three apart, and that is
-//! the field's whole reason for being three-valued — a config that exists and
-//! will not parse printed as `[]` would tell an operator they hold nothing when
-//! the truth is that warlock could not read what they hold.
-//!
-//! A home directory that cannot be resolved is [`Sigils::Nothing`](warlock_tui::Sigils::Nothing) and not
-//! [`Sigils::Unknown`](warlock_tui::Sigils::Unknown), which is [`sigils_held`](crate::session) reading of it
-//! and is the honest one: `Unknown` says *a file is there and would not read*,
-//! and the prose for it names that file. With no home there is no file and no
-//! path to name one by, so there is nothing broken to report — only a machine
-//! nobody has configured, which is what `Nothing` says.
-//!
-//! # What is refused, and what is merely closed
-//!
-//! A closed scope is an answer: the prose says so, `opens` is `false`, and the
-//! exit status is 0 — which is what makes `warlock check <path> --json | jq -e
+//! A closed scope is an answer, not a failure: `opens` is `false` and the exit
+//! status is 0, which is what makes `warlock check <path> --json | jq -e
 //! '.opens'` the CI recipe, with `jq` and not warlock spending the non-zero
-//! status on the verdict. `Nothing` and `Unknown` are answers too, and both
-//! close every scoped path without failing.
-//!
-//! A path [`scope_covering`] refuses — outside the repository root, or not
-//! spellable as UTF-8 — is the one refusal here: one line on stderr, exit 1, and
-//! no object printed at all. It is never reported as `scope: null`, per that
-//! function's own doc: such a path is not unscoped, it is a path this manifest
-//! has nothing whatever to say about.
+//! status on the verdict. So is a config that will not read — three-valued for
+//! that reason, because printing `[]` for it would tell an operator they hold
+//! nothing when the truth is warlock could not read what they hold. The one
+//! refusal is a path [`scope_covering`] itself refuses: outside the root or not
+//! spellable, which is not an unscoped path but one this manifest has nothing
+//! whatever to say about.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -68,98 +31,48 @@ use crate::query::{envelope, spelled, write_object};
 use crate::session::sigils_under;
 use crate::standing::{FOR_CHECK, Standing};
 
-/// The word this subcommand names itself with in its object, and the word a
-/// reader typed to get it.
 const CHECK: &str = "check";
 
-/// The path the check was asked about, as the manifest spells it.
 const PATH: &str = "path";
 
-/// The scope covering that path, or `null` when nothing covers it.
 const SCOPE: &str = "scope";
 
-/// What this machine holds: the list, `[]` for nothing, `null` for a config
-/// that would not read.
 const SIGILS: &str = "sigils";
 
-/// Whether those sigils open that scope.
 const OPENS: &str = "opens";
 
-/// The whole answer to one check: what was asked about, what covers it, what is
-/// held, and whether the two meet.
-///
-/// A value rather than four things printed as they are worked out, so that the
-/// prose and the object are two renderings of one answer and cannot disagree
-/// about it — and so the answer itself is testable with nothing attached to
-/// stdout.
+// A value rather than four things printed as they are worked out, so the prose
+// and the object are two renderings of one answer and cannot disagree about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Checked {
-    /// The path asked about, repository-root-relative with forward slashes, and
-    /// `.` for the repository root itself. Never the absolute path typed: an
-    /// absolute machine path is the one non-reproducible thing in a document
-    /// meant to be diffable across machines.
+    // Repository-root-relative and never the absolute path typed: an absolute
+    // machine path is the one non-reproducible thing in output meant to be
+    // diffable across machines.
     path: String,
-    /// The scope covering it, or `None` when nothing at or above it carries
-    /// one. Owned rather than borrowed from the manifest, because what is
-    /// printed outlives the read.
     scope: Option<String>,
-    /// What this machine holds, in the header's own three states.
     sigils: Sigils,
-    /// The config those sigils were read from, or `None` when there is no home
-    /// directory to look under. Named in the prose for [`Sigils::Unknown`](warlock_tui::Sigils::Unknown) and
-    /// unused otherwise: a file that would not read is only useful to a reader
-    /// who is told which file it is.
+    // Named in the prose for `Sigils::Unknown` and unused otherwise: a file
+    // that would not read is only useful to a reader told which file it is.
     config: Option<PathBuf>,
-    /// Whether the sigils open the scope: [`scope_opens_to`]'s answer, and
-    /// `false` for both `Nothing` and `Unknown` over a scoped path.
     opens: bool,
 }
 
-/// `warlock check <path>`: say which scope covers `path`, what this machine
-/// holds, and whether those sigils open it.
-///
-/// The steps are the module doc's, in this order: the working directory says
-/// where the repository is, the repository root is resolved from it, the
-/// manifest and the sigil config are read, and the answer is printed as prose or
-/// as one object.
-///
-/// `path` is taken relative to the working directory, as a person typing one at
-/// a shell means it, and an absolute one is used as it stands ([`Path::join`]
-/// does both). It is not made absolute or normalised beyond that: a `..` that
-/// climbs out of the repository is refused by the spelling below rather than
-/// being resolved into something inside it.
-///
-/// Nothing on disk has to exist for this to answer. Coverage is a walk up the
-/// manifest's stored paths and never a walk of the filesystem, so a check about
-/// a file somebody is *about* to write answers exactly as one about a file that
-/// is there.
-///
-/// # Errors
-///
-/// [`Error::WorkingDirectory`] and [`Error::NoRepository`] before anything is
-/// read; [`Error::Manifest`] for a manifest that will not parse; and
-/// [`Error::Unspellable`] for a path with no repository-relative form. Every one
-/// of them is one line on stderr and an exit status of 1, and none of them
-/// prints a partial answer first. A config that will not read is deliberately
-/// not among them: it is a state of the answer, not a failure to reach one.
+// Nothing on disk has to exist for this to answer: coverage is a walk up the
+// manifest's stored paths and never a walk of the filesystem, so a check about a
+// file somebody is *about* to write answers exactly as one about a file that is
+// there. `path` is joined onto the working directory, which leaves an absolute
+// one as it stands, and a `..` that climbs out of the repository is refused by
+// the spelling below rather than resolved into something inside it.
 pub(crate) fn check(path: PathBuf, json: bool) -> Result<(), Error> {
     checked_onto(&Standing::here(FOR_CHECK)?, path, json, &mut io::stdout())
 }
 
-/// The verdict itself, onto `out`: the whole of [`check`] past the environment.
-///
-/// Split from [`check`] so that the order — manifest, then home, then the
-/// answer, then one line — is something a test can run against a temporary
-/// repository and a temporary home rather than something the prose above has to
-/// be believed about. It is also where the two readings that are easy to get
-/// backwards live: a **missing** manifest is an empty one and answers "nothing
-/// covers this", while a manifest that will not **parse** is a failure; and a
-/// home that will not resolve is nothing held, which is a state of the answer
-/// and not a failure to reach one.
-///
-/// # Errors
-///
-/// Everything [`check`] names, unchanged.
+// Split from `check` so the order — manifest, then home, then the answer, then
+// one line — is something a test can run against a temporary repository and a
+// temporary home. It is where the two readings that are easy to get backwards
+// live: a *missing* manifest is an empty one and answers "nothing covers this",
+// while a manifest that will not *parse* is a failure; and a home that will not
+// resolve is nothing held, which is a state of the answer.
 fn checked_onto<W: Write>(
     standing: &Standing,
     path: PathBuf,
@@ -189,24 +102,16 @@ fn checked_onto<W: Write>(
     Ok(())
 }
 
-/// The whole answer about `target`, for the repository at `repo_root`, with
-/// this machine's sigils read from under `home`.
-///
-/// Every input is a parameter — the manifest already in hand, the home the
-/// caller resolved, the path the caller joined — so the one thing this reads
-/// from disk is the sigil config, under the home it was handed. That is what
-/// keeps the tests off the developer's real home and out of a real repository.
-///
-/// The path is spelled *before* coverage is asked for, and both refusals are the
-/// same one: [`spelled`] and [`scope_covering`] agree by construction, since the
-/// second is the first followed by a walk. Asking here means a refused path is a
-/// refusal before anything is printed, rather than an answer with an
-/// unprintable path in it.
-///
-/// # Errors
-///
-/// [`Error::Unspellable`] for a `target` outside `repo_root` or not spellable as
-/// UTF-8.
+// Every input is a parameter — the manifest in hand, the home the caller
+// resolved, the path it joined — so the one thing read from disk here is the
+// sigil config, under the home handed in. That is what keeps the tests off the
+// developer's real home.
+//
+// The path is spelled *before* coverage is asked for, and both refusals are the
+// same one: `spelled` and `scope_covering` agree by construction, since the
+// second is the first followed by a walk. Asking here means a refused path is a
+// refusal before anything is printed rather than an answer with an unprintable
+// path in it.
 fn checked(
     repo_root: &Path,
     home: Option<&Path>,
@@ -233,16 +138,8 @@ fn checked(
     })
 }
 
-/// The answer as prose: the boundary, the holding, and the verdict, one line
-/// each.
-///
-/// Three lines rather than a paragraph, because the three facts are answers to
-/// three questions and a reader looking for one of them should find it on a line
-/// of its own. Each is a sentence in warlock's own vocabulary: the wording of
-/// what is held is `warlock config`'s and the header's, to the letter, and the
-/// closed line ends the way the TUI's refusal ends — naming `warlock config`,
-/// which is the one place a sigil is recorded and the only road from this line
-/// to the work.
+// Three lines rather than a paragraph, because the three facts answer three
+// questions and a reader looking for one should find it on a line of its own.
 fn prose(checked: &Checked) -> String {
     format!(
         "{}\n{}\n{}",
@@ -252,12 +149,10 @@ fn prose(checked: &Checked) -> String {
     )
 }
 
-/// What covers `path`, or that nothing does.
-///
-/// "Nothing scopes" rather than "is unscoped", because the fact is about the
-/// whole line of ancestors and not only about the directory named: an
-/// unscoped directory under a scoped one is covered, and this line is the
-/// answer after that walk.
+// "Nothing scopes" rather than "is unscoped", because the fact is about the
+// whole line of ancestors and not only the directory named: an unscoped
+// directory under a scoped one is covered, and this line is the answer after
+// that walk.
 fn covering_line(path: &str, scope: Option<&str>) -> String {
     match scope {
         Some(scope) => format!("`{path}` is scoped `{scope}`"),
@@ -265,13 +160,10 @@ fn covering_line(path: &str, scope: Option<&str>) -> String {
     }
 }
 
-/// What this machine holds, in the words `warlock config` and the header use.
-///
-/// The same "holding", the same backticked sigils in the order the config lists
-/// them, and the same "nothing" and "unknown" — one fact should not have two
-/// wordings. What is added here is the file: `Sigils::line` says only "holding
-/// unknown", and a reader running a subcommand about a config that will not
-/// parse is owed the path to go and fix.
+// The wording is `warlock config`'s and the header's to the letter — one fact
+// should not have two wordings. What is added here is the file: `Sigils::line`
+// says only "holding unknown", and a reader running a subcommand about a config
+// that will not parse is owed the path to go and fix.
 fn holding_line(sigils: &Sigils, config: Option<&Path>) -> String {
     match sigils {
         Sigils::Held(held) => format!(
@@ -293,12 +185,10 @@ fn holding_line(sigils: &Sigils, config: Option<&Path>) -> String {
     }
 }
 
-/// Whether the holding opens the boundary, said as the consequence it is.
-///
-/// The unscoped case is stated as the permissive default it comes from rather
-/// than as a bare "open": a reader who has just been told nothing scopes the
-/// path should be told that this is what makes it open, not left to wonder which
-/// sigil did it.
+// The unscoped case is stated as the permissive default it comes from rather
+// than as a bare "open": a reader just told nothing scopes the path should not
+// be left wondering which sigil did it. The closed line ends by naming `warlock
+// config`, which is the one place a sigil is recorded.
 fn verdict_line(scope: Option<&str>, opens: bool) -> String {
     match scope {
         None => "an unscoped path is open to anyone, so this machine may work here".to_owned(),
@@ -310,14 +200,9 @@ fn verdict_line(scope: Option<&str>, opens: bool) -> String {
     }
 }
 
-/// The object `--json` prints for a check: the command it answers, the path it
-/// answers about, and the three facts of the answer.
-///
-/// The same envelope a listing prints, with this command's own body in it, and
-/// in this order: `command`, `path`, `scope`, `sigils`, `opens`. There is no
-/// `root` field, deliberately — an absolute machine path is the one
-/// non-reproducible thing in a document meant to be diffable across machines,
-/// and it tells a consumer a constant.
+// The same envelope a listing prints, with this command's body in it. No `root`
+// field and no home, deliberately: an absolute machine path is not reproducible
+// across machines, and a home names a person.
 fn object(checked: &Checked) -> Value {
     envelope(
         CHECK,
@@ -333,16 +218,11 @@ fn object(checked: &Checked) -> Value {
     )
 }
 
-/// What is held, as JSON's three answers: the list, `[]`, and `null`.
-///
-/// The three-valuedness is the whole point of this function. `[]` for
-/// [`Sigils::Unknown`](warlock_tui::Sigils::Unknown) would tell an operator they hold nothing when the truth
-/// is that warlock could not read what they hold, and those two mean opposite
-/// things about what is on disk — so the broken case is `null`, which a consumer
-/// has to handle deliberately rather than iterate over by accident.
-///
-/// A total match, so a fourth state on the header breaks this at compile time
-/// rather than being printed as whatever a fallback arm picked.
+// The three-valuedness is the whole point. `[]` for `Sigils::Unknown` would tell
+// an operator they hold nothing when warlock could not read what they hold, and
+// those mean opposite things about what is on disk — so the broken case is
+// `null`, which a consumer has to handle deliberately rather than iterate over
+// by accident. Total, so a fourth state breaks this at compile time.
 fn sigils_value(sigils: &Sigils) -> Value {
     match sigils {
         Sigils::Held(held) => Value::Array(held.iter().cloned().map(Value::String).collect()),
@@ -364,13 +244,10 @@ mod tests {
     use crate::standing::Standing;
     use crate::status_for;
 
-    /// A `Standing` in `repo`, which is both the working directory and the
-    /// root: `warlock check` run from the top of a checkout.
     fn standing_in(repo: &Path) -> Standing {
         Standing::at(repo.to_path_buf(), repo.to_path_buf())
     }
 
-    /// What `checked_onto` wrote, without the trailing newline.
     fn said(repo: &Path, path: &str, json: bool) -> String {
         let mut out = Vec::new();
         checked_onto(&standing_in(repo), PathBuf::from(path), json, &mut out)
@@ -460,27 +337,22 @@ mod tests {
         );
     }
 
-    /// The repository every check here is asked about. A path rather than a
-    /// directory on disk, deliberately: coverage is a walk up the manifest's
-    /// stored paths and never a walk of the filesystem, so nothing here has to
-    /// exist for the answer to be the answer.
+    // A path rather than a directory on disk, deliberately: coverage is a walk
+    // up the manifest's stored paths and never a walk of the filesystem, so
+    // nothing here has to exist for the answer to be the answer.
     const REPO: &str = "/repo";
 
-    /// A throwaway directory. Every test that reads or writes a config builds
-    /// its home out of one of these, so nothing here goes near the developer's
-    /// real home.
+    // Every test that reads or writes a config builds its home out of one of
+    // these, so nothing here goes near the developer's real home.
     fn a_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("a temporary directory")
     }
 
-    /// An entry for `module`, documented the way a pact would document it.
     fn entry(module: &str) -> PactEntry {
         PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
             .expect("a relative module path is inside the root")
     }
 
-    /// A repository with a scope on `crates`, a nearer one on `crates/engine`,
-    /// and a pacted-but-unscoped `docs`.
     fn a_manifest() -> Manifest {
         Manifest::with_entries([
             entry("crates").with_scope("platform"),
@@ -489,8 +361,6 @@ mod tests {
         ])
     }
 
-    /// The answer about `path` in [`a_manifest`], with this machine's sigils
-    /// read from under `home`.
     fn answer(home: &Path, path: &str) -> Checked {
         checked(
             Path::new(REPO),
@@ -501,13 +371,11 @@ mod tests {
         .expect("a path inside the repository has a manifest form")
     }
 
-    /// Write `sigils` as what the machine holds for [`REPO`] under `home`.
     fn holding(home: &Path, sigils: &[&str]) {
         let sigils: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
         save_sigils(home, Path::new(REPO), &sigils).expect("a config that writes");
     }
 
-    /// Put a file that is not a config where this machine's sigils would be.
     fn a_broken_config(home: &Path) {
         let path = sigils_path(home, Path::new(REPO));
         fs::create_dir_all(
