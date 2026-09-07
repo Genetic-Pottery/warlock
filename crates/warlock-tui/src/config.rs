@@ -1,54 +1,15 @@
-//! `warlock config`: the sigils this machine holds for this repository.
+//! `warlock config`: the sigils this machine holds for this repository. A scope
+//! is committed in `.warlock/pacts.toml` and read by everyone who clones the
+//! repository; a sigil is what one person holds on one machine, so nothing here
+//! writes, or offers to write, a file inside the checkout.
 //!
-//! The second subcommand, in the shape `warlock init` gave the first: it
-//! is dispatched before anything touches the terminal, it never enters the
-//! alternate screen, it installs no panic hook, and everything it has to say is
-//! printed on the ordinary screen. A failure is an [`Error`] returned to `main`,
-//! which prints it in the same place and the same shape as a tree that would not
-//! load.
-//!
-//! # What it is for
-//!
-//! A **scope** is a fact about a directory, committed in `.warlock/pacts.toml`
-//! and read by everybody who clones the repository. A **sigil** is what one
-//! person on one machine holds, and it is never written inside a repository.
-//! This subcommand is the only way to record the second, and it records it at
-//! `<home>/.warlock/<project>/config.toml` — see
-//! [`sigils_path`]. Nothing here writes, or offers
-//! to write, any file inside the repository, and nothing here matches a sigil
-//! against a scope: what ships is the record and the vocabulary.
-//!
-//! # Print, then read, and say everything before the cursor
-//!
-//! The interaction is one line in and one file out, and the whole of it is
-//! stated above the cursor: which project was resolved and where its file is,
-//! what is held right now, the rules a sigil follows, and what each of the three
-//! possible answers does. A blank line *clears* the set, and a prompt whose
-//! blank answer destroys something has to say so on the screen rather than in a
-//! manual — which is also what buys the single entry point. There is no `warlock
-//! config clear`, no `warlock config set`, no flag and no second spelling of
-//! anything, so there is no argument parser here and no line editor: exactly one
-//! line is read, with [`io::Stdin::read_line`], in cooked mode.
-//!
-//! Cooked mode is also the whole of what Ctrl-C needs. The terminal is never put
-//! into raw mode and no panic hook is installed, so Ctrl-C at this prompt is a
-//! SIGINT that ends the process where it stands — before the read returns, and
-//! so before anything is validated or written. EOF is the same promise by
-//! another road and is the one this file has to keep deliberately: a `0` from
-//! the read writes nothing at all, leaving a missing file missing and an
-//! existing one byte for byte as it was.
-//!
-//! # Where each judgement is made
-//!
-//! [`sigils_in`] turns the line into the set and is the only judge of it, and
-//! [`preamble`] composes everything printed above the prompt. Both are pure
-//! functions of their arguments — no stdin, no repository, no home directory —
-//! so the two things worth being sure of, that a line means what it looks like
-//! it means and that the screen says what it has to say before the cursor, are
-//! tested without a process to spawn. What a sigil may be is not decided here at
-//! all: it is [`validate_sigil`]'s answer, asked one string at a time, which is
-//! what keeps one vocabulary for a boundary typed at this prompt and a boundary
-//! read out of a manifest.
+//! One line in and one file out, with everything the answer turns on printed
+//! above the cursor — including that a blank line clears the set. That is what
+//! buys the single entry point: no `warlock config clear`, no flag, no second
+//! spelling, and so no argument parser and no line editor here. EOF is the one
+//! answer that writes nothing, told apart from a blank line in [`read_line`]
+//! rather than anywhere below it. Ctrl-C needs no code at all, because this
+//! subcommand never enters raw mode and installs no panic hook.
 
 use std::fmt;
 use std::io::{self, Write};
@@ -59,49 +20,20 @@ use warlock_engine::{load_sigils, save_sigils, sigils, sigils_path, validate_sig
 use crate::error::{Error, one_line};
 use crate::standing::{FOR_SIGILS, Standing};
 
-/// The cursor's own line. Named for what is expected of it and for the one
-/// thing a reader has to get right about the syntax — several sigils are
-/// separated by spaces — because it is the last thing on the screen before they
-/// type.
 const PROMPT: &str = "sigils (separated by spaces)> ";
 
-/// How a set holding nothing is worded, at the prompt and afterwards.
 const NOTHING: &str = "nothing";
 
-/// The rules a sigil follows, in the one sentence they are printed as.
-///
-/// Written out rather than derived from
-/// [`validate_sigil`], which judges strings and
-/// has nothing to say about itself. That makes this a second statement of the
-/// same rules, and it is the honest place for one: it is what a person reads
-/// before typing, and the alternative is a prompt that says nothing and refuses
-/// afterwards. The wildcard is on the end because it is the one thing a sigil
-/// may be that a scope may not.
+// A second statement of `validate_sigil`'s rules, written out because that
+// function judges strings and has nothing to say about itself. This is the
+// honest place for the duplicate: it is what a person reads before typing, and
+// the alternative is a prompt that says nothing and refuses afterwards. The
+// wildcard is last because it is the one thing a sigil may be that a scope may
+// not.
 const RULES: &str = "a sigil is 1 to 24 characters of lowercase letters, digits, `-` and \
                      `_`, begins with a letter and does not end with `-` or `_`; `*` on \
                      its own means anywhere";
 
-/// `warlock config`: print what is held, read one line, and write what it says.
-///
-/// The steps are the ones the module doc describes, in that order and with the
-/// read in the middle of them: the working directory says where to start,
-/// [`repository_root`](warlock_engine::repository_root) walks up to the nearest ancestor with a `.git/` — so
-/// running this from any subdirectory configures the one checkout — the home
-/// directory says where the file goes, and what is already held is printed
-/// before a cursor ever appears.
-///
-/// Every way out of the read but one writes something: a line of sigils replaces
-/// the set, a blank line replaces it with the empty set, and EOF returns here
-/// having touched nothing. That last case is a `return` of its own rather than
-/// an empty set, because "changed nothing" and "cleared it" are the two answers
-/// this prompt most has to keep apart.
-///
-/// # Errors
-///
-/// [`Error::WorkingDirectory`], [`Error::NoRepository`] and [`Error::NoHome`]
-/// before anything is printed; [`Error::Prompt`] if the line cannot be read;
-/// [`Error::Sigil`] if something on it is not a sigil, in which case nothing is
-/// written; and [`Error::Sigils`] if the file itself will not write.
 pub(crate) fn configure() -> Result<(), Error> {
     let standing = Standing::here(FOR_SIGILS)?;
     // The one subcommand that takes the error rather than `.ok()`: a home is the
@@ -112,25 +44,14 @@ pub(crate) fn configure() -> Result<(), Error> {
     prompted(&standing, &home, read_line, &mut io::stdout())
 }
 
-/// The prompt itself: say what is held, read one line, and write what it says.
-///
-/// Split from [`configure`] so the order is something a test can run. `ask` is
-/// where the line comes from — [`read_line`] on the real road, a canned answer
-/// under test — and `out` is where every word of it goes, so that a suite can
-/// assert what a reader would have seen rather than only what ended up on disk.
-///
-/// The order is the part worth pinning. The preamble is written and **flushed**
-/// before anything is read, because the prompt has no newline of its own and
-/// would otherwise sit in the terminal's buffer behind a cursor waiting on a
-/// person; EOF is answered before anything is parsed, so a Ctrl-D leaves a
-/// missing file missing and an existing one unopened; and the confirmation names
-/// the file only after [`hold`] has actually written it.
-///
-/// # Errors
-///
-/// [`Error::Prompt`] if the line cannot be read, [`Error::Sigil`] if something
-/// on it is not a sigil — in which case nothing is written — and
-/// [`Error::Sigils`] if the file itself will not write.
+// Split from `configure` so the order is something a test can run: `ask` is a
+// canned answer under test and `out` collects what a reader would have seen.
+//
+// That order is the part worth pinning. The preamble is flushed before anything
+// is read, because the prompt carries no newline and would otherwise sit in the
+// terminal's buffer behind a cursor waiting on a person; EOF is answered before
+// anything is parsed; and the confirmation names the file only after `hold`
+// has written it.
 fn prompted<W: Write>(
     standing: &Standing,
     home: &Path,
@@ -171,32 +92,21 @@ fn prompted<W: Write>(
     Ok(())
 }
 
-/// What this machine holds for a repository, as `warlock config` found it.
-///
-/// Two answers rather than three, and the join is deliberate: a config that is
-/// not there and a config holding an empty set both read as *nothing held* at
-/// this prompt, because the line about to be typed replaces either of them in
-/// exactly the same way. A file that is there and cannot be read is the answer
-/// that must stay apart from those, since it is the one case where what is on
-/// disk is not what this says.
+// Two answers rather than three, and the join is deliberate: a config that is
+// not there and a config holding an empty set both read as nothing held,
+// because the line about to be typed replaces either of them the same way. A
+// file that is there and cannot be read has to stay apart from those — it is
+// the one case where what this prints is not what is on disk, and the reader is
+// about to be offered a line that would overwrite it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Held {
-    /// The sigils the config holds, in file order and exactly as stored. Empty
-    /// means nothing is held, whether the file said so or was not there at all.
     Sigils(Vec<String>),
-    /// The file is there and could not be read or understood, with the one line
-    /// saying why. Printed as it stands: the reader is about to be offered a
-    /// line that would overwrite it, and they should know that is what it does.
     Unreadable(String),
 }
 
-/// Read what is held for `root` under `home`, without failing.
-///
-/// A read that goes wrong is a state to print rather than a way out, because
-/// this subcommand's job is to *set* the sigils and a config that cannot be read
-/// is the situation a reader most needs to be able to type over. The engine's
-/// "not found" is the one error that is not a problem — see
-/// [`load_sigils`] — and it reads as the empty set here.
+// A read that goes wrong is a state to print rather than a way out: the job
+// here is to *set* the sigils, and a config that cannot be read is the
+// situation a reader most needs to be able to type over.
 fn held_for(home: &Path, root: &Path) -> Held {
     match load_sigils(home, root) {
         Ok(sigils) => Held::Sigils(sigils),
@@ -205,19 +115,11 @@ fn held_for(home: &Path, root: &Path) -> Held {
     }
 }
 
-/// Everything printed above the cursor: what was resolved, what is held, what a
-/// sigil may be, what each answer does, and the prompt itself.
-///
-/// Pure, and it ends *without* a newline, because the last thing it composes is
-/// the line the reader types on. `root` is the repository this is about and
-/// `path` the file it would write, both named because a subcommand that edits a
-/// file the reader has never seen should say which file, and because the project
-/// directory in that path is what tells two checkouts of one repository apart.
-///
-/// The order is fixed by what the reader needs before they can answer: what this
-/// is about, what it is now, what a legal answer looks like, and only then what
-/// their answer will do. The three answers are stated together, in one line
-/// each, with the destructive one named as plainly as the others.
+// Pure, and it ends *without* a newline, because the last thing it composes is
+// the line the reader types on. The order is fixed by what the reader needs
+// before they can answer: what this is about, what it is now, what a legal
+// answer looks like, and only then what their answer will do — the destructive
+// one named as plainly as the other two.
 fn preamble(root: &Path, path: &Path, held: &Held) -> String {
     // One `format!` rather than a line at a time, so what is on the screen is
     // read here in the order it is printed in.
@@ -247,12 +149,9 @@ impl fmt::Display for Held {
     }
 }
 
-/// The set `sigils`, as the middle of a sentence: each one quoted and separated
-/// by commas, or [`NOTHING`] when there are none.
-///
-/// One wording, used before the line is typed and after it is written, so that
-/// running `warlock config` twice and typing the same line the second time
-/// prints back exactly what the first run printed.
+// One wording, used before the line is typed and after it is written, so that
+// running `warlock config` twice and typing the same line the second time
+// prints back exactly what the first run printed.
 fn holding(sigils: &[String]) -> String {
     if sigils.is_empty() {
         return NOTHING.to_owned();
@@ -265,28 +164,15 @@ fn holding(sigils: &[String]) -> String {
         .join(", ")
 }
 
-/// The set of sigils `line` asks for, or the first thing on it that is not one.
-///
-/// Whitespace separates them and nothing else does: a line is a shell-like list
-/// of words, which is what makes the trailing `\n` — or `\r\n` — vanish rather
-/// than becoming a token, and what makes a line of only spaces the same answer
-/// as an empty one. So a blank line yields the empty set, which the caller
-/// writes: clearing is a set that is replaced, not a file that is deleted.
-///
-/// Each word is lower-cased and then judged, in that order, because folding
-/// belongs where a person supplies a string — `Data-Plane` and `data-plane` are
-/// one holding, not two — and the engine's validator deliberately never repairs
-/// what it is handed. The first word that fails ends the whole line: a set is
-/// replaced entirely, so writing the words that came before a typo would leave
-/// the reader holding half of what they typed.
-///
-/// Repeats are dropped, keeping the first of them. What is stored is a set — the
-/// question a sigil answers is "do you hold this one" — and typing `Billing
-/// billing` is one holding written twice rather than two.
-///
-/// # Errors
-///
-/// [`Error::Sigil`], naming the word as it was typed and the one rule it broke.
+// Whitespace separates the words and nothing else does, which is what makes the
+// trailing newline vanish rather than become a token and a line of only spaces
+// the same answer as an empty one. The empty set that comes back from a blank
+// line is written like any other: clearing is a set replaced, not a file
+// deleted.
+//
+// The first word that fails ends the whole line, because a set is replaced
+// entirely and writing the words before a typo would leave the reader holding
+// half of what they typed.
 fn sigils_in(line: &str) -> Result<Vec<String>, Error> {
     let mut sigils: Vec<String> = Vec::new();
     for word in line.split_whitespace() {
@@ -313,40 +199,20 @@ fn sigils_in(line: &str) -> Result<Vec<String>, Error> {
     Ok(sigils)
 }
 
-/// Judge `line` and, if every word on it is a sigil, make it the set held for
-/// `root` under `home`. Hands back what is now held.
-///
-/// The whole of what an answered prompt does, with both ends passed in rather
-/// than looked up: `home` is a parameter all the way down to the engine, which
-/// is what lets this be tested against a temporary directory and what keeps any
-/// test from writing to the developer's real home.
-///
-/// Nothing is written unless the whole line is sigils, because [`sigils_in`]
-/// runs first and returns before the save is reached. The save itself is
-/// write-and-rename inside the home directory (see
-/// [`save_sigils`]): the set is replaced rather
-/// than added to, and no file inside the repository is touched.
-///
-/// # Errors
-///
-/// [`Error::Sigil`] for a word that is not a sigil, or [`Error::Sigils`] if the
-/// file will not write.
+// `home` is a parameter all the way down to the engine, which is what lets this
+// be tested against a temporary directory and keeps any test off the
+// developer's real home. Nothing is written unless the whole line is sigils:
+// `sigils_in` runs first and returns before the save is reached.
 fn hold(home: &Path, root: &Path, line: &str) -> Result<Vec<String>, Error> {
     let sigils = sigils_in(line)?;
     save_sigils(home, root, &sigils).map_err(|source| Error::Sigils { source })?;
     Ok(sigils)
 }
 
-/// The one line the prompt reads, or `None` at end of input.
-///
-/// `Ok(0)` from the read is EOF and nothing else, and it is kept apart from an
-/// empty line here rather than anywhere further down: everything below this
-/// treats a line as text, and only this function can tell "they pressed Enter on
-/// an empty line" from "there is no line and never will be".
-///
-/// # Errors
-///
-/// [`Error::Prompt`] if stdin cannot be read at all.
+// `Ok(0)` is EOF and nothing else. It is told apart from an empty line here
+// rather than further down, because everything below treats a line as text and
+// only this function can tell "they pressed Enter" from "there is no line and
+// never will be".
 fn read_line() -> Result<Option<String>, Error> {
     let mut line = String::new();
     match io::stdin().read_line(&mut line) {
@@ -366,18 +232,14 @@ mod tests {
     use crate::error::Error;
     use crate::standing::Standing;
 
-    /// A throwaway directory. Every test that writes anything builds both its
-    /// home *and* its repository root out of these, so nothing here reads or
-    /// writes the developer's real home.
+    // Every test that writes anything builds both its home *and* its repository
+    // root out of these, so nothing here touches the developer's real home.
     fn a_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("a temporary directory")
     }
 
-    /// `warlock config` in `repo`, under `home`, answered with `line`.
-    ///
-    /// The production composition, with the two things a person supplies handed
-    /// in instead: the answer and somewhere to print. `None` is EOF, which is
-    /// Ctrl-D at a terminal.
+    // The production composition with the two things a person supplies handed
+    // in instead: the answer — `None` is EOF — and somewhere to print.
     fn prompt_with(repo: &Path, home: &Path, line: Option<&str>) -> (Result<(), Error>, String) {
         let standing = Standing::at(repo.to_path_buf(), repo.to_path_buf());
         let answer = line.map(str::to_owned);
@@ -455,12 +317,10 @@ mod tests {
         );
     }
 
-    /// The sigils `line` asks for, for the lines that are all sigils.
     fn parsed(line: &str) -> Vec<String> {
         sigils_in(line).expect("every word on this line is a sigil")
     }
 
-    /// The sigils held for `root` under `home`, as the engine has them on disk.
     fn on_disk(home: &Path, root: &Path) -> Vec<String> {
         load_sigils(home, root).expect("a config that was just written")
     }

@@ -1,299 +1,20 @@
-//! Terminal front end for warlock.
+//! The terminal front end: the impure shell around the pure parts in
+//! `warlock_tui`. It owns the terminal's lifecycle, the directory warlock was
+//! invoked from, and the event loop, and nothing else.
 //!
-//! This binary is the thin, impure shell around the pure parts in
-//! `warlock_tui`: it owns the terminal's lifecycle, the working directory it
-//! was invoked from, and the event loop, and nothing else. It asks the engine
-//! to load the tree for that directory and knows nothing about how one is
-//! built; what a frame looks like is [`warlock_tui::draw`]'s business and how
-//! the selection moves is [`App`]'s.
+//! Every subcommand is dispatched *before* anything touches the terminal, and
+//! none of them installs the panic hook: they print on the ordinary screen for
+//! a script reading through a pipe, and `Cli::parse` exits the process itself
+//! on `--help`, which is only safe while there is nothing attached to the
+//! terminal to leave un-restored. The terminal is then restored on every way
+//! out, including a panic on any thread, which is why [`install_panic_hook`]
+//! runs before [`TerminalGuard::enter`] and why the guard lives inside [`run`].
 //!
-//! This file is the loop itself; each of the loop's concerns lives in a
-//! sibling module. What a keystroke or a click means is [`input`]'s, running a
-//! pact on a worker thread and applying what it says is [`pacting`]'s, the whole
-//! conversation — the draft at the foot of the panel, the register it is in, the
-//! turns it is made of and the window a `/write` opens — is [`chatting`]'s,
-//! asking
-//! for a scope and writing it is [`scoping`]'s, reading a file into the panel is
-//! [`viewing`]'s, handing one to `$EDITOR` and taking the terminal back
-//! afterwards is [`editing`]'s, what a brief written out of the conversation
-//! would be called and the bytes of it going to disk is [`writing`]'s, where
-//! the tree came from and when it is re-read is [`session`]'s, the terminal's
-//! setup and restoration is [`terminal`]'s, and the one-line errors `main`
-//! prints are [`error`]'s. The paragraphs below describe how the loop drives
-//! all of them, and each module's own doc says why it is shaped as it is.
-//!
-//! The one rule this shell exists to keep is that the terminal is restored on
-//! every way out: a normal quit, an error returned up to `main`, and a panic.
-//! Raw mode left switched on after exit means a shell that no longer echoes
-//! what the user types, and that is not something they should have to know how
-//! to fix. A pact runs on a thread of its own now, so a panic *there* is one of
-//! those ways out too — and it is covered by the same process-wide hook, which
-//! is why the hook is installed before anything else happens.
-//!
-//! The one long keystroke is the pact key, and it is the reason the loop below
-//! is shaped the way it is. A subtree pact is minutes of model passes, so
-//! pressing the key spawns a worker thread ([`pacting::spawn_pact`]) and hands back a
-//! [`Receiver`] of what that worker has to say: which directory it is on, and,
-//! once, how the whole thing went. The loop polls for a keystroke with a short
-//! timeout instead of blocking on one, drains that channel every frame, and
-//! draws — so the tree still scrolls, the footer's progress line still advances,
-//! and the run lands on screen the moment the worker is done with it. Nothing
-//! here waits on the worker: the manifest, the tree and the message are updated
-//! from the events it sends, and the thread is never joined.
-//!
-//! The refresh key is the second long keystroke and is not a second anything
-//! else: `r` asks the engine to describe only the stale directories under the
-//! selected one, and it does so through the same [`Pact`] — the same worker,
-//! the same channel, the same account and the same say-when — which is what
-//! makes one run at a time a fact rather than a rule. The two keys refuse each
-//! other by that alone, and neither has to be told: [`Pact::press`] reads the
-//! one run it holds before it decides anything, and says so on the line the
-//! reader is already watching.
-//!
-//! Those events are also what fills the panel. The press that really starts a
-//! run opens an [`warlock_tui::Account`] on the app — one pact, one account, so
-//! the next run clears the last one — each directory the worker names opens a
-//! section of it, and everything a pass is seen doing lands under the section it
-//! belongs to. Both halves are [`Pact::keep_up`], which is handed the instant
-//! it is called at rather than reading a clock, and so is the draw above it: the
-//! newest line of the live section counts up against that instant, which is what
-//! makes a pass that thinks for a minute look like something is happening. The
-//! loop's existing hundred-millisecond round is the whole of the tick — there is
-//! no timer, no second thread and no redraw on a schedule of its own.
-//!
-//! What a run leaves behind is on disk rather than in the rows, and that is the
-//! other thing the shape of the loop is for. A pact writes a `WARLOCK.md` beside
-//! every directory it descends through, and those are rows the tree on screen
-//! has never had, so the moment a run ends the view is one load out of date. One
-//! rule covers it: [`Pact::keep_up`] does its own arm's work first — the
-//! outcome applied, the manifest saved — and then [`reload_tree`] re-reads the
-//! tree from disk and re-seats the view on top of it, carrying the selection,
-//! the collapsed directories, the filters and the window across by path. The
-//! same single call ends all four ways a run can finish and an un-pact besides,
-//! it runs here on the loop's thread and never on the worker's, and a load that
-//! fails this late keeps the tree already drawn instead of ending the loop.
-//!
-//! The third reason to reload is that the disk moved without anybody
-//! here pressing a key, and it is what [`Watched`] is for. A watcher started
-//! beside the first load reports every path that changes under the tree's root
-//! and at `.warlock/pacts.toml`; the loop drains it once a round, holds each
-//! path against the directories the last successful load produced — the walk is
-//! the whole filter, so a `cargo build` writing into a directory no walk
-//! produced costs one comparison a path and nothing else — and asks a
-//! [`WatchPolicy`] whether the tree is owed a reload yet. When it is, the same
-//! [`reload_tree`] runs, on this thread, and the tree it hands back becomes the
-//! filter the next round holds paths against. So a file saved in another window
-//! turns its directory yellow with no keystroke instead of waiting for a
-//! relaunch. Two things this reason gives way to: a pact in flight, whose
-//! documents set off events the run's own end-of-run reload already answers, so
-//! the trigger is remembered and nothing is read twice; and warlock itself,
-//! since a watcher that will not start is one line on the footer rather than a
-//! way out of [`run`] — warlock with no live updates is warlock as it was.
-//!
-//! The fourth and last is the disk having moved because this loop asked somebody
-//! else to move it: `e` hands a file to `$EDITOR`, and whatever was saved in
-//! there is on disk before the terminal comes back. So the same [`reload_tree`]
-//! runs on the way in, inside [`editing::edit_press`] — a `WARLOCK.md` that was
-//! edited restales its own directory, and a row that only went yellow at the
-//! reader's next keystroke would be warlock knowing something and not saying it.
-//! The panel is read again there too, and only in one case: when the document
-//! card is holding the very file that was edited, which is what `document` below
-//! is kept for. Which card is showing never moves for it.
-//!
-//! A run that takes minutes has to be stoppable, and there are two ways to stop
-//! one, which this file keeps apart on purpose. Esc *cancels*: the descent ends
-//! between directories, the `claude` running right now is killed, and the worker
-//! still finishes — it hashes and grants what it did write and saves the
-//! manifest, so the record on disk is what actually completed. `q` and Ctrl-C
-//! *quit*: the same handle kills the same child, but nothing waits for the
-//! worker to tidy up, so the manifest is simply never rewritten. Either way the
-//! documents already written are whole, because each of them is written beside
-//! its directory and renamed over (WAR-21.01), and the manifest is written once
-//! by a rename too — so there is no half-state for an abandoned worker to leave.
-//! Both roads run through one [`Cancel`], which the run inside [`Pact`] owns and
-//! drops through, which is why every way out of the loop — a quit, an error, a
-//! `?` in the middle of a frame — takes the child with it.
-//!
-//! The loop answers a pointer as well as a keyboard, and it is the same
-//! arrangement twice over. [`TerminalGuard`] asks the terminal to report its
-//! mouse in the same breath as it takes the alternate screen, so the reporting
-//! is switched off by the same [`restore_terminal`] every way out already runs
-//! through; and an event that arrives is turned into an intention by
-//! [`mouse_action`], which is [`input::action_for`] for the pointer — a function
-//! of the event, the size this round measured, the app and the gate on the way
-//! out, with no terminal in it. The wheel drives whichever pane the pointer is
-//! over rather than whichever pane has the keys, a left click selects a row and
-//! takes the keys with it, and everything else a mouse can send is read and
-//! dropped, so a pointer swept across the screen changes nothing and costs no
-//! more than the round it arrived in.
-//!
-//! There is one thing between a keystroke and the end of the session now, and
-//! it is a question. Esc and `q` no longer return from [`run`]: with nothing
-//! running they open the quit confirmation ([`QuitConfirm`]), which is drawn
-//! over the frame and answered from the keyboard, and only a Yes returns. The
-//! decision is [`press_for`]'s and not this file's — a key, the question's
-//! state, the scope prompt's, the composer's and whether a run is in flight go
-//! in, and what the loop is to do comes out — so the whole gate is testable with
-//! nothing attached to stdout, and the arms below are the five things that can
-//! come of a keystroke: leave, move the question, type into the scope prompt,
-//! type into the composer, or hand the key to the app. While either window is up
-//! the app hears nothing, the pointer included: mouse events are read and
-//! dropped, so a click cannot select a row behind a window that is about to
-//! close.
-//!
-//! The composer is the third place a keystroke can land, and the newest. It is
-//! not on this stack and it is not on the app: it lives inside the [`Chat`],
-//! with the turn that mutes it and the register it types commands into — and
-//! being off the app is still load-bearing for its original reason, since a
-//! draft on the app would be a draft the copy put back after a run had never
-//! heard of. It is offered to [`press_for`] exactly when [`App::focus`] is on
-//! it, read through [`Chat::composer`], which can only ever lend it out: this
-//! file's `draw` lives in the library and has no way even to name a `Chat`.
-//! While it holds the keyboard every key but Ctrl-C and
-//! Tab goes to [`warlock_tui::compose_for`] and never to [`input::action_for`],
-//! which is the whole point of the field: `p` is the letter p rather than a pact
-//! over whatever row happens to be selected. Ctrl-C still leaves, Tab still moves
-//! the keyboard on, Esc hands it back with the draft intact, and Enter offers the
-//! draft up to nobody — this slice has no consumer for a submission, and the arm
-//! below is inert on purpose.
-//!
-//! The second window is the scope prompt, and it is the one keystroke that
-//! writes to disk without being a run. `s` opens it over the selected directory
-//! holding the scope that directory carries now, read out of the manifest this
-//! loop already holds; Enter writes the manifest here, on this thread, between
-//! two frames. There is no worker, no channel, no say-when, no account and no
-//! reload — a scope is one string in one entry of a file already in hand, and it
-//! changes no row's state or colour, so re-reading the tree afterwards would walk
-//! the repository to arrive at the tree already on screen. Both halves of it live
-//! in [`scoping`], the way the pact key's live in [`pacting`], and the deliberate
-//! consequence is recorded there: a successful write says nothing at all, because
-//! the fact it produces is a label on the row that a sibling slice draws.
-//!
-//! Two keystrokes are deliberately outside the gate. Ctrl-C is answered before
-//! the question is consulted, because in raw mode it is a key event rather than
-//! a signal: routed through the dialog it would be an ordinary `c` with a
-//! modifier riding along — one of the keys that change nothing — and the last
-//! resort of a reader who wants out would be the one keystroke the dialog
-//! swallowed. And a run in flight suppresses the gate entirely: Esc means cancel
-//! for as long as there is something to cancel, so the reflex press this gate
-//! exists for cannot reach the way out anyway, while `q` and Ctrl-C during a run
-//! are what a reader reaches for having already decided — a question in front of
-//! them would be a question asked of somebody who has answered it.
-//!
-//! One thing now happens before any of that, and it happens with nothing
-//! attached to the terminal: the arguments are read. The parser is [`Cli`], a
-//! clap derive type, so the whole command line is a data structure rather than a
-//! chain of string comparisons and every case below is testable with no
-//! terminal, no repository and no process to spawn. No subcommand is the whole
-//! of warlock as it was — the panic hook, the loop, the alternate screen — and
-//! anything else is answered here and exits. `init` writes a `CLAUDE.md` at the
-//! repository root and says which file it wrote; `config` prints the sigils this
-//! machine holds for this repository and reads a line replacing them
-//! ([`config`]); `stale` and `fresh` print the pacted directories at or below a
-//! path that are in that state, a path a line or, with `--json`, one object
-//! ([`query`]); `check` says which scope covers a path, what this machine holds
-//! and whether the two meet, as prose or as one object ([`check`]); `unpact`
-//! drops the pact on a directory and every pact below it, and `scope add` and
-//! `scope remove` write and clear the boundary on one directory's pact — all
-//! three only if this machine holds the boundary covering the path
-//! ([`mod@edits`]); `pact` and `refresh` descend a subtree, spending a model
-//! pass per directory and saying on stdout where they have got to, behind that
-//! same boundary ([`mod@running`]); `-h` and
-//! `--help` print clap's help; and every other word, and
-//! every argument warlock has no place for, is clap's error and usage on stderr.
-//! Refusing is the point of the last of those: warlock used to open the tree for
-//! `warlock status`, which reads as the typed command having run.
-//!
-//! Every subcommand shares one rule, and it is why they are dispatched here
-//! rather than anywhere inside [`run`]: none of them goes near the terminal. No
-//! alternate screen, no raw mode and no panic hook — the hook exists to restore
-//! a terminal these paths never take, and `config` reads its line in cooked
-//! mode, which is also what makes Ctrl-C at its prompt an ordinary SIGINT that
-//! ends the process before anything is written. The two listings and the check
-//! add a second reason of their own: their answer is read by a script through a
-//! pipe, and a program that had taken the alternate screen to print one would
-//! have piped its answer into a repaint.
-//!
-//! The three questions — `stale`, `fresh` and `check` — share a second rule,
-//! and it is the one that makes them safe to put in a script, a CI job or an
-//! agent's hands: they only read. None of them writes to `.warlock/pacts.toml`
-//! — no grant, no scope, no entry — none of them spawns a process, and none of
-//! them runs a model pass, so asking costs no tokens, no minutes and no risk of
-//! a manifest left in a state nobody asked for. What they read is what the loop
-//! itself reads: the tree through [`load_tree`](warlock_engine::load_tree) with
-//! its states already decided, coverage through the engine's
-//! [`scope_covering`](warlock_engine::scope_covering) — never a second
-//! staleness rule or a second walk written on this side of the edge. What they
-//! leave behind is one answer on stdout and an exit status, and that status is
-//! the whole of the contract a script reads: 0 means the question was answered,
-//! whatever the answer turned out to be — nothing stale, nothing covering the
-//! path, a scope closed to this machine — 1 means warlock could not answer it,
-//! and 2 is clap's, for a command line that was never a question. Which is why
-//! `warlock check <path> --json | jq -e '.opens'` is the recipe: the verdict is
-//! `jq`'s non-zero status, and warlock spends none of its own on saying no.
-//!
-//! `unpact`, `scope add` and `scope remove` are the subcommands that do not only
-//! read, and they are the reason the rule above is stated as being the three
-//! questions' rather than
-//! every subcommand's. They still take no terminal, spawn no process and run no
-//! model pass — all three are `.warlock/pacts.toml` rewritten and nothing else,
-//! with every `WARLOCK.md` left where it was — but they are writes, so they are
-//! the ones asked who is asking. The boundary covering the path is held against
-//! the sigils `warlock config` wrote for this machine before the command looks
-//! at anything else at all — before the path is even checked for an entry, so
-//! `warlock scope add` inside a closed boundary answers with the scope refusal
-//! and never with what the manifest holds — and a boundary this machine does not
-//! hold is one line on stderr and a 3, with the manifest untouched. That check is
-//! [`mod@edits`]'s, it is the engine's own
-//! [`scope_covering`](warlock_engine::scope_covering) and
-//! [`scope_opens_to`](warlock_engine::scope_opens_to) rather than a second
-//! reading of them, and there is no flag past it: `warlock config` is the only
-//! road. So the writes have one status the questions never spend: 0 for a write
-//! that happened, 3 for one refused at the boundary with nothing spent, 1 for
-//! one warlock could not finish, 2 for a command line that was never a request.
-//! The whole vocabulary, and why the refusal is worth a number of its own, is in
-//! [`status_for`].
-//!
-//! `pact` and `refresh` are the writes that are not only a rewritten
-//! `.warlock/pacts.toml`, and they are the reason the boundary is worth a check
-//! that costs a file read before anything else happens. A run is minutes long,
-//! it hands one `claude --print` per directory to a model and it writes a
-//! `WARLOCK.md` beside each one, so a boundary asked any later than first would
-//! be asked after somebody's tokens were spent and somebody else's prose was
-//! overwritten. It is the same gate the three cheap writes pass through, in the
-//! same words and with the same 3 ([`mod@running`]), and past it the only thing
-//! that reaches the terminal is one line per directory entered and one per
-//! directory documented, on stdout, because a run is watched through a pipe.
-//! Nothing is drawn.
-//!
-//! They are also the two subcommands that can half-work, and that is where they
-//! spend a status nothing else does. Each directory fails on its own — a pass
-//! refused, a document that would not write — without ending the run, so a run
-//! that had failures still saves the manifest the rest of the subtree earned,
-//! names every failing directory on stderr a line at a time, ends with one line
-//! saying how many of how many failed, and exits **4**. The split between the
-//! two streams is what makes that readable: progress on stdout, every failure
-//! and the count on stderr, so `warlock pact . > run.log` puts the descent in
-//! the file and leaves what went wrong on the terminal.
-//!
-//! And they are the two subcommands with a key: minutes of somebody's tokens
-//! with no panel to press Esc in leaves Ctrl-C as the only say-when, so a
-//! headless run listens for it ([`mod@running`]). The first press is the
-//! panel's Esc — the `claude` in flight is killed, the descent ends at the next
-//! directory rather than part way through one, and what finished is hashed,
-//! granted and saved before the process leaves with **130**. The second is the
-//! panel's `q`: it exits at once, saving nothing and printing nothing. The same
-//! [`Cancel`] does both halves of the first press, which is why a stop takes
-//! milliseconds rather than the rest of a five-minute pass.
-//!
-//! The reader can hand the pointer back. `m` turns the terminal's reporting off
-//! and on for the rest of the session ([`Action::ToggleMouseCapture`]); with it
-//! off the terminal keeps its own text selection and no `Event::Mouse` arrives
-//! at all, so nothing here needs a second gate. Whether it is on is this
-//! thread's to know — the app is handed a copy of it every round so the footer
-//! can name the key by what the next press does — and every way out still goes
-//! through [`restore_terminal`], which turns reporting off whichever state the
-//! toggle was left in.
+//! The loop draws and then *polls* for [`POLL_INTERVAL`] rather than blocking
+//! on a key, because the long keystrokes run on worker threads and report over
+//! channels that only the bottom of the loop drains. Doc comments on the
+//! `#[arg]` fields below are clap's `--help` text, not prose: deleting one
+//! changes what `warlock --help` prints.
 
 use std::io;
 use std::path::PathBuf;
@@ -324,9 +45,6 @@ mod running;
 mod scoping;
 mod session;
 mod standing;
-/// In-memory stand-ins for the two model seams, so a test that is not about the
-/// model does not have to spawn one. Test-only, and private on purpose: warlock
-/// itself talks to `claude`.
 #[cfg(test)]
 mod stubs;
 mod terminal;
@@ -349,58 +67,23 @@ use standing::{FOR_CLAUDE_MD, Standing};
 use terminal::{Screen, TerminalGuard, install_panic_hook};
 use viewing::view_press;
 
-/// How long the loop waits for a keystroke before going round again.
+/// How long the loop waits for a keystroke before going round anyway.
 ///
-/// The number is a compromise between two things that are both cheap. A pact in
-/// flight says where it has got to over a channel, and nothing but the top of
-/// the loop reads that channel, so this is also how long a progress line can be
-/// out of date: a tenth of a second is under the threshold at which a person
-/// reads a screen as lagging. Ten wakeups a second with nothing to do is a
-/// rounding error next to a terminal that repaints on every keystroke, and the
-/// draw either side of it writes nothing when nothing has changed, because
-/// ratatui diffs each frame against the last.
-///
-/// Polled rather than blocked on even when no pact is running, so there is one
-/// loop rather than two: a second, blocking path taken only while idle would be
-/// a second place the frame is drawn and the keys are handled, for a saving of a
-/// few timer wakeups.
+/// The ceiling on how stale the footer's clock and a run's progress line can
+/// get, and the reason an idle warlock redraws ten times a second rather than
+/// sleeping: the worker threads have no way to wake this one.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// What `warlock init` says when there was no `CLAUDE.md` and now there is one.
+/// The two words [`init`] reports with. Everything the engine can return that
+/// is not a brand-new file is an update, which is why this is a `matches!` on
+/// one variant rather than a match over an `#[non_exhaustive]` enum.
 const CREATED: &str = "created";
 
-/// What it says when there was one already and warlock's section in it is now
-/// current — which includes the case where the file did not change, since
-/// "updated" is true of the section either way and a reader running `init`
-/// twice is not owed a third word for it.
 const UPDATED: &str = "updated";
 
-/// What warlock was asked to do, as read off the command line and nothing else.
-///
-/// `name` is spelled out rather than taken from the package, because the package
-/// is `warlock-tui` and the executable it ships is `warlock`; the help and the
-/// usage lines have to say the word a reader typed.
-///
-/// `about` is written here and `long_about` is switched off, on this type and on
-/// every subcommand, because clap's derive otherwise lifts the doc comment above
-/// it into `--help`. This file's comments are essays for whoever maintains
-/// warlock, and a paragraph on why the panic hook is installed where it is would
-/// be a strange answer to `warlock --help`. Short help is the only help.
-///
-/// No `version` is declared, and that is a decision rather than an omission:
-/// `--version` and `-V` are unrecognized arguments, refused with everything else
-/// warlock does not have. Warlock is not installed from a registry and nobody is
-/// diagnosing a version skew in it yet, so the honest answer today is that the
-/// flag does not exist. Adding it later is `version` in the attribute below —
-/// not a reason to carry a half-answer in the meantime.
-///
-/// The subcommand is an `Option`, never `arg_required_else_help`: bare `warlock`
-/// is the tree, which is the thing warlock mostly is, not a mistake to be
-/// answered with help.
-///
-/// Not [`Copy`] any more, and it is the path arguments below that took it away:
-/// a [`PathBuf`] owns its bytes. Nothing here misses it — the whole of what
-/// `main` does with this value is move it into one `match`.
+/// `about` is spelled out on every command below, with `long_about = None`, so
+/// that the doc comments in this file are free to say why rather than being
+/// lifted into `--help`. The `#[arg]` fields are the exception and keep theirs.
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
 #[command(
     name = "warlock",
@@ -408,39 +91,28 @@ const UPDATED: &str = "updated";
     long_about = None
 )]
 struct Cli {
-    /// Which of warlock's operations to run; none of them opens the tree.
     #[command(subcommand)]
     command: Option<Command>,
 }
 
-/// The operations warlock will do without opening the tree.
+/// Everything warlock does without opening the tree.
 ///
-/// An enum rather than a parsed word, which is what makes the two listings
-/// below cost a field each rather than an argument parser of their own: the
-/// path they take and the `--json` they answer in are declared here, beside
-/// what they dispatch to, with nothing above this to change.
-///
-/// The two of them are one shape twice over rather than one variant carrying a
-/// state, and deliberately: what a reader types is the whole of the difference
-/// between them, and a `Command::List { state }` would be a variant nobody can
-/// find by grepping for the word they typed. What they *do* is one function
-/// ([`query::list`]) taking a [`Listing`], so the sameness is where the work is
-/// and the difference is where the words are.
+/// `Stale` and `Fresh` are one shape twice over rather than one variant
+/// carrying a state: what a reader types is the whole difference between them,
+/// and a `List { state }` would be a variant nobody finds by grepping for the
+/// word they typed. What they *do* is one function taking a [`Listing`].
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum Command {
-    /// `warlock init`.
     #[command(
         about = "Write warlock's section of CLAUDE.md at the repository root.",
         long_about = None
     )]
     Init,
-    /// `warlock config`.
     #[command(
         about = "Set the sigils this machine holds for this repository.",
         long_about = None
     )]
     Config,
-    /// `warlock stale [path]`.
     #[command(
         about = "List the pacted directories that are stale.",
         long_about = None
@@ -453,7 +125,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// `warlock fresh [path]`.
     #[command(
         about = "List the pacted directories that are fresh.",
         long_about = None
@@ -466,7 +137,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// `warlock check <path>`.
     #[command(
         about = "Say which scope covers a path and whether this machine's sigils open it.",
         long_about = None
@@ -484,7 +154,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// `warlock unpact <path>`.
     #[command(
         about = "Drop the pact on a directory and every pact below it.",
         long_about = None
@@ -498,7 +167,6 @@ enum Command {
         #[arg(value_name = "PATH")]
         path: PathBuf,
     },
-    /// `warlock pact <path>`.
     #[command(
         about = "Describe a directory and everything below it, writing a WARLOCK.md for each.",
         long_about = None
@@ -513,7 +181,6 @@ enum Command {
         #[arg(value_name = "PATH")]
         path: PathBuf,
     },
-    /// `warlock refresh <path>`.
     #[command(
         about = "Describe the stale directories at or below one, leaving the fresh ones alone.",
         long_about = None
@@ -523,40 +190,25 @@ enum Command {
         #[arg(value_name = "PATH")]
         path: PathBuf,
     },
-    /// `warlock scope <add|remove>`.
-    ///
-    /// The one subcommand with subcommands of its own, and the nesting is the
-    /// vocabulary rather than decoration: a scope is a noun with two things a
-    /// person does to it, and `warlock scope-add` would be two commands that
-    /// merely start with the same letters. It carries no work of its own — every
-    /// arm below dispatches into [`mod@edits`] exactly as `unpact` does, through
-    /// the same boundary and the same manifest save.
     #[command(
         about = "Set or clear the scope on a pacted directory.",
         long_about = None
     )]
     Scope {
-        /// Which of the two writes; there is no bare `warlock scope`.
         #[command(subcommand)]
         command: ScopeCommand,
     },
 }
 
-/// The two things `warlock scope` will do to a directory's boundary.
+/// Add and remove, and no third. No `list`, because that is `warlock check`;
+/// no `set` beside `add`, because one write with one name is what keeps the
+/// shell and the `s` key describable as one rule.
 ///
-/// Add and remove and nothing else — no `list`, because that is `warlock check`
-/// and a second spelling of a question is how a vocabulary rots, and no `set`
-/// beside `add`, because one write with one name is what keeps the shell and the
-/// `s` key describable as one rule.
-///
-/// Clearing is [`ScopeCommand::Remove`] and only that. The TUI's field clears a
-/// scope by being empty, which is the right answer for a window somebody is
-/// typing in; at a shell the empty string is far more often an argument that
-/// went missing than a clear somebody meant, so `warlock scope add <path> ''` is
-/// the engine's `Empty` rule and the reader is told which command clears.
+/// Clearing is [`ScopeCommand::Remove`] only. The TUI's field clears by being
+/// empty, which is right for a window somebody is typing in; at a shell an
+/// empty string is far more often an argument that went missing.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum ScopeCommand {
-    /// `warlock scope add <path> <scope>`.
     #[command(
         about = "Write a scope onto a pacted directory.",
         long_about = None
@@ -573,7 +225,6 @@ enum ScopeCommand {
         #[arg(value_name = "SCOPE")]
         scope: String,
     },
-    /// `warlock scope remove <path>`.
     #[command(
         about = "Clear the scope on a pacted directory.",
         long_about = None
@@ -676,79 +327,19 @@ fn main() -> ExitCode {
     ExitCode::from(status_for(&outcome))
 }
 
-/// The status warlock leaves behind for `outcome`, as the number a shell sees.
+/// The process's exit status.
 ///
-/// A few lines, given a name and pulled out of `main`, because they are the
-/// whole of the exit contract every headless subcommand promises and `main`
-/// itself is the one function here that no test can call: a test that ran it
-/// would run the event loop, or would have to spawn a process to avoid doing so.
-/// As a function of the outcome it is ordinary code, and the modules that
-/// produce those outcomes ([`query`], [`check`], [`mod@edits`]) pin their own end
-/// of the contract against it — an empty listing and a scope closed to this
-/// machine are both `Ok(())` from a question, and both are a 0.
+/// Four non-zero registers, kept distinct so a script can tell them apart
+/// without reading a word of the message: **2** is clap's, for a command line
+/// it could not parse; **1** is warlock could not do it; **3** is a boundary
+/// this machine's sigils do not open, refused with nothing spent; **4** is a
+/// run that finished with some directories failed, which is the one non-zero
+/// status that comes with the work having been done and saved; and
+/// [`CANCELLED`] is a run somebody stopped, likewise saved.
 ///
-/// The vocabulary the project agreed, in full. **0** completed: the question
-/// was answered or the write happened, whatever the answer turned out to be.
-/// **1** warlock could not do it: the repository will not resolve, the manifest
-/// will not parse or will not save, the path has no repository-relative
-/// spelling — the line on stderr is the thing to go and read. **2** a malformed
-/// invocation, which is clap's and is never produced here at all: `Cli::parse`
-/// has exited the process with it long before this is reached. **3** refused,
-/// with nothing spent: this machine's sigils do not open the scope covering the
-/// path a write was aimed at, so no byte of `.warlock/pacts.toml` moved,
-/// retrying changes nothing, and the road out is `warlock config` rather than
-/// anything in the message. **4** completed with failures: a `warlock pact` or
-/// `warlock refresh` descended the subtree, wrote the documents it could and
-/// saved the manifest, and some of its directories did not come out of it — the
-/// directories are named on stderr, one line each, and the line this status goes
-/// with says how many of how many ([`mod@running`]). **130** cancelled: somebody
-/// pressed Ctrl-C during one of those two runs, the descent stopped at the next
-/// directory and the pass in flight was killed, and what had finished by then is
-/// hashed, granted and saved before the status is reached — 128 plus SIGINT, so
-/// a shell, `make` and CI read it as interrupted without being told to.
-///
-/// 4 is not 1 for the reason 3 is not: they want different things done about
-/// them. A 1 is warlock unable to do the thing and nothing having happened
-/// — including a run whose manifest would not save, which stays a 1 however many
-/// directories failed inside it, because a run whose record never reached the
-/// disk is the bigger news and the one worth retrying. A 4 is the work done and
-/// partly not taken: the grants that were earned are on disk, so the thing to do
-/// is read the lines above the count and re-run over what failed.
-///
-/// 130 is not 4 for the same kind of reason, one step further along: a 4 is
-/// warlock's news about a run, and a 130 is the reader's own news back. Nothing
-/// went wrong in a cancelled run — the passes that finished are on disk and
-/// granted, the rest were never asked for — so a script that retries a 4 over
-/// the directories that failed must not retry a 130 at all, because the thing
-/// that stopped it was somebody deciding to stop it. The number is not warlock's
-/// invention: 128 plus the signal is what a shell reports for a killed process,
-/// SIGINT is 2, and every wrapper that already special-cases 130 gets this run
-/// right without being told anything about warlock.
-///
-/// 3 is here so that a script can act without reading English: the two non-zero
-/// results a write can have want opposite things done about them, and telling
-/// them apart by their wording is telling them apart by parsing prose. It is
-/// spent on a write refused and never on a question — `warlock check` over a
-/// boundary this machine does not hold still exits 0, because there a closed
-/// scope is the answer rather than a failure to reach one. So no verdict a
-/// question reached — nothing stale, nothing covering a path, a scope closed to
-/// this machine — ever spends a non-zero status, which is what leaves that
-/// status free for `jq -e '.opens'`.
-///
-/// [`Error::ClosedScopeBelow`] — the un-pact refused because the subtree it
-/// would drop carries a scope this machine does not hold — stays a 1, and that
-/// is a decision rather than an oversight. A 3 says the reader is *outside*:
-/// the path they aimed at is not theirs to touch, they were told nothing about
-/// what the manifest holds past it, and one road leads out. The descendant
-/// refusal says the reverse about the same reader — the boundary over that path
-/// already said yes and they may work there — and what it refuses is the blast
-/// radius, which is why its own sentence offers a second road that needs no
-/// sigil at all: un-pact the parts you hold. A script reading a 3 as "this
-/// checkout is locked out of that path, stop" would be wrong about it, and it
-/// is that wrongness which decides this rather than the tidiness of one number
-/// per rule. It is the weaker half of the fit — nothing was spent there either
-/// — so if the pact/refresh slice finds callers wanting the two together,
-/// moving it is one arm of the match below.
+/// **0** means the question was answered whatever the answer was — an empty
+/// listing is "nothing is stale", and a closed scope is `check`'s answer rather
+/// than a failure to reach one.
 const fn status_for(outcome: &Result<(), Error>) -> u8 {
     match outcome {
         Ok(()) => 0,
@@ -769,53 +360,12 @@ const fn status_for(outcome: &Result<(), Error>) -> u8 {
     }
 }
 
-/// What an interrupted run leaves behind: 128 plus SIGINT, the number every
-/// shell already reports for a process that took a Ctrl-C.
-///
-/// Named once and read twice, which is the whole reason it is a constant: the
-/// first Ctrl-C ends with [`status_for`] mapping [`Error::Cancelled`] to it, and
-/// the second leaves through the handler in [`mod@running`] without any outcome
-/// to map — and the two must not be able to drift into telling one shell two
-/// different stories about the same keypress.
+/// The status a shell already spells an interrupted process with, so warlock
+/// does not invent a second one.
 const CANCELLED: u8 = 130;
 
-/// `warlock init`: write the `CLAUDE.md` at the repository root and say which
-/// file was written.
-///
-/// Three steps and no policy of its own. [`Standing`] says where warlock is and
-/// which repository is above it — so running this from any subdirectory writes
-/// the one file in the right place — and the engine does the writing, because
-/// the splice, the delimiters and the text are all its business (see
-/// [`write_claude_md`]).
-///
-/// Nothing here touches the terminal: what happened is one line on the ordinary
-/// screen, and a failure is an [`Error`] returned to `main`, which prints it in
-/// exactly the same place and shape as a tree that would not load.
-///
-/// # This is the one in-repository write that asks no boundary
-///
-/// Every other write warlock does from the shell — `unpact`, `scope add`,
-/// `scope remove`, `pact`, `refresh` — goes through
-/// [`opened`](crate::edits::opened) and cannot happen over a scope this machine
-/// does not hold. This one writes `CLAUDE.md` at the repository root, which is
-/// exactly where a repository-wide scope sits, and asks nothing.
-///
-/// That is a decision rather than an oversight, and it is worth writing down
-/// because the asymmetry looks like a hole. Three things argue for it. It writes
-/// no pact and no scope, so there is no term of anybody's pact for it to move;
-/// the manifest is what the boundary is read out of, and the ordinary time to
-/// run this is *before* there is one, when nothing covers anything and the gate
-/// would pass every caller anyway; and in a repository that is already
-/// initialised the whole of what it does is re-splice warlock's own block
-/// between its own markers, which is a paragraph about warlock rather than a
-/// claim about the code around it.
-///
-/// The argument on the other side is real and is the reason for this note: a
-/// scoped root says "this part of the repository is theirs", and this writes a
-/// file into it regardless. Gating it is four lines — build an
-/// [`Opened`](crate::edits::Opened) over [`Standing::repo_root`] and let its
-/// constructor refuse — so if the asymmetry ever costs somebody something, the
-/// road is short and this paragraph is what to delete.
+/// `warlock init`: write warlock's section of `CLAUDE.md` at the repository
+/// root and say which file changed. Touches no terminal and spends nothing.
 fn init() -> Result<(), Error> {
     let standing = Standing::here(FOR_CLAUDE_MD)?;
 
@@ -834,43 +384,16 @@ fn init() -> Result<(), Error> {
     Ok(())
 }
 
-/// Load the tree, set the terminal up, run the event loop, and put the
-/// terminal back.
+/// The interactive session: load, take the terminal, then loop.
 ///
-/// The load happens *before* the guard is entered, on purpose. Both orders
-/// restore the terminal correctly — the guard's `Drop` covers every `?` after
-/// it, and it does not exist before it — so the choice is about what the user
-/// sees on the failing path: loading first means a repository that will not
-/// load never switches the screen at all, instead of flashing the alternate
-/// screen up and tearing it down again around a message that is printed after
-/// it is gone. It also keeps every filesystem error out of raw mode.
+/// The order of the first half is the point. The manifest, the tree and the
+/// watch are all set up before [`TerminalGuard::enter`], so anything that can
+/// fail says so on the ordinary screen; from the guard onwards the alternate
+/// screen is up and the only way back is dropping it.
 ///
-/// After the guard is entered, every `?` returns through its `Drop`, which is
-/// the whole reason the guard exists: there is no error path out of this
-/// function that skips restoration. The pact key is the one keystroke that
-/// writes to disk, and it is deliberately not one of those paths — a pact that
-/// goes wrong is news for the footer, not a reason to tear the screen down
-/// (see [`apply_toggle`]).
-///
-/// The loop draws, waits [`POLL_INTERVAL`] for a keystroke, and then applies
-/// whatever a pact in flight has said since the last time round. That order is
-/// the one that matters: a progress event drained at the bottom of the loop is
-/// on screen at the top of the next one, a few milliseconds later, and a
-/// keystroke pressed during a pact is handled by exactly the same match as a
-/// keystroke pressed with nothing running. Quitting while a pact runs returns
-/// from here without joining the worker — see [`pacting::spawn_pact`] for why that is
-/// safe — and the guard restores the terminal on the way out as it always did.
-///
-/// The round has a third thing in it now: what the disk did while the loop was
-/// waiting on a keystroke. [`Watched`] is drained and asked once a round, after
-/// a run that ended has had its own reload, and a watcher that could not be
-/// started is a line put on the footer here — once, before the loop — and never
-/// an error out of this function.
-///
-/// One thing now stands between a keystroke and the return: the question the
-/// gate asks. It is a value on this stack rather than a field on the app, and
-/// [`press_for`] is what decides what each key does to it — see the module docs
-/// above for why Ctrl-C goes round it and why a run in flight suppresses it.
+/// Returning is the whole of quitting: the session drops on this stack, which
+/// cancels any run and kills the `claude` it was waiting on, and the guard
+/// drops after it. Nothing joins the worker.
 fn run() -> Result<(), Error> {
     let (app, scope, tree) = load_app()?;
     // Loaded before the terminal is touched, for the same reason the tree is:
@@ -965,111 +488,40 @@ fn run() -> Result<(), Error> {
     }
 }
 
-/// One warlock session: everything on screen, everything in flight, and
-/// everything a keystroke is allowed to move.
+/// Everything one interactive session holds, and the seam the tests drive.
 ///
-/// The eleven values [`run`] used to keep as locals, owned in one place. They
-/// were locals because they *are* one thing — a session — and the loop proved it
-/// by threading overlapping subsets of them through four different argument
-/// lists, thirty-one parameters in all, plus a struct of borrows built afresh
-/// every round to carry the widest of those subsets. Adding one fact about a
-/// session meant editing four signatures and the struct.
-///
-/// So the four are methods now, and a round is [`Session::draw`],
-/// [`Session::press`] or [`Session::point`], and [`Session::keep_up`]. What a
-/// method needs it reaches for; nothing is handed to it that it already had.
-///
-/// The two prompts are fields here and deliberately *not* fields on the
-/// [`App`]: a window that lived on the app would be a window a restored copy of
-/// the app could put back up, and an Esc could have changed something with. The
-/// app is copied and put back by a run that recorded nothing; a session is not.
-///
-/// It is generic over its three seams and over nothing else. Warlock runs it on
-/// a [`TerminalGuard`], a [`ClaudeAgent`] and a [`ChatAgent`]; a test runs it on
-/// three values that answer out of memory, which is the whole reason a round can
-/// be driven at all.
+/// Generic over all three impure things — the screen, the model, the
+/// conversation's model — so a test can press keys at a whole session with no
+/// terminal attached and no `claude` installed. `warlock` itself only ever
+/// instantiates it one way, in [`run`].
 struct Session<S: Screen, P: Wired + Agent, C: Converses> {
-    /// What is on screen: the tree, the panel, the register and the footer.
     app: App,
-    /// The screen this session is drawn on, given away for `e` and taken back.
     screen: S,
-    /// The repository root and what warlock was pointed at. Settled by the load
-    /// and never moved afterwards.
     scope: Scope,
-    /// The manifest this thread holds, which the scope prompt reads and writes.
     manifest: Manifest,
-    /// The pact key's business: the agent runs are made with, and the run
-    /// happening somewhere else when there is one. Never the conversation's
-    /// agent, which is inside `chat`.
     pact: Pact<P>,
-    /// The conversation, and the turn being answered when there is one.
     chat: Chat<C>,
-    /// The gate on the way out.
     confirm: QuitConfirm,
-    /// The scope prompt: the window `s` opens.
     prompt: ScopePrompt,
-    /// Which file the panel's document card is holding.
+    /// Which file is on the document card, which the app is never told:
+    /// `App::show_document` takes lines and never a path. The edit key is what
+    /// asks, so that it re-reads the card only when the file it just handed to
+    /// an editor is the one on it. A press that read nothing leaves this as it
+    /// was rather than clearing it.
     document: Option<PathBuf>,
-    /// Whether the terminal is reporting its mouse.
     mouse_captured: bool,
-    /// The filesystem watcher, and what it has been told about the tree.
     watched: Watched,
 }
 
 impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
-    /// How big the screen is right now.
-    ///
-    /// Measured once a round and handed to the three methods that cut a layout
-    /// by it, so a frame, a click and the app's own idea of its viewport cannot
-    /// disagree about the size they were computed at.
-    ///
-    /// # Errors
-    ///
-    /// Whatever the screen says when it cannot be measured.
     fn size(&self) -> io::Result<Size> {
         self.screen.size()
     }
 
-    /// Tell the app how big the frame it is about to be drawn in is, and draw
-    /// it.
-    ///
-    /// Told before it is drawn, and every frame rather than on resize: the
-    /// scroll offset is only right if it was computed against the height this
-    /// frame gives the tree, and [`tree_height`] is the same layout the frame is
-    /// cut by. A terminal resized between frames is handled by that alone — the
-    /// next frame measures again, and the next frame is at most one
-    /// [`POLL_INTERVAL`] away. The panel's window is measured the same way and
-    /// for the same reason, off the same size: [`panel_height`] and
-    /// [`tree_height`] are two answers from the one layout.
-    ///
-    /// The composer and the run's header are the two things that take rows off
-    /// the panel, and both are read *here*, once, and handed to
-    /// [`panel_height`] and to [`draw`] — so the measurement and the drawing
-    /// cannot disagree about how many rows the account has.
-    ///
-    /// `size` is the caller's rather than measured here, because the round needs
-    /// it again: a click is hit-tested against the size of the frame it landed
-    /// on, and measuring twice would be two answers where the hit test needs
-    /// one.
-    ///
-    /// What the terminal is doing with the pointer is told to the app here as
-    /// well. Every frame rather than at the keystroke, so a view restored from
-    /// the copy taken before a pact — a copy of a flag that may have been
-    /// toggled since — is put right before it is drawn.
-    ///
-    /// So is the width, to the app and to the composer both, off one
-    /// measurement: the panel wraps what it holds at it and the field is drawn
-    /// in the same column, and the field's row-wise keys — Home, End, Up and
-    /// Down — move over the rows that width folds the draft into. See
-    /// [`Chat::set_composer_width`].
-    ///
-    /// The instant the frame is drawn at is read here and handed to the
-    /// renderer: the panel's newest clock counts up against it, so a frame drawn
-    /// with no event waiting still shows a run that is moving. See [`draw`].
-    ///
-    /// # Errors
-    ///
-    /// Whatever the screen says when the frame cannot be written.
+    /// Everything that has to be told the frame's dimensions before anything
+    /// reads them. The loop draws and *then* waits for a key, which is what
+    /// lets the composer's row-wise keys and the panel's wrapping both work off
+    /// a width nothing has measured yet at startup.
     fn draw(&mut self, size: Size) -> io::Result<()> {
         self.app.set_mouse_captured(self.mouse_captured);
         // One reading of the panel's inside width, told to both the things that
@@ -1105,11 +557,6 @@ impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
         })
     }
 
-    /// What a pointer event at `size` comes to.
-    ///
-    /// A thin arm onto [`apply_mouse`], which stays a function over an app and
-    /// a layout: what a click *means* is decidable with nothing owned, and a
-    /// session is not needed to assert it.
     fn point(&mut self, mouse: MouseEvent, size: Size) {
         apply_mouse(
             &mut self.app,
@@ -1122,28 +569,16 @@ impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
         );
     }
 
-    /// What one keystroke comes to, with everything it can move at `pressing` and
-    /// the instant it arrived at `now`: `true` when the session goes on and `false`
-    /// when it is over.
+    /// One keystroke. `Ok(false)` is the session being over and the only thing
+    /// that ends [`run`]'s loop.
     ///
-    /// The loop's list of consequences, and it is a list rather than a decision:
-    /// what a key *means* is [`press_for`]'s, and this is what warlock does about
-    /// the answer. Splitting it out of [`run`] changes nothing about either — the
-    /// arms are the arms, in the order they were in — and it keeps the round above
-    /// short enough to read: draw, wait, press, drain.
+    /// `now` is the instant the event arrived, read once by the caller: a turn
+    /// and a pass are clocked from the keystroke that asked for them rather
+    /// than from the first thing the model got round to saying.
     ///
-    /// The four situations a key is read against are taken here, once each, and
-    /// immediately: whether there is a draft for it to land in, which is the
-    /// keyboard being pointed at the composer and is offered to [`press_for`]
-    /// rather than looked up there; whether a run is in flight; whether a turn is
-    /// being answered; and the instant above. One reading apiece, before anything
-    /// is done, so the arms below cannot disagree with the gate about what was
-    /// going on when the key was pressed.
-    ///
-    /// The only way out is `false`, and only [`Pressed::Leave`] and the app's old
-    /// quit produce it. Leaving is deliberately not done from in here: the run's
-    /// handle and the terminal guard are [`run`]'s to drop, in the order it has
-    /// always dropped them.
+    /// Every arm below is one key. Nothing here re-gates what the module it
+    /// dispatches to already refuses, which is why most arms have no error case
+    /// — a refusal is a line on the footer and the loop goes round again.
     fn press(&mut self, key: KeyEvent, now: Instant) -> Result<bool, Error> {
         // The composer is offered on exactly the condition that lights its border,
         // which is the keyboard being pointed at it: with the keys anywhere else
@@ -1451,27 +886,13 @@ impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
         Ok(true)
     }
 
-    /// What one pasted block comes to.
+    /// A block the terminal handed over whole. Nothing is returned and nothing
+    /// can be: a paste never ends the session and never starts a turn, whatever
+    /// newlines are in it.
     ///
-    /// [`Session::press`]'s much shorter neighbour, and deliberately the same
-    /// shape at the top: the composer is offered on exactly the condition that
-    /// lights its border, which is the keyboard being pointed at it. With the
-    /// focus anywhere else there is no draft for the text to land in and a paste
-    /// does nothing at all — it is not a command, so unlike a keystroke there is
-    /// nothing else for it to mean.
-    ///
-    /// The second gate is the muting, and it is checked here as well as inside
-    /// [`paste_for`] because this is where the reader's other gates are: bytes
-    /// the terminal delivered while a question is being answered are not
-    /// somebody typing at this field. Nothing here sets or clears the flag —
-    /// `Chat::settle_field` stays the one place — and nothing here can start a
-    /// turn: [`Pasted`](warlock_tui::Pasted) has one variant, so there is no
-    /// value this path could produce that reaches `Chat::compose`'s submit road,
-    /// and no answer to give [`run`] because a paste never ends the session.
-    ///
-    /// There is no clock and no [`Result`] for the same reason: nothing here is
-    /// timed, nothing here is spawned, and nothing here reads or writes a
-    /// terminal. The next round redraws the field with the block in it.
+    /// The two gates are here rather than in [`paste_for`], because a paste is
+    /// a single arrival carrying however much was copied and a gate missed at a
+    /// call site would land the lot.
     fn paste(&mut self, text: &str) {
         let Some(typing) = (self.app.focus() == Focus::Composer).then(|| self.chat.composer())
         else {
@@ -1485,43 +906,9 @@ impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
         self.chat.paste(pasted);
     }
 
-    /// Keep up with what is happening off this thread: the run's progress, the
-    /// turn's, and the disk moving under the tree.
-    ///
-    /// The bottom of every round, whether or not a key was pressed. [`Pact::keep_up`]
-    /// is the only place anything the worker says reaches the screen, and it has to
-    /// keep up with a thread that is not waiting for it; the scope is handed to it
-    /// because the end of a run re-reads the tree.
-    ///
-    /// Whether a run was in flight is read *before* the drain, because the drain is
-    /// what ends one: a pact that is `Some` on the way in and `None` on the way out
-    /// finished in this round, and its own reload has already read the tree. The
-    /// documents it wrote are exactly the sort of thing the watcher reports, so the
-    /// events they set off are already sitting in the policy — they are answered by
-    /// the reload that just happened rather than by one of their own, and the tree it
-    /// read becomes the next round's filter.
-    ///
-    /// Then what everything else did to the disk. Nothing is read again while a pact
-    /// is in flight — the trigger keeps until the run's own reload above — and
-    /// nothing at all is read when the disk has been still, which is almost every
-    /// round.
-    ///
-    /// The turn is drained last and by exactly the same rules: [`apply_turn`] takes
-    /// whatever the worker has said since the last frame and returns rather than
-    /// waiting, so the frame goes on redrawing while a question is being answered
-    /// and a burst of tool calls that arrived between two frames lands in the order
-    /// it happened. Last rather than first only because the two are independent —
-    /// a turn writes no file, changes no row and reloads nothing, so there is no
-    /// order between it and the run for the screen to disagree about. It is where
-    /// the muting ends: the drain is what takes `turn` down, however the turn
-    /// finished, and the top of the next round hands the field back on the strength
-    /// of that alone.
-    ///
-    /// The clock is read once, here, and handed to everything under this: the round
-    /// is measured against one instant, which is when the events being drained now
-    /// land on screen — within one [`POLL_INTERVAL`] of when they were sent. It is
-    /// read at the top rather than per call for the reason the frame reads its own:
-    /// two readings a round would be two answers to one question.
+    /// Everything that happened off this thread since the last round: what a
+    /// run has said, what a turn has, and what the disk did while this thread
+    /// was waiting on a keystroke.
     fn keep_up(&mut self) {
         let now = Instant::now();
         // The one round in a run's life the watcher has to hear about, and it says
@@ -1546,28 +933,11 @@ impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
     }
 }
 
-/// Do to the app whatever the pointer just asked for.
+/// A pointer event, at the size the frame it lands on was drawn at.
 ///
-/// The other half of [`mouse_action`], which is handed the event, the size the
-/// round measured — the one the hit test has to agree with, because it is the
-/// size the frame was drawn at — and the app, since which row a click lands on
-/// depends on where the tree's window is. Nothing here reads the terminal and
-/// nothing draws: the round is the redraw, which is why a pointer swept across
-/// the screen costs nothing.
-///
-/// Nothing at all covers a click that means nothing and every event arriving
-/// while a window is up: the pointer is read and dropped then, because neither
-/// dialog has clickable answers and a click on the tree behind one would move a
-/// selection the reader cannot see.
-///
-/// The decision is made here rather than in the loop's arm because it takes the
-/// app as it stands and the app cannot be lent out twice: the hit test reads it,
-/// and what comes of the hit test writes to it, so the two are two statements
-/// with the reading finished before the writing starts. The composer is in that
-/// reading — the rows it takes are rows the panel gave up, so a click on the
-/// field would otherwise be answered as a line of an account that is not drawn
-/// there — and whether the frame had one on it at all is
-/// [`composer_on_screen`]'s answer, asked here about the app that was drawn.
+/// Free rather than a method because none of it reads the terminal, spawns
+/// anything or draws: the round is the redraw, which is why a pointer swept
+/// across the screen costs nothing.
 fn apply_mouse(
     app: &mut App,
     mouse: MouseEvent,
@@ -1637,23 +1007,18 @@ mod tests {
     use crate::stubs::{Passing, Saying};
     use crate::terminal::Screen;
 
-    /// What warlock would do, given `args` after the program's own name.
-    ///
-    /// `try_parse_from` wants argv as the process gets it, program name and all,
-    /// so the name is put back here and every test below reads as the words a
-    /// person types.
+    // `try_parse_from` wants argv as the process gets it, program name and all,
+    // so the name is put back here and every test below reads as the words a
+    // person types.
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         let typed = std::iter::once("warlock").chain(args.iter().copied());
         Cli::try_parse_from(typed)
     }
 
-    /// The parser clap built for the subcommand spelled by `names`, walked one
-    /// word at a time so that a nested pair — `["scope", "add"]` — is reached the
-    /// way a reader types it.
-    ///
-    /// A clone rather than a borrow, because [`clap::Command::render_long_help`]
-    /// wants the command by mutable reference and the tests below want several of
-    /// them from one parser.
+    // Walked one word at a time, so a nested pair — `["scope", "add"]` — is
+    // reached the way a reader types it. Cloned because `render_long_help` wants
+    // the command by mutable reference and the tests want several from one
+    // parser.
     fn subcommand(names: &[&str]) -> clap::Command {
         let mut command = Cli::command();
         for name in names {
@@ -2328,26 +1693,14 @@ mod tests {
         }
     }
 
-    /// A screen that draws into memory and is never given away.
-    ///
-    /// The second adapter at the [`Screen`] seam, and the whole reason a
-    /// [`Session`] is reachable from a test. Warlock's own is a terminal in raw
-    /// mode on the alternate screen, which a test runner has not got; this one
-    /// is ratatui's `TestBackend`, which every `ui.rs` test already draws
-    /// against, plus a record of the two things a session asks of a terminal
-    /// that are not drawing.
     #[derive(Debug)]
     struct FakeScreen {
-        /// Where frames go.
         terminal: Terminal<TestBackend>,
-        /// The `mouse` of every suspension asked for, in the order it was asked.
         suspensions: Vec<bool>,
-        /// Every mouse-reporting change asked for, in the order it was asked.
         reported: Vec<bool>,
     }
 
     impl FakeScreen {
-        /// A screen `width` by `height`, with nothing asked of it yet.
         fn of(width: u16, height: u16) -> Self {
             Self {
                 terminal: Terminal::new(TestBackend::new(width, height))
@@ -2383,17 +1736,8 @@ mod tests {
         }
     }
 
-    /// The session a test drives: an in-memory screen, and both models answering
-    /// out of memory.
     type Driven = Session<FakeScreen, Passing, Saying>;
 
-    /// A session over `rows`, with nothing pacted, nothing in flight and no
-    /// child process anywhere.
-    ///
-    /// The very value [`run`] builds, with its three seams filled by stand-ins
-    /// instead of a terminal and two `claude`s — which is the point: what these
-    /// tests press is the real key handler over the real session, rather than a
-    /// retyped copy of either.
     fn session(rows: Vec<Row>) -> Driven {
         let root = PathBuf::from("/warlock/no/such/repository");
         let scope = Scope {
@@ -2422,42 +1766,24 @@ mod tests {
         }
     }
 
-    /// Press `key` on `driven`, and say whether the session goes on.
-    ///
-    /// The instant is read here because none of the tests below are about a
-    /// clock: what a key *does* is the same at every instant, and the two things
-    /// that are timed — a run's account and a turn's — are driven from their own
-    /// modules against instants those tests hand in.
     fn pressed(driven: &mut Driven, key: KeyEvent) -> bool {
         driven
             .press(key, Instant::now())
             .expect("no key pressed here writes to a terminal")
     }
 
-    /// What the stand-in model answers a turn with.
     const ANSWER: &str = "The tree, the manifest and the pact.";
 
-    /// One ordinary keystroke, with no modifier held.
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    /// One directory row, which is what every refusal below is aimed at.
     fn directory(path: &str) -> Row {
         Row::new(0, path, None, NodeState::Unpacted)
     }
 
-    /// How long a round-driving test waits for a run that is never going to
-    /// end. Only ever reached when something is already wrong, and every wait
-    /// ends the moment the run does.
     const AT_MOST: Duration = Duration::from_secs(5);
 
-    /// A repository on disk: one crate of two directories, and the `.git/` that
-    /// makes the loader agree it is a repository.
-    ///
-    /// The file inside `.git/` is neither read nor walked — hidden directories
-    /// are skipped — and is written only because a directory is made here by
-    /// writing a file into it.
     fn a_repository() -> tempfile::TempDir {
         let scratch = tempfile::tempdir().expect("a temporary directory");
         for (path, text) in [
@@ -2472,8 +1798,8 @@ mod tests {
         scratch
     }
 
-    /// A session over a repository that is really on disk, built the way
-    /// [`run`] builds one — and, like it, with the tree read first.
+    // `session` over a real scratch repository, built the way `run` builds one
+    // and, like it, with the tree read first.
     fn session_over(root: &Path) -> Driven {
         let Loaded { tree, .. } = load_tree(root).expect("a scratch repository loads");
         let repo_root = repository_root(tree.root_path()).expect("the load found a repository");
@@ -2498,7 +1824,6 @@ mod tests {
         }
     }
 
-    /// Round after round, until nothing is in flight any more.
     fn rounds_until_settled(driven: &mut Driven) {
         let waited = Instant::now();
         while driven.pact.running() && waited.elapsed() < AT_MOST {
@@ -2681,15 +2006,6 @@ mod tests {
         );
     }
 
-    /// The gates on the paste road, over the session that really has them.
-    ///
-    /// These are here rather than beside [`paste_for`]'s own tests because the
-    /// two gates are the session's: `press_for` is never handed a paste, so
-    /// neither its focus gate nor its mute gate has ever seen one, and the
-    /// thing that decides whether a pasted block reaches the field at all is
-    /// [`Session::paste`]. Driving the real session is what makes "nothing else
-    /// moved" assertable — the tree's selection, the register and the footer are
-    /// all reachable from here and none of them is reachable from a composer.
     mod pasting {
         use super::{Focus, Instant, directory, session};
         use crate::chatting::Asked;

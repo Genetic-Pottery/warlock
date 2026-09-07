@@ -1,61 +1,15 @@
-//! The view key, from the keystroke to the lines in the panel.
+//! The view key. [`view_press`] is the two steps between
+//! [`App::view_target`], which decides what the press means over the selected
+//! row and words every refusal itself, and
+//! [`App::show_document`](warlock_tui::App::show_document), which takes lines
+//! and never a path.
 //!
-//! One press, one read, one thing on screen: [`view_press`] asks the app which
-//! file the selection is on, reads it, hands the lines over and says which file
-//! they came out of — the one thing about the panel the app is deliberately not
-//! told, since a path on it would be a path something later had to open. It is
-//! the
-//! smallest of the three key modules — [`mod@crate::pacting`] runs a thread and
-//! [`mod@crate::scoping`] writes a file — because reading is the smallest thing
-//! a key here can ask for.
-//!
-//! ## Nothing is written, and nothing is a run
-//!
-//! Warlock has never shown a file, and the reason to start is section 6: the
-//! judgement about a document is the reader's, and a colour is not a document.
-//! What that costs is one capped read on the event loop's own thread. There is
-//! no worker, no channel, no account, no progress line and no reload — a file
-//! read is over inside a frame, and re-reading the tree afterwards would walk a
-//! repository to arrive at the tree already on screen, since nothing about it
-//! changed.
-//!
-//! It is not a write either, in any sense: [`view_file`] opens the file, reads
-//! at most one byte past the cap, and closes it. The workspace's writers are
-//! still the pact, the refresh, the manifest, the scope key and `warlock init`,
-//! and this module is not among them.
-//!
-//! ## The app words the row, this file does the filesystem
-//!
-//! [`scope_press`](crate::scoping::scope_press)'s shape exactly.
-//! [`App::view_target`] decides what the press means over the row the selection
-//! is on and words every row-level refusal itself — a directory with a document
-//! names that document, a directory without one names `p` — and a `None` from it
-//! is a press that has already been answered. Only the reading is here, because
-//! [`App`] opens nothing: what crosses back into it is the file's lines, never
-//! its path.
-//!
-//! ## A run in flight is not a reason to refuse
-//!
-//! Unlike `p`, `r` and `s`, this key does not consult the run. Those three
-//! refuse mid-run because a second run would race the first for the same
-//! documents and the same manifest; a read races nothing, writes nothing and is
-//! done before the next frame. So `v` means the same thing during a pact as
-//! outside one, which is also what [`action_for`](crate::input::action_for)
-//! says about it. The panel is a shared surface, but a shared surface with two
-//! cards on it: a document shows over a running account rather than taking the
-//! slot from it, so the run goes on writing its own card behind the file. The
-//! key that swaps the two back and forth is not here.
-//!
-//! ## A failed read is a line, not an end
-//!
-//! None of the three ways a read can fail is fatal and none of them touches the
-//! panel: an unreadable file, a path that has vanished since the walk listed it
-//! and a file that is not text each put one line on
-//! [`App::message`](warlock_tui::App::message) — where the pact and scope keys'
-//! refusals already go — and leave whatever the panel was holding exactly as it
-//! was. Blanking the panel on the way in would mean a failed read taking down
-//! the document a reader was looking at, so nothing is cleared until there are
-//! lines to put there.
+//! Two things here are choices rather than consequences. The press consults no
+//! run and no manifest, so `v` means the same thing during a pact as outside
+//! one: `p`, `r` and `s` refuse mid-run because a second run would race the
+//! first for the same documents and the same manifest, and a read races
+//! nothing. And nothing is cleared on the way in, so a read that fails costs
+//! one line on the footer rather than the document a reader was looking at.
 
 use std::path::PathBuf;
 
@@ -64,52 +18,12 @@ use warlock_tui::App;
 
 use crate::error::one_line;
 
-/// What one press of the view key comes to: the selected file's lines in the
-/// panel, or one line in the footer saying why not.
-///
-/// Answers nothing itself about which row can be read — that is
-/// [`App::view_target`]'s, which has already put its sentence on
-/// [`App::message`](warlock_tui::App::message) by the time `None` gets back here
-/// — and decides nothing about how much of a file there is to show, which is
-/// [`view_file`]'s and the one cap it reads under. What is left is the two
-/// steps between them: open the file the app named, and hand over what came
-/// back.
-///
-/// The read happens on every press. A second `v` on the same row opens the file
-/// again, so a document a pass has just rewritten under a reader is one
-/// keystroke away from being the one on screen — there is no cache to go stale
-/// and no path kept to be opened later.
-///
-/// The cut is passed on as the fact it is. [`Viewed::cut`] says the cap stopped
-/// the read short and [`App::show_document`](warlock_tui::App::show_document)
-/// says so in the panel's own words: the engine adds no line to the text, and
-/// this function invents none.
-///
-/// Splitting the text into lines is [`str::lines`] and nothing more elaborate:
-/// what is handed over is the file's own lines, `\r\n` and `\n` alike, and a
-/// file's trailing newline is not a blank line at the end of them. How many
-/// *rows* one of those lines is drawn in is not decided here and is nothing this
-/// key knows: a line too long for the panel is wrapped to its width when the
-/// frame is drawn, at whatever width the frame is then.
-///
-/// Takes no run and no manifest: see the module docs for why a read is neither
-/// refused mid-run nor followed by a reload.
-///
-/// What comes back is the file that is now on the document card, and `None` for
-/// a press that put nothing there — a row that was refused, or a read that
-/// failed and left the card holding whatever it held before. It is handed back
-/// because somebody has to know which file the panel is showing and it is not
-/// going to be [`App`]: a path kept there would be a path something later had to
-/// open, and [`App::show_document`] takes lines for exactly that reason. The
-/// loop keeps it, and the edit key asks for it — a file rewritten by `$EDITOR`
-/// is re-read only when it is the one on the card (see
-/// [`edit_press`](crate::editing::edit_press)).
-///
-/// Nothing else about the press changed for it. A refusal is still worded by
-/// [`App::view_target`], a failed read still leaves one line on the footer and
-/// the panel exactly as it was, and neither of those is a file the caller should
-/// start remembering: `None` means the card is holding what it was already
-/// holding.
+// The file that is now on the document card, and `None` for a press that put
+// nothing there — a row `App::view_target` refused, or a read that failed and
+// left the card holding what it held before. It is handed back rather than kept
+// on `App`: a path there would be a path something later had to open, which is
+// why `App::show_document` takes lines. The loop keeps it so the edit key can
+// ask whether the file `$EDITOR` rewrote is the one on the card.
 pub(crate) fn view_press(app: &mut App) -> Option<PathBuf> {
     // Every row-level refusal leaves through here, having already said its
     // piece: there is one place that decides what this press means over a row,
@@ -133,13 +47,6 @@ pub(crate) fn view_press(app: &mut App) -> Option<PathBuf> {
     }
 }
 
-/// What one press of the view key actually does: what ends up in the panel,
-/// what ends up on the footer, and what — deliberately — does not move at all.
-///
-/// Driven over a repository of the test's own under the temporary directory,
-/// because this is the half of the key that touches disk: the files are really
-/// written, really read and really checked afterwards. No terminal, no network,
-/// no `claude` and no worker thread.
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -152,25 +59,18 @@ mod tests {
 
     use super::view_press;
 
-    /// The line the last keystroke left on the footer, which a successful read
-    /// is not allowed to spend: showing a file says nothing, exactly as opening
-    /// the scope window says nothing.
+    // The line the last keystroke left on the footer. A successful read is not
+    // allowed to spend it: showing a file says nothing.
     const LAST_KEY: &str = "something the last key said";
 
-    /// A panel with room for far more lines than any file below has, so that
-    /// what a test reads back is the whole document rather than a screenful of
-    /// it.
+    // Room for far more lines than any file below has, so what a test reads
+    // back is the whole document rather than a screenful of it.
     const PANEL: u16 = 400;
 
-    /// The document the tests read, written into every repository below.
     const DOCUMENT: &str = "# The engine\n\nIt walks the tree and writes what it finds.\n";
 
-    /// A repository of this test's own, with the files the tree below lists
-    /// really written into it, removed when the test that made it ends.
-    ///
-    /// One directory that is documented and holds files, one that is not, and
-    /// one file the tree lists that was never written — which is what a path
-    /// that vanished between the walk and the keystroke looks like.
+    // Writes every file `tree` lists except `gone.txt`, which is what a path
+    // that vanished between the walk and the keystroke looks like.
     fn a_repo() -> TempDir {
         let repo = tempfile::tempdir().expect("a temporary directory");
         let engine = repo.path().join("crates/engine");
@@ -188,14 +88,10 @@ mod tests {
         repo
     }
 
-    /// A file comfortably past [`PER_FILE_BYTE_CAP`], in lines long enough that
-    /// the whole of it still fits in a panel: a hundred and twenty-eighth of the
-    /// cap apiece, numbered so that no two lines are the same.
-    ///
-    /// The line length is a fraction of the cap rather than a number of
-    /// characters, so that a cap raised in a one-line diff does not turn this
-    /// fixture into a file with more lines than [`PANEL`] has rows — which is a
-    /// test failing on its own scaffolding rather than on what it is about.
+    // The line width is a fraction of the cap rather than a fixed number of
+    // characters: a cap raised in a one-line diff would otherwise turn this into
+    // a file with more lines than `PANEL` has rows, and the tests below would
+    // fail on their own scaffolding instead of on what they are about.
     fn over_the_cap() -> String {
         let cap = usize::try_from(PER_FILE_BYTE_CAP).expect("the cap fits in memory");
         let width = cap / 128;
@@ -212,8 +108,7 @@ mod tests {
         text
     }
 
-    /// The tree the app is built over, rooted at `root` and listing the files
-    /// [`a_repo`] wrote, plus one it did not.
+    /// The tree the app is built over, rooted at `root`.
     ///
     /// ```text
     /// <root>                          pacted, stale, documented
@@ -244,9 +139,8 @@ mod tests {
         )
     }
 
-    /// The app the event loop would hold for `root`, with the files shown, the
-    /// row for `path` selected, a panel with room to read, and a line on the
-    /// footer from the keystroke before this one.
+    // The app the event loop would hold for `root`: files shown, the row for
+    // `path` selected, and a line on the footer from the keystroke before.
     fn app_on(root: &Path, path: &Path) -> App {
         let mut app = App::from_tree(&tree(root));
         app.toggle_files();
@@ -263,16 +157,12 @@ mod tests {
         app
     }
 
-    /// The app with `path` under `root` selected, by the file's name inside
-    /// `crates/engine`.
     fn app_on_file(root: &Path, file: &str) -> App {
         app_on(root, &root.join("crates/engine").join(file))
     }
 
-    /// What the panel is showing, as the rows it draws as.
-    ///
-    /// A document draws as text and nothing else — no clock, no heading, no
-    /// summary — so anything else here is the panel showing the wrong card.
+    // A document draws as text and nothing else — no clock, no heading, no
+    // summary — so anything else here is the panel showing the wrong card.
     fn panel_text(app: &App) -> Vec<String> {
         app.panel()
             .window(Instant::now())
@@ -397,13 +287,9 @@ mod tests {
         assert!(text.len() <= usize::try_from(PER_FILE_BYTE_CAP).expect("a few kilobytes"));
     }
 
-    /// An app that has already read a document into the panel and is now on the
-    /// row for `file`, with a line on the footer from the keystroke that moved
-    /// there.
-    ///
-    /// What the three failure tests below need is a panel with something really
-    /// in it, so that "the panel is exactly as it was" is an assertion about a
-    /// document a reader would have lost rather than about emptiness.
+    // The panel really holds a document, so that "the panel is exactly as it
+    // was" is an assertion about something a reader would have lost rather than
+    // about emptiness.
     fn app_holding_a_document_on(root: &Path, file: &Path) -> App {
         let mut app = app_on_file(root, "WARLOCK.md");
         assert!(view_press(&mut app).is_some(), "the fixture read nothing");
@@ -415,8 +301,8 @@ mod tests {
         app
     }
 
-    /// The assertions the three failures share: one line on the footer naming
-    /// the file, the panel byte for byte as it was, and nothing else moved.
+    // The assertions the three failures share: one line on the footer naming the
+    // file, the panel as it was, and nothing else moved.
     fn assert_failed_read(app: &App, before: &App, shown: &[String], names: &str) {
         let message = app.message().expect("a read that failed says so");
         assert!(message.contains(names), "{message}");
@@ -547,7 +433,6 @@ mod tests {
         );
     }
 
-    /// Move the selection to the row for `path`, as the movement keys would.
     fn select(app: &mut App, path: &Path) {
         app.select_first();
         while app.selected_row().expect("the fixture has rows").path != path {

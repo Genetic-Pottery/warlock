@@ -1,104 +1,46 @@
-//! May this operator act here? Asked once, answered once, rendered twice.
+//! One function over values, because the panel's keys and the headless
+//! subcommands have to refuse the same things for the same reasons and both
+//! used to work it out for themselves. Nothing in here reads the disk, sets a
+//! message, returns an error or knows which door asked.
 //!
-//! Warlock has two doors onto every write: the panel's keys and the headless
-//! subcommands. Both have to refuse the same things for the same reasons, and
-//! until now both worked the answer out for themselves — `session.rs` climbing
-//! to the covering scope for the panel, `edits.rs` climbing to it again for the
-//! shell, and each of them asking a second question about the scopes *below* a
-//! directory in its own place and its own order. What held them together was a
-//! shared sentence and one test that had to reach through a `#[cfg(test)]` hole
-//! in another module to press both.
-//!
-//! So the question lives here now, and it is a function over values:
-//! [`verdict`] takes a directory, a manifest, a repository root and what this
-//! machine holds, and answers with a [`Verdict`]. Nothing in here reads the
-//! disk, sets a message, returns an error or knows which door asked.
-//!
-//! ## The two questions, and why an un-pact asks both
-//!
-//! A scope covers everything beneath it until a nearer one overrides it, so
-//! whether an operator may act *at* a directory is a question about the scopes
-//! at and **above** it — the engine's
-//! [`scope_covering`]. That is the whole of what
-//! `p`, `r` and `s` need, and the whole of what the shell's cheap writes need.
-//!
-//! An un-pact needs one more, because of what it destroys. Un-pacting drops
-//! every pact in the subtree, and a scope is a term of a pact rather than a
-//! thing beside it — so it takes their scopes away with them. A directory that
-//! is itself open may still sit above pacts that are not, and dropping those
-//! would erase boundaries this operator was never entitled to move. That is the
-//! engine's
-//! [`closed_scopes_at_or_below`], and
-//! it is asked only for [`Reach::HereAndBelow`].
-//!
-//! The two are genuinely different questions rather than one asked twice: the
-//! first looks up, the second looks down, and neither answer implies the other.
-//! What *was* duplicated is the order they are asked in, which is here now and
-//! nowhere else: the scope covering the directory is the sharper thing to say
-//! and is said first, because an operator who may not act here at all does not
-//! need a list of what is underneath.
-//!
-//! ## The wording lives here too
-//!
-//! [`closed_scope_message`] and [`blocking_scopes_message`] are what the
-//! panel's footer says. The shell says the same things through
-//! [`Error`](crate::error::Error)'s `Display`, which calls these — so the two
-//! doors cannot drift into wording the same refusal differently, and a test that
-//! wants to prove they agree compares two renderings of one value instead of
-//! translating one door's sentence into the other's.
+//! The two questions are genuinely different rather than one asked twice.
+//! Whether an operator may act *at* a directory looks up, at the scopes at and
+//! above it; whether an un-pact may proceed looks down, because it drops every
+//! pact in the subtree and a directory that is itself open may sit above
+//! boundaries this operator was never entitled to move. Neither answer implies
+//! the other; what *was* duplicated is the order they are asked in. The wording
+//! lives here for the same reason, since the footer calls these functions and
+//! `Error`'s `Display` calls them too.
 
 use std::path::Path;
 
 use warlock_engine::{Manifest, closed_scopes_at_or_below, scope_covering, scope_opens_to};
 
-/// How far a boundary question reaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reach {
-    /// The directory itself: the scopes at and above it.
-    ///
-    /// What `p` (pacting), `r`, `s` and the shell's cheap writes ask, because
-    /// none of them touches a pact anywhere but the one directory named.
+    // What `p` (pacting), `r`, `s` and the shell's cheap writes ask: none of
+    // them touches a pact anywhere but the one directory named.
     Here,
-    /// The directory and everything under it.
-    ///
-    /// What an un-pact asks, in both doors, because it drops every pact in the
-    /// subtree and their scopes with them.
+    // What an un-pact asks, in both doors.
     HereAndBelow,
 }
 
-/// Whether this operator may act on a directory, and what stands in the way when
-/// they may not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Verdict {
-    /// Nothing in the way: no scope covers the directory, or a held sigil opens
-    /// the one that does.
-    ///
-    /// The permissive default sits here rather than on the operator: a pacted
-    /// directory with no scope above it is open to anyone.
+    // The permissive default sits on the directory rather than on the
+    // operator: a pacted directory with no scope above it is open to anyone.
     Open,
-    /// A scope covers the directory that no held sigil opens.
-    Closed {
-        /// The scope in the way, as the manifest spells it.
-        scope: String,
-    },
-    /// The directory is open, but pacts under it are not.
-    ///
-    /// Only ever answered for [`Reach::HereAndBelow`], and only ever by an
-    /// un-pact.
-    ClosedBelow {
-        /// The scopes in the way, in the engine's order, deduplicated by it.
-        scopes: Vec<String>,
-    },
+    Closed { scope: String },
+    // Only ever answered for `Reach::HereAndBelow`, and only ever to an
+    // un-pact.
+    ClosedBelow { scopes: Vec<String> },
 }
 
 impl Verdict {
-    /// The one line the panel's footer says about this verdict, for a directory
-    /// the reader knows as `label`, or `None` for one that does not refuse.
-    ///
-    /// The label is the caller's because it is a fact about the view: the panel
-    /// spells a directory the way the tree on screen spells it, and the shell
-    /// spells it the way the manifest does. What is *said* about it is the same
-    /// sentence either way, which is the point of it being here.
+    // The label is the caller's because it is a fact about the view: the panel
+    // spells a directory the way the tree on screen spells it, and the shell
+    // spells it the way the manifest does. What is *said* about it is the same
+    // sentence either way, which is the point of it being here.
     pub(crate) fn message(&self, label: &str) -> Option<String> {
         match self {
             Self::Open => None,
@@ -111,28 +53,16 @@ impl Verdict {
     }
 }
 
-/// May this operator act on `directory`, as far as `reach` looks?
-///
-/// The one place the question is decided. Both doors call it, neither adds to
-/// it, and nothing about which door asked reaches in here.
-///
-/// `held` is what this machine holds, and it is a plain slice rather than the
-/// header's [`Sigils`](warlock_tui::Sigils): the decision is two-valued —
-/// either a held sigil matches the covering scope or none does — and the
-/// header's third state, a config that would not parse, is a thing to *say*
-/// rather than a third answer to give. Flattening it is
-/// [`Sigils::as_slice`](warlock_tui::Sigils::as_slice)'s, where the reading is
-/// argued: a machine that has recorded nothing and one whose config is broken
-/// are both refused by every scope, exactly as one holding the wrong sigil is.
-/// Taking the flattened fact is what keeps a change to the header from being a
-/// change to who may write, and what lets the shell's doors reach this without
-/// building a value whose other half is a line they never print.
-///
-/// A path with no manifest-relative spelling answers [`Verdict::Open`] rather
-/// than refusing. It is not a boundary question — it takes a tree rooted outside
-/// its own repository to reach — and every caller has a better sentence for it
-/// than this one would invent. The engine's own calls refuse it again a moment
-/// later, so nothing is let through by it.
+// `held` is a plain slice rather than the header's `Sigils`, because the
+// decision is two-valued — either a held sigil matches the covering scope or
+// none does — and the header's third state, a config that would not parse, is a
+// thing to *say* rather than a third answer to give. Taking the flattened fact
+// is what keeps a change to the header from being a change to who may write.
+//
+// A path with no manifest-relative spelling answers `Verdict::Open` rather than
+// refusing: it is not a boundary question, it takes a tree rooted outside its
+// own repository to reach, and every caller has a better sentence for it than
+// this one would invent. The engine's own calls refuse it again a moment later.
 pub(crate) fn verdict(
     directory: &Path,
     repo_root: &Path,
@@ -170,22 +100,16 @@ pub(crate) fn verdict(
     }
 }
 
-/// What warlock says when a directory is closed to this machine.
-///
-/// One sentence, said by the panel's footer and by the shell's error alike, and
-/// it names the scope wanted rather than the sigils held: what is missing is the
-/// thing to say, and what is held is `warlock config`'s to print.
+// Names the scope wanted rather than the sigils held: what is missing is the
+// thing to say, and what is held is `warlock config`'s to print.
 pub(crate) fn closed_scope_message(label: &str, scope: &str) -> String {
     format!("{label} is scoped `{scope}` — hold that sigil to work here, with `warlock config`")
 }
 
-/// What warlock says when an un-pact would drop pacts this machine may not
-/// touch.
-///
-/// A different sentence from [`closed_scope_message`] because it is a different
-/// refusal: the directory named is open, and what is in the way is underneath
-/// it. It names the way out that does not need a sigil at all — un-pact the
-/// parts you hold — because that is usually what was meant.
+// A different sentence from `closed_scope_message` because it is a different
+// refusal: the directory named is open and what is in the way is underneath it.
+// It names the way out that needs no sigil at all — un-pact the parts you hold —
+// because that is usually what was meant.
 pub(crate) fn blocking_scopes_message(label: &str, scopes: &[&str]) -> String {
     let named: Vec<String> = scopes.iter().map(|scope| format!("`{scope}`")).collect();
     // Singular for one, because the ordinary refusal is by a single boundary and
@@ -212,11 +136,9 @@ mod tests {
     use super::{Reach, Verdict, verdict};
     use crate::error::Error;
 
-    /// The repository every case below is asked about. Never read: nothing in
-    /// this module touches a disk.
+    // Never read: nothing in this module touches a disk.
     const ROOT: &str = "/repo";
 
-    /// A pacted entry on `module`, scoped `scope` when there is one.
     fn pact(module: &str, scope: Option<&str>) -> PactEntry {
         let entry = PactEntry::new(ROOT, module, format!("{module}/WARLOCK.md"))
             .expect("a relative module path is inside the root");
@@ -226,17 +148,14 @@ mod tests {
         }
     }
 
-    /// A manifest holding `entries`, each a module and the scope it carries.
     fn pacts(entries: &[(&str, Option<&str>)]) -> Manifest {
         Manifest::with_entries(entries.iter().map(|(module, scope)| pact(module, *scope)))
     }
 
-    /// The directory `module` names, as this module's callers hand one over.
     fn at(module: &str) -> PathBuf {
         PathBuf::from(ROOT).join(module)
     }
 
-    /// What a machine holding `sigils` is answered about `module`, at `reach`.
     fn asked(manifest: &Manifest, module: &str, sigils: &[&str], reach: Reach) -> Verdict {
         let held: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
         verdict(&at(module), &PathBuf::from(ROOT), manifest, &held, reach)

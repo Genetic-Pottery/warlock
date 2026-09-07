@@ -1,54 +1,18 @@
-//! The scope key, from the keystroke to the saved manifest.
+//! The `s` key, from the press to the saved `.warlock/pacts.toml`.
 //!
-//! The other half of [`mod@crate::prompt`](warlock_tui::ScopePrompt): that
-//! module says what a key does to a field, and this one says what a *press of
-//! `s`* comes to and what an Enter in that field writes. [`scope_press`] decides
-//! whether the window opens and what it opens holding, [`scope_edit`] is what
-//! the loop does about a key typed into it, and [`scope_submit`] judges what was
-//! typed and writes `.warlock/pacts.toml`.
+//! Unlike a pact — the sibling to read this against, in [`mod@crate::pacting`] —
+//! nothing here is a run. A scope is one string written into one entry of a file
+//! already in this thread's hand, so [`scope_submit`] writes on the event loop's
+//! own thread between two frames. It reloads nothing either: a scope changes no
+//! directory's state and no row's colour, so re-reading the tree would walk the
+//! whole repository to arrive at the tree already on screen.
 //!
-//! ## This is not a run, and that is the whole shape of it
-//!
-//! [`mod@crate::pacting`] is the sibling to read this against, because the
-//! difference is the point. A pact is minutes of model passes, so it is a worker
-//! thread, a channel, a say-when, an account, a progress line and a reload. A
-//! scope is one string written into one entry of a file that is already in this
-//! thread's hand: there is nothing to report on, nothing to cancel, and nothing
-//! for a second thread to do except make the manifest reachable from two of
-//! them. So [`scope_submit`] runs on the event loop's own thread, between two
-//! frames, and spawns nothing.
-//!
-//! It reloads nothing either. A scope changes no directory's state and no row's
-//! colour — it is a label on an entry — so re-reading the tree afterwards would
-//! walk the whole repository to arrive at the tree already on screen.
-//!
-//! ## A successful write says nothing
-//!
-//! No message, no colour, no marker. Warlock states facts rather than narrating
-//! its own actions, and the fact a scope write produces is the `(scope)` label
-//! beside the directory — which belongs to a sibling slice and is not here yet.
-//! Until it lands, Enter is deliberately invisible: the alternative is a sentence
-//! invented to stand in for a label, which would have to be taken out again the
-//! week the label arrives. What that costs is recorded rather than worked around.
-//!
-//! The corollary is that the message line is left exactly as it was found across
-//! a set and a clear, which is the same promise [`App::scope_target`] makes about
-//! the press: the reader who opened a window and wrote a label did not answer the
-//! keystroke that put the last line up.
-//!
-//! ## One judge, and folding before it
-//!
-//! Whether a string is a scope is [`validate_scope`]'s answer and nobody else's:
-//! there is no length constant and no character predicate anywhere in this crate.
-//! What this module does before asking is fold case, because that is where
-//! folding belongs — see the module docs of `warlock_engine::scope`. `Data-Plane`
-//! and `data-plane` are one boundary, so the string that is judged and the string
-//! that is stored are both the lower-cased one.
-//!
-//! Two answers are not refusals. An empty field *clears* the scope, which is how
-//! a directory goes back to belonging to no particular boundary; and a refusal
-//! keeps the prompt up over the text that earned it, one character away from
-//! being fixed.
+//! A successful write says nothing at all and leaves the message line as it
+//! found it, across both a set and a clear. Whether a string is a scope is
+//! [`validate_scope`]'s answer and nobody else's — no length constant and no
+//! character predicate lives in this crate — and case is folded before asking,
+//! so the string judged is the string stored. An empty field clears the scope
+//! rather than being refused.
 
 use std::path::Path;
 
@@ -58,38 +22,16 @@ use warlock_tui::{App, Edited, ScopeField, ScopePrompt, Sigils};
 use crate::error::Error;
 use crate::session::closed_scope;
 
-/// What one press of the scope key comes to, given whether a run is going
-/// already: the prompt the event loop holds from here on.
-///
-/// [`pact_press`](crate::pacting::pact_press)'s shape for the third key, and
-/// deliberately the same two refusals in the same two places. A press while
-/// *any* run is in flight opens nothing and says so on the progress line the
-/// reader is already watching, through
-/// [`App::set_pact_refused`](warlock_tui::App::set_pact_refused) — the very
-/// channel a second `p` and an `r` mid-run use, so a scope refused during a pact
-/// and a pact refused during a refresh read alike. Deliberately not a message:
-/// the message line is the one a run in flight has taken, so a sentence left
-/// there would be the one sentence the reader could not see. A press the app
-/// itself turns down — a file row, a directory that is not pacted — has no run
-/// over it and has its say the ordinary way, in
-/// [`App::message`](warlock_tui::App::message), which
-/// [`App::scope_target`](warlock_tui::App::scope_target) has already written by
-/// the time this returns.
-///
-/// What an accepted press opens on is the scope that directory carries *now*,
-/// read out of the manifest this loop is holding: [`to_manifest_path`] spells
-/// the row's path the way the manifest stores it, and [`Manifest::entry`]
-/// answers. Never off a [`Row`](warlock_tui::Row) — a row knows a path, a state
-/// and a document, and inventing a fourth field on it for a string only this
-/// window reads would be a copy of the manifest to keep in step with the
-/// manifest. A directory with no scope opens on an empty field, which is exactly
-/// what a submit of an empty field then writes back: nothing.
-///
-/// A path with no manifest-relative spelling has nowhere to be written and so
-/// opens nothing, and says why on the message line. It takes a tree rooted
-/// outside its own repository to reach, which is a situation warlock cannot
-/// currently be started in — but the alternative to answering it is a window
-/// whose Enter has nowhere to go.
+// The three refusals are ordered deliberately, matching
+// [`pact_press`](crate::pacting::pact_press): a run in flight, then the
+// boundary, then whatever the app makes of the row. A refusal during a run
+// goes to the progress line rather than the message line, because a run has
+// taken the message line and a sentence left there is the one sentence the
+// reader cannot see.
+//
+// The field opens on the scope read out of the manifest, never off a
+// [`Row`](warlock_tui::Row): a fourth row field holding this string would be a
+// copy of the manifest to keep in step with the manifest.
 pub(crate) fn scope_press(
     app: &mut App,
     manifest: &Manifest,
@@ -137,20 +79,12 @@ pub(crate) fn scope_press(
     ScopePrompt::open(module, scope)
 }
 
-/// What one keystroke *inside* the open window comes to: the prompt the event
-/// loop holds from here on.
-///
-/// [`edit_for`](warlock_tui::edit_for) has already said which of the three
-/// things a key in a field can be; this is what the loop does about each, kept
-/// here beside the write rather than spread across the match that dispatches
-/// it. Typing and abandoning move nothing but the prompt — the app was never
-/// told the question was asked, so an Esc has nothing to put back — and Enter is
-/// [`scope_submit`] and only [`scope_submit`].
-///
-/// A closed prompt cannot submit: [`press_for`](crate::input::press_for) only
-/// consults `edit_for` while one is up, so the `None` road below is unreachable
-/// rather than silent. It answers with a closed prompt because a submit that
-/// found no field to write is not a window anybody can still be typing into.
+// Typing and abandoning move nothing but the prompt: the app was never told
+// the question was asked, so an Esc has nothing to put back.
+//
+// The `None` arm is unreachable rather than silent —
+// [`press_for`](crate::input::press_for) only consults
+// [`edit_for`](warlock_tui::edit_for) while a prompt is up.
 pub(crate) fn scope_edit(
     app: &mut App,
     manifest: &mut Manifest,
@@ -168,43 +102,15 @@ pub(crate) fn scope_edit(
     }
 }
 
-/// What Enter in the scope prompt comes to: the manifest written, or the prompt
-/// still up over the reason it was not.
-///
-/// The one keystroke in this file that touches disk, and it touches it here, on
-/// the event loop's own thread — see the module docs for why a scope is not a
-/// run. What comes back is the prompt the loop holds next: [`ScopePrompt::Closed`]
-/// for a submit that was answered one way or another, and an open prompt over the
-/// same text for one the engine refused.
-///
-/// The order is judge, then write. [`validate_scope`] is asked about the
-/// lower-cased text and its verdict decides the road: a rule broken reopens the
-/// field through [`ScopeField::refused`] with the text and the cursor exactly
-/// where they were, and nothing is written to disk — which is what keeps
-/// `control-plane, data-plane` a single refused string rather than two scopes
-/// somebody meant. An empty field is not judged at all, because clearing is an
-/// answer rather than an error.
-///
-/// The entry is edited by rebuilding the manifest through
-/// [`Manifest::with_entries`] over [`PactEntry::with_scope`] /
-/// [`PactEntry::without_scope`], which is what keeps this to the one field a
-/// person owns: every other entry is cloned untouched, and the edited one keeps
-/// its document, its granted hash and its granted timestamp. Entry order is kept
-/// too, so the saved file differs from the one on disk by the scope line and
-/// nothing else.
-///
-/// The manifest in the loop's hand is replaced only *after* the save succeeded,
-/// so what this thread believes is what is on disk. A save that fails puts its
-/// reason on [`App::message`](warlock_tui::App::message) and never returns out of
-/// the event loop, exactly as an un-pact that will not write does (see the
-/// `Some(Err(message))` arm of
-/// [`apply_progress`](crate::pacting::apply_progress)): a manifest that would not
-/// write is news for the footer, not a reason to tear the screen down. The prompt
-/// comes down with it, because the reason is a line on the very footer the window
-/// is drawn over.
-///
-/// Nothing else moves. No thread, no channel, no account, no progress line, no
-/// success message and no reload of the tree.
+// Judge, then write. A refusal reopens the field over the text and cursor
+// exactly as they were and touches no disk, which is what keeps
+// `control-plane, data-plane` one refused string rather than two scopes
+// somebody meant. An empty field is not judged at all: clearing is an answer.
+//
+// The manifest the loop holds is replaced only *after* the save succeeded, so
+// what this thread believes is what is on disk. A save that fails is a line on
+// the footer rather than a return out of the event loop — a manifest that will
+// not write is news, not a reason to tear the screen down.
 pub(crate) fn scope_submit(
     app: &mut App,
     manifest: &mut Manifest,
@@ -245,27 +151,17 @@ pub(crate) fn scope_submit(
     ScopePrompt::Closed
 }
 
-/// `manifest` with the entry for `module` carrying `scope`, or carrying none
-/// when `scope` is `None`.
-///
-/// A rebuild rather than a mutation, because [`Manifest`] has no mutating scope
-/// setter and should not grow one for this: the entries go through
-/// [`PactEntry::with_scope`] and [`PactEntry::without_scope`], both of which are
-/// the person's field and leave the grant alone, and every other entry is cloned
-/// as it stands. Order is preserved by the map, so the file this saves to
-/// differs from the one on disk in one place.
-///
-/// A `module` no entry matches hands back a copy of the manifest, and no caller
-/// gets that far: [`scope_submit`] and
-/// [`Opened::scoped`](crate::edits) each refuse such a write before reaching
-/// here.
-///
-/// Shared with the headless writes rather than copied into them: `warlock scope
-/// add` and `warlock scope remove` write the same field of the same file as the
-/// keystroke above, and a second rebuild would be a second chance to forget that
-/// the grant, the document and the entry order are not this edit's to move. The
-/// sharing is a visibility and nothing else — what this does, and what
-/// [`scope_submit`] does with it, are unchanged.
+// A rebuild rather than a mutation, because [`Manifest`] has no mutating scope
+// setter and should not grow one for this. Every other entry is cloned as it
+// stands and the map preserves order, so the saved file differs from the one on
+// disk in one place; the edited entry keeps its document, granted hash and
+// granted timestamp, none of which are this edit's to move.
+//
+// A `module` no entry matches hands back a copy. No caller reaches that:
+// [`scope_submit`] and [`Opened::scoped`](crate::edits) both refuse first.
+//
+// Shared with the headless `warlock scope add`/`remove` rather than copied,
+// since a second rebuild would be a second chance to forget the above.
 pub(crate) fn with_scope_on(manifest: &Manifest, module: &str, scope: Option<&str>) -> Manifest {
     Manifest::with_entries(manifest.entries().iter().map(|entry| {
         let entry = entry.clone();
@@ -279,30 +175,19 @@ pub(crate) fn with_scope_on(manifest: &Manifest, module: &str, scope: Option<&st
     }))
 }
 
-/// What the footer says when the directory the prompt was opened over is not in
-/// the manifest by the time Enter is pressed.
-///
-/// A scope is written on a pact's entry, so a directory with no entry has
-/// nowhere to keep one. The app's rows and the manifest are derived from the
-/// same load and agree in every ordinary session, so this is the answer to a
-/// manifest hand-edited in another window since warlock read it — said out loud
-/// rather than smoothed over, because a prompt that closed on a write that never
-/// happened is the one outcome a reader cannot tell from success.
+// Reachable only when the manifest was edited in another window since warlock
+// read it — rows and manifest come from one load and otherwise agree. Said out
+// loud rather than smoothed over, because a prompt that closed on a write that
+// never happened is the one outcome a reader cannot tell from success.
 fn no_pact_message(module: &str) -> String {
     format!(
         "`{module}` is not in the manifest, so there is no pact to write a scope on; press `p` to pact it"
     )
 }
 
-/// What one press of the scope key and one Enter in the window it opens
-/// actually do: which prompt the loop holds next, what ends up in
-/// `.warlock/pacts.toml`, and what — deliberately — does not move at all.
-///
-/// The whole path is driven here, from the press to the saved file, over a
-/// repository of the test's own under the temporary directory. No terminal, no
-/// network, no `claude` and no worker thread: a scope write is a function of an
-/// app, a manifest and a field, which is the point of the module above and is
-/// what makes every rule below one assertion.
+// The whole path from press to saved file, over a repository of the test's own.
+// No terminal, no network, no `claude` and no worker thread: a scope write is a
+// function of an app, a manifest and a field.
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -315,17 +200,11 @@ mod tests {
 
     use super::{scope_edit, scope_submit};
 
-    /// [`super::scope_press`] with no boundary in the way.
-    ///
-    /// The wildcard sigil, which opens every scope, so
-    /// [`closed_scope`](crate::session::closed_scope) answers `None` and the
-    /// press behaves exactly as it did before boundaries existed — which is what
-    /// every test using this shadow is about. It is `*` rather than
-    /// [`Sigils::Nothing`](warlock_tui::Sigils::Nothing) because the fixture manifest *does* scope
-    /// `crates/engine`, and holding nothing opens nothing that is scoped: an
-    /// empty set here would turn a suite about the scope prompt into a suite
-    /// about being refused. The tests that *are* about the boundary call
-    /// `super::scope_press` directly.
+    // `super::scope_press` with no boundary in the way, so these tests are about
+    // the prompt rather than about being refused. The wildcard rather than
+    // `Sigils::Nothing` because the fixture manifest *does* scope
+    // `crates/engine`, and holding nothing opens nothing that is scoped. Tests
+    // that are about the boundary call `super::scope_press` directly.
     fn scope_press(
         app: &mut App,
         manifest: &Manifest,
@@ -335,20 +214,17 @@ mod tests {
         super::scope_press(app, manifest, repo_root, &Sigils::held(["*"]), in_flight)
     }
 
-    /// The grant every entry below carries, so that "the write left the grant
-    /// alone" is an assertion about two values that are really there.
+    // A grant on every entry, so "the write left the grant alone" is an
+    // assertion about two values that are really there.
     const HASH: &str = "d0f5a1";
 
-    /// When that grant happened, in the form the manifest stores.
     const AT: &str = "2026-08-19T07:32:00Z";
 
-    /// The line the last keystroke left on the footer, which no press of `s`
-    /// and no Enter in its window is allowed to spend.
+    // What no press of `s` and no Enter in its window is allowed to spend.
     const LAST_KEY: &str = "something the last key said";
 
-    /// A repository of this test's own, removed when the test that made it
-    /// ends. The tree below is written out by hand rather than loaded, so
-    /// nothing is inside it until a scope is saved.
+    // The tree below is written out by hand rather than loaded, so nothing is
+    // inside this until a scope is saved.
     fn a_repo() -> TempDir {
         tempfile::tempdir().expect("a temporary directory")
     }

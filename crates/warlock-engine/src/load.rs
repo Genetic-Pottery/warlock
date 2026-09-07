@@ -90,10 +90,7 @@ pub struct Problem {
 #[non_exhaustive]
 pub enum ProblemCause {
     Hash(hash::Error),
-    Scope {
-        scope: String,
-        rule: scope::Rule,
-    },
+    Scope { scope: String, rule: scope::Rule },
 }
 
 impl fmt::Display for Problem {

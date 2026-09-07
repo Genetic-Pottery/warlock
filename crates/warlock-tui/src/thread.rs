@@ -1,102 +1,20 @@
-//! What the reader asked, and what came back.
+//! The conversation card: an ordered list of turns and of notes, one line each,
+//! that warlock says for itself.
 //!
-//! The panel's other two cards are a ledger and a file: an account is one pact
-//! writing documents, and a document is what it wrote. This one is the
-//! conversation — the third card, and the only place in warlock where a model's
-//! prose is ever shown. It is an ordered list of entries. Most of them are
-//! turns, one per message somebody typed at the foot of the panel, each holding
-//! that message, the work the model was seen doing while it answered, and the
-//! answer. The rest are notes: one line warlock says itself. Nothing else is a
-//! turn: a pact running behind the conversation is the account card's, whole,
-//! and this card has nothing to say about it.
+//! Plain data, as the account is. [`Instant::now`] is never called in this file,
+//! so a whole conversation can be driven off `base + Duration::from_secs` with
+//! nothing attached to stdout and no `claude` installed. The clock rule is
+//! literally the account's code — both are built on [`Log`] — and tool results,
+//! model reasoning and early fragments of an answer are kept out so the answer
+//! lands whole.
 //!
-//! It is plain data like the account is: no terminal, no channel, no child
-//! process, and no clock of its own. [`Instant::now`] is never called in this
-//! file, so a whole conversation can be driven through it in a test off `base +
-//! Duration::from_secs` with nothing attached to stdout, no `claude` installed
-//! and no thread started.
-//!
-//! # A turn is a section that somebody asked for
-//!
-//! The clock rule is the account's, to the letter, and is the account's *code*
-//! as well — both are built on [`Log`], so a work line here counts from the
-//! start of the turn it belongs to, the newest one ticks against whatever `now`
-//! the caller hands in, and it freezes at the instant the next line arrives.
-//! A turn that has heard nothing yet shows the same `waiting` placeholder, for
-//! the same reason: the first thing a model does with a question is spend a
-//! while not answering it, and a still screen is what a hang looks like.
-//!
-//! The work lines are the account's shape too — a tool call is its name and the
-//! one detail it carries, thinking is the word `thinking`, writing is the word
-//! `writing` — because a `Grep` is a `Grep` whichever card it turns up on. And
-//! what is kept out is kept out just as firmly: no tool results, no model
-//! reasoning, no fragment of the answer arriving early. The answer is the one
-//! piece of prose a turn has, it is a value of its own, and it lands whole.
-//!
-//! # A run is not a turn
-//!
-//! A pact or a refresh started while the conversation is on screen puts nothing
-//! here. The panel has a card for a run — the account, one swap away, where the
-//! directory headings, the passes and the summary all live in the account's own
-//! words — and a conversation that also carried them would be a second copy of
-//! the same run for the reader to reconcile with the first, in the middle of
-//! what they were reading. So this card is what was asked and what came back,
-//! and nothing that nobody typed.
-//!
-//! # A note is warlock's own line
-//!
-//! The other entry is one line warlock says for itself: a draft refused, a file
-//! written, a document gone stale under an answer that quoted it. It has to sit
-//! in the conversation because *when* it was said is the whole of what it means
-//! — a warning above the turn it is about and a warning three turns later are
-//! different warnings — which is why the entries are one sequence and not a
-//! turn list with a side table of remarks beside it.
-//!
-//! A note is unclocked: no `0:00`, no elapsed time, no ticking. A clock beside
-//! it would say warlock had been at something for that long, and it has not
-//! been at anything — the note is the whole event. It draws as
-//! [`Line::Note`](crate::Line), which is neither a work line nor a
-//! [`Line::Said`](crate::Line), so warlock's own voice is not read as something
-//! the model did or something the reader typed. It also does nothing to a turn:
-//! it opens none, closes none and freezes none, so a note landing while an
-//! answer is on its way leaves that turn ticking exactly as it was.
-//!
-//! # A synthesized instruction is a turn, shown as the command
-//!
-//! A command that ends up asking the model something — `/brief`, `/write` —
-//! sends an instruction warlock wrote, not a sentence the reader typed. That is
-//! a *turn*, with the work lines and the answer of any other turn, and its
-//! message is the command that caused it: the card shows `/brief`, never the
-//! paragraph of instructions actually sent. The reader typed one word and asked
-//! for one thing, and a screen of prose they did not write in the place their
-//! own question goes would be warlock putting words in their mouth. Nothing
-//! here builds such a turn yet — [`Thread::ask`] takes whatever message it is
-//! given, and it is the caller's business which string that is — but the entry
-//! model is the one that has to allow it, so the decision is recorded where the
-//! entries are.
-//!
-//! # Where this one differs
-//!
-//! Two things, both deliberate.
-//!
-//! A question costs money and the card says nothing about it. A pact's spending
-//! is the account's business — per pass in `wrote … — 2341 bytes, $0.21`, and
-//! totalled in `pact finished — …` — because a pact is a run somebody started
-//! for a purpose and the money is part of what it did. A chat turn is a
-//! sentence and a reply, and a price under every reply is a number a reader
-//! cannot use for anything: it belongs to no total, it is not a budget, and
-//! saying so on its own row spent a line of the card explaining a number that
-//! should not have been there. So the cost a turn reports is heard and
-//! discarded (see [`Thread::record`]).
-//!
-//! And a turn ends in one line however it ends. A pact has three
-//! [`Outcome`](crate::Outcome)s because a pass either writes a document, is
-//! refused, or is stopped; a turn has an answer or an [`Ending`] — cancelled,
-//! no `claude` to ask, a non-zero exit, a timeout, or a model that finished with
-//! nothing to say. Each is one line, said about the turn rather than about the
-//! model, so a failed turn costs the reader a row and not a screen. Nothing here
-//! returns an error to anybody: a turn that could not be run is a line in the
-//! panel, which is the whole reason the endings are values.
+//! Notes share the sequence with the turns rather than sitting in a side table,
+//! because *when* one was said is the whole of what it means: a warning above
+//! the turn it is about and the same warning three turns later are different
+//! warnings. A pact running behind the conversation puts nothing here, because
+//! the account card already carries the passes and the summary. What a turn
+//! costs is heard and discarded (see [`Thread::record`]): a price under a single
+//! reply belongs to no total.
 
 use std::time::{Duration, Instant};
 
@@ -105,72 +23,32 @@ use warlock_engine::agent;
 use crate::account::{Line, Log, THINKING, WRITING, tool_line};
 use crate::claude::Activity;
 
-/// One thing that stopped a turn short of an answer, in the words it ends with.
+/// Five ways a turn stops short of an answer and no sixth a caller has to word
+/// for itself: the four the model seam fails in
+/// ([`agent::Error`](warlock_engine::agent::Error), mapped by [`ending_for`]),
+/// plus the cancel warlock does on purpose. [`Ending::Broke`] is the catch,
+/// because `agent::Error` is `#[non_exhaustive]` and a variant added over there
+/// has to arrive as whatever it says about itself rather than as a panic.
 ///
-/// Five ways and no sixth that a caller has to word for itself: the four the
-/// model seam fails in ([`agent::Error`](warlock_engine::agent::Error), mapped by [`ending_for`]), plus the one
-/// warlock does on purpose. [`Ending::Broke`] is the catch — `agent::Error` is
-/// `#[non_exhaustive]`, so a variant added over there arrives here as whatever
-/// it says about itself rather than as a panic or a silent nothing.
-///
-/// Every line it makes is about *the turn*: `the turn was cancelled`, `the turn
-/// failed — …`. Never about the model, because none of these is a thing the
-/// model did — it was stopped, or never reached, or not installed — and never in
-/// an [`Account`](crate::Account)'s words, because a reader looking at the panel
-/// should not have to work out which card they are on.
+/// Every line it makes is about *the turn* and never about the model: none of
+/// these is a thing the model did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ending {
-    /// Somebody stopped the turn before the answer landed.
-    ///
-    /// Carries nothing: what was said before the cancel is already in the turn,
-    /// and what it had spent by then is already the cost line's business.
     Cancelled,
-    /// There is no such program to ask, which on a fresh machine is the
-    /// ordinary state of the world rather than a fault.
-    NoModel {
-        /// The command that was looked for, e.g. `claude`.
-        program: String,
-    },
-    /// The turn ran and exited non-zero: something went wrong on the far side.
-    Failed {
-        /// The exit code, or `None` if it was killed before it could set one.
-        code: Option<i32>,
-        /// What it wrote to stderr, verbatim and possibly over several lines —
-        /// flattened into one line on the way to the panel, because a row is a
-        /// row.
-        stderr: String,
-    },
-    /// The turn ran past the time it was given and was stopped.
-    TimedOut {
-        /// How long it was given.
-        after: Duration,
-    },
-    /// The turn finished cleanly and said nothing, so there is no answer to
-    /// draw. Its own ending rather than an empty answer, because a blank turn
-    /// on screen is indistinguishable from one that is still going.
+    NoModel { program: String },
+    Failed { code: Option<i32>, stderr: String },
+    TimedOut { after: Duration },
     NothingSaid,
-    /// The turn could not be run for some other reason: a pipe broke, a handle
-    /// could not be opened, or the seam grew a failure this list has not been
-    /// taught yet.
-    Broke {
-        /// What went wrong, in whatever words it came in.
-        reason: String,
-    },
+    Broke { reason: String },
 }
 
 impl Ending {
-    /// The one line a turn ends with.
-    ///
     /// One line and never two, whatever it carries: a stderr with a stack trace
-    /// in it is flattened to a single row here and cut to the panel's width by
-    /// whoever knows the width, the same division of labour the account keeps.
+    /// in it is flattened here and cut to width by whoever knows the width.
     ///
     /// Public because a failed turn is said in two places — the row under the
-    /// question, and the footer, for a reader who is looking at another card —
-    /// and those two have to be one sentence rather than two spellings that
-    /// happen to agree. Whoever ends a turn puts this on the footer and hands
-    /// the [`Ending`] itself to [`Thread::end`], which files the very same
-    /// string as a line.
+    /// question, and the footer for a reader looking at another card — and those
+    /// two have to be one string rather than two spellings that happen to agree.
     ///
     /// ```
     /// use warlock_tui::Ending;
@@ -205,17 +83,12 @@ impl Ending {
     }
 }
 
-/// Which [`Ending`] a failed turn is.
-///
 /// The one place the model seam's failure vocabulary becomes the panel's, so
-/// whoever runs a turn hands the error over rather than wording it — the same
-/// arrangement as [`answer_for`](crate::answer_for) and
-/// [`compose_for`](crate::compose_for), a value in and a value out.
+/// whoever runs a turn hands the error over rather than wording it.
 ///
 /// A cancel does not come through here. It reaches a caller as an ordinary I/O
 /// error — a killed child is a broken pipe, and nothing about the errno says who
-/// killed it — so whether a turn was cancelled is a fact the caller holds and
-/// [`Ending::Cancelled`] is theirs to choose.
+/// killed it — so [`Ending::Cancelled`] is the caller's to choose.
 #[must_use]
 pub fn ending_for(error: &agent::Error) -> Ending {
     match error {
@@ -237,74 +110,49 @@ pub fn ending_for(error: &agent::Error) -> Ending {
     }
 }
 
-/// One entry of the conversation: a question somebody typed, everything the
-/// model was seen doing about it, and what came back.
-///
 /// Opened by [`Thread::ask`] and closed by [`Thread::answer`] or
-/// [`Thread::end`]. Between those two it is the live turn — the one whose newest
-/// work line ticks and the only one anything can be filed under — and a closed
-/// turn never moves again, however long the session goes on.
-///
-/// One kind of turn and no second: a pact running behind the conversation is the
-/// account card's, whole, and nothing anybody did not type is an entry here.
+/// [`Thread::end`]. Between those two it is the live turn, the only one anything
+/// can be filed under, and a closed turn never moves again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Turn {
-    /// The message the reader typed, exactly as they typed it, newlines and
-    /// all. Never wrapped here: the width is a fact about a terminal.
     message: String,
-    /// When the turn was asked, what has been filed under it, and whether its
-    /// clock is still moving.
     log: Log,
-    /// What came back, whole and unwrapped, once it has.
     answer: Option<String>,
-    /// How it ended instead, if it did. Never both this and an answer: the
-    /// first of the two to arrive closes the turn.
     ending: Option<Ending>,
 }
 
 impl Turn {
-    /// The message this turn was asked in, in the reader's own words.
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
 
-    /// What came back, or `None` while the turn is still going — and for good
-    /// on a turn that ended without answering.
-    ///
-    /// Whole and unwrapped, as it arrived. Breaking it into the rows a panel of
-    /// some width can draw it in happens on the way to the screen, so a terminal
-    /// made narrower re-flows an answer the reader is looking at rather than
-    /// asking the model again.
+    /// Whole and unwrapped, as it arrived. Breaking it into rows happens on the
+    /// way to the screen, so a terminal made narrower re-flows an answer the
+    /// reader is looking at rather than asking the model again.
     #[must_use]
     pub fn answer(&self) -> Option<&str> {
         self.answer.as_deref()
     }
 
-    /// How this turn ended short of an answer, or `None` if it did not.
     #[must_use]
     pub const fn ending(&self) -> Option<&Ending> {
         self.ending.as_ref()
     }
 
-    /// When this turn was asked, which is where its clocks count from.
     #[must_use]
     pub const fn started(&self) -> Instant {
         self.log.started()
     }
 
-    /// Whether this turn has stopped moving: answered, ended, or overtaken by a
-    /// newer turn.
+    /// Answered, ended, or overtaken by a newer turn.
     #[must_use]
     pub const fn is_closed(&self) -> bool {
         self.log.is_closed()
     }
 
-    /// How many rows this turn draws as, before anything is wrapped to a width.
-    ///
-    /// The message's own lines, the work lines — at least one, since a turn that
-    /// has heard nothing draws the `waiting` placeholder — and the answer's own
-    /// lines.
+    /// At least one work row, because a turn that has heard nothing still draws
+    /// the `waiting` placeholder.
     fn line_count(&self) -> usize {
         broken(&self.message).count()
             + self.log.row_count()
@@ -314,13 +162,8 @@ impl Turn {
                 .map_or(0, |answer| broken(answer).count())
     }
 
-    /// Every row of this turn, in the order a reader reads them, with clocks
-    /// measured against `now`.
-    ///
-    /// The question, then the work, then the answer, and nothing after it. An
-    /// ending needs no arm of its own: it is filed as an ordinary line when the
-    /// turn closes, so it clocks and freezes like everything else and sits
-    /// exactly where a reader is already looking.
+    /// An ending needs no arm of its own: it is filed as an ordinary line when
+    /// the turn closes, so it clocks and freezes like everything else.
     fn rows(&self, now: Instant) -> impl Iterator<Item = Line> + '_ {
         let said = broken(&self.message).map(|text| Line::Said {
             text: text.to_owned(),
@@ -336,30 +179,22 @@ impl Turn {
         said.chain(self.log.rows(now)).chain(answer)
     }
 
-    /// Stop this turn moving as of `at`, if it has not stopped already.
-    ///
-    /// What a newer turn does to the one above it. It adds no line: a turn
-    /// overtaken by a newer question is simply frozen where it got to, with
-    /// whatever it had said still on screen.
+    /// What a newer turn does to the one above it. It adds no line: an
+    /// overtaken turn is frozen where it got to, with what it had said still on
+    /// screen.
     fn freeze(&mut self, at: Instant) {
         self.log.freeze(at);
     }
 
-    /// This turn while it is still live, or `None` once it is over.
-    ///
-    /// The one gate everything a conversation does goes through: a message's
-    /// activity, its answer and its ending are all filed here or dropped. A turn
-    /// that is over is never it, for the reason [`Thread::record`] gives.
+    /// The one gate everything a conversation does goes through: activity, an
+    /// answer and an ending are all filed here or dropped.
     fn live(&mut self) -> Option<&mut Self> {
         (!self.is_closed()).then_some(self)
     }
 
-    /// Close this turn at `at` with the line `ending` makes.
-    ///
-    /// Reached only through [`Turn::live`], which is what makes the first
-    /// ending win: a turn that is closed already is not a live one, so a cancel
-    /// that lands a moment before the answer does is still the cancel that is on
-    /// screen.
+    /// Reached only through [`Turn::live`], which is what makes the first ending
+    /// win: a cancel landing a moment before the answer does is still the cancel
+    /// on screen.
     fn word(&mut self, ending: &Ending, at: Instant) {
         self.log.push(ending.line(), at);
         self.ending = Some(ending.clone());
@@ -367,29 +202,17 @@ impl Turn {
     }
 }
 
-/// One thing that happened in the conversation, in the order it happened: a
-/// turn, or a line warlock said itself.
-///
-/// The two are one sequence and not two lists, because a note's whole meaning is
-/// where it sits — see the module docs. Private, and it stays private: what a
-/// caller writes is [`Thread::ask`] or [`Thread::note`], and what it reads back
-/// is rows, or [`Thread::turns`] for the turns among them.
+/// One sequence and not two lists, because a note's whole meaning is where it
+/// sits — see the module docs. Private, and it stays private: what a caller
+/// writes is [`Thread::ask`] or [`Thread::note`], and what it reads back is rows
+/// or [`Thread::turns`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Entry {
-    /// A question somebody typed and everything that came of it.
     Turn(Turn),
-    /// One line warlock said, drawn unclocked as [`Line::Note`].
-    Note {
-        /// The line, already flattened to one row by [`Thread::note`].
-        text: String,
-        /// When it was said. Not drawn — a note has no clock — but it is what
-        /// [`Thread::started`] counts from when a note is the first entry.
-        at: Instant,
-    },
+    Note { text: String, at: Instant },
 }
 
 impl Entry {
-    /// When this entry happened, which for a turn is when it was asked.
     const fn at(&self) -> Instant {
         match self {
             Self::Turn(turn) => turn.started(),
@@ -397,11 +220,6 @@ impl Entry {
         }
     }
 
-    /// How many rows this entry draws as, before anything is wrapped.
-    ///
-    /// A note is one row and always one row: [`Thread::note`] flattens whatever
-    /// it is handed, so warlock's own voice cannot take two rows of the card by
-    /// accident.
     fn line_count(&self) -> usize {
         match self {
             Self::Turn(turn) => turn.line_count(),
@@ -409,10 +227,6 @@ impl Entry {
         }
     }
 
-    /// Every row of this entry, with clocks measured against `now`.
-    ///
-    /// Boxed because the two arms are different iterators and the difference is
-    /// of no interest to anybody: what comes out is rows, in order.
     fn rows(&self, now: Instant) -> Box<dyn Iterator<Item = Line> + '_> {
         match self {
             Self::Turn(turn) => Box::new(turn.rows(now)),
@@ -420,7 +234,6 @@ impl Entry {
         }
     }
 
-    /// This entry as a turn, or `None` for a note.
     const fn turn(&self) -> Option<&Turn> {
         match self {
             Self::Turn(turn) => Some(turn),
@@ -428,7 +241,6 @@ impl Entry {
         }
     }
 
-    /// This entry as a turn to write to, or `None` for a note.
     const fn turn_mut(&mut self) -> Option<&mut Turn> {
         match self {
             Self::Turn(turn) => Some(turn),
@@ -437,22 +249,14 @@ impl Entry {
     }
 }
 
-/// The conversation, from the first question to the last answer — and, in the
-/// same sequence, every line warlock said for itself along the way.
-///
 /// One session, one thread: warlock's chat is one conversation for the life of
-/// the process, so turns are appended and nothing is ever dropped or trimmed —
-/// a reader can scroll back to what they asked ten minutes ago, and the model
-/// remembers it too, which is [`ChatAgent`](crate::ChatAgent)'s half of the same
-/// arrangement.
+/// the process, so turns are appended and nothing is ever dropped or trimmed.
+/// [`ChatAgent`](crate::ChatAgent) holds the other half of that arrangement.
 ///
 /// Driven by five calls, all of which take the instant they happened at:
-/// [`Thread::ask`] when a message is submitted, [`Thread::record`] for every
-/// activity the turn reports, [`Thread::answer`] or [`Thread::end`] when it is
-/// over, and [`Thread::note`] for a line warlock says itself. Read back as rows
-/// with [`Thread::lines`] or [`Thread::window`], which take the `now` the newest
-/// clock is measured against. There is no sixth call and nothing for a pact to
-/// say here: a run belongs to the account card.
+/// [`Thread::ask`], [`Thread::record`], [`Thread::answer`] or [`Thread::end`],
+/// and [`Thread::note`]. Read back with [`Thread::lines`] or [`Thread::window`],
+/// which take the `now` the newest clock is measured against.
 ///
 /// ```
 /// use std::time::{Duration, Instant};
@@ -476,18 +280,10 @@ impl Entry {
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Thread {
-    /// Everything that has happened, in the order it happened: turns and the
-    /// notes between them, one sequence. There is no second list — a note's
-    /// place among the turns is what it means.
     entries: Vec<Entry>,
 }
 
 impl Thread {
-    /// A conversation nobody has said anything in yet.
-    ///
-    /// Empty means empty: no entries, no lines, nothing to draw. A panel whose
-    /// thread card has never been asked a question draws warlock's mark, which
-    /// is the same fact said one level up.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -495,14 +291,11 @@ impl Thread {
         }
     }
 
-    /// Ask `message` at `at`, and freeze the turn above it.
-    ///
-    /// The clock under this question counts from `at`, so every turn starts
-    /// again at `0:00` — and it is on screen from this call, as the `waiting`
-    /// placeholder, rather than from whenever the model first says something.
-    /// Whatever turn was live stops here: one question at a time is the rule
-    /// the event loop keeps, and a turn still ticking under a newer one would
-    /// be a second answer to that question.
+    /// The clock under this question counts from `at`, and the turn is on screen
+    /// from this call as the `waiting` placeholder rather than from whenever the
+    /// model first says something. Whatever turn was live stops here: one
+    /// question at a time is the rule the event loop keeps, and a turn still
+    /// ticking under a newer one would be a second answer to that question.
     pub fn ask(&mut self, message: impl Into<String>, at: Instant) {
         self.freeze_last(at);
         self.entries.push(Entry::Turn(Turn {
@@ -513,22 +306,11 @@ impl Thread {
         }));
     }
 
-    /// Say `text` on the card at `at`, as one unclocked line of warlock's own.
+    /// It touches no turn at all: nothing is opened, closed or frozen, so a note
+    /// arriving while an answer is on its way leaves that turn live and
+    /// [`Thread::in_flight`] saying what it said a moment before.
     ///
-    /// A refusal, a file written, a warning about something going stale: the
-    /// things warlock has to say for itself, which have nobody to ask and no
-    /// model to run. It lands where it happened — under the turn above it and
-    /// above whatever is asked next — because a note read out of order is a
-    /// note about the wrong thing.
-    ///
-    /// It touches no turn at all. Nothing is opened, nothing is closed and
-    /// nothing is frozen, so a note that arrives while an answer is on its way
-    /// leaves that turn live and still ticking, and [`Thread::in_flight`] says
-    /// what it said a moment before.
-    ///
-    /// One row, always: whatever is handed in is flattened to a single line
-    /// first, for the reason [`Ending::line`] gives — a row is a row, and
-    /// warlock saying one thing should cost the card one line of it.
+    /// Flattened to one row first, for [`Ending::line`]'s reason.
     pub fn note(&mut self, text: impl Into<String>, at: Instant) {
         let text = text.into();
         self.entries.push(Entry::Note {
@@ -537,20 +319,12 @@ impl Thread {
         });
     }
 
-    /// Record what the live turn was seen doing at `at`.
+    /// A cost becomes nothing at all — not a line, not a total, not a field. See
+    /// the module docs.
     ///
-    /// A tool becomes its name plus the one detail [`Activity`] chose to carry,
-    /// thinking becomes the word `thinking`, writing the word `writing` — the
-    /// account's wording, from the account's own function, because they are the
-    /// same facts. A cost becomes nothing at all — not a line, not a total, not
-    /// a field: what a chat turn spends is not a thing the turn did, it belongs
-    /// to no total, and a price the reader can do nothing with is a row of the
-    /// card spent on nothing.
-    ///
-    /// Does nothing when there is no live turn — before the first question, and
-    /// after the current one has been answered or ended. A line cannot be filed
-    /// under a turn that is already over without contradicting a line already on
-    /// screen; dropping it is the honest way to fail.
+    /// Does nothing when there is no live turn. A line filed under a turn that
+    /// is already over would contradict a line already on screen, so dropping it
+    /// is the honest way to fail.
     pub fn record(&mut self, activity: &Activity, at: Instant) {
         let Some(turn) = self.live() else {
             return;
@@ -570,17 +344,10 @@ impl Thread {
         }
     }
 
-    /// Land `answer` on the live turn at `at`, and close it.
-    ///
-    /// The answer is stored as it arrived, whole and unwrapped, and the turn
-    /// stops moving: `at` is the instant its last work line freezes at.
-    ///
-    /// An answer with nothing in it is not an answer. A model that finished and
-    /// said nothing ends the turn with [`Ending::NothingSaid`] instead, because
-    /// a turn drawn as a question with nothing under it is indistinguishable
-    /// from one still going, and a reader would sit and wait for it.
-    ///
-    /// Does nothing when there is no live turn, for [`Thread::record`]'s reason.
+    /// An answer with nothing in it is not an answer: the turn ends with
+    /// [`Ending::NothingSaid`] instead, because a question with nothing under it
+    /// is indistinguishable from one still going and a reader would sit and wait
+    /// for it.
     pub fn answer(&mut self, answer: impl Into<String>, at: Instant) {
         let Some(turn) = self.live() else {
             return;
@@ -595,120 +362,81 @@ impl Thread {
         turn.log.freeze(at);
     }
 
-    /// End the live turn at `at` with the one line `ending` makes.
-    ///
-    /// The cancel and every failure come through here, and every one of them is
-    /// one line: whatever arrived before it stays exactly where it was, so a
-    /// turn cancelled after two tool calls still shows those two tool calls.
-    ///
-    /// Does nothing when there is no live turn, or when the newest one is over
-    /// already — the first ending wins, and a failure reported twice is still
-    /// one line.
+    /// Whatever arrived before the ending stays exactly where it was, so a turn
+    /// cancelled after two tool calls still shows those two tool calls. Does
+    /// nothing once the newest turn is over: the first ending wins, and a
+    /// failure reported twice is still one line.
     pub fn end(&mut self, ending: &Ending, at: Instant) {
         if let Some(turn) = self.live() {
             turn.word(ending, at);
         }
     }
 
-    /// The turns, in the order they were asked, with the notes between them
-    /// left out.
-    ///
     /// Borrowed turns rather than a slice, since the turns are no longer stored
     /// end to end: what is stored is the sequence of everything that happened,
-    /// and this is the turns picked out of it. A note changes nothing here —
-    /// it is not a turn, and never becomes one.
+    /// and this is the turns picked out of it.
     #[must_use]
     pub fn turns(&self) -> Vec<&Turn> {
         self.entries.iter().filter_map(Entry::turn).collect()
     }
 
-    /// Whether nothing has happened: no question asked, and no note said.
-    ///
-    /// A card with one note on it is not empty — there is a row to draw, and a
-    /// refusal before the first question is exactly that case.
+    /// A card with one note on it is not empty — a refusal before the first
+    /// question is exactly that case.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// When the first thing in this conversation happened, or `None` while
-    /// there is nothing in it.
-    ///
     /// The one instant a thread with rows in it can always name, whether it
-    /// opens with a question or with a note — which is what a caller counting
-    /// rows at some width needs, since `now` decides what a clock says and never
-    /// whether it is a row.
+    /// opens with a question or with a note.
     #[must_use]
     pub fn started(&self) -> Option<Instant> {
         self.entries.first().map(Entry::at)
     }
 
-    /// The turn still going, or `None` when none is.
-    ///
-    /// The live turn is the newest one, and only while it is un-frozen: a turn
-    /// stops being live the moment it answers, ends, or is overtaken by a newer
-    /// one. Notes are stepped over — one landing under a question does not end
-    /// it — so what a caller does with this is decide whether the composer is
-    /// muted, one question at a time, without keeping a second flag that could
-    /// disagree with the thread.
+    /// Notes are stepped over — one landing under a question does not end it —
+    /// so a caller can decide whether the composer is muted without keeping a
+    /// second flag that could disagree with the thread.
     #[must_use]
     pub fn in_flight(&self) -> Option<&Turn> {
         self.last_turn().filter(|turn| !turn.is_closed())
     }
 
-    /// The newest turn, whatever has been said since it. See [`Thread::note`]:
-    /// a note is not a turn and never stands in front of one.
     fn last_turn(&self) -> Option<&Turn> {
         self.entries.iter().rev().find_map(Entry::turn)
     }
 
-    /// The newest turn, to write to.
     fn last_turn_mut(&mut self) -> Option<&mut Turn> {
         self.entries.iter_mut().rev().find_map(Entry::turn_mut)
     }
 
-    /// Stop the newest turn moving as of `at`: what every turn opening does to
-    /// the one above it. See [`Turn::freeze`].
     fn freeze_last(&mut self, at: Instant) {
         if let Some(previous) = self.last_turn_mut() {
             previous.freeze(at);
         }
     }
 
-    /// The live turn, which is the only turn anything can be filed under.
     fn live(&mut self) -> Option<&mut Turn> {
         self.last_turn_mut().and_then(Turn::live)
     }
 
-    /// How many rows the whole thread draws as, before anything is wrapped.
-    ///
-    /// What a scroll offset is clamped against — at a width of nothing, which is
-    /// every card's count until the frame says otherwise. The card is the one
-    /// that knows the width, and it is the one that wraps.
+    /// Before any wrapping, which is the card's business: the card is the one
+    /// that knows the width.
     #[must_use]
     pub fn line_count(&self) -> usize {
         self.entries.iter().map(Entry::line_count).sum()
     }
 
-    /// Every row of the thread, with clocks measured against `now`.
-    ///
     /// `now` is the caller's: this reads no clock, so the same thread and the
-    /// same instant give the same rows every time. Only the newest work line of
-    /// a live turn depends on it — a note has no clock at all.
+    /// same instant give the same rows every time.
     #[must_use]
     pub fn lines(&self, now: Instant) -> Vec<Line> {
         self.window(0, self.line_count(), now)
     }
 
-    /// The `height` rows starting at `offset`, with clocks measured against
-    /// `now`.
-    ///
     /// Asking for more rows than there are, or starting past the end, gives back
     /// what is there rather than failing: a viewport is a request, not an
     /// assertion about the conversation's length.
-    ///
-    /// The entries are walked in order, so a note sits exactly where it was
-    /// said: under the turn it followed, above the one asked after it.
     #[must_use]
     pub fn window(&self, offset: usize, height: usize, now: Instant) -> Vec<Line> {
         self.entries
@@ -720,9 +448,6 @@ impl Thread {
     }
 }
 
-/// `text` as the rows it is drawn in before any wrapping: its own lines, and one
-/// empty row for a text with nothing in it.
-///
 /// Never empty, for [`wrapped`](crate::wrap)'s reason: a blank line is a
 /// paragraph break, and a message or an answer that came to no rows at all would
 /// be a turn with a hole in it.
@@ -732,11 +457,8 @@ fn broken(text: &str) -> impl Iterator<Item = &str> {
     empty.into_iter().chain(lines)
 }
 
-/// `text` as one line: runs of whitespace collapsed to single spaces.
-///
-/// A row is a row, and a stderr with a stack trace in it would otherwise be
-/// several. Nothing is cut — the account refuses to truncate for the same
-/// reason, since the width is a fact about a terminal and this is not.
+/// Nothing is cut. The account refuses to truncate for the same reason: the
+/// width is a fact about a terminal, and this is not.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -751,13 +473,10 @@ mod tests {
     use crate::account::{Account, Line, Outcome};
     use crate::claude::Activity;
 
-    /// The instant `seconds` after `base`, so a whole conversation can be driven
-    /// without anything ever reading a clock.
     fn at(base: Instant, seconds: u64) -> Instant {
         base + Duration::from_secs(seconds)
     }
 
-    /// The activity a turn reports for a tool call with one detail worth saying.
     fn tool(name: &str, detail: &str) -> Activity {
         Activity::Tool {
             name: name.to_owned(),
@@ -765,8 +484,6 @@ mod tests {
         }
     }
 
-    /// What the thread's rows say, as plain text, for the tests that care about
-    /// the wording rather than the shape.
     fn said(thread: &Thread, now: Instant) -> Vec<String> {
         thread
             .lines(now)
@@ -788,8 +505,6 @@ mod tests {
             .collect()
     }
 
-    /// Only the clocked rows: the work lines, which is where the promises about
-    /// what never reaches the panel are kept.
     fn work(thread: &Thread, now: Instant) -> Vec<String> {
         thread
             .lines(now)

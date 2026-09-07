@@ -1,11 +1,7 @@
-//! What can stop warlock showing a tree, said in one line.
-//!
-//! [`Error`] is the binary's whole error vocabulary: everything that reaches
-//! `main` is one of its variants, and every variant prints as a single line,
-//! because `main` prints exactly one after the terminal is back and a message
-//! wrapping onto a second line in a restored shell is a message that looks
-//! like a crash. [`one_line`] is the flattening that rule leans on, and other
-//! modules borrow it for the same reason: the footer is one line too.
+//! Every variant prints as a single line, because `main` prints exactly one
+//! after the terminal is back and a message wrapping onto a second line in a
+//! restored shell looks like a crash. `one_line` is the flattening that rule
+//! leans on, and other modules borrow it because the footer is one line too.
 
 use std::path::PathBuf;
 use std::{fmt, io};
@@ -14,364 +10,100 @@ use warlock_engine::{claude_md, load, manifest, pact, scope, sigils};
 
 use crate::boundary::{blocking_scopes_message, closed_scope_message};
 
-/// Everything that can stop warlock showing a tree, or writing a `CLAUDE.md`.
-///
-/// Richer than the `io::Error` this used to return, because loading brings
-/// failures that are not I/O — a directory outside any repository, a manifest
-/// that will not parse — and each of them is a different sentence. Every one
-/// of those sentences is a single line: `main` prints exactly one, after the
-/// terminal is back, and a message wrapping onto a second line in a restored
-/// shell is a message that looks like a crash.
-///
-/// Every subcommand shares the vocabulary rather than having one each: they
-/// fail in the same ways the tree does — a working directory outside any
-/// repository, a manifest that will not parse, a file that will not write — and
-/// they are printed by the same line of `main`, so a second enum would be a
-/// second wording of the same sentences. Where one of them needs a sentence of
-/// its own, it is a variant here beside the others: [`Error::ClaudeMd`] is
-/// `init`'s, [`Error::NoHome`] and [`Error::Sigil`] are `config`'s,
-/// [`Error::Unspellable`] belongs to the queries — the two listings and the
-/// check, which refuse a path with no repository-relative form on the same
-/// grounds and in the same words — and [`Error::ClosedScope`],
-/// [`Error::ClosedScopeBelow`], [`Error::Scope`] and [`Error::NoPact`] belong to
-/// the headless writes, which refuse a boundary this machine does not hold in
-/// the footer's own words, an un-pact that would drop one it does not hold in
-/// the footer's other ones, a scope that is not one in the engine's, and a
-/// directory nobody has pacted in the manifest's. [`Error::Pact`] is the
-/// headless run's — the one way `warlock pact` and `warlock refresh` fail as a
-/// whole rather than one directory at a time — and [`Error::Failures`] and
-/// [`Error::Cancelled`] are the other two ends of the same run: the count under
-/// the directories that failed one at a time, and the run somebody stopped with
-/// Ctrl-C, both of which are runs that finished rather than runs that did not.
-/// [`Error::Signal`] is the run that never started because that Ctrl-C could
-/// not be listened for.
+// One vocabulary for the panel and every subcommand rather than one enum
+// each: they fail in the same ways and are printed by the same line of `main`,
+// so a second enum would be a second wording of the same sentences.
 #[derive(Debug)]
 pub(crate) enum Error {
-    /// The working directory could not be read, so there is nothing to scope
-    /// the run to.
     WorkingDirectory {
-        /// What the operating system said.
         source: io::Error,
     },
-    /// The engine refused to load a tree for the working directory.
     Load {
-        /// Which of the load's fatal cases it was.
         source: load::Error,
     },
-    /// The load finished, but could not colour every node it was asked to.
-    ///
-    /// Kept as finished text rather than as the [`load::Problem`]s themselves:
-    /// what this variant needs to carry is one line, and formatting it at the
-    /// point the problems are still in hand keeps [`fmt::Display`] free of the
-    /// question of how many of them to mention.
     Problems {
-        /// The first problem, as it worded itself: node, file and reason.
         first: String,
-        /// How many further problems went unnamed.
         rest: usize,
     },
-    /// The pact manifest could not be read at startup, or written when a pact
-    /// was toggled.
-    ///
-    /// The write is the interesting half: a read-only `.warlock/`, a full
-    /// disk. It reaches `main` the same way every other failure does, which is
-    /// the point — the terminal is restored by the guard on the way out, one
-    /// line goes to stderr, and the exit status says it did not work.
     Manifest {
-        /// Which of the manifest's cases it was, with the path it names.
         source: manifest::Error,
     },
-    /// A path a query was pointed at, or a directory it would have listed, has
-    /// no form the manifest could spell: it is outside the repository root, or
-    /// some component of it is not valid UTF-8.
-    ///
-    /// A listing prints repository-root-relative paths, so a directory it
-    /// cannot spell is a directory it cannot report — and an answer with that
-    /// directory quietly left out would tell a script that nothing is stale
-    /// there, which is the one thing warlock does not know about it. So it is a
-    /// refusal with an exit status rather than a line dropped.
-    ///
-    /// `warlock check` refuses the same path on the same grounds, and the
-    /// reasoning is
-    /// [`scope_covering`](warlock_engine::scope_covering)'s own: a path the
-    /// manifest cannot spell is not an unscoped path, it is one this manifest
-    /// has nothing whatever to say about, and reporting it as `scope: null`
-    /// would tell a script it is open to anyone.
-    ///
-    /// Kept apart from [`Error::Manifest`] even though both carry the engine's
-    /// [`manifest::Error`]: that one is a file that would not read or write, and
-    /// this one never opens a file at all.
+    // Kept apart from `Manifest` even though both carry the engine's
+    // `manifest::Error`: that one is a file that would not read or write, this
+    // one never opens a file at all. A path with no repository-relative form is
+    // refused rather than quietly dropped from a listing, because an answer with
+    // it left out would tell a script nothing is stale there.
     Unspellable {
-        /// Which of the engine's two path cases it was, naming the path.
         source: manifest::Error,
     },
-    /// A headless write was pointed at a path inside a boundary this machine's
-    /// sigils do not open.
-    ///
-    /// The one refusal in this enum that is about *who* rather than about what
-    /// is on disk, and the only one whose sentence is written somewhere else:
-    /// [`closed_scope_message`] is what the TUI's footer says when `p`, `r` or
-    /// `s` is refused over the same boundary, and one rule refused in two
-    /// registers must not be refused in two wordings. Borrowed rather than
-    /// retyped, so the day that sentence changes it changes in one place.
-    ///
-    /// Nothing has been read past this point and nothing at all has been
-    /// written: the boundary is asked before the path is spelled and before the
-    /// manifest is looked into (see [`mod@crate::edits`]), so this refusal
-    /// cannot have leaked what the manifest holds on the far side of it.
-    ///
-    /// The one variant here that is not exit status 1: nothing was spent and
-    /// nothing can be retried into working, so `main` leaves a 3 behind and a
-    /// script can act on it without reading the sentence. See
-    /// [`status_for`](crate::status_for).
+    // The boundary is asked before the path is spelled and before the manifest
+    // is looked into (see `crate::edits`), so neither this nor `NoPact` below
+    // can be prised out of warlock from outside a scope it does not open.
     ClosedScope {
-        /// The path, as the manifest spells it: repository-root-relative with
-        /// forward slashes, and `.` for the root itself. Never the absolute
-        /// path typed, so the sentence reads the way the TUI's does over a row.
         path: String,
-        /// The scope covering it — the sigil to go and ask for, which is the
-        /// whole social half of the refusal.
         scope: String,
     },
-    /// `warlock unpact` was pointed at a subtree carrying boundaries this
-    /// machine's sigils do not open.
-    ///
-    /// [`Error::ClosedScope`]'s question aimed downwards, and the only refusal
-    /// in this enum that an un-pact has and the other two writes do not.
-    /// Coverage walks up, so the variant above answers whether this machine may
-    /// act *at* the path; this one answers what the act would **reach**, which
-    /// only an un-pact raises — it drops every entry below as well, and an entry
-    /// is the only home a scope has, so without this a boundary could be erased
-    /// by aiming at its parent. The decision is argued in
-    /// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
-    ///
-    /// Its sentence is written elsewhere for [`Error::ClosedScope`]'s reason:
-    /// [`blocking_scopes_message`] is what the TUI's footer says when `p` is
-    /// refused un-pacting-ward over the same subtree, and one rule refused in
-    /// two registers must not be refused in two wordings.
-    ///
-    /// The path has been spelled and the boundary *over* it has already said
-    /// yes; nothing has been written, and nothing the manifest holds has been
-    /// disclosed beyond the scopes named — which are committed inside the
-    /// repository and visible to everyone who clones it.
+    // `ClosedScope`'s question aimed downwards, and the only refusal an
+    // un-pact has that the other writes do not: coverage walks up, so that one
+    // answers whether this machine may act *at* the path, while an un-pact drops
+    // every entry below as well and an entry is the only home a scope has.
+    // Without this a boundary could be erased by aiming at its parent. Argued in
+    // `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
     ClosedScopeBelow {
-        /// The path the un-pact was aimed at, as the manifest spells it. Not the
-        /// paths underneath: what a reader must hold to proceed is the scopes,
-        /// and `warlock check` is what locates the directories carrying them.
         path: String,
-        /// Every distinct scope at or below it that this machine does not open,
-        /// deduplicated and in the manifest's own order — see
-        /// [`closed_scopes_at_or_below`](warlock_engine::closed_scopes_at_or_below).
-        /// Never empty: no blocking scope is nothing to refuse.
         scopes: Vec<String>,
     },
-    /// `warlock scope add` was handed something that is not a scope.
-    ///
-    /// The engine's own [`scope::Rule`] and nothing wrapped around it: the
-    /// sentence a rule renders as is already the whole answer — what a scope may
-    /// hold, and what this one held instead — and a preamble of warlock's own
-    /// would be a second voice saying the same thing less precisely. It is the
-    /// line the TUI puts under the scope field, printed where a shell can read
-    /// it.
-    ///
-    /// Nothing has been written when this arrives. The judging happens before
-    /// the manifest is rebuilt, and what is judged is the ASCII-lower-cased
-    /// text — folding case is the one thing done to it, and there is no
-    /// trimming, repairing or splitting anywhere on this road.
+    // The engine's `scope::Rule` and nothing wrapped around it: the sentence a
+    // rule renders as is already the whole answer, and a preamble of warlock's
+    // own would be a second voice saying the same thing less precisely.
     Scope {
-        /// The one rule it broke, in the engine's words.
         rule: scope::Rule,
     },
-    /// A headless scope write was pointed at a directory the manifest has no
-    /// entry for.
-    ///
-    /// A scope is written on a pact's entry, so a directory with no entry has
-    /// nowhere to keep one — the same fact
-    /// [`no_pact_message`](crate::scoping) states on the footer when the prompt
-    /// is answered over a directory that has been hand-edited out of the file,
-    /// worded for a reader at a shell rather than at a keyboard.
-    ///
-    /// Only ever reached past an *open* boundary: the boundary is asked before
-    /// the manifest is looked into (see [`mod@crate::edits`]), so this sentence
-    /// — which is a fact about what the manifest holds — cannot be prised out of
-    /// warlock from outside a scope it does not open.
     NoPact {
-        /// The directory, as the manifest spells it: repository-root-relative
-        /// with forward slashes, and `.` for the root itself.
         module: String,
     },
-    /// The subtree a headless `warlock pact` or `warlock refresh` was aimed at
-    /// could not be walked, so the run never started.
-    ///
-    /// The one thing that fails a run as a whole rather than one directory of
-    /// it: everything else that goes wrong goes wrong for a single directory and
-    /// comes back in [`PactedSubtree::failures`](warlock_engine::PactedSubtree),
-    /// beside the manifest the rest of the subtree earned. A pact planned from
-    /// half a walk would silently leave directories out, which is why the engine
-    /// refuses it outright — see
-    /// [`pact_subtree`](warlock_engine::pact_subtree).
-    ///
-    /// Nothing has been written when this arrives, and no model pass has been
-    /// spent: the walk is the first thing either operation does, before any
-    /// directory is offered to the agent.
-    ///
-    /// The engine's own sentence, flattened, for [`Error::Manifest`]'s reason —
-    /// the walker names the directory and what the filesystem said, and there is
-    /// nothing warlock could add to that.
     Pact {
-        /// Which of the engine's cases it was, with the directory it names.
         source: pact::Error,
     },
-    /// A headless `warlock pact` or `warlock refresh` finished with some of its
-    /// directories failed.
-    ///
-    /// The one variant here that is not a refusal to do something and not an
-    /// inability to: the run happened, the documents that could be written are
-    /// written, and the manifest holding what the rest of the subtree earned is
-    /// saved before this is built. What it carries is the count under a list —
-    /// [`mod@crate::running`] has already named every failing directory on
-    /// stderr, one line each, because a shell reader's list of what to go and
-    /// look at must not be summarised away — and its whole job is to be the
-    /// last line and the exit status.
-    ///
-    /// That status is 4 and not 1: warlock did the thing, so a script that
-    /// re-runs on a 1 and stops on a 3 needs a third answer for "it ran, and
-    /// some of it did not take". See [`status_for`](crate::status_for).
-    ///
-    /// The counts are directories, both of them: how many failed, out of how
-    /// many the run offered — which for a refresh is the stale ones and not the
-    /// whole subtree, since those are the directories it set out to describe.
     Failures {
-        /// How many directories failed. Never zero: a run with nothing wrong
-        /// with it is `Ok(())`.
         failed: usize,
-        /// How many directories the run offered a pass, which is the engine's
-        /// own denominator — the number every progress line counted against.
         total: usize,
     },
-    /// A headless `warlock pact` or `warlock refresh` was stopped from the
-    /// keyboard.
-    ///
-    /// Neither a refusal nor an inability, and not [`Error::Failures`] either:
-    /// the run was doing what it was asked and the reader ended it. Ctrl-C
-    /// latches the run's [`Cancel`](warlock_tui::Cancel), which kills the pass
-    /// in flight and ends the descent at the next directory boundary, and
-    /// everything that finished before that is hashed, granted and saved
-    /// exactly as a run that reached the end saves it — so this is built after
-    /// the manifest is already on disk.
-    ///
-    /// It carries no count, and it is printed *instead of* the list of failing
-    /// directories rather than under it. A cancel makes failures of its own —
-    /// the killed pass comes back as one — and there is nothing in the engine's
-    /// list saying which of them the reader caused, so naming any of them would
-    /// put directories on stderr as though somebody had to go and look at them
-    /// when the only thing that happened is that Ctrl-C was pressed. It is the
-    /// footer's decision about the same event, for the same reason, and what
-    /// finished is on stdout either way. See [`mod@crate::running`].
-    ///
-    /// Exit status 130 — 128 plus SIGINT, which shells, `make` and CI already
-    /// read as interrupted. See [`status_for`](crate::status_for).
     Cancelled,
-    /// Ctrl-C could not be listened for, so a headless run was never started.
-    ///
-    /// The other half of [`Error::Cancelled`], and the reason it is a refusal
-    /// rather than a shrug: a `warlock pact` is minutes of somebody's tokens
-    /// with no panel to press Esc in, and the signal is the only say-when a
-    /// shell has over it. A run nobody could stop is not the run that was asked
-    /// for, so warlock declines to start one — which it can do here for free,
-    /// because the handler is installed after the boundary is asked and before
-    /// the first pass is spent, so nothing has been paid for and nothing is
-    /// written.
-    ///
-    /// Warlock unable to do the thing, and so exit status 1 like every other
-    /// inability. See [`status_for`](crate::status_for).
+    // A refusal rather than a shrug: a `warlock pact` is minutes of somebody's
+    // tokens with no panel to press Esc in, and the signal is the only say-when
+    // a shell has over it. Free to refuse here — the handler is installed after
+    // the boundary is asked and before the first pass is spent.
     Signal {
-        /// What the signal crate said: a handler already registered for this
-        /// process, or the system refusing the registration.
         source: ctrlc::Error,
     },
-    /// A subcommand was run somewhere with no repository above it, so there is
-    /// no root to write a `CLAUDE.md` at or to hold sigils for.
-    ///
-    /// The tree's own version of this refusal comes through [`Error::Load`] in
-    /// the engine's words; neither subcommand loads a tree, so each asks
-    /// [`repository_root`](warlock_engine::repository_root) directly and words
-    /// the same fact here, in the same shape: what was looked for, where the
-    /// looking started, and what that means for what was asked.
-    ///
-    /// One variant for both subcommands, with the consequence carried as
-    /// `wanted`: the sentence up to that point is the same fact about `.git`
-    /// twice over, and two variants would be two wordings of it to keep in step.
     NoRepository {
-        /// The working directory the search upwards started from.
         start: PathBuf,
-        /// What the root was wanted for, as the tail of the sentence: "write
-        /// `CLAUDE.md` at", "hold sigils for". A `&'static str` because there
-        /// are exactly as many of these as there are subcommands, each spelled
-        /// where its subcommand is written.
         wanted: &'static str,
     },
-    /// `warlock init` could not write the `CLAUDE.md`: it is there and cannot
-    /// be read, it is not text, or the write itself failed.
-    ///
-    /// Nothing is half-written when this arrives — the engine writes beside and
-    /// renames over — so the file named is either untouched or whole.
     ClaudeMd {
-        /// Which of the writer's cases it was, with the path it names.
         source: claude_md::Error,
     },
-    /// `warlock config` could not work out where this machine's home directory
-    /// is, so it does not know where the sigils would be kept.
-    ///
-    /// Carries nothing: the two variables that were looked at are the whole of
-    /// the fact, and they are named in the sentence rather than stored.
     NoHome,
-    /// The line `warlock config` prints its prompt for could not be read.
-    ///
-    /// Deliberately not [`Error::Terminal`]: `warlock config` never enters the
-    /// alternate screen and never leaves cooked mode, so a failure here is
-    /// stdin being closed or unreadable — a pipe that broke — rather than
-    /// anything the terminal was asked to do.
     Prompt {
-        /// What the read said.
         source: io::Error,
     },
-    /// Something typed at that prompt is not a sigil.
-    ///
-    /// Nothing has been written when this arrives: the whole line is judged
-    /// before anything is saved, so the set held is the set that was held. The
-    /// string is kept as it was typed rather than as it was folded, because
-    /// that is what the reader can see on their screen.
     Sigil {
-        /// The offending string, exactly as it was entered.
         entered: String,
-        /// The one rule it broke, in the engine's words.
         rule: scope::Rule,
     },
-    /// The machine-local sigil config could not be read or written.
-    ///
-    /// Nothing is half-written when this arrives — the engine writes beside and
-    /// renames over — and nothing inside the repository is touched either way:
-    /// the file named is under the home directory.
     Sigils {
-        /// Which of the engine's cases it was, with the path it names.
         source: sigils::Error,
     },
-    /// The terminal could not be set up, drawn to, or read from.
     Terminal {
-        /// What the terminal said.
         source: io::Error,
     },
 }
 
 impl Error {
-    /// The error for a load's non-fatal `problems`, or `None` when it had
-    /// none.
-    ///
-    /// Only the first problem is quoted. One unreadable file usually means a
-    /// whole directory of them, and a message per file would scroll the useful
-    /// one off the screen; the count says how much was left out, and the named
-    /// file is enough to go and look at.
+    // Only the first problem is quoted. One unreadable file usually means a
+    // whole directory of them, and a message per file would scroll the useful
+    // one off the screen; the count says how much was left out.
     pub(crate) fn from_problems(problems: &[load::Problem]) -> Option<Self> {
         let first = problems.first()?;
         Some(Self::Problems {
@@ -381,19 +113,12 @@ impl Error {
     }
 }
 
-/// `message` as a single line: what it says first, and, when it ran to several
-/// lines, why it says so last.
-///
-/// A parser's diagnostic is laid out for a compiler's output — the location on
-/// the first line, then the offending source with a caret under it, then the
-/// explanation — and those middle lines mean nothing once they are not in a
-/// fixed-width block under each other. What survives is the two lines that are
-/// sentences: `TOML parse error at line 1, column 5` and the explanation under
-/// the caret, which between them say where to look and what is wrong.
-///
-/// Rejoining rather than truncating, because dropping the last line would
-/// throw away the only part that says *why*. Single-line messages — every I/O
-/// error, and every error this workspace writes itself — come back untouched.
+// First line and last, rejoined rather than truncated. A parser's diagnostic is
+// laid out for a compiler's output — location, then the offending source with a
+// caret under it, then the explanation — and the middle lines mean nothing once
+// they are not in a fixed-width block. Dropping the last line instead would
+// throw away the only part that says *why*. Single-line messages, which is every
+// I/O error and everything this workspace writes itself, come back untouched.
 pub(crate) fn one_line(message: &str) -> String {
     let mut lines = message
         .lines()
@@ -576,9 +301,9 @@ impl std::error::Error for Error {
 }
 
 impl From<io::Error> for Error {
-    /// Everything reached by `?` once the terminal is up is the terminal:
-    /// entering raw mode, drawing a frame, reading an event. The load path
-    /// names its own errors and never comes through here.
+    // Everything reached by `?` once the terminal is up is the terminal:
+    // entering raw mode, drawing a frame, reading an event. The load path names
+    // its own errors and never comes through here.
     fn from(source: io::Error) -> Self {
         Self::Terminal { source }
     }
@@ -596,11 +321,6 @@ mod tests {
     // sentence nothing said any more.
     use crate::standing::{FOR_CLAUDE_MD, FOR_SIGILS};
 
-    /// The problem text the engine hands over, standing in for a
-    /// [`load::Problem`](warlock_engine::load::Problem) — which cannot be built
-    /// outside the engine, because the hash error inside it is
-    /// `#[non_exhaustive]`. What is under test here is the wrapping, not the
-    /// engine's wording.
     const PROBLEM: &str = "`/repo/crates/engine` could not be hashed and is stale: \
                            could not read `/repo/crates/engine/src/lib.rs`, so the \
                            subtree has no hash: permission denied";
