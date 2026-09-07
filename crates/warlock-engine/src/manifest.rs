@@ -1,36 +1,3 @@
-//! The pact manifest: `.warlock/pacts.toml`.
-//!
-//! Section 9 of the design doc asks for an escape hatch — whatever Warlock
-//! records has to be something a human can open, read and hand-edit their way
-//! out of. So there is exactly one manifest per repository, it is TOML, it is
-//! committed to git, and it holds nothing but the list of pacted modules and
-//! what was granted to each.
-//!
-//! This module is the in-memory shape of that file, the rules for turning it
-//! into text and back, and the two functions that move it on and off disk:
-//! [`Manifest::save`] and [`Manifest::load`]. Both are given the root directory
-//! — the parent of `.warlock/` — and go straight to it; nothing here searches
-//! upwards for a repository root.
-//!
-//! Two properties are worth stating up front, because everything else follows
-//! from them:
-//!
-//! * **An entry with no granted hash is an entry that was never judged**, and
-//!   the absent key is the whole representation — no sentinel hash, no empty
-//!   string, no `judged = false`. It round-trips with the key still absent.
-//!   Per [`NodeState`](crate::NodeState) unjudged *is* stale, so nothing is
-//!   lost by saying nothing.
-//! * **Paths are stored relative to the manifest's own directory, with forward
-//!   slashes.** Two clones of the same commit sitting at different absolute
-//!   paths, on different operating systems, produce the same bytes.
-//! * **What a person wrote here is read back exactly as written.** An entry's
-//!   optional `scope` is stored, never validated and never normalised on the
-//!   way in or out, so a load-then-save of a hand-edited manifest reproduces it
-//!   byte for byte — including a scope this crate would call malformed. The
-//!   rules for a well-formed one live in
-//!   [`validate_scope`](crate::validate_scope), and are asked by whoever acts
-//!   on the answer.
-
 use std::fmt;
 use std::fs;
 use std::io::Write as _;
@@ -39,54 +6,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// The directory the manifest lives in, directly under the repository root.
-///
-/// Committed to git, like the manifest itself: a pact is a fact about the
-/// repository, not about one developer's checkout.
 const MANIFEST_DIR: &str = ".warlock";
 
-/// The manifest's file name inside [`MANIFEST_DIR`].
 const MANIFEST_FILE: &str = "pacts.toml";
 
-/// How the repository root itself is spelled as a stored path, per
-/// [`to_manifest_path`]: the one module that is an ancestor of every other.
-///
-/// Spelled once, here, because two things walk stored paths against each other
-/// — un-pacting a subtree and asking which scope covers a path — and a root
-/// that meant `"."` to one of them and something else to the other would make
-/// them disagree about the one directory everything sits under.
 pub(crate) const ROOT_MODULE: &str = ".";
 
-/// The schema version this build reads and writes.
-///
-/// A manifest carrying any other version is rejected outright with
-/// [`Error::UnsupportedVersion`] rather than being read as if it were this
-/// one: an old binary guessing at a newer file is how a manifest gets
-/// silently rewritten and loses data.
+// A manifest declaring any other version is refused rather than read as if it
+// were this one. The alternative — read it leniently and keep going — was
+// rejected: an old binary that guesses at a newer file rewrites it with less
+// than it came with.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// The whole manifest: a schema version and the pacted modules.
-///
-/// The fields are private, unlike the tree types, because there *is* an
-/// invariant to protect here: the version is fixed at [`SCHEMA_VERSION`] and
-/// entry order is the order the file is written in, which is what makes two
-/// clones agree byte for byte.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
-    /// Serialised first, so the file opens with `version = 1` above the array
-    /// of tables — TOML puts plain values before tables, and this is also the
-    /// order a reader wants them in.
     #[serde(deserialize_with = "deserialize_version")]
     version: u32,
-    /// One `[[pact]]` table per pacted module, in the order they are written.
-    /// An empty manifest omits the key entirely rather than writing `pact = []`.
     #[serde(rename = "pact", default, skip_serializing_if = "Vec::is_empty")]
     entries: Vec<PactEntry>,
 }
 
 impl Manifest {
-    /// An empty manifest at the current [`SCHEMA_VERSION`].
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -95,10 +36,6 @@ impl Manifest {
         }
     }
 
-    /// A manifest holding `entries`, in the order given.
-    ///
-    /// The order is kept, not sorted: the caller decides what the file looks
-    /// like, and a stable order is what keeps a save from churning the diff.
     #[must_use]
     pub fn with_entries(entries: impl IntoIterator<Item = PactEntry>) -> Self {
         Self {
@@ -107,35 +44,25 @@ impl Manifest {
         }
     }
 
-    /// The schema version, always [`SCHEMA_VERSION`] for a manifest this build
-    /// produced or accepted.
     #[must_use]
     pub const fn version(&self) -> u32 {
         self.version
     }
 
-    /// The pacted modules, in file order.
     #[must_use]
     pub fn entries(&self) -> &[PactEntry] {
         &self.entries
     }
 
-    /// Append `entry` after the entries already held.
     pub fn push(&mut self, entry: PactEntry) {
         self.entries.push(entry);
     }
 
-    /// The entry for the module stored at `module`, or `None`.
-    ///
-    /// `module` is compared as stored, i.e. in manifest-relative forward-slash
-    /// form; [`to_manifest_path`] turns a caller's path into that form.
     #[must_use]
     pub fn entry(&self, module: &str) -> Option<&PactEntry> {
         self.entries.iter().find(|entry| entry.module == module)
     }
 
-    /// The manifest as the text of a `pacts.toml` file.
-    ///
     /// ```
     /// use warlock_engine::{Manifest, PactEntry};
     ///
@@ -148,31 +75,10 @@ impl Manifest {
     /// assert!(!toml.contains("granted_hash"));
     /// # Ok::<(), warlock_engine::manifest::Error>(())
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Serialize`] if the manifest cannot be written as TOML. Nothing
-    /// in the current schema can trigger that, but the fallibility is the
-    /// serialiser's, not ours to swallow.
     pub fn to_toml_string(&self) -> Result<String, Error> {
         toml::to_string(self).map_err(|source| Error::Serialize { source })
     }
 
-    /// Parse the text of a `pacts.toml` file.
-    ///
-    /// The version is checked before any entry is looked at, so a file from a
-    /// future schema is rejected rather than half-read. Entries are then
-    /// parsed one at a time, which is what lets a failure name the entry that
-    /// caused it instead of pointing at the file as a whole.
-    ///
-    /// # Errors
-    ///
-    /// * [`Error::Syntax`] if the text is not TOML, or does not have the shape
-    ///   of a manifest at all (no `version` key, `pact` not an array of
-    ///   tables, an unknown top-level key).
-    /// * [`Error::UnsupportedVersion`] if `version` is not [`SCHEMA_VERSION`].
-    /// * [`Error::Entry`] if one of the `[[pact]]` tables is malformed, naming
-    ///   it by index and, where it can be read, by module path.
     pub fn from_toml_str(text: &str) -> Result<Self, Error> {
         let raw: RawManifest = toml::from_str(text).map_err(|source| Error::Syntax { source })?;
 
@@ -207,19 +113,6 @@ impl Manifest {
         })
     }
 
-    /// Write the manifest to `<root>/.warlock/pacts.toml`, atomically.
-    ///
-    /// `root` is the parent of `.warlock/` — the repository root — and is
-    /// taken as given: nothing here walks upwards looking for one. The
-    /// directory is created if it is not there.
-    ///
-    /// Atomic means the file is never seen half-written, not even if the
-    /// process dies mid-save: the text goes to a temporary file *in the same
-    /// directory* as the target (so the rename cannot cross a filesystem) and
-    /// is then renamed over it. A reader either sees the whole old manifest or
-    /// the whole new one. On success no temporary file is left behind; on
-    /// failure it is cleaned up on a best-effort basis.
-    ///
     /// ```
     /// use warlock_engine::{Manifest, PactEntry};
     ///
@@ -231,12 +124,6 @@ impl Manifest {
     /// assert_eq!(Manifest::load(root.path())?, manifest);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Serialize`] if the manifest cannot be written as TOML, or
-    /// [`Error::Io`] naming the path that failed if the directory cannot be
-    /// created, the temporary file cannot be written, or the rename fails.
     pub fn save(&self, root: impl AsRef<Path>) -> Result<(), Error> {
         // Serialise before touching the filesystem: a manifest that cannot be
         // written as TOML should not leave a new directory behind.
@@ -248,6 +135,8 @@ impl Manifest {
             source,
         })?;
 
+        // The temporary must sit in the same directory as the target, so the
+        // rename below cannot cross a filesystem and stops being atomic.
         let temp = dir.join(temp_file_name(MANIFEST_FILE));
         if let Err(source) = write_and_sync(&temp, text.as_bytes()) {
             drop(fs::remove_file(&temp));
@@ -265,16 +154,6 @@ impl Manifest {
         Ok(())
     }
 
-    /// Read the manifest at `<root>/.warlock/pacts.toml`.
-    ///
-    /// `root` is the parent of `.warlock/`, exactly as for [`Manifest::save`].
-    ///
-    /// **A missing file is [`Error::NotFound`], not an empty manifest.** The
-    /// two are different facts — "this repository has never pacted anything"
-    /// versus "this repository pacted nothing" — and only the caller knows
-    /// which of the two it wants to act on, so nothing is invented here. A
-    /// caller happy to treat the first as the second writes:
-    ///
     /// ```
     /// use warlock_engine::{manifest, Manifest};
     ///
@@ -287,15 +166,11 @@ impl Manifest {
     /// assert_eq!(manifest, Manifest::new());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// * [`Error::NotFound`] if there is no manifest at that path.
-    /// * [`Error::Io`] if there is one but it cannot be read.
-    /// * [`Error::UnsupportedVersion`], [`Error::Syntax`] or [`Error::Entry`]
-    ///   if it can be read but not understood, as per
-    ///   [`Manifest::from_toml_str`] — a corrupt manifest is never confused
-    ///   with a missing one.
+    // Absent is not empty. Answering `Ok(Manifest::new())` for a missing file
+    // was the rejected alternative: "this repository has never pacted anything"
+    // and "this repository pacted nothing" are different facts, and only the
+    // caller knows which one it means to act on. The doctest above is the
+    // caller that wants them to be the same fact, written out.
     pub fn load(root: impl AsRef<Path>) -> Result<Self, Error> {
         let path = manifest_path(root);
         match fs::read_to_string(&path) {
@@ -309,82 +184,41 @@ impl Manifest {
 }
 
 impl Default for Manifest {
-    /// An empty manifest at the current schema version — *not* version zero,
-    /// which is why this is written out rather than derived.
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// One pacted module: where it lives, what documents it, and what was granted.
-///
-/// Both paths are held in manifest-relative forward-slash form, which is why
-/// they are private: [`PactEntry::new`] is the only way in from a caller's
-/// path, and it is the thing that normalises. Read them back as stored with
-/// [`PactEntry::module`] / [`PactEntry::document`], or as real paths under a
-/// root with [`PactEntry::module_path`] / [`PactEntry::document_path`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PactEntry {
-    /// The pacted directory, relative to the manifest's directory.
     module: String,
-    /// The document describing it, relative to the manifest's directory. Held
-    /// separately from `module` because the file name is not Warlock's to
-    /// assume.
     document: String,
-    /// The boundary this module belongs to — `data-plane`, `billing` — or
-    /// `None` for a module that belongs to no particular one.
-    ///
-    /// A person's field, not a run's: it is only ever written by somebody
-    /// saying so, which is why no run can reach it (see
-    /// [`PactEntry::overwrite_run_fields`]) and why an entry that has none
-    /// omits the key entirely rather than writing `scope = ""`.
-    ///
-    /// Stored exactly as written, and **not validated here**. Whether a string
-    /// is a well-formed scope is [`validate_scope`](crate::validate_scope)'s
-    /// question, asked by whoever wants to act on the answer; a scope this
-    /// crate would refuse is still read back byte for byte, because these bytes
-    /// are committed and a load-then-save that rewrote them would put a line in
-    /// a diff nobody authored.
+    // Read back exactly as written, never validated or folded here. These bytes
+    // are committed, so normalising a hand-edited scope on the way through would
+    // put a line in somebody's diff on a save they only asked for because they
+    // pacted something else. `validate_scope` is where a caller asks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scope: Option<String>,
-    /// The subtree hash captured when freshness was last granted. Opaque here:
-    /// this crate neither computes nor verifies it. Absent means never judged.
+    // The absent key is the whole representation of "never judged" — no sentinel
+    // hash, no empty string, no `judged = false`. An entry with no grant
+    // round-trips with the keys still missing, and unjudged is already stale, so
+    // nothing is lost by saying nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     granted_hash: Option<String>,
-    /// When that grant happened, as an RFC 3339 timestamp. A plain string, so
-    /// no date/time crate is dragged in to read a field nothing here does
-    /// arithmetic on. Absent alongside an absent hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     granted_at: Option<String>,
-    /// What this module must still look like for its grant to be carried
-    /// forward without a new pass: the digest of the directory's own non-prose
-    /// files, its children's documents and the document this grant is for, from
-    /// `fitting::carry_hash`. Opaque here, exactly as `granted_hash` is.
-    ///
-    /// It is beside the grant rather than in a cache of its own because it is
-    /// safety-critical and not merely an optimisation. A run consults it to
-    /// decide it need not pay for a pass, and a stale or missing answer that
-    /// said *unchanged* when the inputs had moved would grant freshness no pass
-    /// earned — a false green. Written in the same atomic save as the hash it
-    /// qualifies, the two cannot drift apart.
-    ///
-    /// Absent on every entry granted before this field existed, and absent is
-    /// the safe reading: no recorded input means nothing to compare against,
-    /// which means the pass runs. An old manifest costs a full refresh once and
-    /// records inputs on the way through.
+    // Safety-critical rather than a cache: a run reads it to decide it need not
+    // pay for a pass, so an answer that said "unchanged" when the inputs had
+    // moved would grant freshness no pass earned. It lives beside the grant so
+    // the same atomic save writes both and they cannot drift. Absent means no
+    // shortcut and the pass runs, which is why every pre-carry-hash entry is
+    // safe to read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     carry_hash: Option<String>,
 }
 
 impl PactEntry {
-    /// An entry for `module`, documented by `document`, never judged.
-    ///
-    /// Both paths may be absolute or relative. An absolute path is made
-    /// relative to `root`; a relative one is taken to already be relative to
-    /// it. Either way what gets stored is forward-slash form, so the same
-    /// logical entry under two different roots stores the same string.
-    ///
     /// ```
     /// use warlock_engine::PactEntry;
     ///
@@ -396,12 +230,6 @@ impl PactEntry {
     /// assert_eq!(under_a.granted_hash(), None);
     /// # Ok::<(), warlock_engine::manifest::Error>(())
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// [`Error::PathOutsideRoot`] if either path is not inside `root` (which
-    /// includes a relative path that climbs out with `..`), or
-    /// [`Error::NonUtf8Path`] if either cannot be written as UTF-8 text.
     pub fn new(
         root: impl AsRef<Path>,
         module: impl AsRef<Path>,
@@ -418,11 +246,6 @@ impl PactEntry {
         })
     }
 
-    /// The same entry with a grant recorded: the subtree hash that was judged
-    /// fresh, and when.
-    ///
-    /// `granted_at` is expected to be RFC 3339, but is stored as given —
-    /// nothing here parses it.
     #[must_use]
     pub fn with_grant(
         mut self,
@@ -434,24 +257,12 @@ impl PactEntry {
         self
     }
 
-    /// The same entry with the grant's carry digest recorded: what the module
-    /// must still look like for that grant to stand without a new pass.
-    ///
-    /// Separate from [`PactEntry::with_grant`] rather than a third argument to
-    /// it, because that signature is public and a caller with nothing to record
-    /// must stay able to grant. An entry that never meets this call is an entry
-    /// with no shortcut, which is the safe reading.
     #[must_use]
     pub fn with_carry_hash(mut self, carry_hash: impl Into<String>) -> Self {
         self.carry_hash = Some(carry_hash.into());
         self
     }
 
-    /// The same entry with any grant dropped, i.e. back to never-judged.
-    ///
-    /// The input digest goes with it. It describes what earned *that* grant, so
-    /// left behind it would be a claim about a judgement no longer recorded —
-    /// and the one use anything has for it is deciding a pass can be skipped.
     #[must_use]
     pub fn without_grant(mut self) -> Self {
         self.granted_hash = None;
@@ -460,17 +271,6 @@ impl PactEntry {
         self
     }
 
-    /// The same entry carrying `scope` as its boundary.
-    ///
-    /// Stored as given: nothing here validates it, lower-cases it or trims it.
-    /// A caller that wants a well-formed scope asks
-    /// [`validate_scope`](crate::validate_scope) *before* getting here, and a
-    /// caller taking the string from a person folds its case there too — this
-    /// is the store, not the gate.
-    ///
-    /// The grant is untouched, in both directions: putting a boundary on a
-    /// module says nothing about whether its document is still true.
-    ///
     /// ```
     /// use warlock_engine::PactEntry;
     ///
@@ -490,28 +290,12 @@ impl PactEntry {
         self
     }
 
-    /// The same entry with any scope dropped, i.e. belonging to no particular
-    /// boundary. The grant and both paths are untouched.
     #[must_use]
     pub fn without_scope(mut self) -> Self {
         self.scope = None;
         self
     }
 
-    /// A never-judged, unscoped entry whose paths are **already** in the form
-    /// this manifest stores — relative, forward slashes, `"."` for the root.
-    ///
-    /// [`PactEntry::new`]'s job less the normalising, for the one caller that
-    /// has done that normalising itself: a pact run, which spells its stored
-    /// paths with [`to_manifest_path`] while it is still holding the directory
-    /// to blame if one cannot be spelled. Crate-private for the same reason
-    /// `module` and `document` are private — nothing outside this crate should
-    /// be trusted to have got the form right.
-    ///
-    /// There is deliberately no scope parameter: a run has no scope to hand
-    /// over, so the entry a run creates starts with none and the only way one
-    /// ever appears is a person putting it there with
-    /// [`PactEntry::with_scope`].
     pub(crate) fn stored(module: String, document: String) -> Self {
         Self {
             module,
@@ -523,28 +307,12 @@ impl PactEntry {
         }
     }
 
-    /// Overwrite the fields a pact run owns — `module`, `document` and the
-    /// grant — and **touch nothing else on this entry**.
-    ///
-    /// `grant` is the subtree hash, the timestamp and the carry digest
-    /// together, `None` for a module that was left pacted and unjudged; passing
-    /// `None` clears any grant already recorded here, all three at once. They
-    /// travel as one so no caller can leave a hash without the timestamp that
-    /// says when it was earned, and none can leave a carry digest describing a
-    /// grant that is no longer there — a carry digest outliving its grant is
-    /// exactly the stale answer that could later skip a pass that was owed.
-    ///
-    /// The carry digest is itself an `Option` inside that triple, because a
-    /// directory can be granted while it could not be digested
-    /// (`fitting::carry_hash` answers `None` on any failure). That records the
-    /// grant and no shortcut for next time, which is the safe pair.
-    ///
-    /// Crate-private, and written as a mutation rather than as a fresh entry to
-    /// swap in, precisely so that a field a person owns rather than a run
-    /// survives every pact and every refresh without anyone having to remember
-    /// to carry it across. `scope` is the first such field: it is not a
-    /// parameter here and is not assigned below, so no run can write one and no
-    /// run can clear one.
+    // A mutation rather than a fresh entry to swap in, so that a field a person
+    // owns survives every pact and refresh without anyone remembering to carry
+    // it across: `scope` is not a parameter and is not assigned below, so no run
+    // can write one and no run can clear one. The grant travels as one triple
+    // for the same reason — a carry digest left behind by a cleared grant is a
+    // stale answer that could later skip a pass that was owed.
     pub(crate) fn overwrite_run_fields(
         &mut self,
         module: String,
@@ -562,86 +330,52 @@ impl PactEntry {
         self.carry_hash = carry_hash;
     }
 
-    /// The module directory as stored: relative, forward slashes, `"."` for
-    /// the root of the repository itself.
     #[must_use]
     pub fn module(&self) -> &str {
         &self.module
     }
 
-    /// The document as stored, in the same form as [`PactEntry::module`].
     #[must_use]
     pub fn document(&self) -> &str {
         &self.document
     }
 
-    /// The boundary this module belongs to, exactly as stored, or `None`.
-    ///
-    /// As stored means as written: a hand-edited manifest can hold a string
-    /// this crate would refuse, and it comes back from here unchanged rather
-    /// than corrected or dropped. A caller that needs a *valid* scope asks
-    /// [`validate_scope`](crate::validate_scope) about what it gets.
     #[must_use]
     pub fn scope(&self) -> Option<&str> {
         self.scope.as_deref()
     }
 
-    /// The module directory as a path under `root`.
     #[must_use]
     pub fn module_path(&self, root: impl AsRef<Path>) -> PathBuf {
         from_manifest_path(root, &self.module)
     }
 
-    /// The document as a path under `root`.
     #[must_use]
     pub fn document_path(&self, root: impl AsRef<Path>) -> PathBuf {
         from_manifest_path(root, &self.document)
     }
 
-    /// The subtree hash captured at the last grant, or `None` if this module
-    /// has never been judged.
-    ///
-    /// The hash is opaque to this crate: nothing here computes or verifies it.
     #[must_use]
     pub fn granted_hash(&self) -> Option<&str> {
         self.granted_hash.as_deref()
     }
 
-    /// The carry digest recorded with that grant, or `None`.
-    ///
-    /// `None` means no shortcut is available for this module and the pass runs:
-    /// either it was granted before the field existed, or the run that granted
-    /// it could not digest what it had been shown.
     #[must_use]
     pub fn carry_hash(&self) -> Option<&str> {
         self.carry_hash.as_deref()
     }
 
-    /// When the grant happened, as stored (RFC 3339), or `None`.
     #[must_use]
     pub fn granted_at(&self) -> Option<&str> {
         self.granted_at.as_deref()
     }
 
-    /// Whether this module has ever been judged.
-    ///
-    /// `false` means pacted-but-never-judged, which is
-    /// [`NodeState::PactedStale`](crate::NodeState::PactedStale) — there is no
-    /// fourth state for it, and this crate does not decide freshness either
-    /// way, because that needs a hash it never computes.
     #[must_use]
     pub fn is_judged(&self) -> bool {
         self.granted_hash.is_some()
     }
 }
 
-/// `path` in the form the manifest stores: relative to `root`, forward
-/// slashes, and `"."` for `root` itself.
-///
-/// An absolute `path` is made relative to `root`; a relative one is taken to
-/// already be relative to it, and `root` is then only used to describe an
-/// error. `.` components are dropped.
-///
 /// ```
 /// use std::path::Path;
 /// use warlock_engine::to_manifest_path;
@@ -651,12 +385,9 @@ impl PactEntry {
 /// assert_eq!(to_manifest_path("/repo", "/repo")?, ".");
 /// # Ok::<(), warlock_engine::manifest::Error>(())
 /// ```
-///
-/// # Errors
-///
-/// [`Error::PathOutsideRoot`] if `path` does not sit inside `root`, including
-/// a relative path that climbs out of it with `..`; [`Error::NonUtf8Path`] if
-/// any component is not valid UTF-8, since the manifest is text.
+// Relative to the manifest's own directory, with forward slashes, because these
+// bytes are committed: two clones of one commit at different absolute paths, on
+// different operating systems, have to produce the same file.
 pub fn to_manifest_path(root: impl AsRef<Path>, path: impl AsRef<Path>) -> Result<String, Error> {
     let (root, path) = (root.as_ref(), path.as_ref());
     let outside = || Error::PathOutsideRoot {
@@ -695,11 +426,6 @@ pub fn to_manifest_path(root: impl AsRef<Path>, path: impl AsRef<Path>) -> Resul
     Ok(parts.join("/"))
 }
 
-/// A path stored in the manifest, back as a path under `root`.
-///
-/// The inverse of [`to_manifest_path`]: forward-slash segments are joined onto
-/// `root` with the platform's separator, and `"."` gives `root` itself.
-///
 /// ```
 /// use std::path::Path;
 /// use warlock_engine::from_manifest_path;
@@ -719,11 +445,6 @@ pub fn from_manifest_path(root: impl AsRef<Path>, stored: &str) -> PathBuf {
     path
 }
 
-/// Where the manifest lives under `root`: `<root>/.warlock/pacts.toml`.
-///
-/// `root` is the parent of `.warlock/`, i.e. the repository root. There is no
-/// search: this is a join, and the caller is the one that knows the root.
-///
 /// ```
 /// use std::path::Path;
 /// use warlock_engine::manifest_path;
@@ -738,106 +459,55 @@ pub fn manifest_path(root: impl AsRef<Path>) -> PathBuf {
     root.as_ref().join(MANIFEST_DIR).join(MANIFEST_FILE)
 }
 
-/// A file name for the temporary file a write-then-rename goes through, for a
-/// target file called `target`.
-///
-/// It only has to be unique among whatever else might be writing this
-/// directory right now — process id for other processes, a counter for other
-/// threads in this one. It is a dot file for two reasons: a save interrupted
-/// hard enough to leave one behind at least stays out of a casual `ls`, and the
-/// [`ignore`] walks the rest of the crate is built on skip hidden entries, so a
-/// temporary sitting in a module directory cannot reach a tree, a subtree hash
-/// or a pact request while it exists.
-///
-/// Crate-private and parameterised because [`pact`](crate::pact) writes
-/// `WARLOCK.md` the same way: one idiom for every atomic write in the engine,
-/// not two that can drift apart.
+// The leading dot is load-bearing, not cosmetic: the `ignore` walks the rest of
+// the crate is built on skip hidden entries, so a temporary sitting in a module
+// directory cannot reach a tree, a subtree hash or a pact request while it
+// exists. Naming it without the dot would let a half-written file be hashed.
 pub(crate) fn temp_file_name(target: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!(".{target}.{}.{n}.tmp", std::process::id())
 }
 
-/// Write `bytes` to a fresh file at `path` and flush them to the disk.
-///
-/// The `sync_all` is the point: without it the rename can land before the
-/// contents do, and a crash in between leaves an empty file where a good one
-/// used to be.
 pub(crate) fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = fs::File::create(path)?;
     file.write_all(bytes)?;
+    // The `sync_all` is the point of this function: without it the rename that
+    // follows can land before the contents do, and a crash in between leaves an
+    // empty file where a good manifest used to be.
     file.sync_all()
 }
 
-/// Everything that can go wrong reading, writing or building a manifest.
-///
-/// Hand-rolled rather than derived: an error-handling dependency would buy
-/// nothing over the four impls below, and the variants are the vocabulary a
-/// front end shows a user, so they are worth writing out.
-///
-/// `Display` includes the wrapped cause where there is one, so printing an
-/// error with `{}` alone says the whole story; [`Error::source`] still exposes
-/// it for callers that walk the chain themselves.
-///
-/// [`Error::source`]: std::error::Error::source
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// The manifest file is not there. Distinguishes a repository that has
-    /// never pacted anything from one whose manifest is corrupt.
     NotFound {
-        /// The path that was looked for.
         path: PathBuf,
     },
-    /// The manifest could not be read or written.
     Io {
-        /// The path being read or written.
         path: PathBuf,
-        /// What the filesystem said.
         source: std::io::Error,
     },
-    /// The text is not valid TOML, or has nothing like the shape of a
-    /// manifest.
     Syntax {
-        /// What the TOML parser said, including where.
         source: toml::de::Error,
     },
-    /// The manifest declares a schema version this build does not understand.
-    /// Refusing is deliberate: guessing would risk rewriting a newer file with
-    /// less than it came with.
     UnsupportedVersion {
-        /// The version the file declares.
         found: i64,
-        /// The version this build reads and writes, i.e. [`SCHEMA_VERSION`].
         supported: u32,
     },
-    /// One `[[pact]]` table is malformed or has a key of the wrong type.
-    /// Named by position, and by module path when that much could be read, so
-    /// a hand-editor knows which entry to go and look at.
     Entry {
-        /// Which `[[pact]]` table it was, counting from zero.
         index: usize,
-        /// Its `module` path, if the table had a readable one.
         module: Option<String>,
-        /// What the TOML deserialiser said.
         source: toml::de::Error,
     },
-    /// The manifest could not be turned into TOML.
     Serialize {
-        /// What the TOML serialiser said.
         source: toml::ser::Error,
     },
-    /// A path was handed in that does not sit inside the manifest's root, so
-    /// it has no manifest-relative form.
     PathOutsideRoot {
-        /// The root paths are measured against.
         root: PathBuf,
-        /// The path that fell outside it.
         path: PathBuf,
     },
-    /// A path is not valid UTF-8, and the manifest is a text file people edit.
     NonUtf8Path {
-        /// The path that could not be written as text.
         path: PathBuf,
     },
 }
@@ -898,25 +568,21 @@ impl std::error::Error for Error {
     }
 }
 
-/// The manifest as read before anything is believed about it: the version as
-/// whatever integer the file says, and the entries still raw.
-///
-/// Parsing in two passes is what buys the two error variants that name things
-/// — the version before it is trusted, and each entry by index — instead of
-/// one blanket "this file is wrong".
+// Reading in two passes — the version as whatever integer the file says, the
+// entries still raw — is what buys the two error variants that name something:
+// the version before it is trusted, and each entry by index. Deserialising
+// straight into `Manifest` instead would give one blanket "this file is wrong".
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawManifest {
-    /// The declared schema version, unchecked.
     version: i64,
-    /// The `[[pact]]` tables, unvalidated.
     #[serde(default)]
     pact: Vec<toml::Value>,
 }
 
-/// Reject a foreign schema version even on the derived path, so
-/// `toml::from_str::<Manifest>` cannot quietly do what
-/// [`Manifest::from_toml_str`] refuses to.
+// Looks redundant beside the check in `from_toml_str` and is not: this is the
+// derived path, and without it `toml::from_str::<Manifest>` would quietly accept
+// a version `from_toml_str` refuses.
 fn deserialize_version<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
     let version = u32::deserialize(deserializer)?;
     if version == SCHEMA_VERSION {
@@ -938,7 +604,6 @@ mod tests {
         manifest_path, to_manifest_path,
     };
 
-    /// An entry that has never been judged.
     fn unjudged() -> PactEntry {
         PactEntry::new(
             ".",
@@ -948,24 +613,18 @@ mod tests {
         .expect("a relative path inside the root is storable")
     }
 
-    /// The same entry, judged: a hash and the time it was granted.
     fn judged() -> PactEntry {
         unjudged().with_grant("d0f5a1", "2026-08-19T07:32:00Z")
     }
 
-    /// A parser error to hang the `Display` tests off, since one cannot be
-    /// constructed directly.
     fn a_de_error() -> toml::de::Error {
         toml::from_str::<Manifest>("version = \"one\"").expect_err("a string is not an integer")
     }
 
-    /// A throwaway directory to stand in for a repository root. Each test gets
-    /// its own, so the suite stays parallel-safe and leaves nothing behind.
     fn a_root() -> tempfile::TempDir {
         tempfile::tempdir().expect("a temporary directory")
     }
 
-    /// The file names directly inside `<root>/.warlock`, sorted.
     fn warlock_dir_listing(root: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(root.join(".warlock"))
             .expect("the directory a save just created")
@@ -981,8 +640,6 @@ mod tests {
         names
     }
 
-    /// Write `text` to `<root>/.warlock/pacts.toml` without going through
-    /// [`Manifest::save`], the way a human or a merge conflict would.
     fn hand_write(root: &Path, text: &str) {
         let path = manifest_path(root);
         fs::create_dir_all(path.parent().expect("the manifest has a directory"))
