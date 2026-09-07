@@ -558,7 +558,13 @@ and saying when you do not know. Wait for the next question.";
 ///   behind in a long conversation, which is exactly where a model's memory of
 ///   an instruction goes vague. Two copies of a shape that must not drift apart
 ///   is the cost, and it is cheaper than a document that quietly grew a
-///   `## Implementation plan`.
+///   `## Implementation plan`. They have drifted once already — this named four
+///   of [`DEFAULT_TEMPLATE`](crate::template::DEFAULT_TEMPLATE)'s five sections
+///   and then said "No other sections", so every document came back without
+///   `## Scope` and [`missing_sections`](crate::template::missing_sections)
+///   refused every one of them. The cost is paid by
+///   `the_write_instruction_names_every_section_the_shape_is_checked_for`,
+///   which fails when a section is added to one copy and not the other.
 /// * **Write the decision, not the transcript.** The failure this turn has is a
 ///   summary of the conversation with headings on it. What was decided is the
 ///   product; what was left open is said as one line rather than filled in with
@@ -578,7 +584,10 @@ files and the behaviour; then `## Outcome`, what somebody sees once the change \
 is made; then `## Success criteria`, each one a fact that can be checked as \
 done or not done; then `## Constraints`, what must not change and what the work \
 may not reach for; then `## Out of scope`, named and refused rather than left \
-unsaid. No other sections, and no plan of which files to edit.\n\nWrite what we \
+unsaid; then `## Scope`, the work as numbered slices, each a \
+`### N. What the slice does` line followed by a line reading \
+`depends_on: [<the numbers it needs first>]` and then what that slice decides \
+and why. No other sections, and no plan of which files to edit.\n\nWrite what we \
 decided rather than a summary of how we got there. Where something was left \
 open, say so in a line instead of inventing an answer.";
 
@@ -2518,6 +2527,7 @@ impl Converses for ChatAgent {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::io;
     use std::sync::mpsc;
     use std::thread;
@@ -3366,6 +3376,7 @@ mod tests {
             "## Success criteria",
             "## Constraints",
             "## Out of scope",
+            "## Scope",
         ] {
             assert!(
                 WRITE_INSTRUCTION.contains(section),
@@ -3391,6 +3402,56 @@ mod tests {
                 .iter()
                 .any(|word| word == WRITE_INSTRUCTION),
             "the write instruction reached the argument vector",
+        );
+    }
+
+    /// The shape is written down twice — as instructions in
+    /// [`DEFAULT_TEMPLATE`], and restated inline in [`WRITE_INSTRUCTION`] for
+    /// the reason that constant's docs give — and only one of the two is
+    /// enforced: `write_submit` holds the document to the template's sections
+    /// and writes nothing when one is absent. So a section in the template that
+    /// the instruction never asks for is not a document with a gap in it, it is
+    /// a `/write` that can never succeed, and every brief refused for a reason
+    /// no conversation could have avoided.
+    ///
+    /// That is exactly what happened once: the instruction named four of the
+    /// five and closed with "No other sections", so `## Scope` was dropped by an
+    /// obedient model and refused by warlock. This is the assertion that would
+    /// have caught it.
+    #[test]
+    fn the_write_instruction_names_every_section_the_shape_is_checked_for() {
+        // The template's `## ` lines, read the same way `missing_sections` reads
+        // them, so this test and the check cannot disagree about what a section
+        // is.
+        let checked_for: Vec<&str> = DEFAULT_TEMPLATE
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("## "))
+            .map(str::trim)
+            .filter(|section| !section.is_empty())
+            .collect();
+        assert!(
+            !checked_for.is_empty(),
+            "the built-in shape asks for no sections, so this guards nothing",
+        );
+
+        for section in &checked_for {
+            assert!(
+                WRITE_INSTRUCTION.contains(&format!("## {section}")),
+                "the shape is checked for `## {section}` and the write \
+                 instruction never asks for it: every brief would be refused",
+            );
+        }
+
+        // And said the other way round, against the check itself: a document
+        // carrying exactly what the instruction asks for is a document warlock
+        // will write.
+        let mut obedient = String::from("# A change\n\nWhat is wrong now.\n");
+        for section in &checked_for {
+            let _ = write!(obedient, "\n## {section}\n\nSomething under it.\n");
+        }
+        assert!(
+            crate::template::missing_sections(DEFAULT_TEMPLATE, &obedient).is_empty(),
+            "a document in the instructed shape was refused by the check",
         );
     }
 

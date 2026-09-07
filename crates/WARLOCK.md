@@ -3,19 +3,23 @@
 
 # crates
 
-The crates directory holds warlock's two-crate workspace: warlock-engine, the domain core with no terminal or network dependency, and warlock-tui, the terminal front end and binary that depends on it.
+Workspace directory holding warlock's two crates: warlock-engine, the pure domain core for pacting repositories, and warlock-tui, the front-end crate shipping the warlock binary and its terminal panel.
 
 ## Directories
 
-- `warlock-engine/` — The domain vocabulary for pacting a repository — manifest, freshness ledger, module document tree, agent seam, request fitting — go here for any question about engine behaviour with no TUI dependency.
-- `warlock-tui/` — The terminal front end and warlock binary — tree/panel UI, headless subcommands, config — go here for any question about the running program or its interface.
+- `warlock-engine/` — The domain core: manifest, freshness ledger, module document tree, agent seam, request fitting; open for questions about pacting logic with no terminal or network dependency.
+- `warlock-tui/` — The front-end crate: warlock binary, terminal panel, headless subcommands, and the warlock_tui library of tree/panel/account/thread state.
 
 ## Structure
 
-- warlock-tui depends on warlock-engine; the dependency edge runs TUI -> engine and never the reverse
-- warlock-engine defines the domain types and logic that warlock-tui's binary consumes
+- warlock-tui depends on warlock-engine; the dependency edge runs TUI -> engine and never back
+- warlock-engine has no TUI, terminal, HTTP or Anthropic dependency
+
+## Rules
+
+- Lint configuration is set once in the workspace root manifest's [workspace.lints] and inherited by both member crates
 
 ## Where to look
 
-- what is the core domain logic with no terminal or network dependency → `warlock-engine` `pact_subtree`
-- what produces the warlock binary and its terminal UI → `warlock-tui` `App`
+- domain vocabulary for pacting a repository, manifest, freshness ledger → `warlock-engine` `pact_subtree`
+- the warlock binary, terminal panel, headless subcommands → `warlock-tui` `warlock_tui`
