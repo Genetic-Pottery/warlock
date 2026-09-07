@@ -1,91 +1,20 @@
-//! What the front end holds between keystrokes.
+//! What the front end holds between keystrokes: a plain value, no terminal.
 //!
-//! The tree is a tree, but the screen is a list of lines, so the app state
-//! keeps the engine's depth-first walk flattened into [`Row`]s and remembers
-//! which one is selected. Flattening here, rather than in the renderer, means
-//! the renderer and the key handler agree on what "the next row" is without
-//! either of them walking the tree again.
+//! The engine hands over a [`Tree`]; the screen wants a list of lines. So
+//! `walk_of` flattens the depth-first walk once into `all_rows` — every node,
+//! plus a row per file each node lists — and `reflow` derives the drawn `rows`
+//! from it by three filters in a fixed order: files, then pacted-only, then
+//! collapsed. `all_rows` is never filtered in place, so every view toggle is
+//! the same re-derivation and turning one off puts the rest back untouched.
 //!
-//! The whole walk is kept, though, not only the part on screen: collapsing a
-//! directory re-runs that flattening with the directory's descendants filtered
-//! out, and expanding it re-runs the same flattening with them back, at the
-//! depths and in the order the engine gave them. Which directories are
-//! collapsed is remembered as node *paths* rather than row indices, because an
-//! index means nothing once the row list has been rebuilt — and rebuilding it
-//! is exactly what a reloaded tree does.
-//!
-//! Narrowing the view to what Warlock manages is the same kind of thing, and
-//! goes through the same re-flattening: a pacted-only flag that drops every row
-//! that is neither pacted nor on the way to something pacted. It is a filter
-//! over the walk, not a rule about what the tree contains — the tree keeps every
-//! node it was loaded with, the flag says which of them are worth drawing right
-//! now, and turning it off puts the rest back untouched.
-//!
-//! Showing the files inside a directory is the third flag of that same shape.
-//! The files a node lists are flattened into rows alongside the nodes, once,
-//! when the app is built; the flag decides whether those rows are drawn. Doing
-//! it that way rather than splicing files in when the flag goes on is what lets
-//! the flag go off again without the tree: the rows were never thrown away, so
-//! turning files off is the same filter-and-re-flatten every other view change
-//! goes through. A file row is a row for something that is not a node — no
-//! document, no children, and the state of the directory holding it, because
-//! the colour of a file is the colour of its module — so the operations that
-//! act on nodes refuse it rather than half-working on it.
-//!
-//! A tree taller than the terminal does not fit, so the app also remembers
-//! which slice of those rows is on screen: a scroll offset, kept in step with
-//! the selection by every method that moves it, and computed by one pure
-//! function (`scroll_offset_for`) that the tests can drive directly.
-//!
-//! It also holds the one line it has to say about the last keystroke — why a
-//! pact was refused, say. That wording is state like everything else here, set
-//! by whatever refused and dropped by the next movement, so the renderer draws
-//! it without knowing what happened and the key handler never has to explain
-//! itself.
-//!
-//! Which of the screen's three places the keys drive is view state of the same
-//! kind, and lives here for the same reason: it is a fact about what the reader
-//! is looking at, it changes what a keystroke does, and a rule about keystrokes
-//! that only an event loop with a terminal attached could demonstrate is a rule
-//! nobody can test. See [`Focus`].
-//!
-//! A pointer asks for the same moves in a different grammar, and gets methods of
-//! its own rather than a mode on the keys': it names a row instead of a
-//! direction, and it names the pane it is over instead of accepting whichever
-//! pane the keys are driving. So [`App::select_row`], [`App::select_next_by`],
-//! [`App::select_previous_by`], [`App::scroll_panel_down`] and
-//! [`App::scroll_panel_up`] never consult the focus, while landing in the same
-//! places the keys land — a wheel notch over the tree is three presses of the
-//! down key, a wheel notch over the panel is three of them at the panel, follow
-//! rule and all. Which pointer landed where is somebody else's arithmetic; this
-//! type is told the answer.
-//!
-//! A pact in flight is the same kind of thing said over a longer span. A subtree
-//! pact is minutes of work happening somewhere else, so the app holds which
-//! directory that work is on and how far down the list it has got — set and
-//! cleared by whoever is running it, since only they know — and the renderer
-//! draws a line from it. It is deliberately not a message: a message belongs to
-//! the last keystroke and the next keystroke takes it down, while a pact goes on
-//! running whatever the reader presses, so the two are separate fields and
-//! movement clears only the one that belongs to a keystroke.
-//!
-//! What that pact has been *doing* is the same kind of thing again, held one
-//! field along: the [`Account`](crate::Account) of the run, or nothing at all before the first
-//! pact of the session. The account is one of the panel's two cards — the other
-//! is the document last read — and the window onto each is view state exactly as
-//! the tree's is: a height set per frame for the slot they share, and an offset
-//! and one bit apiece saying whether that window is following the
-//! newest line. Following is not a mode the app has to be reminded of on every
-//! appended line: while the flag is on, the offset *is* the end of the account,
-//! computed when it is asked for, so a line arriving during a redraw pins itself
-//! to the bottom by arithmetic rather than by a hook somebody could forget to
-//! call. Scrolling up turns the flag off and the window stops where the reader
-//! left it; scrolling back to the end turns it on again, because being at the
-//! end is the whole of what following means.
-//!
-//! Nothing here touches a terminal: it is a plain data structure with plain
-//! methods, so every rule about how the selection moves is testable with
-//! nothing attached to stdout.
+//! Two consequences worth knowing before editing anything here. First, what the
+//! reader has selected and which directories are collapsed are remembered as
+//! *paths*, never as row indices: `reflow` and [`reseat_on`] both rebuild the
+//! row list, and an index into the old list names a different node in the new
+//! one. Second, `reflow` is meant to be the only thing that turns `all_rows`
+//! into `rows`; `App::insert_file_row` is the single exception, and it has to
+//! ask the same three filters in the same order or the spliced row and the next
+//! `reflow` will disagree about what is on screen.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -97,126 +26,35 @@ use warlock_engine::{IntoDocument, NodeState, StateCounts, Tree, to_manifest_pat
 
 use crate::panel::{Panel, Showing};
 
-/// One line of the flattened tree: what to draw, how far to indent it, and
-/// which colour it takes.
+/// One line of the flattened tree.
 ///
-/// A row owns its path rather than borrowing from the tree, so [`App`] is a
-/// self-contained value that can be built, moved and asserted on without
-/// lifetimes threading through the event loop.
+/// A row owns its path and document rather than borrowing from the [`Tree`], so
+/// [`App`] is a self-contained value with no lifetimes threading through the
+/// event loop, and a key handler can refuse a keystroke from the row alone
+/// without going back to the tree for a second copy of the same fact.
 ///
-/// The document comes along for the same reason: pacting a node needs one, and
-/// the row is what the key handler has in its hand when the key is pressed.
-/// Fetching it back out of the tree at that moment would mean keeping the tree
-/// alongside the rows and looking a path up in it, which is two sources for one
-/// fact.
-///
-/// The child count comes along for a third reason of the same shape: a
-/// directory with no children can be neither collapsed nor expanded, and a row
-/// that could not say so would send the renderer back to the tree to find out
-/// whether to draw a marker.
-///
-/// Most rows stand for a node. A row can also stand for one of the files a node
-/// lists — see [`Row::file`] — which is drawn like any other row and is nothing
-/// like one otherwise: it documents nothing, contains nothing, and is counted
-/// nowhere.
-///
-/// Whether a `.warlockignore` keeps the row's content out comes along for the
-/// same reason the document does: the pact key has to refuse such a row, and
-/// [`App`] touches no filesystem, so the fact has to be here by the time the key
-/// is pressed. See [`Row::is_ignored`].
-///
-/// Whether a file row is its directory's own `WARLOCK.md` comes along for a
-/// related reason: the fact is a comparison against the node's document, the tree
-/// is gone by the time anything asks, and the only way to answer it later would
-/// be to spell the file's name a second time. See [`Row::is_document`].
-///
-/// The scope written on the row's own pact entry comes along for the same reason
-/// again: the renderer draws the label beside the name and has nothing but the
-/// row in its hand. See [`Row::scope`].
+/// Most rows stand for a node. The rest stand for one of the files a node lists
+/// (see [`Row::file`]): drawn like any other row, and nothing like one
+/// otherwise — it documents nothing, holds nothing, and is counted nowhere.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Row {
-    /// How deep the node sits: `0` for the root, `1` for its children.
     pub depth: usize,
-    /// The path of the node this row stands for, exactly as the engine stores
-    /// it.
     pub path: PathBuf,
-    /// The `WARLOCK.md` documenting the node, straight from
-    /// [`warlock_engine::Node`], or `None` for an ordinary directory that has
-    /// no documentation yet.
     pub document: Option<PathBuf>,
-    /// What Warlock knows about the node, which is what colours the row.
+    /// A file row carries the state of the directory holding it, which is what
+    /// makes a file take its module's colour.
     pub state: NodeState,
-    /// How many child *nodes* the node has in the tree — not how many are
-    /// drawn, which is none of them while the node is collapsed, and not how
-    /// many rows hang under it, which counts the files it lists as well.
-    ///
-    /// A fact about the tree, and only that. Whether collapsing this row would
-    /// hide anything is a question about the view — the file toggle and the
-    /// pacted-only filter both change the answer without the tree moving — so it
-    /// is [`App::can_collapse`] that decides it, not this.
     pub children: usize,
-    /// Whether the row stands for a file rather than a node. See [`Row::file`],
-    /// and ask it with [`Row::is_file`] rather than reading this: what the flag
-    /// *means* is the interesting part.
     pub file: bool,
-    /// Whether this file row is the `WARLOCK.md` of the directory listing it —
-    /// the one file in that listing Warlock wrote. Ask it with
-    /// [`Row::is_document`], and set it with [`Row::with_document_row`].
-    ///
-    /// Never true on a directory row: a directory *has* a document (see
-    /// [`Row::document`]) and is not one.
-    ///
-    /// Carried rather than worked out where it is wanted, for the reason every
-    /// other fact on a row is carried: the answer is a comparison against
-    /// [`warlock_engine::Node::document`], the tree the rows were flattened from
-    /// is not kept, and the alternative — matching the row's file name against
-    /// the literal `WARLOCK.md` — would be a second spelling of a name the engine
-    /// owns and would call any stray `WARLOCK.md` a document even where the load
-    /// found none.
+    /// Set on the one file row that is its directory's own `WARLOCK.md`. Kept
+    /// on the row because the comparison against the node's document cannot be
+    /// made again once the tree is gone.
     pub document_row: bool,
-    /// Whether the repository's `.warlockignore` keeps this row's content out of
-    /// Warlock, straight from [`warlock_engine::Node::is_ignored`]. Ask it with
-    /// [`Row::is_ignored`], and set it with [`Row::with_ignored`].
     pub ignored: bool,
-    /// The scope written on this row's *own* pact entry, straight from
-    /// [`warlock_engine::Node::scope`], or `None` where it has none — which
-    /// includes every unpacted directory, since a scope lives on a pact entry
-    /// and an unpacted directory has none, and every file row, since a file has
-    /// no entry either.
-    ///
-    /// This directory's scope and never an ancestor's. The label in the tree
-    /// marks where a boundary *starts*, so a directory covered only by a scope
-    /// written further up carries `None` here and draws nothing; the different
-    /// question — which scope covers a given path — is
-    /// [`warlock_engine::scope_covering`]'s, and nothing that fills this in may
-    /// ask it, or the two answers would drift.
-    ///
-    /// It colours nothing and gates nothing: a scoped row is drawn in the same
-    /// state colour it would have had unlabelled. Set it with
-    /// [`Row::with_scope`].
     pub scope: Option<String>,
 }
 
 impl Row {
-    /// A row for a childless node at `path`, documented by `document`, sitting
-    /// at `depth`, in `state`.
-    ///
-    /// `document` takes whatever [`warlock_engine::Node::new`] takes: anything
-    /// path-like for a node that has one, or `None` for a directory that has
-    /// no documentation yet.
-    ///
-    /// Childless is the safe default rather than the common case: a row that
-    /// claims children it does not have is a row the collapse key hides
-    /// nothing with. Say otherwise with [`Row::with_child_count`].
-    ///
-    /// Covered by Warlock is the safe default in the same way: a row wrongly
-    /// claiming a `.warlockignore` keeps it out is a row the pact key refuses
-    /// for a reason nobody wrote down. Say otherwise with
-    /// [`Row::with_ignored`].
-    ///
-    /// Unscoped is the safe default for the same kind of reason: a scope is
-    /// something somebody wrote on a pact entry, so a row nobody told about one
-    /// has none to draw. Say otherwise with [`Row::with_scope`].
     #[must_use]
     pub fn new(
         depth: usize,
@@ -237,31 +75,6 @@ impl Row {
         }
     }
 
-    /// A row for the file at `path`, sitting at `depth`, in `state`.
-    ///
-    /// A file is not a node: it has no document of its own, no children, and no
-    /// state the engine ever decided for it. What it has is the state of the
-    /// directory holding it, handed over here by the caller doing the
-    /// flattening, because the design doc's rule is that a file takes its
-    /// module's colour — the colour says which module the file belongs to, not
-    /// something about the file. That copy is the reason
-    /// [`App::set_subtree_state`] writes a new state onto a directory's file
-    /// rows as well as onto the directory: a copy nobody updates is a colour
-    /// that goes quietly stale.
-    ///
-    /// `depth` is the caller's too, and is one deeper than the directory's, so
-    /// the file indents under it.
-    ///
-    /// The state is the only thing a file borrows from the directory holding it.
-    /// The scope is not: a scope lives on a pact entry, a file has none, and the
-    /// label in the tree marks the directory that owns the boundary rather than
-    /// everything under it. So a file row is unscoped even inside a scoped
-    /// directory, and there is no builder call here to make it otherwise.
-    ///
-    /// An ordinary file is the safe default in one more way: a row nobody told
-    /// otherwise is not the holding directory's document, because deciding that
-    /// takes the directory's [`warlock_engine::Node::document`] and this knows
-    /// nothing of any node. Say otherwise with [`Row::with_document_row`].
     #[must_use]
     pub fn file(depth: usize, path: impl Into<PathBuf>, state: NodeState) -> Self {
         Self {
@@ -270,245 +83,90 @@ impl Row {
         }
     }
 
-    /// The same row, standing for a node with `children` children of its own.
     #[must_use]
     pub const fn with_child_count(mut self, children: usize) -> Self {
         self.children = children;
         self
     }
 
-    /// The same row, with the repository's `.warlockignore` keeping its content
-    /// out of Warlock, or not.
-    ///
-    /// [`App::from_tree`] says this from [`warlock_engine::Node::is_ignored`],
-    /// and it is the whole of how the fact reaches [`App::toggle_pact`]. It is a
-    /// builder rather than an argument to [`Row::new`] so that a test can hand a
-    /// row over without a tree, a loader or a disk behind it.
     #[must_use]
     pub const fn with_ignored(mut self, ignored: bool) -> Self {
         self.ignored = ignored;
         self
     }
 
-    /// The same row, standing for the document of the directory listing it, or
-    /// not.
-    ///
-    /// [`App::from_tree`] says this by comparing the file's path against the
-    /// holding node's [`warlock_engine::Node::document`], and
-    /// [`App::insert_file_row`] says it of every row it splices, since its caller
-    /// hands over the document by construction. Between them that is the whole of
-    /// how the fact reaches a row: nothing downstream re-derives it, and nothing
-    /// downstream spells `WARLOCK.md`. It is a builder rather than an argument to
-    /// [`Row::file`] so that a test can hand a row over without a tree, a loader
-    /// or a disk behind it.
     #[must_use]
     pub const fn with_document_row(mut self, document_row: bool) -> Self {
         self.document_row = document_row;
         self
     }
 
-    /// The same row, carrying — or no longer carrying — the scope written on its
-    /// own pact entry.
-    ///
-    /// [`App::from_tree`] says this from [`warlock_engine::Node::scope`], and it
-    /// is the whole of how the fact reaches the renderer. It is a builder rather
-    /// than an argument to [`Row::new`] so that a test can hand
-    /// [`App::from_rows`] a scoped row without a tree, a loader or a disk behind
-    /// it.
-    ///
-    /// Pass this row's own scope and never an ancestor's: see [`Row::scope`].
     #[must_use]
     pub fn with_scope(mut self, scope: Option<String>) -> Self {
         self.scope = scope;
         self
     }
 
-    /// Whether the node has child nodes in the tree.
-    ///
-    /// Not the question the collapse key asks — see [`App::can_collapse`]. A
-    /// directory holding nothing but files has no children by this and still
-    /// has rows under it when the file toggle is on; a directory whose children
-    /// the pacted-only filter has taken away has children by this and nothing
-    /// under it on screen.
     #[must_use]
     pub const fn has_children(&self) -> bool {
         self.children > 0
     }
 
-    /// Whether the row stands for a file rather than for a node.
-    ///
-    /// The one bit that tells a file row from a childless, undocumented
-    /// directory, which is otherwise the same set of fields. Everything that
-    /// acts on a node — pacting, above all — asks this first.
     #[must_use]
     pub const fn is_file(&self) -> bool {
         self.file
     }
 
-    /// Whether this row is the `WARLOCK.md` of the directory listing it: the one
-    /// row under a directory that Warlock itself wrote.
-    ///
-    /// A fact carried from the load, never worked out here — see
-    /// [`Row::document_row`] for why. True only on file rows, and on at most one
-    /// file row per directory, since a node has at most one document.
-    ///
-    /// It says nothing about how the row is drawn: a document row takes its
-    /// directory's colour like every other file row, and has no colour, shade,
-    /// marker or label of its own.
     #[must_use]
     pub const fn is_document(&self) -> bool {
         self.document_row
     }
 
-    /// Whether a `.warlockignore` in the repository keeps this row's content out
-    /// of Warlock.
-    ///
-    /// A fact carried from the load, never worked out here: this reads a stored
-    /// flag and opens nothing, which is what lets [`App::toggle_pact`] refuse
-    /// such a row without a filesystem under it.
-    ///
-    /// It says nothing about how the row is drawn. An excluded directory loads
-    /// as [`NodeState::Unpacted`] and is gray like any other unpacted directory
-    /// — gray already means outside Warlock's management — so there is no
-    /// colour, shade or marker of its own for this.
     #[must_use]
     pub const fn is_ignored(&self) -> bool {
         self.ignored
     }
 }
 
-/// What a pact toggle asked for, for the caller that has to carry it out.
-///
-/// [`App::toggle_pact`] moves the colours on screen; the documents and the
-/// manifest are somebody else's, so this says which directory the key was
-/// pressed on and which way it went, and lets that somebody act on it.
-///
-/// There is no document in here, and no list of directories either. A pact
-/// covers the directory and everything below it, and the documents are the pact
-/// operation's own output rather than something the front end finds and hands
-/// over: the one directory the user chose is the whole of what a caller needs
-/// to run that operation over the subtree, or to undo it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PactToggle {
-    /// The directory the key was pressed on, whose subtree the toggle covers.
     pub path: PathBuf,
-    /// Whether the subtree is pacted *now*, after the toggle: `true` means the
-    /// pact operation should run over it, `false` that its entries should go.
     pub pacted: bool,
 }
 
-/// What the pact key would mean on the selected row: the answer
-/// [`App::pact_intent`] gives.
+/// What the pact key would do, asked without doing it.
 ///
-/// Three cases and not two, because "nothing to press it on" and "pressed on
-/// something that cannot take it" are answered differently: an empty tree has
-/// nothing to say, and a file row has a sentence saying what the row is. The
-/// sentence comes back rather than being written, so asking is free of
-/// consequence — see [`App::pact_intent`].
+/// [`App::toggle_pact`] is this decision plus its effect; keeping the decision
+/// separate is what lets a caller show the refusal — or count the nodes a pact
+/// would reach — without moving any state.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PactIntent {
-    /// The press means this: which directory, and which way.
     Toggles(PactToggle),
-    /// The press means nothing, and this is the one line saying why.
     Refused(String),
-    /// There is no row under the selection at all. Not a refusal: there was
-    /// nothing to refuse.
     NoRow,
 }
 
-/// Which kind of run is in flight: a pact over a whole subtree, or a refresh
-/// over the stale parts of one.
-///
-/// The two runs are the same run in every way the app cares about — one worker,
-/// one channel, one account, one cancel, one line on the footer — and differ in
-/// exactly one: the verb that line is worded with. So this is a kind on the one
-/// in-flight record rather than a second in-flight state, and everything that
-/// asks whether something is running ([`App::is_pacting`], [`App::is_in_flight`],
-/// [`App::in_flight_covers`]) goes on asking it without knowing which kind it
-/// got.
-///
-/// It is public because the caller starting the run is the only one who knows
-/// which it started: see [`App::set_run_in_flight`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Run {
-    /// A pact: every directory in the subtree is described, whatever state it
-    /// was in.
     Pact,
-    /// A refresh: only the stale directories of the subtree are described, and
-    /// the fraction counts those rather than all of them.
     Refresh,
 }
 
-/// A pact running somewhere else, as far as the screen is concerned: the
-/// directory being worked now, where it sits in the run, and which kind of run
-/// it is.
-///
-/// The directory is kept as the path the caller was handed, not as finished
-/// text, so the label is spelled relative to the root of the tree *on screen*
-/// when it is drawn — see [`App::pact_line`]. `position` is one-based and
-/// counts directories, so it reads as `(3/12)` beside a `total` that does not
-/// move for the length of the run.
-///
-/// Private, and what comes out of it comes out finished: the yes-or-no of
-/// [`App::is_in_flight`], the worded line of [`App::pact_line`], and the
-/// already-spelled [`RunHeader`] of [`App::run_header`]. The path is answered
-/// against or spelled, never handed back, so there is no second place the
-/// directory's wording could be decided. A renderer needs to know which row of
-/// the tree is the one being worked, and asking about a path it already holds
-/// settles that without learning how the run is spelled.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct InFlight {
-    /// The directory the pact is working now.
     path: PathBuf,
-    /// Which directory of the run this is, counting from one.
     position: usize,
-    /// The furthest position this run has reached: `position` at its high-water
-    /// mark, which is what a bar is filled to.
-    ///
-    /// It is state on the record rather than something worked out when a frame
-    /// is drawn, because "furthest so far" is a fact about the run's history and
-    /// a draw sees only the run's present. It is seeded from the position the
-    /// run starts at and only ever rises, so a directory reported out of order —
-    /// a late event, a re-send, an engine that counts a retry backwards — cannot
-    /// take a fill that has already been drawn back down. It goes with the rest
-    /// of the record on [`App::clear_pact_in_flight`], so the next run starts its
-    /// fraction again rather than inheriting this one's.
-    ///
-    /// `position` is left exactly as the caller said it, because the footer
-    /// reports what is happening now: see [`App::pact_line`].
+    // Highest `position` this run has been told about. Nodes are not
+    // necessarily reported in order, so the header counts by this and the
+    // message line by `position`; a header that could go backwards would read
+    // as work being undone.
     reached: usize,
-    /// How many directories the whole run covers.
     total: usize,
-    /// Whether the run is a pact or a refresh, which decides the verb
-    /// [`App::pact_line`] words the line with and nothing else.
     run: Run,
 }
 
-/// The run in flight as a header states it: which run it is, the directory it is
-/// working spelled for the tree on screen, and how far through the run that
-/// directory is.
-///
-/// A snapshot, made when it is asked for and thrown away after — see
-/// [`App::run_header`]. Nothing keeps one, and nothing outside this module can
-/// make one: the fields are read-only, so the only way to a header is a run
-/// actually being in flight.
-///
-/// It exists because a header needs the *parts* where the footer needs a
-/// sentence. [`App::pact_line`] words one line and hands over the words;
-/// a header sets the directory in one place and a bar filled to
-/// `position/total` in another, and cannot take those out of a sentence again.
-/// So the parts come out here, already spelled — `directory` is
-/// [`App::label_for`]'s spelling, decided at the moment the header is asked for
-/// and against the tree that is on screen then, which is the same rule the
-/// footer's line is spelled by and the same single speller.
-///
-/// `position` is the run's high-water mark rather than the last position
-/// reported, so a fill drawn from it never goes backwards within one run: see
-/// `InFlight::reached`. `total` is the engine's own count of the directories the
-/// run plans to visit and does not move for the length of it, so
-/// `position/total` is the whole of what a bar is filled to — there is nothing
-/// here to estimate a remaining time from, and nothing that moves when a clock
-/// moves.
+/// The run in flight, as the header draws it. [`RunHeader::position`] is the
+/// furthest node this run has reached, not the one it is on.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RunHeader {
     run: Run,
@@ -518,90 +176,43 @@ pub struct RunHeader {
 }
 
 impl RunHeader {
-    /// Whether the run being reported is a pact or a refresh.
     #[must_use]
     pub const fn run(&self) -> Run {
         self.run
     }
 
-    /// The directory being worked, spelled relative to the root of the tree on
-    /// screen the way every other label in the front end is: see
-    /// [`App::label_for`].
     #[must_use]
     pub fn directory(&self) -> &str {
         &self.directory
     }
 
-    /// Which directory of the run is being worked, counting from one — at the
-    /// furthest the run has got, so it never goes backwards.
     #[must_use]
     pub const fn position(&self) -> usize {
         self.position
     }
 
-    /// How many directories the whole run covers, which does not move for the
-    /// length of it.
     #[must_use]
     pub const fn total(&self) -> usize {
         self.total
     }
 }
 
-/// Which of the screen's three places the keys are driving.
+/// Which of the screen's three places the movement keys drive.
 ///
-/// The screen is a tree column, a panel beside it, and the composer at the foot
-/// of the panel's column; a key that moves a selection has to be about one of
-/// them, and a key that is a letter has to be either a command or a character
-/// somebody typed. This says which. Three variants and no fourth: the footer
-/// runs the width of the screen and is nobody's to drive, so there is nothing
-/// else focus could land on.
-///
-/// It is deliberately not a general "which widget has the cursor" — nothing here
-/// is a widget, and the one cursor there is sits at the end of the composer's
-/// draft by construction. It is one piece of view state, cycled by one key, read
-/// by the renderer to decide which border is lit and by [`App`] to decide
-/// whether a keystroke is a command about a pane or a character for the draft:
-/// see [`App::toggle_focus`] and [`App::focus`].
-///
-/// [`Focus::Composer`] is the one variant that is not always available: the
-/// composer is drawn under the conversation and under neither of the other two
-/// cards, and focus must never sit on a field nobody can see. That rule lives on
-/// the app rather than here, because it is a fact about which card is showing —
-/// see [`Panel::composer_showable`](crate::Panel::composer_showable).
+/// [`Focus::next`] cycles through all three unconditionally; whether the
+/// composer is reachable is [`App::toggle_focus`]'s question, not this type's,
+/// because only the app can see the panel. The pointer methods
+/// ([`App::select_row`], [`App::scroll_panel_down`] and their neighbours) name
+/// their pane instead and never consult the focus at all.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Focus {
-    /// The tree column. The movement keys move its selection, which is what
-    /// they have always done, and this is where a freshly built [`App`] starts:
-    /// the tree is what warlock opens on and the thing there is anything to do
-    /// with yet.
     #[default]
     Tree,
-    /// The panel beside it. The same movement keys scroll the panel's window
-    /// over whichever of its two cards is showing — the account of the pact or
-    /// the document last read, see [`Panel::scroll_offset`](crate::Panel::scroll_offset) — and the tree's
-    /// selection stays exactly where the reader left it.
     Panel,
-    /// The composer under the panel. The keyboard is the draft's while focus is
-    /// here: a letter is the letter and not the command it spells, and a
-    /// movement key moves nothing at all, because neither the tree's selection
-    /// nor the panel's window is what the reader is pointed at. See
-    /// [`Composer`](crate::Composer).
     Composer,
 }
 
 impl Focus {
-    /// The next place round the cycle: what [`App::toggle_focus`] moves to.
-    ///
-    /// Written as a method on the enum rather than as arithmetic on an index
-    /// somewhere, so that "focus is one of these places" stays the thing the
-    /// type says and a fourth place would be a compile error here rather than a
-    /// silent wrong answer.
-    ///
-    /// The order is the order they sit on screen: the tree, then the panel, then
-    /// the composer beneath it, then round to the tree again. Whether the
-    /// composer is a place the cycle can *stop* is not this method's business —
-    /// it is a fact about which card the panel is showing, and [`App`] answers
-    /// it.
     #[must_use]
     pub const fn next(self) -> Self {
         match self {
@@ -611,18 +222,6 @@ impl Focus {
         }
     }
 
-    /// Whether a movement key moves the tree's selection: whether this focus is
-    /// the one driving the tree column.
-    ///
-    /// The single place the rule is written down, so every movement method asks
-    /// the same question rather than each of them matching on the enum in its
-    /// own way. `false` does not mean the key does something else here — at the
-    /// panel it scrolls the panel's window, at the composer it does nothing
-    /// whatever. See [`Focus::drives_the_panel`] and `App::movement`.
-    ///
-    /// Spelled out arm by arm rather than as a `matches!`, so that a variant
-    /// added later has to be answered for here instead of quietly falling
-    /// through to `false`.
     #[must_use]
     pub const fn drives_the_tree(self) -> bool {
         match self {
@@ -631,14 +230,6 @@ impl Focus {
         }
     }
 
-    /// Whether a movement key scrolls the panel's window: the same question of
-    /// the other pane that a movement key can be about.
-    ///
-    /// The pair of them is not one boolean, because there are three places focus
-    /// can be and only two of them a movement key means anything at: the
-    /// composer answers `false` to both, which is exactly how "a movement key at
-    /// the composer moves nothing" is written down once. Arm by arm for
-    /// [`Focus::drives_the_tree`]'s reason.
     #[must_use]
     pub const fn drives_the_panel(self) -> bool {
         match self {
@@ -648,49 +239,21 @@ impl Focus {
     }
 }
 
-/// What this machine holds for the repository on screen, as the header states
-/// it.
+/// Which sigils the machine holds, for the one line the chrome draws about it.
 ///
-/// A **scope** is a fact about a directory, committed inside the repository; a
-/// **sigil** is what one person on one machine holds, recorded by `warlock
-/// config` at `<home>/.warlock/<project>/config.toml` and never inside a
-/// repository. Nothing here matches the one against the other — this is a
-/// statement, not a rule — and nothing here reads a disk either: whoever loaded
-/// the config turns what they found into one of these three values and hands it
-/// over with [`Chrome::with_sigils`], exactly as the header's text is worded
-/// once by [`Chrome::of`].
-///
-/// Three variants because there are exactly three things the header can
-/// honestly say, and the middle one is why this is not an `Option<Vec<String>>`:
-/// a config that is there and will not parse must never look like a machine
-/// that holds nothing, since the two mean opposite things about what is on disk.
-/// The absent file and the empty set are deliberately the *same* value, on the
-/// other hand — both are "nothing is held", and a reader who has never run
-/// `warlock config` should see the header they have always seen.
+/// `Nothing` and `Unknown` are not the same answer and must not be merged:
+/// holding no sigil draws no line at all, while failing to find out draws
+/// "holding unknown". [`Sigils::held`] folds an empty list into `Nothing`, so
+/// `Held` is never empty and the line is never a dangling "holding".
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum Sigils {
-    /// Nothing is held: no config file, an empty set in one, or no home
-    /// directory to look in at all. The header says nothing whatever about
-    /// sigils in this state, which is what makes it the default — an app nobody
-    /// has told is an app with nothing to state.
     #[default]
     Nothing,
-    /// The sigils held, in the order the config lists them. Never empty: an
-    /// empty set is [`Sigils::Nothing`], which is what [`Sigils::held`] is for.
     Held(Vec<String>),
-    /// The config is there and could not be read or understood. Said out loud,
-    /// so broken is never drawn as absent.
     Unknown,
 }
 
 impl Sigils {
-    /// What was read out of the config, with the empty set folded into
-    /// [`Sigils::Nothing`].
-    ///
-    /// The one constructor for a holding, so the "never empty" invariant on
-    /// [`Sigils::Held`] is kept by construction rather than by every caller
-    /// remembering it. It is the loader's natural shape too: the engine hands
-    /// back a list, and an empty list is a machine that holds nothing.
     #[must_use]
     pub fn held(sigils: impl IntoIterator<Item = impl Into<String>>) -> Self {
         let sigils: Vec<String> = sigils.into_iter().map(Into::into).collect();
@@ -700,30 +263,6 @@ impl Sigils {
         Self::Held(sigils)
     }
 
-    /// The sigils held, as the matcher takes them.
-    ///
-    /// The one place the three states are flattened into the two the boundary
-    /// question has, so what each one means to a refusal is written down once
-    /// rather than decided at each key that can refuse.
-    ///
-    /// [`Sigils::Nothing`] is the empty slice, which opens no scoped directory:
-    /// a sigil is what opens a scope, so holding none opens none. It still opens
-    /// every *unscoped* directory, because that permissiveness lives on the
-    /// directory rather than here — see
-    /// [`scope_opens_to`](warlock_engine::scope_opens_to), where the asymmetry is
-    /// argued. A machine that has never run `warlock config` is therefore refused
-    /// by a scoped repository until somebody records what it holds, which is the
-    /// onboarding this vocabulary was designed around rather than a failure mode.
-    ///
-    /// [`Sigils::Unknown`] is the empty slice **too**, and that is a decision
-    /// rather than a fallthrough. A config that will not parse leaves warlock
-    /// unable to establish that anything is held, and "nobody told me what you
-    /// hold" is already the same answer as "what you hold does not match" — so
-    /// refusing is the consistent reading rather than a second rule. The state is
-    /// not swallowed on the way: the header says `holding unknown` out loud for
-    /// as long as it lasts ([`Sigils::line`]), so a machine refused for a broken
-    /// file is told which of the two it is without pressing anything, and the fix
-    /// is to repair the file rather than to guess at it here.
     #[must_use]
     pub fn as_slice(&self) -> &[String] {
         match self {
@@ -732,19 +271,6 @@ impl Sigils {
         }
     }
 
-    /// What the header has to say about what is held, or `None` when it has
-    /// nothing to say.
-    ///
-    /// `None` is [`Sigils::Nothing`] and is the whole of the promise that a
-    /// machine holding nothing gets the header it always had: there is no
-    /// wording for it, not even an empty one to be joined onto the line with a
-    /// separator.
-    ///
-    /// The wording is `warlock config`'s own, to the letter: the same word
-    /// "holding", the same backticked sigils in the order the config lists
-    /// them, and the same "unknown" for a config that would not read. The
-    /// subcommand that sets these and the header that states them are
-    /// describing one fact, and two wordings for one fact is one too many.
     #[must_use]
     pub fn line(&self) -> Option<String> {
         match self {
@@ -762,22 +288,6 @@ impl Sigils {
     }
 }
 
-/// What the header line states: which tree is on screen, and what this machine
-/// holds for the repository it came out of.
-///
-/// Both are resolved once, by whoever loaded the app, and neither can change
-/// under a running warlock: the tree's root and the repository above it are
-/// fixed for the session, and a sigil is written by `warlock config` with
-/// warlock not running. So this is not app state and is deliberately not a field
-/// on [`App`] — it is handed to [`draw`](crate::draw) beside the two windows
-/// that are drawn over the frame, for the reason those are:
-/// a value the app has never heard of is a value no keystroke, run or reload can
-/// be suspected of having changed.
-///
-/// It used to be two fields on [`App`], which meant every reload had to carry
-/// them and then recompute the header anyway — `reseat_on` copied the header
-/// across and its one caller immediately overwrote it. Neither move is needed
-/// when the fact never moves.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Chrome {
     header: String,
@@ -785,28 +295,9 @@ pub struct Chrome {
 }
 
 impl Chrome {
-    /// The header for the tree rooted at `root` inside the repository at
-    /// `repo_root`, holding nothing.
-    ///
-    /// The text is `root` relative to `repo_root` in forward slashes — the
-    /// engine's own manifest spelling, so the header and the manifest name a
-    /// module the same way on every platform.
-    ///
-    /// A tree rooted at `repo_root` itself gets no header at all. The line is
-    /// there to say *which part* of the repository is on screen, which is a
-    /// thing worth saying only when it is not the whole of it: at the root there
-    /// is no part, the relative spelling would be a bare `"."`, and any wording
-    /// for it says out loud what the root row underneath already shows. So the
-    /// line goes blank and keeps its row, because a header that appeared and
-    /// disappeared would move every tree row up and down with it.
-    ///
-    /// The caller resolving the pair is where the filesystem is touched; this
-    /// only formats what it was handed, which keeps the header a pure function
-    /// of the values above it all the way down to the renderer. A `root` that
-    /// does not sit inside `repo_root`, or that is not UTF-8, cannot be
-    /// described relatively at all and falls back to `root` printed lossily: a
-    /// header is a label, and failing to draw one is no reason to fail to draw
-    /// the tree.
+    /// The header is empty for a root that *is* the repo root, so the title bar
+    /// draws no redundant "." — and falls back to the absolute path when `root`
+    /// turns out not to be under `repo_root` at all.
     #[must_use]
     pub fn of(repo_root: impl AsRef<Path>, root: impl AsRef<Path>) -> Self {
         let root = root.as_ref();
@@ -821,110 +312,30 @@ impl Chrome {
         }
     }
 
-    /// The same header, stating `sigils` beside it.
-    ///
-    /// The other half of the one line: the header says which tree is on screen,
-    /// and this says what this machine holds for the repository it came out of.
-    /// Set once, by whoever loaded the app — a sigil is written by `warlock
-    /// config`, on the ordinary screen, with warlock not running.
-    ///
-    /// Takes the value rather than a path or a home directory: reading the
-    /// config is the caller's, so this type keeps no filesystem and the three
-    /// states it can be in are three values a test can write down. See
-    /// [`Sigils`] for why there are three of them, and note that
-    /// [`Sigils::Nothing`] leaves the header byte for byte the line it would
-    /// have been if this had never been called.
-    ///
-    /// It states them and nothing else: no row is coloured, filtered, sorted or
-    /// re-ordered by what is held, nothing is refused for it, and no key acts on
-    /// it. Matching a sigil against a scope is not this slice's, and it would not
-    /// be this type's when it is.
     #[must_use]
     pub fn with_sigils(mut self, sigils: Sigils) -> Self {
         self.sigils = sigils;
         self
     }
 
-    /// The header line: what tree is on screen, as [`Chrome::of`] worded it.
-    ///
-    /// The repository identity alone. What this machine *holds* is stated on the
-    /// same line and is kept apart from it here, because the header states the
-    /// two in order of importance and drops the second when the pane is too
-    /// narrow for both: see [`Chrome::sigils`].
     #[must_use]
     pub fn header(&self) -> &str {
         &self.header
     }
 
-    /// What this machine holds for the repository on screen, as
-    /// [`Chrome::with_sigils`] was told it.
     #[must_use]
     pub const fn sigils(&self) -> &Sigils {
         &self.sigils
     }
 }
 
-/// The front end's state: the flattened tree, where the selection sits, the
-/// slice of rows on screen, and the three groups of view state beside them.
+/// The whole of the front end's state, and none of its plumbing.
 ///
-/// Nine fields, six of them about the tree and three of them values of their
-/// own. The split is by *lifetime*, and it is the thing this type is arranged
-/// around, because the one operation that has to know it — [`reseat_on`], which
-/// puts a reader back on a tree that has just been read again — used to be
-/// twenty assignments that named each field by hand and could not be checked.
-/// The three groups are `Viewpoint`, what the reader has done to the view;
-/// `Status`, what the footer is saying right now; and `Panel`, the two cards of
-/// the slot beside the tree with a window onto each. Each carries whole across a
-/// reload, so there is nothing inside them for that function to forget.
-///
-/// What is *not* here is the header line, and its absence is deliberate: see
-/// [`Chrome`]. Both halves of it are resolved once and cannot change while
-/// warlock runs, so an app rebuilt on every reload has no business holding
-/// either, and the renderer is handed one directly.
-///
-/// `all_rows` is the engine's whole walk as it was when the app was built. No
-/// view change touches it, and a reload replaces it whole; the only thing that
-/// writes into it is news a reload cannot be waited for — a state a running pact
-/// has earned ([`App::set_subtree_state`]) and a document it has just written
-/// ([`App::insert_file_row`]). `rows` is what is actually drawn, rebuilt
-/// from `all_rows` every time the collapsed set changes, with the descendants
-/// of every collapsed node filtered out. Keeping both means collapsing is
-/// reversible without a second walk of a tree the app no longer holds, and that
-/// a row hidden under a collapsed parent keeps its depth and its place in the
-/// order for when the parent opens again.
-///
-/// `collapsible` is the paths of the rows that have something under them *in
-/// this view* — which is not what the tree says, because the file toggle and the
-/// pacted-only filter both change what a row holds without the tree moving. It
-/// is derived beside `rows`, in the one pass that already knows: see
-/// `drawn_rows`, and [`App::can_collapse`] for what reads it. Kept as paths
-/// rather than as a flag on [`Row`] so that a row stays a fact about the tree
-/// and two rows for the same node compare equal whatever is filtered.
-///
-/// The tally is the engine's own [`StateCounts`], carried along rather than
-/// recomputed: counting states is the engine's job, and a renderer that adds
-/// up its rows itself is a second implementation of that job waiting to
-/// disagree with the first.
-///
-/// `selected` is kept in range by construction and by every method that moves
-/// it, so [`App::selected_row`] is `None` only when there are no rows at all.
-/// It is kept *meaningful* by `reflow`, which puts it back on the node it was
-/// on after the row list changes, or on that node's nearest drawn ancestor when
-/// collapsing has taken it off screen.
-///
-/// `scroll_offset` is kept in step with `selected` by those same methods, so
-/// the selected row is always inside the window the renderer draws — see
-/// [`App::scroll_offset`]. It is derived state, never moved on its own: there
-/// is no "scroll without moving the selection" here, because a selection that
-/// has scrolled off screen is a selection the next keystroke moves invisibly.
-///
-/// Those two are also the two that a re-seat cannot simply carry, which is why
-/// they sit out here rather than in `Viewpoint` with the rest of the reader's
-/// state: an index names whichever node now sits at that position, so the
-/// selection has to travel by path and be looked up again in the new rows.
-///
-/// Holds an [`Account`](crate::Account), which holds an [`f64`] cost, so it is [`PartialEq`] and
-/// not [`Eq`].
+/// `all_rows` is the flattening of the tree and `rows` is the part of it being
+/// drawn; `selected` and `scroll_offset` index `rows`, so anything that
+/// rebuilds `rows` owes both of them a re-derivation. The three groups below
+/// are grouped so that [`reseat_on`] can carry them across a reload by moving
+/// three fields rather than by copying twenty.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct App {
     all_rows: Vec<Row>,
@@ -938,56 +349,8 @@ pub struct App {
     panel: Panel,
 }
 
-/// What the reader has done to the view, and the only part of an [`App`] that
-/// survives a reload whole.
-///
-/// The five facts here move together because they have one lifetime: they are
-/// set by a keystroke, they are true until another keystroke changes them, and
-/// nothing about a tree being read again touches any of them. That is what lets
-/// [`reseat_on`] carry them as one value rather than as five assignments it has
-/// to remember to make — and what makes a sixth of them one field here rather
-/// than a field, a copy and a test that nobody writes.
-///
-/// The two facts that are *not* here are `selected` and `scroll_offset`, and
-/// they are missing on purpose. Both have to be re-derived against the new rows
-/// rather than carried: the selection is carried by *path* and looked up again,
-/// because an index names whichever node now sits at that position, and the
-/// offset is restored and then put back in range by `rescroll`. They are the
-/// exception, so they are visibly the exception — see [`reseat_on`].
-///
-/// `collapsed` holds node paths, never row indices: an index names a different
-/// node the moment the row list changes length, and the row list is rebuilt
-/// both by every collapse and by every reload of the tree.
-///
-/// `pacted_only` is the second input to that rebuild: with it set, only the
-/// pacted nodes and the ancestors leading to them are drawn. It is view state
-/// and nothing else — no node is dropped from `all_rows`, no state is changed,
-/// nothing is written anywhere — so [`App::toggle_pacted_only`] is reversible in
-/// the strongest sense: the rows come back exactly as they were, at the same
-/// depths, in the same order, still collapsed wherever they were collapsed.
-///
-/// `show_files` is the third, and the only one that can put a row on screen
-/// rather than take one off: `all_rows` holds a row for every file the tree
-/// listed as well as one for every node, and with the flag off — which is how an
-/// app starts — every one of those file rows is filtered out before anything
-/// else looks at the list. Keeping them in `all_rows` rather than splicing them
-/// in when the flag goes on is what makes the flag reversible without the tree,
-/// exactly as `collapsed` is.
-///
-/// `focus` is which of the screen's three places the keys are driving, and it is
-/// here rather than in the event loop for the reason everything else here is:
-/// it is view state that changes what a keystroke does, and the rule it decides
-/// — that a movement key moves the tree's selection while the tree has the focus,
-/// scrolls the panel while the panel has it, and moves nothing at all while the
-/// composer has it — is a rule about [`App`]'s methods, testable with nothing
-/// attached to stdout. It starts on the tree, which is the pane warlock opens
-/// on. See [`Focus`].
-///
-/// The variant is the whole of what the composer keeps here. The draft itself is
-/// deliberately *not* a field on [`App`]: [`App::restore_from`] puts a pre-run
-/// copy of the app back after a run that recorded nothing and keeps only the
-/// panel, so a draft stored anywhere but the panel group would die every time
-/// somebody pacted a clean directory.
+// What the reader is looking at rather than what is being looked at, which is
+// why a reload carries this whole and rebuilds everything above it.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Viewpoint {
     collapsed: BTreeSet<PathBuf>,
@@ -997,50 +360,12 @@ struct Viewpoint {
     focus: Focus,
 }
 
-/// What the footer is saying right now: the line about the last keystroke, the
-/// run in flight, and the two flags that word them.
-///
-/// One lifetime again, and it is the shortest of the three: everything here
-/// belongs to the keystroke just pressed or to the run going on behind it, and
-/// every movement method empties the message as it goes. It is the group a run
-/// that ends with nothing recorded *rolls back* — see `restore` in
-/// `mod@crate::pacting` — which is the whole reason it is kept apart from the
-/// panel beside it.
-///
-/// `mouse_captured` is here for its lifetime rather than its ownership: it is
-/// not the app's own fact — the terminal is the binary's to switch, and the loop
-/// tells the app what it did every frame — but it changes at the same rate as
-/// everything around it and is read by the same footer, in `keys_line`. Being in
-/// this group means a rolled-back run installs the flag as it was before the
-/// run; that is what happened before this type existed too, and it is put right
-/// by the loop's next frame, which sets it unconditionally.
-///
-/// The message is the one line the app has to say about the keystroke just
-/// pressed — why a pact was refused, or whatever the caller put there. It is
-/// finished text, and it lives here rather than in the caller's hand because it
-/// is display state like everything else around it: the renderer draws whatever
-/// is in it, and every method that moves the selection empties it, so a message
-/// lasts exactly until the next keystroke.
-///
-/// `in_flight` is the pact running now, if one is, and is the one piece of state
-/// here that no keystroke touches: it is put there and taken away by whoever is
-/// running the pact — see [`App::set_pact_in_flight`] — because the app cannot
-/// see a background thread and the thread cannot see a screen. It outlasts
-/// keystrokes for that reason, and takes the message line while it is there:
-/// see [`App::pact_line`].
-///
-///
-/// `pact_refused` is the one keystroke that has nowhere else to go: the pact key
-/// pressed while `in_flight` is already there. It is a flag rather than a
-/// message because the message line is exactly what a pact in flight has taken —
-/// a sentence put in the message would be the one sentence nobody could read —
-/// and it is a flag rather than a fourth footer line because the footer is a
-/// fixed three. So it is a bit that changes how `in_flight` is worded, and
-/// nothing more: see [`App::set_pact_refused`] and [`App::pact_line`]. It
-/// belongs to the keystroke that set it, so it goes the way the message does,
-/// on the next one.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Status {
+    // Belongs to the last keystroke: set by whatever refused it, dropped by the
+    // next movement (`forget_last_keystroke`). Deliberately separate from
+    // `in_flight`, which outlives any number of keystrokes and must survive
+    // them.
     message: Option<String>,
     in_flight: Option<InFlight>,
     pact_refused: bool,
@@ -1048,97 +373,15 @@ struct Status {
 }
 
 impl App {
-    /// The app state for `tree`, with everything expanded and the first row
-    /// selected.
-    ///
-    /// This is the only place the tree's shape is read: the whole walk is
-    /// flattened here, and every later question about the tree's shape — which
-    /// nodes hang under a collapsed one, whether a node has children to hide at
-    /// all — is answered from the rows this produces rather than from a tree
-    /// the app would otherwise have to keep. The front end gets its tree by
-    /// calling the engine's constructor and hands it straight here; it never
-    /// learns where the tree came from.
-    ///
-    /// Nothing starts collapsed, which is what makes a freshly launched app
-    /// draw every node the walk yields. Carrying a previous run's collapsed
-    /// directories onto a reloaded tree is [`App::with_collapsed`]'s job.
-    ///
-    /// The files each node lists are flattened in here too, each one a
-    /// [`Row::file`] straight after the row for the directory holding it, one
-    /// level deeper and in the state that directory is in. They are not drawn:
-    /// the file toggle starts off (see [`App::toggle_files`]), so a freshly
-    /// built app draws the nodes and nothing else. Reading the listing once,
-    /// here, is what lets the toggle be a filter later rather than a second
-    /// visit to a tree the app does not keep.
-    ///
-    /// Each row is told whether a `.warlockignore` keeps its content out, from
-    /// the node's own flag, and the file rows are told the same as the directory
-    /// listing them — the rules exclude a directory's content along with it, so
-    /// a file row saying otherwise would be a second answer to one question. It
-    /// changes no colour and hides no row: an excluded directory keeps its row
-    /// and its gray, and the flag is there for [`App::toggle_pact`] to refuse a
-    /// press on it without asking the filesystem anything.
-    ///
-    /// Each row is told the scope written on its own node the same way, from the
-    /// node's own field — never an ancestor's, and never by asking
-    /// [`warlock_engine::scope_covering`], because the label in the tree marks
-    /// where a boundary starts. The file rows are told nothing: a file has no
-    /// pact entry to write a scope on, so unlike the state and the exclusion
-    /// flag there is nothing of the directory's to copy down. See [`Row::scope`].
     #[must_use]
     pub fn from_tree(tree: &Tree) -> Self {
         Self::from_rows(walk_of(tree)).with_counts(tree.counts())
     }
 
-    /// The app state for an already-flattened list of rows, with everything
-    /// expanded, the first row selected and an all-zero tally.
-    ///
-    /// A [`Tree`] always has a root and so is never empty; this constructor is
-    /// how the no-rows case is reachable at all, in tests and in any future
-    /// caller that filters the tree down to nothing. Zero counts are the
-    /// truth for that empty case; any caller passing rows should say what they
-    /// tally to with [`App::with_counts`].
-    ///
-    /// Nothing here says anything about the header line: neither half of it is
-    /// app state, and an app carries no [`Chrome`] at all — see that type for
-    /// why a fact resolved once and fixed for the session has no business being
-    /// rebuilt on every reload.
-    ///
-    /// The viewport starts at zero rows tall and the window at the top, which
-    /// is what is true of an app that has never been drawn: nothing is on
-    /// screen yet, so nothing has been scrolled past. See
-    /// [`App::set_viewport_height`].
-    ///
-    /// There is no message either: an app that has answered no keystroke yet
-    /// has nothing to say about one. See [`App::message`]. Nor is a pact in
-    /// flight — nobody has started one — see [`App::set_pact_in_flight`] — and
-    /// so nothing has been refused for one running either, see
-    /// [`App::set_pact_refused`].
-    ///
-    /// All three of the panel's cards are empty: no pact has run this session,
-    /// nobody has asked anything and no file has been read, so the panel has
-    /// nothing whatever to draw, which is a different state from a run that has
-    /// started and done nothing yet. See [`App::start_account`]. The
-    /// conversation is the card showing — it is the one card that is always
-    /// somewhere to be, and the one the field is drawn under — and all three
-    /// windows start the way the tree's does, no height and no offset, since
-    /// nothing has been drawn.
-    ///
-    /// The tree has the focus, so the movement keys move its selection from the
-    /// first keystroke on. See [`App::focus`].
-    ///
-    /// The mouse is not captured, which is what is true of an app that is on no
-    /// terminal: whoever puts one under it says so, every frame, and until they
-    /// do the footer names the `m` key by what it does on a terminal reporting
-    /// nothing. See [`App::set_mouse_captured`].
-    ///
-    /// Nothing is collapsed and the pacted-only filter is off, so the rows
-    /// handed over are exactly the rows drawn — unless some of them are file
-    /// rows, which the file toggle starts off over. They are kept a second time
-    /// as the unfiltered list a later collapse re-filters and a later expand
-    /// restores from; a caller that wants collapsing to hide anything has to
-    /// say which rows have children, with [`Row::with_child_count`], because a
-    /// bare list of rows is the one input here that does not come from a tree.
+    /// Builds an app from rows alone, leaving the tally at zero. Tests use it;
+    /// [`App::from_tree`] is the path that also has counts to give. A zero tally
+    /// never described these rows, which is why [`App::set_subtree_state`]
+    /// declines to move it rather than counting up from nothing.
     #[must_use]
     pub fn from_rows(rows: Vec<Row>) -> Self {
         // Every field named, and no `..Default::default()` anywhere in this
@@ -1174,20 +417,6 @@ impl App {
         app
     }
 
-    /// The same app state, with every node in `collapsed` collapsed and the
-    /// rows re-filtered to match.
-    ///
-    /// This is how a collapsed tree survives a reload. The app state is thrown
-    /// away and rebuilt from the new tree whenever the tree is re-read, so
-    /// something has to carry the view across the gap; paths carry, which is
-    /// the whole reason [`App::collapsed`] hands back paths rather than the row
-    /// indices they were pressed on. A path the new tree no longer has is kept
-    /// and ignored — a directory that has come and gone and come back should
-    /// find itself as the user left it, and the set is small enough that
-    /// pruning it would cost more than carrying it.
-    ///
-    /// The rows are filtered on the way in rather than at the next keystroke,
-    /// so the first frame drawn after a reload is already the collapsed one.
     #[must_use]
     pub fn with_collapsed(
         mut self,
@@ -1198,80 +427,25 @@ impl App {
         self
     }
 
-    /// The same app state, reporting `counts` in its footer.
-    ///
-    /// Takes the engine's tally as a value instead of deriving one, so the
-    /// numbers on screen are the engine's numbers.
     #[must_use]
     pub const fn with_counts(mut self, counts: StateCounts) -> Self {
         self.counts = counts;
         self
     }
 
-    /// What the app has to say about the last keystroke, or `None` when it has
-    /// nothing to say.
-    ///
-    /// Set by whatever refused to do something — [`App::toggle_pact`] on a file
-    /// row — or by something that did it and had news about it, or by the
-    /// caller through [`App::set_message`], and emptied by the next movement, so
-    /// what is here always belongs to the keystroke just pressed.
     #[must_use]
     pub fn message(&self) -> Option<&str> {
         self.status.message.as_deref()
     }
 
-    /// Say `message` until the next keystroke moves the selection.
-    ///
-    /// For the caller's own sentences — a manifest that would not write is the
-    /// caller's news, not the app's — so that there is one place a line reaches
-    /// the screen from rather than two. Replaces whatever was there: only the
-    /// latest keystroke has anything to report.
     pub fn set_message(&mut self, message: impl Into<String>) {
         self.status.message = Some(message.into());
     }
 
-    /// Say that a pact is working the directory at `path`, which is directory
-    /// `position` of `total`.
-    ///
-    /// The app runs no pact and can see none: a subtree pact happens on another
-    /// thread, over minutes, and the only thing here that could know how it is
-    /// going is whoever started it. So this is the caller's to set as the run
-    /// advances — once per directory, with the same `total` throughout — and the
-    /// caller's to take away with [`App::clear_pact_in_flight`] when the run
-    /// ends, however it ends.
-    ///
-    /// What lands on screen is [`App::pact_line`]; `position` counts from one,
-    /// because the line is read by a person rather than indexed.
-    ///
-    /// Not a keystroke, so it says nothing and takes nothing down: the message
-    /// the last keystroke left is still the last keystroke's, and is still there
-    /// when the pact is over. Movement does not undo this either — a pact
-    /// carries on being in flight however much the reader scrolls.
     pub fn set_pact_in_flight(&mut self, path: impl Into<PathBuf>, position: usize, total: usize) {
         self.set_run_in_flight(Run::Pact, path, position, total);
     }
 
-    /// Say that the run of kind `run` is working the directory at `path`, which
-    /// is directory `position` of `total`.
-    ///
-    /// [`App::set_pact_in_flight`] with the kind said out loud, for the caller
-    /// driving a refresh — which is the same run reported the same way, over the
-    /// same channel, in the same account, with one word of the footer different:
-    /// see [`Run`]. Everything the doc comment on [`App::set_pact_in_flight`]
-    /// says holds here, kind and all, because that method is this one with
-    /// [`Run::Pact`] filled in.
-    ///
-    /// The kind rides on the same single in-flight record as the directory and
-    /// the fraction, so a run cannot end up half pact and half refresh, and
-    /// [`App::clear_pact_in_flight`] takes the kind away with everything else.
-    ///
-    /// This is also where the run's high-water mark is kept up: a call with a
-    /// `position` lower than one already seen in this run leaves the furthest
-    /// position where it was, so a header filled from it never draws a smaller
-    /// fraction than it has already drawn — see [`App::run_header`]. The footer
-    /// is not affected either way, because it reports the position it was just
-    /// handed. A run that has been cleared has no history to keep, so the next
-    /// one starts its fraction again.
     pub fn set_run_in_flight(
         &mut self,
         run: Run,
@@ -1293,73 +467,19 @@ impl App {
         });
     }
 
-    /// Say that no pact is running any more.
-    ///
-    /// The other half of [`App::set_pact_in_flight`], for the end of a run
-    /// whether it finished, failed or was cancelled: the line describes work
-    /// happening now, so it has to go when the work stops, and only the caller
-    /// knows that it has. Leaves the message alone, so whatever the caller says
-    /// about how the run went is on screen the moment the progress line is off
-    /// it.
-    ///
-    /// The run's high-water position goes with it too, because it is a field of
-    /// the record being dropped rather than something kept beside it: this is
-    /// the boundary between one run and the next, so a second run reports 1 of
-    /// 12 rather than inheriting the first run's 12 of 12. See
-    /// [`App::run_header`].
-    ///
-    /// A no-op when no pact was in flight.
     pub fn clear_pact_in_flight(&mut self) {
         self.status.in_flight = None;
     }
 
-    /// Say that the pact key was pressed while a pact was already running, so
-    /// that the press is answered rather than swallowed.
-    ///
-    /// The caller refuses the press — nothing starts, nothing toggles — and
-    /// says here that it did. Deliberately not [`App::set_message`]: the
-    /// message line is the very thing a pact in flight has taken (see
-    /// [`App::pact_line`]), so a sentence left there would be the one sentence
-    /// the reader could not see, and it would then turn up minutes later when
-    /// the run ended, long after the key that earned it. Deliberately not a
-    /// fourth footer line either — the footer is three lines at fixed heights.
-    /// What it does instead is re-word the line the reader is already watching,
-    /// as a suffix on [`App::pact_line`].
-    ///
-    /// A flag and not a count: a second, third or fourth press says the same
-    /// thing, so setting this again changes nothing. It says nothing at all
-    /// while no pact is in flight, since there is no line for it to be a suffix
-    /// on and no press it could have refused.
-    ///
-    /// This one *is* a keystroke, so it goes the way a message goes: the next
-    /// keystroke takes it down. Progress events do not — a tick landing a
-    /// fraction of a second after the press would otherwise wipe the answer
-    /// before it was read.
     pub fn set_pact_refused(&mut self) {
         self.status.pact_refused = true;
     }
 
-    /// Whether a pact is running now, as last set by
-    /// [`App::set_pact_in_flight`].
-    ///
-    /// For a renderer deciding which keys to advertise, and for a key handler
-    /// deciding what Esc means. It is display state and nothing more: it is
-    /// whatever the caller last said, not something the app went and checked.
     #[must_use]
     pub const fn is_pacting(&self) -> bool {
         self.status.in_flight.is_some()
     }
 
-    /// Whether `path` is the directory the pact is working now.
-    ///
-    /// The narrow question a renderer asks: given a row it is about to draw,
-    /// is this the one the run is inside? Answering it here rather than handing
-    /// the path out keeps [`InFlight`] private, and keeps the comparison one
-    /// exact path against one exact path — no ancestors, no descendants, and
-    /// nothing about the file rows beneath the directory.
-    ///
-    /// `false` when no pact is running, so a caller needs no separate
-    /// [`App::is_pacting`] check.
     #[must_use]
     pub fn is_in_flight(&self, path: &Path) -> bool {
         self.status
@@ -1368,18 +488,10 @@ impl App {
             .is_some_and(|in_flight| in_flight.path == path)
     }
 
-    /// Whether the pass in flight covers `row`: the directory being worked, or
-    /// a file that directory holds.
-    ///
-    /// The pulse's question, wider than [`App::is_in_flight`] by exactly the
-    /// file rows. A directory's pass reads the files directly inside it, so
-    /// while it runs those rows are the work on screen and flash with it. Its
-    /// child *directories* are not covered — each has a pass of its own,
-    /// already finished by the time the parent's runs, and a row that is done
-    /// has no business flashing — and nor are files deeper down, which belong
-    /// to those passes. Ancestors and siblings are as untouched as ever.
-    ///
-    /// `false` when no pact is running, exactly as [`App::is_in_flight`] is.
+    /// True for the directory being run *and* for the file rows directly inside
+    /// it, so a run marks the rows a reader can see it working on. Only one
+    /// level down: a file under a subdirectory belongs to that subdirectory's
+    /// own turn.
     #[must_use]
     pub fn in_flight_covers(&self, row: &Row) -> bool {
         self.status.in_flight.as_ref().is_some_and(|in_flight| {
@@ -1388,38 +500,6 @@ impl App {
         })
     }
 
-    /// The line describing the run in flight — `pacting crates/engine (3/12)`,
-    /// or `refreshing crates/engine (3/7)` for a refresh — or `None` when no run
-    /// is running.
-    ///
-    /// The verb is the one the caller said the run was started by — see [`Run`]
-    /// and [`App::set_run_in_flight`] — and it is the only difference between the
-    /// two lines: the directory, the fraction and the refusal suffix are worded
-    /// the same way for both, because a refresh is a
-    /// run in flight in every way that matters here.
-    ///
-    /// The directory is named relative to the root of the tree on screen, in the
-    /// engine's own manifest spelling, for the reason every other label here is:
-    /// an absolute path spends the footer on the part the reader already knows.
-    /// It is worded here rather than by the caller so that the app is the one
-    /// place a footer line is decided, and spelled at draw time rather than when
-    /// it was set so that it is spelled against the tree that is on screen now.
-    ///
-    /// This takes the message line when there is one to take: while a pact runs,
-    /// what is happening to the reader's repository right now outranks a
-    /// sentence about a keystroke, and the run is the thing Esc is about to act
-    /// on. The message underneath is not thrown away — [`App::message`] still
-    /// holds it, and it appears when the run ends — which is what makes the
-    /// precedence a display rule rather than a loss of state.
-    ///
-    /// A press of the pact key refused because this run is already going adds
-    /// `— already running` to the end of it, rather than taking a line of its
-    /// own: see [`App::set_pact_refused`]. It is a suffix and goes last, so that
-    /// a narrow terminal cuts the answer to a key just pressed rather than the
-    /// fraction, which is the part that
-    /// says Warlock has not hung. The line is rebuilt every frame, so a progress
-    /// event arriving after the press re-words it around the new directory and
-    /// position and carries the suffix along.
     #[must_use]
     pub fn pact_line(&self) -> Option<String> {
         self.status.in_flight.as_ref().map(|in_flight| {
@@ -1436,28 +516,6 @@ impl App {
         })
     }
 
-    /// The run in flight in parts rather than in words — which run, which
-    /// directory, how far through — or `None` when no run is running.
-    ///
-    /// What [`App::pact_line`] is to the footer, this is to the panel's header:
-    /// the same one in-flight record, read for the same frame, given out as the
-    /// pieces a header sets in separate places instead of as a sentence. See
-    /// [`RunHeader`] for what each piece is worth.
-    ///
-    /// Nothing new is measured for it. Every part comes off the record
-    /// [`App::set_run_in_flight`] already keeps — which is why there is no new
-    /// event, no new observer call and nothing to change in the engine — and the
-    /// directory is spelled here, at the moment it is asked for, by the same
-    /// [`App::label_for`] the footer uses, so a header and a footer drawn in one
-    /// frame cannot spell one directory two ways.
-    ///
-    /// It reads no clock and takes none: two frames drawn at two instants with
-    /// no event in between come back with the same header, because the fraction
-    /// is the run's own counting and moves only when the run says it has moved.
-    ///
-    /// `None` before the first run and after [`App::clear_pact_in_flight`], so a
-    /// caller needs no separate [`App::is_pacting`] check — and so the rows a
-    /// header would take are the account's again the moment a run is over.
     #[must_use]
     pub fn run_header(&self) -> Option<RunHeader> {
         self.status.in_flight.as_ref().map(|in_flight| RunHeader {
@@ -1468,54 +526,9 @@ impl App {
         })
     }
 
-    /// Begin the account of a pact starting at `at`, throwing away whatever the
-    /// last one left.
-    ///
-    /// One pact, one account. A second run does not append to the first: the
-    /// panel is a record of what is happening now, and a reader who has to
-    /// scroll past a finished run to find the live one has been handed a log
-    /// rather than a report. So this clears the sections, the lines and the
-    /// summary of the previous run outright, and puts the window back at the top
-    /// following the newest line — which for an account with nothing in it is
-    /// the same place.
-    ///
-    /// This is also the only way an app comes to have an account at all: before
-    /// the first call there is none, and the panel draws nothing whatever rather
-    /// than an empty frame around a run that has not happened. See
-    /// [`Panel::has_account`](crate::Panel::has_account).
-    ///
-    /// Not a keystroke — the pact key reaches this by way of whoever starts the
-    /// run — so it neither says anything nor takes down what the last keystroke
-    /// said.
-    ///
-    /// A document in the panel stays exactly where it is, and stays showing. The
-    /// panel is three cards in one slot: this one fills the account's card,
-    /// wherever the reader happens to be looking, because which card is on
-    /// screen is the reader's and a run that took the slot would take a document
-    /// out of their hands mid-sentence. The account goes on being written behind
-    /// the document, following its own newest line, and is there the moment they
-    /// swap back.
-    ///
-    /// The conversation is not touched, and that is the rule rather than an
-    /// omission. A run has a card of its own — this one — and a conversation
-    /// that also carried it would be the same run written twice on one screen,
-    /// arriving in the middle of whatever the reader was reading. The thread is
-    /// what somebody typed and what came back; a pact is the account's, whole,
-    /// one swap away.
-    ///
-    /// Which card is showing moves in one case and one only: when the card on
-    /// screen has nothing on it. A reader watching a conversation keeps it, and
-    /// a reader reading a file keeps that — taking either away is taking away
-    /// something they chose to look at — but a reader who pressed the pact key
-    /// on a session that has said nothing is looking at warlock's mark, and the
-    /// run they just asked for is worth more than that. Nothing is lost either
-    /// way: an empty card has nothing to come back to, and the swap key reaches
-    /// it in one press once it does.
-    ///
-    /// The focus is rescued with it, because the account is a card with no field
-    /// under it (see [`Panel::composer_showable`](crate::Panel::composer_showable)): a keyboard pointed at a
-    /// composer that has just stopped being drawn goes to the panel, exactly as
-    /// it does when a document takes the field away.
+    /// A run switches the panel to its account only when there is nothing there
+    /// to lose. A reader part-way through a document keeps it: the account has
+    /// been opened either way and the swap key reaches it.
     pub fn start_account(&mut self, at: Instant) {
         if !self.panel.has_content() {
             self.panel.show(Showing::Account);
@@ -1524,91 +537,11 @@ impl App {
         self.panel.open_account(at);
     }
 
-    /// Put the lines of a file on the panel's document card, from its first
-    /// line, and show it.
-    ///
-    /// The read happened somewhere else. What arrives here is text — the file's
-    /// own lines, in order — and a yes-or-no about whether the cap cut the read
-    /// short; never a path, because a path is something that would have to be
-    /// opened later and [`App`] opens nothing. Whoever pressed the key did the
-    /// reading, worded any failure on [`App::message`], and calls this only when
-    /// there is something to show.
-    ///
-    /// `cut` adds one line under the last of the file's own, saying so. It is the
-    /// only line in the panel a document did not write, and it is added here
-    /// rather than by the reader because the words are the screen's: the engine
-    /// hands over the fact and nothing else.
-    ///
-    /// The document's window goes to the top and does not follow. A file is read
-    /// from its first line — a document pinned to its own last line would be a
-    /// log — and the follow rule that keeps a live account's newest line on the
-    /// bottom row has nothing to be true of here, since nothing is appended to a
-    /// file that has been read.
-    ///
-    /// The account's card is left alone, lines, window and all: this is the one
-    /// thing that shows the document card, and showing it puts the account
-    /// behind it rather than throwing it out. A run under way goes on filling
-    /// that card, and a swap comes back to it where it was.
-    ///
-    /// Not a keystroke's whole answer: it neither says anything nor takes down
-    /// what the last keystroke said, exactly as [`App::start_account`] does not.
-    ///
-    /// The one other way lines reach this card is [`Panel::refill_document`](crate::Panel::refill_document),
-    /// which is this method minus the last two lines of it: a file read again
-    /// because something changed it under the reader does not get to decide what
-    /// they are looking at, and so cannot hide the composer either.
-    ///
-    /// The document card hides the composer, so a reader who was typing when
-    /// they pressed the view key has the focus moved onto the panel — see
-    /// `rescue_focus`. Their draft is untouched: it is not kept here, and the
-    /// field it is kept in is not emptied by anything on screen changing.
     pub fn show_document(&mut self, lines: impl IntoIterator<Item = impl Into<String>>, cut: bool) {
         self.panel.show_document(lines, cut);
         self.rescue_focus();
     }
 
-    /// Show the next card of the panel: the account, then the thread, then the
-    /// document, then the account again.
-    ///
-    /// The whole of what the swap key does, and the only thing besides
-    /// [`App::show_document`] and [`Panel::start_turn`](crate::Panel::start_turn) that decides which card is
-    /// on screen — which is what makes a document survive a pact starting,
-    /// finishing, failing or being cancelled underneath it. A cycle rather than
-    /// three "show the account" / "show the thread" / "show the document" calls,
-    /// for [`App::toggle_focus`]'s reason: there are three cards and one key, and
-    /// a cycle cannot be asked for a fourth.
-    ///
-    /// A card nothing has filled is stepped over rather than shown, so the key
-    /// never spends a press on warlock's mark: a session that has read no file
-    /// swaps between the conversation and the run, and one that has run no pact
-    /// swaps between the conversation and the file. The conversation is the
-    /// exception and is never stepped over, empty or not — it is where the panel
-    /// opens and the one card the composer is drawn under, so it is always the
-    /// way back to a screen the reader can type on.
-    ///
-    /// Nothing else moves, with one exception. The focus stays on the pane it
-    /// was on — unless it was on the composer and this is the swap that hides
-    /// it, and then it lands on the panel as it does for
-    /// [`App::show_document`]; see `rescue_focus`. The tree's
-    /// selection and window stay where the reader left them, each card keeps its
-    /// own window — so scrolling a card, swapping away and swapping back lands
-    /// on the line they left, while an account or a thread left following goes on
-    /// following and shows the newest line of whatever reported while the
-    /// document was up — and the last keystroke's message stays exactly as it
-    /// was. A swap that worked says nothing: the panel is now drawing another
-    /// card, which the reader can see, and a footer line announcing it would only
-    /// push aside something they had not finished reading.
-    ///
-    /// The one thing it says is the refusal, and there is exactly one press that
-    /// comes to it: the conversation showing on a session where no pact has run
-    /// and no file has been read, so both of the cards the key would reach are
-    /// cards about nothing (see `stops_on`). The panel stays where it is and the
-    /// footer names the key that would make one of them — the shape every
-    /// refusal here takes: a fact about what is there, and then the keystroke
-    /// that helps.
-    ///
-    /// Reads no file and asks the engine nothing: the cards are already in hand,
-    /// and this only picks which of them is drawn.
     pub fn swap_card(&mut self) {
         let Some(card) = self.panel.next_card() else {
             self.set_message(no_document_message());
@@ -1618,43 +551,18 @@ impl App {
         self.rescue_focus();
     }
 
-    /// The panel beside the tree: the three cards, which one is showing, and
-    /// the window over it.
-    ///
-    /// The panel is a value of its own with its own interface, and this is how
-    /// that interface is reached — rather than a method on [`App`] per method
-    /// on [`Panel`], which is a second name for every one of them and a second
-    /// place each has to be documented. What the app adds over the panel is the
-    /// handful of methods that do something *besides* passing the call on:
-    /// [`App::swap_card`] words a refusal, [`App::show_document`] spells a
-    /// label, [`App::start_account`] carries the run header, and
-    /// [`App::restore_from`] decides which panel a re-seated app keeps.
-    ///
-    /// [`Panel`]: crate::Panel
     #[must_use]
     pub const fn panel(&self) -> &Panel {
         &self.panel
     }
 
-    /// The panel, to write to: see [`App::panel`].
     pub const fn panel_mut(&mut self) -> &mut Panel {
         &mut self.panel
     }
 
-    /// Put `view` back in place of this app, keeping this app's panel.
-    ///
-    /// The one move a run that ended with nothing recorded needs, and the whole
-    /// of it. `view` is the copy taken before the run started, so it holds the
-    /// rows, the colours and the selection the manifest on disk still says are
-    /// true; what it cannot hold is the account of the run that has just
-    /// happened, because it predates it. An account is not a claim about the
-    /// tree and has no business being rolled back with one — and the run that
-    /// ends this way is exactly the one a reader most wants to see the end of.
-    ///
-    /// So the panel stays and everything else goes back. This used to be
-    /// `take_account_from`, a method that reached into the live app from the old
-    /// one to steal four fields back out of it; with the panel a value of its
-    /// own it is one move, and the four fields are not enumerated anywhere.
+    /// Rolls the view back to an earlier copy — but keeps the live panel, since
+    /// an account or a conversation is a record of what happened and rolling it
+    /// back would discard it at the moment the reader turned to read it.
     pub fn restore_from(&mut self, view: Self) {
         let panel = mem::take(&mut self.panel);
         *self = view;
@@ -1666,56 +574,25 @@ impl App {
         self.rescue_focus();
     }
 
-    /// Every row that is drawn, in the order it is drawn: the engine's walk
-    /// with the descendants of every collapsed node left out.
-    ///
-    /// Depths are the tree's own, not the drawn list's, so a row whose parent
-    /// is two levels of collapsed directory above it still indents to where it
-    /// belongs when those levels open again.
     #[must_use]
     pub fn rows(&self) -> &[Row] {
         &self.rows
     }
 
-    /// Which nodes are collapsed, by path, in a fixed order.
-    ///
-    /// For handing to [`App::with_collapsed`] on a rebuild, and for a test to
-    /// assert on. It is what the user pressed the key on, which is not
-    /// necessarily what is on screen: a node under a collapsed parent can be
-    /// in here and drawn nowhere.
     #[must_use]
     pub const fn collapsed(&self) -> &BTreeSet<PathBuf> {
         &self.viewpoint.collapsed
     }
 
-    /// Whether the node at `path` is collapsed.
-    ///
-    /// Answers for a node holding nothing too, where it means only that the path
-    /// is in the set: there is nothing to hide, so nothing is hidden. A renderer
-    /// deciding which marker to draw wants this *and* [`App::can_collapse`] —
-    /// collapsed, expanded-over-something and holding-nothing are three cases,
-    /// and this answers one bit of them.
     #[must_use]
     pub fn is_collapsed(&self, path: impl AsRef<Path>) -> bool {
         self.viewpoint.collapsed.contains(path.as_ref())
     }
 
-    /// Whether the row at `index` in [`App::rows`] has anything under it in the
-    /// view as it stands, and so whether collapsing it would hide something.
-    ///
-    /// This is the question the collapse key asks, and it is a question about
-    /// the view rather than about the tree. A directory holding nothing but
-    /// files has no children in the tree and has rows under it whenever the file
-    /// toggle is on — and a documented one has its document row under it even
-    /// when the toggle is off; a directory whose children the pacted-only filter
-    /// has taken away has children in the tree and nothing under it. Asking
-    /// [`Row::children`] instead gets both of those wrong, in opposite
-    /// directions — the first as a key that silently does nothing, the second as
-    /// a marker promising something to unfold.
-    ///
-    /// Answered from the set `reflow` derived beside the rows, so it costs a
-    /// lookup and it is the same answer the drawn rows were filtered with. An
-    /// `index` past the end is not a row and holds nothing.
+    /// Asks whether the row has anything *drawn* under it, not whether the node
+    /// has children: a directory whose children are all filtered away collapses
+    /// onto nothing, so the marker is not offered. `collapsible` is rebuilt by
+    /// `drawn_rows` on every `reflow` for that reason.
     #[must_use]
     pub fn can_collapse(&self, index: usize) -> bool {
         self.rows
@@ -1723,222 +600,77 @@ impl App {
             .is_some_and(|row| self.collapsible.contains(&row.path))
     }
 
-    /// Whether the view is narrowed to the pacted part of the tree.
-    ///
-    /// `false` is the whole walk, which is what a freshly built app shows. See
-    /// [`App::toggle_pacted_only`] for what `true` leaves on screen.
     #[must_use]
     pub const fn pacted_only(&self) -> bool {
         self.viewpoint.pacted_only
     }
 
-    /// Narrow the view to the pacted part of the tree, or widen it back to the
-    /// whole of it.
-    ///
-    /// Narrowed, the drawn rows are every node whose state
-    /// [`NodeState::is_pacted`] calls pacted, plus every ancestor needed to
-    /// reach one, and nothing else: an unpacted directory earns its row only by
-    /// having something pacted somewhere below it. That is a filter over the
-    /// walk and not a change to it — no node leaves [`App::rows`]' source, no
-    /// state moves, [`App::counts`] still describes the whole tree, and nothing
-    /// about the flag reaches a file.
-    ///
-    /// It composes with collapsing rather than replacing it. Which rows survive
-    /// the filter is decided from the whole walk, so a directory that is only on
-    /// the way to something pacted survives even while it is collapsed over that
-    /// something; the collapse then hides its descendants as it always did. A
-    /// directory collapsed before the filter went on is still collapsed after it
-    /// comes off again, because the filter never touched the collapsed set.
-    ///
-    /// The selection is carried by path, so widening the view again finds the
-    /// node that was selected while it was narrow. Narrowing over the selection
-    /// lands it on the nearest still-drawn ancestor — the same rule collapsing
-    /// over the selection follows, and for the same reason: that ancestor is the
-    /// row the hidden node went behind. A node with no drawn ancestor at all,
-    /// which is any node once nothing in the tree is pacted, falls back to the
-    /// first row.
-    ///
-    /// Clears the last keystroke's message, like every other key that does
-    /// something.
     pub fn toggle_pacted_only(&mut self) {
         self.viewpoint.pacted_only = !self.viewpoint.pacted_only;
         self.forget_last_keystroke();
         self.reflow();
     }
 
-    /// Whether the files inside each directory are drawn as well as the
-    /// directories themselves.
-    ///
-    /// `false` for a freshly built app: the tree is a tree of modules, and the
-    /// files are detail asked for by [`App::toggle_files`] rather than the
-    /// first thing a reader is shown.
     #[must_use]
     pub const fn show_files(&self) -> bool {
         self.viewpoint.show_files
     }
 
-    /// Show the files inside each directory, or hide them again.
-    ///
-    /// Shown, every file a node listed gets a row directly under the row for
-    /// the directory holding it, one level deeper, in that directory's state
-    /// and so in that module's colour. The order is the walk's: the files of a
-    /// directory come in the order the tree listed them, before the rows for
-    /// that directory's subdirectories.
-    ///
-    /// A file row is drawn and nothing else. It is no module, so
-    /// [`App::toggle_pact`] refuses it; it contains nothing, so collapsing it
-    /// hides nothing; and it is no node, so [`App::counts`] does not move by a
-    /// single one when this is toggled either way — the footer counts modules,
-    /// and a module has the same files whether or not they are on screen.
-    ///
-    /// It composes with the other two view flags the way they compose with each
-    /// other, and in that order: the file rows are filtered out first, so with
-    /// files hidden the pacted-only pass and the collapsed set see exactly the
-    /// list of nodes they saw before files existed. With files shown, a file
-    /// under a collapsed directory is hidden with it, and — because a file row
-    /// carries its directory's state — a file under a pacted directory survives
-    /// the pacted-only filter while one under a directory that is merely on the
-    /// way to something pacted does not.
-    ///
-    /// Clears the last keystroke's message, like every other key that does
-    /// something.
     pub fn toggle_files(&mut self) {
         self.viewpoint.show_files = !self.viewpoint.show_files;
         self.forget_last_keystroke();
         self.reflow();
     }
 
-    /// How many nodes sit in each state, as the engine counted them.
     #[must_use]
     pub const fn counts(&self) -> StateCounts {
         self.counts
     }
 
-    /// Whether there is nothing to draw and nothing to select.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
 
-    /// Where the selection sits in [`App::rows`].
-    ///
-    /// Meaningless when there are no rows, where it stays `0`; ask
-    /// [`App::selected_row`] instead if you need the row itself.
     #[must_use]
     pub const fn selected(&self) -> usize {
         self.selected
     }
 
-    /// The selected row, or `None` when there are no rows.
     #[must_use]
     pub fn selected_row(&self) -> Option<&Row> {
         self.rows.get(self.selected)
     }
 
-    /// Which row of [`App::rows`] is drawn at the top of the tree area: the
-    /// window onto the tree starts here and runs for [`App::viewport_height`]
-    /// rows.
-    ///
-    /// `0` for a tree that fits on screen, and for an app that has not been
-    /// drawn yet. The selection is always inside the window, so a renderer
-    /// that honours this offset draws the selected row in every frame.
     #[must_use]
     pub const fn scroll_offset(&self) -> usize {
         self.scroll_offset
     }
 
-    /// How many rows of tree fit on screen, as last set by
-    /// [`App::set_viewport_height`].
-    ///
-    /// `0` until something tells it otherwise, which is honest for an app
-    /// nobody has drawn.
     #[must_use]
     pub const fn viewport_height(&self) -> usize {
         self.viewpoint.viewport_height
     }
 
-    /// Tell the app how many rows of tree fit on screen, and bring the window
-    /// back into line with the selection.
-    ///
-    /// The height is a field set from outside rather than an argument to each
-    /// movement method, because the only place that knows it is the layout —
-    /// it is the height of the tree area, which is the terminal's height less
-    /// the header and the footer — and the movement methods are called from
-    /// the key handler, which lays nothing out. Passing it in per call would
-    /// make every caller fetch a number from the renderer first, and would let
-    /// two call sites disagree about the size of one window; keeping it here
-    /// means the app is asked once per frame and every rule reads the same
-    /// value.
-    ///
-    /// Takes the `u16` a terminal rectangle measures itself in, so the caller
-    /// hands over `area.height` without converting; everything downstream
-    /// counts rows in `usize` alongside the selection index.
-    ///
-    /// Safe to call every frame, including when the height has not changed:
-    /// it recomputes the offset from the same rule as any movement, so a
-    /// terminal that has just been made shorter scrolls the selection back
-    /// into view instead of leaving it below the fold.
     pub fn set_viewport_height(&mut self, height: u16) {
         self.viewpoint.viewport_height = usize::from(height);
         self.rescroll();
     }
 
-    /// Whether the terminal is reporting its mouse, as last set by
-    /// [`App::set_mouse_captured`].
-    ///
-    /// For the footer and nobody else: the keys line names the `m` key by what
-    /// the next press of it will do, which is the one thing on screen that
-    /// depends on this. Nothing in here gates on it — while capture is off the
-    /// pointer's events never arrive, so there is no second door to lock.
     #[must_use]
     pub const fn mouse_captured(&self) -> bool {
         self.status.mouse_captured
     }
 
-    /// Tell the app whether the terminal is reporting its mouse.
-    ///
-    /// A mirror rather than a switch: turning capture on and off is the
-    /// binary's, because it is a sequence written to a terminal this type cannot
-    /// see, and the app is told what was done so the footer can say it. Safe to
-    /// call every frame, and meant to be — told the same way the two window
-    /// heights are, from the one place that knows, so a copy of the app taken
-    /// before a pact and put back after one cannot leave the keys line naming a
-    /// state the terminal is no longer in.
     pub const fn set_mouse_captured(&mut self, captured: bool) {
         self.status.mouse_captured = captured;
     }
 
-    /// Which place the keys are driving: the tree column, the panel beside it,
-    /// or the composer under the panel.
-    ///
-    /// [`Focus::Tree`] for a freshly built app, which is the pane warlock opens
-    /// on. For the renderer, deciding which border to light and where to put the
-    /// cursor, for the event loop, deciding whether a letter is a command or a
-    /// character, and for the movement methods below, deciding whether they mean
-    /// anything.
     #[must_use]
     pub const fn focus(&self) -> Focus {
         self.viewpoint.focus
     }
 
-    /// Move the focus one place round the cycle: tree, panel, composer, tree.
-    ///
-    /// The whole of what the focus key does. It is a cycle rather than three
-    /// "focus the tree" / "focus the panel" / "focus the composer" calls because
-    /// there are three places and one key, and a cycle cannot be asked for a
-    /// fourth.
-    ///
-    /// The composer is skipped while it is not on screen — see
-    /// [`Panel::composer_showable`](crate::Panel::composer_showable) — so a reader with a document up tabs between
-    /// the tree and the panel and never lands on a field that is not there. One
-    /// skip is enough and there is no loop here: the composer is the only place
-    /// that can be unavailable, and the place after it is always the tree.
-    ///
-    /// Nothing else moves: the selection stays on the row it was on, the windows
-    /// stay where they were, the draft stays exactly as it was typed, and the
-    /// last keystroke's message stays up. Focus changes what the *next* key
-    /// means and says nothing itself, so there is nothing here for a message to
-    /// report and nothing that would make a message stale.
     pub const fn toggle_focus(&mut self) {
         let next = self.viewpoint.focus.next();
         self.viewpoint.focus = match next {
@@ -1947,41 +679,15 @@ impl App {
         };
     }
 
-    /// Put the focus on `focus`, wherever it was.
-    ///
-    /// What a pointer can ask for and a key cannot. The focus key knows only
-    /// "the next one", which is the whole of what one key over three places can
-    /// mean; a click names the pane it landed in, and naming the pane that
-    /// already has the focus has to leave it there rather than move off it —
-    /// which is exactly what assigning the value it already holds does.
-    ///
-    /// Asking for the composer while it is not on screen puts the focus on the
-    /// panel instead, which is the same rule [`App::toggle_focus`] keeps and the
-    /// same one [`App::show_document`] applies to focus that was already there:
-    /// nothing may point the keyboard at a field nobody can see.
-    ///
-    /// Nothing else moves, for the reason [`App::toggle_focus`] moves nothing
-    /// else: focus changes what the *next* movement means and says nothing
-    /// itself, so the selection, both windows, the draft and the last
-    /// keystroke's message are none of its business.
     pub const fn set_focus(&mut self, focus: Focus) {
         self.viewpoint.focus = focus;
         self.rescue_focus();
     }
 
-    /// Move the focus off the composer if the composer is not on screen.
-    ///
-    /// The one rescue, called by everything that can put the document card up
-    /// under a focused composer — [`App::show_document`], [`App::swap_card`] and
-    /// [`App::restore_from`] — and by [`App::set_focus`], which can be handed the
-    /// composer outright. Written once here rather than at each of those, so
-    /// "focus never sits on a hidden field" is one sentence in one place.
-    ///
-    /// It lands on the panel, not on the tree: the document that hid the
-    /// composer is drawn in the panel, so the panel is where the reader is
-    /// looking and the movement keys they press next are about the thing they
-    /// just asked for. Nothing else moves, and nothing is said — a rescue is not
-    /// a keystroke's answer.
+    // The composer can stop being showable under a focus already resting on it
+    // — a card swap, a document arriving, a view restored over a live panel — so
+    // every path that sets a focus or changes what the panel shows ends here
+    // rather than trusting the focus it was handed.
     const fn rescue_focus(&mut self) {
         match self.viewpoint.focus {
             Focus::Composer if !self.panel().composer_showable() => {
@@ -1991,13 +697,6 @@ impl App {
         }
     }
 
-    /// Move up one line: the selection while the tree has the focus, the
-    /// panel's window while the panel has it.
-    ///
-    /// It clamps rather than wrapping: an unnoticed wrap at the top of a long
-    /// tree throws the reader to the bottom of it, and the arrow key is for
-    /// stepping, not teleporting. A no-op when there are no rows, or — at the
-    /// panel — when the window is already at the top of the account.
     pub fn select_previous(&mut self) {
         self.movement(
             |app| app.selected.saturating_sub(1),
@@ -2005,12 +704,6 @@ impl App {
         );
     }
 
-    /// Move down one line: the selection at the tree, the panel's window at the
-    /// panel.
-    ///
-    /// Clamps for the same reason [`App::select_previous`] does. A no-op when
-    /// there are no rows, or when the panel's window is already at the end —
-    /// where, being at the end, it goes back to following the newest line.
     pub fn select_next(&mut self) {
         self.movement(
             |app| {
@@ -2021,18 +714,6 @@ impl App {
         );
     }
 
-    /// Move one screenful up: the selection at the tree, the panel's window at
-    /// the panel.
-    ///
-    /// A screenful is the focused pane's own height — [`App::viewport_height`]
-    /// or [`Panel::height`](crate::Panel::height) — so the row that was at the top of the window is
-    /// roughly the one at the bottom afterwards: paging by the window's own
-    /// height is what makes reading a long list a sequence of screens rather
-    /// than a slide.
-    ///
-    /// A pane that has never been drawn has no height to page by, and a key
-    /// that does nothing at all reads as a broken key, so the step never falls
-    /// below one line.
     pub fn select_page_up(&mut self) {
         self.movement(
             |app| app.selected.saturating_sub(app.page()),
@@ -2040,11 +721,6 @@ impl App {
         );
     }
 
-    /// Move one screenful down: the selection at the tree, the panel's window at
-    /// the panel.
-    ///
-    /// The mirror of [`App::select_page_up`], down to the one-line floor for a
-    /// pane that has not been drawn.
     pub fn select_page_down(&mut self) {
         self.movement(
             |app| {
@@ -2055,49 +731,20 @@ impl App {
         );
     }
 
-    /// Go to the beginning: the first row of the tree, or the first line of the
-    /// account.
-    ///
-    /// At the panel this is the start of the run, which for an account of any
-    /// length means the window is no longer following the newest line.
     pub fn select_first(&mut self) {
         self.movement(|_| 0, |_, _| 0);
     }
 
-    /// Go to the end: the last row of the tree, or the newest line of the
-    /// account.
-    ///
-    /// At the panel this is what returns a scrolled-back reader to live. The
-    /// window goes to the end of the account *and* starts following again, so
-    /// the lines that arrive afterwards go on moving it — which is the whole
-    /// difference between the end of the account and the end of the account as
-    /// it stood when the key was pressed. It is the movement key the pane
-    /// already has rather than a key of its own: "go to the end" and "follow the
-    /// end" are the same instruction to a list that is still being written.
     pub fn select_last(&mut self) {
+        // `usize::MAX` rather than the panel's last line: the panel clamps, and
+        // asking it for its length here would be a second place that knows how
+        // long a card is.
         self.movement(|app| app.rows.len().saturating_sub(1), |_, _| usize::MAX);
     }
 
-    /// Select the row at `index` in [`App::rows`], wherever the focus is.
-    ///
-    /// What a click on a tree row asks for. A key names a direction and lets
-    /// the app work out where that lands; a pointer names the row outright, and
-    /// this is the only way to say so. It goes through the same path an
-    /// ordinary movement key goes through all the same — the last keystroke's
-    /// message comes down and the window is brought back into line with the
-    /// selection — because a row reached by pointer is the same selection as a
-    /// row reached by pressing `j` at it, and everything downstream should be
-    /// unable to tell which one happened.
-    ///
-    /// An `index` no row stands for is refused outright rather than clamped to
-    /// the nearest one: what counts rows here is a layout answering a screen
-    /// point, and a point below the last row of a half-full tree is a point on
-    /// nothing at all — not a roundabout way of asking for the last row. So this
-    /// is a complete no-op there, message included, and on an app with no rows.
-    ///
-    /// The focus is neither read nor written. Which pane the keys are driving
-    /// says nothing about which row a pointer landed on, and a caller that wants
-    /// the click to move the focus as well says so with [`App::set_focus`].
+    // The pointer family, from here to `scroll_panel_up`. These never consult
+    // the focus — the pointer names the pane it is over — and so must not be
+    // routed through `movement`.
     pub fn select_row(&mut self, index: usize) {
         if index >= self.rows.len() {
             return;
@@ -2106,93 +753,29 @@ impl App {
         self.moved();
     }
 
-    /// Move the selection `rows` rows down the tree, wherever the focus is.
-    ///
-    /// Exactly where `rows` presses of [`App::select_next`] at a focused tree
-    /// would leave it, clamped at the last row, reached by arithmetic rather
-    /// than by a loop. The wheel's, and the reason it does not go through
-    /// `movement` the way the keys do: the pointer is over the tree column, so
-    /// the tree column is what moves, however the keys happen to be pointed at
-    /// the time.
-    ///
-    /// It scrolls nothing on its own. The tree pane has no window of its own to
-    /// scroll — the window is derived from the selection by `rescroll`, as it is
-    /// for every key — so a notch of the wheel here is three rows of selection
-    /// and the window comes along behind it.
-    ///
-    /// A no-op on an app with no rows, and clears the last keystroke's message
-    /// exactly as the key it stands in for does.
     pub fn select_next_by(&mut self, rows: usize) {
         let last = self.rows.len().saturating_sub(1);
         self.selected = self.selected.saturating_add(rows).min(last);
         self.moved();
     }
 
-    /// Move the selection `rows` rows up the tree, wherever the focus is.
-    ///
-    /// The mirror of [`App::select_next_by`], clamping at the first row: what
-    /// `rows` presses of [`App::select_previous`] at a focused tree would leave
-    /// behind.
     pub fn select_previous_by(&mut self, rows: usize) {
         self.selected = self.selected.saturating_sub(rows);
         self.moved();
     }
 
-    /// Scroll the panel's window `lines` lines towards the newest line of the
-    /// account, wherever the focus is.
-    ///
-    /// The panel's half of the same wheel, and focus-free for the same reason:
-    /// the pointer is over the panel, so it is the panel that scrolls. Where it
-    /// lands is `scroll_panel_to`'s to decide, which is what keeps one rule
-    /// about the end of the account rather than two — the window stops at the
-    /// end however many lines were asked for, and a window that has arrived at
-    /// the end is following the newest line again, with nothing here having to
-    /// mean "and go live" as well as what it already means.
-    ///
-    /// Says nothing and takes nothing down. Nothing in the tree column has
-    /// moved, and the line explaining the last keystroke belongs to the tree —
-    /// the same reading a movement key at the panel takes, see `movement`.
     pub fn scroll_panel_down(&mut self, lines: usize) {
         self.scroll_panel_to(self.panel().scroll_offset().saturating_add(lines));
     }
 
-    /// Scroll the panel's window `lines` lines back towards the start of the
-    /// account, wherever the focus is.
-    ///
-    /// The mirror of [`App::scroll_panel_down`], stopping at the first line. Any
-    /// movement off the end stops the panel following the newest line, so the
-    /// lines that arrive afterwards leave the window where the reader put it —
-    /// which is the whole of what scrolling back through a live log is for.
     pub fn scroll_panel_up(&mut self, lines: usize) {
         self.scroll_panel_to(self.panel().scroll_offset().saturating_sub(lines));
     }
 
-    /// Carry out a movement key: `tree` says where the selection lands, `panel`
-    /// says where the panel's window lands, and the focus decides which of them
-    /// is asked.
-    ///
-    /// Every movement method goes through here, so the rule that a movement key
-    /// drives whichever pane has the focus is written once rather than six times
-    /// — and so a seventh movement method cannot be added without it. Each method
-    /// hands over where to land as a function of the app, because that is the
-    /// only part of a movement that differs between them; the clamping is
-    /// theirs, since what "one row up" clamps to is not what "one screenful
-    /// down" clamps to. The panel's is handed the offset as well as the app,
-    /// because the panel has no selection to work from and its window is
-    /// computed rather than stored.
-    ///
-    /// A movement at the tree clears the last keystroke's message, as every key
-    /// that does something does. A movement at the panel does not: nothing in
-    /// the tree column has moved, the reader is looking somewhere else entirely,
-    /// and sweeping away the line explaining what the last key did would be the
-    /// panel answering for the tree.
-    ///
-    /// A movement at the composer does neither, because there is no third thing
-    /// to move: the draft has no window and its cursor is at its end by
-    /// construction, so `j` at the composer is the letter j and never reaches
-    /// here at all. If one does — a wheel, a chord, anything routed here while
-    /// the keyboard is the draft's — it is a no-op rather than a selection
-    /// moving under a reader who is typing.
+    // One key, two meanings: the caller supplies what the keystroke means to the
+    // tree and what it means to the panel, and the focus picks. Neither runs
+    // when the composer has the focus, which is how a movement key reaches the
+    // text field without also moving the selection behind it.
     fn movement(
         &mut self,
         tree: impl FnOnce(&Self) -> usize,
@@ -2208,25 +791,10 @@ impl App {
         }
     }
 
-    /// Park the showing card's window at `offset`, or as near to it as that card
-    /// allows, and say whether that is still following.
-    ///
-    /// The one place the follow flag is decided by a keystroke, and it is
-    /// decided by where the window ended up rather than by which key was
-    /// pressed: following the newest line *is* sitting at the end of the card,
-    /// so scrolling up breaks it and scrolling back down restores it, with no key
-    /// having to mean "and start following again" as well as what it already
-    /// means.
-    ///
-    /// The card that is not showing does not move. A key is about what is on
-    /// screen, and a reader scrolling a document has said nothing whatever about
-    /// where the account behind it should sit.
     fn scroll_panel_to(&mut self, offset: usize) {
         self.panel.scroll_to(offset);
     }
 
-    /// How many rows one page key moves the tree by: a windowful, or a single
-    /// row for an app whose window nobody has measured yet.
     const fn page(&self) -> usize {
         if self.viewpoint.viewport_height == 0 {
             1
@@ -2235,20 +803,10 @@ impl App {
         }
     }
 
-    /// How many lines one page key moves the panel by, on the same rule.
-    ///
-    /// The panel's, forwarded: see [`Panel::page`], where the whole of
-    /// this lives and is argued.
     const fn panel_page(&self) -> usize {
         self.panel.page()
     }
 
-    /// Bring the window back into line with wherever the selection now is.
-    ///
-    /// Every method that moves the selection ends here, which is what keeps
-    /// the two fields from ever describing different screens. The rule itself
-    /// lives in `scroll_offset_for`, where it is a pure function of four
-    /// numbers and can be tested without an `App` at all.
     fn rescroll(&mut self) {
         self.scroll_offset = scroll_offset_for(
             self.rows.len(),
@@ -2258,39 +816,6 @@ impl App {
         );
     }
 
-    /// Rebuild the drawn rows from the whole walk, the file and pacted-only
-    /// flags and the collapsed set, and put the selection and the window back
-    /// where they belong.
-    ///
-    /// Every change to what is drawn ends here, and it is the only place
-    /// `rows` is written: the drawn list is derived from `all_rows`,
-    /// `show_files`, `pacted_only` and `collapsed` and nothing else, so there is
-    /// no state to get out of step with them.
-    ///
-    /// The three filters are applied in that order and never as one pass. Files
-    /// go first, so that with the toggle off the two passes below it see the
-    /// nodes and, under each documented one, the single file row that is its own
-    /// `WARLOCK.md` — see [`node_rows`], which is the only pass that reads what a
-    /// row *is*. Both passes below reason by depth, and a surviving document row
-    /// is one they are right about without being told: it carries its directory's
-    /// state, so pactedness keeps it wherever it keeps that directory for being
-    /// pacted and never lets it rescue an ancestor; and it sits one level under
-    /// its directory, so collapsing takes it away with everything else of that
-    /// directory's. Every other file row is gone, and would have been a row those
-    /// passes had to reason around for no reason.
-    ///
-    /// Then pactedness: what is pacted, and what is on the way to something
-    /// pacted, is read off the whole walk, so a directory that is collapsed over
-    /// the only pacted node below it still earns its row; deciding pactedness
-    /// from the already-collapsed list would make collapsing a directory delete
-    /// it from a narrowed view, which is the one thing collapsing must never do.
-    ///
-    /// The selection is carried by path rather than by index, because the index
-    /// it sat at meant a row that may not exist any more. A selection whose
-    /// node is still drawn stays exactly where it is, however many rows above
-    /// it have gone; one whose node has just been hidden — collapsed over or
-    /// filtered away, it makes no difference here — lands on the nearest
-    /// ancestor still drawn, and on the first row when not even that survives.
     fn reflow(&mut self) {
         let selected = self.rows.get(self.selected).map(|row| row.path.clone());
         let kept: Cow<'_, [Row]> = if self.viewpoint.show_files {
@@ -2310,51 +835,16 @@ impl App {
         self.rescroll();
     }
 
-    /// The selection has just moved: forget last keystroke's message and bring
-    /// the window back into line with it.
-    ///
-    /// Every movement method ends here rather than in `rescroll` alone, so no
-    /// caller has to remember to clear a message by hand — a message belongs to
-    /// the keystroke that produced it, and the next one has moved on. Clearing
-    /// lives here and not in `rescroll` because `App::set_viewport_height`
-    /// rescrolls on every frame, including the frame that is about to draw the
-    /// message.
     fn moved(&mut self) {
         self.forget_last_keystroke();
         self.rescroll();
     }
 
-    /// A keystroke has just done something: forget what the one before it left
-    /// on the footer, whether that was a message or a refusal.
-    ///
-    /// The two go together because they are one thing said two ways — what the
-    /// app has to say about the key just pressed — and a reader who has moved on
-    /// to the next key is owed neither. Which is why the refusal recorded by
-    /// [`App::set_pact_refused`] is taken down here rather than by the next
-    /// progress event: the run advancing is not a keystroke, and a tick arriving
-    /// a fraction of a second after the press would wipe the answer before it
-    /// could be read.
     fn forget_last_keystroke(&mut self) {
         self.status.message = None;
         self.status.pact_refused = false;
     }
 
-    /// How to name `path` in a message: relative to the root of the tree on
-    /// screen, in the engine's own forward-slash manifest spelling.
-    ///
-    /// A message naming a directory by its absolute path spends most of a
-    /// footer line on the part of it the reader already knows, and truncation
-    /// then eats the part they do not. The root row's path is the root of the
-    /// tree by construction, so relative spelling is available without keeping
-    /// a second copy of it. A path that cannot be described relative to that
-    /// root — including the root itself, which is `"."` — is printed as it
-    /// stands: a label that says something odd beats a label that says nothing.
-    ///
-    /// Public because a refusal worded outside [`App`] still has to name its row
-    /// the way every refusal worded inside it does. The scope boundary is the
-    /// one such refusal: sigils live on [`Chrome`], which is deliberately not a
-    /// field here, so the app cannot word that message itself and must at least
-    /// lend its spelling of the path.
     #[must_use]
     pub fn label_for(&self, path: &Path) -> String {
         match self
@@ -2367,28 +857,6 @@ impl App {
         }
     }
 
-    /// Hide the selected node's descendants, or bring them back.
-    ///
-    /// The rows come back exactly as they were — same nodes, same order, same
-    /// depths — because they were never thrown away: expanding re-filters the
-    /// walk this app was built from rather than reconstructing anything.
-    ///
-    /// A no-op, and deliberately a *complete* no-op, on a row with nothing under
-    /// it in this view — see [`App::can_collapse`], which is the question, and
-    /// not the tree's child count, which is not. Nothing to hide means nothing
-    /// collapses, nothing is recorded, and last keystroke's message is left on
-    /// screen rather than swept away by a key that did nothing. A no-op on an
-    /// app with no rows too.
-    ///
-    /// Collapsing a directory the selection sits inside moves the selection
-    /// onto that directory — see `reflow` — because a selection on a row that
-    /// is not drawn is a selection the next keystroke moves invisibly. The
-    /// window follows, so the selected row is on screen when the frame is next
-    /// drawn whichever way the row count went.
-    ///
-    /// Collapsing a node under a *collapsed* node is allowed and draws nothing:
-    /// what is recorded is the state of that node, and it takes effect when the
-    /// node is on screen to take effect on.
     pub fn toggle_collapsed(&mut self) {
         if !self.can_collapse(self.selected) {
             return;
@@ -2405,54 +873,6 @@ impl App {
         self.reflow();
     }
 
-    /// Bring the selected directory and everything below it under Warlock's
-    /// management, or take the lot back out again, and say what was asked for.
-    ///
-    /// A pact covers a subtree, so both directions do: the selected directory's
-    /// row, every row below it and every file row inside any of them move
-    /// together, through [`App::set_subtree_state`].
-    ///
-    /// An unpacted subtree becomes [`NodeState::PactedStale`], never fresh: a
-    /// pact with no granted hash was never judged, and unjudged *is* stale. The
-    /// caller that runs the pact and lands the grants says so afterwards, with
-    /// [`App::set_subtree_state`] again. A pacted subtree, stale or fresh,
-    /// becomes [`NodeState::Unpacted`] — dropping a pact drops whatever was
-    /// granted with it.
-    ///
-    /// A directory with no `WARLOCK.md` is pacted like any other: writing that
-    /// document is what the pact operation *does*, so having none yet is the
-    /// ordinary case rather than a reason to refuse. Two rows are refused, and
-    /// they are the only ones that are:
-    ///
-    /// - a file row, because a pact is made with a module, and a file is part of
-    ///   one rather than being one;
-    /// - a row the repository's `.warlockignore` keeps out, because the pact
-    ///   walks would find nothing there to describe — the engine excludes such a
-    ///   directory from `pactable_directories` whether or not this refuses — so a
-    ///   press that went through would paint a subtree that no run would ever
-    ///   make good on. The rules are the repository author's, so the refusal
-    ///   names the file rather than Warlock's own judgement.
-    ///
-    /// So `None` comes back for an app with no rows, for a selected file and for
-    /// excluded content, and nothing moves in any of the three cases.
-    ///
-    /// Being excluded is read off the row (see [`Row::is_ignored`]), which read
-    /// it off the node the load put it on. Nothing here opens anything: this
-    /// method is pure, and a filesystem call in it would be a filesystem under
-    /// every test of it.
-    ///
-    /// A refusal sets [`App::message`] to say so, and the return value stays a
-    /// bare `Option`: the wording is display state, it belongs here with the
-    /// rest of the display state, and a caller that had to translate an outcome
-    /// into a sentence would be a second place deciding what a refused row
-    /// means.
-    /// Un-pacting sets a message of its own — the documents stay on disk, and a
-    /// subtree that has just gone grey should say that the writing survived it.
-    /// Pacting clears the message instead: whatever the last keystroke said,
-    /// this one did something.
-    ///
-    /// Writing documents and saving the manifest are the caller's job. This is
-    /// app state and touches no file.
     pub fn toggle_pact(&mut self) -> Option<PactToggle> {
         match self.pact_intent() {
             PactIntent::Toggles(toggle) => {
@@ -2467,27 +887,6 @@ impl App {
         }
     }
 
-    /// What the pact key would mean on the selected row, asked without pressing
-    /// it.
-    ///
-    /// [`App::toggle_pact`] is this and [`App::apply_toggle`] in one call, and
-    /// the reason the two are separable is that `p` is one key with two
-    /// meanings — pact a subtree, or drop the pact on one — and the second is
-    /// the direction a scope boundary is lost in. A caller that has to decline
-    /// the press before anything moves cannot ask a method that paints a whole
-    /// subtree what the press would have meant, so it would work the direction
-    /// out from the row for itself, and `!row.state.is_pacted()` would be an
-    /// expression two modules had to keep in step. It is here instead, once.
-    ///
-    /// Nothing is changed, said or painted: this takes `&self`, so a caller
-    /// that asks and then declines leaves the app exactly as it found it, and
-    /// the sentence a refusal would have put on the message line comes back as
-    /// a value rather than being written.
-    ///
-    /// The rules are the row's own: a file is not a module, and a directory
-    /// `.warlockignore` excludes is not warlock's to manage. A file is answered
-    /// as a file first — that is what the row *is*, and it is the answer whether
-    /// or not the exclusion would also have kept it out.
     #[must_use]
     pub fn pact_intent(&self) -> PactIntent {
         let Some(row) = self.rows.get(self.selected) else {
@@ -2506,16 +905,6 @@ impl App {
         })
     }
 
-    /// Which directory the pact key would reach and which way it would go,
-    /// before this repository's own rules are applied to the press.
-    ///
-    /// [`App::pact_intent`] without the refusals, and the difference is one
-    /// row: a directory `.warlockignore` excludes answers here like any other.
-    /// That is deliberate rather than an oversight — whether a press would lose
-    /// a scope boundary is settled before what the repository's own rules would
-    /// have made of it, so the boundary question has to be able to ask about a
-    /// row the press is going to be refused on anyway. A file row answers
-    /// `None`: it is no module, so there is no subtree for a press to reach.
     #[must_use]
     pub fn pact_reach(&self) -> Option<PactToggle> {
         let row = self.rows.get(self.selected)?;
@@ -2525,14 +914,6 @@ impl App {
         })
     }
 
-    /// Carry out the press [`App::pact_intent`] described: repaint the subtree
-    /// and word what was left on disk.
-    ///
-    /// The other half of [`App::toggle_pact`], and the half that changes
-    /// something. Takes the toggle rather than reading the selection again, so
-    /// the press that is carried out is provably the press that was asked
-    /// about — a selection moved between the question and the answer cannot
-    /// repaint a different subtree than the one a caller was told about.
     pub fn apply_toggle(&mut self, toggle: &PactToggle) {
         self.set_subtree_state(
             &toggle.path,
@@ -2546,42 +927,6 @@ impl App {
             (!toggle.pacted).then(|| left_on_disk_message(&self.label_for(&toggle.path)));
     }
 
-    /// Ask for the selected directory's stale parts to be described again, and
-    /// say why not when there is nothing to ask for.
-    ///
-    /// The refresh key's half of what [`App::toggle_pact`] is for the pact key:
-    /// it decides what the press means on the row the selection is on, words any
-    /// refusal, and hands the directory back for whoever actually runs the pass.
-    /// The path that comes back is the root of the subtree to refresh — the run
-    /// covers it and everything below it, exactly as a pact does — and `None`
-    /// means nothing should start.
-    ///
-    /// Three rows are refused, and each says so through [`App::message`]:
-    ///
-    /// - a file row, in [`App::toggle_pact`]'s own words, because the reason is
-    ///   the same one — a file is part of a module rather than being one, so
-    ///   there is no subtree here to describe;
-    /// - a directory that is pacted and *fresh*, because a refresh describes the
-    ///   stale directories of a subtree and this one has none, so the honest
-    ///   answer is that the work is already done;
-    /// - a directory that is not pacted, which points at the pact key: a refresh
-    ///   re-describes an existing pact and cannot make one, so `p` is the key
-    ///   that would help. A directory a `.warlockignore` keeps out reads as
-    ///   unpacted here like any other, and is refused for that reason without
-    ///   this having to know which reason made it so.
-    ///
-    /// A refusal moves nothing else whatever: no subtree is repainted, no tally
-    /// moves, no account is started and no run is touched. A press that goes
-    /// through clears the message instead — whatever the last keystroke said,
-    /// this one did something — and the run's own line takes the footer from
-    /// there.
-    ///
-    /// Whether a run is already in flight is not asked here. That refusal is
-    /// worded on the progress line rather than in the message (see
-    /// [`App::set_pact_refused`]), so it belongs to the caller that knows about
-    /// the worker, exactly as it does for the pact key. Nothing here spawns
-    /// anything, reads a file or starts an account either: this is app state,
-    /// and the pass is somebody else's.
     pub fn refresh(&mut self) -> Option<PathBuf> {
         let row = self.rows.get(self.selected)?;
         let path = row.path.clone();
@@ -2607,45 +952,6 @@ impl App {
         }
     }
 
-    /// Say which directory the scope key would set a scope on, and say why not
-    /// when there is none.
-    ///
-    /// The scope key's half of what [`App::toggle_pact`] is for the pact key and
-    /// [`App::refresh`] is for the refresh key: it decides what the press means
-    /// on the row the selection is on, words any refusal, and hands the
-    /// directory back for whoever actually opens the prompt and writes the
-    /// manifest. `None` means nothing should open.
-    ///
-    /// A scope is a fact recorded against a pact — an entry in
-    /// `.warlock/pacts.toml` — so the rows that have one to set are exactly the
-    /// pacted ones, fresh or stale alike: whether a pact's grants still hold has
-    /// nothing to do with which team the module belongs to. Two rows are
-    /// refused, and each says so through [`App::message`]:
-    ///
-    /// - a file row, in [`App::toggle_pact`]'s own words, because the reason is
-    ///   the same one — a file is part of a module rather than being one, and it
-    ///   is the module that carries the pact a scope hangs off;
-    /// - a directory that is not pacted, which points at the pact key: there is
-    ///   no entry to record a scope against until one exists, so `p` is the key
-    ///   that would help. A directory a `.warlockignore` keeps out reads as
-    ///   unpacted here like any other, and is refused for that reason without
-    ///   this having to know which reason made it so.
-    ///
-    /// A press that goes through changes *nothing whatever*, and that includes
-    /// the message line: unlike the other two keys this one does not clear it,
-    /// because opening the prompt and dismissing it with Esc must leave the app
-    /// exactly as it was found — the reader who opened a window and closed it
-    /// again did not answer the keystroke that put the last line up. Nothing is
-    /// repainted, no tally moves, no selection moves and no run is touched
-    /// either.
-    ///
-    /// Whether a run is already in flight is not asked here, exactly as it is
-    /// not asked by the other two keys: that refusal is worded on the progress
-    /// line rather than in the message (see [`App::set_pact_refused`]), so it
-    /// belongs to the caller that knows about the worker. Nothing here reads the
-    /// manifest either — what scope the directory carries now is read from the
-    /// manifest by the caller that opens the prompt, never off a [`Row`] — and
-    /// nothing here opens, spawns or writes anything: this is app state.
     pub fn scope_target(&mut self) -> Option<PathBuf> {
         let row = self.rows.get(self.selected)?;
         let path = row.path.clone();
@@ -2666,39 +972,6 @@ impl App {
         }
     }
 
-    /// Say which file the view key would read, and say why not when there is
-    /// none.
-    ///
-    /// [`App::scope_target`]'s shape for the other key: it decides what the press
-    /// means on the row the selection is on, words any refusal, and hands the
-    /// file back for whoever actually opens it and puts its lines in the panel
-    /// with [`App::show_document`]. `None` means nothing should be read.
-    ///
-    /// A file row is the yes, and it is the only one. Warlock reads a file, and
-    /// the design doc's rule that a file has no state of its own is not bent
-    /// here: a `WARLOCK.md` is an ordinary file row, so the document of a pacted
-    /// directory is read by pressing the key on the document's own row, in
-    /// whatever state or colour that row is drawn.
-    ///
-    /// A directory is the no, and it is refused in the terms the row it is on
-    /// makes available, each said through [`App::message`]:
-    ///
-    /// - a directory that has a `WARLOCK.md` is one keystroke away from what the
-    ///   reader wanted, so the refusal names that document — the row beneath the
-    ///   directory — rather than only saying no;
-    /// - a directory with no `WARLOCK.md` has nothing to read at all, so the
-    ///   refusal names `p`, exactly as [`unpacted_scope_message`] does: a pact is
-    ///   what would write the document this key would then read.
-    ///
-    /// A press that goes through changes *nothing whatever*, [`App::scope_target`]
-    /// fashion, and that includes the message line and the panel: the reading has
-    /// not happened yet, and a panel cleared here would blank on a read that then
-    /// failed. Nothing is repainted, no tally moves, no selection moves and no run
-    /// is touched.
-    ///
-    /// Nothing here opens, reads or writes anything: this is app state, and the
-    /// path handed back is the row's own — the only filesystem fact in the answer
-    /// is the one the walk already put on the row.
     pub fn view_target(&mut self) -> Option<PathBuf> {
         let row = self.rows.get(self.selected)?;
         let path = row.path.clone();
@@ -2714,45 +987,6 @@ impl App {
         None
     }
 
-    /// Put the directory at `path`, every directory below it and every file
-    /// inside any of them into `state`.
-    ///
-    /// This is how a whole subtree changes colour at once, and it is the only
-    /// way any state moves after the tree was loaded: [`App::toggle_pact`] goes
-    /// through it, and so does a caller with news about how a pact actually
-    /// went — a subtree pacted and granted is [`NodeState::PactedFresh`], and
-    /// only whoever ran it knows that.
-    ///
-    /// Both lists move together: the drawn rows, and the whole walk behind them
-    /// that the next collapse or filter rebuilds those rows from. Writing only
-    /// the drawn ones would make the new colour last exactly until something
-    /// was collapsed and then quietly revert.
-    ///
-    /// The file rows move with the directories holding them. A file row carries
-    /// a copy of its directory's state so that it can be drawn in its module's
-    /// colour, and a copy nobody updates is a file drawn in the colour its
-    /// module used to be.
-    ///
-    /// Content the repository's `.warlockignore` keeps out is the one thing a
-    /// pacted `state` does not reach — see [`moves_with_subtree`] for why the
-    /// two directions differ. It is why this method takes a whole subtree and
-    /// still cannot paint a pact onto a directory no pact will ever cover.
-    ///
-    /// The tally moves too, one node out of each old state's field and into
-    /// `state`, so [`App::counts`] keeps describing [`App::rows`] and
-    /// [`StateCounts::total`] does not budge. Nothing recounts the rows: the
-    /// counts are the engine's numbers, kept current rather than re-derived.
-    /// Files are counted nowhere, and so move nothing.
-    ///
-    /// A `path` no row stands for changes nothing at all — a subtree that is
-    /// not on screen has no colour to move — and neither does a `path` whose
-    /// rows are in `state` already.
-    ///
-    /// Says nothing: this is not a keystroke, so it neither sets a message nor
-    /// clears the one the last keystroke left. It does not re-filter the drawn
-    /// rows either, which is what lets a subtree that has just been un-pacted
-    /// stay on screen under the pacted-only filter until the next keystroke
-    /// rebuilds the view.
     pub fn set_subtree_state(&mut self, path: impl AsRef<Path>, state: NodeState) {
         let path = path.as_ref();
 
@@ -2779,53 +1013,6 @@ impl App {
         paint_subtree(&mut self.rows, path, state);
     }
 
-    /// Splice a row for the file at `path` in under the directory holding it,
-    /// where a fresh load would have put it.
-    ///
-    /// A pact writes a `WARLOCK.md` beside each directory as its pass delivers,
-    /// and the row for that document has to appear then rather than when the run
-    /// ends. The tree the app was built from is not held and the tree on disk is
-    /// mid-run — the manifest is still the pre-pact one — so the row cannot be
-    /// re-derived: re-reading would repaint every row from stale state and wipe
-    /// the colours the run has already earned. So the one row that is news is
-    /// written in, and nothing else moves.
-    ///
-    /// It is written in at the place [`App::from_tree`] would have flattened it
-    /// to: among that directory's file rows in path order — the order the
-    /// engine's loader sorts a node's listing into — at one depth deeper than
-    /// the directory, and so before the rows for any of its subdirectories. A
-    /// mid-run tree and the reload that follows the run therefore agree.
-    ///
-    /// The row it splices is the directory's *document*, and is marked as one
-    /// ([`Row::is_document`]). That is the contract rather than a guess: the one
-    /// caller is the pact observer, which passes the path the pass has just
-    /// written on the engine's word that it wrote it, so there is nothing to
-    /// compare and no `WARLOCK.md` to spell here. Nor could it be worked out from
-    /// the holder row, whose [`Row::document`] is the *pre-run* tree's and is
-    /// `None` for exactly the directory this method exists for: the one the run
-    /// has this moment documented for the first time. So a caller that hands over
-    /// some other file is not listing a file, it is saying that file is the
-    /// document now, and gets a document row.
-    ///
-    /// The row carries the directory's state *now*, and its `.warlockignore`
-    /// flag, for the reason [`Row::file`] gives: a file is drawn in its module's
-    /// colour, and the module's colour is whatever the run has just made it.
-    ///
-    /// Both lists move, the way [`App::set_subtree_state`] moves both: into the
-    /// whole walk, so the row survives the next collapse or filter rebuild
-    /// rather than vanishing, and into the drawn rows when the view is one this
-    /// file is drawn in. It re-filters nothing, again like `set_subtree_state` —
-    /// the drawn half is decided by asking what this view already shows, not by
-    /// rebuilding it.
-    ///
-    /// Nothing else moves at all. A `path` already in the walk is inserted
-    /// nowhere, so a re-pact of an already documented directory leaves exactly
-    /// one row for it; a `path` whose directory has no row is not news about
-    /// anything on screen and changes nothing. [`App::counts`] never moves,
-    /// because files are counted nowhere. The selection keeps naming the row it
-    /// named, and the window keeps its rows, both of which mean an index that
-    /// shifts when a row lands above it. And no message is set or cleared: this
-    /// is not a keystroke.
     pub fn insert_file_row(&mut self, path: impl AsRef<Path>) {
         let path = path.as_ref();
         // One row per path, so a second delivery for a directory already
@@ -2902,22 +1089,6 @@ impl App {
     }
 }
 
-/// Where the row for the file at `path` goes in `rows`, given that the
-/// directory holding it has the row at `directory` and that its file rows sit at
-/// `depth`.
-///
-/// The engine's loader sorts each node's listing (`directory.files.sort()`), and
-/// [`App::from_tree`] flattens that listing straight after the directory's own
-/// row, so the file rows of a directory are the run of rows following it that
-/// are files at `depth`, in path order. The answer is the first of them that
-/// sorts after `path`, or the end of that run — which is where the rows for the
-/// directory's subdirectories begin, and so is before all of them.
-///
-/// Paths are compared as [`Path`] compares them, component by component, which
-/// is the ordering `sort` on a [`Vec<PathBuf>`] uses: one ordering, so a spliced
-/// row and a reloaded one land in the same place.
-///
-/// Pure, and deliberately free of [`App`]: rows and a path in, an index out.
 fn file_row_position(rows: &[Row], directory: usize, depth: usize, path: &Path) -> usize {
     let mut at = directory + 1;
     for row in rows.iter().skip(directory + 1) {
@@ -2929,46 +1100,6 @@ fn file_row_position(rows: &[Row], directory: usize, depth: usize, path: &Path) 
     at
 }
 
-/// The view `view` is showing, re-seated on `tree`: the rows and the tally of
-/// the tree just handed over, under the selection, the collapsed set, the
-/// filters, the window and the footer the reader already had.
-///
-/// An [`App`] reads a tree exactly once, in [`App::from_tree`], and answers
-/// every later question from the rows that produced — so a tree that has
-/// changed since then can reach the screen only as a *new* app. Building that
-/// new app is the easy half. The half that matters is this one: a front end
-/// that built it and left it as [`App::from_tree`] made it would answer every
-/// re-read by expanding everything the reader had collapsed, dropping their
-/// filters, throwing the selection to the first row and scrolling to the top.
-/// That is worse than never re-reading at all, because it happens exactly when
-/// the reader was watching something.
-///
-/// So the view is carried and only the tree is replaced. What comes from
-/// `tree`: every row, every state on one, and [`App::counts`]. What comes from
-/// `view`: which node is selected, which directories are collapsed, the
-/// pacted-only and file flags, the scroll offset and the viewport height, the
-/// header, the focus, the message, the pact in flight if there is one, and both
-/// of the panel's cards with the window onto each and which of them is showing.
-///
-/// The account has to be carried for the plainest of reasons: the tree is read
-/// again *because* a pact has just finished, so a re-seat that dropped it would
-/// wipe the record of the run at the exact moment the run was over and the
-/// reader turned to read it.
-///
-/// The selection and the collapsed set are carried by *path*, never by row
-/// index: an index names whichever node now sits at that position, which after
-/// a re-read is any node at all. A selected path the new tree no longer has
-/// falls back to its nearest surviving ancestor — the deepest part of the way
-/// to it that is still drawn, which is where the node the reader was looking at
-/// went — and only falls to the first row when not even an ancestor of it
-/// survived. A collapsed path the new tree has no node for is carried
-/// untouched and hides nothing, exactly as [`App::with_collapsed`] documents:
-/// a directory that goes and comes back should come back as the reader left it.
-///
-/// Nothing here knows why the tree was re-read. It is a function of two values
-/// — a view and a tree — so it runs no pact, waits on no thread, spawns
-/// nothing, reads no file and triggers no re-read of its own: whoever loaded
-/// `tree` decided when to, and this only puts the reader back on top of it.
 #[must_use]
 pub fn reseat_on(view: &App, tree: &Tree) -> App {
     // Taken before anything is rebuilt, because it is the one fact about the
@@ -3034,38 +1165,6 @@ pub fn reseat_on(view: &App, tree: &Tree) -> App {
     reseated
 }
 
-/// The engine's whole walk of `tree`, flattened into the row list an [`App`]
-/// keeps as `all_rows`.
-///
-/// Pulled out of [`App::from_tree`] so that [`reseat_on`] has the same thing to
-/// build from without going through a whole [`App`] it would then have to take
-/// apart again: the tree-derived half of a re-seat is this list and the tally
-/// beside it, and nothing else.
-///
-/// Each row is told whether a `.warlockignore` keeps its content out, from the
-/// node's own flag, and the file rows are told the same as the directory
-/// listing them — the rules exclude a directory's content along with it, so a
-/// file row saying otherwise would be a second answer to one question. It
-/// changes no colour and hides no row: an excluded directory keeps its row and
-/// its gray, and the flag is there for [`App::toggle_pact`] to refuse a press on
-/// it without asking the filesystem anything.
-///
-/// Each row is told the scope written on its own node the same way, from the
-/// node's own field — never an ancestor's, and never by asking
-/// [`warlock_engine::scope_covering`], because the label in the tree marks where
-/// a boundary starts. The file rows are told nothing: a file has no pact entry
-/// to write a scope on, so unlike the state and the exclusion flag there is
-/// nothing of the directory's to copy down. See [`Row::scope`].
-///
-/// Each file row is also told whether it is the holding directory's own
-/// document, by comparing its whole path against that node's
-/// [`warlock_engine::Node::document`] — whole paths, not file names, and the
-/// node's own document rather than any name the walk happened to list. A node
-/// has at most one document, so at most one file row under a directory is told
-/// yes, and a directory whose load found no document has none among its files
-/// however they are spelled. That field is presence-on-disk, so a `WARLOCK.md` an
-/// un-pact left behind still compares equal and still gives a document row: the
-/// tree says what is there. See [`Row::is_document`].
 fn walk_of(tree: &Tree) -> Vec<Row> {
     let mut rows = Vec::new();
     for (node, depth) in tree.walk() {
@@ -3084,31 +1183,6 @@ fn walk_of(tree: &Tree) -> Vec<Row> {
     rows
 }
 
-/// Which of `all` the view keeps when the file toggle is off: every node, and
-/// under each documented one the single file row that is its own `WARLOCK.md`.
-///
-/// Every other file row goes. The document stays because it is the one file
-/// Warlock wrote and the whole point of the tool, and a directory that showed no
-/// sign of it would leave the reader nothing to land on and read; it is drawn as
-/// the plain file row `f` already produces for it, with no colour, shade, marker
-/// or label of its own. A node has at most one document, so a directory gains at
-/// most one row, and an undocumented one gains none.
-///
-/// The one filter here that is about what a row *is* rather than about where it
-/// sits, which is why it runs before the other two. What they are owed is not
-/// quite a list of nodes any more, so it is worth saying why neither minds the
-/// document rows that survive. A document row carries its directory's state (see
-/// [`walk_of`]), so under [`pacted_rows`] it is kept exactly where its directory
-/// is kept for being pacted, and it can never rescue an ancestor that its own
-/// directory would not have rescued — while a leftover document under a gray
-/// directory kept only as the way in to something pacted is dropped, like any
-/// other unpacted row that is nobody's way in. And it sits directly under its
-/// directory, one level deeper, so under [`drawn_rows`] it is a descendant of
-/// that directory and of nothing else: collapsing the directory takes it away
-/// with the rest, and it makes a documented directory with no children hold
-/// something, which is exactly what [`App::can_collapse`] should say of it.
-///
-/// Pure, and deliberately free of [`App`]: rows in, rows out.
 fn node_rows(all: &[Row]) -> Vec<Row> {
     all.iter()
         .filter(|row| !row.is_file() || row.is_document())
@@ -3116,15 +1190,6 @@ fn node_rows(all: &[Row]) -> Vec<Row> {
         .collect()
 }
 
-/// Put every row inside the subtree at `path` into `state`: the directory
-/// itself, every directory below it, and every file in any of them.
-///
-/// A pact covers a subtree, so a colour does too. The directories and their
-/// files move together because they are one fact drawn more than once: a file
-/// takes its module's colour, so the state on a file row is the state of the
-/// directory holding it and has no other source to be refreshed from.
-///
-/// Pure, and deliberately free of [`App`]: rows in, rows painted.
 fn paint_subtree(rows: &mut [Row], path: &Path, state: NodeState) {
     for row in rows {
         if moves_with_subtree(row, path, state) {
@@ -3133,84 +1198,14 @@ fn paint_subtree(rows: &mut [Row], path: &Path, state: NodeState) {
     }
 }
 
-/// Whether `row` moves when the subtree at `root` is put into `state`.
-///
-/// Being in the subtree is most of the answer, and for every ordinary row it is
-/// the whole of it. The exception is the row the repository's `.warlockignore`
-/// keeps out, which moves in one direction only, because the two engine walks
-/// underneath the two directions do not agree about it:
-///
-/// - **Into a pacted state, it does not move.** `pactable_directories` reads
-///   `.warlockignore` and leaves excluded content out of the walk, so no pass
-///   runs there, no `WARLOCK.md` is written and no entry is recorded. Painting
-///   such a row yellow — or, when the grants land, green — would promise a pact
-///   that the run has already decided not to make, and the promise would stand
-///   until the reload at the end quietly took it back. This is the same refusal
-///   [`App::toggle_pact`] makes when the excluded row is the one *selected*; it
-///   belongs here as well, because a subtree paints rows the selection never
-///   touched.
-/// - **Into [`NodeState::Unpacted`], it moves like anything else.**
-///   `unpact_subtree` is manifest arithmetic and drops every entry at or below
-///   the directory without asking what the ignore rules say, so an excluded
-///   directory carrying a pact from before it was excluded loses it with the
-///   rest. Skipping it here would leave that row coloured for a pact that is no
-///   longer recorded.
-///
-/// So the rule is not "excluded rows never move" but "excluded rows are never
-/// pacted", which is the same thing the rest of Warlock says: a directory the
-/// repository keeps out can always stop being managed, and can never start.
-///
-/// File rows are included in this. A file row carries the ignore flag of the
-/// directory holding it (see [`Row::file`] and [`App::from_tree`]), so a file
-/// inside excluded content is held back exactly as its directory is, and is not
-/// left drawn in a colour its module never took.
 fn moves_with_subtree(row: &Row, root: &Path, state: NodeState) -> bool {
     in_subtree(&row.path, root) && !(state.is_pacted() && row.is_ignored())
 }
 
-/// Whether `path` is the subtree rooted at `root`, or something inside it —
-/// a directory below it, or a file in any of them.
-///
-/// Ancestry is a path prefix taken component by component, the way
-/// [`Path::starts_with`] takes it and the way the engine's paths nest, so
-/// `crates-old` is no part of the subtree at `crates` however much of the name
-/// it shares.
 fn in_subtree(path: &Path, root: &Path) -> bool {
     path.starts_with(root)
 }
 
-/// Which of `all` are drawn, given that every node in `collapsed` is
-/// collapsed: the same rows in the same order at the same depths, less the
-/// descendants of any collapsed node.
-///
-/// The filtering is done on depth rather than on paths, which is what makes it
-/// one pass. A walk is depth first and parents come before children, so a
-/// node's descendants are exactly the rows following it that are deeper than
-/// it, up to the first row that is not — no path comparisons, and no
-/// assumptions about how a child's path is spelled relative to its parent's.
-///
-/// A collapsed node inside a collapsed node is skipped like any other
-/// descendant, so its own state is remembered and does nothing until its
-/// ancestor opens: expanding a directory you cannot see is allowed and draws
-/// nothing, which is the only reading that lets the collapsed set be carried
-/// whole across a reload.
-///
-/// A collapsed node with nothing under it hides nothing. It cannot arrive
-/// through [`App::toggle_collapsed`], which refuses such a node, but it can
-/// arrive through [`App::with_collapsed`] carrying a set from a tree whose shape
-/// has since changed, or through the file toggle taking away the only rows a
-/// directory had.
-///
-/// The second value out is the other half of the same reading: the paths of the
-/// rows that hold something *here*, collapsed or not. `all` is this view with
-/// nothing collapsed, so a row holds something exactly when the row after it is
-/// deeper than it — the same depth comparison the skipping runs on, asked one
-/// row ahead instead of one row behind. It is worked out in this pass because
-/// this is the only point where it can be: before it the answer is the tree's
-/// rather than the view's, and after it a collapsed row's descendants are gone
-/// and nothing is left to count.
-///
-/// Pure, and deliberately free of [`App`]: rows in, rows and paths out.
 fn drawn_rows(all: &[Row], collapsed: &BTreeSet<PathBuf>) -> (Vec<Row>, BTreeSet<PathBuf>) {
     let mut drawn = Vec::with_capacity(all.len());
     let mut collapsible = BTreeSet::new();
@@ -3234,31 +1229,6 @@ fn drawn_rows(all: &[Row], collapsed: &BTreeSet<PathBuf>) -> (Vec<Row>, BTreeSet
     (drawn, collapsible)
 }
 
-/// Which of `all` the pacted-only view keeps: every pacted node, plus every
-/// ancestor needed to reach one, in the order and at the depths they came in.
-///
-/// An unpacted node survives only as somebody's way in. That makes the rule a
-/// question about what comes *after* a row rather than before it, which is why
-/// this pass runs backwards: a walk is depth first, so the ancestors of a row
-/// are the rows before it that are shallower than it, and going in reverse means
-/// each row is met with the requirement its descendants have already left
-/// behind. `needed` is that requirement — the depth of the last row kept, which
-/// is still short of an ancestor — so a row is kept when it is pacted itself or
-/// when it is shallower than that, and every row kept replaces the requirement
-/// with its own depth. Forwards, the same rule would mean holding every unpacted
-/// directory aside until its subtree had been read.
-///
-/// Replaces rather than lowers, because the requirement belongs to one branch at
-/// a time: a pacted node met after a shallower one has already been kept still
-/// needs its own way in, and a running minimum would decide that way in had
-/// already been found.
-///
-/// Depth is the whole of it: no path comparisons, so nothing here assumes how a
-/// child's path is spelled relative to its parent's, and one reversed pass
-/// answers for a walk of any shape.
-///
-/// Nothing is dropped from the tree and no state is read but [`Row::state`].
-/// Pure, and deliberately free of [`App`]: rows in, rows out.
 fn pacted_rows(all: &[Row]) -> Vec<Row> {
     let mut kept = Vec::with_capacity(all.len());
     // The depth of the last row kept, which is still waiting for an ancestor,
@@ -3275,48 +1245,12 @@ fn pacted_rows(all: &[Row]) -> Vec<Row> {
     kept
 }
 
-/// Where `path` sits in `rows`, or where the deepest drawn ancestor of it
-/// sits, or `None` when neither is drawn.
-///
-/// The ancestor is the fallback because it is what hiding a row leaves behind: a
-/// collapsed node's nearest drawn ancestor is the directory that was collapsed
-/// over it, and a filtered-away node's is the deepest part of the way to it that
-/// the filter had a reason to keep. Either way that is where the selection
-/// belongs, and either way it is the first row when nothing on the way to the
-/// node survived at all. Ancestry is a path prefix
-/// — the engine's paths nest the way the tree does — taken component by
-/// component, so `crates-old` is no ancestor of anything under `crates`; and
-/// the last matching row is the deepest one, since a walk visits ancestors
-/// before descendants.
 fn index_for(rows: &[Row], path: &Path) -> Option<usize> {
     rows.iter()
         .position(|row| row.path == path)
         .or_else(|| rows.iter().rposition(|row| path.starts_with(&row.path)))
 }
 
-/// Where the window onto `rows` rows should start, given a window `viewport`
-/// rows tall, a selection at `selected`, and a window starting at `offset` now.
-///
-/// The rule is minimum movement. If the selection is already inside the window,
-/// the window does not move at all; if it has fallen off an edge, the window
-/// moves by exactly the rows needed to put it back on that same edge, and no
-/// further. It never recentres: a reader stepping down one row wants the tree
-/// to hold still and the selection to move, not the other way about, and a
-/// window that jumps by half a screen loses whatever the reader was comparing
-/// the selected row against.
-///
-/// The offset it is handed is a starting point, not a promise: it is clamped
-/// to what the current row count allows, so a tree that has shrunk (or a
-/// terminal that has grown) closes the gap under the last row instead of
-/// leaving the window hanging past the end.
-///
-/// Two cases return `0` outright. A window at least as tall as the tree has
-/// nothing to scroll — everything is on screen, and any offset at all would
-/// push rows off the top for no reason. A window no rows tall has no screen to
-/// scroll: nothing is drawn, so the honest offset is the top.
-///
-/// Pure, and deliberately free of [`App`]: it takes four numbers and returns
-/// one, so every edge of it is testable with no rows, no tree and no terminal.
 fn scroll_offset_for(rows: usize, viewport: usize, selected: usize, offset: usize) -> usize {
     if viewport == 0 {
         return 0;
@@ -3341,15 +1275,6 @@ fn scroll_offset_for(rows: usize, viewport: usize, selected: usize, offset: usiz
     }
 }
 
-/// What the app says when a subtree has just been un-pacted, naming the
-/// directory it was rooted at as `label`.
-///
-/// Un-pacting drops the manifest entries for a directory and everything below
-/// it, and nothing else: the `WARLOCK.md` files those pacts were written in
-/// stay exactly where they are. That is worth a line, because the subtree has
-/// just gone grey, and grey is the colour of a directory Warlock knows nothing
-/// about — a reader could easily take a whole subtree turning that colour for
-/// the writing having been thrown away.
 fn left_on_disk_message(label: &str) -> String {
     format!(
         "{label} is no longer pacted — every WARLOCK.md in it was left on disk, \
@@ -3357,194 +1282,58 @@ fn left_on_disk_message(label: &str) -> String {
     )
 }
 
-/// What the app says while a pact is working the directory named `label`, which
-/// is directory `position` of `total`.
-///
-/// A present participle and a fraction, and nothing else. The verb is the one
-/// the product's own key is named after, so the line reads as the `p` key still
-/// going rather than as a report about something; the fraction is what turns a
-/// screen that has not changed in two minutes from a hung Warlock into a working
-/// one, which is the whole reason the line exists.
 fn pacting_message(label: &str, position: usize, total: usize) -> String {
     format!("pacting {label} ({position}/{total})")
 }
 
-/// What the app says while a refresh is working the directory named `label`,
-/// which is directory `position` of `total`.
-///
-/// [`pacting_message`] with the other verb, and shaped identically down to the
-/// fraction, because the reader is watching the same kind of work: a pass per
-/// directory, minutes at a time, with a number that has to move. The verb is the
-/// one the `r` key is named after, so the line says which key is still going —
-/// which is the one thing a reader cannot tell from the shape alone.
-///
-/// The fraction counts the directories this run will visit, which for a refresh
-/// is the stale ones rather than all of them: a refresh of a forty-directory
-/// subtree with seven stale directories counts to seven. That is the engine's
-/// counting, passed straight through, exactly as [`pacting_message`]'s is.
 fn refreshing_message(label: &str, position: usize, total: usize) -> String {
     format!("refreshing {label} ({position}/{total})")
 }
 
-/// What the app says when the refresh key is pressed on a pacted directory that
-/// is already fresh, naming it as `label`.
-///
-/// A refresh describes the stale directories under the one it is pointed at, so
-/// a subtree with none is a run with nothing in it: starting one would spend
-/// minutes and money re-describing content that already holds. Worded as news
-/// rather than as an error, because it is the good outcome — the reader asked
-/// whether anything needed doing and the answer is no — and said out loud rather
-/// than silently ignored, so that a key that starts a long run on some rows and
-/// nothing on others always says which it just did.
 fn already_fresh_message(label: &str) -> String {
     format!("{label} is already fresh — there is nothing under it to describe again")
 }
 
-/// What the app says when the refresh key is pressed on a directory that is not
-/// pacted, naming it as `label`.
-///
-/// A refresh re-describes an existing pact; it cannot make one, and a directory
-/// with no pact has no grant to have gone stale against. So the refusal names
-/// the key that would help rather than merely saying no — the reader is one
-/// keystroke from what they wanted, and the two keys sit next to each other in
-/// the footer.
-///
-/// This is the answer for a directory a `.warlockignore` keeps out as well. Such
-/// a directory reads as unpacted, which is exactly what it is as far as the
-/// manifest goes, and the sentence stays true: `p` is still the key that
-/// would change it.
 fn unpacted_message(label: &str) -> String {
     format!("{label} is not pacted — press p to pact it, and there will be something to refresh")
 }
 
-/// What the app says when the scope key is pressed on a directory that is not
-/// pacted, naming it as `label`.
-///
-/// [`unpacted_message`]'s sibling, and deliberately not that same sentence: a
-/// scope is recorded against a manifest entry, so what a pact would give this
-/// directory is something to *scope* rather than something to refresh, and a
-/// refusal that promised the wrong thing would send the reader looking for it.
-/// The front half is shared word for word, because it is the same fact about the
-/// same row, and it names the key that would help for the same reason — the
-/// reader is one keystroke from what they wanted.
-///
-/// This is the answer for a directory a `.warlockignore` keeps out as well, for
-/// [`unpacted_message`]'s reason: such a directory reads as unpacted, which is
-/// what it is as far as the manifest goes, and `p` is still the key that would
-/// change it.
 fn unpacted_scope_message(label: &str) -> String {
     format!("{label} is not pacted — press p to pact it, and there will be a pact to scope")
 }
 
-/// What the app says when the view key is pressed on a directory that has a
-/// `WARLOCK.md`, naming the directory as `label` and its document as `document`.
-///
-/// The refusal names the row that would have worked, because it is directly
-/// beneath this one and the reader is one keystroke from what they asked for. A
-/// directory is not a thing there is text of — the text is in the document — and
-/// this is the whole of how that is told, in the shape [`unpacted_scope_message`]
-/// established: the fact about the row, then the key or the row that would help.
 fn directory_view_message(label: &str, document: &str) -> String {
     format!("{label} is a directory — press v on {document}, the row beneath it, to read it")
 }
 
-/// What the app says when the view key is pressed on a directory with no
-/// `WARLOCK.md`, naming it as `label`.
-///
-/// [`directory_view_message`] with nothing to point at, so it points at the key
-/// that would make something to point at: a pact is what writes a document, and
-/// a directory with none has nothing whatever to read. Named `p` for
-/// [`unpacted_message`]'s reason — the reader is one keystroke from the thing
-/// they wanted to exist, and the two keys sit next to each other in the footer.
-///
-/// This is the answer for an unpacted directory and for a pacted one whose
-/// document has not been written yet alike: what decides the wording is whether
-/// there is a document to read, which is the question the key asks.
 fn undocumented_view_message(label: &str) -> String {
     format!(
         "{label} is a directory with no WARLOCK.md — press p to pact it, and there will be a document to read"
     )
 }
 
-/// The one line a document gets that the file did not write: that the read
-/// stopped at the cap and the file goes on past it.
-///
-/// Worded here rather than by whoever did the reading, because the engine hands
-/// over the cut as a fact and the words on a screen are the screen's. It names
-/// no size: the cap is a number the reader cannot do anything with, while "there
-/// is more of this file than you are looking at" is the whole of what they need
-/// to know before judging what they are reading.
 pub(crate) fn cut_at_cap_message() -> String {
     "— cut here: the file goes on past this line, and Warlock reads no further".to_owned()
 }
 
-/// What the app says when the swap key is pressed on a session with nothing but
-/// the conversation in the panel.
-///
-/// The slot holds three cards and two of them are empty, so there is nowhere to
-/// swap to: said out loud rather than swallowed, because a key that did nothing
-/// and reported nothing is indistinguishable from a key that is broken. In the
-/// shape [`undocumented_view_message`] and `scoping::no_pact_message` share —
-/// the fact about what is there, then the key that would make the thing the
-/// reader asked for — and it names `v` rather than `p`, since a file is a
-/// keystroke away where a pact is a run.
 fn no_document_message() -> String {
     "nothing has been read this session — press v on a file row, and there will be a document to swap to".to_owned()
 }
 
-/// What the app says when the pact or refresh key is pressed while `pacting` — a
-/// line from [`pacting_message`] or [`refreshing_message`] — is already on the
-/// footer: that same line with `— already running` on the end.
-///
-/// The answer to the press is worded as a suffix rather than as a line of its
-/// own because the run's line is where the reader is already looking, and
-/// because it answers the press in the run's own terms: the reason nothing
-/// started is the thing the rest of the line is describing. It goes last so that
-/// a terminal too narrow for the whole of it cuts the answer and keeps the
-/// fraction.
 fn already_running_message(pacting: &str) -> String {
     format!("{pacting} — already running")
 }
 
-/// What the app says when the pact key is pressed on a file, naming it as
-/// `label`.
-///
-/// The one refusal the pact key has left, and the one it should have: a pact is
-/// an agreement about a module — the document it is written in and the
-/// directory it covers — and the files are what the module is made of, so the
-/// answer is to point at the directory holding this one. Said out loud rather
-/// than silently ignored: a key that does nothing on some rows and something on
-/// others has to say which it just did.
 fn file_row_message(label: &str) -> String {
     format!("{label} is a file — pacts are made with the directory holding it, not with a file")
 }
 
-/// What the app says when the pact key is pressed on a directory the
-/// repository's `.warlockignore` keeps out, naming it as `label`.
-///
-/// The pact key's other refusal, worded in the same shape and for the same
-/// reason: a key that does nothing on some rows and something on others has to
-/// say which it just did. It names `.warlockignore` because the rule is the
-/// repository's own and is written down in a file the reader can open and edit —
-/// this is not Warlock deciding the directory is uninteresting, and the sentence
-/// should send them to the place where that decision lives rather than sound
-/// like a verdict.
-///
-/// The row stays gray and stays where it is. Being kept out is not a fourth
-/// state and gets no colour of its own: gray already means outside Warlock's
-/// management, and this sentence is the whole of how the difference is told.
 fn ignored_row_message(label: &str) -> String {
     format!(
         "{label} is kept out by .warlockignore — Warlock covers nothing in there, so there is nothing to pact"
     )
 }
 
-/// The field of `counts` holding the tally for `state`.
-///
-/// [`StateCounts`]' fields are public but its own accessor for this is not, so
-/// the match lives here instead. Written as a match on the enum rather than a
-/// lookup, so a fourth state would fail to compile rather than quietly go
-/// uncounted.
 fn count_mut(counts: &mut StateCounts, state: NodeState) -> &mut usize {
     match state {
         NodeState::Unpacted => &mut counts.unpacted,
@@ -3571,20 +1360,11 @@ mod tests {
     use crate::panel::panel_offset_for;
     use crate::thread::Ending;
 
-    /// How many rows the scrolling tests work with, and how tall the window
-    /// onto them is. A tree comfortably taller than its window, so there is a
-    /// top edge and a bottom edge that are not the same row.
     const MANY: usize = 20;
-    /// The window height those tests set, small enough to leave rows off both
-    /// ends of it.
     const WINDOW: u16 = 5;
 
-    /// One of [`App`]'s selection-moving methods, so a test can drive the whole
-    /// set of them from a list rather than repeating itself six times.
     type Movement = fn(&mut App);
 
-    /// Three rows, one per state, standing in for a flattened tree without
-    /// dragging a `Tree` into tests that are only about the selection.
     fn three_rows() -> Vec<Row> {
         vec![
             Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale),
@@ -3603,13 +1383,6 @@ mod tests {
         ]
     }
 
-    /// Three rows rooted at an absolute path, for the tests about how a
-    /// directory is named on the footer.
-    ///
-    /// [`three_rows`] and the shared fixture are both rooted at relative paths,
-    /// which the engine's manifest spelling takes to be relative to the root
-    /// already and hands straight back — so neither of them can show that a
-    /// label really is cut down to its place under the tree's root.
     fn rooted_rows() -> Vec<Row> {
         vec![
             Row::new(0, "/repo", "/repo/WARLOCK.md", NodeState::PactedStale).with_child_count(1),
@@ -3629,14 +1402,6 @@ mod tests {
         ]
     }
 
-    /// The tally the rows actually add up to, counted here rather than asked
-    /// of the app: a test that recomputes is the only way to catch the app's
-    /// carried counts drifting from the rows they claim to describe.
-    ///
-    /// Node rows only. The counts are a count of directories, and a file row —
-    /// including the document row the default view now draws under a documented
-    /// directory — carries its directory's state rather than one of its own, so
-    /// counting it would count that directory twice.
     fn tally(app: &App) -> StateCounts {
         let mut counts = StateCounts::default();
         for row in app.rows().iter().filter(|row| !row.is_file()) {
@@ -3649,8 +1414,6 @@ mod tests {
         counts
     }
 
-    /// `count` rows of nothing in particular, for the tests that care only
-    /// about how many there are and which one is selected.
     fn many_rows(count: usize) -> Vec<Row> {
         (0..count)
             .map(|index| {
@@ -3664,9 +1427,6 @@ mod tests {
             .collect()
     }
 
-    /// An app of [`MANY`] rows with a [`WINDOW`]-tall window, selecting
-    /// `selected` — reached by stepping, so the offset is whatever ordinary
-    /// movement leaves it as rather than something the test wrote directly.
     fn scrolled_to(selected: usize) -> App {
         let mut app = App::from_rows(many_rows(MANY));
         app.set_viewport_height(WINDOW);
@@ -3676,8 +1436,6 @@ mod tests {
         app
     }
 
-    /// The rows an app draws, by path, for a test that is about which rows are
-    /// on screen rather than what is on them.
     fn drawn(app: &App) -> Vec<String> {
         app.rows()
             .iter()
@@ -3685,19 +1443,12 @@ mod tests {
             .collect()
     }
 
-    /// Rows by path and depth, for a test comparing two views that are two
-    /// accounts of the same rows rather than the same value — a mid-run tree and
-    /// the tree the reload after it finds. Takes a list rather than an app so
-    /// that the walk behind the screen can be compared as well as the screen.
     fn paths_and_depths(rows: &[Row]) -> Vec<(String, usize)> {
         rows.iter()
             .map(|row| (row.path.to_string_lossy().into_owned(), row.depth))
             .collect()
     }
 
-    /// The drawn rows that stand for directories, by path: what `drawn` used to
-    /// give back before the default view started drawing a document row under
-    /// each documented directory, for the tests that are about the nodes.
     fn node_paths(app: &App) -> Vec<String> {
         app.rows()
             .iter()
@@ -3706,8 +1457,6 @@ mod tests {
             .collect()
     }
 
-    /// The drawn rows, by path and state, for a test that is about which rows
-    /// changed colour and which were left alone.
     fn states(app: &App) -> Vec<(&str, NodeState)> {
         app.rows()
             .iter()
@@ -3715,13 +1464,6 @@ mod tests {
             .collect()
     }
 
-    /// The whole fixture, in walk order: what an app with nothing collapsed
-    /// draws.
-    ///
-    /// Every node, and under each documented one its own `WARLOCK.md` — the
-    /// default view hides the files a directory merely holds, not the one
-    /// Warlock wrote. `crates/` has no document in this fixture and so draws
-    /// nothing under it.
     fn whole_fixture() -> Vec<String> {
         vec![
             "warlock".to_owned(),
@@ -3736,12 +1478,6 @@ mod tests {
         ]
     }
 
-    /// The fixture under the pacted-only filter: the two pacted leaves, the
-    /// pacted root, and the undocumented `crates/` that is the only way down to
-    /// them, each documented one still followed by its own `WARLOCK.md`.
-    /// `assets/` is unpacted and has nothing pacted below it, so it and the
-    /// document row under it both go — a document row carries its directory's
-    /// state, so it is kept and dropped with the directory it belongs to.
     fn pacted_fixture() -> Vec<String> {
         vec![
             "warlock".to_owned(),
@@ -3754,9 +1490,6 @@ mod tests {
         ]
     }
 
-    /// [`whole_fixture`] one load later: [`fixture::tree_after_a_run`] drawn in
-    /// the default view, where the `WARLOCK.md` the run wrote under `crates/`
-    /// gives that directory a document row it did not have before.
     fn whole_fixture_after_a_run() -> Vec<String> {
         vec![
             "warlock".to_owned(),
@@ -3772,9 +1505,6 @@ mod tests {
         ]
     }
 
-    /// The default view with `crates/` collapsed: the two modules under it go,
-    /// and so do their document rows, which are descendants of `crates/` like
-    /// anything else one level under a directory it holds.
     fn collapsed_over_crates() -> Vec<String> {
         vec![
             "warlock".to_owned(),
@@ -3785,8 +1515,6 @@ mod tests {
         ]
     }
 
-    /// The whole fixture with its files shown: every node, each one followed by
-    /// the files it lists, one level deeper.
     fn whole_fixture_with_files() -> Vec<String> {
         vec![
             "warlock".to_owned(),
@@ -3804,20 +1532,16 @@ mod tests {
         ]
     }
 
-    /// The app for the shared fixture, selecting the row for `path`.
     fn app_selecting(path: &str) -> App {
         select(App::from_tree(&fixture::tree()), path)
     }
 
-    /// The app for the shared fixture with its files shown, selecting the row
-    /// for `path` — which may be a file.
     fn app_with_files_selecting(path: &str) -> App {
         let mut app = App::from_tree(&fixture::tree());
         app.toggle_files();
         select(app, path)
     }
 
-    /// `app` with the row for `path` selected, reached by stepping down to it.
     fn select(mut app: App, path: &str) -> App {
         while app.selected_row().expect("the fixture has rows").path != Path::new(path) {
             let before = app.selected();
@@ -4172,8 +1896,6 @@ mod tests {
         assert_eq!(scroll_offset_for(MANY, 0, 12, 3), 0);
     }
 
-    /// Whether the selected row is inside the window the app would be drawn
-    /// with, which is the property every movement has to preserve.
     fn selection_is_on_screen(app: &App) -> bool {
         let first = app.scroll_offset();
         (first..first + app.viewport_height()).contains(&app.selected())
@@ -4363,8 +2085,6 @@ mod tests {
         );
     }
 
-    /// Every drawn row by path, depth and whether it stands for a file: the
-    /// shape of the flattening, rather than only its order.
     fn shape(app: &App) -> Vec<(String, usize, bool)> {
         app.rows()
             .iter()
@@ -4810,14 +2530,6 @@ mod tests {
         );
     }
 
-    /// Three rows with a `.warlockignore` keeping the middle one out: a covered
-    /// sibling on either side, so a refusal that repainted the whole tree, or
-    /// repainted nothing because it refused every press, would both be caught.
-    ///
-    /// Rows rather than a tree, and a hand-written flag rather than a load: the
-    /// point of carrying the fact on the row is that no filesystem is needed to
-    /// answer the key, and a test that built the fixture off disk could not show
-    /// that.
     fn rows_with_one_kept_out() -> Vec<Row> {
         vec![
             Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale).with_child_count(2),
@@ -5109,9 +2821,6 @@ mod tests {
         );
     }
 
-    /// A scoped directory holding a file, an unscoped pacted child and an
-    /// unpacted one: every way a row can come out of the flatten with or without
-    /// a scope, in one tree.
     fn tree_with_one_scoped_directory() -> Tree {
         Tree::new(
             Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
@@ -5516,9 +3225,6 @@ mod tests {
         assert_eq!(app.pact_line(), None);
     }
 
-    /// The mode is one word and it is only a word: the card showing, the turns
-    /// on the thread and the run header are exactly what they were, and a run in
-    /// flight neither blocks the change nor is disturbed by it.
     #[test]
     fn setting_the_mode_changes_the_mode_and_nothing_else() {
         let base = Instant::now();
@@ -5955,7 +3661,6 @@ mod tests {
         }
     }
 
-    /// How many children the fixture's tree gives the node at `path`.
     fn children_in_fixture(path: &Path) -> usize {
         fixture::tree()
             .find(path)
@@ -6184,8 +3889,6 @@ mod tests {
         assert!(selection_is_on_screen(&app));
     }
 
-    /// Whether the window sits over rows that exist: it may start at the top of
-    /// a tree shorter than itself, but it must never hang off the end of one.
     fn window_is_in_range(app: &App) -> bool {
         app.scroll_offset() <= app.rows().len().saturating_sub(app.viewport_height())
     }
@@ -7168,10 +4871,6 @@ mod tests {
         assert!(selection_is_on_screen(&app));
     }
 
-    /// Every method a movement key reaches, named so a failure says which one
-    /// broke the rule. The same six [`every_movement_clears_a_message`] drives,
-    /// and the whole of what focus is allowed to redirect from the tree's
-    /// selection to the panel's window.
     const MOVEMENTS: [(&str, Movement); 6] = [
         ("select_previous", App::select_previous),
         ("select_next", App::select_next),
@@ -7181,19 +4880,12 @@ mod tests {
         ("select_last", App::select_last),
     ];
 
-    /// An app of [`MANY`] rows scrolled to the middle of them, with the panel
-    /// focused. Mid-tree on purpose: a selection at either end could sit still
-    /// under half the movement keys for reasons that have nothing to do with
-    /// focus.
     fn panel_focused() -> App {
         let mut app = scrolled_to(MANY / 2);
         app.set_focus(Focus::Panel);
         app
     }
 
-    /// The same app with the keyboard on the composer instead: mid-tree for
-    /// [`panel_focused`]'s reason, and on the conversation, which is the card
-    /// the field is drawn under and the card a session opens on.
     fn composer_focused() -> App {
         let mut app = scrolled_to(MANY / 2);
         app.set_focus(Focus::Composer);
@@ -7502,13 +5194,6 @@ mod tests {
         assert_eq!(app, before, "the focus key changed something else");
     }
 
-    /// Everything that is not a movement key, run over an app with each focus in
-    /// turn: the two apps must end up as one, focus aside.
-    ///
-    /// Each case is a name and something to do to an app. Written as one list
-    /// rather than a test each, because what is being asserted is the same
-    /// sentence six times over — focus decides what the *movement* keys mean and
-    /// nothing else about this type.
     #[test]
     fn nothing_but_a_movement_key_cares_which_pane_has_the_focus() {
         type Change = fn(&mut App);
@@ -7547,24 +5232,12 @@ mod tests {
         }
     }
 
-    /// How many lines of account the panel tests give the panel room for. Small
-    /// enough that an account of a dozen lines has a top and a bottom that are
-    /// nowhere near each other.
     const PANEL: u16 = 3;
 
-    /// The instant `seconds` after `base`, so a run can be driven through an
-    /// account without anything reading a clock. The same helper
-    /// [`crate::account`]'s own tests use, for the same reason.
     fn at(base: Instant, seconds: u64) -> Instant {
         base + Duration::from_secs(seconds)
     }
 
-    /// An app with the panel focused, [`PANEL`] lines of panel, and an account of
-    /// one section holding `lines` activity lines — so `lines + 1` drawable
-    /// lines, the heading included.
-    ///
-    /// The lines are numbered tool calls rather than bare thinking, so a test can
-    /// say which line it is looking at from the text alone.
     fn app_pacting(lines: usize, base: Instant) -> App {
         let mut app = App::from_rows(three_rows());
         app.panel_mut().set_height(PANEL);
@@ -7588,8 +5261,6 @@ mod tests {
         app
     }
 
-    /// What the panel is drawing, as plain text, so a test asserts on the window
-    /// a reader would see rather than on an offset.
     fn panel_text(app: &App, now: Instant) -> Vec<String> {
         app.panel()
             .window(now)
@@ -7952,7 +5623,6 @@ mod tests {
         assert_eq!(below_at_top[1], below_at_top[0] + HEADER);
     }
 
-    /// The lines of a small file, as whoever read it would hand them over.
     fn document_lines() -> Vec<String> {
         (0..5).map(|line| format!("line {line}")).collect()
     }
@@ -8005,8 +5675,6 @@ mod tests {
         assert_eq!(panel_text(&app, now), document_lines());
     }
 
-    /// A document with one line in it far too long for [`NARROW`], and two short
-    /// ones either side of it, so a test can say which rows came from wrapping.
     fn a_long_line() -> Vec<String> {
         [
             "# The engine",
@@ -8017,7 +5685,6 @@ mod tests {
         .to_vec()
     }
 
-    /// A panel narrow enough that the long line above needs three rows of it.
     const NARROW: u16 = 18;
 
     #[test]
@@ -8151,34 +5818,18 @@ mod tests {
         assert_eq!(panel_text(&app, at(base, 9)).len(), 2);
     }
 
-    /// Where the account's card would be if the reader swapped to it: the line
-    /// at the top of its window, and whether it is still following its newest
-    /// one.
-    ///
-    /// Asked of the card rather than of [`Panel::scroll_offset`](crate::Panel::scroll_offset), because
-    /// the point of every test below is what the card that is *not* showing is
-    /// doing.
     fn account_window(app: &App) -> (usize, bool) {
         app.panel.window_of(Showing::Account)
     }
 
-    /// The same of the thread's card.
     fn thread_window(app: &App) -> (usize, bool) {
         app.panel.window_of(Showing::Thread)
     }
 
-    /// The same of the document's card.
     fn document_window(app: &App) -> (usize, bool) {
         app.panel.window_of(Showing::Document)
     }
 
-    /// Every line the document's card holds, whole, whatever the panel's window
-    /// is over and whichever card is showing.
-    ///
-    /// What a snapshot is asserted with: [`panel_text`] is the window a reader
-    /// would see, and this is the card underneath it, so a test can say that the
-    /// lines themselves never changed rather than that a cut of them looked the
-    /// same.
     fn document_text(app: &App) -> Vec<String> {
         app.panel
             .document_lines()
@@ -8382,9 +6033,6 @@ mod tests {
         assert_eq!(app, before, "the swap moved something other than the card");
     }
 
-    /// The file the tests below re-read, as whoever read it again would hand it
-    /// over: the same document rewritten by somebody else's editor, so that a
-    /// card holding the new lines cannot be mistaken for one holding the old.
     fn rewritten_lines() -> Vec<String> {
         ["# Rewritten", "by somebody else"]
             .map(str::to_owned)
@@ -8548,9 +6196,6 @@ mod tests {
         assert_eq!(panel_text(&app, at(base, 20))[0], "crates/engine");
     }
 
-    /// Record one numbered tool line per second of `lines` on `app`'s account,
-    /// the way [`app_pacting`] fills one, so a test can go on writing a run that
-    /// started before it.
     fn record_lines(app: &mut App, lines: std::ops::Range<u64>, base: Instant) {
         let account = app.panel_mut().account_mut().expect("a run has started");
         for line in lines {
@@ -8638,18 +6283,9 @@ mod tests {
         assert_eq!(app, before, "the refusal moved something else");
     }
 
-    /// What the thread tests ask.
     const QUESTION: &str = "what does the engine do?";
-    /// What comes back: prose, and long enough that [`NARROW`] has to break it
-    /// over three rows — the same sentence [`a_long_line`] wraps, so the two
-    /// tests agree about what wrapping does.
     const ANSWER: &str = "It walks the tree and writes what it finds.";
 
-    /// Put one whole turn on `app`'s thread: the question a second past `base`,
-    /// three tool calls under it, then the answer.
-    ///
-    /// Five rows, so a [`PANEL`]-tall window over it has a top and a bottom that
-    /// are not the same row, and every row says which one it is.
     fn ask_and_answer(app: &mut App, base: Instant) {
         app.panel_mut().start_turn(QUESTION, at(base, 1));
         for line in 0..3 {
@@ -9073,13 +6709,6 @@ mod tests {
         assert_eq!(panel_text(&app, at(base, 9)), thread);
     }
 
-    /// A whole run driven through `app` from `at(base, from)`, event by event
-    /// and through the one call a run's events go through: the account starts,
-    /// one directory is worked and says what it wrote, and the run finishes.
-    ///
-    /// Six rows of account — a heading, three activities, an outcome and a
-    /// summary — so a window [`PANEL`] rows tall has a top and a bottom that are
-    /// nowhere near each other, and every row says which one it is.
     fn run_a_pact(app: &mut App, base: Instant, from: u64) {
         app.start_account(at(base, from));
         app.panel_mut()
@@ -9440,10 +7069,6 @@ mod tests {
         assert!(!app.panel().has_content());
     }
 
-    /// How many rows or lines the tests below move by where they stand in for
-    /// one notch of the wheel. Nothing in this module decides that number —
-    /// whoever reads the pointer does — but a step of more than one is what
-    /// makes clamping worth asserting on, and three is what will be asked for.
     const NOTCH: usize = 3;
 
     #[test]
@@ -9796,13 +7421,6 @@ mod tests {
         assert_eq!(panel_text(&reseated, at(base, 9)), showing);
     }
 
-    /// The fixture's shape with `warlock/crates/tui` gone, and its files with
-    /// it: what a re-seat meets when the node the selection was sitting on is
-    /// not in the new tree at all.
-    ///
-    /// Hand-written rather than loaded, like every other tree these tests use,
-    /// so a re-seat is driven by two values and needs no repository, no pact and
-    /// no `claude` on the path.
     fn tree_without_the_tui_crate() -> Tree {
         Tree::new(
             Node::new("warlock", "warlock/WARLOCK.md", NodeState::PactedStale).with_children([
@@ -9820,8 +7438,6 @@ mod tests {
         )
     }
 
-    /// The path of the selected row, for the re-seat tests, which are about
-    /// which node the selection is on rather than which index it sits at.
     fn selected_path(app: &App) -> Option<&Path> {
         app.selected_row().map(|row| row.path.as_path())
     }
@@ -9985,14 +7601,6 @@ mod tests {
         assert_eq!(reseated, app);
     }
 
-    /// The fixture as a later load would find it once the file at `path` had
-    /// been written: listed on the directory holding it, in the sorted order the
-    /// loader's `files.sort()` leaves a listing in.
-    ///
-    /// This is what an insertion is measured against. A test that asserted a
-    /// hand-written order would be asserting the same guess twice; comparing
-    /// against a tree built the way `from_tree` reads one is asserting that a
-    /// mid-run splice and the reload after the run agree.
     fn tree_listing(path: &str) -> Tree {
         let mut tree = fixture::tree();
         assert!(
@@ -10002,8 +7610,6 @@ mod tests {
         tree
     }
 
-    /// List `path` on whichever node under `node` is the directory holding it,
-    /// keeping the listing sorted. Whether one was found.
     fn list_file(node: &mut Node, path: &Path) -> bool {
         if Some(node.path.as_path()) == path.parent() {
             node.files.push(path.to_path_buf());
@@ -10013,24 +7619,12 @@ mod tests {
         node.children.iter_mut().any(|child| list_file(child, path))
     }
 
-    /// The fixture with its files shown, which is the view every file an
-    /// insertion names is visible in.
     fn app_with_files() -> App {
         let mut app = App::from_tree(&fixture::tree());
         app.toggle_files();
         app
     }
 
-    /// `app` with the row for `path` calling itself the document of the
-    /// directory holding it, in the walk and in the drawn rows both.
-    ///
-    /// The one field a load and an insertion disagree about, and they disagree on
-    /// purpose. A load reads the tree, where `index.html` is an ordinary file
-    /// nobody documented anything with; an insertion is the pact observer's word
-    /// that the file it names is the document the pass has just written, which is
-    /// a fact no tree the app can see holds yet (see `App::insert_file_row`). So
-    /// a reloaded app is brought into line by marking the row the insertion
-    /// marked, rather than by leaving that difference unasserted.
     fn as_the_document(mut app: App, path: &str) -> App {
         let path = Path::new(path);
         let mut found = false;

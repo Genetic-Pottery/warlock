@@ -1,70 +1,15 @@
-//! What one frame looks like.
+//! One frame, drawn from the arguments and nothing else.
 //!
-//! The screen is a footer along the bottom and two panes above it: the panel on
-//! the left, and on the right a bordered column carrying a header naming which
-//! tree is on screen and the flattened tree itself, one node per line. The
-//! footer runs the full width under both of them with the tally, the keys and
-//! whatever the app has to say about the last keystroke — or about the pact it
-//! is running, which takes that line and changes the one above it for as long as
-//! it runs. [`draw`] takes a frame, the app state and the instant the frame is
-//! being drawn at, and nothing else — no terminal setup, no globals, no clock of
-//! its own, no reaching back into the engine — so what appears on screen is a
-//! pure function of what the app state says and what time the caller says it is,
-//! and a test can assert it against an in-memory buffer with no tty attached.
+//! Nothing here reads a clock, a terminal or a global: the instant a pulse is
+//! measured against arrives as a parameter, so a frame can be asserted against
+//! an in-memory buffer with no tty attached.
 //!
-//! The panel is the account of the pact that is running, or of the last one to
-//! run: a heading naming each directory and, under it, one row per thing that
-//! pass was seen doing, each with the elapsed clock of its own section. Before
-//! the first pact of the session there is no account, and what it holds instead
-//! is warlock's mark: the program's name in shaded blocks, compiled in, centred
-//! and dim, and gone for good the moment a pact starts. Not a word of text goes
-//! with it — a screen saying something before anything has happened would be
-//! saying it about nothing, where a mark only says whose screen this is. A panel
-//! with no room for the whole mark draws the bare border, which on a narrow
-//! terminal is every panel there is. Nothing on any card runs off the
-//! right-hand edge: a line too long for the panel is broken into the rows it
-//! needs, under its own clock or marker, and none of that happens here — every
-//! card arrives already in the rows its width needs (see [`mod@crate::wrap`]),
-//! so this module draws the rows it is handed. See [`draw_panel`].
-//!
-//! Under the panel, in the panel's own column, is the composer: the draft
-//! somebody is typing, in a bordered box of its own. It is one row tall while
-//! there is nothing in it and grows a row per newline and per wrapped line up to
-//! a cap, past which it scrolls within itself and keeps the cursor's row on
-//! screen (see [`mod@crate::composer`]). Every row it takes is a row the panel
-//! above it does not have — [`areas`] cuts one column into the two of them, and
-//! [`panel_height`] and [`composer_height`] are that one cut read twice — and
-//! while the panel is showing a document it is not drawn at all and the panel
-//! has the column back. Its border is lit by [`pane_block`] like either pane's,
-//! which is what makes three places for the keyboard readable as three.
-//!
-//! The tree area is a window onto the flattened rows: it draws the slice
-//! starting at the app's scroll offset and running for as many rows as the area
-//! is tall, so a tree taller than the terminal scrolls under a header and a
-//! footer that stay where they are. The window is the app's, not the widget's —
-//! see [`draw_tree`]. Which rows exist at all is the app's too: collapsing a
-//! directory takes its descendants out of [`App::rows`], and whatever rows the
-//! app holds are the rows drawn — this module only says which of them is
-//! collapsed, with a marker on the line, and leads each one in with the guides
-//! [`guide_prefixes`] works out for the window.
-//!
-//! A pointer is answered by measuring, not by remembering: [`hit_test`] takes a
-//! screen column and row and says which of these areas they landed on — the
-//! footer, a border, the header, a row of the tree's window, a line of the
-//! panel's — off the very [`areas`] call the frame is cut by, so a click lands
-//! on what the reader saw there. It is a function of three numbers and knows
-//! nothing about the tree, the selection or the window's contents: what a row
-//! offset means is the app's to say. Nothing here follows the pointer around,
-//! and there is deliberately no hover.
-//!
-//! One thing is drawn over all of that, and only one: the gate on the way out.
-//! When [`QuitConfirm`] is up, [`draw`] finishes the frame it would have drawn
-//! anyway and then puts a small window in the middle of the terminal, with the
-//! cells behind it cleared — see [`draw_confirm`]. The question is handed in
-//! beside the app rather than read off it, because the app has never heard of it
-//! (see [`mod@crate::confirm`]), and it is one parameter of the one drawing
-//! function rather than a second entry point, so the binary still makes one call
-//! per frame and a test still asserts one buffer.
+//! The measuring entry points — [`tree_height`], [`panel_height`],
+//! [`run_header_height`], [`composer_height`], [`panel_width`] and
+//! [`hit_test`] — all go back through [`areas`], the same cut [`draw`] uses.
+//! That is the point of them: they are how the app asks what fits, and a
+//! second copy of the layout arithmetic here would answer for a screen that
+//! was never drawn. Sizes it needs are therefore derived, never remembered.
 
 use std::time::{Duration, Instant};
 
@@ -87,96 +32,22 @@ use crate::panel::Mode;
 use crate::prompt::{ScopeField, ScopePrompt};
 use crate::wrap::shape;
 
-/// One level of nesting, per unit of the depth the engine's walk yields.
 const INDENT: &str = "  ";
 
-/// The stroke a guide is drawn with where the branch it stands for carries on
-/// below this row: one per level of nesting, in the first of that level's
-/// [`INDENT`] columns.
-///
-/// Unicode where the markers are held to ASCII, because ratatui already draws
-/// this pane's border in box-drawing characters — a terminal that cannot manage
-/// this one is already drawing a mess of the frame around it.
 const GUIDE: &str = "│";
 
-/// The guide on the row itself, where the directory holding it has more rows
-/// under it after this one.
-///
-/// The tee and [`GUIDE_LAST`] are what make the guides say something the
-/// verticals alone could not: where a subtree stops. Reading down a column of
-/// plain bars, the eye has to count indents to find out whether the next row is
-/// a sibling or an aunt; the corner says it in the glyph. Costing a
-/// last-sibling pass to work out, which is why it is worked out once for the
-/// drawn rows rather than asked per row — see [`guide_prefixes`].
-///
-/// Nothing reaches from the corner across to the row it belongs to, and the
-/// horizontal that would is deliberately not drawn. [`EXPANDED_MARKER`] is a
-/// hyphen sitting at the same height as such a line and two columns along from
-/// it, so an arm would run into the marker on a directory row and stop short on
-/// a file row — leaving the right-hand end of the line jumping a column back and
-/// forth down a column of siblings. The rest of that level stays blank: nothing
-/// can merge with a space.
 const GUIDE_BRANCH: &str = "├";
 
-/// The guide on the last row a directory holds, where the branch stops.
 const GUIDE_LAST: &str = "└";
 
-/// Drawn to the left of the selected row. The reversed highlight already says
-/// where the selection is on any terminal with colour; the marker says it
-/// again for the ones without.
 const SELECTION_MARKER: &str = "> ";
 
-/// Drawn on a directory whose children are hidden, between its indent and its
-/// name.
-///
-/// Plus and minus rather than arrows or triangles: the selection marker is
-/// already plain ASCII for the terminals and fonts that would make a mess of
-/// anything else, and a marker that renders as a box on such a terminal says
-/// less than no marker at all.
 const COLLAPSED_MARKER: &str = "+ ";
 
-/// Drawn on a directory whose children are on screen. See [`COLLAPSED_MARKER`].
 const EXPANDED_MARKER: &str = "- ";
 
-/// Drawn on a node with no children: nothing, in the width of a marker.
-///
-/// A node with nothing under it is neither collapsed nor expanded and says so
-/// by carrying no marker — an empty directory must not look like one hiding
-/// something. It still takes the marker's two columns, because a name that
-/// slid left when a directory turned out to be empty would put the siblings of
-/// one parent at two different indents and undo what the indent is for.
 const NO_MARKER: &str = "  ";
 
-/// Warlock's mark: the program's name set in shaded blocks, one row per line,
-/// drawn in the panel while there is no account to put there.
-///
-/// The name rather than the logo of `assets/warlock-logo.png`. A `W` alone asks
-/// the reader to already know whose `W` it is, and the panel it sits in is the
-/// first thing a new reader looks at; the word answers the question the mark is
-/// there to answer.
-///
-/// Compiled in as text. Nothing is read off the disk to draw it: an image on
-/// disk would be a file the program had to find, a decoder to read it with and a
-/// terminal that could show it, and the mark is the one thing on screen that
-/// must be there before anything has happened. Being a constant also means it is
-/// the same mark in a test buffer as on a terminal, which is how
-/// [`mod@crate::ui`] asserts anything at all.
-///
-/// Block elements rather than plain ASCII, which is a raised ceiling and a
-/// deliberate one. Everywhere else this crate holds itself to what
-/// [`SELECTION_MARKER`] and [`COLLAPSED_MARKER`] are held to, and the highest it
-/// goes is the box drawing ratatui already puts in the panes' borders and in
-/// [`GUIDE`]. `█` and `▒` are one block along from that in Unicode and rather
-/// older in practice — both are in the original IBM PC character set — so a
-/// terminal that can draw a border can draw these. The shading is what the mark
-/// is: a solid face with a lighter one falling away behind it, which is a
-/// letterform no single-weight character set can carry.
-///
-/// A hundred columns wide, which is the size the shape needs and is wider than
-/// this panel is on an ordinary terminal. It is drawn on a wide one and not on a
-/// narrow one — see [`mark_area`], which draws it whole or not at all — and that
-/// is the trade taken knowingly: warlock puts a file tree beside this panel, so
-/// the terminal it is run in is a wide one or the tree has nowhere to be either.
 const MARK: &[&str] = &[
     " █████   ███   █████   █████████   ███████████   █████          ███████      █████████  █████   ████",
     "▒▒███   ▒███  ▒▒███   ███▒▒▒▒▒███ ▒▒███▒▒▒▒▒███ ▒▒███         ███▒▒▒▒▒███   ███▒▒▒▒▒███▒▒███   ███▒",
@@ -188,147 +59,34 @@ const MARK: &[&str] = &[
     "     ▒▒▒   ▒▒▒      ▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒      ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒   ▒▒▒▒",
 ];
 
-/// The clear space the mark wants on either side of it, and the least the panel
-/// can be wider than the art and still draw it.
-///
-/// Two columns, so the mark reads as a mark inside a border rather than as
-/// something wedged against it. Below that the panel draws its bare border and
-/// no mark at all: the art is drawn whole or not drawn, since half a `W` is not
-/// a smaller mark but a different and wrong one.
 const MARK_MARGIN: u16 = 2;
 
-/// The rows the mark wants spare on top of its own height, and the least the
-/// panel can be taller than the art and still draw it.
-///
-/// One row over the whole height, where [`MARK_MARGIN`] is two columns a side: a
-/// row costs about two columns' worth of screen, and rows are what a terminal is
-/// short of first. On a panel with exactly that row spare it falls under the
-/// mark, because the odd row of an uneven split always does — see [`mark_area`].
 const MARK_MARGIN_ROWS: u16 = 1;
 
-/// The one line naming the tree's root.
 const HEADER_HEIGHT: u16 = 1;
 
-/// What the run in flight takes off the top of the panel, inside the border and
-/// above the window: the one line naming it, and one blank row under that.
-///
-/// The line itself is one row, like the tree's header, and for the same reason:
-/// every row it takes is a row of the card the reader no longer has, and the run
-/// says what it is doing in one line or it is not worth a second — see
-/// [`run_header_line`].
-///
-/// The blank row is what makes it read as a header rather than as the first row
-/// of whatever is under it. The header is bold and so are an account's headings,
-/// a summary and a question, so with nothing between them a run's line and the
-/// card's first line are two bold rows against each other and the eye has to
-/// work out which is furniture. A row is a cheap price for that, and it is only
-/// paid while a run is actually going.
 const RUN_HEADER_HEIGHT: u16 = 2;
 
-/// What the run header calls a pact.
-///
-/// The footer's own verb, because it is the same run said twice on one screen
-/// and a header that called it something else would be a second name for one
-/// thing. It is repeated here rather than borrowed because
-/// [`App::pact_line`](crate::app::App::pact_line) hands over a finished
-/// sentence and a header sets its parts in different places; what is shared is
-/// the vocabulary, not the wording.
 const PACTING_RUN: &str = "pacting";
 
-/// What the run header calls a refresh: [`PACTING_RUN`]'s counterpart, and the
-/// one word the two runs differ by, exactly as on the footer.
 const REFRESHING_RUN: &str = "refreshing";
 
-/// One column of the bar the run header ends with that the run has reached.
-///
-/// A full block, so the fill reads as a quantity at a glance and on a terminal
-/// with no colour — the bar carries none, like everything else in the panel.
 const BAR_FILLED: &str = "█";
 
-/// One column of the run header's bar the run has not reached: the same block
-/// shaded, so the bar's whole length is visible and the fill is read against it
-/// rather than against the border.
 const BAR_EMPTY: &str = "░";
 
-/// What the run header's line and its bar are held apart by.
 const BAR_GAP: &str = " ";
 
-/// The fewest columns of bar worth drawing.
-///
-/// Below this the bar is dropped whole and the line keeps the columns, the way
-/// the tree header drops its sigils: a bar three columns long cannot show a
-/// fraction — every position in a run of any length would fill the same one or
-/// two of them — so it would be furniture in place of the directory name it
-/// crowded out.
 const BAR_MIN_WIDTH: usize = 4;
 
-/// What the header's two facts are joined by: which tree is on screen, and what
-/// this machine holds for the repository it came out of.
-///
-/// A dash with a space either side rather than a run of blanks, because the two
-/// are different kinds of fact — a path and a holding — and a gap alone would
-/// read as one sentence that had drifted apart. Unicode, like [`ELLIPSIS`] and
-/// the panel's arrow, and measured with [`display_width`] like everything else
-/// on the line, so what it costs is what the backend will charge for it.
 const HEADER_GAP: &str = " — ";
 
-/// Drawn on the left of every panel line that sits under a section heading, so a
-/// directory and the pass under it read as one block rather than as a list with
-/// a path in the middle of it.
-///
-/// The tree's [`INDENT`] happens to be the same two columns and deliberately is
-/// not reused: that one is a unit of a walk's depth, this one is a fixed inset
-/// under a heading, and a change to either has nothing to say about the other.
 pub(crate) const PANEL_INDENT: &str = "  ";
 
-/// What the panel's top edge says while the conversation is the card on screen.
-///
-/// The one card that is named on the border, because it is the one card a reader
-/// could otherwise mistake for another: an account says what it is in every row
-/// it draws — a directory and a clock — and a document is the file's own text,
-/// where a question and an answer are neither, and a reader who swapped one card
-/// too far would have to read the prose to find out where they had landed. A
-/// word costs nothing off the window: a title sits on the border row the panel
-/// was drawing anyway, so the thread has exactly the rows the account has.
-///
-/// Padded a column each side so it does not sit against the corner, like
-/// [`scrollback`]'s indicator on the opposite edge. No colour, for the reason
-/// written out at [`draw_panel`]: bold is what a heading gets here.
-///
-/// What the title says while the conversation is in brief mode is
-/// [`BRIEF_THREAD_TITLE`]; [`thread_title`] is the choice between the two.
 const THREAD_TITLE: &str = " thread ";
 
-/// The same title while the conversation is converging on a document: the card's
-/// name, then the register it is in.
-///
-/// The whole of what brief mode says on screen. It is the card's own name with a
-/// word added rather than a name of its own, because it is the same card and the
-/// same conversation — every turn that was on it is still on it — in a state; a
-/// title that read `brief` alone would be a fourth card that does not exist. The
-/// mode is worth saying at all because it changes what the next thing typed will
-/// do, and a reader who has scrolled back past the `/brief` turn has nothing
-/// else on screen to tell them.
-///
-/// What it does *not* say is anything about an artifact — no "nothing written
-/// yet", no path of a file that has been written. A title is what the card is,
-/// and the state of a document is news, which belongs in the thread with the
-/// turn that caused it and a clock beside it, not on a border that would go on
-/// asserting it every frame for the rest of the session.
-///
-/// The separator is the middot [`crate::account`] uses between the parts of a
-/// line, and it lands on the same border row: a brief-mode panel has exactly the
-/// rows a chat-mode one has. On a panel too narrow for it, the border truncates
-/// the title as it always did.
 const BRIEF_THREAD_TITLE: &str = " thread · brief ";
 
-/// What the panel's top edge says about the conversation, given the register it
-/// is in.
-///
-/// The one place the title is decided, so the two strings above are the two
-/// things a top edge can say and a third register would be a compile error here
-/// rather than a card that silently kept the old name. Called at the one
-/// `title_top` in [`draw_panel`] and nowhere else.
 const fn thread_title(mode: Mode) -> &'static str {
     match mode {
         Mode::Chat => THREAD_TITLE,
@@ -336,191 +94,42 @@ const fn thread_title(mode: Mode) -> &'static str {
     }
 }
 
-/// Drawn on the left of the reader's own words in the thread, so a question
-/// reads as a question rather than as the first line of an answer.
-///
-/// The turn's own heading, and marked rather than indented for the same reason
-/// [`PANEL_INDENT`] indents what sits under a heading: the question is what the
-/// rest of the turn is about, and everything under it belongs to it. Not
-/// [`SELECTION_MARKER`], which is the tree's `>` and says where the keyboard is
-/// — nothing is selected in the panel — and not a colour, which is a node
-/// state's.
 pub(crate) const SAID_MARKER: &str = "› ";
 
-/// Drawn on the left of warlock's own line in the thread, so a note reads as the
-/// program talking rather than as a question, an answer or a pass at work.
-///
-/// A dot rather than [`SAID_MARKER`]'s arrow, because an arrow points at what
-/// follows it and a note is not addressed to anybody: it is an aside beside the
-/// conversation. Two columns like the question's marker and like
-/// [`PANEL_INDENT`], so the three shapes of the card line up down the same
-/// column instead of stepping in and out by a character. Plain rather than bold
-/// — a note heads nothing, and bold is what the turn's own heading gets — which
-/// is the second half of telling it from a question drawn with the same width in
-/// front of it.
 pub(crate) const NOTE_MARKER: &str = "· ";
 
-/// What a truncated panel line ends with, in place of what was cut off.
-///
-/// One column rather than three dots, because the columns it takes are columns
-/// taken off the text it is there to make room for. Unicode, like the scrollback
-/// indicator's arrow: a terminal that cannot draw this cannot draw the panel's
-/// arrow either, and the ASCII the tree's markers are held to is about a screen
-/// full of them rather than about the odd line that ran long.
 const ELLIPSIS: &str = "…";
 
-/// The arrow the scrollback indicator leads with: down, because what it counts
-/// is below the view.
 const SCROLLBACK_ARROW: &str = "↓";
 
-/// The key the scrollback indicator names, which is the one that returns a
-/// scrolled-back panel to the newest line.
-///
-/// `G` and not a key of its own: it is the focused pane's ordinary end-of-list
-/// movement, already on [`KEYS`], and a run that needed a new binding to get
-/// back to live would be a run with a mode in it.
 const LIVE_KEY: &str = "G";
 
-/// The `k`/`j` key pair, which moves the selection one row.
 const ROW_KEY: &str = "k/j: row";
 
-/// The page keys, which move the selection one screenful.
 const PAGE_KEYS: &str = "PgUp/PgDn";
 
-/// The `g`/`G` pair, which goes to the top of the list or the bottom of it.
 const ENDS_KEY: &str = "g/G: ends";
 
-/// The space key, which hides the subtree under the selected row or shows it
-/// again.
 const FOLD_KEY: &str = "space: fold";
 
-/// The `o` key, which hides everything warlock is not managing.
 const PACTS_KEY: &str = "o: pacts";
 
-/// The `f` key, which puts the files inside a directory on screen.
 const FILES_KEY: &str = "f: files";
 
-/// The `p` key, which makes a pact with the selected directory or gives one up.
 const PACT_KEY: &str = "p: pact";
 
-/// The `r` key, which runs a pass over what is stale.
 const REFRESH_KEY: &str = "r: refresh";
 
-/// The `s` key, which opens the scope prompt on a directory already pacted.
 const SCOPE_KEY: &str = "s: scope";
 
-/// The Tab key, which moves the focus on one place: the tree, then the panel,
-/// then the composer under it, then round again.
-///
-/// `focus` and not `compose`, because that is what the key does — see
-/// [`Focus::next`](crate::Focus::next) — and a name that said the composer would
-/// be a name that lied on the two presses out of three that land somewhere else.
-/// It is still the name that says the composer is reachable at all: the field is
-/// drawn without the keyboard until this key hands it over.
 const FOCUS_KEY: &str = "Tab: focus";
 
-/// The Enter pair inside the composer: Enter offers the draft up, Alt+Enter puts
-/// a newline in it.
-///
-/// One name for the two keys because they are one decision — this line ends the
-/// message or this line does not — and a reader who is told about Enter without
-/// being told about Alt+Enter has been told that a draft can only ever be one
-/// line. Paired the way [`ROW_KEY`] and [`ENDS_KEY`] are, keys then effects in
-/// the same order, so the slash reads across rather than down.
-///
-/// Shift+Enter is deliberately unnamed: [`compose_for`](crate::compose_for)
-/// treats it as Enter because terminals disagree about whether they report it at
-/// all, and a name for a keystroke half the readers of warlock cannot send is a
-/// name that costs columns to mislead them.
 const COMPOSE_KEYS: &str = "Enter/Alt+Enter: send/newline";
 
-/// The Esc key inside the composer, which hands the keyboard back and leaves
-/// what was typed exactly where it was.
-///
-/// The draft half of the name is the half that has to be there. Esc is the key
-/// every other field in every other program throws work away with, and
-/// [`compose_for`](crate::compose_for) does the opposite —
-/// [`Composed::Leave`](crate::Composed::Leave) keeps the draft — so a reader who
-/// is not told that is a reader who retypes a paragraph rather than pressing it.
-///
-/// Esc is on this line twice, here and inside [`QUIT_KEY`], and that is the
-/// truth rather than a duplication: the same key leaves the field when the field
-/// has the keyboard and leaves warlock when nothing does.
 const LEAVE_KEY: &str = "Esc: leave, draft kept";
 
-/// The leading slash inside the composer, which makes a draft a command instead
-/// of a message.
-///
-/// One name for all three commands rather than one name each. The line is
-/// already wider than an eighty-column terminal and every column of it costs
-/// another key its place, so what the footer buys here is the shape of the
-/// thing — a draft that starts with a slash is read as a command — and not the
-/// vocabulary. The vocabulary is a keystroke away and already written:
-/// [`submitted_for`](crate::submitted_for) refuses a slash that is not one of
-/// the commands with a line that names `/brief`, `/write` and `/chat`, so a
-/// reader who types `/` and guesses wrong is told all three by the thing they
-/// typed at. Three names here would spend three times the columns to say that
-/// worse, and would want widening again for every command that came after.
-///
-/// It is listed with the composer's names in [`KEYS`] and given up with them in
-/// [`KEY_DROP_ORDER`], because it is a fact about the one field rather than
-/// about the screen: a slash typed anywhere else is a slash, and a reader with
-/// no cursor in the composer has nothing to do with this name.
 const COMMAND_KEY: &str = "/: command";
 
-/// The keys line of the footer, up to the one key whose name depends on what it
-/// would do next: every key that does something, in the order [`keys_line`]
-/// assembles them.
-///
-/// A sequence of names rather than one joined string, because the line is laid
-/// out for the width the terminal actually has: [`laid_out_keys`] gives names up
-/// whole until what is left fits, and a name buried inside a joined string is a
-/// name it cannot give up.
-///
-/// The movement keys first and together, in the order a reader reaches for
-/// them: one row, one screen, the whole tree. Then the three keys that move
-/// nothing but change what there is to move through — space, which hides a
-/// subtree, `o`, which hides everything Warlock is not managing, and `f`, which
-/// is the one of the three that puts rows on screen rather than taking them
-/// off — and only then the keys that change something. `s` comes after `p` and
-/// `r` because it is the one of the three that needs a pact to already be
-/// there: nothing on a row `p` has never been pressed on is scopeable.
-///
-/// The composer's four come last, together and in the order somebody meets
-/// them: [`FOCUS_KEY`] reaches the field, [`COMPOSE_KEYS`] is what to press in
-/// it, [`LEAVE_KEY`] is how to stop, and [`COMMAND_KEY`] is the one thing the
-/// field does that a cursor does not explain. They sit at the end because they
-/// are the keys of one pane rather than of the whole screen, and because that is
-/// where a reader who has just looked down from a cursor finds them — next to
-/// the other facts about what the terminal is doing rather than buried among the
-/// tree's movement. Where they sit is not where they are given up: see
-/// [`KEY_DROP_ORDER`], which loses all four before it loses anything else.
-///
-/// Every name here is as short as it can be and still be read: the line is
-/// already wider than an eighty-column terminal, and a key nobody can see
-/// because the line ran off the right-hand edge is a key nobody knows about.
-/// That is why `o` is labelled with what it leaves on screen rather than with a
-/// sentence about filtering, and `f` with what it shows rather than with a
-/// sentence about a toggle.
-///
-/// The movement names are the shortest of the lot because they are the ones a
-/// reader needs told once. `k/j: row` names the keys that have to be learnt and
-/// leaves the arrows unnamed — they were the same sentence twice, and the
-/// arrows are what a reader presses before reading anything — and `g/G: ends`
-/// says where the pair go without spelling out which end is which, which the
-/// keys' own order already implies. `PgUp/PgDn` carries no label at all for the
-/// same reason: its label was the word already inside the keys' own names, and
-/// a name that repeats itself is the cheapest kind of column to give up. The
-/// three of them read as the granularities they are — a row, a page, the ends —
-/// which is the order the group is in anyway.
-///
-/// Those shortenings are what paid for the keys that came later: `r: refresh`
-/// was bought with `up/down k/j: move` and `g/G: first/last`, and `s: scope`
-/// with `k/j: move` → `k/j: row`, `PgUp/PgDn: page` → `PgUp/PgDn`,
-/// `space: collapse` → `space: fold` and `o: pacted` → `o: pacts` — twelve
-/// columns for a twelve-column key. Those shortenings are still worth making,
-/// but they are no longer the only thing standing between a narrow terminal and
-/// the way out: see [`KEY_DROP_ORDER`].
 const KEYS: &[&str] = &[
     ROW_KEY,
     PAGE_KEYS,
@@ -537,92 +146,24 @@ const KEYS: &[&str] = &[
     COMMAND_KEY,
 ];
 
-/// What separates one key's name from the next on the keys line.
-///
-/// Wide enough that two names read as two keys rather than as one phrase, and
-/// the same gap between every pair — including the two [`keys_line`] adds, which
-/// are part of the same line and not an afterthought tacked onto the end of it.
 const KEY_GAP: &str = "    ";
 
-/// The `m` key's name while the terminal is reporting its mouse: what the next
-/// press does, which is stop it.
-///
-/// Named by its effect rather than by its state — `m: mouse off` and not
-/// `mouse: on` — because a line of keys is a line of things to press, and every
-/// other name on it says what pressing does. It is short for the reason every
-/// name here is short, and it sits next to quit rather than beside `f` and `o`:
-/// those change what warlock draws, this changes what the terminal does with the
-/// pointer, which is the same kind of fact as how to leave.
 const MOUSE_OFF_KEY: &str = "m: mouse off";
 
-/// The `m` key's name while capture is off: what the next press does, which is
-/// start it again. See [`MOUSE_OFF_KEY`].
-///
-/// This is the wording that has to be right. Capture off is the state a reader
-/// can be surprised by — the wheel does nothing, and the only way back is a key
-/// whose name is the one thing on screen that says so.
 const MOUSE_ON_KEY: &str = "m: mouse on";
 
-/// The way out, last on the keys line because it is the last thing anybody needs
-/// and the first thing they have to be able to find.
 const QUIT_KEY: &str = "q/Esc/Ctrl-C: quit";
 
-/// The `v` key's name, reserved in [`KEY_DROP_ORDER`] before the key exists.
-///
-/// Not on the line: naming a key warlock does not have would be the footer
-/// lying. Its place in the order is here so that the slice which adds the key
-/// adds a name to [`KEYS`] and nothing else.
 const VIEW_KEY: &str = "v: view";
 
-/// The `e` key's name, reserved the same way and for the same reason as
-/// [`VIEW_KEY`].
 const EDIT_KEY: &str = "e: edit";
 
-/// The order the idle keys line gives its names up in, first dropped to last
-/// kept.
-///
-/// A terminal too narrow for the whole line has to lose something, and this is
-/// where which something is decided. Left to the right-hand edge the line loses
-/// its tail, and its tail is [`QUIT_KEY`] — the one name a stuck reader is
-/// looking for, gone on the eighty-column terminal where being stuck is most
-/// likely. So the line is laid out for the width it has, by [`laid_out_keys`],
-/// and gives up the names a reader is least likely to need told first.
-///
-/// The composer's four go before everything, because a reader looking at a
-/// composer has a cursor in front of them saying it takes typing — the field is
-/// the one thing on screen that explains itself, so its names are the cheapest
-/// on the line. [`COMPOSE_KEYS`] goes first of the four: it is the widest name
-/// here by some way, and Enter is the press everybody makes in a field without
-/// being told. [`LEAVE_KEY`] next, because Esc is the other press everybody
-/// makes, and because the way out is still spelled on the line inside
-/// [`QUIT_KEY`]. [`COMMAND_KEY`] outlasts those two, because the slash is the
-/// one thing about the field a cursor does not hint at and nobody presses by
-/// accident. [`FOCUS_KEY`] is the last of the four kept even so: Tab is the only
-/// one of them a reader needs *before* the cursor is theirs, and a composer
-/// nobody can reach is a composer nobody types a command into either.
-///
-/// Movement goes next, all of it: `PgUp/PgDn`, then `g/G: ends`, then
-/// `k/j: row`. The arrows are what a reader presses before reading anything at
-/// all, and j/k and the page keys are the guesses anyone who has used a pager
-/// already has — a movement key nobody names is a movement key most people find
-/// anyway. The view toggles go next — `f: files`, `o: pacts`, `space: fold` —
-/// because each of them is undone by pressing it again, so a reader who trips
-/// over one is a single keystroke from the screen they had.
-///
-/// The verbs go late — `s: scope`, `r: refresh`, `p: pact` — because nobody
-/// guesses p/r/s/v/e. They are the names that are only known if they are read,
-/// so they are the last ones worth spending columns on, and `p` outlasts the
-/// other two because a pact is the thing the other two are about.
-///
-/// The `m` key is in this order twice, and the asymmetry is the point.
-/// [`MOUSE_OFF_KEY`] drops early, with the view toggles: while capture is on the
-/// wheel works, and a reader who never learns it can be stopped has lost
-/// nothing. [`MOUSE_ON_KEY`] is the last name kept before the way out, because
-/// capture off is the state a reader can be surprised by — the wheel does
-/// nothing, and this name is the only thing on screen that says how to get it
-/// back.
-///
-/// [`QUIT_KEY`] is not in this order at all, which is how it is never dropped.
+// The order the footer gives keys up in as the terminal narrows, first named
+// first dropped. `QUIT_KEY` is deliberately absent, so it is the one piece that
+// survives every width: a reader who cannot see how to leave has no way to find
+// out. Names not on the footer at the time — the mouse key that is not the
+// current one, and keys no footer carries yet — are skipped rather than being
+// an error, which is what lets this be one list instead of one per key set.
 const KEY_DROP_ORDER: &[&str] = &[
     COMPOSE_KEYS,
     LEAVE_KEY,
@@ -643,26 +184,6 @@ const KEY_DROP_ORDER: &[&str] = &[
     MOUSE_ON_KEY,
 ];
 
-/// `pieces` joined by [`KEY_GAP`] into a line of at most `width` columns, giving
-/// names up in `drop_order` until what is left fits.
-///
-/// Arithmetic, and all of it here: measure, drop the next name the order names,
-/// measure again. A name goes with its gap because the gap is what joins it to
-/// its neighbour, and four columns of nothing between two keys would be the
-/// dropped name still costing what it cost.
-///
-/// Whole names or nothing. Half a key's text is a key nobody can press, so a
-/// name that does not fit is not abbreviated or ellipsised, it is left off, and
-/// the reader is told fewer true things rather than one untrue one.
-///
-/// Measured with [`display_width`], which is what the backend will charge for
-/// the row, rather than with `str::len`, which is only the same number while
-/// every name is ASCII.
-///
-/// A name not in `drop_order` is never dropped. When only those are left and
-/// they still do not fit, the line is cut to the width by [`clipped`] — which is
-/// a terminal narrower than [`QUIT_KEY`] itself, or than [`CANCEL_KEY`] and the
-/// way out together, where the start of a name is more use than a blank line.
 fn laid_out_keys(width: usize, pieces: &[&str], drop_order: &[&str]) -> String {
     let mut kept: Vec<&str> = pieces.to_vec();
     let mut order = drop_order.iter();
@@ -678,16 +199,10 @@ fn laid_out_keys(width: usize, pieces: &[&str], drop_order: &[&str]) -> String {
     clipped(&kept.join(KEY_GAP), width)
 }
 
-/// `text`, cut to `width` columns with nothing put in place of what was cut.
-///
-/// [`truncated`] with the [`ELLIPSIS`] left off, and the difference is what the
-/// cut means. There it says a path goes on past the edge of the panel; here the
-/// only thing ever cut is the tail of a keys line that has already given up
-/// every name it is allowed to — [`QUIT_KEY`], or [`CANCEL_KEY`] and the way out
-/// of a run — and a mark saying the key goes on would cost a column of the key
-/// it was marking.
-///
-/// Cut on a character boundary, so this cannot panic on text that is not ASCII.
+// Cuts to fit and says nothing about it, where `truncated` spends columns on an
+// ellipsis to say it cut. The two are not interchangeable: the footer has
+// already dropped whole keys to reach this width, so an ellipsis there would
+// mark the one loss that is already visible and cost a column to do it.
 fn clipped(text: &str, width: usize) -> String {
     if display_width(text) <= width {
         return text.to_owned();
@@ -708,18 +223,6 @@ fn clipped(text: &str, width: usize) -> String {
     text[..end].to_owned()
 }
 
-/// The keys line for a terminal `width` columns wide that is reporting its mouse
-/// or one that is not.
-///
-/// The only name that varies with the state is the `m` key's, and it varies the
-/// way [`KEYS`] and [`PACTING_KEYS`] do: the line says what the next press will
-/// do, so the state capture is in is read off the key that changes it rather
-/// than announced on the message line — which the next keystroke would wipe,
-/// while capture stays off until somebody presses `m` again.
-///
-/// What comes back is no wider than `width`, whichever name it picked and
-/// however narrow the terminal: which names survive that is [`KEY_DROP_ORDER`]'s
-/// business and fitting them is [`laid_out_keys`]'.
 fn keys_line(mouse_captured: bool, width: usize) -> String {
     let mouse = if mouse_captured {
         MOUSE_OFF_KEY
@@ -733,367 +236,68 @@ fn keys_line(mouse_captured: bool, width: usize) -> String {
     laid_out_keys(width, &pieces, KEY_DROP_ORDER)
 }
 
-/// The keys line while a pact is running: the same line's job, for the mode the
-/// app is in while it works.
-///
-/// Esc is why this line exists. It means quit on [`KEYS`] and cancel here, and a
-/// key that means two things has to say which one it means now; a run that
-/// cannot be stopped by anyone who does not already know how is a run the reader
-/// waits out.
-///
-/// Much shorter than [`KEYS`], and short on purpose. It names what a reader
-/// reaches for while waiting — a look around the tree, a way to stop, a way out
-/// — and leaves out the rest rather than restating a line they have been reading
-/// since launch. Short also means it survives a narrow terminal whole, which
-/// matters more here than there: this is the line that answers "how do I stop
-/// this?", and an answer truncated off the right-hand edge is no answer.
-///
-/// Names rather than one joined string for the reason [`KEYS`] is: a terminal
-/// narrow enough to lose part of even this line loses whole names, in
-/// [`PACTING_KEY_DROP_ORDER`], rather than losing its right-hand end.
-///
-/// The names are longer than their counterparts on [`KEYS`] — the movement key
-/// is spelled `up/down k/j: move` where the idle line says `k/j: row` — and can
-/// afford to be, because there are only four of them. A reader who has just
-/// started a run is reading this line for the first time; the idle line they
-/// have had on screen since launch.
 const PACTING_KEYS: &[&str] = &[MOVE_KEYS, COLLAPSE_KEY, CANCEL_KEY, PACTING_QUIT_KEY];
 
-/// The movement keys while a pact runs, arrows and j/k named together.
-///
-/// Both halves named, unlike [`ROW_KEY`] on the idle line, because this line has
-/// the columns for it: see [`PACTING_KEYS`].
 const MOVE_KEYS: &str = "up/down k/j: move";
 
-/// The space key while a pact runs: what it does, spelled out.
 const COLLAPSE_KEY: &str = "space: collapse";
 
-/// Esc while a pact runs, which is the whole reason this line differs from
-/// [`KEYS`]: the key that means quit there means stop the run here.
 const CANCEL_KEY: &str = "Esc: cancel";
 
-/// The way out while a pact runs, with Esc left off it because Esc is spoken for
-/// by [`CANCEL_KEY`].
 const PACTING_QUIT_KEY: &str = "q/Ctrl-C: quit";
 
-/// The order the pacting keys line gives its names up in, first dropped to last
-/// kept.
-///
-/// [`KEY_DROP_ORDER`]'s reasoning, applied to a line with four names on it.
-/// [`MOVE_KEYS`] goes first: the arrows and j/k are what a reader presses
-/// without being told, and a look around the tree is the least of what they came
-/// to this line for. [`COLLAPSE_KEY`] next, because folding a subtree is undone
-/// by pressing the same key again.
-///
-/// [`CANCEL_KEY`] and [`PACTING_QUIT_KEY`] are not in this order at all, which is
-/// how neither is ever dropped. This is the line that answers "how do I stop
-/// this?" and both of its answers outlast every other name on it — the run's own
-/// stop first, then the way out of warlock entirely.
 const PACTING_KEY_DROP_ORDER: &[&str] = &[MOVE_KEYS, COLLAPSE_KEY];
 
-/// The keys line for a terminal `width` columns wide while a pact is running.
-///
-/// [`keys_line`]'s job for [`PACTING_KEYS`], and the same [`laid_out_keys`] doing
-/// it: nothing about this line varies with app state, so the width is the only
-/// thing it is told.
 fn pacting_keys_line(width: usize) -> String {
     laid_out_keys(width, PACTING_KEYS, PACTING_KEY_DROP_ORDER)
 }
 
-/// The tally line, the keys line and the message line.
-///
-/// The message line is there whether or not there is a message to put on it: a
-/// footer that grew a line when the app had something to say would shove the
-/// tree down a row and reflow the whole window on a keystroke that changed
-/// nothing about the tree.
 const FOOTER_HEIGHT: u16 = 3;
 
-/// The share of the width the tree column asks for while the terminal is wide
-/// enough to give it: a proportion, so a wide terminal spends its extra columns
-/// on the panel rather than on a tree column that has nothing to do with them.
-///
-/// See [`areas`] for the whole rule.
 const TREE_PERCENT: u16 = 30;
 
-/// The fewest columns the tree column is cut to while the terminal can afford
-/// it.
-///
-/// Roughly a name at four levels of indent, its markers and its gutter: below
-/// this a tree column stops showing the tree and starts showing the left-hand
-/// end of it. See [`areas`] for what happens when the terminal cannot afford
-/// even this.
 const TREE_MIN_WIDTH: u16 = 30;
 
-/// The border every pane carries, on all four sides.
-///
-/// One row at the top and one at the bottom, one column each side: the tree's
-/// rows and its header are drawn inside this, which is why [`tree_height`] has
-/// to take it off the terminal's height as well as the header and the footer.
 const BORDER_THICKNESS: u16 = 1;
 
-/// How long the row of the directory a pact is working right now holds each of
-/// its two colours before taking the other: half a second stale, half a second
-/// fresh, over and over for as long as that pass runs. See [`pulse_colour`].
-///
-/// Half a second because of what it is measured against at either end. The event
-/// loop wakes every 100 ms (`POLL_INTERVAL`), so a phase this long is redrawn
-/// about five times before it turns over: the change lands within a tenth of a
-/// second of when it is due, and the pulse never depends on a wakeup arriving at
-/// a particular moment. Much shorter and it would start to alias against that
-/// tick — a phase of two or three wakeups reads as a flicker whose rate depends
-/// on how busy the loop was — and a row flashing several times a second beside
-/// text somebody is reading is the kind of movement that has to be looked away
-/// from. Much longer and it stops reading as movement at all: a row that holds
-/// one colour for two seconds looks like a row that has settled on it, which is
-/// the one thing this must not say. Half a second is slow enough to be calm and
-/// fast enough that a pass of even a few seconds visibly pulses more than once.
 const PULSE_PHASE: Duration = Duration::from_millis(500);
 
-/// What the gate on the way out asks.
-///
-/// A question, in the words the answers answer: "Leave warlock?" is answered by
-/// Yes and No without either of them having to be re-read as a verb. It names
-/// the program rather than saying "quit?", because the reader who pressed Esc by
-/// reflex is being told what the keystroke was about to do, and "leave" is what
-/// the footer's own [`QUIT_KEY`] calls it in the other direction.
-///
-/// Nothing is said here about the keys that answer it. The two answers are on
-/// screen and Enter takes the lit one; a line spelling out `y`/`n`/Esc would be
-/// a second footer inside a window that exists to be read in one glance, and the
-/// keys that work are the ones anybody would try. See [`mod@crate::confirm`] for
-/// what those are.
 const CONFIRM_QUESTION: &str = "Leave warlock?";
 
-/// The left-hand answer, the one that leaves.
-///
-/// Padded a column each side so the highlight is a block around the word rather
-/// than a word with its edges touching whatever is beside it: the lit answer is
-/// drawn reversed, and reversing exactly three columns reads as a stain on the
-/// text instead of as a button. The padding is part of the constant so that the
-/// width the window is sized to (see [`confirm_size`]) is the width actually
-/// drawn.
 const CONFIRM_YES: &str = " Yes ";
 
-/// The right-hand answer, the one the question opens on. See [`CONFIRM_YES`] for
-/// the padding, and [`mod@crate::confirm`] for why the order of the two is
-/// load-bearing: Left lights this one's neighbour and Right lights this one,
-/// positionally, which is only true while Yes is drawn on the left.
 const CONFIRM_NO: &str = " No ";
 
-/// What sits between the two answers.
-///
-/// The footer's [`KEY_GAP`] is the same four columns and is deliberately not
-/// reused: that one separates names on a line of keys, this one separates two
-/// answers to one question, and a change to either has nothing to say about the
-/// other.
 const CONFIRM_ANSWER_GAP: &str = "    ";
 
-/// The clear columns the question is given inside the window's border, each
-/// side.
-///
-/// Three, where the panel's mark takes two: this window is a handful of columns
-/// of text in the middle of a full screen, and the space around it is what makes
-/// it read as something laid on top rather than as a box that happens to be
-/// there.
 const CONFIRM_MARGIN: u16 = 3;
 
-/// The clear rows above the question and below the answers, inside the border.
-///
-/// One each, for the reason [`MARK_MARGIN_ROWS`] is one: a row costs about two
-/// columns' worth of screen, and this window is drawn over a tree somebody was
-/// reading.
 const CONFIRM_MARGIN_ROWS: u16 = 1;
 
-/// The lines of the window itself: the question, a blank, the answers.
-///
-/// The blank between them is not decoration. The question and the pair of
-/// answers are two different things to read, and a reader who has already read
-/// the question needs to find the highlight without their eye being caught by
-/// the text above it.
 const CONFIRM_LINES: u16 = 3;
 
-/// How tall the whole window is: its lines, the rows kept clear around them, and
-/// the border.
-///
-/// A number rather than something measured, because unlike the width there is
-/// nothing to measure: [`CONFIRM_LINES`] is a fixed three. It is what
-/// [`confirm_area`] clamps against a short terminal.
 const CONFIRM_HEIGHT: u16 = CONFIRM_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
-/// What the scope window says it is about, in front of the directory it is
-/// about.
-///
-/// "Scope for `crates/warlock-engine`" rather than a bare path, because a path
-/// on its own in a window that appeared under somebody's hands says which
-/// directory but not what is being asked of it — and this window is opened by a
-/// single keystroke, which is exactly the way to arrive at one without having
-/// meant to. The trailing space is part of the constant so that the width the
-/// window is sized to (see [`scope_size`]) is the width actually drawn, the way
-/// [`CONFIRM_YES`]'s padding is.
-///
-/// Handed to [`draw_scope`] rather than read inside it: the same window draws
-/// the path prompt too, under [`PATH_HEADING`], and a window that named itself
-/// would be a second window to keep in step with this one.
 const SCOPE_HEADING: &str = "Scope for ";
 
-/// What the path prompt's window says it is about, in front of what
-/// [`ScopeField::directory`] carries — which is nothing, because that field
-/// carries the whole heading.
-///
-/// Empty on purpose, and a constant rather than a bare `""` at the one call
-/// site, so that the two windows are drawn from two pairs of words in the same
-/// place rather than from one pair and a literal. The path prompt is opened by a
-/// `/write` turn landing, not by a keystroke, so the heading has to come from
-/// whoever knew what was being asked for; that is the binary, and the one string
-/// a [`ScopeField`] already has for saying what it is asking about is its
-/// directory (see [`mod@crate::prompt`]). Nothing here reads it as a path — this
-/// window prints it, as it prints the module the scope prompt puts there.
 const PATH_HEADING: &str = "";
 
-/// The dim last line of the path prompt's window: what the two keys do.
-///
-/// [`scope::RULES`](warlock_engine::scope::RULES)'s place in the window, and deliberately not the same kind of
-/// sentence. The scope prompt's line is the engine's, word for word, because
-/// what a scope may say is the engine's to judge; what a path may say is judged
-/// where the file is written, and this line does not attempt it. It says what
-/// Enter and Esc come to, which is worth saying here for the reason nothing else
-/// in warlock needs it said: this is the one window a reader arrives at without
-/// having pressed a key for it, so the way out of it is not something they can
-/// have just done.
 const PATH_RULES: &str = "Enter writes the document, Esc writes nothing";
 
-/// The clear columns the scope window's text is given inside its border, each
-/// side: [`CONFIRM_MARGIN`], spelled as that rather than as a three.
-///
-/// Two windows laid over the same frame by the same program, inset by different
-/// amounts, would read as two programs — and a number copied here would be free
-/// to become a different number by nobody's decision.
 const SCOPE_MARGIN: u16 = CONFIRM_MARGIN;
 
-/// The clear rows above and below the scope window's text, inside its border:
-/// [`CONFIRM_MARGIN_ROWS`], for the reason [`SCOPE_MARGIN`] is
-/// [`CONFIRM_MARGIN`].
 const SCOPE_MARGIN_ROWS: u16 = CONFIRM_MARGIN_ROWS;
 
-/// The one column drawn after the text in the field, reversed, to say where the
-/// next character will land.
-///
-/// Drawn rather than asked for. The terminal's own caret is hidden for every
-/// frame warlock draws — a caret parked in the corner of a tree nobody is typing
-/// into is a caret in the wrong place all session — and showing it for this one
-/// window would mean putting it back for the frame after, on a terminal whose
-/// blink and shape warlock does not control. A reversed blank is in the buffer,
-/// so it is the same on every terminal and a test can find it.
-///
-/// A space rather than a block glyph, for the same reason: reversing a cell
-/// lands wherever the palette lands, where `█` is a font's opinion of a full
-/// block and sits a row too high in some of them.
 const SCOPE_CURSOR: &str = " ";
 
-/// The lines of the scope window: the heading, a blank, the field, the row the
-/// broken rule goes in, and the rules a scope keeps.
-///
-/// Five whether or not a rule has been broken. The row under the field is kept
-/// clear rather than closed up when [`ScopeField::rule`] is `None`, so a refused
-/// submit puts a line on screen without moving the field out from under the
-/// reader's eye — a window that grew a row on Enter would take the text they are
-/// about to correct with it, and on a short terminal would take it a row closer
-/// to being clipped. The blank under the heading is [`CONFIRM_LINES`]'s blank,
-/// for the same reason: what the window is about and what is being typed are two
-/// things to read.
-///
-/// Five for the path prompt as well, which is drawn by the same [`draw_scope`]
-/// with the other pair of words in it: one window somebody types a line into,
-/// asked twice, rather than two windows that could drift a row apart.
 const SCOPE_LINES: u16 = 5;
 
-/// How tall the whole scope window is: its lines, the rows kept clear around
-/// them, and the border. [`CONFIRM_HEIGHT`]'s arithmetic, over
-/// [`SCOPE_LINES`].
 const SCOPE_HEIGHT: u16 = SCOPE_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
-/// The caret drawn after the composer's draft: [`SCOPE_CURSOR`], spelled as that
-/// rather than as another space.
-///
-/// The two fields are the only things in warlock somebody types into, and a
-/// reader who has seen one of them has learnt what the caret looks like. Written
-/// as the constant rather than copied so that a change to how warlock draws a
-/// cursor is one change and not two that have to be remembered together.
 const COMPOSER_CURSOR: &str = SCOPE_CURSOR;
 
-/// The fewest rows a composer can be drawn in: one row for the draft, and the
-/// border above and below it.
-///
-/// Below this the field is not drawn at all and the panel keeps the whole column
-/// — see [`split_column`]. A box with a border and no row inside it would be two
-/// rows spent saying there is somewhere to type and no room to type in it.
 const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
 
-/// Draw the whole frame: the panel on the left, the tree column on the right,
-/// the footer full width beneath both.
-///
-/// Pure in the sense that matters here — it reads `app` and writes `frame`,
-/// touching no terminal state of its own.
-///
-/// The panes take what the footer leaves and so give their rows up first when
-/// the terminal is short: on a screen with no room for everything, which nodes
-/// are off the bottom matters less than still being told the tally and how to
-/// get out.
-///
-/// `now` is the instant this frame is being drawn at, and it is the caller's
-/// rather than read here: the newest line of the panel's live section counts up
-/// against it, the row of the directory a pact is working pulses against it (see
-/// [`pulse_colour`]), and a renderer that called [`Instant::now`] itself would be
-/// a second clock for a test to fight. The event loop already redraws on a tick,
-/// so handing it the instant it woke up at is all the ticking there is.
-///
-/// `confirm` is the gate on the way out, and it is handed in beside the app
-/// because it is not part of the app: answering No has to leave the view exactly
-/// as it was, and the cheapest guarantee of that is an app that never heard the
-/// question (see [`mod@crate::confirm`]). While it is [`QuitConfirm::Closed`]
-/// this draws the frame it has always drawn, cell for cell. While it is open the
-/// same frame is drawn and then [`draw_confirm`] puts the question over the
-/// middle of it — over, and not instead of, so the reader can still see what
-/// they are about to leave, and so the footer keeps its three lines and its
-/// wording whichever way the question is answered.
-///
-/// `scope` is the other question this frame can be carrying, handed in beside
-/// the app for the same reason and drawn the same way: closed, it changes
-/// nothing about the frame; open, [`draw_scope`] puts a window over the middle
-/// of it with the directory being scoped, the field, and the rules a scope keeps
-/// (see [`mod@crate::prompt`]). By reference rather than by value, unlike
-/// `confirm`, because it is carrying a string somebody is typing and a renderer
-/// has no business owning a copy of it.
-///
-/// `path` is the third window and the only one no keystroke opens: the path a
-/// brief is about to be written to, up from the moment a `/write` turn answers
-/// until Enter writes the file or Esc writes nothing. It is a [`ScopePrompt`]
-/// like the one above it because it is the same field and the same editor with a
-/// different question in it, and it is drawn by the same [`draw_scope`] with
-/// [`PATH_HEADING`] and [`PATH_RULES`] in place of the scope's two sentences —
-/// so the window a reader has already learnt to read is the window they get. The
-/// heading itself rides in the field (see [`PATH_HEADING`]): this crate never
-/// composed it and never reads it as a path.
-///
-/// The windows are drawn in that order, and the scope prompt last, so that a
-/// frame somehow carrying more than one shows the one whose keys are live rather
-/// than half of each — the order they are stacked in here is the order
-/// [`press_for`](crate::input::press_for) consults them in, back to front. The
-/// event loop never opens two — while any is up it consults that one instead of
-/// the app, so the key that would open another never reaches anything — and this
-/// is what that costs to be safe about it: two `if`s in the order the modes
-/// stack.
-///
-/// `composer` is the draft somebody is typing under the panel, handed in beside
-/// the app for the reason the two questions are: the loop owns it and the app
-/// has never heard of it (see [`mod@crate::composer`]). Unlike them it is not
-/// drawn *over* anything — it is a pane of its own, cut off the bottom of the
-/// panel's column by [`areas`], so the panel above it loses exactly the rows it
-/// takes. `None` is a frame with no composer at all, which is what a test that
-/// is not about the field draws; and a `Some` handed in while the document card
-/// has the panel is put back to `None` here (see [`on_screen`]), so the rule
-/// about when the field is on screen is [`Panel::composer_showable`](crate::Panel::composer_showable)'s and is
-/// asked rather than repeated.
 #[expect(
     clippy::too_many_arguments,
     reason = "one frame's worth of state, and the point of it is that the binary \
@@ -1137,6 +341,9 @@ pub fn draw(
     draw_tree_pane(frame, tree, app, chrome, now);
     draw_footer(frame, footer, app);
 
+    // Over the finished frame rather than instead of it, each clearing the cells
+    // behind it, so what a prompt is answered against is still on screen around
+    // it. Nothing below is skipped when one of these is up.
     if let Some(highlighted) = confirm.highlighted() {
         draw_confirm(frame, screen, highlighted);
     }
@@ -1148,62 +355,13 @@ pub fn draw(
     }
 }
 
-/// The areas one frame is cut into: the panel, the composer under it, the tree
-/// column beside them, and the footer under everything.
-///
-/// Split out so that [`tree_height`] answers the same question [`draw`] does,
-/// from the same call: a caller that told the app one height while the frame
-/// used another would scroll by a window that is not on screen. The composer is
-/// why that matters twice over — the rows it takes are rows off the panel, so
-/// [`panel_height`] and [`composer_height`] have to be two answers from the one
-/// cut rather than two opinions about the same column.
 struct Areas {
-    /// The left-hand pane, the majority of the width, drawn by [`draw_panel`].
     panel: Rect,
-    /// The composer's own pane, under the panel and in the same column: `None`
-    /// on a frame that has no composer on it, and on one with no room for even
-    /// the smallest field. See [`split_column`].
     composer: Option<Rect>,
-    /// The right-hand pane: border, header, tree rows.
     tree: Rect,
-    /// Full width along the bottom, under both panes.
     footer: Rect,
 }
 
-/// Cut `area` into the footer and the two panes above it.
-///
-/// The footer is taken off the bottom first, at its fixed [`FOOTER_HEIGHT`] and
-/// the full width: it is nobody's pane, it says what the keys do and what the
-/// tally is, and both of those are about the screen rather than about either
-/// side of it.
-///
-/// What is left is split left to right by a proportion with a floor, not by a
-/// fixed column count:
-///
-/// * The tree column asks for [`TREE_PERCENT`] of the width, and never fewer
-///   than [`TREE_MIN_WIDTH`] columns.
-/// * It is capped at half the width, so the panel is never the smaller of the
-///   two: it keeps whatever is left over, which on an odd width is the extra
-///   column. Everywhere the terminal is wide enough for the floor and the
-///   proportion both, that leaves the panel the clear majority.
-/// * On a terminal too narrow for the floor to be honoured (under twice
-///   [`TREE_MIN_WIDTH`]) the cap wins and the floor is given up: the two panes
-///   halve what there is. The floor is the first thing dropped because the
-///   alternative is a panel squeezed to nothing or a tree column wider than the
-///   pane it was supposed to be a column beside; an even split is at least a
-///   split both panes survive, and warlock is not usable at such a width
-///   whichever way the columns are shared out.
-///
-/// So: 160 columns gives the tree 48 and the panel 112; 80 gives the tree its
-/// floor of 30 and the panel 50; 40 gives the tree 20 and the panel 20; 41 gives
-/// the tree 20 and the panel 21.
-///
-/// The panel's side of that is then cut again, top to bottom, and only then: the
-/// composer is a pane under the panel and in the panel's column, so it is paid
-/// for out of the panel's rows and out of nothing else — see [`split_column`].
-/// The tree column and the footer never hear about it, and neither does the
-/// width, which is why a document wrapped at [`panel_width`] is wrapped at the
-/// width the composer is drawn at too.
 fn areas(area: Rect, composer: Option<&Composer>) -> Areas {
     let [above, footer] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(FOOTER_HEIGHT)]).areas(area);
@@ -1223,24 +381,6 @@ fn areas(area: Rect, composer: Option<&Composer>) -> Areas {
     }
 }
 
-/// Cut the composer's pane off the bottom of `column`, the panel's, and give
-/// back what is left of the panel and what the composer got.
-///
-/// The composer asks for the rows its draft needs at the column's own inside
-/// width — one when the draft is empty, one more per newline and per wrap, and
-/// never more than [`COMPOSER_MAX_ROWS`], past which the field scrolls within
-/// itself (see [`Composer::height`]) — plus the row its border costs top and
-/// bottom. What it asks for is what it gets, and the panel above keeps the rest:
-/// panel and composer together are the column, so the rows one gains are rows
-/// the other lost and no row of the column goes unaccounted for.
-///
-/// Two things it does not get. It never takes the panel's own border with it:
-/// the most it is given is the column less those two rows, so the panel is
-/// squeezed to nothing before the composer is drawn in a column with no panel
-/// left around it. And below [`COMPOSER_MIN_HEIGHT`] — a field with no row to
-/// type on — it is not drawn at all and the panel keeps the whole column, which
-/// is the same answer a frame with no composer gets. A border round nothing
-/// would be furniture on the terminal that can least afford it.
 fn split_column(column: Rect, composer: Option<&Composer>) -> (Rect, Option<Rect>) {
     let Some(composer) = composer else {
         return (column, None);
@@ -1250,6 +390,10 @@ fn split_column(column: Rect, composer: Option<&Composer>) -> (Rect, Option<Rect
         .height(pane_inner(column).width)
         .saturating_add(2 * BORDER_THICKNESS);
     let rows = wanted.min(column.height.saturating_sub(2 * BORDER_THICKNESS));
+    // Too little room and the composer is not drawn at all rather than drawn
+    // short: below `COMPOSER_MIN_HEIGHT` it is two borders and no line to type
+    // on. The panel keeps the whole column, and the `None` is also what stops
+    // `draw` from looking for a caret in an area that is not on the frame.
     if rows < COMPOSER_MIN_HEIGHT {
         return (column, None);
     }
@@ -1260,53 +404,30 @@ fn split_column(column: Rect, composer: Option<&Composer>) -> (Rect, Option<Rect
     (panel, Some(field))
 }
 
-/// The composer as a frame drawn over `app` has it: `Some` when the field is on
-/// screen, `None` while the document card is showing.
-///
-/// One question asked in one place, because four things have to give the same
-/// answer to it: what [`draw`] draws, what [`panel_height`] tells the app to
-/// scroll the account by, what [`composer_height`] says that cost, and what
-/// [`hit_test`] is pointing at. The rule itself is [`Panel::composer_showable`](crate::Panel::composer_showable)'s
-/// — the panel holds one card at a time and a document takes the whole column —
-/// and it is asked here rather than stated again, so the frame agrees with the
-/// app that is already keeping the keyboard off a hidden field (see
-/// [`App::toggle_focus`]).
-///
-/// The app is borrowed only for the length of the call: what comes back borrows
-/// the draft and nothing else, so a caller can measure the frame's composer and
-/// still hand the app out mutably to draw it.
+// Exported so the binary can route a keystroke by the same question the frame
+// was cut by. `on_screen` below is this one over an `Option`, and `draw` and
+// `areas` both go through it: if the two answers ever came from two rules, keys
+// would go to a field the reader cannot see.
 #[must_use]
 pub fn composer_on_screen<'a>(app: &App, composer: &'a Composer) -> Option<&'a Composer> {
     app.panel().composer_showable().then_some(composer)
 }
 
-/// [`composer_on_screen`] for a caller that may not have a field at all: the
-/// same rule, over an `Option`.
-///
-/// [`draw`] takes the composer as an `Option` — a frame with no composer on it
-/// is what a test not about the field draws — and filtering it again there is
-/// belt and braces: whatever a caller hands in, a document card on the panel is
-/// a frame with no field on it.
 fn on_screen<'a>(app: &App, composer: Option<&'a Composer>) -> Option<&'a Composer> {
     composer.and_then(|field| composer_on_screen(app, field))
 }
 
-/// How many columns of `width` the tree column gets. The rule is [`areas`]'s and
-/// is written out there.
 fn tree_width(width: u16) -> u16 {
     let share = u32::from(width) * u32::from(TREE_PERCENT) / 100;
     let share = u16::try_from(share).unwrap_or(width);
 
+    // Floor first, then ceiling, so the ceiling wins: on a terminal narrower
+    // than twice `TREE_MIN_WIDTH` the tree gets less than its minimum rather
+    // than more than half the screen. Swapping the two would let a narrow
+    // terminal hand the tree everything and leave the panel a bare border.
     share.max(TREE_MIN_WIDTH).min(width / 2)
 }
 
-/// The inside of a pane: `area` less its border on all four sides.
-///
-/// Asked of the block itself rather than worked out here, so what is measured is
-/// what the border widget will actually leave rather than a second opinion about
-/// it. [`BORDER_THICKNESS`] is what that comes to, and the assertion is there so
-/// that a border which ever stopped costing exactly that says so here — in a
-/// test run — rather than by quietly drawing one row too many.
 fn pane_inner(area: Rect) -> Rect {
     let inner = pane_block(false).inner(area);
     debug_assert_eq!(
@@ -1318,11 +439,6 @@ fn pane_inner(area: Rect) -> Rect {
     inner
 }
 
-/// The rows of `tree`, the tree pane's area, that the tree itself is drawn into:
-/// what the border and the header leave.
-///
-/// Empty rather than negative on a pane with no room for either — a `Rect` of
-/// zero height draws nothing, which is what a terminal that short should get.
 fn tree_rows_area(tree: Rect) -> Rect {
     let [_header, rows] = Layout::vertical([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)])
         .areas(pane_inner(tree));
@@ -1330,29 +446,11 @@ fn tree_rows_area(tree: Rect) -> Rect {
     rows
 }
 
-/// Cut the run's header off the top of `panel`, the panel pane's area, and give
-/// back the row it got and the rows the account window keeps.
-///
-/// [`tree_rows_area`]'s counterpart, and the panel's one cut: the header is a
-/// fixed line inside the border and above the window, so the window is what the
-/// border and the header leave. Everything that has to agree about it comes
-/// through here — what [`draw_panel`] draws, what [`panel_height`] tells the app
-/// to scroll the account by, what [`run_header_height`] says that cost, and what
-/// [`hit_test`] is pointing at — because a header measured in one place and
-/// drawn from another is an account scrolled by rows it does not have.
-///
-/// `header` is the run in flight as the next frame has it, or `None` when no run
-/// is running, which is when the window keeps the whole inside of the border. It
-/// is the header's own value rather than a flag because the caller drawing the
-/// row holds it anyway and a second question would be a second answer.
-///
-/// A header is only cut when a row is left over for the account under it. A
-/// panel no taller than the header would otherwise be a header over nothing — a
-/// run reporting its progress into a window with no room to report anything in —
-/// so such a panel degrades to the bare account, exactly as it was before there
-/// was a header to pay for.
 fn panel_split(panel: Rect, header: Option<&RunHeader>) -> (Option<Rect>, Rect) {
     let inner = pane_inner(panel);
+    // A panel with no room to spare loses the run header whole rather than
+    // sharing: `Length` would take its rows anyway and leave the account with
+    // none, so the reader would watch a progress bar over an empty pane.
     if header.is_none() || inner.height <= RUN_HEADER_HEIGHT {
         return (None, inner);
     }
@@ -1363,60 +461,20 @@ fn panel_split(panel: Rect, header: Option<&RunHeader>) -> (Option<Rect>, Rect) 
     (Some(header), rows)
 }
 
-/// The rows of `panel` the account's window is drawn into: what the border and
-/// the run's header leave. The cut is [`panel_split`]'s and is written out
-/// there.
 fn panel_rows_area(panel: Rect, header: Option<&RunHeader>) -> Rect {
     panel_split(panel, header).1
 }
 
-/// How many rows of tree a terminal of `size` has room for, once the footer, the
-/// tree pane's border and its header have taken theirs.
-///
-/// This is what [`App::set_viewport_height`] wants, and the only reason it is
-/// public: the app's scroll offset is only right if it was computed against the
-/// height the next frame actually gives the tree, and the layout is the one
-/// thing that knows that height. The caller asks before it draws, so the offset
-/// the frame reads was computed for the frame being drawn. It is measured off
-/// the same [`areas`] call the frame is cut by, border included, so the answer
-/// is the number of rows drawn rather than a count that happens to agree.
 #[must_use]
 pub fn tree_height(size: Size) -> u16 {
     tree_rows_area(areas(Rect::from(size), None).tree).height
 }
 
-/// How many lines of account a terminal of `size` has room for in the panel,
-/// once the footer, the panel's own border, the composer under it and the run's
-/// header above it have taken theirs.
-///
-/// [`tree_height`]'s counterpart, public for the same reason and measured the
-/// same way: off the very [`areas`] call the frame is cut by and through the
-/// very [`panel_rows_area`] cut the frame draws the window into, so the height
-/// the app scrolls the panel's window by is the height the next frame draws it
-/// at.
-///
-/// `composer` is the field the next frame will draw, or `None` for a frame with
-/// no composer on it — which is what the panel gets back while the document card
-/// is showing. `header` is the run the next frame will report, or `None` when no
-/// run is in flight, which is when the account has those rows back too (see
-/// [`App::run_header`]).
-///
-/// What the two of them cost is [`composer_height`] and [`run_header_height`],
-/// and the three come to what the panel's column has inside it: a row is the
-/// account's, the field's or the header's and never none of them.
 #[must_use]
 pub fn panel_height(size: Size, composer: Option<&Composer>, header: Option<&RunHeader>) -> u16 {
     panel_rows_area(areas(Rect::from(size), composer).panel, header).height
 }
 
-/// How many rows of `size`'s panel the run's header takes, and zero on a frame
-/// with no run in flight — or one with no room for a header and an account both.
-///
-/// [`composer_height`]'s counterpart for the row above the window rather than
-/// the pane below it, and measured off the same cut for the same reason:
-/// `panel_height(size, composer, header) + run_header_height(size, composer,
-/// header) + composer_height(size, composer)` is the height the panel's column
-/// had inside it before either was paid for, at every terminal size.
 #[must_use]
 pub fn run_header_height(
     size: Size,
@@ -1428,19 +486,6 @@ pub fn run_header_height(
         .map_or(0, |area| area.height)
 }
 
-/// How many rows of `size`'s panel column the composer takes, its border
-/// included, and zero on a frame that has no composer on it.
-///
-/// [`panel_height`]'s other half and measured off the same [`areas`] call, which
-/// is the whole point of it being here: the two are one cut of one column read
-/// two ways, so `panel_height(size, composer) + composer_height(size, composer)`
-/// is the height that column had inside it before there was a composer to pay
-/// for — at every terminal size, including the short ones where the field is
-/// squeezed or dropped altogether.
-///
-/// The border is counted in because the border is a row the column gave up. What
-/// is left over inside it is the draft's, and how many rows the draft asked for
-/// is [`Composer::height`]'s answer at [`panel_width`]'s width.
 #[must_use]
 pub fn composer_height(size: Size, composer: Option<&Composer>) -> u16 {
     areas(Rect::from(size), composer)
@@ -1448,131 +493,28 @@ pub fn composer_height(size: Size, composer: Option<&Composer>) -> u16 {
         .map_or(0, |area| area.height)
 }
 
-/// How many columns wide the panel's contents are in a terminal of `size`, once
-/// the panel's own border has taken its two.
-///
-/// [`panel_height`]'s counterpart and public for the counterpart of its reason:
-/// a document is drawn in as many rows as its lines need at the panel's width
-/// (see [`mod@crate::wrap`]), so the app can only say how many rows it holds if
-/// it was told the width the next frame is about to draw them at. Measured off
-/// the same [`areas`] call, so the width wrapped at is the width drawn at and a
-/// row that fits one fits the other.
-///
-/// No composer is handed in and none is needed: the composer is cut off the
-/// bottom of the panel's column and takes rows rather than columns, so the panel
-/// is exactly as wide with a draft under it as without one — and the composer
-/// itself is drawn at this very width, which is why [`Composer::height`] can be
-/// asked for before the frame is cut.
 #[must_use]
 pub fn panel_width(size: Size) -> u16 {
     pane_inner(areas(Rect::from(size), None).panel).width
 }
 
-/// What is drawn at the point [`hit_test`] was asked about.
-///
-/// One variant per thing a pointer can be over, because the answers are acted on
-/// differently and a caller that had to work out which was which from a pair of
-/// numbers would be doing the layout's arithmetic a second time. The two that
-/// carry an offset carry it from the top of their own window, not from the top
-/// of the screen: what is *at* that offset is the app's business, since the app
-/// owns both windows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Hit {
-    /// A point warlock does not draw: past the terminal's last column or last
-    /// row. Nothing reports such a point, and a total answer beats an assumption
-    /// that nothing ever will.
     Offscreen,
-    /// The footer, whichever of its three lines. It is nobody's pane and takes
-    /// no focus.
     Footer,
-    /// A pane's border, either pane's, corners included — the columns and rows
-    /// between the two panes' insides, which belong to neither.
     Border,
-    /// The one line naming the tree, inside the tree pane's border and above its
-    /// rows.
     TreeHeader,
-    /// A row of the tree's window: `offset` rows below the first one on screen.
-    ///
-    /// A window offset and not a row of the tree. The app adds
-    /// [`App::scroll_offset`] to get the row it means, and the app is also the
-    /// one that knows whether it has that many rows: a window can be taller than
-    /// the tree in it, and this says where the pointer is rather than what is
-    /// under it.
     TreeRow {
-        /// How many rows below the top of the tree's window the point is.
         offset: u16,
     },
-    /// Inside the tree pane, below every row the window has room for.
-    ///
-    /// Asked of the layout rather than assumed away: the rows currently take
-    /// everything the header leaves, so nothing lands here today, and a pane
-    /// that ever grew a line of its own along the bottom would put points here
-    /// rather than quietly hand out a row offset the tree's window does not
-    /// have.
     TreeBelowRows,
-    /// The one line naming the run in flight, inside the panel's border and
-    /// above its window.
-    ///
-    /// [`Hit::TreeHeader`]'s counterpart and there for the same reason: the
-    /// header is not a line of the account, so a point on it is not a line
-    /// offset — answering with one would hand out the account's first line for a
-    /// point drawn on a row the account does not own. Nothing lands here on a
-    /// frame with no run in flight, because on such a frame no header is drawn
-    /// and the window has the row.
     PanelHeader,
-    /// A line of the panel's window: `offset` lines below the first one on
-    /// screen. The whole of the window answers this, drawn on or not — the
-    /// panel has no selection, so a point in it is a point in the panel.
     PanelLine {
-        /// How many lines below the top of the panel's window the point is.
         offset: u16,
     },
-    /// Inside the composer, under the panel and in the panel's column.
-    ///
-    /// No offset and nothing to count: the field has one cursor, it is always
-    /// after the last character, and nothing on screen moves it — a row of a
-    /// draft is not a place a reader can point at. What this says is that the
-    /// point is in the field, which is the whole of what a pointer can mean
-    /// there.
-    ///
-    /// A variant of its own rather than a [`Hit::PanelLine`] with a big offset:
-    /// the composer's rows are rows the panel gave up, so a point on them is a
-    /// point on a line the panel does not have, and answering with one would
-    /// scroll a window the reader is not over.
     Composer,
 }
 
-/// What is drawn at column `column`, row `row` of a terminal of `size`.
-///
-/// The one place a screen point is turned into something warlock has a name
-/// for, and the mouse's counterpart to [`tree_height`] and [`panel_height`]:
-/// measured off the same [`areas`] call [`draw`] cuts the frame by, so what a
-/// click lands on is what the reader saw at that point rather than what a second
-/// opinion about the layout thinks is there.
-///
-/// A function of three numbers, the draft under the panel and the run reported
-/// above it. No frame, no app state, no terminal — which is what lets the event
-/// loop's answer to a click be tested with nothing attached to stdout, and what
-/// keeps this file from needing to know what a row of the tree is.
-///
-/// `composer` is here for one reason: the rows it takes are rows the panel no
-/// longer has, so a hit test that did not know about the draft would hand out
-/// panel lines for points drawn on a field. It is the same `composer` the frame
-/// was drawn with — `None` on a frame with no composer on it — and the caller
-/// hands over the one the round measured, so the answer is about the frame the
-/// reader is pointing at.
-///
-/// `header` is here for the same reason at the other end of the panel: the row
-/// the run's header takes is a row the account gave up, so the line offsets are
-/// counted from the top of the window the header left rather than from the top
-/// of the border, and the header's own row answers [`Hit::PanelHeader`]. It is
-/// the run the frame was drawn with, or `None` on a frame with no run in flight,
-/// when the offsets are what they always were.
-///
-/// Every case is asked of a [`Rect`] the layout produced, so a terminal too
-/// short for a tree row, too short for a header, or too short for anything but a
-/// footer answers what it has rather than underflowing its way to a row that is
-/// not there.
 #[must_use]
 pub fn hit_test(
     column: u16,
@@ -1581,6 +523,12 @@ pub fn hit_test(
     composer: Option<&Composer>,
     header: Option<&RunHeader>,
 ) -> Hit {
+    // Answered by measuring the same `areas` cut the frame was drawn by, not by
+    // anything remembered from drawing it, so a click lands on what the reader
+    // is looking at. Every test below is against a `pane_inner`, which is why a
+    // border belongs to no pane and falls through to `Border` without being
+    // asked about. This knows the three numbers and nothing else: what a row
+    // offset stands for is the app's to say, and there is no hover.
     let point = Position::new(column, row);
     let screen = Rect::from(size);
     if !screen.contains(point) {
@@ -1629,14 +577,6 @@ pub fn hit_test(
     Hit::Border
 }
 
-/// The border a pane is drawn in, lit if it has the focus and dim if it has not.
-///
-/// A border and nothing else: no title, no padding. The lit border takes
-/// [`FOCUS_COLOUR`], which is no node state's colour (see [`colour_for`]) — a
-/// focused pane is not a state a node can be in, and a border that borrowed one
-/// of the three colours would be a fourth thing those colours meant. The
-/// unfocused border takes no colour at all, only [`Modifier::DIM`], so the
-/// distinction reads on a terminal with no colour as well as on one with.
 fn pane_block(focused: bool) -> Block<'static> {
     let style = if focused {
         Style::new().fg(FOCUS_COLOUR).add_modifier(Modifier::BOLD)
@@ -1647,95 +587,6 @@ fn pane_block(focused: bool) -> Block<'static> {
     Block::bordered().border_style(style)
 }
 
-/// Draw the panel: the window onto the card it is showing, one row per line,
-/// inside its border.
-///
-/// One slot and three cards. The panel holds the account of the pact, the
-/// conversation somebody is having and the document they asked to read, and
-/// draws whichever of them is showing — which is the app's answer and never this
-/// function's. [`Panel::window`](crate::Panel::window) hands over the showing card's window and
-/// [`Panel::lines_below`](crate::Panel::lines_below) counts what is under it, so a swap (see
-/// [`App::swap_card`]) changes what reaches the screen without changing a line of
-/// the drawing. All three are drawn in the same border, at the same width, under
-/// the same indicator: what mostly differs between them is what the lines say,
-/// not how the panel says them.
-///
-/// Mostly, and not entirely, because a reader has to be able to tell which card
-/// they are on. The thread is named on the top edge with [`thread_title`] and
-/// the other two are not, which is one word on a row the border already owns —
-/// and its rows say it a second time, since a question carries [`SAID_MARKER`]
-/// and nothing on an account ever does (see [`panel_row`]). No colour does any
-/// of this work: see the note at the end of this comment.
-///
-/// That name is computed rather than fixed, and the one thing it varies by is
-/// the register the conversation is in ([`Mode`]): `thread` while questions are
-/// being answered, `thread · brief` while it is converging on a document. It is
-/// the only place on the screen the mode is said. Not the run header below it —
-/// that row belongs to a pact, which can be started in either mode and would
-/// collide with it — and not a row of the card, which the title deliberately
-/// costs nothing of.
-///
-/// While no card has anything in it — before the first pact, the first question
-/// and the first read — what this draws inside the border is [`MARK`], centred
-/// and dim:
-/// warlock's own `W` and not one word — no heading, no title, no welcome, no key
-/// hints. A screen that said something before anything had happened would be
-/// saying it about nothing; a screen carrying the program's mark is saying whose
-/// screen it is, which is true before anything happens and stops being worth the
-/// room the moment there is something to put there. [`Panel::has_content`](crate::Panel::has_content)
-/// is the switch, and not the number of lines: an account that has started and
-/// has nothing in it yet is a pact under way, and the mark does not come back
-/// for it. A panel too small for the mark and its margins draws the bare border,
-/// exactly as it always did.
-///
-/// With the account showing, every row is a line of it or the rest of one: a
-/// section heading naming a directory, or one thing that pass was seen doing
-/// with the elapsed clock of its own section in front of it, or the line the run
-/// finished with. With the thread showing, every row is a line of the
-/// conversation: a question somebody typed, one thing the model was seen doing
-/// while it answered, or a row of the answer itself. With the document showing,
-/// every row is a line of the file, from its first. Which rows those are is
-/// [`Panel::window`](crate::Panel::window)'s answer, window and all — the app owns the scrolling,
-/// exactly as it owns the tree's — and this only words them and cuts them to the
-/// width.
-///
-/// A [`Paragraph`] with no [`Wrap`](ratatui::widgets::Wrap): every line handed
-/// over is one row, whatever is on it. Wrapping here would be the widget
-/// deciding how many rows the panel holds, which is the app's answer — it is
-/// what the window is cut out of and what the scrollback counts — so every card
-/// arrives already broken into the rows its width needs (see
-/// [`mod@crate::wrap`]). The count of rows on screen is therefore not the count
-/// of things that happened; the clock in front of each of them is what says
-/// where one ends and the next begins.
-///
-/// While the showing card's window is scrolled back, the bottom edge of the
-/// border says how much of *that* card is below it and which key returns to
-/// live. It goes on the border rather than on a row of its own, because a row of
-/// its own would be a row taken off the card by the act of looking at it — and
-/// it goes away the moment the window is back at the end, since an indicator
-/// that always says `0 more` is furniture rather than information. It counts the
-/// card on screen and not the slot: what is under the card behind is no part of
-/// what the reader is scrolling through, so a swap changes the number on the
-/// edge or takes it away.
-///
-/// While a run is in flight the top row inside the border is not the window at
-/// all but the run's header — which run, which directory, how far through, and a
-/// bar filled to that fraction (see [`draw_run_header`]). It is fixed there: the
-/// window under it is a row shorter for as long as the run lasts, so scrolling
-/// the account back moves the lines and leaves the header where it is. The cut
-/// is [`panel_split`]'s, which is also what told the app how tall its window is,
-/// so the header costs the account exactly the row it takes and no line is
-/// scrolled past unseen. The moment the run is over there is no header, and the
-/// window has the row back.
-///
-/// No colour anywhere in here. The three node-state colours are the tree's and
-/// [`FOCUS_COLOUR`] is the border's; a fourth meaning for colour would cost both
-/// of those their meaning. Bold, which is not a colour, is all the headings get
-/// — the account's, the run's, the thread's title and a reader's question — and
-/// dim, which is not one either, is all the mark and the indicator get. Telling
-/// the cards apart is a word and a marker for that reason: a card that was
-/// recognised by its colour would be a card nobody could recognise on a terminal
-/// without one.
 fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     let below = app.panel().lines_below();
     let mut block = pane_block(app.focus() == Focus::Panel);
@@ -1768,14 +619,6 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     frame.render_widget(Paragraph::new(rows), inner);
 }
 
-/// Draw the run's header: the one line [`run_header_line`] words for the width
-/// there is.
-///
-/// Bold, like the account's own headings and like the tree's header, and for the
-/// same reason: it is a heading rather than a thing that happened, and every
-/// colour on this screen already means a node state. Nothing here reads a clock
-/// and nothing is handed one — what the line says is what the run has said, so
-/// two frames drawn at two instants with no event in between draw the same row.
 fn draw_run_header(frame: &mut Frame<'_>, area: Rect, header: &RunHeader) {
     // Into the whole of the area it was given, which is the line's row and the
     // blank one under it (see [`RUN_HEADER_HEIGHT`]): one line drawn into two
@@ -1786,26 +629,6 @@ fn draw_run_header(frame: &mut Frame<'_>, area: Rect, header: &RunHeader) {
     );
 }
 
-/// The run header's line for a panel `width` columns wide: which run is going,
-/// the directory it is working, its position out of the run's total, and a bar
-/// filled to that fraction in the columns left over.
-///
-/// Two facts of unequal standing, like the tree header's, and the same rule
-/// settles them. The words are written out as they stand — the verb, the
-/// directory as [`App::label_for`] spells it, and the fraction in the
-/// parentheses the footer puts it in — and the bar is offered the room left over
-/// after them and a column of gap. Below [`BAR_MIN_WIDTH`] there is no bar at
-/// all rather than a stub of one, and the words keep the width; the whole row is
-/// then cut once, by [`panel_row`]'s [`truncated`], so a directory too long for
-/// the panel costs the line its tail rather than the row its shape.
-///
-/// The bar is `position/total` of the columns it was given, rounded down, and is
-/// nothing else: no clock is read, no instant is taken, nothing is interpolated
-/// between two fractions and nothing is estimated from them. Rounded down so
-/// that a full bar means a run that has reached its last directory and never
-/// merely one that is near it; and `position` is the run's high-water mark (see
-/// [`RunHeader`]), so within one run the fill cannot fall back. A `total` of
-/// none is a run with nothing to count, drawn empty rather than divided by.
 fn run_header_line(header: &RunHeader, width: usize) -> String {
     let words = format!(
         "{} {} ({}/{})",
@@ -1825,7 +648,6 @@ fn run_header_line(header: &RunHeader, width: usize) -> String {
     truncated(&format!("{words}{BAR_GAP}{}", bar(header, room)), width)
 }
 
-/// The word the header calls `run` by: the footer's verb for the same run.
 const fn run_word(run: Run) -> &'static str {
     match run {
         Run::Pact => PACTING_RUN,
@@ -1833,9 +655,10 @@ const fn run_word(run: Run) -> &'static str {
     }
 }
 
-/// A bar `columns` wide, filled to `header`'s fraction of it. The rule is
-/// [`run_header_line`]'s and is written out there.
 fn bar(header: &RunHeader, columns: usize) -> String {
+    // Both guards feed the subtraction below, which would panic without them: a
+    // run counted at zero nodes has nothing to divide by, and `position` is the
+    // furthest node reached, which a caller is free to report past `total`.
     let filled = header
         .position()
         .saturating_mul(columns)
@@ -1850,11 +673,6 @@ fn bar(header: &RunHeader, columns: usize) -> String {
     )
 }
 
-/// Draw [`MARK`] in the middle of `inner`, or draw nothing if it does not fit.
-///
-/// Dim and with no foreground colour, like everything else in the panel: the
-/// mark is what is there while nothing has happened, and something that had to
-/// be looked past once the account arrived would have been drawn too loud.
 fn draw_mark(frame: &mut Frame<'_>, inner: Rect) {
     let Some(area) = mark_area(inner) else {
         return;
@@ -1865,28 +683,14 @@ fn draw_mark(frame: &mut Frame<'_>, inner: Rect) {
     frame.render_widget(Paragraph::new(rows).style(style), area);
 }
 
-/// Where [`MARK`] is drawn inside `inner`, or `None` when there is not the room
-/// for the whole of it and its margins.
-///
-/// Centred on both axes. Where the rows left over do not halve evenly the spare
-/// one goes below, so the mark sits a hair high — which is where the eye expects
-/// the middle of a rectangle to be, and where a mark that sat a row low would
-/// read as having slipped.
-///
-/// All of the art or none of it: there is no scaled variant and no second
-/// smaller mark, because a mark that changed shape with the terminal would be
-/// two marks and a reader would have to learn that both are warlock.
-///
-/// [`MARK`] is wide enough that "none of it" is the answer on an ordinary
-/// terminal — see the size note there. This function is not where that is
-/// decided and does not soften it: what it owns is that the panel falls back to
-/// the bare border it drew before there was a mark at all, which is a panel with
-/// nothing missing from it rather than a mark with something missing from it.
 fn mark_area(inner: Rect) -> Option<Rect> {
     let width = MARK.iter().copied().map(display_width).max().unwrap_or(0);
     let width = u16::try_from(width).ok()?;
     let height = u16::try_from(MARK.len()).ok()?;
 
+    // All of the mark or none of it. A partial mark reads as a rendering fault
+    // rather than as a logo, so a panel that cannot hold the whole thing shows
+    // the bare border — which on a narrow terminal is every panel there is.
     if inner.width < width.saturating_add(2 * MARK_MARGIN)
         || inner.height < height.saturating_add(MARK_MARGIN_ROWS)
     {
@@ -1901,53 +705,6 @@ fn mark_area(inner: Rect) -> Option<Rect> {
     })
 }
 
-/// Draw the composer: the rows of the draft the cursor is among, one row per row
-/// it wraps to, inside a border lit exactly when the field is `live` — the keys
-/// pointed at it and it taking them.
-///
-/// [`pane_block`] and no other border, so the field is lit and dimmed by the
-/// rule the two panes above it already follow — three places the keys can be and
-/// one lit border between them, which is what makes the focus readable at all
-/// (see [`Focus`]).
-///
-/// `live` rather than `focused`, and that is the whole of what muting looks
-/// like: while a turn is being answered the field keeps the keyboard and hears
-/// nothing with it, so it is drawn as a field nobody is pointed at — dim border,
-/// no caret — and lights again the moment the answer lands. It is drawn rather
-/// than announced: there is no second wording for it and no placeholder in the
-/// box, because a line of prose explaining a dim border would be warlock talking
-/// about itself over the answer somebody is waiting for.
-///
-/// The rows and the caret's cell among them are [`Composer::window`]'s, asked
-/// for at the rows the border actually left rather than at
-/// [`COMPOSER_MAX_ROWS`](crate::COMPOSER_MAX_ROWS): a draft past what the field
-/// has room for scrolls within it, following the cursor, so there is one cut and
-/// it is made where the arithmetic lives. Nothing is re-cut here — a second
-/// opinion about which rows are on screen would be a caret counted against rows
-/// that are not the ones drawn.
-///
-/// The caret is drawn *in the buffer*, by splitting the row it is on into what
-/// comes before its column, the character drawn in that column styled
-/// [`Modifier::REVERSED`], and what comes after. A reversed cell rather than the
-/// terminal's own cursor for [`SCOPE_CURSOR`]'s reasons — blink and shape are
-/// not warlock's to control, a reversed cell looks the same everywhere, and a
-/// test can find it — and columns are [`display_width`]'s, so a caret on a row
-/// of wide characters lands in the cell its character draws in.
-///
-/// Where the cursor is past the last character of its row — the end of the
-/// draft, or the end of a line with a newline after it — there is no character
-/// to reverse, and the caret is a reversed [`COMPOSER_CURSOR`] appended to the
-/// row instead. That is dropped rather than wrapped when the row already fills
-/// the width: a caret is not text, and a row of its own for a cursor would take
-/// a row off the draft and move everything above it while somebody is typing.
-///
-/// Either way it is drawn only while the field is live: the caret says where the
-/// next character lands, and while the keys are somewhere else — or the field is
-/// not hearing them — nothing is landing.
-///
-/// No colour and no prompt glyph. The panel above spends none, the draft is the
-/// reader's own words, and a `>` in front of them would be a column off every
-/// row of a field this narrow for the sake of saying what the lit border says.
 fn draw_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, live: bool) {
     let inner = pane_inner(area);
     frame.render_widget(pane_block(live), area);
@@ -1990,20 +747,6 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, live: b
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// `row` cut at `column`: what is drawn before that cell, the character drawn in
-/// it, and what is drawn after — the three spans the caret's row is drawn as.
-///
-/// Columns rather than characters, measured with [`display_width`], because
-/// `column` is a cell of the screen: it comes from
-/// [`ComposerWindow`](crate::ComposerWindow), which measures the row up to the
-/// cursor the same way, so walking the row by cells lands on exactly the
-/// character that map pointed at, wide or narrow.
-///
-/// The middle piece is empty when `column` is past the last character of the
-/// row — the end of the draft, and the end of a line a newline follows — which
-/// is the one case with no character to reverse, and the caller draws a blank
-/// there instead. It is never a partial character: the row is split on `char`
-/// boundaries either side.
 fn split_at_column(row: &str, column: usize) -> (&str, &str, &str) {
     let mut at = row.len();
     let mut taken = 0;
@@ -2021,45 +764,14 @@ fn split_at_column(row: &str, column: usize) -> (&str, &str, &str) {
     (before, at, after)
 }
 
-/// What the bottom edge of a scrolled-back panel says: how many lines are below
-/// the view, and the key back to the newest one.
-///
-/// `↓ 214 more (G)`, padded a column each side so it does not sit against the
-/// border's corner. Counted in lines rather than in screenfuls or in a
-/// percentage, because a line is the thing the reader is scrolling past.
 fn scrollback(below: usize) -> String {
     format!(" {SCROLLBACK_ARROW} {below} more ({LIVE_KEY}) ")
 }
 
-/// One line of the panel's contents as one row of it, cut to `width`.
-///
-/// What goes in front of a line and whether it is bold is [`shape`]'s answer,
-/// not this function's, and that is the whole of why it is a call: the app wraps
-/// a line at the width the prefix leaves it (see [`mod@crate::wrap`]), and a
-/// second opinion here about what that prefix is would be a line broken at one
-/// width and drawn at another. A heading is the directory's path, bold and flush
-/// left; a clocked line is its elapsed time and what happened, indented under
-/// the heading it belongs to; the summary is the run's last word, flush left and
-/// bold like a heading because it is about the whole run rather than about any
-/// one directory; a question carries [`SAID_MARKER`] and is bold like the
-/// headings it stands among, since it is the heading of its turn.
-///
-/// A line of a document is the file's own text, flush left, unindented and
-/// unstyled — nothing is added to it and nothing is taken off it. So is a
-/// model's answer, because prose is prose, and it reaches here only on the
-/// thread's card: nothing an [`Account`] holds is an [`Entry::Text`], so no
-/// arrangement of runs and swaps can put a sentence of a model's on the account.
-///
-/// Everything arrives already broken into the rows this width needs, one row per
-/// row the app counted, so on the frames the binary draws — which tell the app
-/// the width first, every time — [`truncated`] takes nothing off anything. The
-/// call stays because [`draw`] takes an [`App`] rather than a promise about one:
-/// a caller that never measured the panel, or measured a different one, gets a
-/// row inside the border rather than a row over it. See [`App::show_document`].
-///
-/// The row is built whole and cut once, rather than assembled from a styled
-/// clock and a styled text: the width is a fact about the row, and two spans
-/// each guessing at their share of it is how a line ends up one column too wide.
+// One entry, one row. Nothing is wrapped here: a line too long for the panel
+// has already been broken into the rows it needs, under its own clock or marker
+// (see `crate::wrap`), so the truncation below is the last-resort cut for a row
+// that still does not fit and not the way long text is handled.
 fn panel_row(line: &Entry, width: u16) -> Line<'static> {
     let shape = shape(line);
     let row = Line::from(truncated(
@@ -2069,19 +781,6 @@ fn panel_row(line: &Entry, width: u16) -> Line<'static> {
     if shape.heading { row.bold() } else { row }
 }
 
-/// `text`, cut to `width` columns with an [`ELLIPSIS`] where it was cut.
-///
-/// Columns, not bytes and not characters: a path with an accent in it takes
-/// fewer columns than bytes and a CJK name takes more columns than characters,
-/// and a row measured in either of the wrong ones is a row that overflows into
-/// its neighbour or stops short of the edge. Measured with [`Line::width`],
-/// which is the same measurement the terminal backend lays the row out with, so
-/// what is cut here fits there exactly.
-///
-/// Cut on a character boundary, so this can never panic on a multi-byte path;
-/// a character that is part of a longer grapheme cluster can still be separated
-/// from what follows it, which costs a glyph its accent in the worst case and
-/// never costs a row its shape.
 fn truncated(text: &str, width: usize) -> String {
     if display_width(text) <= width {
         return text.to_owned();
@@ -2106,21 +805,10 @@ fn truncated(text: &str, width: usize) -> String {
     format!("{}{ELLIPSIS}", &text[..end])
 }
 
-/// How many columns `text` takes on screen.
-///
-/// Asked of ratatui rather than worked out here, and asked of a borrowed span so
-/// that measuring costs no allocation: the renderer's own measurement is the one
-/// that decides whether a row fits, so a second opinion about it would only ever
-/// be wrong.
 pub(crate) fn display_width(text: &str) -> usize {
     Span::raw(text).width()
 }
 
-/// Draw the tree pane: its border, the header naming the tree inside the top of
-/// it, and the window onto the rows under that.
-///
-/// `now` is only passed through: nothing about the border or the header moves
-/// with the clock, and the rows under them do — see [`draw_tree`].
 fn draw_tree_pane(frame: &mut Frame<'_>, area: Rect, app: &App, chrome: &Chrome, now: Instant) {
     let inner = pane_inner(area);
     frame.render_widget(pane_block(app.focus() == Focus::Tree), area);
@@ -2131,13 +819,6 @@ fn draw_tree_pane(frame: &mut Frame<'_>, area: Rect, app: &App, chrome: &Chrome,
     draw_tree(frame, rows_area, app, now);
 }
 
-/// Draw the header: which tree this is and what this machine holds for it, as
-/// [`header_line`] composes the two for the width there is.
-///
-/// Bold rather than coloured, because every colour on this screen already
-/// means a node state and the header is not a node — and a holding is not one
-/// either, so it is drawn in the header's own weight rather than picking up a
-/// colour or a mark of its own.
 fn draw_header(frame: &mut Frame<'_>, area: Rect, chrome: &Chrome) {
     frame.render_widget(
         Paragraph::new(Line::from(header_line(chrome, usize::from(area.width))).bold()),
@@ -2145,28 +826,6 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, chrome: &Chrome) {
     );
 }
 
-/// The header's line for a pane `width` columns wide: the tree on screen, and
-/// what this machine holds stated after it when there is room for both.
-///
-/// Two facts of unequal standing, and this function is the whole of the
-/// inequality. The identity — the module [`Chrome::of`] worded, which is
-/// the answer to "what am I looking at" — is written out as it stands, whatever
-/// the width; the holding is offered the room left over and dropped entirely
-/// when it does not fit. Dropped rather than cut, because half a set of sigils
-/// is a claim about what is held that is not true, while no sigils at all is
-/// the header this screen has always had.
-///
-/// So the decision is made here, on two strings, and never by cutting a joined
-/// one: joining first and truncating after would spend the identity's columns on
-/// the holding and end the line in an [`ELLIPSIS`] where the name of the module
-/// used to be. Nothing is truncated here at all — an identity too long for the
-/// pane is clipped by the widget exactly as it was before there were sigils.
-///
-/// [`Sigils::Nothing`](crate::app::Sigils::Nothing) has no wording
-/// ([`Sigils::line`](crate::app::Sigils::line)), so a machine that
-/// holds nothing gets the identity and nothing else, byte for byte the line it
-/// got before this existed — including the empty one a tree rooted at the
-/// repository root draws.
 fn header_line(chrome: &Chrome, width: usize) -> String {
     let identity = chrome.header();
     let Some(holding) = chrome.sigils().line() else {
@@ -2178,6 +837,10 @@ fn header_line(chrome: &Chrome, width: usize) -> String {
     } else {
         format!("{identity}{HEADER_GAP}{holding}")
     };
+    // Both or neither, and never a cut one: the sigils are the answer to what
+    // this machine is allowed to do, and half of that list read as the whole of
+    // it would be worse than not saying. So a header too narrow for both drops
+    // the sigils and keeps the identity, rather than truncating the pair.
     if display_width(&both) <= width {
         both
     } else {
@@ -2185,29 +848,6 @@ fn header_line(chrome: &Chrome, width: usize) -> String {
     }
 }
 
-/// Draw the window onto the flattened tree — the rows from the app's scroll
-/// offset that fit in `area` — one per line, with the selected one highlighted.
-///
-/// The window is applied here, by slicing the rows, rather than handed to the
-/// widget as a scroll offset to interpret. A `List` given every row would scroll
-/// itself to keep the selection visible, on its own rule, and there would then
-/// be two answers to which rows are on screen — the app's and the widget's — of
-/// which only the app's is the one the page keys move by. Slicing leaves the
-/// widget nothing to scroll: it is handed at most `area.height` items, so what
-/// it draws is exactly the window [`App::scroll_offset`] describes.
-///
-/// A selection outside that window cannot happen for an app told the height
-/// this frame was laid out with, but if it ever does, nothing is highlighted
-/// rather than the wrong row.
-///
-/// While a pact is running, the rows the pass covers are drawn in the pulsing
-/// colour [`pulse_colour`] works out for this frame instead of their own state
-/// colour: the row of the directory the run is inside right now, and the rows
-/// of the files that directory holds — the very files the pass is reading. The
-/// colour is computed once for the frame and then offered to exactly the rows
-/// [`App::in_flight_covers`] says yes to; ancestors, siblings and child
-/// *directories* — passes of their own, already finished — are never offered it
-/// and keep the colour their state paints.
 fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     let first = app.scroll_offset().min(app.rows().len());
     let height = usize::from(area.height);
@@ -2257,79 +897,6 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// One line of the tree: indented by depth, marked by whether its children are
-/// hidden, named by its last path component, coloured by its state.
-///
-/// The indentation already spells out the ancestry, so repeating the full
-/// path on every line would be noise; a path with no final component (a bare
-/// root) falls back to printing itself, because a blank line is worse than a
-/// long one.
-///
-/// The marker goes inside the indent, so it sits with the node it describes and
-/// every sibling's name starts in the same column whichever marker it carries —
-/// see [`NO_MARKER`]. Whether the row is collapsed is passed in rather than read
-/// off the row: which nodes are collapsed is view state the app owns, and a
-/// [`Row`] describes the tree, which knows nothing about it.
-///
-/// Two spans, and only two. The first is `guides`, worked out for the whole
-/// window by [`guide_prefixes`] because it is the one thing about a row that
-/// cannot be read off the row: it takes the rows after this one to know whether
-/// a branch carries on. It is one [`INDENT`]-wide unit per level of nesting, so
-/// the marker column and the first column of every name are exactly where they
-/// were before the guides arrived. A depth-0 row draws no guide at all and its
-/// span is empty. The second span is the marker and the name, which take the
-/// row's state colour together: colour on this screen means node state and
-/// nothing else, so a marker in a colour of its own would be a second thing
-/// colour meant.
-///
-/// The guides take [`GUIDE_COLOUR`] and no modifier — not `DIM`, which is the
-/// obvious way to ask for a quieter line. `DIM` is honoured inconsistently
-/// across terminals, and a guide that vanishes on one and shouts on another is
-/// worse than one dim colour everywhere, so the dimness is pinned into the
-/// colour itself. They are a span of their own rather than part of the row's
-/// text because they are not state: a guide in the row's colour would make depth
-/// look like something the engine had decided.
-///
-/// `pulse` is the marker-and-name style overridden for this frame, and is `Some`
-/// for at most one row of the tree: the directory a pact is working right now,
-/// which alternates between the two pacted colours rather than sitting in the
-/// stale one for the whole run (see [`pulse_colour`]). It never reaches the
-/// guides, which say depth and have nothing to report about a run. It is still
-/// only a foreground colour, so the selection — a `REVERSED`/`BOLD` modifier the
-/// `List` applies over the whole row, guides included — reads exactly the same on
-/// a pulsing row as on any other, and the pulse cannot move it.
-///
-/// `collapsible` is whether the row has anything under it *in this view*, which
-/// is [`App::can_collapse`]'s answer and not the tree's child count. The marker
-/// and the collapse key have to agree — a `+` on a row space refuses to open is
-/// the screen making a promise the keyboard then breaks — so both ask the one
-/// question, and neither asks [`Row::children`], which is a fact about the tree
-/// that the file toggle and the pacted-only filter can each make untrue of the
-/// screen.
-///
-/// A file row needs no case of its own here and deliberately does not get one.
-/// Nothing is ever under a file, so it falls into [`NO_MARKER`] like any other
-/// row holding nothing, and its depth is already one deeper than its
-/// directory's, so it indents under it. Its colour is its directory's state,
-/// copied onto the row when the tree was flattened (see [`Row::file`]), which is
-/// how the design doc's rule that a file takes its module's colour arrives here
-/// as an ordinary row with an ordinary colour.
-///
-/// A row carrying a scope of its own reads `<name> (<scope>)`, and the label
-/// goes inside that same second span rather than beside it in one of its own:
-/// name, space and parentheses are one run of text in one colour, so there is
-/// nothing here for a fourth colour or a modifier of its own to creep into, and
-/// the label cannot end up styled differently from the name it belongs to. The
-/// row's own scope and nothing else appears — [`Row::scope`] is never an
-/// ancestor's — so a file, a gray unpacted row and a directory covered only from
-/// above all fall out of it being `None` without this asking what they are.
-///
-/// `width` is the columns the row's text has, and a label that does not fit in
-/// them is dropped whole rather than cut: half a scope names a boundary that
-/// does not exist, while no label at all is the row this screen drew before
-/// scopes. The name is handed on untouched either way — it is never shortened to
-/// make room — so a row whose label is dropped is byte for byte the row it
-/// always was.
 fn line(
     row: &Row,
     guides: &str,
@@ -2363,31 +930,6 @@ fn line(
     ])
 }
 
-/// The guide prefix for each of the `height` rows of `all` starting at `first`,
-/// one string per drawn row, each [`INDENT`] wide per level of nesting.
-///
-/// A row's own guide is [`GUIDE_BRANCH`] or [`GUIDE_LAST`] according to whether
-/// the directory holding it has another row after this one, and the levels
-/// above it are [`GUIDE`] where that ancestor's branch carries on below and
-/// blank where it has ended. Blank is the whole point of the exercise: a column
-/// of unbroken verticals says a subtree is still open long after it has closed,
-/// and the reader has to count indents to find out otherwise.
-///
-/// Sibling here means *drawn* sibling. The rows handed in are the window's own
-/// list, after the collapse, the file toggle and the pacted-only filter have had
-/// it, so a guide describes the tree on screen rather than the tree on disk —
-/// which is the only one the reader can check it against. A walk is depth first
-/// and parents come before children, so a row's next sibling is the next row at
-/// its depth before any row shallower than it, and no path comparisons are
-/// needed for any of this.
-///
-/// Two passes and no per-row search. The first runs backwards over everything
-/// from the end to `first`, and is what makes this a function over the list
-/// rather than a method on a row: whether a branch carries on is a fact about
-/// the rows *after* it, and a row cannot answer it alone. The second runs
-/// forwards from the root, carrying a stack of which ancestors are still open,
-/// and starts at the root rather than at `first` because the row at the top of a
-/// scrolled window inherits its verticals from ancestors above the window.
 fn guide_prefixes(all: &[Row], first: usize, height: usize) -> Vec<String> {
     let last = all.len().min(first.saturating_add(height));
     if first >= last {
@@ -2449,29 +991,6 @@ fn guide_prefixes(all: &[Row], first: usize, height: usize) -> Vec<String> {
     prefixes
 }
 
-/// The colour the row of the directory in flight takes this frame, or `None`
-/// when no pact is running and every row is simply its own state's colour.
-///
-/// The pulse is not stored anywhere and nothing is stepped: it is a function of
-/// how long the pass on screen has been going, so the phase is worked out afresh
-/// on every frame from `now` and the instant the account's open section was
-/// opened at. Whole [`PULSE_PHASE`]s since that instant, even or odd: even is
-/// stale, odd is fresh. Measuring it against the *section*'s start rather than
-/// the run's is what makes each directory's pulse begin on stale — the account
-/// opens a section as each pass starts, so the phase resets under every
-/// directory and the handover from one to the next is visible as a colour that
-/// goes back to yellow.
-///
-/// Both colours come from [`colour_for`], the one place a state's colour is
-/// decided, so a change to the palette moves the pulse with it and this file
-/// names no colour of its own.
-///
-/// A pact in flight with no open section — the moment between the keypress and
-/// the first progress event, or a run whose account was closed while the app
-/// still thinks something is in flight — draws steady stale. That is the colour
-/// the keypress already painted the subtree in, so such a row is never blank and
-/// never unstyled; it simply sits in the colour it would have had anyway until
-/// its section opens and the pulse has a start to measure from.
 fn pulse_colour(app: &App, now: Instant) -> Option<Color> {
     if !app.is_pacting() {
         return None;
@@ -2494,41 +1013,6 @@ fn pulse_colour(app: &App, now: Instant) -> Option<Color> {
     }))
 }
 
-/// Draw the tally of nodes by state, the keys that do something, and the one
-/// line the app has to say about the last keystroke.
-///
-/// The message goes last, nearest the bottom of the screen, so the tally and
-/// the keys sit where they always have. It is dim and uncoloured like the keys:
-/// every colour on this screen already means a node state, and a sentence about
-/// a keystroke is not a node. With no message the line is drawn blank rather
-/// than skipped — see [`FOOTER_HEIGHT`].
-///
-/// A pact in flight takes both of the lower two lines and adds neither: the
-/// progress line goes on the message line ahead of any message (the precedence
-/// is [`App::pact_line`]'s, decided with the rest of the display state rather
-/// than here) and the keys line becomes [`pacting_keys_line`]'s. Same three lines,
-/// same heights, same places — a footer that grew while a pact ran would reflow
-/// the tree under it on a keystroke that changed nothing about the tree, and
-/// would do it in the middle of the one operation the reader is watching.
-///
-/// The keys line is also where the terminal's mouse capture is reported, by
-/// naming the key that changes it with what the next press of it will do: see
-/// [`keys_line`] and [`App::mouse_captured`]. Not on the message line, because
-/// capture being off outlasts the keystroke that turned it off while a message
-/// lasts until the next one.
-///
-/// The `Paragraph` is given no `.wrap`, deliberately: a line too long for the
-/// terminal is cut at the right-hand edge rather than folded onto the line
-/// below, so the footer is three lines whatever the app has put on them and it
-/// is always the end of a line that is lost. Which end is worth losing is the
-/// app's business and not decided here — [`App::pact_line`] puts the part that
-/// answers a keystroke last for exactly this reason.
-///
-/// The keys line is the one line that never reaches that edge: it is laid out
-/// for `area.width` by [`keys_line`] or [`pacting_keys_line`], which give whole
-/// names up in [`KEY_DROP_ORDER`] and [`PACTING_KEY_DROP_ORDER`] until what is
-/// left fits. Cut at the edge instead, the name each would lose first is the way
-/// out of warlock and the way out of the run.
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let area = footer_text_area(area);
     let counts = app.counts();
@@ -2559,23 +1043,6 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(vec![Line::from(tally), keys, message]), area);
 }
 
-/// Where the footer's own text goes inside the band it was given: in from each
-/// edge by the width of a pane's border.
-///
-/// The footer is nobody's pane and draws no border, so left alone its lines
-/// would start in column zero — the column the panel's border owns, one to the
-/// left of every row of text above it. Three lines flush against the edge under
-/// a screen of lines that are not reads as a slip rather than as a band of its
-/// own, and the fix is a column, not a border: a box around the footer would
-/// cost two rows and make the tally look like a fourth card.
-///
-/// Taken off both edges rather than only the left, so the keys line — which is
-/// laid out for the width it is handed — gives its names up at the width it is
-/// actually drawn in, and a long message is cut where the panes end rather than
-/// a column past them.
-///
-/// A band too narrow to inset comes back with nothing in it, which on a
-/// terminal one or two columns wide is every line there is anyway.
 fn footer_text_area(footer: Rect) -> Rect {
     Rect {
         x: footer.x + BORDER_THICKNESS,
@@ -2584,11 +1051,6 @@ fn footer_text_area(footer: Rect) -> Rect {
     }
 }
 
-/// What a state is called in the footer.
-///
-/// A total `match` rather than a `Display` impl on the engine's enum: how a
-/// state is worded on screen is the renderer's business, and the engine should
-/// not have to grow API for it.
 const fn noun(state: NodeState) -> &'static str {
     match state {
         NodeState::Unpacted => "unpacted",
@@ -2597,32 +1059,6 @@ const fn noun(state: NodeState) -> &'static str {
     }
 }
 
-/// Draw the gate on the way out: the question in a small bordered window in the
-/// middle of `screen`, with `highlighted` lit.
-///
-/// The cells behind it are cleared first. A window drawn straight over the frame
-/// would keep whatever the panel or the tree had put in the columns its own text
-/// does not reach — a path ending inside the border, half a row of guides under
-/// the answers — and the reader would be asked a question with the screen it is
-/// about still legible through it. [`Clear`] is ratatui's own widget for exactly
-/// this, so no cell is blanked by hand.
-///
-/// The two answers are drawn Yes then No, in that order, because
-/// [`mod@crate::confirm`] makes Left and Right positional against it. The lit one
-/// takes [`FOCUS_COLOUR`] reversed and bold — the colour that already means
-/// "this is what the keys are driving" on a pane border, and the modifiers the
-/// tree's own selection is drawn with, so nothing new has to be learnt and no
-/// fourth colour is spent. The other is dim, which is what the unfocused pane
-/// border is: the pair reads on a terminal with no colour as well as on one with,
-/// which matters more here than anywhere else on the screen, because the
-/// highlight is the whole of what says which way Enter goes.
-///
-/// The window is clamped rather than skipped on a terminal with no room for it —
-/// see [`confirm_area`]. This is deliberately the opposite rule to
-/// [`mark_area`]'s draw-it-whole-or-not: a mark that is not drawn costs nothing,
-/// where a question that is not drawn is a mode the reader is in with nothing on
-/// screen to say so, and every key they press then goes somewhere they cannot
-/// see.
 fn draw_confirm(frame: &mut Frame<'_>, screen: Rect, highlighted: Answer) {
     let area = confirm_area(screen);
     let block = Block::bordered().padding(Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS));
@@ -2640,11 +1076,6 @@ fn draw_confirm(frame: &mut Frame<'_>, screen: Rect, highlighted: Answer) {
     );
 }
 
-/// The two answers as one line, with `highlighted` lit.
-///
-/// Three spans and a fixed order: the gap is a span of its own rather than
-/// padding on either answer, so neither highlight can grow into the space
-/// between them and the two blocks stay the same shape as each other.
 fn answers_line(highlighted: Answer) -> Line<'static> {
     let lit = Style::new()
         .fg(FOCUS_COLOUR)
@@ -2660,41 +1091,10 @@ fn answers_line(highlighted: Answer) -> Line<'static> {
     .centered()
 }
 
-/// Where the confirmation is drawn on a terminal of `screen`: centred, and cut
-/// down to the screen if the screen is smaller than the window.
-///
-/// A name of its own for what [`centred`] says about [`confirm_size`], because
-/// the question's own place on the frame is what the tests about it ask for; the
-/// centring and the clamping are [`centred`]'s, and are the same for the scope
-/// prompt.
 fn confirm_area(screen: Rect) -> Rect {
     centred(screen, confirm_size())
 }
 
-/// Where a window of `size` is drawn on a terminal of `screen`: in the middle of
-/// it, and cut down to the screen when the screen is the smaller of the two.
-///
-/// Both windows over the frame place themselves through here, so the quit
-/// confirmation and the scope prompt land in the same place and behave the same
-/// way on a terminal too small for either.
-///
-/// Centred on both axes, with the odd spare row falling below the window and the
-/// odd spare column to its right, so it sits a hair high and a hair left — which
-/// is where the eye reads the middle of a rectangle to be, and is the same
-/// rounding [`mark_area`] takes.
-///
-/// Clamped, never skipped. A terminal too narrow or too short for the whole
-/// window gets as much of it as there is room for: at that point the border is
-/// cut into, then the padding, then the text itself, and at one column by one row
-/// what is left is a single cell of border — which is still the screen saying
-/// that something is being asked. The alternative is worse than ugly: a window
-/// that declined to draw would leave the reader in a mode with no sign of it,
-/// pressing keys that reach nothing they can see, and the only way out of it
-/// would be the one keystroke they cannot know is wanted.
-///
-/// Every arithmetic step is saturating or is guarded by the [`Ord::min`] above
-/// it, so no size of terminal — a zero-width [`Rect`] included — underflows its
-/// way to a window somewhere off the screen.
 fn centred(screen: Rect, size: Size) -> Rect {
     let Size { width, height } = size;
     let width = width.min(screen.width);
@@ -2708,15 +1108,6 @@ fn centred(screen: Rect, size: Size) -> Rect {
     }
 }
 
-/// How big the whole window wants to be: the wider of its two lines, the margins
-/// and the border.
-///
-/// The width is measured off the text rather than written down as a number, the
-/// way [`mark_area`] measures the art: the question and the answers are constants
-/// a few lines apart, and a window sized by hand would be the thing that stopped
-/// agreeing with them when one of them was reworded. [`display_width`] rather
-/// than a byte count, so a question with anything but ASCII in it is still sized
-/// in the columns the backend will lay it out in.
 fn confirm_size() -> Size {
     let answers =
         display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
@@ -2729,29 +1120,6 @@ fn confirm_size() -> Size {
     Size::new(width, CONFIRM_HEIGHT)
 }
 
-/// Draw a prompt somebody types one line into: what it is about, what has been
-/// typed into it, and the sentence under it, in a bordered window over the
-/// middle of `screen`.
-///
-/// Two windows, one function. `heading` goes in front of what the field carries
-/// and `rules` on the last line, so the caller says which prompt this is —
-/// [`SCOPE_HEADING`] and [`scope::RULES`](warlock_engine::scope::RULES) for the scope, [`PATH_HEADING`] and
-/// [`PATH_RULES`] for the path a brief is about to be written to. Nothing else
-/// differs: same [`Clear`], same border, same margins, same five lines, same
-/// clamping on a terminal with no room, because a reader who has answered one of
-/// them has learnt the other.
-///
-/// [`draw_confirm`]'s shape, down to the [`Clear`] before the border and the
-/// clamping rather than skipping on a terminal with no room — a mode with
-/// nothing on screen to say so is the same trap whichever question is being
-/// asked. What differs is that this window is sized off a value rather than off
-/// constants, because part of what it shows is being typed: see [`scope_size`].
-///
-/// Left-aligned, where the confirmation is centred. The field is a line somebody
-/// is adding characters to, and a centred field would slide half a column left
-/// on every other keystroke, taking the cursor and the text already typed with
-/// it. Everything above and below it is aligned to the same edge, so the window
-/// reads as one block rather than as a centred heading over a left-hung field.
 fn draw_scope(frame: &mut Frame<'_>, screen: Rect, field: &ScopeField, heading: &str, rules: &str) {
     let area = centred(screen, scope_size(field, heading, rules));
     let block = Block::bordered().padding(Padding::symmetric(SCOPE_MARGIN, SCOPE_MARGIN_ROWS));
@@ -2762,26 +1130,6 @@ fn draw_scope(frame: &mut Frame<'_>, screen: Rect, field: &ScopeField, heading: 
     frame.render_widget(Paragraph::new(scope_lines(field, heading, rules)), inner);
 }
 
-/// The [`SCOPE_LINES`] lines of one prompt's window, in the order they are
-/// drawn.
-///
-/// What the field carries is bold against the plain `heading`: the heading is
-/// the same words every time the window opens and the path is the one part of it
-/// worth reading, and bold is what the tree already spends on the row the keys
-/// are driving, so no new colour is invented for a window that is up for a few
-/// seconds. The path prompt hands in an empty heading and its whole first line
-/// is that bold field (see [`PATH_HEADING`]), which is the same rule and not an
-/// exception to it: the words worth reading are the words drawn bold.
-///
-/// The cursor is a reversed [`SCOPE_CURSOR`] after the text and nowhere else,
-/// which is not a decision made here: [`mod@crate::prompt`] appends and deletes
-/// at the end and moves nothing, so the end of the text is where the next
-/// character lands, by construction.
-///
-/// The rules line is dim, as the footer's keys are: it is there to be read once,
-/// before anything is typed, and then to stop competing with the text. The
-/// broken rule above it is not dimmed — it is the one thing that changed since
-/// the last frame, and it is the reason the prompt is still up.
 fn scope_lines<'a>(field: &'a ScopeField, heading: &'a str, rules: &'a str) -> Vec<Line<'a>> {
     vec![
         Line::from(vec![
@@ -2798,26 +1146,6 @@ fn scope_lines<'a>(field: &'a ScopeField, heading: &'a str, rules: &'a str) -> V
     ]
 }
 
-/// How big one prompt's window wants to be: its widest line, the margins and the
-/// border.
-///
-/// Measured off the lines the way [`confirm_size`] is, and off the field as well
-/// as off the two sentences handed in, because a path and a broken rule are as
-/// much of the window as the heading is. In practice the rules line is the floor
-/// and the window does not breathe as somebody types: [`scope::RULES`](warlock_engine::scope::RULES) is wider
-/// than a directory that fits on a tree row and wider than any scope the engine
-/// would accept, so the width only moves for something longer than it. The path
-/// prompt is the one window that does breathe — a proposed path is about as long
-/// as [`PATH_RULES`] — and it breathes at the pace a path is edited, which is a
-/// character at a time and no faster than the scope window already moves when a
-/// refusal lands.
-///
-/// [`scope::RULES`](warlock_engine::scope::RULES) is the engine's sentence rather than one written here, and
-/// that is a rule rather than a convenience: a window that spelled out how long
-/// a scope may be or which characters it may hold would be this crate judging a
-/// scope, and there is one judge — see [`mod@crate::prompt`]. Taking the
-/// sentence as a parameter is what keeps that true of a function that now sizes
-/// two windows: the caller says which words, and this measures them.
 fn scope_size(field: &ScopeField, heading: &str, rules: &str) -> Size {
     let heading = display_width(heading) + display_width(field.directory());
     let typed = display_width(field.text()) + display_width(SCOPE_CURSOR);
@@ -2874,63 +1202,21 @@ mod tests {
     use crate::panel::Mode;
     use crate::prompt::{ScopeField, ScopePrompt};
 
-    /// How many rows the window tests work with: comfortably more than fit on
-    /// the terminal they draw into.
     const MANY: usize = 20;
 
-    /// The terminal most of these tests draw into.
-    ///
-    /// Wide enough that the tree column is well clear of its floor and every
-    /// line of the fixture fits inside its border — what is under test here is
-    /// what the rows say, not how a name survives a narrow column — and tall
-    /// enough for a header, a footer, the pane borders and a handful of tree
-    /// rows, and no taller.
     const WIDTH: u16 = 120;
-    /// See [`WIDTH`].
     const HEIGHT: u16 = 10;
 
-    /// The height every row of the frame's chrome takes off the tree: the
-    /// footer, the tree pane's border top and bottom, and its header.
     const CHROME_HEIGHT: u16 = FOOTER_HEIGHT + 2 * BORDER_THICKNESS + HEADER_HEIGHT;
 
-    /// A terminal wide enough for the whole of [`keys_line`], whatever it grows
-    /// to: the footer test asserts that line for equality, and a line drawn onto
-    /// a narrower terminal than it needs would be compared against its own
-    /// truncation.
     const KEYS_WIDTH: u16 = 240;
 
-    /// The terminal the footer has to survive: eighty columns, which is what a
-    /// split window on a laptop is and has been the default width of a terminal
-    /// for longer than any of this.
-    ///
-    /// Narrower than the whole keys line by some way, so the line drawn here is
-    /// one that has given names up — and the point of the tests that draw at
-    /// this width is which name it kept.
     const EIGHTY_COLUMNS: u16 = 80;
 
-    /// Tall enough for the whole fixture with its files on screen, chrome
-    /// included, so a file test asserts about rows rather than about where the
-    /// window happened to stop.
     const FILES_HEIGHT: u16 = 20;
 
-    /// Tall enough for the whole of the fixture's default view on screen,
-    /// chrome included: its five directories, the four document rows drawn
-    /// under the documented ones, and then some.
-    ///
-    /// Nine rows rather than five, because the view the app opens on draws each
-    /// directory's own `WARLOCK.md` under it — see [`WHOLE_FIXTURE`].
     const FIXTURE_HEIGHT: u16 = 16;
 
-    /// Every line the fixture's default view draws, in order, exactly as it
-    /// reaches the screen: the selection's gutter, the guides, the collapse
-    /// marker's two columns and the name.
-    ///
-    /// Nine lines for five directories. The four that carry a document draw it
-    /// under them as the ordinary file row `f` has always produced — one indent
-    /// deeper than the directory, no collapse marker, nothing added to the name
-    /// — and `crates/`, which has no document, draws nothing under itself. The
-    /// three directories that hold only a document are marked expanded here
-    /// because there is now something under them to hide.
     const WHOLE_FIXTURE: [&str; 9] = [
         "> - warlock",
         "  ├   WARLOCK.md",
@@ -2943,74 +1229,27 @@ mod tests {
         "    └   WARLOCK.md",
     ];
 
-    /// The narrowest terminal the mark is drawn on: a hundred and fifty-one
-    /// columns gives the tree forty-five and the panel a hundred and six, whose
-    /// inside is a hundred and four — the art's hundred columns and
-    /// [`MARK_MARGIN`] either side of it, exactly and not a column over.
-    ///
-    /// A wide terminal, and knowingly: see [`MARK`]. What this constant is for
-    /// is that the threshold is a number in a test rather than something
-    /// discovered by resizing a window.
     const MARK_WIDTH: u16 = 151;
 
-    /// One column narrower than [`MARK_WIDTH`]: the tree takes forty-five at
-    /// both widths, so the whole of the missing column comes off the panel and
-    /// its inside is a column short of the art and its margins.
     const BELOW_MARK_WIDTH: u16 = MARK_WIDTH - 1;
 
-    /// The shortest terminal the mark is drawn on: fourteen rows less the footer
-    /// and the panel's border leaves nine, the art's eight and the
-    /// [`MARK_MARGIN_ROWS`] row it wants clear.
     const MARK_HEIGHT: u16 = 14;
 
-    /// One row shorter than [`MARK_HEIGHT`], leaving the panel's inside the
-    /// art's own eight rows with none to spare.
     const BELOW_MARK_HEIGHT: u16 = MARK_HEIGHT - 1;
 
-    /// A terminal with room to spare for the mark in both directions, for the
-    /// tests that are about something else happening on a frame the mark is on —
-    /// where drawing at the threshold would make a failure read as a rounding
-    /// error rather than as the thing under test.
     const MARK_ROOM_WIDTH: u16 = 170;
 
-    /// The height half of [`MARK_ROOM_WIDTH`], with rows to spare over the art
-    /// and its margin.
     const MARK_ROOM_HEIGHT: u16 = 20;
 
-    /// The 80-column terminal, where the tree takes its floor of thirty and the
-    /// panel the other fifty: the width the mark has to survive to be drawn on
-    /// an ordinary terminal at all.
     const STANDARD_WIDTH: u16 = 80;
 
-    /// A terminal with room on the header for both of its facts: the tree pane
-    /// takes its thirty per cent, forty-eight columns, and the border leaves
-    /// forty-six inside — comfortably more than the thirty-three the fixture's
-    /// identity, the gap and two sigils come to.
-    ///
-    /// Room to spare, and deliberately: what these tests are about is that the
-    /// holding is stated when it fits, so drawing at the threshold would make a
-    /// failure read as a rounding error rather than as the thing under test.
     const HELD_WIDTH: u16 = 160;
 
-    /// The 40-column terminal, where the two panes halve the width and the
-    /// panel is twenty columns: too narrow for the mark by a long way, and the
-    /// size that pins what the panel does instead.
     const NARROW_WIDTH: u16 = 40;
 
-    /// How far apart the pulse tests draw their frames: one phase, after which
-    /// the row in flight should have changed colour, and the two phases that
-    /// make a whole cycle, after which it should be back where it started.
-    ///
-    /// Written as wall-clock durations rather than as multiples of the
-    /// `PULSE_PHASE` under test, because "about half a second" is what was
-    /// asked for: a phase that quietly grew to two seconds would still be
-    /// self-consistent with itself, and would fail here.
     const PHASE: Duration = Duration::from_millis(500);
-    /// See [`PHASE`]: two of them.
     const CYCLE: Duration = Duration::from_secs(1);
 
-    /// `count` rows of nothing in particular, named so that a line on screen
-    /// says which row of the tree it is.
     fn many_rows(count: usize) -> Vec<Row> {
         (0..count)
             .map(|index| {
@@ -3024,37 +1263,12 @@ mod tests {
             .collect()
     }
 
-    /// The scope the label tests write on a row, and the name of the row it is
-    /// written on.
-    ///
-    /// A name of some length on purpose: the width the labelled row needs has to
-    /// be clear of the floor [`TREE_MIN_WIDTH`] puts under the tree column, or
-    /// the boundary test would be asking for a terminal no width produces.
     const SCOPED_NAME: &str = "warlock-terminal-ui";
-    /// See [`SCOPED_NAME`].
     const SCOPE_TEAM: &str = "tui-team";
-    /// What [`SCOPED_NAME`] scoped to [`SCOPE_TEAM`] reads on screen: the
-    /// name, a space, and the scope in parentheses.
     const SCOPED_LABEL: &str = "warlock-terminal-ui (tui-team)";
 
-    /// A terminal with room to spare for [`SCOPED_LABEL`]: a hundred and sixty
-    /// columns gives the tree forty-eight, which is well over the thirty-four
-    /// the labelled row needs.
-    ///
-    /// Room to spare on purpose — the label tests are about what the row says,
-    /// and drawing them at the threshold would make a failure read as a
-    /// rounding error rather than as the thing under test. The threshold itself
-    /// is what [`terminal_width_for`] is for.
     const SCOPE_ROOM_WIDTH: u16 = 160;
 
-    /// A root, a directory carrying `scope`, a pacted directory under that one
-    /// with no scope of its own, and a file inside the scoped directory: the
-    /// four rows the label has to tell apart, all in `state`.
-    ///
-    /// Built as rows rather than from a tree, so what is under test is the
-    /// renderer reading [`Row::scope`] and not a loader filling it in. `scope`
-    /// is `None` for the same rows with nothing written on them, which is the
-    /// screen as it was before there were labels.
     fn labelled_rows(scope: Option<&str>, state: NodeState) -> Vec<Row> {
         vec![
             Row::new(0, "warlock", "warlock/WARLOCK.md", NodeState::Unpacted).with_child_count(1),
@@ -3076,13 +1290,6 @@ mod tests {
         ]
     }
 
-    /// The colour and the modifiers of every cell `needle` is drawn in on tree
-    /// row `index`.
-    ///
-    /// Read off the buffer cell by cell rather than trusted to a span, because
-    /// what the reader sees is the cells: a label that arrived in a second span
-    /// with a colour or an emphasis of its own would pass an assertion about the
-    /// text and fail here.
     fn styles_of(buffer: &Buffer, index: u16, needle: &str) -> Vec<(Color, Modifier)> {
         let area = rows_area(buffer);
         let start =
@@ -3096,12 +1303,6 @@ mod tests {
             .collect()
     }
 
-    /// The narrowest terminal whose tree draws its rows into exactly
-    /// `rows_width` columns.
-    ///
-    /// Searched for rather than worked out, so a boundary test asks for the
-    /// width it means — the one the rows are measured against — without
-    /// restating the layout's own arithmetic beside it.
     fn terminal_width_for(rows_width: u16) -> u16 {
         (2 * TREE_MIN_WIDTH..=400)
             .find(|width| {
@@ -3111,12 +1312,6 @@ mod tests {
             .unwrap_or_else(|| panic!("no terminal gives the tree's rows {rows_width} columns"))
     }
 
-    /// An app of [`MANY`] rows with `selected` selected, measured for a
-    /// [`WIDTH`]×[`HEIGHT`] terminal exactly the way the binary measures one.
-    ///
-    /// The selection is reached by stepping, so the offset it is drawn with is
-    /// whatever ordinary movement left behind rather than something the test
-    /// wrote in by hand.
     fn tall_app(selected: usize) -> App {
         let mut app = App::from_rows(many_rows(MANY));
         app.set_viewport_height(tree_height(Size::new(WIDTH, HEIGHT)));
@@ -3126,19 +1321,10 @@ mod tests {
         app
     }
 
-    /// The instant `seconds` after `base`, so a run can be drawn at an instant
-    /// the test chose and its clocks asserted for equality.
     fn at(base: Instant, seconds: u64) -> Instant {
         base + Duration::from_secs(seconds)
     }
 
-    /// The `line`th activity of a pass, as a tool call numbered so it is its
-    /// own line.
-    ///
-    /// The tests below that need a long account need it to be long, and a
-    /// stretch of thinking is one line however often it is reported — so what
-    /// fills a panel is a sequence of distinguishable activities rather than
-    /// the same one repeated.
     fn numbered(line: usize) -> Activity {
         Activity::Tool {
             name: "Read".to_owned(),
@@ -3146,14 +1332,6 @@ mod tests {
         }
     }
 
-    /// An app with the fixture's tree and an account of a pact that started at
-    /// `base`, measured for a `width`×`height` terminal exactly the way the
-    /// binary measures one.
-    ///
-    /// Nothing has happened in the run yet: the caller opens the sections and
-    /// records the activities it wants, at the instants it wants, so that what
-    /// is on screen is what a run put there rather than something a fixture
-    /// arranged.
     fn pacting_app(base: Instant, width: u16, height: u16) -> App {
         let mut app = App::from_tree(&fixture::tree());
         app.set_viewport_height(tree_height(Size::new(width, height)));
@@ -3165,15 +1343,10 @@ mod tests {
         app
     }
 
-    /// Where the panel's lines land in a buffer of this size: the whole inside
-    /// of the panel's border, which is the account's window and — while a run is
-    /// in flight — the run's header on the top row of it.
     fn panel_area(buffer: &Buffer) -> Rect {
         pane_inner(areas(buffer.area, None).panel)
     }
 
-    /// The rows of `buffer` the panel is drawn into, as text, without the tree
-    /// pane's border on the end of them.
     fn panel_rows(buffer: &Buffer) -> Vec<String> {
         let area = panel_area(buffer);
         (0..area.height)
@@ -3181,31 +1354,22 @@ mod tests {
             .collect()
     }
 
-    /// The panel's bottom border row, as text: the edge the scrollback
-    /// indicator is written on, border glyphs and all.
     fn panel_bottom_edge(buffer: &Buffer) -> String {
         let panel = areas(buffer.area, None).panel;
 
         text_in(buffer, panel, panel.y + panel.height - 1)
     }
 
-    /// The panel's top border row, as text: the edge the thread's own name is
-    /// written on, border glyphs and all.
     fn panel_top_edge(buffer: &Buffer) -> String {
         let panel = areas(buffer.area, None).panel;
 
         text_in(buffer, panel, panel.y)
     }
 
-    /// Where the tree's rows land in a buffer of this size: inside the tree
-    /// pane's border, under its header. Measured off the layout the frame was
-    /// cut by, so a test asserts about where the tree is rather than about where
-    /// it used to be.
     fn rows_area(buffer: &Buffer) -> Rect {
         tree_rows_area(areas(buffer.area, None).tree)
     }
 
-    /// The tree pane's header line: one row, inside the border, above the rows.
     fn header_area(buffer: &Buffer) -> Rect {
         let inner = pane_inner(areas(buffer.area, None).tree);
 
@@ -3215,8 +1379,6 @@ mod tests {
         }
     }
 
-    /// The rows of `buffer` the tree is drawn into, as text: the window onto the
-    /// tree, inside the tree pane's border and under its header.
     fn tree_rows(buffer: &Buffer) -> Vec<String> {
         let area = rows_area(buffer);
         (0..area.height)
@@ -3224,42 +1386,26 @@ mod tests {
             .collect()
     }
 
-    /// Tree row `index` of the window, as text.
     fn tree_row(buffer: &Buffer, index: u16) -> String {
         let area = rows_area(buffer);
 
         text_in(buffer, area, area.y + index)
     }
 
-    /// The tree under `crates`, holding `sigils`: the header line the tests
-    /// about it draw, with both halves set.
-    ///
-    /// The holding is handed over as a value, as [`Chrome`](crate::app::Chrome)
-    /// takes it — nothing here reads a config, and no test of this module goes
-    /// anywhere near a home directory.
     fn held_chrome(sigils: Sigils) -> Chrome {
         Chrome::of("/repo", "/repo/crates").with_sigils(sigils)
     }
 
-    /// The app the header tests draw under that line: the fixture, unchanged.
-    ///
-    /// A header says which tree is on screen and nothing about the rows, so
-    /// every one of those tests draws the same app and varies only the
-    /// [`Chrome`](crate::app::Chrome) beside it — which is the arrangement the
-    /// type exists to make possible.
     fn header_app() -> App {
         App::from_tree(&fixture::tree())
     }
 
-    /// The tree pane's header line, as text.
     fn header_text(buffer: &Buffer) -> String {
         let area = header_area(buffer);
 
         text_in(buffer, area, area.y)
     }
 
-    /// The header line of `buffer`, and its footer block: the two that must not
-    /// move when the tree scrolls.
     fn header_and_footer(buffer: &Buffer) -> (Vec<String>, Vec<String>) {
         let height = buffer.area.height;
         (
@@ -3270,13 +1416,6 @@ mod tests {
         )
     }
 
-    /// The line row `index` of [`many_rows`] is drawn as when `selected` is the
-    /// selected row: the selection marker's gutter, the one level of depth's
-    /// guide in the columns an indent takes, the blank a childless row carries
-    /// where a collapse marker would go, then the name.
-    ///
-    /// [`many_rows`] is a flat run of siblings, so every one of them is a branch
-    /// except the last, which is the corner. `count` is what says which that is.
     fn drawn_row(index: usize, selected: usize, count: usize) -> String {
         let gutter = if index == selected {
             SELECTION_MARKER.to_owned()
@@ -3291,29 +1430,14 @@ mod tests {
         format!("{gutter}{corner} {NO_MARKER}module{index}")
     }
 
-    /// Draw `app` onto an in-memory terminal of the given size and hand back
-    /// the buffer. No tty is involved, so this runs anywhere `cargo test` does.
-    ///
-    /// Drawn at this moment, which every test that is not about the panel's
-    /// clocks can ignore: an app with no account draws the same frame whatever
-    /// instant it is handed. The ones that do care use [`render_at`].
     fn render(app: &App, width: u16, height: u16) -> Buffer {
         render_at(app, width, height, Instant::now())
     }
 
-    /// [`render`], at an instant the test chose, so a clock on screen can be
-    /// asserted for equality rather than for looking about right.
-    ///
-    /// With the gate on the way out closed, which is every test that is not
-    /// about the gate: the frame this draws is the frame warlock has always
-    /// drawn.
     fn render_at(app: &App, width: u16, height: u16, now: Instant) -> Buffer {
         render_confirm(app, width, height, now, QuitConfirm::Closed)
     }
 
-    /// [`render_at`], with the quit confirmation in whatever state the test is
-    /// about, and the scope prompt closed — which is every test but the ones
-    /// about the scope prompt itself.
     fn render_confirm(
         app: &App,
         width: u16,
@@ -3332,8 +1456,6 @@ mod tests {
         )
     }
 
-    /// [`render_at`], with the scope prompt in whatever state the test is about
-    /// and the gate on the way out closed.
     fn render_scope(
         app: &App,
         width: u16,
@@ -3352,9 +1474,6 @@ mod tests {
         )
     }
 
-    /// [`render_at`], with the path prompt in whatever state the test is about
-    /// and every other window closed: the frame a `/write` turn's answer leaves
-    /// on screen.
     fn render_path(app: &App, width: u16, height: u16, now: Instant, path: &ScopePrompt) -> Buffer {
         render_all(
             app,
@@ -3369,13 +1488,6 @@ mod tests {
         )
     }
 
-    /// [`render`], with a header line the test chose.
-    ///
-    /// The header is no longer app state, so the tests about it hand one in
-    /// rather than building an app that carries one: see
-    /// [`Chrome`](crate::app::Chrome). Every other test here draws through
-    /// [`render`], which passes a default — an empty identity holding nothing,
-    /// which is the line warlock drew before either half existed.
     fn render_chrome(app: &App, chrome: &Chrome, width: u16, height: u16) -> Buffer {
         render_windows(
             app,
@@ -3388,12 +1500,6 @@ mod tests {
         )
     }
 
-    /// [`render`], with a composer under the panel: the frame the binary draws
-    /// once there is a draft on screen.
-    ///
-    /// Every other helper here passes `None`, which is a frame with no field on
-    /// it — the shape of every test written before there was a composer, and
-    /// still the shape of a frame while the document card has the panel.
     fn render_composer(app: &App, composer: &Composer, width: u16, height: u16) -> Buffer {
         render_all(
             app,
@@ -3408,11 +1514,6 @@ mod tests {
         )
     }
 
-    /// The one place a frame is actually drawn: the app, the instant, and the
-    /// windows that can be over it.
-    ///
-    /// The path prompt is closed here, which is every test but the ones about
-    /// the path prompt itself — they go through [`render_path`].
     fn render_windows(
         app: &App,
         chrome: &Chrome,
@@ -3435,8 +1536,6 @@ mod tests {
         )
     }
 
-    /// [`render_windows`] with the composer as well: everything one frame can
-    /// have on it, and the only place a test attaches a terminal.
     #[expect(
         clippy::too_many_arguments,
         reason = "one frame's worth of state, and the point of it is that no \
@@ -3461,14 +1560,10 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
-    /// The text of one row of a buffer, full width, trailing blanks trimmed off.
     fn row_text(buffer: &Buffer, y: u16) -> String {
         text_in(buffer, buffer.area, y)
     }
 
-    /// The text of row `y` of `buffer`, clipped to `area`'s columns, trailing
-    /// blanks trimmed off: how a row of one pane is read without the other
-    /// pane's border on the end of it.
     fn text_in(buffer: &Buffer, area: Rect, y: u16) -> String {
         let text: String = (area.x..area.x + area.width)
             .map(|x| buffer[(x, y)].symbol())
@@ -3476,13 +1571,6 @@ mod tests {
         text.trim_end().to_string()
     }
 
-    /// Line `line` of the footer, read from the columns the footer's text is
-    /// drawn in.
-    ///
-    /// The footer draws no border and its text is inset a column from each edge
-    /// so that it begins where the panes' own rows do (see
-    /// [`footer_text_area`]). A test reading the whole row would read that
-    /// column too and compare every line against a leading blank.
     fn footer_line(buffer: &Buffer, line: u16) -> String {
         let band = Rect {
             x: buffer.area.x,
@@ -3494,35 +1582,18 @@ mod tests {
         text_in(buffer, footer_text_area(band), band.y + line)
     }
 
-    /// How many columns the footer's text has on a terminal `width` wide: the
-    /// width the keys line is laid out for, which is what [`footer_text_area`]
-    /// leaves after insetting a column at each edge.
     fn footer_width(width: u16) -> usize {
         usize::from(footer_text_area(Rect::new(0, 0, width, FOOTER_HEIGHT)).width)
     }
 
-    /// Every row of a buffer, full width, as text.
     fn rows_text(buffer: &Buffer) -> Vec<String> {
         (0..buffer.area.height)
             .map(|y| row_text(buffer, y))
             .collect()
     }
 
-    /// Every glyph a guide is drawn with: the verticals and the two corners.
-    ///
-    /// Named once here so that the helpers below ask "is this a guide?" rather
-    /// than listing the three constants each time and drifting apart when a
-    /// fourth arrives.
     const GUIDE_GLYPHS: [&str; 3] = [GUIDE, GUIDE_BRANCH, GUIDE_LAST];
 
-    /// The foreground colour of tree row `index`'s first glyph of *text*:
-    /// its marker, or the first letter of its name when it carries none.
-    ///
-    /// Two things to the left of that are skipped, and neither is the row's
-    /// text. The gutter the selection marker lives in is drawn by the list
-    /// itself and takes no state colour; the indent guides are drawn in
-    /// [`GUIDE_COLOUR`] and say depth, not state, which is what
-    /// [`guide_columns`] is for.
     fn first_glyph_colour(buffer: &Buffer, index: u16) -> Color {
         let area = rows_area(buffer);
         let gutter = u16::try_from(SELECTION_MARKER.chars().count()).expect("a two-char marker");
@@ -3533,12 +1604,6 @@ mod tests {
             .fg
     }
 
-    /// Which column of `line` `needle` starts in, counted in characters rather
-    /// than bytes.
-    ///
-    /// [`GUIDE`] is three bytes and one column, so a byte offset compared across
-    /// two rows of different depths says nothing about what lines up with what
-    /// on screen.
     fn column_of(line: &str, needle: &str) -> usize {
         let byte = line
             .find(needle)
@@ -3547,12 +1612,6 @@ mod tests {
         line[..byte].chars().count()
     }
 
-    /// The columns of tree row `index` that carry a guide stroke, counted from
-    /// the left-hand edge of the tree's rows, the gutter included.
-    ///
-    /// Read off the buffer a column at a time rather than out of the row's text,
-    /// because [`GUIDE`] is three bytes and a byte offset into a string is not a
-    /// column on screen.
     fn guide_columns(buffer: &Buffer, index: u16) -> Vec<u16> {
         let area = rows_area(buffer);
         (0..area.width)
@@ -3562,13 +1621,6 @@ mod tests {
             .collect()
     }
 
-    /// Which drawn row of `app` stands for `path`, as an index into the window
-    /// [`tree_rows`] and [`first_glyph_colour`] read.
-    ///
-    /// The pulse tests name the directory or file they mean rather than
-    /// counting the fixture's rows, so that they keep asserting about the same
-    /// node if the fixture ever grows another one above it. Only sound while
-    /// the whole tree is on screen, which the tests that use it check.
     fn row_index(app: &App, path: &str) -> u16 {
         let index = app
             .rows()
@@ -3579,13 +1631,6 @@ mod tests {
         u16::try_from(index).expect("the fixture tree is small")
     }
 
-    /// `app` with the row for `path` selected, reached by stepping down to it
-    /// the way the movement keys do.
-    ///
-    /// Named rather than counted, for the same reason [`row_index`] is: the
-    /// default view draws a document row under each documented directory, so
-    /// which press of `down` lands on which directory is a fact about the
-    /// fixture that no test of this module is about.
     fn select(mut app: App, path: &str) -> App {
         while app.selected_row().expect("the app has rows").path != Path::new(path) {
             let before = app.selected();
@@ -3595,12 +1640,6 @@ mod tests {
         app
     }
 
-    /// The rows of `buffer` — counted from the top of the screen — drawn with
-    /// the selection's highlight.
-    ///
-    /// Read down the tree's own first column rather than the screen's, which is
-    /// the panel's border now; still the whole height of the screen, so a header
-    /// or footer row that lit up would show up here as well.
     fn highlighted_rows(buffer: &Buffer) -> Vec<u16> {
         let x = rows_area(buffer).x;
         (0..buffer.area.height)
@@ -3608,7 +1647,6 @@ mod tests {
             .collect()
     }
 
-    /// How wide [`MARK`] is drawn: the widest of its rows, in columns.
     fn mark_width() -> usize {
         MARK.iter()
             .copied()
@@ -3617,15 +1655,6 @@ mod tests {
             .expect("the art has rows")
     }
 
-    /// Assert that the panel of `buffer` is the whole of [`MARK`] and nothing
-    /// else: the art centred inside the border, dim, in no colour of its own,
-    /// on otherwise blank rows.
-    ///
-    /// Where the art lands is worked out here from [`MARK`] and the panel's
-    /// inner area rather than asked of [`mark_area`], so that a mark which
-    /// moved or was redrawn fails here rather than agreeing with itself. The
-    /// art is compared against the constant for the same reason: a copy of it
-    /// written out in a test would go on passing after the mark changed.
     fn assert_mark_drawn(buffer: &Buffer) {
         let inner = panel_area(buffer);
         let left = (usize::from(inner.width) - mark_width()) / 2;
@@ -3670,15 +1699,6 @@ mod tests {
         }
     }
 
-    /// Assert that the panel of `buffer` is the bare border it drew before
-    /// there was a mark: every cell inside it a space, the border whole on all
-    /// four sides but for the card's own title, and nothing on its bottom edge.
-    ///
-    /// The title is the one thing the top edge is allowed to carry. The panel
-    /// opens on the conversation, which is the card that says its name on the
-    /// border (see [`THREAD_TITLE`]), and the blanks padding that name off the
-    /// corner are cells of the edge that are not border — so the top edge is
-    /// only held to being unbroken on the cards that name nothing.
     fn assert_bare_panel(buffer: &Buffer) {
         let panel = areas(buffer.area, None).panel;
         let inner = pane_inner(panel);
@@ -3725,8 +1745,6 @@ mod tests {
         assert!(!edge.contains("more"), "{edge:?}");
     }
 
-    /// Assert that no row of `buffer`'s panel carries any part of [`MARK`],
-    /// however much else is drawn there.
     fn assert_no_mark(buffer: &Buffer) {
         for row in panel_rows(buffer) {
             for line in MARK {
@@ -3812,7 +1830,6 @@ mod tests {
         }
     }
 
-    /// The last component of `path`: what a directory's row draws as.
     fn directory_name(path: &str) -> &str {
         path.rsplit('/')
             .next()
@@ -4981,13 +2998,6 @@ mod tests {
         }
     }
 
-    /// The names the idle keys line carries while the mouse key reads one way or
-    /// the other: [`KEYS`], that name, and the way out, in the order
-    /// [`keys_line`] assembles them.
-    ///
-    /// Joined by [`KEY_GAP`] this is the whole line, so its width is the width
-    /// the line needs — which is what the tests below shrink a terminal down
-    /// from.
     fn idle_keys(mouse_captured: bool) -> Vec<&'static str> {
         let mut pieces = KEYS.to_vec();
         pieces.push(if mouse_captured {
@@ -5063,13 +3073,6 @@ mod tests {
         }
     }
 
-    /// What eighty columns costs, now that the composer has names on the line:
-    /// its four and no other name before them, with the way out still whole.
-    ///
-    /// The assertions are about the row the footer drew rather than about what
-    /// [`keys_line`] returned, because "nothing moves off the footer" is a claim
-    /// about the screen: a line that fit the layout and was then cut by the
-    /// backend would pass the one and fail the other.
     #[test]
     fn the_composers_names_are_the_first_the_eighty_column_footer_gives_up() {
         let mut app = App::from_tree(&fixture::tree());
@@ -5320,8 +3323,6 @@ mod tests {
         assert_eq!(first_column(&buffer, footer + 1), Some(panel.x));
     }
 
-    /// The first column of row `y` with something drawn in it, or `None` for a
-    /// row that is all blanks.
     fn first_column(buffer: &Buffer, y: u16) -> Option<u16> {
         (buffer.area.x..buffer.area.x + buffer.area.width).find(|&x| buffer[(x, y)].symbol() != " ")
     }
@@ -6159,13 +4160,6 @@ mod tests {
         }
     }
 
-    /// The lines of a small document, one of them longer than a narrow panel and
-    /// one of them empty, measured for a `width`×`height` terminal the way the
-    /// binary measures one — height *and* width, since a document is wrapped to
-    /// the width the frame gives the panel.
-    ///
-    /// `cut` is the read that stopped at the cap, which puts one line more on
-    /// screen than the file has.
     fn viewing_app(width: u16, height: u16, cut: bool) -> App {
         let mut app = App::from_tree(&fixture::tree());
         app.set_viewport_height(tree_height(Size::new(width, height)));
@@ -6268,13 +4262,6 @@ mod tests {
         assert_eq!(whole[3], "");
     }
 
-    /// An app whose panel holds both cards: an account of a pact that started at
-    /// `base`, with one section and one thing recorded in it, and a document
-    /// showing over the top of it.
-    ///
-    /// Both filled on purpose — the slot holds two cards, and a document placed
-    /// over a run puts the account behind it rather than throwing it out — so a
-    /// test can swap between them and assert what reaches the screen.
     fn two_card_app(base: Instant, width: u16, height: u16) -> App {
         let mut app = pacting_app(base, width, height);
         let account = app.panel_mut().account_mut().expect("a pact has started");
@@ -6337,22 +4324,9 @@ mod tests {
         );
     }
 
-    /// The words the account's heading and the thread's question both carry in
-    /// the test below: a directory, because a heading is one.
-    ///
-    /// The point of saying the very same thing on both cards is that the frames
-    /// still differ. Two cards that only looked different because their contents
-    /// differ would be two cards a reader could be fooled by, and the question
-    /// "which card am I on?" would be answerable only by reading the rows.
     const SAME_WORDS: &str = "crates/engine";
 
-    /// The message the thread tests ask, and the sentence that comes back.
-    ///
-    /// The answer is prose in the model's own words, which is the one kind of
-    /// text that must never reach the account's card: it is asserted for by
-    /// substring, so a row that carried any of it anywhere on the frame fails.
     const QUESTION: &str = "what does the engine do?";
-    /// See [`QUESTION`].
     const ANSWER: &str = "It walks the tree and writes what it finds.";
 
     #[test]
@@ -6446,9 +4420,6 @@ mod tests {
         );
     }
 
-    /// The border title is the whole of what brief mode looks like: the same
-    /// card, the same rows, the same width, one word more on the edge — and the
-    /// other cards go on naming nothing at all.
     #[test]
     fn the_thread_title_says_which_register_the_conversation_is_in() {
         let base = Instant::now();
@@ -6632,17 +4603,8 @@ mod tests {
         );
     }
 
-    /// The width the single-row tests below draw into: room for a marker, a
-    /// clock and a few words, and no more than a failure message can be read
-    /// in.
     const ROW_WIDTH: u16 = 24;
 
-    /// One line of a card drawn on its own, as what a reader would see: the
-    /// text that lands in the buffer, and whether any of it is bold.
-    ///
-    /// Drawn rather than read off the value, because what tells warlock's own
-    /// voice from the reader's and from a pass at work is what reaches the
-    /// screen.
     fn row_drawn(line: &Entry) -> (String, bool) {
         let area = Rect::new(0, 0, ROW_WIDTH, 1);
         let mut buffer = Buffer::empty(area);
@@ -7020,22 +4982,10 @@ mod tests {
         }
     }
 
-    /// The directory the run-header tests report: a node of the fixture's tree,
-    /// so the header names something the reader can see on screen beside it.
     const RUNNING_ON: &str = "warlock/crates/engine";
 
-    /// How [`RUNNING_ON`] reaches the header, spelled by the one speller the
-    /// footer uses: the fixture's paths are already relative to its root, so
-    /// they are handed back as they stand.
     const RUNNING_LABEL: &str = RUNNING_ON;
 
-    /// Tell `app` how many lines of account its window has, the way the event
-    /// loop's `draw_frame` does: what is inside the panel's border, less the
-    /// rows the run's header is about to take.
-    ///
-    /// Measured off the app's own header, and *before* the frame is drawn, which
-    /// is the whole point — an app told the taller number would scroll its
-    /// account by a row the header owns.
     fn measure_panel(app: &mut App, width: u16, height: u16) {
         let header = app.run_header();
         app.panel_mut().set_height(panel_height(
@@ -7045,9 +4995,6 @@ mod tests {
         ));
     }
 
-    /// [`pacting_app`] with a run of `total` directories in flight, `position`
-    /// of the way through [`RUNNING_ON`], measured the way the binary measures
-    /// one.
     fn running_app(
         base: Instant,
         width: u16,
@@ -7062,8 +5009,6 @@ mod tests {
         app
     }
 
-    /// Put `lines` numbered activities in `app`'s account, one a second from
-    /// `base`, under a section for the directory the run is working.
     fn fill_account(app: &mut App, base: Instant, lines: usize) {
         let account = app.panel_mut().account_mut().expect("a pact has started");
         account.open_section(RUNNING_LABEL, base);
@@ -7072,8 +5017,6 @@ mod tests {
         }
     }
 
-    /// The run header's row of a frame drawn at `now`: the top row inside the
-    /// panel's border, which is the header's while a run is in flight.
     fn run_header_row(app: &App, width: u16, height: u16, now: Instant) -> String {
         panel_rows(&render_at(app, width, height, now))
             .first()
@@ -7448,13 +5391,6 @@ mod tests {
         assert_eq!(after, before);
     }
 
-    /// The drafts the layout tests are run against: nothing typed, one row,
-    /// several newlines, a run long enough to wrap, and one well past the cap.
-    ///
-    /// One list rather than a test per draft, because what is under test is
-    /// arithmetic that has to hold whatever is in the field — and a draft that
-    /// wants more rows than the cap is the case the arithmetic is easiest to get
-    /// wrong at.
     fn drafts() -> Vec<Composer> {
         let many = (0..usize::from(COMPOSER_MAX_ROWS) * 3)
             .map(|line| format!("line {line}"))
@@ -7470,7 +5406,6 @@ mod tests {
         ]
     }
 
-    /// The rows of `buffer` the composer is drawn into, as text.
     fn composer_rows(buffer: &Buffer, composer: &Composer) -> Vec<String> {
         let area = composer_field(buffer, composer);
 
@@ -7479,8 +5414,6 @@ mod tests {
             .collect()
     }
 
-    /// The area of `buffer` the composer's rows are drawn in: its pane inside
-    /// its border, which is what every column and row below is counted from.
     fn composer_field(buffer: &Buffer, composer: &Composer) -> Rect {
         pane_inner(
             areas(buffer.area, Some(composer))
@@ -7489,16 +5422,6 @@ mod tests {
         )
     }
 
-    /// Every cell of the field that is drawn reversed, as the column and row it
-    /// is at inside the field and the symbol drawn in it.
-    ///
-    /// The caret is a reversed cell in the buffer and nothing else — the
-    /// terminal's own cursor is neither moved nor shown (see [`draw_composer`])
-    /// — so this is the whole of what a test can ask about where the caret is,
-    /// and it is asked of the drawn field rather than of the composer. A `Vec`
-    /// rather than the first one found, so that "the caret is here" and "there
-    /// is one caret" are the same assertion: a caret left behind on the row the
-    /// cursor used to be on would be a second entry.
     fn caret_cells(buffer: &Buffer, composer: &Composer) -> Vec<(u16, u16, String)> {
         let area = composer_field(buffer, composer);
 
@@ -7513,12 +5436,6 @@ mod tests {
             .collect()
     }
 
-    /// The one caret of a field drawn with the keys in it: where it is and what
-    /// it is drawn over.
-    ///
-    /// # Panics
-    ///
-    /// If the field drew no caret, or more than one.
     fn caret_cell(buffer: &Buffer, composer: &Composer) -> (u16, u16, String) {
         let mut cells = caret_cells(buffer, composer);
         assert_eq!(cells.len(), 1, "one caret and one only: {cells:?}");
@@ -7920,13 +5837,6 @@ mod tests {
         assert_eq!(muted_rows.last().map(String::as_str), Some(live.draft()));
     }
 
-    /// An app showing a conversation with a run going on behind it: a question,
-    /// its answer, and then a pact started from the tree, which fills the
-    /// account card without touching the one on screen.
-    ///
-    /// The two tests below are about the field under that thread, so what they
-    /// need of the app is that the thread is what is showing and that a run is
-    /// under way — the clocks are read at `at(base, 9)` by both.
     fn app_running_under_a_thread(base: Instant) -> App {
         let mut app = App::from_tree(&fixture::tree());
         app.set_focus(Focus::Composer);
@@ -8266,28 +6176,11 @@ mod tests {
         );
     }
 
-    /// The terminal the covering is asserted on: small enough that the window
-    /// lands on all three parts of the frame at once — the panel's columns to
-    /// its left, the tree pane's to its right, and the footer under its last
-    /// rows — so "nothing shows through" is one assertion rather than three
-    /// sizes of terminal.
-    ///
-    /// Smaller than warlock is meant to be run at, and that is the point: the
-    /// window is fixed at what [`confirm_size`] says, so the way to put it over
-    /// everything at once is to shrink the frame around it.
     const COVER_WIDTH: u16 = 60;
-    /// See [`COVER_WIDTH`]: eight rows puts the bottom of the window over the
-    /// top of the footer.
     const COVER_HEIGHT: u16 = 8;
 
-    /// A word drawn all over the frame the confirmation is about to be drawn
-    /// over, so that the covering is asserted against a screen with something to
-    /// show through rather than against a blank one.
     const UNDERNEATH: &str = "underneath";
 
-    /// An app with something on every part of the frame: the fixture's tree in
-    /// the tree pane, an account long enough to fill the panel with lines wide
-    /// enough to fill its rows, and the ordinary footer under both.
     fn busy_app(base: Instant, width: u16, height: u16) -> App {
         let mut app = pacting_app(base, width, height);
         let detail = [UNDERNEATH; MANY].join(" ");
@@ -8305,15 +6198,10 @@ mod tests {
         app
     }
 
-    /// Where the confirmation's window lands on a buffer of this size, measured
-    /// off the very function [`draw`] places it with.
     fn confirm_rect(buffer: &Buffer) -> Rect {
         confirm_area(buffer.area)
     }
 
-    /// The rows of the confirmation's window, as text, clipped to its own
-    /// columns — so what these say is what the window says, with neither pane
-    /// beside it on the end.
     fn confirm_rows(buffer: &Buffer) -> Vec<String> {
         let area = confirm_rect(buffer);
         (0..area.height)
@@ -8321,32 +6209,17 @@ mod tests {
             .collect()
     }
 
-    /// What one row of the window actually says, with its border glyphs and the
-    /// blanks either side of them taken off.
-    ///
-    /// Trimmed from the ends only, so the gap between the two answers survives
-    /// and a row that leaked something from underneath keeps it: the whole use
-    /// of this is that a row of the window is one of three known strings, and a
-    /// helper that could turn a fourth into one of them would prove nothing.
     fn inside_the_border(row: &str) -> String {
         row.trim_matches(|glyph: char| "┌┐└┘─│ ".contains(glyph))
             .to_owned()
     }
 
-    /// The answers line as it reads on screen: Yes, the gap, No.
     fn answers_text() -> String {
         format!("{CONFIRM_YES}{CONFIRM_ANSWER_GAP}{CONFIRM_NO}")
             .trim()
             .to_owned()
     }
 
-    /// The colour and modifiers every cell of `answer`'s word is drawn with.
-    ///
-    /// Every cell rather than the first, because a highlight that covered half a
-    /// word would still be a highlight the eye could find and would still be
-    /// wrong. The padding either side of the word is skipped: what is asserted
-    /// is that the answer is lit, and the columns the constant pads it with are
-    /// [`CONFIRM_YES`]'s business.
     fn answer_style(buffer: &Buffer, answer: &str) -> Vec<(Color, Modifier)> {
         let area = confirm_rect(buffer);
         let word = answer.trim();
@@ -8367,7 +6240,6 @@ mod tests {
             .collect()
     }
 
-    /// Assert that `answer` is the one the highlight is on.
     fn assert_lit(buffer: &Buffer, answer: &str) {
         let cells = answer_style(buffer, answer);
         assert!(!cells.is_empty(), "{answer:?} is drawn nowhere");
@@ -8384,7 +6256,6 @@ mod tests {
         }
     }
 
-    /// Assert that `answer` is the one the highlight is not on.
     fn assert_unlit(buffer: &Buffer, answer: &str) {
         let cells = answer_style(buffer, answer);
         assert!(!cells.is_empty(), "{answer:?} is drawn nowhere");
@@ -8701,27 +6572,14 @@ mod tests {
         assert!(keys.contains(QUIT_KEY), "{keys:?}");
     }
 
-    /// The directory the scope prompt's tests open over: a path with a separator
-    /// in it, because a bare name would not show whether the heading has room
-    /// for what a real module is called.
     const SCOPED: &str = "crates/warlock-engine";
 
-    /// A scope already on that directory, so the field can be asserted holding
-    /// something rather than only being empty.
     const CARRIED: &str = "data-plane";
 
-    /// Where one prompt's window lands on a buffer, measured off the very
-    /// functions [`draw`] places it with.
-    ///
-    /// The two sentences are what say which prompt: the same window is drawn
-    /// twice over, so a helper that assumed the scope's words would measure the
-    /// path prompt's window in the wrong columns.
     fn window_rect(buffer: &Buffer, field: &ScopeField, heading: &str, rules: &str) -> Rect {
         centred(buffer.area, scope_size(field, heading, rules))
     }
 
-    /// The rows of one prompt's window, as text, clipped to its own columns —
-    /// [`confirm_rows`] for the other kind of window.
     fn window_rows(buffer: &Buffer, field: &ScopeField, heading: &str, rules: &str) -> Vec<String> {
         let area = window_rect(buffer, field, heading, rules);
         (0..area.height)
@@ -8729,9 +6587,6 @@ mod tests {
             .collect()
     }
 
-    /// The cell the cursor should be in: one column past `text` on the field's
-    /// row, worked out from the window's own corner, its border and its margin
-    /// rather than by looking for something that looks like a cursor.
     fn window_cursor(buffer: &Buffer, field: &ScopeField, heading: &str, rules: &str) -> Position {
         let area = window_rect(buffer, field, heading, rules);
         let typed = u16::try_from(display_width(field.text())).expect("a short line");
@@ -8742,45 +6597,29 @@ mod tests {
         )
     }
 
-    /// [`window_rect`] for the scope prompt: the window drawn with the engine's
-    /// sentence under it.
     fn scope_rect(buffer: &Buffer, field: &ScopeField) -> Rect {
         window_rect(buffer, field, SCOPE_HEADING, scope::RULES)
     }
 
-    /// [`window_rows`] for the scope prompt.
     fn scope_rows(buffer: &Buffer, field: &ScopeField) -> Vec<String> {
         window_rows(buffer, field, SCOPE_HEADING, scope::RULES)
     }
 
-    /// [`window_cursor`] for the scope prompt.
     fn cursor_cell(buffer: &Buffer, field: &ScopeField) -> Position {
         window_cursor(buffer, field, SCOPE_HEADING, scope::RULES)
     }
 
-    /// [`window_rows`] for the path prompt: the window whose heading rides in
-    /// the field and whose last line is [`PATH_RULES`].
     fn path_rows(buffer: &Buffer, field: &ScopeField) -> Vec<String> {
         window_rows(buffer, field, PATH_HEADING, PATH_RULES)
     }
 
-    /// [`window_cursor`] for the path prompt.
     fn path_cursor(buffer: &Buffer, field: &ScopeField) -> Position {
         window_cursor(buffer, field, PATH_HEADING, PATH_RULES)
     }
 
-    /// Which of the window's [`SCOPE_LINES`] the field is: the heading, a blank,
-    /// then the field.
     const FIELD_LINE: u16 = 2;
 
-    /// [`COVER_WIDTH`] for the scope prompt, which is the wider and taller of
-    /// the two windows: a terminal small enough that the window lands over the
-    /// panel, the tree pane and the top of the footer at once, and large enough
-    /// that it is still a window with frame either side of it rather than a
-    /// screen clamped to the terminal's own edges.
     const SCOPE_COVER_WIDTH: u16 = 80;
-    /// See [`SCOPE_COVER_WIDTH`]: twelve rows puts the bottom of the window over
-    /// the top of the footer.
     const SCOPE_COVER_HEIGHT: u16 = 12;
 
     #[test]
@@ -9069,19 +6908,8 @@ mod tests {
         }
     }
 
-    /// The heading the path prompt's window opens under, in the field rather
-    /// than in front of it — see [`PATH_HEADING`], which is empty for exactly
-    /// this reason.
-    ///
-    /// Spelled here rather than imported from whoever composes it: this crate
-    /// draws the string it is handed and never asks what it means, so a test
-    /// reading the binary's constant would be asserting that two modules agree
-    /// on some words rather than that this window draws them.
     const HEADED: &str = "Write the brief to";
 
-    /// The path a `/write` turn's answer proposes, as the binary works one out:
-    /// the directory, the number and the slug a reader checks before pressing
-    /// Enter, and long enough to be worth reading off the screen.
     const PROPOSED: &str = "docs/warlock-brief-13-scopes-and-sigils.md";
 
     #[test]
