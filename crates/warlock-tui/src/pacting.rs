@@ -152,6 +152,11 @@ pub(crate) struct Running {
     pub(crate) work: Work,
     pub(crate) before: App,
     pub(crate) unchanged: Vec<PathBuf>,
+    // Directory and the failure below it that cost it its pass. Remembered for
+    // the same reason `unchanged` is: the filesystem cannot tell a document
+    // this run declined to rewrite from one it wrote, and the section's closing
+    // line turns on exactly that.
+    pub(crate) skipped: Vec<(PathBuf, PathBuf)>,
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +257,10 @@ pub(crate) enum PactEvent {
     Unchanged {
         directory: PathBuf,
     },
+    Skipped {
+        directory: PathBuf,
+        below: PathBuf,
+    },
     Finished(Result<Toggled, String>),
 }
 
@@ -307,6 +316,13 @@ impl pact::Observer for Reporting<'_> {
             directory: directory.to_path_buf(),
         });
     }
+
+    fn skipped(&mut self, directory: &Path, below: &Path) {
+        let _ = self.events.send(PactEvent::Skipped {
+            directory: directory.to_path_buf(),
+            below: below.to_path_buf(),
+        });
+    }
 }
 
 pub(crate) fn spawn_pact<P: Wired + Agent>(
@@ -344,6 +360,7 @@ fn start_run<P: Wired + Agent>(
         work,
         before,
         unchanged: Vec::new(),
+        skipped: Vec::new(),
     }
 }
 
@@ -626,6 +643,14 @@ fn drain(
                 app.insert_file_row(directory.join(DOCUMENT_FILE));
                 running.unchanged.push(directory);
             }
+            // No paint at all, and that is the point: a skipped directory is
+            // one the refresh found stale and left stale, so the row is already
+            // the colour it should be. Remembered so its section can close
+            // saying what happened rather than reading the document on disk and
+            // calling it a write.
+            Ok(PactEvent::Skipped { directory, below }) => {
+                running.skipped.push((directory, below));
+            }
             Ok(PactEvent::Finished(outcome)) => break Some(outcome),
             // Still running, and nothing new to say.
             Err(TryRecvError::Empty) => return None,
@@ -704,7 +729,15 @@ fn drain(
     // screen and the account belongs to whichever one survives — and because a
     // run that ends without its clocks stopped is a finished run whose newest
     // line goes on counting up for as long as warlock is open.
-    close_account(app, scope, &refusals, &running.unchanged, cancelled, now);
+    close_account(
+        app,
+        scope,
+        &refusals,
+        &running.unchanged,
+        &running.skipped,
+        cancelled,
+        now,
+    );
 
     // The run is over and everything it recorded is on disk, so the rows on
     // screen are one load out of date whichever arm above ran. Saying so is the
@@ -719,6 +752,7 @@ fn close_account(
     scope: &Scope,
     refusals: &[Refusal],
     unchanged: &[PathBuf],
+    skipped: &[(PathBuf, PathBuf)],
     cancelled: bool,
     now: Instant,
 ) {
@@ -727,7 +761,7 @@ fn close_account(
             account.close_section(&Outcome::Cancelled, now);
         }
         account.close_open_sections(now, |section| {
-            section_outcome(section, refusals, unchanged, &scope.root)
+            section_outcome(section, refusals, unchanged, skipped, &scope.root)
         });
         account.finish(now);
     });
@@ -737,6 +771,7 @@ fn section_outcome(
     section: &Section,
     refusals: &[Refusal],
     unchanged: &[PathBuf],
+    skipped: &[(PathBuf, PathBuf)],
     root: &Path,
 ) -> Outcome {
     let refused = refusals
@@ -745,6 +780,18 @@ fn section_outcome(
     if let Some(refusal) = refused {
         return Outcome::Refused {
             reason: refusal.reason.clone(),
+        };
+    }
+
+    // Asked before the filesystem for the reason the carry below is: this
+    // directory has a `WARLOCK.md` and did not write it, so metadata would read
+    // as a write that never happened.
+    let passed_over = skipped
+        .iter()
+        .find(|(directory, _)| Path::new(&section_label(root, directory)) == section.directory());
+    if let Some((_, below)) = passed_over {
+        return Outcome::Skipped {
+            below: PathBuf::from(section_label(root, below)),
         };
     }
 
@@ -898,7 +945,7 @@ mod tests {
 
     use warlock_engine::{
         Agent, Loaded, Manifest, Node, NodeState, PactEntry, Tree, Unwatched, agent, decide_state,
-        load_tree, repository_root, stub_answer, subtree_hash,
+        document::ATTEMPTS, load_tree, repository_root, stub_answer, subtree_hash,
     };
     use warlock_tui::{
         Account, Activities, Activity, App, Chrome, ClaudeAgent, Line, Mode, PactToggle, Run,
@@ -1206,6 +1253,7 @@ mod tests {
             work: work.clone(),
             before,
             unchanged: Vec::new(),
+            skipped: Vec::new(),
         });
         pact.keep_up(app, manifest, scope, Instant::now());
         assert!(!pact.running(), "the run reported its outcome and is over");
@@ -1567,6 +1615,7 @@ mod tests {
                 | PactEvent::Rejected { .. }
                 | PactEvent::Documented { .. }
                 | PactEvent::Unchanged { .. }
+                | PactEvent::Skipped { .. }
                 | PactEvent::Finished(_) => None,
             })
             .collect()
@@ -1587,6 +1636,7 @@ mod tests {
                 | PactEvent::Rejected { .. }
                 | PactEvent::Documented { .. }
                 | PactEvent::Unchanged { .. }
+                | PactEvent::Skipped { .. }
                 | PactEvent::Finished(_) => None,
             })
             .collect()
@@ -2698,13 +2748,16 @@ mod tests {
             PathBuf::from("crates/alpha"),
         ];
         assert_eq!(announced(&events, &scratch), worked);
-        // The refused directory costs two passes — the engine asks once more
-        // with the defects listed before giving up — so it is seen twice.
+        // The refused directory costs a pass for every attempt — the engine
+        // asks again with the defects listed, up to `document::ATTEMPTS` times,
+        // before giving up — so it is seen once per attempt.
         assert_eq!(
             agent.directories(),
             [
                 PathBuf::from("crates/beta/src"),
                 PathBuf::from("crates/beta"),
+                PathBuf::from("crates/alpha/src"),
+                PathBuf::from("crates/alpha/src"),
                 PathBuf::from("crates/alpha/src"),
                 PathBuf::from("crates/alpha/src"),
                 PathBuf::from("crates/alpha"),
@@ -3109,6 +3162,7 @@ mod tests {
             work: pact_of("/repo/crates"),
             before: App::from_tree(&tree),
             unchanged: Vec::new(),
+            skipped: Vec::new(),
         };
 
         assert!(!watching.is_cancelled(), "a run in flight is not cancelled");
@@ -3137,6 +3191,7 @@ mod tests {
             work: pact_of("/repo/crates"),
             before: before.clone(),
             unchanged: Vec::new(),
+            skipped: Vec::new(),
         };
         (app, before, Manifest::new(), events, running)
     }
@@ -3465,6 +3520,7 @@ mod tests {
             work: pact_of("/repo/crates"),
             before: app.clone(),
             unchanged: Vec::new(),
+            skipped: Vec::new(),
         });
 
         // The deepest directory's pass delivers, and the run moves on to the
@@ -3528,6 +3584,7 @@ mod tests {
             work,
             before: app.clone(),
             unchanged: Vec::new(),
+            skipped: Vec::new(),
         };
         (events, Pact::with_run(running))
     }
@@ -3743,6 +3800,7 @@ mod tests {
             work: pact_of("/repo/crates"),
             before: app.clone(),
             unchanged: Vec::new(),
+            skipped: Vec::new(),
         });
 
         // The reader parks on `docs`, which is nowhere near the subtree
@@ -3824,6 +3882,7 @@ mod tests {
             work: pact_of("/repo/crates"),
             before: before.clone(),
             unchanged: Vec::new(),
+            skipped: Vec::new(),
         });
 
         events
@@ -3932,6 +3991,7 @@ mod tests {
             work: work.clone(),
             before: app.clone(),
             unchanged: Vec::new(),
+            skipped: Vec::new(),
         });
         let mut progress: Vec<String> = Vec::new();
         for (frame, event) in said.into_iter().enumerate() {
@@ -4074,18 +4134,21 @@ mod tests {
 
         let lines = panel_text(&app, at(base, 10_000));
         // The refused directory's section: its first request, the pass, the
-        // engine turning the answer down, the second request with the
-        // defects listed, that pass, the second rejection, and the refusal.
+        // engine turning the answer down, then the same four lines again for
+        // every repair attempt, and the refusal. The repairs in the middle are
+        // counted rather than spelled, so the shape here follows
+        // `document::ATTEMPTS` instead of pinning it.
         let [
             first,
             _,
             _,
             _,
             rejected_once,
+            repairs @ ..,
             _,
             _,
             _,
-            rejected_twice,
+            rejected_last,
             refused,
             second,
             _,
@@ -4099,19 +4162,27 @@ mod tests {
         };
         assert_eq!(first, "crates/engine/src");
         assert_eq!(second, "crates/engine");
+        assert_eq!(
+            repairs.len(),
+            (ATTEMPTS - 2) * 4,
+            "four lines for every attempt between the first and the last — a \
+             request, the read, the wait, the rejection: {repairs:?}",
+        );
         assert!(
-            rejected_once
-                .starts_with("1:00 rejected · attempt 1/2: the answer is not a JSON object"),
+            rejected_once.starts_with(&format!(
+                "1:00 rejected · attempt 1/{ATTEMPTS}: the answer is not a JSON object"
+            )),
             "the first answer is turned down in the engine's words: {rejected_once}"
         );
         assert!(
-            rejected_twice.starts_with("1:50 rejected · attempt 2/2: "),
-            "and so is the second: {rejected_twice}"
+            rejected_last.contains(&format!("rejected · attempt {ATTEMPTS}/{ATTEMPTS}: ")),
+            "and so is the last: {rejected_last}"
         );
 
-        let reason = refused
-            .strip_prefix("1:50 refused — ")
-            .unwrap_or_else(|| panic!("the section says why it was refused: {refused}"));
+        let reason = refused.split_once(" refused — ").map_or_else(
+            || panic!("the section says why it was refused: {refused}"),
+            |(_, reason)| reason,
+        );
         assert!(
             reason.contains("crates/engine/src"),
             "and the reason is about that directory: {reason}"
@@ -4141,9 +4212,66 @@ mod tests {
                 .exists(),
             "the refused directory really has no document"
         );
-        // Three passes in all: the refused directory's two and the parent's
-        // one, each reporting what it cost.
-        assert_eq!(summary, "pact finished — 2 directories, 2:40, $0.75");
+        // One pass per attempt on the refused directory and one for the
+        // parent, each reporting what it cost, and fifty seconds of run for
+        // every attempt after the first.
+        // In cents, so the arithmetic stays integer: the fixture charges a
+        // quarter for every pass, and there is one per attempt plus the
+        // parent's.
+        let cents = 25 * (ATTEMPTS + 1);
+        let spent = format!("${}.{:02}", cents / 100, cents % 100);
+        let seconds = 160 + (ATTEMPTS - 2) * 50;
+        let elapsed = format!("{}:{:02}", seconds / 60, seconds % 60);
+        assert_eq!(
+            summary,
+            &format!("pact finished — 2 directories, {elapsed}, {spent}")
+        );
+    }
+
+    #[test]
+    fn a_directory_a_refresh_skipped_says_which_failure_below_it_cost_it_the_pass() {
+        // The counterpart to the test above, on the refresh side: the parent
+        // over a refused child gets no pass at all, so its section cannot close
+        // on the document it finds on disk — that document is the one it
+        // already had, and calling it a write would put a pass in the panel
+        // that never ran.
+        let scratch = one_crate_to_load("skipped-in-the-panel");
+        let before = pacted(&scratch, "crates/engine");
+        scratch.write("crates/engine/src/lib.rs", "//! Core engine, moved on.\n");
+        let (mut app, scope) = load(&scratch);
+        let mut manifest = before.clone();
+        let base = Instant::now();
+        app.start_account(base);
+
+        let work = refreshing(&scratch, "crates/engine");
+        let said = recorded_from(&scratch, &before, &work, &Cancel::new(), |events| {
+            Canned::new(&scratch, ["crates/engine/src"]).reporting(activity_port(events))
+        });
+        replay_work(
+            &mut app,
+            &mut manifest,
+            &scope,
+            CancelGuard::new(),
+            &work,
+            said,
+            base,
+        );
+
+        let lines = panel_text(&app, at(base, 10_000));
+        let skipped = lines
+            .iter()
+            .find(|line| line.contains("skipped"))
+            .unwrap_or_else(|| panic!("the parent's section says it was skipped: {lines:?}"));
+        assert!(
+            skipped.contains("crates/engine/src"),
+            "and names the directory below that cost it the pass: {skipped}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("wrote crates/engine/WARLOCK.md")),
+            "and no write is claimed for a directory no pass ran for: {lines:?}"
+        );
     }
 
     #[test]
@@ -4567,6 +4695,7 @@ mod tests {
             work: pact_of(scope.root.clone()),
             before: app.clone(),
             unchanged: Vec::new(),
+            skipped: Vec::new(),
         });
         let mut lengths = Vec::new();
         for (frame, event) in said.into_iter().enumerate() {
@@ -4768,6 +4897,7 @@ mod tests {
                 work,
                 before: app.clone(),
                 unchanged: Vec::new(),
+                skipped: Vec::new(),
             });
             for (frame, event) in said.into_iter().enumerate() {
                 let frame = u64::try_from(frame).expect("a run of fewer than 2^64 events");
@@ -4827,6 +4957,7 @@ mod tests {
             work: pact_of("/repo/crates"),
             before: before.clone(),
             unchanged: Vec::new(),
+            skipped: Vec::new(),
         };
         (app, before, Manifest::new(), events, running)
     }
@@ -5205,6 +5336,7 @@ mod tests {
             work: pact_of("/repo/crates"),
             before: before.clone(),
             unchanged: Vec::new(),
+            skipped: Vec::new(),
         });
 
         events
@@ -5437,6 +5569,7 @@ mod tests {
             work: pact_of("/repo/crates"),
             before: before.clone(),
             unchanged: Vec::new(),
+            skipped: Vec::new(),
         });
 
         events
@@ -5505,6 +5638,7 @@ mod tests {
                 work: pact_of("/repo/crates"),
                 before,
                 unchanged: Vec::new(),
+                skipped: Vec::new(),
             });
 
             events
@@ -5575,6 +5709,7 @@ mod tests {
             work: pact_of(scratch.path("crates/engine")),
             before: app.clone(),
             unchanged: Vec::new(),
+            skipped: Vec::new(),
         });
         events
             .send(PactEvent::Finished(Ok(Toggled {
@@ -5775,6 +5910,7 @@ mod tests {
                 work: pact_of(scratch.path("crates/engine")),
                 before: app.clone(),
                 unchanged: Vec::new(),
+                skipped: Vec::new(),
             });
             events
                 .send(PactEvent::Finished(Ok(Toggled {

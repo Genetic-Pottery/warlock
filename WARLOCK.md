@@ -3,39 +3,41 @@
 
 # warlock
 
-Workspace root of warlock, a repository-pacting tool: manifest, license and toolchain config that bind the two crates together as one Cargo workspace.
+The warlock workspace root: a Cargo workspace of two crates building the freshness-ledger tool that reads a repository and keeps its documentation honest, plus the license and formatting rules that govern it.
 
 ## Files
 
-- `Cargo.lock` (56.8 KB) — Generated, pinned dependency graph for the whole workspace; not hand-edited.
-- `Cargo.toml` (6.9 KB) — Workspace manifest: members, workspace.package fields, [workspace.lints] for rustc/clippy, and [workspace.dependencies] with rationale per crate (serde, ratatui, ignore, blake3, notify, clap, ctrlc).
-- `LICENSE` (11.0 KB) — Apache License, Version 2.0 full text.
-- `rustfmt.toml` (1.3 KB) — Formatting config: edition/style_edition 2024, newline_style Unix, use_field_init_shorthand true, deliberately close to rustfmt defaults.
+- `Cargo.lock` (56.8 KB) — Generated, exact dependency graph for the workspace, including warlock-engine and warlock-tui and every crate they pull in (ratatui, clap, notify, blake3, ignore, serde, toml, etc.).
+- `Cargo.toml` (7.4 KB) — Workspace manifest: declares the two member crates, shared package metadata, the workspace-wide lint config (unsafe_code deny, pedantic warn, missing_docs allow), and workspace.dependencies with a comment justifying each dependency.
+- `LICENSE` (11.0 KB) — Full text of the Apache License, Version 2.0 under which warlock is distributed.
+- `rustfmt.toml` (1.3 KB) — rustfmt configuration: edition 2024, style_edition 2024, newline_style Unix, use_field_init_shorthand true, each pinned with a stated reason.
 
 ## Directories
 
-- `crates/` — The two workspace member crates, warlock-engine (domain core) and warlock-tui (binary and terminal panel); open for any question about pacting logic or the TUI itself.
+- `crates/` — The two Rust crates, warlock-engine (core logic) and warlock-tui (terminal front end and binary); open for any question about engine types, pacts, scopes, sigils, or TUI panels, keys and subcommands.
 
 ## Structure
 
-- Cargo.toml declares crates/warlock-engine and crates/warlock-tui as workspace members
-- Cargo.toml's [workspace.lints] is inherited by both member crates via [lints] workspace = true
-- Cargo.lock is generated from Cargo.toml and the members' own manifests
+- crates/warlock-tui depends on crates/warlock-engine; the dependency runs tui -> engine, never the reverse
+- Cargo.toml declares workspace.lints, which both crates opt into via `[lints] workspace = true` rather than repeating attributes
 
 ## Rules
 
-- unsafe_code = "deny" workspace-wide: no unsafe in warlock, any future use must carry an explicit #[allow] a reviewer will see
-- CI runs cargo clippy --workspace --all-targets -- -D warnings, so every warning here fails the build
-- Any lint set to allow must carry a comment directly above it saying why
-- clippy::nursery and clippy::cargo are deliberately not enabled
-- rustfmt parses as Rust 2024 and pins style_edition 2024 for reproducibility
-- rustfmt always emits Unix (LF) line endings
-- Rust comes from nixpkgs stable rustc, not rustup; nothing nightly-only belongs in rustfmt.toml
+- unsafe_code = "deny" workspace-wide: there is no unsafe in warlock
+- missing_docs = "allow": brief 15 deletes source prose and restores comments only where their absence would let a correct-looking edit break something
+- clippy::pedantic is warn-level as a group; clippy::nursery and clippy::cargo are deliberately not enabled
+- any workspace.lints entry set to allow must carry a comment directly above it saying why
+- any workspace.dependencies entry must carry a one-line comment above it saying why it's worth the supply chain
+- CI runs cargo clippy --workspace --all-targets -- -D warnings, so anything warned about here fails the build
+- rustfmt.toml stays close to rustfmt defaults; only options with a stated reason belong there, nothing nightly-only
+- local toolchain is nixpkgs stable rustc with no rustup shims
 
 ## Where to look
 
-- why a dependency is in the workspace, e.g. why ratatui or notify or clap → `Cargo.toml` `workspace.dependencies`
-- which crates make up the project and how they depend on each other → `crates` `warlock-engine`
-- the lint policy CI enforces → `Cargo.toml` `workspace.lints`
-- the project's license terms → `LICENSE` `Apache License`
-- code formatting rules and why they deviate from rustfmt defaults → `rustfmt.toml` `style_edition`
+- why a given dependency is in the tree → `Cargo.toml` `workspace.dependencies`
+- what lints are enforced and why one is allowed → `Cargo.toml` `workspace.lints`
+- exact pinned version of a transitive dependency → `Cargo.lock` `warlock-engine`
+- engine types, pacts, scopes, sigils, or the Fill schema → `crates` `warlock-engine`
+- the warlock binary, TUI panel state, or a subcommand → `crates` `warlock-tui`
+- formatting conventions like brace style or newline handling → `rustfmt.toml` `newline_style`
+- license terms for redistribution or modification → `LICENSE` `Apache License`

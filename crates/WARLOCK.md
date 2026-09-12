@@ -3,23 +3,24 @@
 
 # crates
 
-Workspace directory holding warlock's two crates: warlock-engine, the pure domain core for pacting repositories, and warlock-tui, the front-end crate shipping the warlock binary and its terminal panel.
+The crates directory is the workspace root for warlock's two Rust crates: warlock-engine, the core freshness-ledger engine, and warlock-tui, the terminal front end and warlock binary that depends on it.
 
 ## Directories
 
-- `warlock-engine/` — The domain core: manifest, freshness ledger, module document tree, agent seam, request fitting; open for questions about pacting logic with no terminal or network dependency.
-- `warlock-tui/` — The front-end crate: warlock binary, terminal panel, headless subcommands, and the warlock_tui library of tree/panel/account/thread state.
+- `warlock-engine/` — The core engine crate: pacts, scopes, sigils, hashing, fitting and document rendering; open for questions about engine logic, types, or the Fill schema.
+- `warlock-tui/` — The terminal front end and warlock binary: panel state, claude/watch seams, and subcommands; open for questions about a specific TUI type, key or subcommand.
 
 ## Structure
 
-- warlock-tui depends on warlock-engine; the dependency edge runs TUI -> engine and never back
-- warlock-engine has no TUI, terminal, HTTP or Anthropic dependency
+- warlock-tui depends on warlock-engine; the dependency runs TUI -> engine and never the reverse
 
 ## Rules
 
-- Lint configuration is set once in the workspace root manifest's [workspace.lints] and inherited by both member crates
+- The dependency edge between the two crates runs TUI -> engine and never back
+- Lint configuration for both crates is inherited from the workspace root manifest, not set per-crate
 
 ## Where to look
 
-- domain vocabulary for pacting a repository, manifest, freshness ledger → `warlock-engine` `pact_subtree`
-- the warlock binary, terminal panel, headless subcommands → `warlock-tui` `warlock_tui`
+- core engine logic, pacts, scopes, or sigils → `warlock-engine` `pact_directory`
+- the warlock binary or a TUI type/key handler/subcommand → `warlock-tui` `App`
+- why the TUI depends on the engine and not vice versa → `warlock-engine` `workspace`

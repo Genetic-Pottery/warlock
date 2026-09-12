@@ -120,6 +120,17 @@ impl<W: Write> pact::Observer for Progress<W> {
         let named = named(&self.root, directory);
         self.say(&format!("unchanged {named}"));
     }
+
+    // Both names on the line. A headless run is read in a log after the fact,
+    // often by whoever has to explain why a directory is still yellow, and
+    // `skipped crates/tui` on its own is the half of the answer that does not
+    // help.
+    fn skipped(&mut self, directory: &Path, below: &Path) {
+        let (named, below) = (named(&self.root, directory), named(&self.root, below));
+        self.say(&format!(
+            "skipped {named} — {below} below it was not documented"
+        ));
+    }
 }
 
 fn named(root: &Path, directory: &Path) -> String {
@@ -863,6 +874,43 @@ mod tests {
                 .contains(&"warlock: [2/3] documenting alpha".to_owned())
         );
         assert!(!run.lines.contains(&"warlock: documented alpha".to_owned()));
+    }
+
+    #[test]
+    fn a_refresh_says_which_failure_below_cost_a_directory_its_pass() {
+        let repo = a_repository();
+        let home = a_dir();
+        run(repo.path(), home.path(), Descent::Pact, ".").expect("nothing is scoped");
+        let root = load_manifest(repo.path())
+            .expect("a manifest that reads")
+            .entry(".")
+            .expect("the pact granted the root")
+            .clone();
+        // `beta` moves, so `beta` and the root above it are stale, and the pass
+        // over `beta` is the one that refuses.
+        write(repo.path(), "beta/lib.rs", "//! Beta, rewritten.\n");
+
+        let run = run_refusing(repo.path(), home.path(), Descent::Refresh, ".", &["beta"])
+            .expect("nothing is scoped");
+
+        // One request went out, for the directory that refused. The root above
+        // it was never going to be granted, so it was never paid for.
+        assert_eq!(run.agent.directories(), ["beta"]);
+        assert!(
+            run.lines
+                .iter()
+                .any(|line| line == "warlock: skipped . — beta below it was not documented"),
+            "the run says which directory it passed over and why: {:?}",
+            run.lines
+        );
+        // And the entry it did not touch is the entry it found, grant and all —
+        // stale on a hash that moved, which is what the next run will fix.
+        assert_eq!(
+            load_manifest(repo.path())
+                .expect("a manifest that reads")
+                .entry("."),
+            Some(&root),
+        );
     }
 
     #[test]

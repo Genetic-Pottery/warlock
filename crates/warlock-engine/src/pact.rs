@@ -73,7 +73,14 @@ pub fn pact_subtree(
         outcomes,
         failures,
         problems,
-    } = describe_and_grant(&directories, root, &BTreeMap::new(), agent, observer);
+    } = describe_and_grant(
+        &directories,
+        root,
+        &BTreeMap::new(),
+        AboveFailure::Describe,
+        agent,
+        observer,
+    );
 
     Ok(PactedSubtree {
         manifest: rewrite(manifest, &directories, root, outcomes),
@@ -163,7 +170,7 @@ pub fn refresh_subtree(
         outcomes,
         failures,
         problems,
-    } = describe_and_grant(&stale, root, &recorded, agent, observer);
+    } = describe_and_grant(&stale, root, &recorded, AboveFailure::Skip, agent, observer);
 
     // The empty slice, not `stale`: `rewrite` drops an entry only where the run
     // covered its module and earned nothing, and a refresh that could not
@@ -265,6 +272,42 @@ fn carried_document(
     carried.is_file().then_some(carried)
 }
 
+// What a run does with a directory above a failure. Neither can be granted —
+// phase two refuses both the same way — so this is only ever about whether the
+// pass is worth paying for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AboveFailure {
+    // A refresh. The directory already has a document, and the one a pass would
+    // write now does not survive: the directory below has to be described
+    // again, a described child is a moved parent request, and the next run that
+    // gets that far overwrites this answer with another. So the pass buys a
+    // document nobody keeps and a grant nobody gets, and the run says which
+    // failure took the directory down instead.
+    Skip,
+    // A pact. There is no document on disk to fall back on, so the one a pass
+    // writes now is the only one this directory has, ungranted or not — which
+    // is worth the pass in a way re-describing an existing document is not.
+    Describe,
+}
+
+// The one prefix test the rest of this module asks its question through:
+// whether a directory this run failed to document lies at or below `pacted`.
+// `starts_with` is component-wise, so `src` never counts as an ancestor of
+// `src-tests`.
+//
+// Four callers ask it — whether to skip a pass, whether to announce a pass
+// done, whether a carry counts as unchanged, and whether a grant is owed — and
+// they have to agree, because a directory announced done and then left
+// ungranted is a front end painting green over yellow.
+fn failure_below<'missing>(
+    undocumented: &'missing [PathBuf],
+    pacted: &Path,
+) -> Option<&'missing PathBuf> {
+    undocumented
+        .iter()
+        .find(|missing| missing.starts_with(pacted))
+}
+
 // The two phases must not be folded into one loop. A directory's subtree hash
 // covers its children's `WARLOCK.md`, so a per-directory write-hash-grant loop
 // grants a parent a hash the very next child write invalidates, and ends with a
@@ -274,6 +317,7 @@ fn describe_and_grant(
     directories: &[PathBuf],
     root: &Path,
     recorded: &BTreeMap<PathBuf, String>,
+    above_failure: AboveFailure,
     agent: &dyn Agent,
     observer: &mut dyn Observer,
 ) -> Described {
@@ -295,6 +339,20 @@ fn describe_and_grant(
             undocumented.extend(directories[index..].iter().cloned());
             break;
         }
+
+        // Asked before anything is spent, and by the same prefix test phase two
+        // grants by: a directory above something this run failed to document is
+        // already decided, and on a refresh there is nothing left to buy. It is
+        // announced rather than passed over in silence — a run that quietly
+        // described three fewer directories than it started is the thing this
+        // is meant to stop looking like progress.
+        if above_failure == AboveFailure::Skip
+            && let Some(below) = failure_below(&undocumented, pacted)
+        {
+            observer.skipped(pacted, below);
+            continue;
+        }
+
         // Taken now rather than in phase two: the children below have already
         // had their turn, so their documents are final and this is the request
         // that would actually go out.
@@ -303,10 +361,7 @@ fn describe_and_grant(
         if let Some(carried) = carried_document(pacted, carry.as_deref(), recorded) {
             carries.insert(pacted.clone(), carry);
             documents.insert(pacted.clone(), carried);
-            if !undocumented
-                .iter()
-                .any(|missing| missing.starts_with(pacted))
-            {
+            if failure_below(&undocumented, pacted).is_none() {
                 observer.unchanged(pacted);
             }
             continue;
@@ -329,10 +384,7 @@ fn describe_and_grant(
                 // prefix test phase two grants by: the announcement is what a
                 // front end colours done, and a directory above a failure will
                 // be recorded without a grant.
-                if !undocumented
-                    .iter()
-                    .any(|missing| missing.starts_with(pacted))
-                {
+                if failure_below(&undocumented, pacted).is_none() {
                     observer.documented(pacted);
                 }
             }
@@ -369,12 +421,8 @@ fn describe_and_grant(
         };
 
         // No grant is the whole representation of partial completion: pacted,
-        // never judged, yellow. `starts_with` is component-wise, so `src` never
-        // counts as an ancestor of `src-tests`.
-        let ungranted = undocumented
-            .iter()
-            .any(|missing| missing.starts_with(pacted));
-        let grant = if ungranted {
+        // never judged, yellow.
+        let grant = if failure_below(&undocumented, pacted).is_some() {
             None
         } else {
             match subtree_hash(pacted) {
@@ -858,6 +906,13 @@ pub trait Observer {
 
     fn unchanged(&mut self, directory: &Path) {
         let _ = directory;
+    }
+
+    /// A directory a refresh did not describe, because `below` — a directory
+    /// under it — failed and took its grant with it. No pass ran and nothing
+    /// was written; the document it has is the one it had.
+    fn skipped(&mut self, directory: &Path, below: &Path) {
+        let _ = (directory, below);
     }
 }
 
@@ -1932,10 +1987,30 @@ mod tests {
 
     struct FailsFor {
         directory: PathBuf,
+        asked: std::cell::RefCell<Vec<PathBuf>>,
+    }
+
+    impl FailsFor {
+        fn at(directory: impl Into<PathBuf>) -> Self {
+            Self {
+                directory: directory.into(),
+                asked: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        // Every directory a request went out for, refused or not — which is
+        // what a skip is measured against: a directory nobody paid for is a
+        // directory that is not in here.
+        fn asked(&self, root: &Path) -> Vec<String> {
+            relative_to(root, &self.asked.borrow())
+        }
     }
 
     impl Agent for FailsFor {
         fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
+            self.asked
+                .borrow_mut()
+                .push(request.directory().to_path_buf());
             if request.directory() == self.directory {
                 return Err(agent::Error::EmptyOutput);
             }
@@ -1947,6 +2022,7 @@ mod tests {
         stop_after: Option<usize>,
         calls: Vec<(PathBuf, usize, usize)>,
         documented: Vec<PathBuf>,
+        skipped: Vec<(PathBuf, PathBuf)>,
     }
 
     impl Watching {
@@ -1955,6 +2031,7 @@ mod tests {
                 stop_after: None,
                 calls: Vec::new(),
                 documented: Vec::new(),
+                skipped: Vec::new(),
             }
         }
 
@@ -1963,6 +2040,7 @@ mod tests {
                 stop_after: Some(directories),
                 calls: Vec::new(),
                 documented: Vec::new(),
+                skipped: Vec::new(),
             }
         }
 
@@ -1988,6 +2066,22 @@ mod tests {
         fn done(&self, root: &Path) -> Vec<String> {
             relative_to(root, &self.documented)
         }
+
+        // Both halves, because the pair is the announcement: the directory that
+        // got no pass is only half an answer without the one that cost it.
+        fn passed_over(&self, root: &Path) -> Vec<(String, String)> {
+            self.skipped
+                .iter()
+                .map(|(directory, below)| {
+                    let named = |path: &PathBuf| {
+                        relative_to(root, std::slice::from_ref(path))
+                            .pop()
+                            .expect("one directory in, one name out")
+                    };
+                    (named(directory), named(below))
+                })
+                .collect()
+        }
     }
 
     impl Observer for Watching {
@@ -2001,6 +2095,11 @@ mod tests {
 
         fn documented(&mut self, directory: &Path) {
             self.documented.push(directory.to_path_buf());
+        }
+
+        fn skipped(&mut self, directory: &Path, below: &Path) {
+            self.skipped
+                .push((directory.to_path_buf(), below.to_path_buf()));
         }
     }
 
@@ -2167,9 +2266,7 @@ mod tests {
         let repo = project();
         let engine = repo.path().join("crates/engine");
         let failing = engine.join("src").join("inner");
-        let agent = FailsFor {
-            directory: failing.clone(),
-        };
+        let agent = FailsFor::at(failing.clone());
 
         let PactedSubtree {
             manifest, failures, ..
@@ -2424,7 +2521,7 @@ mod tests {
         let repo = project();
         let engine = repo.path().join("crates/engine");
         let failing = engine.join("src").join("inner");
-        let agent = FailsFor { directory: failing };
+        let agent = FailsFor::at(failing);
         let mut observer = Watching::patient();
 
         let PactedSubtree { failures, .. } = pact_subtree(
@@ -2511,9 +2608,7 @@ mod tests {
         let repo = project();
         let engine = repo.path().join("crates/engine");
         let failing = engine.join("src").join("inner");
-        let agent = FailsFor {
-            directory: failing.clone(),
-        };
+        let agent = FailsFor::at(failing.clone());
         // Everything but the selected directory itself, so the run holds all
         // three cases at once: `crates/engine/tests` finished, `crates/engine/src`
         // is documented above a directory that is not, and `crates/engine` is
@@ -3420,9 +3515,10 @@ mod tests {
 
         assert_eq!(
             failures.len(),
-            3,
-            "one per stale directory, and none for the fresh one nobody asked \
-             about: {failures:?}",
+            1,
+            "the deepest stale directory is the only one that reached the \
+             agent: the two above it are ancestors of its failure and were \
+             skipped rather than paid for: {failures:?}",
         );
         assert!(
             failures
@@ -3506,8 +3602,14 @@ mod tests {
         }
     }
 
+    // The whole point of the skip, and the reason it is worth a test of its
+    // own: a refresh that hits a failure used to walk on up the tree, pay for a
+    // pass at every directory above it, and record each one without a grant —
+    // documents the next run has to write again, because the directory below
+    // still has to be described and a described child is a moved parent
+    // request. The spend was real and nothing survived it.
     #[test]
-    fn a_refresh_above_a_failed_pass_records_the_ancestor_without_a_grant() {
+    fn a_refresh_above_a_failed_pass_skips_the_ancestor_rather_than_paying_for_it() {
         let repo = project();
         let engine = repo.path().join("crates/engine");
         let before = refreshable(repo.path());
@@ -3516,46 +3618,64 @@ mod tests {
             "crates/engine/src/inner/deep.rs",
             "fn deeper() {}\n",
         );
+        let agent = FailsFor::at(engine.join("src").join("inner"));
+        let mut observer = Watching::patient();
 
         let PactedSubtree {
             manifest, failures, ..
-        } = refresh_subtree(
-            &engine,
-            repo.path(),
-            &before,
-            &FailsFor {
-                directory: engine.join("src").join("inner"),
-            },
-            &mut Unwatched,
-        )
-        .expect("one refused pass does not fail the refresh");
+        } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut observer)
+            .expect("one refused pass does not fail the refresh");
 
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert_eq!(failures[0].directory(), engine.join("src").join("inner"));
         assert_eq!(
-            manifest.entry("crates/engine/src/inner"),
-            before.entry("crates/engine/src/inner"),
-            "the directory whose pass failed keeps the entry it had — a refresh \
-             that could not re-describe it does not un-pact it",
+            agent.asked(repo.path()),
+            ["crates/engine/src/inner"],
+            "one request went out, for the one stale directory that was not \
+             above a failure — the two above it cost nothing",
         );
-        for above in ["crates/engine/src", "crates/engine"] {
-            assert_eq!(
-                manifest
-                    .entry(above)
-                    .expect("documented, so pacted")
-                    .granted_hash(),
-                None,
-                "`{above}` has an undocumented descendant, so it earned no \
-                 grant — partial completion reads in a refresh exactly as it \
-                 does in a pact",
-            );
-            assert_eq!(state(&manifest, repo.path(), above), NodeState::PactedStale);
-        }
         assert_eq!(
-            manifest.entry("crates/engine/tests"),
-            before.entry("crates/engine/tests"),
-            "and the fresh directory beside all of it is untouched",
+            observer.passed_over(repo.path()),
+            [
+                (
+                    "crates/engine/src".to_owned(),
+                    "crates/engine/src/inner".to_owned()
+                ),
+                (
+                    "crates/engine".to_owned(),
+                    "crates/engine/src/inner".to_owned()
+                ),
+            ],
+            "and each one says which failure below it took it down, so a run \
+             that describes fewer directories than it started does not look \
+             like one that finished",
         );
+        for untouched in [
+            "crates/engine/src/inner",
+            "crates/engine/src",
+            "crates/engine",
+            "crates/engine/tests",
+        ] {
+            assert_eq!(
+                manifest.entry(untouched),
+                before.entry(untouched),
+                "`{untouched}` kept the entry it had, grant and all: a refresh \
+                 that did not re-describe a directory has nothing to say about \
+                 it, and the one it could not re-describe is not un-pacted",
+            );
+        }
+        for stale in [
+            "crates/engine/src/inner",
+            "crates/engine/src",
+            "crates/engine",
+        ] {
+            assert_eq!(
+                state(&manifest, repo.path(), stale),
+                NodeState::PactedStale,
+                "`{stale}` reads stale on the grant it kept, because the hash \
+                 under it moved and no pass has been granted since",
+            );
+        }
     }
 
     // The bytes themselves. Everything above asserts about entries; this
@@ -3858,40 +3978,71 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_partly_completed_run_keeps_every_scope() {
-        let repo = project();
-        let engine = repo.path().join("crates/engine");
-        let before = with_scopes(
-            &refreshable(repo.path()),
+    fn scoped_path(repo: &Path) -> Manifest {
+        with_scopes(
+            &refreshable(repo),
             &[
                 ("crates/engine", "engine"),
                 ("crates/engine/src", "data-plane"),
                 ("crates/engine/src/inner", "deep"),
                 ("crates/engine/tests", "harness"),
             ],
-        );
+        )
+    }
+
+    #[test]
+    fn a_partly_completed_refresh_keeps_every_scope() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let before = scoped_path(repo.path());
         write(
             repo.path(),
             "crates/engine/src/inner/deep.rs",
             "fn deeper() {}\n",
         );
 
-        // One pass refuses, so the two directories above it are described and
-        // recorded without a grant: partial completion, the ungranted-entry
-        // path through phase two.
+        // One pass refuses, so the two scoped directories above it are skipped
+        // and the scoped directory that refused is left where it was.
         let PactedSubtree {
             manifest, failures, ..
         } = refresh_subtree(
             &engine,
             repo.path(),
             &before,
-            &FailsFor {
-                directory: engine.join("src").join("inner"),
-            },
+            &FailsFor::at(engine.join("src").join("inner")),
             &mut Unwatched,
         )
         .expect("one refused pass does not fail the refresh");
+
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(
+            scopes(&manifest),
+            scopes(&before),
+            "a refresh that got part way holds every boundary somebody drew: \
+             it did not describe these directories, so it has nothing to say \
+             about them",
+        );
+    }
+
+    // The other half, on the caller that still describes above a failure.
+    // `AboveFailure::Describe` is now the only route to an ungranted entry
+    // written by a run that meant to grant it, and a scope has to survive it.
+    #[test]
+    fn a_partly_completed_pact_keeps_the_scope_of_every_entry_it_keeps() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let before = scoped_path(repo.path());
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &before,
+            &FailsFor::at(engine.join("src").join("inner")),
+            &mut Unwatched,
+        )
+        .expect("one refused pass does not fail the pact");
 
         assert_eq!(failures.len(), 1, "{failures:?}");
         for above in ["crates/engine/src", "crates/engine"] {
@@ -3905,9 +4056,14 @@ mod tests {
         }
         assert_eq!(
             scopes(&manifest),
-            scopes(&before),
-            "the grant is a field a run owns and clears; the scope is not, so a \
-             directory can go yellow without its boundary moving",
+            scopes(&before)
+                .into_iter()
+                .filter(|(module, _)| *module != "crates/engine/src/inner")
+                .collect::<Vec<_>>(),
+            "the grant is a field a run owns and clears; the scope is not, so \
+             the two ungranted directories keep their boundaries. The one that \
+             earned nothing loses its entry, and a scope has no home outside an \
+             entry — a pact is the direction that can take a boundary away",
         );
     }
 

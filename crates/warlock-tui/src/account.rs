@@ -167,10 +167,24 @@ pub enum Outcome {
     Wrote { document: PathBuf, bytes: u64 },
     Refused { reason: String },
     Unchanged { document: PathBuf },
+    Skipped { below: PathBuf },
     Cancelled,
 }
 
 impl Outcome {
+    /// Whether a model pass ran for this directory at all.
+    ///
+    /// Two of these ran none: a carried document needed no pass and a skipped
+    /// directory was never going to earn a grant. A section with no cost under
+    /// either of them is not a pass whose cost went missing, which is the
+    /// difference [`Account::finish`] reports as `incomplete`.
+    const fn ran_a_pass(&self) -> bool {
+        match self {
+            Self::Unchanged { .. } | Self::Skipped { .. } => false,
+            Self::Wrote { .. } | Self::Refused { .. } | Self::Cancelled => true,
+        }
+    }
+
     /// `cost` of `None` is said in words rather than printed as `$0.00`: a
     /// pass that reported nothing and a pass that was free are different facts.
     fn line(&self, cost: Option<f64>) -> String {
@@ -183,6 +197,16 @@ impl Outcome {
             Self::Unchanged { document } => {
                 let document = document.display();
                 format!("unchanged — {document} kept, no pass needed")
+            }
+            // Says which directory below cost it the pass, because on its own
+            // "skipped" reads as a run losing interest. Nothing was written and
+            // nothing was spent: the document this directory has is the one it
+            // had.
+            Self::Skipped { below } => {
+                let below = below.display();
+                format!(
+                    "skipped — {below} below it was not documented, so no pass would have been granted"
+                )
             }
             Self::Refused { reason } => format!("refused — {reason}"),
             Self::Cancelled => {
@@ -209,6 +233,11 @@ pub struct Section {
     /// [`Account::close_open_sections`] reads this to find the ones still owed
     /// an ending.
     has_outcome: bool,
+    /// Whether any pass ran under this section, taken from the outcome that
+    /// closed it. A section that ran none has no cost to be missing, and
+    /// [`Account::finish`] leaves it out of the `incomplete` count rather than
+    /// reporting a pass nobody made as one that forgot to say what it cost.
+    passless: bool,
 }
 
 impl Section {
@@ -243,6 +272,7 @@ impl Section {
         let at = self.log.closed_at().unwrap_or(at);
         self.log.push(outcome.line(self.cost), at);
         self.has_outcome = true;
+        self.passless = !outcome.ran_a_pass();
         self.log.freeze(at);
     }
 }
@@ -348,6 +378,7 @@ impl Account {
             log: Log::opened_at(at),
             cost: None,
             has_outcome: false,
+            passless: false,
         });
     }
 
@@ -575,7 +606,7 @@ impl Account {
     fn unpriced(&self) -> usize {
         self.sections
             .iter()
-            .filter(|section| section.cost.is_none())
+            .filter(|section| section.cost.is_none() && !section.passless)
             .count()
     }
 }
@@ -1020,6 +1051,74 @@ mod tests {
         assert!(
             !line.contains('$') && !line.contains("cost"),
             "and a carried directory has no spend to report at all: {line}",
+        );
+    }
+
+    #[test]
+    fn a_skipped_section_names_the_failure_below_it_and_claims_no_write() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        account.open_section("crates/engine", base);
+        account.close_section(
+            &Outcome::Skipped {
+                below: "crates/engine/src".into(),
+            },
+            at(base, 0),
+        );
+
+        let line = said(&account, at(base, 5))
+            .into_iter()
+            .find(|line| line.contains("skipped"))
+            .expect("the section closed saying it was skipped");
+        assert!(
+            line.contains("crates/engine/src"),
+            "on its own `skipped` reads as the run losing interest; the \
+             directory below it is the half that explains it: {line}",
+        );
+        assert!(
+            !line.contains("wrote") && !line.contains('$'),
+            "no pass ran, so there is no write and no spend to report: {line}",
+        );
+    }
+
+    #[test]
+    fn a_section_that_ran_no_pass_is_no_part_of_the_incomplete_count() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        // One pass that said what it cost, and two directories no pass ran for
+        // at all: one carried forward, one skipped over a failure below it.
+        account.open_section("crates/alpha", base);
+        account.record(&Activity::Cost { usd: 0.25 }, at(base, 1));
+        account.close_section(
+            &Outcome::Wrote {
+                document: "crates/alpha/WARLOCK.md".into(),
+                bytes: 1_200,
+            },
+            at(base, 10),
+        );
+        account.open_section("crates/beta", at(base, 10));
+        account.close_section(
+            &Outcome::Unchanged {
+                document: "crates/beta/WARLOCK.md".into(),
+            },
+            at(base, 10),
+        );
+        account.open_section("crates", at(base, 10));
+        account.close_section(
+            &Outcome::Skipped {
+                below: "crates/gamma".into(),
+            },
+            at(base, 10),
+        );
+        account.finish(at(base, 60));
+
+        assert_eq!(
+            said(&account, at(base, 60)).last().map(String::as_str),
+            Some("pact finished — 3 directories, 1:00, $0.25"),
+            "a directory no pass ran for has no cost to have gone missing, so \
+             the total is whole rather than `incomplete`",
         );
     }
 

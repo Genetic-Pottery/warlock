@@ -16,10 +16,20 @@ pub const LIST_CAP: usize = 12;
 
 pub const DECLARED_SHOWN: usize = 8;
 
-// Two, not three: the second pass is the first one with its own defects listed
-// at the top of the request, and a model shown that either fixes the slot or
-// cannot. A third buys a third failure at full price.
-pub const ATTEMPTS: usize = 2;
+// Four, and the three after the first are cheap: a repair pass is asked only
+// for the slots the last one got wrong and answers with a patch over it
+// ([`Repair`]), so it re-sends the directory but writes back a few hundred
+// bytes against the first answer's several thousand.
+//
+// Two was the old number, on the reasoning that a model shown its own defects
+// either fixes the slot or cannot. It does not hold: the observed failure is a
+// model that overshoots in the other direction — a file left out of `files`,
+// then supplied at 300 characters against a cap of 280 — and with one repair
+// that oscillation is a refusal. A refusal is the expensive outcome, not the
+// repair: it throws away the whole first pass, and every directory above it
+// loses its grant and has to be described again on the next run. Three more
+// repairs cost less than one of those.
+pub const ATTEMPTS: usize = 4;
 
 // No date in here, though every instinct says to put one: `granted_at` in
 // `.warlock/pacts.toml` already records when the document was granted, and a

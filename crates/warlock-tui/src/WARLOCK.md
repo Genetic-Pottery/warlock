@@ -3,79 +3,85 @@
 
 # src
 
-The front end's own crate root plus binary: warlock_tui is data and pure functions over a flattened tree, panel, account and thread, with no terminal of its own; the warlock binary is the thin impure shell that owns the terminal's lifecycle, the event loop, headless subcommands and the boundary rules that gate writes.
+The warlock-tui library crate's source: the terminal front end's pure parts — account and thread ledgers, the app's tree/row state, panel cards, composer, wrapping, drawing, and the claude/watch impure seams — all assembled and re-exported through lib.rs for the warlock binary to drive.
 
 ## Files
 
-- `account.rs` (86.6 KB) — Account and Section: the ordered per-directory record of what a pact run did, one clocked Line per activity, with the freezing-clock rule and no clock of its own. · declares `THINKING`, `WAITING`, `WRITING`, `Log`, `opened_at`, `started`, `closed_at`, `is_closed` (+43)
-- `app.rs` (434.2 KB) — App, Row, Focus, Chrome, RunHeader, PactToggle: the flattened tree state, selection, scrolling, pact toggling and reseat_on for carrying a view across a reload. · declares `Row`, `new`, `file`, `with_child_count`, `with_ignored`, `with_document_row`, `with_scope`, `has_children` (+56)
-- `boundary.rs` (14.4 KB) — verdict, Verdict, Reach: the one function deciding whether an operator may act on a directory, shared by the TUI's keys and the shell's headless writes. · declares `Reach`, `Verdict`, `message`, `verdict`, `closed_scope_message`, `blocking_scopes_message`
-- `chatting.rs` (163.2 KB) — Chat: the conversation register, composer field and turn machinery (spawn_turn/start_turn/run_turn/apply_turn) driving /brief, /write and ordinary messages. · declares `Chat`, `new`, `with_agent`, `composer`, `set_composer_width`, `write_prompt`, `directory`, `answering` (+31)
-- `check.rs` (30.1 KB) — warlock check <path> subcommand: prints which scope covers a path, what this machine holds, and whether they meet, in prose or --json. · declares `check`, `CHECK`, `PATH`, `SCOPE`, `SIGILS`, `OPENS`, `Checked`, `checked_onto` (+6)
-- `claude.rs` (230.4 KB) — ClaudeAgent and ChatAgent: the transport running the claude CLI as a child process for both a pact pass (Agent) and a read-only chat turn (Converses). · declares `INVOCATION_TIMEOUT`, `BRIEF_EFFORT`, `BRIEF_MODEL`, `brief_instruction`, `CHAT_INSTRUCTION`, `WRITE_INSTRUCTION`, `Cancel`, `cancel` (+56)
-- `colour.rs` (6.2 KB) — colour_for and the pinned indexed colours (unpacted/stale/fresh, focus, guide) as one total match. · declares `colour_for`, `FOCUS_COLOUR`, `GUIDE_COLOUR`
-- `composer.rs` (118.0 KB) — Composer and compose_for/paste_for: the multi-line draft field at the foot of the panel, its cursor, wrapping and paste handling. · declares `COMPOSER_MAX_ROWS`, `Composer`, `new`, `at`, `cursor`, `set_width`, `width`, `set_muted` (+16)
-- `config.rs` (31.3 KB) — warlock config subcommand: the interactive prompt that reads and writes this machine's sigils to <home>/.warlock/<project>/config.toml. · declares `configure`, `PROMPT`, `NOTHING`, `RULES`, `prompted`, `Held`, `held_for`, `preamble` (+5)
-- `confirm.rs` (16.2 KB) — QuitConfirm, Answer, answer_for: the two-answer quit confirmation gate and what a keystroke does to it. · declares `Answer`, `QuitConfirm`, `is_open`, `highlighted`, `Answered`, `answer_for`
-- `descent.rs` (14.4 KB) — Descent enum and descend/carry_on: the one shared entry point both doors (panel keys, shell subcommands) use to run pact/refresh/unpact and save the manifest exactly once. · declares `Descent`, `wanted`, `descend`, `carry_on`
-- `editing.rs` (44.9 KB) — The edit key (e): opening a file in $EDITOR, suspending and restoring the terminal, and re-reading the file afterwards. · declares `edit_press`, `EDITOR_VAR`, `NO_EDITOR`, `Editor`, `came_back`, `edit_target`, `editor_command`, `run_editor`
-- `edits.rs` (74.9 KB) — Headless writes: warlock unpact/scope add/scope remove, gated through Opened which cannot be built without the boundary already being asked. · declares `Opened`, `new`, `repo_root`, `manifest`, `target`, `opened`, `unpact`, `scope_add` (+8)
-- `error.rs` (41.0 KB) — Error: the binary's whole one-line error vocabulary printed by main, covering every subcommand's failure modes and their exit-status mapping. · declares `Error`, `from_problems`, `one_line`, `fmt`, `source`, `from`
-- `fixture.rs` (14.7 KB) — Test-only hand-written Tree fixtures (tree, tree_after_a_run) exercising every NodeState and nesting shape for the crate's own tests. · declares `tree`, `tree_after_a_run`, `files`
-- `input.rs` (194.1 KB) — action_for, mouse_action, press_for: pure translations of key and mouse events into Action/MouseAction intents, with no terminal touched. · declares `Action`, `action_for`, `Pressed`, `press_for`, `MouseAction`, `mouse_action`, `is_ctrl_c`, `is_tab` (+3)
-- `lib.rs` (24.3 KB) — The crate root: module declarations and the full pub use re-export surface for warlock_tui's data types and pure functions.
-- `main.rs` (135.7 KB) — The warlock binary's event loop: terminal setup, dispatch to subcommands, and the frame-per-tick loop driving pacts, chats, watching and rendering. · declares `POLL_INTERVAL`, `CREATED`, `UPDATED`, `Cli`, `Command`, `ScopeCommand`, `main`, `status_for` (+11)
-- `pacting.rs` (296.1 KB) — Pact: running a pact/refresh on a worker thread from a keystroke, Pact::press/keep_up/stop, reporting into the account and saving the manifest once. · declares `Pact`, `Reloaded`, `new`, `with_run`, `with_agent`, `running`, `stop`, `press` (+42)
-- `panel.rs` (55.0 KB) — Panel, Card<T>, Showing: the three-card (account/thread/document) panel state, which one is on screen, and its scrolling window. · declares `Panel`, `Showing`, `Mode`, `panel_offset_for`, `showing`, `window_of`, `document_lines`, `show` (+39)
-- `prompt.rs` (26.0 KB) — ScopePrompt, ScopeField, edit_for: the single-line scope-entry field opened by the s key, judging nothing itself. · declares `ScopeField`, `new`, `refused`, `directory`, `text`, `rule`, `ScopePrompt`, `is_open` (+4)
-- `query.rs` (26.0 KB) — warlock stale/fresh subcommands: listing pacted directories in a given NodeState, spelled against the repository root, prose or --json. · declares `Listing`, `list`, `spelled`, `envelope`, `write_object`, `COMMAND`, `DIRECTORIES`, `wanted` (+6)
-- `running.rs` (69.6 KB) — The headless warlock pact/refresh subcommands: Progress reporting to stdout, cancellation via Ctrl-C, and the Report of failures/status. · declares `pact`, `refresh`, `Progress`, `new`, `total`, `say`, `starting`, `documented` (+12)
-- `scoping.rs` (47.8 KB) — The scope key (s), from keystroke to saved manifest: scope_press/scope_edit/scope_submit, folding and validating via the engine's validate_scope. · declares `scope_press`, `scope_edit`, `scope_submit`, `with_scope_on`, `no_pact_message`
-- `session.rs` (34.2 KB) — Scope, Watched, reload_tree, closed_scope, sigils_held/sigils_under, load_app: where the tree came from, how it's kept true to disk, and the boundary check for p/r/s. · declares `NOT_REFRESHED`, `NOT_WATCHING`, `reload_tree`, `note`, `Scope`, `Watched`, `start`, `off_note` (+8)
-- `standing.rs` (13.5 KB) — Standing: the shared prologue for every headless subcommand — working dir, repository root, manifest, home directory — and the FOR_* sentence tails. · declares `FOR_CLAUDE_MD`, `FOR_SIGILS`, `FOR_CHECK`, `FOR_LISTING`, `FOR_UNPACT`, `FOR_SCOPE_ADD`, `FOR_SCOPE_REMOVE`, `FOR_PACT` (+11)
-- `stubs.rs` (4.3 KB) — Passing and Saying: in-memory stand-ins for the Agent and Converses model seams, for tests that are not about the model transport itself. · declares `Passing`, `filling`, `Saying`, `answering`, `run`, `wired`, `turn`, `raised`
-- `submission.rs` (12.8 KB) — Submitted and submitted_for: classifying a composer draft as /brief, /write, /chat, a message, or a refusal, per the module's stated matching rule. · declares `Submitted`, `refusal`, `submitted_for`, `REFUSAL`
-- `template.rs` (24.3 KB) — brief_template, DEFAULT_TEMPLATE, missing_sections: the shape a brief must take, read fresh from .warlock/brief-template.md or the built-in skeleton. · declares `DEFAULT_TEMPLATE`, `brief_template`, `Error`, `missing_sections`, `TEMPLATE_FILE`, `template_path`, `fmt`, `source` (+2)
-- `terminal.rs` (14.3 KB) — TerminalGuard, Screen trait, install_panic_hook: the terminal's take/restore lifecycle including Screen::suspended for running $EDITOR. · declares `Screen`, `TerminalGuard`, `enter`, `install_panic_hook`, `size`, `draw`, `suspended`, `report_mouse` (+3)
-- `thread.rs` (59.9 KB) — Thread, Turn, Ending: the conversation card's data — every typed message, the model's work and answer, and warlock's own unclocked notes. · declares `Ending`, `line`, `ending_for`, `Turn`, `message`, `answer`, `ending`, `started` (+26)
-- `ui.rs` (405.9 KB) — draw and all layout/rendering: the frame, tree pane, panel, footer, header, composer, confirm and scope windows, plus hit_test. · declares `PANEL_INDENT`, `SAID_MARKER`, `NOTE_MARKER`, `draw`, `composer_on_screen`, `tree_height`, `panel_height`, `run_header_height` (+56)
-- `viewing.rs` (24.6 KB) — The view key (v): view_press reads a file into the panel via the engine's view_file, with no run, no write, no reload. · declares `view_press`
-- `watch.rs` (41.4 KB) — Watch, WatchPolicy, NodeSet, Watching: the filesystem watcher, its debounce/ceiling timing rules, and the filter over the last successful walk. · declares `QUIET_PERIOD`, `RELOAD_CEILING`, `COALESCED_RELOADS`, `NodeSet`, `from_tree`, `accepts`, `len`, `is_empty` (+17)
-- `wrap.rs` (33.7 KB) — rows, wrapped, folded, Shape: breaking one card line into panel-width rows (word-wrapped) or field-width rows (character-filled). · declares `Shape`, `shape`, `rows`, `wrapped`, `folded`, `continued`, `filled`, `break_at` (+1)
-- `writing.rs` (90.6 KB) — Where a brief goes and the writing of it: proposed_path guesses the doc's path from the reply (unfenced, title slugged, next number in the directory) and write_submit writes whatever is in the editable field, never the proposal itself, on Enter. · declares `WRITE_HEADING`, `proposed_path`, `write_opened`, `write_edit`, `write_submit`, `unfenced`, `slug_of`, `BRIEF_PREFIX` (+26)
+- `account.rs` (64.2 KB) — Account, Section, Log, Line, Outcome — the clocked record of one pact's run, one Section per directory, worded lines and the size/money helpers. · declares `THINKING`, `WAITING`, `WRITING`, `Log`, `opened_at`, `started`, `closed_at`, `is_closed` (+44)
+- `app.rs` (287.8 KB) — App and Row — the flattened tree, selection, collapse and filter state, and reflow/walk_of that derive drawn rows from a Tree. · declares `Row`, `new`
+- `boundary.rs` (10.3 KB) — Reach, Verdict, verdict() — the shared scope/sigil boundary check used by both the panel keys and headless subcommands. · declares `Reach`, `Verdict`, `message`, `verdict`, `closed_scope_message`, `blocking_scopes_message`
+- `chatting.rs` (108.5 KB) — Chat, the conversation state machine — agent, in-flight turn, composer draft and brief window, plus /brief, /chat, /write command handling. · declares `TURN_LOST`, `BRIEF_COMMAND`, `CHAT_COMMAND`, `WRITE_COMMAND`, `BRIEF_NOTE`, `CHAT_NOTE`, `ALREADY_CHATTING`, `NOT_BRIEFING`
+- `check.rs` (23.0 KB) — warlock check subcommand — Checked, prose/JSON rendering of which scope covers a path and whether held sigils open it. · declares `check`, `CHECK`, `PATH`, `SCOPE`, `SIGILS`, `OPENS`, `Checked`, `checked_onto` (+6)
+- `claude.rs` (165.5 KB) — Runs `claude` as a child process — ClaudeAgent, Wired, stream reading, cancellation via Cancel and shared Mutex<Child>. · declares `INVOCATION_TIMEOUT`, `BRIEF_EFFORT`, `BRIEF_MODEL`, `PROGRAM`, `ARGS`, `MODEL`, `CONTEXT_TOKENS`, `EFFORT`
+- `colour.rs` (3.7 KB) — colour_for(NodeState) and the FOCUS_COLOUR/GUIDE_COLOUR constants — the only place node states become terminal colours. · declares `colour_for`, `FOCUS_COLOUR`, `GUIDE_COLOUR`
+- `composer.rs` (83.0 KB) — Composer, ComposerWindow, Composed, Pasted, compose_for/paste_for — the multi-line draft field and its keystroke/paste rules. · declares `COMPOSER_MAX_ROWS`, `Composer`, `new`, `at`, `cursor`, `set_width`, `width`, `set_muted` (+16)
+- `config.rs` (23.8 KB) — warlock config subcommand — reads and rewrites sigils for this machine/repository via one prompt line, Held state, sigils_in/hold. · declares `configure`, `PROMPT`, `NOTHING`, `RULES`, `prompted`, `Held`, `held_for`, `preamble` (+5)
+- `confirm.rs` (11.6 KB) — QuitConfirm, Answer, Answered, answer_for — the Esc/quit confirmation dialog's key handling. · declares `Answer`, `QuitConfirm`, `is_open`, `highlighted`, `Answered`, `answer_for`
+- `descent.rs` (11.1 KB) — Descent enum (Pact/Refresh/Unpact) and descend() — the one shared engine-call-plus-save path used by both the panel and shell doors. · declares `Descent`, `wanted`, `descend`, `carry_on`
+- `editing.rs` (32.5 KB) — edit_press/came_back — the `e` key, spawning $EDITOR as a foreground child and reloading the tree/document afterward. · declares `edit_press`, `EDITOR_VAR`, `NO_EDITOR`, `Editor`, `came_back`, `edit_target`, `editor_command`, `run_editor`
+- `edits.rs` (55.1 KB) — Opened gate and the headless writes — warlock unpact / scope add / scope remove — boundary-checked manifest edits. · declares `Opened`, `new`, `repo_root`, `manifest`, `target`, `opened`, `unpact`, `scope_add` (+8)
+- `error.rs` (24.3 KB) — Error enum and Display — every warlock failure flattened to one line via one_line(), shared by panel footer and shell exit. · declares `Error`, `from_problems`, `one_line`, `fmt`, `source`, `from`
+- `fixture.rs` (12.4 KB) — tree()/tree_after_a_run() — hand-built Tree fixtures used by app and draw tests instead of a real repository walk. · declares `tree`, `tree_after_a_run`, `files`
+- `input.rs` (146.8 KB) — Action, action_for/press_for/mouse_action — keys and mouse events turned into intentions, consulting confirm/prompt windows in order. · declares `Action`, `action_for`
+- `lib.rs` (2.6 KB) — The crate root: module declarations and the full list of re-exports (Account, App, Panel, Thread, Watch, etc.) forming the public API.
+- `main.rs` (91.6 KB) — warlock binary's entry point — clap Cli/Subcommand definitions, TerminalGuard lifecycle, panic hook, and the event loop driving everything.
+- `pacting.rs` (229.3 KB) — Pact<P> worker and PactEvent channel — the `p`/`r` keystrokes as a background thread reporting progress, with Reloaded and CancelGuard. · declares `Pact`, `Reloaded`, `PACT_LOST`, `PACT_CANCELLED`
+- `panel.rs` (31.0 KB) — Panel, Card<T>, Showing, Mode — the right-hand pane holding Account/Thread/document cards and the card-swap and scroll-window logic. · declares `Panel`, `Showing`, `Mode`, `panel_offset_for`, `showing`, `window_of`, `document_lines`, `show` (+39)
+- `prompt.rs` (19.5 KB) — ScopeField, ScopePrompt, Edited, edit_for — the single-line scope/write prompt's text-field key handling. · declares `ScopeField`, `new`, `refused`, `directory`, `text`, `rule`, `ScopePrompt`, `is_open` (+4)
+- `query.rs` (18.7 KB) — warlock stale/fresh subcommands — Listing, Listed, envelope()/write_object() JSON helpers shared with check.rs. · declares `Listing`, `list`, `spelled`, `envelope`, `write_object`, `COMMAND`, `DIRECTORIES`, `wanted` (+6)
+- `running.rs` (44.7 KB) — warlock pact/refresh subcommands — Progress observer, Report of failures, Ctrl-C handling via listening(), and the descended() composition. · declares `pact`, `refresh`, `Progress`, `new`, `total`, `say`, `starting`, `documented` (+13)
+- `scoping.rs` (40.5 KB) — scope_press/scope_edit/scope_submit — the `s` key's path from press to a saved scope in .warlock/pacts.toml. · declares `scope_press`, `scope_edit`, `scope_submit`, `with_scope_on`, `no_pact_message`
+- `session.rs` (23.4 KB) — Scope, Watched, load_app/reload_tree/closed_scope — where the on-screen tree comes from and how it's kept true to disk and to sigils. · declares `NOT_REFRESHED`, `NOT_WATCHING`, `reload_tree`, `note`, `Scope`, `Watched`, `start`, `off_note` (+8)
+- `standing.rs` (8.7 KB) — Standing — resolves repository root, working directory and home, and the FOR_* sentence tails for NoRepository errors. · declares `FOR_CLAUDE_MD`, `FOR_SIGILS`, `FOR_CHECK`, `FOR_LISTING`, `FOR_UNPACT`, `FOR_SCOPE_ADD`, `FOR_SCOPE_REMOVE`, `FOR_PACT` (+11)
+- `stubs.rs` (1.4 KB) — Passing and Saying — test-only stand-in Agent/Converses implementations with no cancellation or activity reporting. · declares `Passing`, `filling`, `Saying`, `answering`, `run`, `wired`, `turn`, `raised`
+- `submission.rs` (8.3 KB) — Submitted enum and submitted_for() — parses composer drafts into /brief, /write, /chat, Message or Refused. · declares `Submitted`, `refusal`, `submitted_for`, `REFUSAL`
+- `template.rs` (19.0 KB) — DEFAULT_TEMPLATE, brief_template(), missing_sections() — the brief document shape and the check that a written brief carries every section. · declares `DEFAULT_TEMPLATE`, `brief_template`, `Error`, `missing_sections`, `TEMPLATE_FILE`, `template_path`, `fmt`, `source` (+2)
+- `terminal.rs` (7.5 KB) — Screen trait and TerminalGuard — raw mode, alternate screen, mouse/paste setup and teardown, and the panic hook installer. · declares `Screen`, `TerminalGuard`, `enter`, `install_panic_hook`, `size`, `draw`, `suspended`, `report_mouse` (+3)
+- `thread.rs` (44.2 KB) — Thread, Turn, Ending, ending_for — the conversation card's ordered turns and notes, sharing the Log clock rule with account.rs. · declares `Ending`, `line`, `ending_for`, `Turn`, `message`, `answer`, `ending`, `started` (+26)
+- `ui.rs` (273.1 KB) — draw() and the measuring entry points (tree_height, panel_height, hit_test, etc.) — the one frame-rendering module, no clock or terminal reads. · declares `INDENT`, `GUIDE`, `GUIDE_BRANCH`, `GUIDE_LAST`, `SELECTION_MARKER`, `COLLAPSED_MARKER`, `EXPANDED_MARKER`, `NO_MARKER` (+1)
+- `viewing.rs` (18.1 KB) — view_press() — the `v` key, reading a file into the document card via App::view_target and view_file. · declares `view_press`
+- `watch.rs` (30.5 KB) — NodeSet, WatchPolicy, Watch, Watching — filesystem watching filtered to tree nodes, debounced by QUIET_PERIOD/RELOAD_CEILING. · declares `QUIET_PERIOD`, `RELOAD_CEILING`, `COALESCED_RELOADS`, `NodeSet`, `from_tree`, `accepts`, `len`, `is_empty` (+17)
+- `wrap.rs` (23.9 KB) — Shape, shape(), rows(), wrapped()/folded() — word-wrapping for display versus byte-preserving folding for the composer field. · declares `Shape`, `shape`, `rows`, `wrapped`, `folded`, `continued`, `filled`, `break_at` (+1)
+- `writing.rs` (64.4 KB) — The `/write` command's landing path: `write_submit` writes the shown path, `unfenced` strips a code fence, `slug_of`/`next_number` build the filename, `missing_sections` refuses an incomplete brief, `pacted_above` names the ancestor pact staled. · declares `WRITE_HEADING`, `proposed_path`, `write_opened`, `write_edit`, `write_submit`, `unfenced`, `slug_of`, `BRIEF_PREFIX` (+26)
 
 ## Structure
 
-- main.rs drives the event loop, calling into input.rs for key/mouse translation, pacting.rs/chatting.rs for worker threads, session.rs for tree state, and terminal.rs for setup/teardown.
-- pacting.rs and chatting.rs both call descent.rs's descend/carry_on and boundary.rs's verdict to gate and run work, then save via warlock_engine.
-- edits.rs, check.rs, query.rs, config.rs, running.rs all build on standing.rs's Standing prologue and error.rs's Error vocabulary.
-- session.rs's closed_scope and edits.rs's Opened both call boundary.rs's verdict, keeping panel and shell refusals worded identically.
-- ui.rs draws from app.rs (App/Row), panel.rs (Panel/Card), thread.rs (Thread) and wrap.rs (rows) but writes nothing back to them.
-- app.rs re-exports panel behavior by forwarding to panel.rs methods rather than owning card state directly.
-- claude.rs and stubs.rs both implement the engine's Agent port and the crate's own Converses port, used interchangeably by pacting.rs/chatting.rs.
+- main.rs dispatches subcommands (check, config, edits, running, query) before touching the terminal, then drives the event loop via input.rs, pacting.rs, editing.rs, scoping.rs, viewing.rs, chatting.rs, session.rs
+- descent.rs's descend() is called by both pacting.rs (panel) and running.rs (shell) so the manifest is saved exactly once per descent
+- edits.rs's Opened gate wraps boundary.rs's verdict() and is required before running.rs or edits.rs writes anything
+- session.rs's closed_scope() and boundary.rs's verdict() are the two callers scoping.rs and edits.rs both consult for the same refusal wording
+- panel.rs holds account.rs's Account and thread.rs's Thread as Cards, and calls wrap.rs's rows() to count and window lines
+- ui.rs calls wrap.rs's shape()/rows() to draw exactly what panel.rs counted, and reads app.rs's Row/App for the tree
+- app.rs's reflow derives rows from a warlock_engine::Tree; fixture.rs supplies test trees for app.rs and ui.rs tests
+- writing.rs and chatting.rs call template.rs's brief_template/missing_sections before writing a brief to disk
+- error.rs's one_line() and Error::Display are called from nearly every subcommand module (check, config, edits, running, query, session) to flatten engine errors
+- claude.rs is the only module spawning a child process; chatting.rs and pacting.rs depend on it (or stubs.rs in tests) via the Agent/Converses/Wired traits
+- terminal.rs's Screen trait is implemented by TerminalGuard and used by editing.rs's edit_press to suspend/resume the terminal for $EDITOR
 
 ## Rules
 
-- The three NodeState colours (245/214/71) and the focus/guide colours (45/240) are pinned 256-indexed values, never named ANSI colours.
-- A chat turn's tool vector grants only Read, Grep and Glob — nothing that writes, edits, shells out or reaches the network.
-- The manifest is saved exactly once per descent, after the walk completes and never during it (descent.rs).
-- Boundary verdicts are asked in one fixed order: the scope covering the directory first, then (for un-pact only) the scopes below it.
-- Every Error variant renders as exactly one line, since main prints one line after the terminal is restored.
-- A quit confirmation and a scope prompt are values outside App, never fields on it, so answering No/Esc leaves App untouched by construction.
-- Only key-press events act in confirm.rs/prompt.rs/composer.rs; releases and repeats are treated as no-ops.
-- A run's account and a chat turn never populate each other's card; a pact fills its own account card even while a conversation is on screen.
+- account.rs and thread.rs never call Instant::now(); every entry point takes the instant it happened at, and reads take the `now` explicitly
+- app.rs: reflow is meant to be the only thing turning all_rows into rows, except App::insert_file_row, which must apply the same three filters in the same order
+- descent.rs: the manifest is saved exactly once, after the descent, never during it
+- edits.rs: the boundary is asked before the path is spelled, before the existence check, before anything reads the manifest's contents
+- error.rs: every Error variant's Display prints as a single line, since main prints exactly one line after the terminal is restored
+- terminal.rs: raw mode, alternate screen, bracketed paste and mouse reporting are restored on every way out, including a panic on any thread
+- composer.rs and prompt.rs: only key presses are handled, never releases or auto-repeats, since crossterm reports them inconsistently across platforms
+- submission.rs: command matching is case-sensitive, so `/BRIEF` is refused rather than folded
+- writing.rs: write_submit judges every rule before writing a single byte; the target existing or a missing section both refuse with nothing written
+- watch.rs: NodeSet's filter is the last walk itself, with no re-implementation of gitignore or skip-list rules
 
 ## Where to look
 
-- why is a pact run on a worker thread with a channel → `pacting.rs` `Pact`
-- what happens when Ctrl-C is pressed during a headless pact → `running.rs` `Progress`
-- how are scope and sigil boundary refusals worded identically in TUI and shell → `boundary.rs` `closed_scope_message`
-- how does /write decide the output file path → `writing.rs` `proposed_path`
-- why doesn't warlock scroll long lines instead of wrapping them → `wrap.rs` `wrapped`
-- what does warlock check --json print → `check.rs` `Checked`
-- how is the terminal restored after $EDITOR runs → `terminal.rs` `suspended`
-- why is a chat turn shaped like a run but not an Agent → `claude.rs` `ChatAgent`
-- what decides when the tree is reloaded after a file changes on disk → `watch.rs` `WatchPolicy`
-- how are /brief, /write and /chat distinguished from an ordinary message → `submission.rs` `submitted_for`
-- what does un-pacting refuse that pacting does not → `edits.rs` `Opened`
-- in-memory test doubles for the model instead of a real claude process → `stubs.rs` `Passing`
+- how a run's clock keeps ticking on the newest line → `account.rs` `shown_at`
+- why a directory row is refused mid-pact → `pacting.rs` `Pact`
+- which key does what in the panel → `input.rs` `action_for`
+- how scope and sigil boundaries decide who may act where → `boundary.rs` `verdict`
+- what happens when Enter is pressed in the write prompt → `writing.rs` `write_submit`
+- how a stale directory is detected and coloured → `colour.rs` `colour_for`
+- how the panel decides which of three cards is drawn → `panel.rs` `Showing`
+- how filesystem events become a reload → `watch.rs` `WatchPolicy`
+- how a keystroke wraps or breaks a long line → `wrap.rs` `wrapped`
+- what `claude` is actually invoked with → `claude.rs` `ARGS`
+- how errors are flattened to one shell/footer line → `error.rs` `one_line`
+- how the repository root and home directory are resolved → `standing.rs` `Standing`
