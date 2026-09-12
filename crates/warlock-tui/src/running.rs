@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use warlock_engine::{Agent, PactedSubtree, Pacting, pact, to_manifest_path};
+use warlock_engine::{Agent, PactedSubtree, Pacting, document, pact, to_manifest_path};
 use warlock_tui::{Cancel, ClaudeAgent};
 
 use crate::CANCELLED;
@@ -109,6 +109,18 @@ impl<W: Write> pact::Observer for Progress<W> {
         let named = named(&self.root, directory);
         self.say(&format!("[{position}/{total}] documenting {named}"));
         Pacting::Continue
+    }
+
+    // On stdout with the progress and not on stderr with the report, because a
+    // mended slot is a document that was written, not a directory that was
+    // missed: the failure report is the list of things to go and look at, and a
+    // repair belongs to the story of the run. It costs the run nothing — no
+    // status, no `failed`, no `total` — but a log read tomorrow should still be
+    // able to tell a repaired entry from a written one, so it says which slot
+    // and what was done to it.
+    fn repaired(&mut self, directory: &Path, mend: &document::Mend) {
+        let named = named(&self.root, directory);
+        self.say(&format!("{named} — {mend}"));
     }
 
     fn documented(&mut self, directory: &Path) {
