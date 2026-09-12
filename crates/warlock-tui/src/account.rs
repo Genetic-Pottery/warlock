@@ -33,6 +33,10 @@ pub(crate) const WRITING: &str = "writing";
 /// answer down, so the wait that follows is a second one.
 const REJECTED: &str = "rejected";
 
+/// Opens the line [`Account::record_repaired`] files: the asking ran out and
+/// warlock mended the slot itself, so the document says this much and no more.
+const REPAIRED: &str = "repaired";
+
 /// One line and the instant it arrived. Its own arrival is what freezes the
 /// line above it, so every entry has to remember it even though a line usually
 /// displays the instant belonging to the entry beneath it.
@@ -474,6 +478,24 @@ impl Account {
             format!("{REJECTED} · attempt {attempt}/{attempts}: {first}{rest}"),
             at,
         );
+    }
+
+    /// The other end of [`Account::record_rejected`]: the attempts ran out and
+    /// warlock mended the slot itself rather than refusing the document. One
+    /// line per mend, in the engine's own words — which name the slot the way
+    /// the defect behind it was named, and what was done to it — because that
+    /// is the difference between the model's prose and warlock's fallback, and
+    /// this panel is where a reader of the document finds it out. Same silence
+    /// as [`Account::record`] when there is no live section.
+    pub fn record_repaired(&mut self, mend: &str, at: Instant) {
+        let Some(section) = self.sections.last_mut() else {
+            return;
+        };
+        if section.is_closed() {
+            return;
+        }
+
+        section.log.push(format!("{REPAIRED} · {mend}"), at);
     }
 
     /// [`Account::finish`] without the wording or the money. Crate-private
@@ -1351,6 +1373,64 @@ mod tests {
         account.open_section("crates/engine", at(base, 2));
         account.close_section(&Outcome::Cancelled, at(base, 3));
         account.record_waiting(11, 34 * 1024, at(base, 4));
+
+        assert_eq!(
+            said(&account, at(base, 9)),
+            vec![
+                "crates/engine".to_owned(),
+                "0:01 cancelled — nothing reported spent".to_owned(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_mend_is_one_line_under_the_directory_it_was_done_to() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        // The rejections that ran out, then what warlock did about it: one line
+        // per mend, in the engine's own words, clocked and frozen like any
+        // other. Nothing here counts the mends or folds two of them together —
+        // two slots were mended and the panel says so twice.
+        account.open_section("crates/warlock-tui/src", base);
+        account.record_rejected(&["purpose is empty".to_owned()], 3, 3, at(base, 10));
+        account.record_repaired(
+            r#"files["writing.rs"] was 320 characters and was cut to 280"#,
+            at(base, 20),
+        );
+        account.record_repaired(
+            "purpose was not answered and was filled in from what warlock measured",
+            at(base, 30),
+        );
+
+        // Each line is clocked where the next one froze it, by the ordinary
+        // rule, and the newest goes on ticking.
+        assert_eq!(
+            said(&account, at(base, 40)),
+            vec![
+                "crates/warlock-tui/src".to_owned(),
+                "0:20 rejected · attempt 3/3: purpose is empty".to_owned(),
+                r#"0:30 repaired · files["writing.rs"] was 320 characters and was cut to 280"#
+                    .to_owned(),
+                "0:40 repaired · purpose was not answered and was filled in from what warlock measured".to_owned(),
+            ],
+        );
+    }
+
+    #[test]
+    fn no_repair_line_is_filed_where_there_is_no_live_section() {
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        // A repair arriving before the first directory, and one arriving after
+        // the current directory has been worded and frozen: the same silence
+        // `record` and `record_rejected` keep.
+        account.record_repaired("purpose was dropped", at(base, 1));
+        assert_eq!(account.line_count(), 0);
+
+        account.open_section("crates/engine", at(base, 2));
+        account.close_section(&Outcome::Cancelled, at(base, 3));
+        account.record_repaired("purpose was dropped", at(base, 4));
 
         assert_eq!(
             said(&account, at(base, 9)),
