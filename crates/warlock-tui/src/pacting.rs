@@ -993,8 +993,10 @@ mod tests {
     use std::{env, fs, process};
 
     use warlock_engine::{
-        Agent, Loaded, Manifest, Node, NodeState, PactEntry, Tree, Unwatched, agent, decide_state,
-        document::ATTEMPTS, load_tree, repository_root, stub_answer, subtree_hash,
+        Agent, Fill, Loaded, Manifest, Node, NodeState, PactEntry, Tree, Unwatched, agent,
+        decide_state,
+        document::{ATTEMPTS, ENTRY_CHARS},
+        load_tree, repository_root, stub_answer, subtree_hash,
     };
     use warlock_tui::{
         Account, Activities, Activity, App, Chrome, ClaudeAgent, Line, Mode, PactToggle, Run,
@@ -1037,6 +1039,7 @@ mod tests {
     struct Canned {
         root: PathBuf,
         refused: Vec<&'static str>,
+        over_the_cap: Vec<&'static str>,
         cancel_at: Option<(&'static str, Cancel)>,
         activities: Activities,
         seen: RefCell<Vec<(agent::Request, bool)>>,
@@ -1047,6 +1050,7 @@ mod tests {
             Self {
                 root: scratch.root.clone(),
                 refused: refused.into_iter().collect(),
+                over_the_cap: Vec::new(),
                 cancel_at: None,
                 activities: Activities::none(),
                 seen: RefCell::new(Vec::new()),
@@ -1055,6 +1059,21 @@ mod tests {
 
         fn reporting(mut self, activities: Activities) -> Self {
             self.activities = activities;
+            self
+        }
+
+        /// The other way an answer can be wrong: an object of the right shape
+        /// with every file entry over `ENTRY_CHARS`. It is turned down on every
+        /// attempt — the answer never changes, so the repair passes find the
+        /// same slots too long — which is how the loop is made to run out and
+        /// the engine to mend the fill instead of refusing the directory. The
+        /// defect is built out of the engine's own public `Fill` rather than
+        /// out of its error types, which are `#[non_exhaustive]`.
+        fn answering_over_the_cap(
+            mut self,
+            directories: impl IntoIterator<Item = &'static str>,
+        ) -> Self {
+            self.over_the_cap = directories.into_iter().collect();
             self
         }
 
@@ -1120,8 +1139,47 @@ mod tests {
                 // are `#[non_exhaustive]` and cannot be built from here.
                 return Ok(agent::Response::new("no."));
             }
+            if self
+                .over_the_cap
+                .iter()
+                .any(|name| Path::new(name) == relative)
+            {
+                return Ok(agent::Response::new(over_the_cap(request)));
+            }
             Ok(agent::Response::new(stub_answer(request)))
         }
+    }
+
+    /// How long every file entry of an over-the-cap answer is, in characters.
+    /// Off the cap rather than pinned to a number of its own: what these tests
+    /// are about is that the mend is reported, not where the cap sits.
+    const OVER_THE_CAP: usize = ENTRY_CHARS + 140;
+
+    fn over_the_cap(request: &agent::Request) -> String {
+        let mut fill = Fill::stub(request);
+        // One line, ASCII, and no mention of the tool: the only thing wrong
+        // with it is its length, so every entry is mended the same way — cut —
+        // and no second defect rides along.
+        let long: String = "a stand-in entry that runs on past the cap. "
+            .chars()
+            .cycle()
+            .take(OVER_THE_CAP)
+            .collect();
+        for value in fill.files.values_mut() {
+            value.clone_from(&long);
+        }
+        fill.to_json()
+    }
+
+    /// The sentence the engine makes of one cut entry.
+    fn mended(file: &str) -> String {
+        format!("files[{file:?}] was {OVER_THE_CAP} characters and was cut to {ENTRY_CHARS}")
+    }
+
+    /// The same sentence as the panel files it: one line of the section the
+    /// pass that needed mending opened.
+    fn cut(file: &str) -> String {
+        format!("repaired · {}", mended(file))
     }
 
     fn saved(root: &Path) -> Option<Manifest> {
@@ -1704,6 +1762,18 @@ mod tests {
         let scratch = Scratch::new(name);
         scratch.write("crates/alpha/src/lib.rs", "//! Alpha.\n");
         scratch.write("crates/beta/src/lib.rs", "//! Beta.\n");
+        scratch
+    }
+
+    /// A crate whose `src/` holds three files, so an answer that is over the
+    /// cap in every entry is mended three times over: enough repairs for a
+    /// footer to have to count the ones it has no room to spell.
+    fn three_files_to_load(name: &str) -> Scratch {
+        let scratch = Scratch::new(name);
+        scratch.write("crates/engine/src/lib.rs", "//! Core engine.\n");
+        scratch.write("crates/engine/src/pacting.rs", "//! Pacting.\n");
+        scratch.write("crates/engine/src/writing.rs", "//! Writing.\n");
+        scratch.write(".git/HEAD", "ref: refs/heads/main\n");
         scratch
     }
 
@@ -4277,6 +4347,240 @@ mod tests {
             summary,
             &format!("pact finished — 2 directories, {elapsed}, {spent}")
         );
+    }
+
+    #[test]
+    fn a_run_that_only_had_to_mend_reports_the_first_repair_and_counts_the_rest() {
+        // Nothing was refused and no file was left out of a request, so the
+        // footer's third tier is the one that speaks: the engine's own sentence
+        // about the first slot it mended, and a count of the slots it mended
+        // after that. A repaired run is otherwise an ordinary one, which is the
+        // point — the only way an operator learns a document says less than the
+        // directory holds is this line.
+        let scratch = three_files_to_load("repaired-on-the-footer");
+        let (mut app, scope) = load(&scratch);
+        let mut manifest = Manifest::new();
+        let base = Instant::now();
+        app.start_account(base);
+
+        let said = recorded(&scratch, "crates/engine", &Cancel::new(), |events| {
+            Canned::new(&scratch, [])
+                .answering_over_the_cap(["crates/engine/src"])
+                .reporting(activity_port(events))
+        });
+        replay(
+            &mut app,
+            &mut manifest,
+            &scope,
+            CancelGuard::new(),
+            said,
+            base,
+        );
+
+        // Three entries over the cap, mended in the order the check reads
+        // them, which is the order the names sort in: the first is spelled and
+        // the other two are counted.
+        assert_eq!(
+            app.message()
+                .expect("a run with a repair in it has something to report"),
+            format!(
+                "{}: {} (and 2 more)",
+                scratch.path("crates/engine/src").display(),
+                mended("lib.rs")
+            )
+        );
+    }
+
+    #[test]
+    fn a_repaired_directory_says_what_was_mended_and_still_closes_on_its_document() {
+        // The panel's side of the same run: every mend gets a line of the
+        // section the pass opened, filed after the rejections that ran the
+        // asking out, and the section still ends on the document that was
+        // written — a mended directory is granted like any other.
+        let scratch = three_files_to_load("repaired-in-the-panel");
+        let (mut app, scope) = load(&scratch);
+        let mut manifest = Manifest::new();
+        let base = Instant::now();
+        app.start_account(base);
+
+        let said = recorded(&scratch, "crates/engine", &Cancel::new(), |events| {
+            Canned::new(&scratch, [])
+                .answering_over_the_cap(["crates/engine/src"])
+                .reporting(activity_port(events))
+        });
+        replay(
+            &mut app,
+            &mut manifest,
+            &scope,
+            CancelGuard::new(),
+            said,
+            base,
+        );
+
+        let lines = panel_text(&app, at(base, 10_000));
+        // The mended directory's section: its first request, the pass, the
+        // engine turning the answer down, the same four lines again for every
+        // attempt after it, then one line per mend and the document. The
+        // attempts in the middle are counted rather than spelled, so the shape
+        // follows `document::ATTEMPTS` instead of pinning it.
+        let [
+            first,
+            _,
+            _,
+            _,
+            rejected_once,
+            attempts @ ..,
+            _,
+            _,
+            _,
+            rejected_last,
+            cut_first,
+            cut_second,
+            cut_third,
+            wrote_mended,
+            second,
+            _,
+            _,
+            _,
+            wrote_parent,
+            summary,
+        ] = lines.as_slice()
+        else {
+            panic!("a two-directory run reads as two sections and a summary: {lines:?}");
+        };
+        assert_eq!(first, "crates/engine/src");
+        assert_eq!(second, "crates/engine");
+        assert_eq!(
+            attempts.len(),
+            (ATTEMPTS - 2) * 4,
+            "four lines for every attempt between the first and the last — a \
+             request, the read, the wait, the rejection: {attempts:?}",
+        );
+        assert!(
+            rejected_once.contains(&format!("rejected · attempt 1/{ATTEMPTS}: ")),
+            "the first answer is turned down: {rejected_once}"
+        );
+        assert!(
+            rejected_last.contains(&format!("rejected · attempt {ATTEMPTS}/{ATTEMPTS}: ")),
+            "and so is the last, which is what runs the asking out: {rejected_last}"
+        );
+
+        // The clocks are dropped and nothing else is: what is asserted here is
+        // the wording, and where it lands, and both are `ATTEMPTS` away from
+        // the start of the run.
+        assert_eq!(
+            [cut_first, cut_second, cut_third].map(|line| said_in(line)),
+            [cut("lib.rs"), cut("pacting.rs"), cut("writing.rs")],
+            "one line per mend, in the order the check reads the slots"
+        );
+
+        // One pass per attempt on the mended directory, each charging a
+        // quarter, and the section still closes on the document it wrote.
+        let cents = 25 * ATTEMPTS;
+        assert_eq!(
+            said_in(wrote_mended),
+            format!(
+                "wrote crates/engine/src/WARLOCK.md — {} bytes, ${}.{:02}",
+                document_bytes(&scratch, "crates/engine/src"),
+                cents / 100,
+                cents % 100
+            ),
+            "a mended directory closes on its document like any other"
+        );
+        assert_eq!(
+            said_in(wrote_parent),
+            format!(
+                "wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                document_bytes(&scratch, "crates/engine")
+            )
+        );
+        assert!(
+            summary.starts_with("pact finished — 2 directories,"),
+            "and the run finished: {summary}"
+        );
+
+        // Repairs are not failures, so the subtree they happened in is fresh
+        // and drawn so — the fact this whole road turns on.
+        for relative in ["crates/engine", "crates/engine/src"] {
+            assert_eq!(
+                state_of(&app, &scratch.path(relative)),
+                Some(NodeState::PactedFresh),
+                "{relative} was mended, not refused, so it is granted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_keeps_the_footer_and_the_repairs_below_it_are_not_counted() {
+        // Two directories the engine would not take an answer for and a third
+        // it had to mend. The failures are the first tier, so the footer is one
+        // of them, and the count after it is of the other failure alone: a
+        // repair is not a thing that went wrong, and adding it to that tail
+        // would tell an operator two directories were refused when one was.
+        let scratch = Scratch::new("failed-over-repaired");
+        scratch.write(".git/HEAD", "ref: refs/heads/main\n");
+        scratch.write("crates/alpha/src/lib.rs", "//! Alpha.\n");
+        scratch.write("crates/alpha/src/pacting.rs", "//! Pacting.\n");
+        scratch.write("crates/alpha/src/writing.rs", "//! Writing.\n");
+        scratch.write("crates/beta/src/lib.rs", "//! Beta.\n");
+        scratch.write("crates/gamma/src/lib.rs", "//! Gamma.\n");
+        let (mut app, scope) = load(&scratch);
+        let mut manifest = Manifest::new();
+        let base = Instant::now();
+        app.start_account(base);
+
+        let said = recorded(&scratch, "crates", &Cancel::new(), |events| {
+            Canned::new(&scratch, ["crates/beta/src", "crates/gamma/src"])
+                .answering_over_the_cap(["crates/alpha/src"])
+                .reporting(activity_port(events))
+        });
+        replay(
+            &mut app,
+            &mut manifest,
+            &scope,
+            CancelGuard::new(),
+            said,
+            base,
+        );
+
+        let message = app
+            .message()
+            .expect("a run with a refusal in it reports one");
+        // `crates/gamma/src` and not `crates/beta/src`: children are pacted
+        // before parents, which the engine gets by walking a sorted set
+        // backwards, so the last sibling is the first pass and the first
+        // failure.
+        assert!(
+            message.contains("crates/gamma/src"),
+            "the footer is the first failure, in the engine's words: {message}"
+        );
+        assert!(
+            message.ends_with("(and 1 more)"),
+            "and the tail counts the other failure and nothing else: {message}"
+        );
+        // Said twice on purpose: the tail's arithmetic above is only evidence
+        // that repairs are uncounted if the repairs happened at all.
+        let lines = panel_text(&app, at(base, 10_000));
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| said_in(line) == cut("lib.rs"))
+                .count(),
+            1,
+            "the run really did mend a directory: {lines:?}"
+        );
+        assert!(
+            !message.contains("was cut to"),
+            "and no mend reached the footer: {message}"
+        );
+    }
+
+    // A clocked line without its clock. The clock is a fact about how long the
+    // run took, which every test that counts attempts would otherwise have to
+    // work out; what these tests are about is the wording.
+    fn said_in(line: &str) -> String {
+        line.split_once(' ')
+            .map_or_else(|| line.to_owned(), |(_, said)| said.to_owned())
     }
 
     #[test]
