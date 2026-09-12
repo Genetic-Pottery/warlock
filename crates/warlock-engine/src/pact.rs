@@ -73,6 +73,7 @@ pub fn pact_subtree(
         outcomes,
         failures,
         problems,
+        repairs,
     } = describe_and_grant(
         &directories,
         root,
@@ -86,6 +87,7 @@ pub fn pact_subtree(
         manifest: rewrite(manifest, &directories, root, outcomes),
         failures,
         problems,
+        repairs,
     })
 }
 
@@ -170,6 +172,7 @@ pub fn refresh_subtree(
         outcomes,
         failures,
         problems,
+        repairs,
     } = describe_and_grant(&stale, root, &recorded, AboveFailure::Skip, agent, observer);
 
     // The empty slice, not `stale`: `rewrite` drops an entry only where the run
@@ -179,6 +182,7 @@ pub fn refresh_subtree(
         manifest: rewrite(manifest, &[], root, outcomes),
         failures,
         problems,
+        repairs,
     })
 }
 
@@ -200,6 +204,7 @@ struct Described {
     outcomes: BTreeMap<String, Outcome>,
     failures: Vec<Failure>,
     problems: Vec<Problem>,
+    repairs: Vec<Repaired>,
 }
 
 // The narrow thing a run is allowed to say about an entry. A scope is a
@@ -323,6 +328,7 @@ fn describe_and_grant(
 ) -> Described {
     let mut failures = Vec::new();
     let mut problems = Vec::new();
+    let mut repairs = Vec::new();
 
     let total = directories.len();
     let mut documents = BTreeMap::new();
@@ -371,8 +377,14 @@ fn describe_and_grant(
             Ok(Pacted {
                 document,
                 problems: caps,
+                repairs: mended,
             }) => {
                 problems.extend(caps);
+                // Alongside the caps' problems and for the same reason: a
+                // mended directory was described, hashed and granted like any
+                // other, so this is a note about the run and not a failure in
+                // it.
+                repairs.extend(mended);
                 // Taken again: the document is part of this digest, so the
                 // pre-pass reading describes the directory as it no longer is.
                 // Only this directory's own `WARLOCK.md` moved in between, and
@@ -455,6 +467,7 @@ fn describe_and_grant(
         outcomes,
         failures,
         problems,
+        repairs,
     }
 }
 
@@ -615,7 +628,7 @@ pub fn closed_scopes_at_or_below<'manifest>(
 /// let dir = tempfile::tempdir()?;
 /// fs::write(dir.path().join("lib.rs"), "//! Core engine.\n")?;
 ///
-/// let Pacted { document, problems } = pact_directory(dir.path(), &Canned)?;
+/// let Pacted { document, problems, repairs } = pact_directory(dir.path(), &Canned)?;
 ///
 /// assert_eq!(document, dir.path().join("WARLOCK.md"));
 ///
@@ -626,6 +639,9 @@ pub fn closed_scopes_at_or_below<'manifest>(
 /// assert!(written.starts_with("<!-- warlock -->"));
 /// assert!(written.contains("## Files\n\n- `lib.rs` (17 B) — "));
 /// assert!(problems.is_empty());
+///
+/// // A pass that got everything right leaves warlock nothing to mend.
+/// assert!(repairs.is_empty());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<Pacted, Error> {
@@ -711,14 +727,42 @@ fn pact_directory_watched(
             }
         }
     }
-    let Some(fill) = accepted else {
-        return Err(Error::Refused {
-            directory: directory.to_path_buf(),
-            cause: Refusal::Malformed {
-                defects,
-                attempts: ATTEMPTS,
-            },
-        });
+    // The floor under the exhausted loop. A gate is a shape the document has to
+    // hold, not a test the pass has to pass: once the asking has run out, one
+    // wrong slot out of thirty-six is mended here from what warlock already
+    // measured rather than costing the directory — and every directory above it
+    // — its grant. So `Malformed` is left for the one thing no mend can reach,
+    // an answer that was never an object at all: `previous` is `Some` exactly
+    // when some attempt parsed, and `Accepted::Unparsed` only ever carries
+    // `Defect::NotJson`.
+    let (fill, repairs) = if let Some(fill) = accepted {
+        (fill, Vec::new())
+    } else {
+        let Some(best) = previous else {
+            return Err(Error::Refused {
+                directory: directory.to_path_buf(),
+                cause: Refusal::Malformed {
+                    defects,
+                    attempts: ATTEMPTS,
+                },
+            });
+        };
+        let (mended, mends) = document::mend(&best, &expected, &described);
+        let repairs = mends
+            .into_iter()
+            .map(|mend| {
+                // Announced one at a time as it is made, and carried as data
+                // besides: a front end wants to say so while the run is still
+                // going, and a caller that was not watching still has to be
+                // able to find out.
+                observer.repaired(directory, &mend);
+                Repaired {
+                    directory: directory.to_path_buf(),
+                    mend,
+                }
+            })
+            .collect();
+        (mended, repairs)
     };
 
     // The directory's name and not its path: the path is absolute, it is the
@@ -753,7 +797,11 @@ fn pact_directory_watched(
         });
     }
 
-    Ok(Pacted { document, problems })
+    Ok(Pacted {
+        document,
+        problems,
+        repairs,
+    })
 }
 
 // Deliberately the same list `load_tree` would have made nodes of, so that
@@ -900,6 +948,13 @@ pub trait Observer {
         let _ = (directory, defects, attempt, attempts);
     }
 
+    /// One slot warlock mended itself, once the attempts behind
+    /// [`rejected`](Observer::rejected) ran out. The document was still
+    /// written: this is what it cost, not a reason it was not.
+    fn repaired(&mut self, directory: &Path, mend: &document::Mend) {
+        let _ = (directory, mend);
+    }
+
     fn documented(&mut self, directory: &Path) {
         let _ = directory;
     }
@@ -936,12 +991,33 @@ pub struct PactedSubtree {
     pub manifest: Manifest,
     pub failures: Vec<Failure>,
     pub problems: Vec<Problem>,
+    pub repairs: Vec<Repaired>,
 }
 
 #[derive(Debug)]
 pub struct Pacted {
     pub document: PathBuf,
     pub problems: Vec<Problem>,
+    pub repairs: Vec<Repaired>,
+}
+
+/// One slot warlock filled in itself rather than refusing the document, carried
+/// the way [`Problem`] is: a repair is no more a failure than a file left out
+/// of a request is, and both are things a caller is owed the list of.
+///
+/// The directory is here because the list travels up out of a whole subtree,
+/// where the `field` alone — `purpose`, `files["writing.rs"]` — says nothing
+/// about which document it was in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repaired {
+    pub directory: PathBuf,
+    pub mend: document::Mend,
+}
+
+impl fmt::Display for Repaired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.directory.display(), self.mend)
+    }
 }
 
 #[derive(Debug)]
@@ -1534,6 +1610,450 @@ mod tests {
             );
             assert_eq!(written(dir.path()), None);
         }
+    }
+
+    // The mend: the floor under an exhausted attempt loop.
+
+    // A pass that answers with the right shape and the same slot wrong every
+    // time, however often it is asked. Four attempts that change nothing is
+    // the only road to the mend: it is what is left when the asking has run
+    // out, not a substitute for asking.
+    struct Defective {
+        break_it: fn(&mut serde_json::Map<String, serde_json::Value>),
+        seen: std::cell::RefCell<Vec<agent::Request>>,
+    }
+
+    impl Defective {
+        fn with(break_it: fn(&mut serde_json::Map<String, serde_json::Value>)) -> Self {
+            Self {
+                break_it,
+                seen: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn document_passes(&self) -> usize {
+            self.seen
+                .borrow()
+                .iter()
+                .filter(|request| is_document_pass(request))
+                .count()
+        }
+    }
+
+    impl Agent for Defective {
+        fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
+            self.seen.borrow_mut().push(request.clone());
+            let answer = document::stub_answer(request);
+            if !is_document_pass(request) {
+                return Ok(agent::Response::new(answer));
+            }
+            let mut parsed: serde_json::Value =
+                serde_json::from_str(&answer).expect("a document pass is answered with an object");
+            (self.break_it)(parsed.as_object_mut().expect("a fill is an object"));
+            Ok(agent::Response::new(parsed.to_string()))
+        }
+    }
+
+    fn blank_purpose(answer: &mut serde_json::Map<String, serde_json::Value>) {
+        answer.insert(
+            "purpose".to_owned(),
+            serde_json::Value::String(String::new()),
+        );
+    }
+
+    const OVERLONG: usize = document::ENTRY_CHARS + 120;
+
+    // Two wrong slots of two different kinds: one value warlock can cut back
+    // to its cap out of the answer's own text, and one it has to fill in from
+    // what it measured itself.
+    fn blank_purpose_and_overlong_entries(answer: &mut serde_json::Map<String, serde_json::Value>) {
+        blank_purpose(answer);
+        let files = answer
+            .get_mut("files")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("a fill holds an entry per file");
+        for value in files.values_mut() {
+            *value = serde_json::Value::String("x".repeat(OVERLONG));
+        }
+    }
+
+    fn named(root: &Path, path: &Path) -> String {
+        relative_to(root, std::slice::from_ref(&path.to_path_buf()))
+            .pop()
+            .expect("one directory in, one name out")
+    }
+
+    struct Mending {
+        rejections: Vec<(PathBuf, usize)>,
+        repairs: Vec<(PathBuf, document::Mend)>,
+    }
+
+    impl Mending {
+        fn new() -> Self {
+            Self {
+                rejections: Vec::new(),
+                repairs: Vec::new(),
+            }
+        }
+
+        fn turned_down(&self, root: &Path) -> Vec<(String, usize)> {
+            self.rejections
+                .iter()
+                .map(|(directory, attempt)| (named(root, directory), *attempt))
+                .collect()
+        }
+
+        fn announced(&self, root: &Path) -> Vec<(String, String, document::Mended)> {
+            self.repairs
+                .iter()
+                .map(|(directory, mend)| (named(root, directory), mend.field.clone(), mend.done))
+                .collect()
+        }
+    }
+
+    impl Observer for Mending {
+        fn starting(&mut self, _directory: &Path, _position: usize, _total: usize) -> Pacting {
+            Pacting::Continue
+        }
+
+        fn rejected(
+            &mut self,
+            directory: &Path,
+            _defects: &[document::Defect],
+            attempt: usize,
+            _attempts: usize,
+        ) {
+            self.rejections.push((directory.to_path_buf(), attempt));
+        }
+
+        fn repaired(&mut self, directory: &Path, mend: &document::Mend) {
+            self.repairs.push((directory.to_path_buf(), mend.clone()));
+        }
+    }
+
+    #[test]
+    fn an_answer_that_stays_defective_is_mended_into_a_document_and_a_grant() {
+        let repo = project();
+        let src = repo.path().join("crates/tui/src");
+        let agent = Defective::with(blank_purpose);
+
+        let PactedSubtree {
+            manifest,
+            failures,
+            repairs,
+            ..
+        } = pact_subtree(&src, repo.path(), &Manifest::new(), &agent, &mut Unwatched)
+            .expect("an answer warlock can mend is an answer warlock writes");
+
+        assert_eq!(
+            agent.document_passes(),
+            document::ATTEMPTS,
+            "the asking happened first, in full: the mend is the floor under the \
+             loop and not a shortcut through it",
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+
+        // The document, written and renamed like any other.
+        let text = String::from_utf8(written(&src).expect("a document")).expect("text");
+        assert!(text.starts_with(STAMP), "{text}");
+        assert!(text.contains("`main.rs`"), "{text}");
+
+        // And the grant, recorded where a grant is recorded.
+        manifest.save(repo.path()).expect("saves");
+        let recorded = Manifest::load(repo.path()).expect("loads");
+        assert_eq!(
+            recorded
+                .entry("crates/tui/src")
+                .and_then(PactEntry::granted_hash),
+            Some(subtree_hash(&src).expect("hashes").as_str()),
+            "the hash covers the directory as it now stands, document and all",
+        );
+        assert_eq!(
+            state(&recorded, repo.path(), "crates/tui/src"),
+            NodeState::PactedFresh,
+            "which is what makes the directory green",
+        );
+        assert!(
+            fs::read_to_string(repo.path().join(".warlock/pacts.toml"))
+                .expect("reads")
+                .contains("crates/tui/src"),
+            "and it is in the file, not only in memory",
+        );
+
+        assert_eq!(repairs.len(), 1, "{repairs:?}");
+        assert_eq!(repairs[0].directory, src);
+        assert_eq!(repairs[0].mend.field, "purpose");
+    }
+
+    #[test]
+    fn an_answer_that_is_never_an_object_still_refuses_and_leaves_the_old_document_alone() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "lib.rs", "//! Core engine.\n");
+        let before = format!("{STAMP}\n# engine\n\nThe document that is already here.\n");
+        write(dir.path(), DOCUMENT_FILE, &before);
+        let agent = Canned::new("Here is some prose instead of the object you asked for.");
+
+        let error =
+            pact_directory(dir.path(), &agent).expect_err("there is no slot in prose to mend");
+
+        assert!(
+            matches!(
+                error,
+                super::Error::Refused {
+                    cause: Refusal::Malformed { .. },
+                    ..
+                }
+            ),
+            "an answer that was never an object is the one thing no mend reaches: {error:?}",
+        );
+        assert_eq!(
+            written(dir.path()).map(|bytes| String::from_utf8(bytes).expect("text")),
+            Some(before),
+            "byte for byte what was there: a refusal writes nothing, and half a \
+             document is worse than yesterday's",
+        );
+    }
+
+    // A directory laid out to reach every section `render` writes: a file with
+    // symbols in it, a file with none, a file that is not text, a child with a
+    // document, and an answer carrying structure, rules and a route.
+    fn spelled_out() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(
+            dir.path(),
+            "reading.rs",
+            "pub fn read_one() {}\npub struct Reader;\n",
+        );
+        write(dir.path(), "writing.rs", "fn scratch() {}\n");
+        write(dir.path(), "table.bin", [0xff_u8, 0x00, 0xfe, 0x01]);
+        write(
+            dir.path(),
+            "inner/WARLOCK.md",
+            format!("{STAMP}\n# inner\n"),
+        );
+        dir
+    }
+
+    const SPELLED_OUT_ANSWER: &str = r#"{
+      "purpose": "Reading and writing for the fixture, kept apart from the table beside them.",
+      "files": {
+        "reading.rs": "The reading half: one entry point and the type it hands back.",
+        "writing.rs": "The writing half, which is a single unexported helper for now."
+      },
+      "directories": { "inner": "A child directory carrying a document of its own." },
+      "structure": ["Reading and writing are separate files and share no state."],
+      "rules": ["Anything binary stays out of the two source files."],
+      "lookups": [{ "for": "reading a record", "open": "reading.rs", "symbol": "read_one" }]
+    }"#;
+
+    #[test]
+    fn a_pass_that_got_everything_right_writes_the_document_it_wrote_before_the_mend() {
+        // The mend is a floor under an exhausted loop, so the one thing it must
+        // not do is change what a clean pass produces. The document is spelled
+        // out here rather than compared against `render`, `STAMP` or any other
+        // constant the code could move with it: a stamp reworded, a section
+        // reordered, a size formatted differently or a repaired value reaching
+        // an answer that had nothing wrong with it all fail this, which is the
+        // whole point of writing the bytes out by hand. The bytes below are not
+        // this branch's output written down: this test was run unchanged (minus
+        // the `repairs` field, which did not exist yet) against e1a3dae, the
+        // commit before the mend, and passed there too.
+        let dir = spelled_out();
+        let agent = Canned::new(SPELLED_OUT_ANSWER);
+
+        let Pacted {
+            document,
+            problems,
+            repairs,
+        } = pact_directory(dir.path(), &agent).expect("a right answer is a written document");
+
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(
+            repairs.is_empty(),
+            "a pass that got everything right leaves nothing to mend: {repairs:?}",
+        );
+        assert_eq!(
+            fs::read_to_string(&document).expect("reads"),
+            format!(
+                "<!-- warlock -->\n\
+                 > Written by a model pass over this directory alone, to be read before its \
+                 source and to say which source to read. A map, not a specification: check \
+                 anything you are about to rely on against the files themselves, and where this \
+                 document and the code disagree, the code is right.\n\
+                 \n\
+                 # {}\n\
+                 \n\
+                 Reading and writing for the fixture, kept apart from the table beside them.\n\
+                 \n\
+                 ## Files\n\
+                 \n\
+                 - `reading.rs` (40 B) — The reading half: one entry point and the type it hands \
+                 back. · declares `read_one`, `Reader`\n\
+                 - `table.bin` (4 B) — not text; name and size only\n\
+                 - `writing.rs` (16 B) — The writing half, which is a single unexported helper \
+                 for now. · declares `scratch`\n\
+                 \n\
+                 ## Directories\n\
+                 \n\
+                 - `inner/` — A child directory carrying a document of its own.\n\
+                 \n\
+                 ## Structure\n\
+                 \n\
+                 - Reading and writing are separate files and share no state.\n\
+                 \n\
+                 ## Rules\n\
+                 \n\
+                 - Anything binary stays out of the two source files.\n\
+                 \n\
+                 ## Where to look\n\
+                 \n\
+                 - reading a record → `reading.rs` `read_one`\n",
+                dir.path()
+                    .file_name()
+                    .expect("a temporary directory has a name")
+                    .to_string_lossy(),
+            ),
+        );
+
+        // And written the way it has always been written: beside and renamed
+        // over, leaving the temporary behind nowhere.
+        let mut left: Vec<String> = fs::read_dir(dir.path())
+            .expect("reads")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "WARLOCK.md",
+                "inner",
+                "reading.rs",
+                "table.bin",
+                "writing.rs"
+            ],
+        );
+    }
+
+    #[test]
+    fn a_mended_directory_is_not_a_failure_and_the_subtree_is_still_pacted() {
+        let repo = project();
+        let engine = repo.path().join("crates/engine");
+        let agent = Defective::with(blank_purpose);
+
+        let PactedSubtree {
+            manifest,
+            failures,
+            repairs,
+            ..
+        } = pact_subtree(
+            &engine,
+            repo.path(),
+            &Manifest::new(),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("a subtree of mended passes is a pacted subtree");
+
+        assert!(
+            failures.is_empty(),
+            "a directory warlock mended was documented, hashed and granted, so it \
+             is a note about the run and not a failure in it: {failures:?}",
+        );
+        let mended: Vec<PathBuf> = repairs
+            .iter()
+            .map(|repaired| repaired.directory.clone())
+            .collect();
+        for module in [
+            "crates/engine/tests",
+            "crates/engine/src/inner",
+            "crates/engine/src",
+            "crates/engine",
+        ] {
+            let directory = from_manifest_path(repo.path(), module);
+            assert!(written(&directory).is_some(), "`{module}` is documented");
+            assert!(
+                manifest
+                    .entry(module)
+                    .and_then(PactEntry::granted_hash)
+                    .is_some(),
+                "`{module}` is granted, the same as a clean pass would leave it",
+            );
+            assert!(
+                failures
+                    .iter()
+                    .all(|failure| failure.directory() != directory),
+                "and `{module}` is in no failure: {failures:?}",
+            );
+            assert!(
+                mended.contains(&directory),
+                "`{module}` was mended, which is why this is worth asserting: {repairs:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn every_mend_is_carried_out_of_the_run_and_announced_as_it_is_made() {
+        let repo = project();
+        let src = repo.path().join("crates/tui/src");
+        let agent = Defective::with(blank_purpose_and_overlong_entries);
+        let mut observer = Mending::new();
+
+        let PactedSubtree {
+            failures, repairs, ..
+        } = pact_subtree(&src, repo.path(), &Manifest::new(), &agent, &mut observer)
+            .expect("pacts");
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            observer.turned_down(repo.path()),
+            (1..=document::ATTEMPTS)
+                .map(|attempt| ("crates/tui/src".to_owned(), attempt))
+                .collect::<Vec<_>>(),
+            "the loop ran out first, and said so each time",
+        );
+
+        let carried: Vec<(String, String, document::Mended)> = repairs
+            .iter()
+            .map(|repaired| {
+                (
+                    named(repo.path(), &repaired.directory),
+                    repaired.mend.field.clone(),
+                    repaired.mend.done,
+                )
+            })
+            .collect();
+        assert_eq!(
+            carried,
+            [
+                (
+                    "crates/tui/src".to_owned(),
+                    "purpose".to_owned(),
+                    document::Mended::Supplied,
+                ),
+                (
+                    "crates/tui/src".to_owned(),
+                    "files[\"main.rs\"]".to_owned(),
+                    document::Mended::Cut {
+                        from: OVERLONG,
+                        to: document::ENTRY_CHARS,
+                    },
+                ),
+            ],
+            "one value per slot, naming the directory and the slot in `Defect`'s \
+             own spelling",
+        );
+        assert_eq!(
+            observer.announced(repo.path()),
+            carried,
+            "and the calls a front end saw are the list a caller is handed: the \
+             hook is the same facts, earlier",
+        );
     }
 
     #[test]
@@ -2398,6 +2918,7 @@ mod tests {
             manifest,
             failures,
             problems,
+            ..
         } = pact_subtree(
             &engine,
             repo.path(),
@@ -3095,6 +3616,7 @@ mod tests {
             manifest,
             failures,
             problems,
+            ..
         } = pact_subtree(
             repo.join("crates/engine"),
             repo,
@@ -3375,6 +3897,7 @@ mod tests {
             manifest,
             failures,
             problems,
+            ..
         } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut observer)
             .expect("refreshes");
 
@@ -3820,6 +4343,7 @@ mod tests {
             manifest,
             failures,
             problems,
+            ..
         } = pact_subtree(
             &engine,
             repo.path(),
@@ -3857,6 +4381,7 @@ mod tests {
             manifest,
             failures,
             problems,
+            ..
         } = refresh_subtree(
             &engine,
             repo.path(),

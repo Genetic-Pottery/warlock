@@ -48,6 +48,7 @@ pub use pact::Pacted;
 pub use pact::PactedSubtree;
 pub use pact::Pacting;
 pub use pact::Refusal;
+pub use pact::Repaired;
 pub use pact::Unviewable;
 pub use pact::Unwatched;
 pub use pact::Viewed;
