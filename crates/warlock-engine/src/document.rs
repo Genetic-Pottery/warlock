@@ -954,6 +954,19 @@ mod fallback {
 
     // A file entry: its name, its size as `render` prints it, and the symbols
     // `languages.rs` extracted from it.
+    //
+    // Every one of those facts is already on the line this value is written
+    // into — `render` prints ``- `reading.rs` (40 B) — `` in front of it and
+    // `· declares `read_one`` after it — so the mended line reads as a
+    // restatement of its own surroundings and routes a reader no better than
+    // an empty entry would. It is here for the shape and not for the routing:
+    // an empty value is `Defect::Empty`, so a fill mended with one would still
+    // be defective, and the rendered line would trail off after its em dash.
+    // Read off `render` rather than assumed — the name, the size and the first
+    // `DECLARED_SHOWN` symbols are printed by `render` itself, on this very
+    // line — and the alternative, leaving the entry empty and letting `check`
+    // pass it, was rejected on the two grounds above. Do not dress this line up
+    // into something that sounds like it read the file.
     pub(super) fn file(path: &str, expected: &Expected<'_>, described: &Described) -> String {
         let guarded = !expected.mentions_tool();
         let size = expected.files.get(path).map(|(size, _)| human(*size));

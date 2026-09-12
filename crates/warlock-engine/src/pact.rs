@@ -1814,6 +1814,132 @@ mod tests {
         );
     }
 
+    // A directory laid out to reach every section `render` writes: a file with
+    // symbols in it, a file with none, a file that is not text, a child with a
+    // document, and an answer carrying structure, rules and a route.
+    fn spelled_out() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(
+            dir.path(),
+            "reading.rs",
+            "pub fn read_one() {}\npub struct Reader;\n",
+        );
+        write(dir.path(), "writing.rs", "fn scratch() {}\n");
+        write(dir.path(), "table.bin", [0xff_u8, 0x00, 0xfe, 0x01]);
+        write(
+            dir.path(),
+            "inner/WARLOCK.md",
+            format!("{STAMP}\n# inner\n"),
+        );
+        dir
+    }
+
+    const SPELLED_OUT_ANSWER: &str = r#"{
+      "purpose": "Reading and writing for the fixture, kept apart from the table beside them.",
+      "files": {
+        "reading.rs": "The reading half: one entry point and the type it hands back.",
+        "writing.rs": "The writing half, which is a single unexported helper for now."
+      },
+      "directories": { "inner": "A child directory carrying a document of its own." },
+      "structure": ["Reading and writing are separate files and share no state."],
+      "rules": ["Anything binary stays out of the two source files."],
+      "lookups": [{ "for": "reading a record", "open": "reading.rs", "symbol": "read_one" }]
+    }"#;
+
+    #[test]
+    fn a_pass_that_got_everything_right_writes_the_document_it_wrote_before_the_mend() {
+        // The mend is a floor under an exhausted loop, so the one thing it must
+        // not do is change what a clean pass produces. The document is spelled
+        // out here rather than compared against `render`, `STAMP` or any other
+        // constant the code could move with it: a stamp reworded, a section
+        // reordered, a size formatted differently or a repaired value reaching
+        // an answer that had nothing wrong with it all fail this, which is the
+        // whole point of writing the bytes out by hand. The bytes below are not
+        // this branch's output written down: this test was run unchanged (minus
+        // the `repairs` field, which did not exist yet) against e1a3dae, the
+        // commit before the mend, and passed there too.
+        let dir = spelled_out();
+        let agent = Canned::new(SPELLED_OUT_ANSWER);
+
+        let Pacted {
+            document,
+            problems,
+            repairs,
+        } = pact_directory(dir.path(), &agent).expect("a right answer is a written document");
+
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(
+            repairs.is_empty(),
+            "a pass that got everything right leaves nothing to mend: {repairs:?}",
+        );
+        assert_eq!(
+            fs::read_to_string(&document).expect("reads"),
+            format!(
+                "<!-- warlock -->\n\
+                 > Written by a model pass over this directory alone, to be read before its \
+                 source and to say which source to read. A map, not a specification: check \
+                 anything you are about to rely on against the files themselves, and where this \
+                 document and the code disagree, the code is right.\n\
+                 \n\
+                 # {}\n\
+                 \n\
+                 Reading and writing for the fixture, kept apart from the table beside them.\n\
+                 \n\
+                 ## Files\n\
+                 \n\
+                 - `reading.rs` (40 B) — The reading half: one entry point and the type it hands \
+                 back. · declares `read_one`, `Reader`\n\
+                 - `table.bin` (4 B) — not text; name and size only\n\
+                 - `writing.rs` (16 B) — The writing half, which is a single unexported helper \
+                 for now. · declares `scratch`\n\
+                 \n\
+                 ## Directories\n\
+                 \n\
+                 - `inner/` — A child directory carrying a document of its own.\n\
+                 \n\
+                 ## Structure\n\
+                 \n\
+                 - Reading and writing are separate files and share no state.\n\
+                 \n\
+                 ## Rules\n\
+                 \n\
+                 - Anything binary stays out of the two source files.\n\
+                 \n\
+                 ## Where to look\n\
+                 \n\
+                 - reading a record → `reading.rs` `read_one`\n",
+                dir.path()
+                    .file_name()
+                    .expect("a temporary directory has a name")
+                    .to_string_lossy(),
+            ),
+        );
+
+        // And written the way it has always been written: beside and renamed
+        // over, leaving the temporary behind nowhere.
+        let mut left: Vec<String> = fs::read_dir(dir.path())
+            .expect("reads")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "WARLOCK.md",
+                "inner",
+                "reading.rs",
+                "table.bin",
+                "writing.rs"
+            ],
+        );
+    }
+
     #[test]
     fn a_mended_directory_is_not_a_failure_and_the_subtree_is_still_pacted() {
         let repo = project();
