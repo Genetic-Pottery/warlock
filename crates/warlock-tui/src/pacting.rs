@@ -900,6 +900,10 @@ fn described(subtree: PactedSubtree) -> Toggled {
         manifest,
         failures,
         problems,
+        // Carried by the engine and not shown here yet: a repaired directory
+        // was described and granted like any other, and where the panel says
+        // so is the next slice's question.
+        repairs: _,
     } = subtree;
     // Failures alone decide freshness, and the byte caps' problems do not:
     // a request that left a lockfile out still produced a document, a hash

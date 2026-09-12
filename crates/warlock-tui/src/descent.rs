@@ -87,6 +87,7 @@ pub(crate) fn descend(
                 .map_err(|source| Error::Manifest { source })?,
             failures: Vec::new(),
             problems: Vec::new(),
+            repairs: Vec::new(),
         },
     };
 
