@@ -931,15 +931,13 @@ fn described(subtree: PactedSubtree) -> Toggled {
         manifest,
         failures,
         problems,
-        // Carried by the engine and not shown here yet: a repaired directory
-        // was described and granted like any other, and where the panel says
-        // so is the next slice's question.
-        repairs: _,
+        repairs,
     } = subtree;
-    // Failures alone decide freshness, and the byte caps' problems do not:
-    // a request that left a lockfile out still produced a document, a hash
-    // and a grant. They are still worth a line, which is why the two travel
-    // separately from here on.
+    // Failures alone decide freshness, and neither the byte caps' problems nor
+    // the repairs do: a request that left a lockfile out still produced a
+    // document, a hash and a grant, and so did one warlock had to mend a slot
+    // of. They are still worth a line, which is why the three travel separately
+    // from here on.
     let granted = failures.is_empty();
     // And the same failures a second time, per directory: the footer takes
     // one of them and the panel takes all of them, because the panel has a
@@ -948,16 +946,32 @@ fn described(subtree: PactedSubtree) -> Toggled {
     Toggled {
         manifest,
         granted,
-        message: pact_message(&failures, &problems),
+        message: pact_message(&failures, &problems, &repairs),
         refusals,
     }
 }
 
-fn pact_message(failures: &[pact::Failure], problems: &[fitting::Problem]) -> Option<String> {
+// Three tiers, worst first, and only one of them is ever on the footer: a
+// directory that was refused is the fact the operator needs, a request that
+// went out short is the next one, and a slot warlock mended itself is worth
+// saying only when nothing louder happened. Failures and problems share the
+// first tier because a refusal and a short request are both things about the
+// same attempt; repairs stand alone because they happened to a document that
+// was written and granted.
+fn pact_message(
+    failures: &[pact::Failure],
+    problems: &[fitting::Problem],
+    repairs: &[pact::Repaired],
+) -> Option<String> {
     let (first, rest) = match (failures.split_first(), problems.split_first()) {
         (Some((first, others)), _) => (first.to_string(), others.len() + problems.len()),
         (None, Some((first, others))) => (first.to_string(), others.len()),
-        (None, None) => return None,
+        // The repair's own sentence, not a parallel wording of it: `Repaired`
+        // already says which directory and what was done to which slot.
+        (None, None) => match repairs.split_first() {
+            Some((first, others)) => (first.to_string(), others.len()),
+            None => return None,
+        },
     };
 
     let first = one_line(&first);
