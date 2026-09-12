@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
 
@@ -134,6 +134,13 @@ enum Shown<'a> {
 
 #[derive(Debug)]
 pub struct Expected<'a> {
+    // The directory's own name, the way `render` is given it: the last
+    // component of the request's directory and never the path, which is
+    // absolute and would be the reader's home directory. It is here for
+    // [`fallback::purpose`], the one repair whose fact is the directory itself
+    // rather than a file in it, so [`mend`] needs no fourth argument to say
+    // what the directory is called.
+    name: String,
     files: BTreeMap<&'a str, (u64, Shown<'a>)>,
     directories: BTreeMap<&'a str, &'a str>,
 }
@@ -141,6 +148,11 @@ pub struct Expected<'a> {
 impl<'a> Expected<'a> {
     #[must_use]
     pub fn of(request: &'a Request) -> Self {
+        let name = request
+            .directory()
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let files = request
             .files()
             .iter()
@@ -151,7 +163,11 @@ impl<'a> Expected<'a> {
             .iter()
             .map(|child| (child.directory(), child.text()))
             .collect();
-        Self { files, directories }
+        Self {
+            name,
+            files,
+            directories,
+        }
     }
 
     fn asked(&self) -> impl Iterator<Item = &'a str> + '_ {
@@ -927,11 +943,6 @@ fn human(bytes: u64) -> String {
 // either way. Once the files themselves use the word the rule has stood down
 // and every fact goes in whole.
 mod fallback {
-    // These are the mechanical mend's floor and the mend is the next slice;
-    // until it calls them only the tests below do, and the lib build would
-    // otherwise call them dead. Delete this when the mend lands.
-    #![allow(dead_code)]
-
     use super::{
         DECLARED_SHOWN, Described, ENTRY_CHARS, ENTRY_MINIMUM, Expected, human, names_tool,
     };
@@ -1054,14 +1065,438 @@ mod fallback {
     }
 }
 
+// Four, and the shape of the worst chain is why. A repair can make a slot
+// defective in a new way — an entry cut to the cap can land under
+// `ENTRY_MINIMUM`, and a value dropped for naming the tool is then missing —
+// so the mend is a fixpoint and not a single sweep: repair, check again,
+// repair what the repair left. The longest chain a rule here can start is
+// three links (drop, then fall back, then check clean), and a fourth pass is
+// the margin. It is a stop and not a schedule: the loop leaves as soon as
+// `check` comes back empty, and if it ever did not, an unbounded version would
+// spin between two rules instead of writing a document.
+pub const MEND_PASSES: usize = 4;
+
+// One repair, named the way the defect behind it was. `field` is the slot in
+// `Defect`'s own spelling — `files["writing.rs"]`, `purpose`, `lookups` — so a
+// caller can line a mend up against the defect it answers without parsing
+// prose.
+//
+// Distinct from [`Repair`], which is the other half of this: a `Repair` is the
+// list of slots a *model* is asked about again, and a `Mend` is what warlock
+// did to one of them itself when the asking ran out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mend {
+    pub field: String,
+    pub done: Mended,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mended {
+    // The value spanned lines and keeps its first.
+    FirstLine,
+    // The value ran over its cap and was cut to it, counting characters.
+    Cut { from: usize, to: usize },
+    // The list ran over `LIST_CAP` and keeps its first entries.
+    Shortened { from: usize, to: usize },
+    // The entry could not be made right from the model's own text — it names
+    // something that is not here, or names the tool — so it is gone.
+    Dropped,
+    // The slot fell to the factual line: the name, the size and the symbols
+    // warlock measured. See [`fallback`].
+    Supplied,
+}
+
+impl fmt::Display for Mend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let field = &self.field;
+        match self.done {
+            Mended::FirstLine => {
+                write!(f, "{field} ran to more than one line and keeps its first")
+            }
+            Mended::Cut { from, to } => {
+                write!(f, "{field} was {from} characters and was cut to {to}")
+            }
+            Mended::Shortened { from, to } => {
+                write!(
+                    f,
+                    "{field} had {from} entries and was cut to the first {to}"
+                )
+            }
+            Mended::Dropped => write!(
+                f,
+                "{field} could not be repaired from the answer and was dropped"
+            ),
+            Mended::Supplied => write!(
+                f,
+                "{field} was not answered and was filled in from what warlock measured"
+            ),
+        }
+    }
+}
+
+// The mechanical mend: the floor under an exhausted attempt loop. Every
+// [`Defect`] but `NotJson` has a repair here, and none of them reaches a model
+// — the evidence is the answer's own text, the file names and sizes warlock
+// measured and the symbols `languages.rs` extracted. A fill that comes back
+// from here is not defective: `check` over it is empty, which is the property
+// the loop below exists to hold.
+#[must_use]
+pub fn mend(fill: &Fill, expected: &Expected<'_>, described: &Described) -> (Fill, Vec<Mend>) {
+    let (fill, mends, _) = mended(fill, expected, described);
+    (fill, mends)
+}
+
+// The same operation, saying how many passes it took. Private because the
+// count is a fact about this function and not about the document; the test for
+// the bound is the only caller that has any use for it.
+fn mended(fill: &Fill, expected: &Expected<'_>, described: &Described) -> (Fill, Vec<Mend>, usize) {
+    let mut fill = fill.clone();
+    // The same normalisation `accept` makes before its check, for the same
+    // reason: an entry for something the request does not hold is nothing a
+    // repair could make right, and `keyed`'s debug assertion forbids one
+    // reaching the check at all.
+    let asked: Vec<&str> = expected.asked().collect();
+    fill.files.retain(|key, _| asked.contains(&key.as_str()));
+    fill.directories
+        .retain(|key, _| expected.directories.contains_key(key.as_str()));
+
+    let mut mends = Vec::new();
+    let mut passes = 0;
+    for _ in 0..MEND_PASSES {
+        let defects = check(&fill, expected);
+        if defects.is_empty() {
+            break;
+        }
+        passes += 1;
+        sweep(&mut fill, &defects, expected, described, &mut mends);
+    }
+    (fill, mends, passes)
+}
+
+// One pass of the fixpoint. The order inside it is what keeps a list's indices
+// meaning what the defects say they mean: what to drop and what to fill is
+// decided first, then the values that survive are rewritten in place, and only
+// then does anything move — so a defect naming `lookups[3]` is never applied
+// to whatever slid into position 3.
+fn sweep(
+    fill: &mut Fill,
+    defects: &[Defect],
+    expected: &Expected<'_>,
+    described: &Described,
+    mends: &mut Vec<Mend>,
+) {
+    let mut plan = Plan::default();
+    // Drops before fills before rewrites. An entry that names something which
+    // is not here goes whatever else is wrong with it, so deciding that first
+    // keeps the pass from recording a fill or a cut it then undoes.
+    for defect in defects {
+        plan.note_drop(defect, mends);
+    }
+    for defect in defects {
+        plan.note_fill(defect, mends);
+    }
+    for defect in defects {
+        let (field, done) = match defect {
+            Defect::Multiline { field } => (field, Mended::FirstLine),
+            Defect::TooLong { field, chars, cap } => (
+                field,
+                Mended::Cut {
+                    from: *chars,
+                    to: *cap,
+                },
+            ),
+            _ => continue,
+        };
+        // A slot already on its way out, or already being filled in whole, is
+        // not worth rewriting first: the record would name work the same pass
+        // undoes.
+        if plan.covers(field) {
+            continue;
+        }
+        let Some(value) = target(fill, field) else {
+            continue;
+        };
+        match done {
+            // The first line of the value as the check reads it: `line`
+            // measures the trimmed value, so a value that opens with a blank
+            // line keeps the first line of what was actually written.
+            Mended::FirstLine => {
+                *value = value.trim().lines().next().unwrap_or_default().to_owned();
+            }
+            // Characters, not bytes, and so on a character boundary. No trim:
+            // the cut lands where it lands, and `render` trims on the way out.
+            Mended::Cut { to, .. } => *value = value.chars().take(to).collect(),
+            _ => {}
+        }
+        mends.push(Mend {
+            field: field.clone(),
+            done,
+        });
+    }
+    plan.carry_out(fill, expected, described);
+}
+
+#[derive(Debug, Default)]
+struct Plan {
+    purpose: bool,
+    filled_files: BTreeSet<String>,
+    filled_directories: BTreeSet<String>,
+    dropped_files: BTreeSet<String>,
+    dropped_directories: BTreeSet<String>,
+    dropped_structure: BTreeSet<usize>,
+    dropped_rules: BTreeSet<usize>,
+    dropped_lookups: BTreeSet<usize>,
+    // The lists to cut back to `LIST_CAP`, by the names `check` and `Slot`
+    // spell them: "structure", "rules", "lookups".
+    cut: BTreeSet<&'static str>,
+}
+
+impl Plan {
+    // What goes: an entry naming a file, a subdirectory or a symbol that is
+    // not here, an entry naming the tool, and whatever hangs off the end of a
+    // list over its cap. A claim has no cut and no fallback — there is nothing
+    // factual to put in its place — so the entry is dropped and, where the
+    // slot is a keyed one, the next pass finds it missing and fills it in.
+    fn note_drop(&mut self, defect: &Defect, mends: &mut Vec<Mend>) {
+        let field = match defect {
+            Defect::UnknownTarget { field, .. }
+            | Defect::UnverifiedSymbol { field, .. }
+            | Defect::ToolNamed { field } => field,
+            Defect::TooMany { field, count, cap } => {
+                let Slot::List(list) = slot(field) else {
+                    return;
+                };
+                self.cut.insert(list);
+                mends.push(Mend {
+                    field: field.clone(),
+                    done: Mended::Shortened {
+                        from: *count,
+                        to: *cap,
+                    },
+                });
+                return;
+            }
+            _ => return,
+        };
+        let (recorded, done) = match slot(field) {
+            // The purpose is the one slot a drop cannot answer: a document
+            // with no purpose is not a document, and there is no next rule
+            // under it. So it falls to the fallback line here too, which is
+            // built not to name the tool.
+            Slot::Purpose => (
+                !std::mem::replace(&mut self.purpose, true),
+                Mended::Supplied,
+            ),
+            Slot::File(key) => (self.dropped_files.insert(key), Mended::Dropped),
+            Slot::Directory(key) => (self.dropped_directories.insert(key), Mended::Dropped),
+            // A list entry has no name, size or symbols behind it, and the
+            // prompt says an empty list is fine, so there is nothing to fall
+            // back to and nothing lost by the gap.
+            Slot::Entry("structure", index) => {
+                (self.dropped_structure.insert(index), Mended::Dropped)
+            }
+            Slot::Entry(_, index) => (self.dropped_rules.insert(index), Mended::Dropped),
+            Slot::Route(index) => (self.dropped_lookups.insert(index), Mended::Dropped),
+            Slot::List(_) | Slot::Unknown => (false, Mended::Dropped),
+        };
+        if recorded {
+            mends.push(Mend {
+                field: field.clone(),
+                done,
+            });
+        }
+    }
+
+    // What was never answered: a key left out, a value left empty, a value
+    // too short to hold a fact. Warlock says what it measured instead.
+    fn note_fill(&mut self, defect: &Defect, mends: &mut Vec<Mend>) {
+        let (Defect::Missing { field } | Defect::Empty { field } | Defect::TooShort { field, .. }) =
+            defect
+        else {
+            return;
+        };
+        let recorded = match slot(field) {
+            Slot::Purpose => !std::mem::replace(&mut self.purpose, true),
+            Slot::File(key) => !self.dropped_files.contains(&key) && self.filled_files.insert(key),
+            Slot::Directory(key) => {
+                !self.dropped_directories.contains(&key) && self.filled_directories.insert(key)
+            }
+            Slot::Entry("structure", index) => self.dropped_structure.insert(index),
+            Slot::Entry(_, index) => self.dropped_rules.insert(index),
+            Slot::Route(index) => self.dropped_lookups.insert(index),
+            Slot::List(_) | Slot::Unknown => false,
+        };
+        if recorded {
+            // A list entry is dropped rather than filled, and says so.
+            let done = match slot(field) {
+                Slot::Purpose | Slot::File(_) | Slot::Directory(_) => Mended::Supplied,
+                _ => Mended::Dropped,
+            };
+            mends.push(Mend {
+                field: field.clone(),
+                done,
+            });
+        }
+    }
+
+    // Whether the slot a value rewrite names is already being dropped, filled
+    // in whole, or cut off the end of its list this pass.
+    fn covers(&self, field: &str) -> bool {
+        match slot(field) {
+            Slot::Purpose => self.purpose,
+            Slot::File(key) => {
+                self.dropped_files.contains(&key) || self.filled_files.contains(&key)
+            }
+            Slot::Directory(key) => {
+                self.dropped_directories.contains(&key) || self.filled_directories.contains(&key)
+            }
+            Slot::Entry("structure", index) => {
+                self.dropped_structure.contains(&index) || self.cut_off("structure", index)
+            }
+            Slot::Entry(_, index) => {
+                self.dropped_rules.contains(&index) || self.cut_off("rules", index)
+            }
+            Slot::Route(index) => {
+                self.dropped_lookups.contains(&index) || self.cut_off("lookups", index)
+            }
+            Slot::List(_) | Slot::Unknown => false,
+        }
+    }
+
+    // Whether an entry is past the cap of a list this pass cuts back, and so
+    // about to go anyway.
+    fn cut_off(&self, list: &'static str, index: usize) -> bool {
+        index >= LIST_CAP && self.cut.contains(list)
+    }
+
+    fn carry_out(self, fill: &mut Fill, expected: &Expected<'_>, described: &Described) {
+        if self.purpose {
+            fill.purpose = fallback::purpose(&expected.name, expected);
+        }
+        for key in &self.filled_files {
+            fill.files
+                .insert(key.clone(), fallback::file(key, expected, described));
+        }
+        for key in &self.filled_directories {
+            fill.directories
+                .insert(key.clone(), fallback::directory(key, expected));
+        }
+        fill.files
+            .retain(|key, _| !self.dropped_files.contains(key));
+        fill.directories
+            .retain(|key, _| !self.dropped_directories.contains(key));
+
+        // Dropped by the index the defects named, then cut to the cap: both
+        // read the same pre-pass list, so they are applied in that order and
+        // an index is never used after the list has moved under it.
+        for (name, list, dropped) in [
+            ("structure", &mut fill.structure, &self.dropped_structure),
+            ("rules", &mut fill.rules, &self.dropped_rules),
+        ] {
+            drop_indexes(list, dropped);
+            if self.cut.contains(name) {
+                list.truncate(LIST_CAP);
+            }
+        }
+        drop_indexes(&mut fill.lookups, &self.dropped_lookups);
+        if self.cut.contains("lookups") {
+            fill.lookups.truncate(LIST_CAP);
+        }
+    }
+}
+
+fn drop_indexes<T>(list: &mut Vec<T>, dropped: &BTreeSet<usize>) {
+    if dropped.is_empty() {
+        return;
+    }
+    let mut index = 0;
+    list.retain(|_| {
+        let keep = !dropped.contains(&index);
+        index += 1;
+        keep
+    });
+}
+
+// The slot a defect's `field` names, read back out of the spelling `check`
+// wrote it in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Slot {
+    Purpose,
+    File(String),
+    Directory(String),
+    List(&'static str),
+    Entry(&'static str, usize),
+    Route(usize),
+    Unknown,
+}
+
+fn slot(field: &str) -> Slot {
+    match field {
+        "purpose" => return Slot::Purpose,
+        "structure" => return Slot::List("structure"),
+        "rules" => return Slot::List("rules"),
+        "lookups" => return Slot::List("lookups"),
+        _ => {}
+    }
+    let Some((head, rest)) = field.split_once('[') else {
+        return Slot::Unknown;
+    };
+    let inside = rest.split_once(']').map_or(rest, |(inside, _)| inside);
+    match head {
+        // `check` writes a key with `{key:?}`, which is JSON's own escaping of
+        // a string, so serde reads it back.
+        "files" | "directories" => {
+            let Ok(key) = serde_json::from_str::<String>(inside) else {
+                return Slot::Unknown;
+            };
+            if head == "files" {
+                Slot::File(key)
+            } else {
+                Slot::Directory(key)
+            }
+        }
+        "structure" | "rules" | "lookups" => {
+            let Ok(index) = inside.parse::<usize>() else {
+                return Slot::Unknown;
+            };
+            match head {
+                "structure" => Slot::Entry("structure", index),
+                "rules" => Slot::Entry("rules", index),
+                _ => Slot::Route(index),
+            }
+        }
+        _ => Slot::Unknown,
+    }
+}
+
+// The value a rewrite writes over. `lookups[i].open` and `lookups[i].symbol`
+// are absent on purpose: no cap or line rule is checked on either, so the only
+// defects they carry are the ones that drop the route.
+fn target<'f>(fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
+    match slot(field) {
+        Slot::Purpose => Some(&mut fill.purpose),
+        Slot::File(key) => fill.files.get_mut(&key),
+        Slot::Directory(key) => fill.directories.get_mut(&key),
+        Slot::Entry("structure", index) => fill.structure.get_mut(index),
+        Slot::Entry(_, index) => fill.rules.get_mut(index),
+        // The topic and nothing else: `.open` and `.symbol` carry no cap or
+        // line rule, so no rewrite ever names them.
+        Slot::Route(index) if matches!(field.rsplit_once('.'), Some((_, "for"))) => {
+            fill.lookups.get_mut(index).map(|lookup| &mut lookup.topic)
+        }
+        Slot::Route(_) | Slot::List(_) | Slot::Unknown => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ATTEMPTS, Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Expected, Fill,
-        LIST_CAP, Lookup, PROMPT, PURPOSE_CHARS, Repair, STAMP, accept, check, fallback, human,
-        instructions, names_tool, render, repair_instructions, skeleton, stub_answer,
+        LIST_CAP, Lookup, MEND_PASSES, Mend, Mended, PROMPT, PURPOSE_CHARS, Repair, STAMP, accept,
+        check, fallback, human, instructions, mend, mended, names_tool, render,
+        repair_instructions, skeleton, stub_answer,
     };
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use crate::agent::{ChildDocument, File, Request};
 
@@ -1909,6 +2344,470 @@ mod tests {
                 assert!(!lowered.contains(wording), "{wording:?} in {line:?}");
             }
         }
+    }
+
+    // The mend over the fixture directory, asserting the property every one of
+    // these tests shares: what comes back is not itself defective.
+    #[track_caller]
+    fn mend_of(fill: &Fill) -> (Fill, Vec<Mend>) {
+        let request = request();
+        let expected = Expected::of(&request);
+        let (repaired, mends) = mend(fill, &expected, &declared());
+        assert_eq!(
+            check(&repaired, &expected),
+            [],
+            "a mended fill is not itself defective: {mends:?}"
+        );
+        (repaired, mends)
+    }
+
+    fn measured(path: &str) -> String {
+        let request = request();
+        fallback::file(path, &Expected::of(&request), &declared())
+    }
+
+    #[test]
+    fn a_missing_entry_falls_back_to_what_warlock_measured() {
+        let mut fill = good();
+        fill.files.remove("lib.rs");
+        let (repaired, mends) = mend_of(&fill);
+        assert_eq!(repaired.files["lib.rs"], measured("lib.rs"));
+        assert_eq!(
+            mends,
+            [Mend {
+                field: "files[\"lib.rs\"]".to_owned(),
+                done: Mended::Supplied
+            }]
+        );
+        assert_eq!(repaired.purpose, fill.purpose, "nothing else was touched");
+        assert_eq!(repaired.lookups, fill.lookups);
+    }
+
+    #[test]
+    fn an_empty_value_falls_back_to_what_warlock_measured() {
+        let request = request();
+        let expected = Expected::of(&request);
+        let mut fill = good();
+        fill.purpose = "   ".to_owned();
+        fill.directories.insert("src".to_owned(), String::new());
+        let (repaired, mends) = mend_of(&fill);
+        assert_eq!(repaired.purpose, fallback::purpose("engine", &expected));
+        assert_eq!(
+            repaired.directories["src"],
+            fallback::directory("src", &expected)
+        );
+        assert_eq!(
+            mends,
+            [
+                Mend {
+                    field: "purpose".to_owned(),
+                    done: Mended::Supplied
+                },
+                Mend {
+                    field: "directories[\"src\"]".to_owned(),
+                    done: Mended::Supplied
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_value_under_the_floor_falls_back_to_what_warlock_measured() {
+        let mut fill = good();
+        fill.files
+            .insert("lib.rs".to_owned(), "duplicate".to_owned());
+        let (repaired, mends) = mend_of(&fill);
+        assert_eq!(repaired.files["lib.rs"], measured("lib.rs"));
+        assert_eq!(mends.first().map(|mend| mend.done), Some(Mended::Supplied));
+        assert_eq!(mends.len(), 1, "{mends:?}");
+    }
+
+    #[test]
+    fn a_value_over_more_than_one_line_keeps_the_first() {
+        let mut fill = good();
+        fill.files.insert(
+            "lib.rs".to_owned(),
+            "\nthe crate root, in one line\nand a second the cap would have allowed".to_owned(),
+        );
+        let (repaired, mends) = mend_of(&fill);
+        assert_eq!(repaired.files["lib.rs"], "the crate root, in one line");
+        assert_eq!(
+            mends,
+            [Mend {
+                field: "files[\"lib.rs\"]".to_owned(),
+                done: Mended::FirstLine
+            }]
+        );
+        assert_eq!(
+            mends[0].to_string(),
+            "files[\"lib.rs\"] ran to more than one line and keeps its first"
+        );
+    }
+
+    #[test]
+    fn a_value_over_its_cap_is_cut_to_it_counting_characters() {
+        let mut fill = good();
+        fill.files
+            .insert("lib.rs".to_owned(), "x".repeat(ENTRY_CHARS + 20));
+        fill.purpose = "é".repeat(PURPOSE_CHARS + 1);
+        let (repaired, mends) = mend_of(&fill);
+        assert_eq!(repaired.files["lib.rs"].chars().count(), ENTRY_CHARS);
+        // Characters, and a character boundary: the purpose is multibyte, so a
+        // byte cut would either panic or land inside an `é`.
+        assert_eq!(repaired.purpose.chars().count(), PURPOSE_CHARS);
+        assert_eq!(repaired.purpose.len(), PURPOSE_CHARS * 2);
+        assert_eq!(
+            mends,
+            [
+                Mend {
+                    field: "purpose".to_owned(),
+                    done: Mended::Cut {
+                        from: PURPOSE_CHARS + 1,
+                        to: PURPOSE_CHARS
+                    }
+                },
+                Mend {
+                    field: "files[\"lib.rs\"]".to_owned(),
+                    done: Mended::Cut {
+                        from: ENTRY_CHARS + 20,
+                        to: ENTRY_CHARS
+                    }
+                },
+            ]
+        );
+        assert_eq!(
+            mends[1].to_string(),
+            "files[\"lib.rs\"] was 300 characters and was cut to 280",
+            "the line a run reports, from the brief"
+        );
+    }
+
+    #[test]
+    fn a_list_over_its_cap_keeps_its_first_entries() {
+        let mut fill = good();
+        fill.rules = (0..LIST_CAP + 2)
+            .map(|index| format!("a rule long enough to count, the {index}th"))
+            .collect();
+        let (repaired, mends) = mend_of(&fill);
+        assert_eq!(repaired.rules.len(), LIST_CAP);
+        assert_eq!(repaired.rules, fill.rules[..LIST_CAP]);
+        assert_eq!(
+            mends,
+            [Mend {
+                field: "rules".to_owned(),
+                done: Mended::Shortened {
+                    from: LIST_CAP + 2,
+                    to: LIST_CAP
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn a_lookup_opening_what_is_not_here_is_dropped() {
+        let mut fill = good();
+        fill.lookups.insert(
+            0,
+            Lookup {
+                topic: "somewhere else entirely".to_owned(),
+                open: "../tui/src/app.rs".to_owned(),
+                symbol: None,
+            },
+        );
+        let (repaired, mends) = mend_of(&fill);
+        assert_eq!(
+            repaired.lookups,
+            good().lookups,
+            "the routes that hold stay"
+        );
+        assert_eq!(
+            mends,
+            [Mend {
+                field: "lookups[0].open".to_owned(),
+                done: Mended::Dropped
+            }]
+        );
+    }
+
+    #[test]
+    fn a_lookup_naming_a_symbol_that_is_not_there_is_dropped() {
+        let mut fill = good();
+        fill.lookups[0].symbol = Some("load_tree".to_owned());
+        let (repaired, mends) = mend_of(&fill);
+        assert_eq!(
+            repaired.lookups,
+            good().lookups[1..],
+            "the route with the unverifiable name goes, not the document"
+        );
+        assert_eq!(
+            mends,
+            [Mend {
+                field: "lookups[0].symbol".to_owned(),
+                done: Mended::Dropped
+            }]
+        );
+    }
+
+    #[test]
+    fn a_value_naming_the_tool_is_dropped_and_falls_to_the_next_rule() {
+        let request = request();
+        let expected = Expected::of(&request);
+        let mut fill = good();
+        fill.files.insert(
+            "lib.rs".to_owned(),
+            "the crate root of the warlock engine, and long enough besides".to_owned(),
+        );
+        fill.structure = vec!["warlock-style grants, one per module and then some".to_owned()];
+        // The purpose is the one slot with no next rule under it: a document
+        // without one is not a document, so it falls straight to the fallback.
+        fill.purpose = "A toy freshness ledger belonging to Warlock.".to_owned();
+        let (repaired, mends) = mend_of(&fill);
+        assert_eq!(repaired.files["lib.rs"], measured("lib.rs"));
+        assert_eq!(repaired.purpose, fallback::purpose("engine", &expected));
+        assert!(
+            repaired.structure.is_empty(),
+            "a list entry has no fallback"
+        );
+        assert_eq!(
+            mends,
+            [
+                Mend {
+                    field: "purpose".to_owned(),
+                    done: Mended::Supplied
+                },
+                Mend {
+                    field: "files[\"lib.rs\"]".to_owned(),
+                    done: Mended::Dropped
+                },
+                Mend {
+                    field: "structure[0]".to_owned(),
+                    done: Mended::Dropped
+                },
+                Mend {
+                    field: "files[\"lib.rs\"]".to_owned(),
+                    done: Mended::Supplied
+                },
+            ],
+            "the drop and the fall are two records, in the order they happened"
+        );
+    }
+
+    #[test]
+    fn an_entry_the_request_never_asked_for_is_gone_before_the_first_check() {
+        let mut fill = good();
+        fill.files.insert(
+            "elsewhere.rs".to_owned(),
+            "a file of another crate".to_owned(),
+        );
+        fill.directories.insert(
+            "target".to_owned(),
+            "the build directory, unasked for".to_owned(),
+        );
+        // The same removal `Repair::apply` makes, for the same reason, and so
+        // not a mend: nothing was repaired, an answer to a question nobody
+        // asked was thrown away. Were it left in, `keyed`'s debug assertion
+        // would fire on the mend's own first `check`.
+        let (repaired, mends) = mend_of(&fill);
+        assert!(!repaired.files.contains_key("elsewhere.rs"));
+        assert!(!repaired.directories.contains_key("target"));
+        assert_eq!(repaired.files, good().files, "the asked-for entries stay");
+        assert_eq!(mends, []);
+    }
+
+    #[test]
+    fn the_mend_settles_inside_its_bound_and_two_rules_cannot_spin() {
+        const {
+            assert!(
+                MEND_PASSES >= 3,
+                "the longest chain is drop, fall back, check clean"
+            );
+        }
+        let request = request();
+        let expected = Expected::of(&request);
+
+        // The longest chain a rule here can start: a value both over the cap
+        // and naming the tool. The drop takes it, the fallback answers the gap
+        // the drop left, and the third look finds nothing — the two rules do
+        // not hand the slot back and forth.
+        let mut fill = good();
+        fill.files
+            .insert("lib.rs".to_owned(), format!("warlock{}", "x".repeat(400)));
+        let (repaired, mends, passes) = mended(&fill, &expected, &declared());
+        assert_eq!(check(&repaired, &expected), []);
+        assert_eq!(
+            mends.iter().map(|mend| mend.done).collect::<Vec<_>>(),
+            [Mended::Dropped, Mended::Supplied],
+            "twice over the same slot and then done: {mends:?}"
+        );
+        assert_eq!(passes, 2);
+        assert!(
+            passes < MEND_PASSES,
+            "the bound is a stop, not a schedule: {passes} of {MEND_PASSES}"
+        );
+
+        // Every rule at once, on every slot, still settles inside the bound.
+        let mut fill = good();
+        fill.purpose = "Warlock's own\nledger.".to_owned();
+        fill.files.remove("lib.rs");
+        fill.files
+            .insert("Cargo.toml".to_owned(), "warlock's manifest".to_owned());
+        fill.files
+            .insert("app.rs".to_owned(), "x".repeat(ENTRY_CHARS + 1));
+        fill.directories.insert("src".to_owned(), String::new());
+        fill.structure = vec![String::new(); LIST_CAP + 3];
+        fill.rules = vec!["r".to_owned(); LIST_CAP + 1];
+        fill.lookups = (0..LIST_CAP + 4)
+            .map(|index| Lookup {
+                topic: format!("route {index}"),
+                open: "nowhere.rs".to_owned(),
+                symbol: Some("missing".to_owned()),
+            })
+            .collect();
+        let (repaired, _, passes) = mended(&fill, &expected, &declared());
+        assert_eq!(check(&repaired, &expected), []);
+        assert!(passes <= MEND_PASSES, "{passes}");
+    }
+
+    fn variant(defect: &Defect) -> &'static str {
+        match defect {
+            Defect::NotJson { .. } => "NotJson",
+            Defect::Missing { .. } => "Missing",
+            Defect::Empty { .. } => "Empty",
+            Defect::Multiline { .. } => "Multiline",
+            Defect::TooShort { .. } => "TooShort",
+            Defect::TooLong { .. } => "TooLong",
+            Defect::TooMany { .. } => "TooMany",
+            Defect::UnknownTarget { .. } => "UnknownTarget",
+            Defect::ToolNamed { .. } => "ToolNamed",
+            Defect::UnverifiedSymbol { .. } => "UnverifiedSymbol",
+        }
+    }
+
+    type Mutation = (&'static str, fn(&mut Fill));
+
+    // One per repairable defect, and a few that collide on purpose: two
+    // mutations over the same slot are how a repair comes to answer a slot
+    // another repair already moved.
+    fn mutations() -> [Mutation; 13] {
+        [
+            ("Missing", |fill| {
+                fill.files.remove("lib.rs");
+            }),
+            ("Empty", |fill| fill.purpose = "  ".to_owned()),
+            ("Empty", |fill| fill.rules.push("   ".to_owned())),
+            ("Multiline", |fill| {
+                fill.files.insert(
+                    "Cargo.toml".to_owned(),
+                    "a manifest, and long enough\nand a second line".to_owned(),
+                );
+            }),
+            ("TooShort", |fill| {
+                fill.files
+                    .insert("app.rs".to_owned(), "duplicate".to_owned());
+            }),
+            ("TooLong", |fill| {
+                fill.structure.push("x".repeat(ENTRY_CHARS + 40));
+            }),
+            ("TooLong", |fill| {
+                fill.purpose = "é".repeat(PURPOSE_CHARS + 9);
+            }),
+            ("TooMany", |fill| {
+                fill.rules = vec!["a rule long enough to count".to_owned(); LIST_CAP + 2];
+            }),
+            ("TooMany", |fill| {
+                fill.lookups = (0..LIST_CAP + 3)
+                    .map(|index| Lookup {
+                        topic: format!("route {index} of the many"),
+                        open: "lib.rs".to_owned(),
+                        symbol: None,
+                    })
+                    .collect();
+            }),
+            ("UnknownTarget", |fill| {
+                fill.lookups.push(Lookup {
+                    topic: "somewhere else entirely".to_owned(),
+                    open: "../tui/src/app.rs".to_owned(),
+                    symbol: None,
+                });
+            }),
+            ("UnverifiedSymbol", |fill| {
+                fill.lookups.push(Lookup {
+                    topic: "a name that is not there".to_owned(),
+                    open: "lib.rs".to_owned(),
+                    symbol: Some("load_tree".to_owned()),
+                });
+            }),
+            ("ToolNamed", |fill| {
+                fill.files.insert(
+                    "lib.rs".to_owned(),
+                    "the crate root of the warlock engine, and long enough".to_owned(),
+                );
+            }),
+            ("ToolNamed", |fill| {
+                fill.directories.insert(
+                    "src".to_owned(),
+                    "warlock's own source, in one line".to_owned(),
+                );
+            }),
+        ]
+    }
+
+    #[test]
+    fn a_mended_fill_is_never_defective_whatever_was_wrong_with_it() {
+        let mutations = mutations();
+        let request = request();
+        let expected = Expected::of(&request);
+        let described = declared();
+        let mut covered: BTreeSet<&'static str> = BTreeSet::new();
+        // A fixed seed and a plain congruential generator: this crate takes no
+        // dependency for a coin toss, and a property test that cannot be
+        // reproduced from its own source is not much of one.
+        let mut state: u64 = 0x5eed_1234_5678_9abc;
+        for _ in 0..512 {
+            let mut fill = good();
+            let mut applied: Vec<&str> = Vec::new();
+            for (name, mutate) in &mutations {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                if (state >> 60) & 1 == 1 {
+                    mutate(&mut fill);
+                    applied.push(name);
+                }
+            }
+            let defects = check(&fill, &expected);
+            for defect in &defects {
+                covered.insert(variant(defect));
+            }
+            let (repaired, mends, passes) = mended(&fill, &expected, &described);
+            assert_eq!(
+                check(&repaired, &expected),
+                [],
+                "{applied:?} left {mends:?} and still a defect"
+            );
+            assert!(passes <= MEND_PASSES, "{applied:?} took {passes} passes");
+            assert_eq!(
+                mends.is_empty(),
+                defects.is_empty(),
+                "{applied:?}: a defect is a mend and nothing else is"
+            );
+        }
+        assert_eq!(
+            covered,
+            BTreeSet::from([
+                "Missing",
+                "Empty",
+                "Multiline",
+                "TooShort",
+                "TooLong",
+                "TooMany",
+                "UnknownTarget",
+                "ToolNamed",
+                "UnverifiedSymbol",
+            ]),
+            "every repairable defect was generated, and `NotJson` cannot be: \
+             the mend is handed a fill, not an answer"
+        );
     }
 
     #[test]
