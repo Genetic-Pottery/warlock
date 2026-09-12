@@ -22,8 +22,9 @@ use std::time::Instant;
 use std::{fs, io, thread};
 
 use warlock_engine::{
-    Agent, Manifest, NodeState, PactedSubtree, Pacting, Tree, document::Defect, fitting, pact,
-    to_manifest_path,
+    Agent, Manifest, NodeState, PactedSubtree, Pacting, Tree,
+    document::{self, Defect},
+    fitting, pact, to_manifest_path,
 };
 use warlock_tui::{
     Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactIntent, PactToggle, Run, Section,
@@ -251,6 +252,13 @@ pub(crate) enum PactEvent {
         attempt: usize,
         attempts: usize,
     },
+    // One mend, flattened to the engine's own sentence about it exactly as
+    // `Rejected` flattens a `Defect`: the panel says what happened, and the
+    // types that say why belong to the engine.
+    Repaired {
+        directory: PathBuf,
+        mend: String,
+    },
     Documented {
         directory: PathBuf,
     },
@@ -302,6 +310,13 @@ impl pact::Observer for Reporting<'_> {
             defects: defects.iter().map(ToString::to_string).collect(),
             attempt,
             attempts,
+        });
+    }
+
+    fn repaired(&mut self, directory: &Path, mend: &document::Mend) {
+        let _ = self.events.send(PactEvent::Repaired {
+            directory: directory.to_path_buf(),
+            mend: mend.to_string(),
         });
     }
 
@@ -601,6 +616,22 @@ fn drain(
             }) => {
                 app.panel_mut()
                     .write_run(|account| account.record_rejected(&defects, attempt, attempts, now));
+            }
+            // The panel only, and one line per mend, filed under the same
+            // section as the rejections above it: the asking ran out and the
+            // document was written anyway, so this is the one place a reader
+            // learns that a slot of it is warlock's own words rather than the
+            // model's.
+            //
+            // The engine names the directory and the event carries it, because
+            // a repair is a fact about one directory and nothing reading these
+            // events should have to infer which. Nothing is done with it here:
+            // the line lands where every line of a pass lands, in the section
+            // the `Starting` before it opened, which is that same directory's.
+            Ok(PactEvent::Repaired { directory, mend }) => {
+                let _ = directory;
+                app.panel_mut()
+                    .write_run(|account| account.record_repaired(&mend, now));
             }
             // The one recolouring a run does before it is over. The engine
             // only says this of a directory whose whole subtree delivered —
@@ -1617,6 +1648,7 @@ mod tests {
                 PactEvent::Doing(_)
                 | PactEvent::Requesting { .. }
                 | PactEvent::Rejected { .. }
+                | PactEvent::Repaired { .. }
                 | PactEvent::Documented { .. }
                 | PactEvent::Unchanged { .. }
                 | PactEvent::Skipped { .. }
@@ -1638,6 +1670,7 @@ mod tests {
                 PactEvent::Doing(_)
                 | PactEvent::Requesting { .. }
                 | PactEvent::Rejected { .. }
+                | PactEvent::Repaired { .. }
                 | PactEvent::Documented { .. }
                 | PactEvent::Unchanged { .. }
                 | PactEvent::Skipped { .. }
