@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use warlock_engine::{Agent, PactedSubtree, Pacting, pact, to_manifest_path};
+use warlock_engine::{Agent, PactedSubtree, Pacting, document, pact, to_manifest_path};
 use warlock_tui::{Cancel, ClaudeAgent};
 
 use crate::CANCELLED;
@@ -109,6 +109,18 @@ impl<W: Write> pact::Observer for Progress<W> {
         let named = named(&self.root, directory);
         self.say(&format!("[{position}/{total}] documenting {named}"));
         Pacting::Continue
+    }
+
+    // On stdout with the progress and not on stderr with the report, because a
+    // mended slot is a document that was written, not a directory that was
+    // missed: the failure report is the list of things to go and look at, and a
+    // repair belongs to the story of the run. It costs the run nothing — no
+    // status, no `failed`, no `total` — but a log read tomorrow should still be
+    // able to tell a repaired entry from a written one, so it says which slot
+    // and what was done to it.
+    fn repaired(&mut self, directory: &Path, mend: &document::Mend) {
+        let named = named(&self.root, directory);
+        self.say(&format!("{named} — {mend}"));
     }
 
     fn documented(&mut self, directory: &Path) {
@@ -382,10 +394,12 @@ pub(crate) fn refresh(path: &Path) -> Result<(), Error> {
 mod tests {
     use std::cell::RefCell;
     use std::fs;
+    use std::iter;
     use std::path::{Path, PathBuf};
 
     use warlock_engine::{
-        Agent, Manifest, PactEntry, PactedSubtree, agent, manifest_path, save_sigils, stub_answer,
+        Agent, Manifest, PactEntry, PactedSubtree, agent, document, manifest_path, save_sigils,
+        stub_answer,
     };
 
     use warlock_tui::Cancel;
@@ -456,6 +470,7 @@ mod tests {
     struct Canned {
         root: PathBuf,
         refused: Vec<String>,
+        blanked: Vec<String>,
         cancel_at: Option<(String, Cancel)>,
         seen: RefCell<Vec<(PathBuf, bool)>>,
     }
@@ -465,9 +480,25 @@ mod tests {
             Self {
                 root: root.to_path_buf(),
                 refused: refused.iter().map(|module| (*module).to_owned()).collect(),
+                blanked: Vec::new(),
                 cancel_at: None,
                 seen: RefCell::new(Vec::new()),
             }
+        }
+
+        // The other way an answer can be wrong, and the one this module has to
+        // print: an object of the right shape with `purpose` blank. It is
+        // answered that way on every attempt — the answer never changes, so
+        // every repair pass finds the same slot empty — which runs the asking
+        // out and leaves the engine to mend the fill itself rather than refuse
+        // the directory. Built by blanking one field of the engine's own stub
+        // answer, so the only thing wrong with it is the thing under test.
+        fn blanking(mut self, directories: &[&str]) -> Self {
+            self.blanked = directories
+                .iter()
+                .map(|module| (*module).to_owned())
+                .collect();
+            self
         }
 
         // Latching from inside a pass is where a press really lands, and it is
@@ -512,8 +543,32 @@ mod tests {
                     program: CLAUDE.to_owned(),
                 });
             }
-            Ok(agent::Response::new(stub_answer(request)))
+            let answer = stub_answer(request);
+            if self.blanked.contains(&named(&self.root, &directory)) {
+                return Ok(agent::Response::new(without_a_purpose(&answer)));
+            }
+            Ok(agent::Response::new(answer))
         }
+    }
+
+    // The engine's stub answer with one slot emptied. Through `serde_json`
+    // rather than by hand-writing an object, so this stays an answer of the
+    // shape the engine asked for however that shape moves, and the defect is
+    // the blank field alone.
+    fn without_a_purpose(answer: &str) -> String {
+        let mut fill: serde_json::Value =
+            serde_json::from_str(answer).expect("a document request is answered with JSON");
+        fill["purpose"] = serde_json::Value::String(String::new());
+        fill.to_string()
+    }
+
+    // The sentence the engine makes of the slot it had to fill in, named rather
+    // than retyped in three tests.
+    fn supplied(module: &str) -> String {
+        format!(
+            "warlock: {module} — purpose was not answered and was filled in from what warlock \
+             measured"
+        )
     }
 
     fn named(root: &Path, directory: &Path) -> String {
@@ -563,6 +618,23 @@ mod tests {
     ) -> Result<Run, Error> {
         let cancel = Cancel::new();
         let agent = Canned::refusing(repo_root, refused);
+        driven(repo_root, home, descent, path, agent, &cancel)
+    }
+
+    // Both kinds of wrong answer in one run: the directories that refuse
+    // outright, and the ones that answer with a blank slot until the asking
+    // runs out. `refused` empty is the repaired run on its own, which is the
+    // case the clean status is asked of.
+    fn run_repairing(
+        repo_root: &Path,
+        home: &Path,
+        descent: Descent,
+        path: &str,
+        refused: &[&str],
+        blanked: &[&str],
+    ) -> Result<Run, Error> {
+        let cancel = Cancel::new();
+        let agent = Canned::refusing(repo_root, refused).blanking(blanked);
         driven(repo_root, home, descent, path, agent, &cancel)
     }
 
@@ -701,6 +773,138 @@ mod tests {
                 run.lines
             );
         }
+    }
+
+    #[test]
+    fn a_repaired_directory_says_what_was_mended_between_entering_it_and_documenting_it() {
+        let repo = a_repository();
+        let home = a_dir();
+
+        // `alpha` answers with a blank `purpose` every time it is asked, so the
+        // attempt loop runs out and the engine fills the slot in itself.
+        let run = run_repairing(
+            repo.path(),
+            home.path(),
+            Descent::Pact,
+            ".",
+            &[],
+            &["alpha"],
+        )
+        .expect("nothing is scoped");
+
+        // The exact run, in order. The repair sits between the line that
+        // entered the directory and the line that finished it, because that is
+        // when it happened; the two directories that answered properly say
+        // nothing extra, so a reader can tell a repaired entry from a written
+        // one by reading the log and nothing else.
+        assert_eq!(
+            run.lines,
+            [
+                "warlock: [1/3] documenting beta".to_owned(),
+                "warlock: documented beta".to_owned(),
+                "warlock: [2/3] documenting alpha".to_owned(),
+                supplied("alpha"),
+                "warlock: documented alpha".to_owned(),
+                "warlock: [3/3] documenting .".to_owned(),
+                "warlock: documented .".to_owned(),
+            ]
+        );
+        // A mended directory is documented and granted like any other: the
+        // repair cost the run passes, not its manifest.
+        assert!(repo.path().join("alpha").join("WARLOCK.md").is_file());
+        assert_eq!(stored_modules(repo.path()), [".", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn a_run_that_only_repaired_leaves_with_the_clean_status_and_nothing_to_report() {
+        let repo = a_repository();
+        let home = a_dir();
+
+        let run = run_repairing(
+            repo.path(),
+            home.path(),
+            Descent::Pact,
+            ".",
+            &[],
+            &["alpha"],
+        )
+        .expect("nothing is scoped");
+
+        // There were repairs, so this is a real case rather than a clean run
+        // asserted twice.
+        assert!(
+            !run.subtree.repairs.is_empty(),
+            "nothing was mended, so the run this asserts about did not happen"
+        );
+        // A directory that answered badly enough to be mended is still a
+        // directory that was described, so it costs the run a pass per attempt
+        // and nothing else.
+        assert!(
+            run.subtree.failures.is_empty(),
+            "{:?}",
+            run.subtree.failures
+        );
+        // Asked once per attempt, because every attempt got the same blank
+        // slot back: the count follows `document::ATTEMPTS` rather than pinning
+        // it.
+        let mut offered = vec!["beta"];
+        offered.extend(iter::repeat_n("alpha", document::ATTEMPTS));
+        offered.push(".");
+        assert_eq!(run.agent.directories(), offered);
+        // No report, nothing on stderr and the status of a run that worked: a
+        // repair is not a thing to go and look at, so it is not in the list of
+        // them.
+        assert!(run.report().is_none());
+        assert!(run.stderr().is_empty(), "{:?}", run.stderr());
+        assert!(run.outcome.is_ok(), "{:?}", run.outcome);
+        assert_eq!(status_for(&Ok(())), 0);
+    }
+
+    #[test]
+    fn a_run_that_failed_and_repaired_reports_the_failure_and_not_the_repair() {
+        let repo = a_repository();
+        let home = a_dir();
+
+        // One directory refuses and another is mended, which is the run where
+        // the two could be confused for each other.
+        let run = run_repairing(
+            repo.path(),
+            home.path(),
+            Descent::Pact,
+            ".",
+            &["alpha"],
+            &["beta"],
+        )
+        .expect("a refused pass fails one directory, not the run");
+
+        assert!(
+            !run.subtree.repairs.is_empty(),
+            "nothing was mended, so the run this asserts about did not happen"
+        );
+        let report = run.report().expect("one directory failed");
+        // Only the failure is named, and the arithmetic is the arithmetic of
+        // the same run without the repairs in it — a mended directory is
+        // neither a failure nor an extra denominator.
+        assert_eq!(report.lines.len(), 1, "{:?}", report.lines);
+        assert!(
+            report.lines[0].starts_with("alpha — "),
+            "{:?}",
+            report.lines[0]
+        );
+        assert_eq!((report.failed, report.total), (1, 3));
+        assert_eq!(status_for(&Err(report.status())), 4);
+        // And the repair is on stdout with the progress, where it belongs:
+        // stderr is the list of directories to go and look at.
+        assert!(
+            !run.stderr().iter().any(|line| line.contains("purpose")),
+            "a repair was reported as a failure: {:?}",
+            run.stderr()
+        );
+        assert!(
+            run.lines.contains(&supplied("beta")),
+            "the repair went unannounced: {:?}",
+            run.lines
+        );
     }
 
     #[test]
