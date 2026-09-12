@@ -909,12 +909,157 @@ fn human(bytes: u64) -> String {
     format!("{}.{} {unit}", tenths / 10, tenths % 10)
 }
 
+// The factual floor under a defective fill: a value assembled from what
+// warlock already holds — the name it renders, the size it measured, the
+// symbols `languages.rs` extracted and the counts of what is in the directory.
+// Nothing here states intent, nothing here is a guess about what a file is
+// for, and nothing here comes from a model.
+//
+// On the tool name. `names_tool` fires on any text holding "warlock" in any
+// case, and `check` applies it to every value whenever `Expected::mentions_tool`
+// is false, so a file called `warlock.rs` or a directory called `warlock` would
+// otherwise make its own fallback line defective — and, under the mend, a line
+// that is dropped and rebuilt for ever. Quoting cannot help: the rule is a
+// substring test, not a parse. So while the rule is live a fact that names the
+// tool is left out of the line rather than reworded — the name is dropped and a
+// declared symbol naming the tool is dropped from the list. The document loses
+// nothing by it, because `render` prints the path and the declared names itself
+// either way. Once the files themselves use the word the rule has stood down
+// and every fact goes in whole.
+mod fallback {
+    // These are the mechanical mend's floor and the mend is the next slice;
+    // until it calls them only the tests below do, and the lib build would
+    // otherwise call them dead. Delete this when the mend lands.
+    #![allow(dead_code)]
+
+    use super::{
+        DECLARED_SHOWN, Described, ENTRY_CHARS, ENTRY_MINIMUM, Expected, human, names_tool,
+    };
+
+    // One bound for all three builders, and it is the tightest of the caps any
+    // slot they fill is held to: a purpose may run to `PURPOSE_CHARS`, but a
+    // fallback purpose is a name and two counts and has no use for the room.
+    const CAP: usize = ENTRY_CHARS;
+
+    // A file entry: its name, its size as `render` prints it, and the symbols
+    // `languages.rs` extracted from it.
+    pub(super) fn file(path: &str, expected: &Expected<'_>, described: &Described) -> String {
+        let guarded = !expected.mentions_tool();
+        let size = expected.files.get(path).map(|(size, _)| human(*size));
+        let named = !(path.is_empty() || guarded && names_tool(path));
+        let mut line = match (size, named) {
+            (Some(size), true) => format!("A {size} file named `{path}`"),
+            (Some(size), false) => format!("A {size} file in this directory"),
+            (None, true) => format!("The file `{path}`"),
+            (None, false) => "A file in this directory".to_owned(),
+        };
+
+        let mut written = 0;
+        for name in described
+            .declared
+            .get(path)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter(|name| !(name.trim().is_empty() || guarded && names_tool(name)))
+            .take(DECLARED_SHOWN)
+        {
+            let piece = if written == 0 {
+                format!(", declaring `{name}`")
+            } else {
+                format!(", `{name}`")
+            };
+            // The list stops at the cap rather than running into it, so a cut
+            // lands between names and not through one.
+            if written > 0 && line.chars().count() + piece.chars().count() + 1 > CAP {
+                break;
+            }
+            line.push_str(&piece);
+            written += 1;
+        }
+        if written == 0 {
+            line.push_str(", with no symbols extracted from it");
+        }
+        line.push('.');
+        fit(&line, "A file in this directory.")
+    }
+
+    // A purpose: the directory's own name and how much is under it. What it is
+    // for is exactly what a pass that did not answer never said.
+    pub(super) fn purpose(name: &str, expected: &Expected<'_>) -> String {
+        let guarded = !expected.mentions_tool();
+        let subject = if name.is_empty() || (guarded && names_tool(name)) {
+            "This directory".to_owned()
+        } else {
+            format!("`{name}`")
+        };
+        let line = format!(
+            "{subject} holds {} and {}.",
+            counted(expected.files.len(), "file", "files"),
+            counted(expected.directories.len(), "subdirectory", "subdirectories"),
+        );
+        fit(&line, "A directory of this repository.")
+    }
+
+    // A `directories` entry: the child's name and nothing else. Its own
+    // document says what is under it, and restating that here would be a
+    // second-hand claim.
+    pub(super) fn directory(child: &str, expected: &Expected<'_>) -> String {
+        let guarded = !expected.mentions_tool();
+        let line = if child.is_empty() || (guarded && names_tool(child)) {
+            "A subdirectory of this directory.".to_owned()
+        } else {
+            format!("A subdirectory named `{child}`.")
+        };
+        fit(&line, "A subdirectory of this directory.")
+    }
+
+    fn counted(count: usize, one: &str, many: &str) -> String {
+        match count {
+            0 => format!("no {many}"),
+            1 => format!("1 {one}"),
+            _ => format!("{count} {many}"),
+        }
+    }
+
+    // The shape every fallback value has to hold: one line, at least
+    // `ENTRY_MINIMUM` characters and at most the cap, counted as characters and
+    // cut on a character boundary so a multibyte name cannot split.
+    pub(super) fn fit(line: &str, pad: &str) -> String {
+        let mut line = flattened(line);
+        // A non-empty pad adds at least one character a turn, so this ends.
+        // In practice it runs once or not at all: every pad here is longer than
+        // the floor on its own.
+        while line.chars().count() < ENTRY_MINIMUM && !pad.is_empty() {
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(pad);
+        }
+        let cut: String = line.chars().take(CAP).collect();
+        cut.trim_end().to_owned()
+    }
+
+    // Whitespace of any kind collapses to one space: a name or a symbol that
+    // carried a newline would otherwise make a one-line value into two.
+    fn flattened(text: &str) -> String {
+        let mut line = String::new();
+        for word in text.split_whitespace() {
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        line
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ATTEMPTS, Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Expected, Fill,
-        LIST_CAP, Lookup, PROMPT, PURPOSE_CHARS, Repair, STAMP, accept, human, instructions,
-        render, repair_instructions, skeleton, stub_answer,
+        LIST_CAP, Lookup, PROMPT, PURPOSE_CHARS, Repair, STAMP, accept, check, fallback, human,
+        instructions, names_tool, render, repair_instructions, skeleton, stub_answer,
     };
     use std::collections::BTreeMap;
 
@@ -1566,5 +1711,226 @@ mod tests {
         };
         assert_eq!(described.declared["a.rs"], ["one"]);
         assert_eq!(Described::default().declared, BTreeMap::new());
+    }
+
+    fn declared() -> Described {
+        Described {
+            declared: [
+                (
+                    "lib.rs".to_owned(),
+                    vec!["pact".to_owned(), "subtree_hash".to_owned()],
+                ),
+                (
+                    "app.rs".to_owned(),
+                    (0..20).map(|i| format!("draw{i}")).collect(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    #[track_caller]
+    fn holds_the_shape(line: &str) {
+        assert!(!line.contains(['\n', '\r']), "more than one line: {line:?}");
+        let chars = line.chars().count();
+        assert!(
+            (ENTRY_MINIMUM..=ENTRY_CHARS).contains(&chars),
+            "{chars} characters: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_fallback_line_is_the_name_the_size_and_the_symbols() {
+        let request = request();
+        let expected = Expected::of(&request);
+        let described = declared();
+
+        assert_eq!(
+            fallback::file("lib.rs", &expected, &described),
+            "A 39 B file named `lib.rs`, declaring `pact`, `subtree_hash`."
+        );
+        // A file warlock extracted nothing from still gets its name and size,
+        // and says only that and that it found no names.
+        assert_eq!(
+            fallback::file("Cargo.toml", &expected, &described),
+            "A 26 B file named `Cargo.toml`, with no symbols extracted from it."
+        );
+        // The purpose is the directory's name and what is in it: five files,
+        // one child. No sentence about what any of it is for.
+        assert_eq!(
+            fallback::purpose("engine", &expected),
+            "`engine` holds 5 files and 1 subdirectory."
+        );
+        assert_eq!(
+            fallback::directory("src", &expected),
+            "A subdirectory named `src`."
+        );
+
+        let bare = Request::new("describe", "/repo/empty");
+        assert_eq!(
+            fallback::purpose("empty", &Expected::of(&bare)),
+            "`empty` holds no files and no subdirectories."
+        );
+    }
+
+    #[test]
+    fn every_fallback_line_holds_one_line_and_both_caps() {
+        let request = request();
+        let expected = Expected::of(&request);
+        let described = declared();
+
+        for path in [
+            "lib.rs",
+            "Cargo.toml",
+            "app.rs",
+            "Cargo.lock",
+            "logo.png",
+            // A name the request does not carry: no size to state, and the
+            // line is still a line.
+            "not-here.rs",
+            "a",
+            "",
+        ] {
+            holds_the_shape(&fallback::file(path, &expected, &described));
+        }
+        for name in ["engine", "a", ""] {
+            holds_the_shape(&fallback::purpose(name, &expected));
+            holds_the_shape(&fallback::directory(name, &expected));
+        }
+
+        // The symbol list stops at the cap rather than being cut through a
+        // name: twenty long declarations do not run the line over.
+        let long = Described {
+            declared: [(
+                "lib.rs".to_owned(),
+                (0..20).map(|i| format!("a_long_symbol_name_{i}")).collect(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let line = fallback::file("lib.rs", &expected, &long);
+        holds_the_shape(&line);
+        assert!(line.ends_with("`."), "cut between names: {line:?}");
+    }
+
+    #[test]
+    fn short_facts_are_padded_and_a_long_line_is_cut_to_the_cap() {
+        let padded = fallback::fit("`a`, 5 B.", "A file in this directory.");
+        holds_the_shape(&padded);
+        assert!(padded.starts_with("`a`, 5 B."), "{padded}");
+
+        let cut = fallback::fit(&"x".repeat(ENTRY_CHARS + 50), "pad");
+        assert_eq!(cut.chars().count(), ENTRY_CHARS);
+
+        // Whatever the facts, the value is one line.
+        assert_eq!(
+            fallback::fit("a name\nover\ttwo lines and some", "pad"),
+            "a name over two lines and some"
+        );
+    }
+
+    #[test]
+    fn a_name_warlock_shares_does_not_trip_the_tool_rule() {
+        // The rule is a substring test, so a line naming `warlock.rs` cannot be
+        // quoted out of it: while the rule is live the name is left out
+        // instead, and `render` prints the path either way.
+        let request = Request::new("describe", "/repo/crates").with_files([File::present(
+            "warlock.rs",
+            *b"pub fn draw() {}\npub fn run() {}\n",
+        )]);
+        let expected = Expected::of(&request);
+        assert!(!expected.mentions_tool(), "the rule is live here");
+        let described = Described {
+            declared: [(
+                "warlock.rs".to_owned(),
+                vec!["draw".to_owned(), "warlock_run".to_owned()],
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let line = fallback::file("warlock.rs", &expected, &described);
+        assert!(!names_tool(&line), "{line}");
+        assert!(line.contains("`draw`"), "the other symbols stay: {line}");
+        holds_the_shape(&line);
+        for named in [
+            fallback::purpose("warlock", &expected),
+            fallback::directory("warlock-tui", &expected),
+        ] {
+            assert!(!names_tool(&named), "{named}");
+            holds_the_shape(&named);
+        }
+
+        // And the rule the caller applies cannot fire on a fill built of them.
+        let fill = Fill {
+            purpose: fallback::purpose("crates", &expected),
+            files: [(
+                "warlock.rs".to_owned(),
+                fallback::file("warlock.rs", &expected, &described),
+            )]
+            .into_iter()
+            .collect(),
+            ..Fill::default()
+        };
+        assert_eq!(check(&fill, &expected), []);
+
+        // Where the files use the word the rule has stood down, and the facts
+        // go in whole.
+        let own = Request::new("describe", "/repo")
+            .with_files([File::present("warlock.rs", *b"//! The warlock engine.\n")]);
+        let own = Expected::of(&own);
+        assert!(own.mentions_tool());
+        let line = fallback::file("warlock.rs", &own, &described);
+        assert!(line.contains("`warlock.rs`"), "{line}");
+        assert!(line.contains("`warlock_run`"), "{line}");
+        assert!(
+            fallback::purpose("warlock", &own).contains("`warlock`"),
+            "the directory names itself too"
+        );
+    }
+
+    #[test]
+    fn no_fallback_line_speaks_in_the_stubs_words() {
+        let request = request();
+        let expected = Expected::of(&request);
+        let described = declared();
+        let lines = [
+            fallback::file("lib.rs", &expected, &described),
+            fallback::file("logo.png", &expected, &described),
+            fallback::purpose("engine", &expected),
+            fallback::directory("src", &expected),
+        ];
+        // `Fill::stub` is a test double's wording; a repaired document says
+        // what warlock measured, and never that.
+        for line in &lines {
+            let lowered = line.to_ascii_lowercase();
+            for wording in ["a stand-in entry", "stand-in", "test double"] {
+                assert!(!lowered.contains(wording), "{wording:?} in {line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_multibyte_name_is_cut_on_a_character_boundary() {
+        let name = format!("{}.rs", "é".repeat(400));
+        let symbol = "🜁_très_long_identifiant_déclaré".repeat(20);
+        let request = Request::new("describe", "/repo/x")
+            .with_files([File::present(name.clone(), *b"pub fn draw() {}\n")]);
+        let expected = Expected::of(&request);
+        let described = Described {
+            declared: [(name.clone(), vec![symbol.clone(), symbol])]
+                .into_iter()
+                .collect(),
+        };
+
+        // No panic, and the count is characters rather than bytes.
+        let line = fallback::file(&name, &expected, &described);
+        holds_the_shape(&line);
+        assert_eq!(line.chars().count(), ENTRY_CHARS);
+        assert!(line.len() > ENTRY_CHARS, "multibyte: {} bytes", line.len());
+
+        holds_the_shape(&fallback::purpose(&name, &expected));
+        holds_the_shape(&fallback::directory(&name, &expected));
     }
 }
