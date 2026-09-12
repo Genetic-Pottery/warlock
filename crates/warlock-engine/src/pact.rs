@@ -1677,6 +1677,94 @@ mod tests {
         }
     }
 
+    // `Defective` breaks every answer the same way, which is a model that
+    // cannot get a slot right. This one breaks the nth answer its own way,
+    // which is the model [`document::ATTEMPTS`] was raised for: one that fixes
+    // the slot it was asked about and breaks it again in the other direction.
+    struct Wavering {
+        breaks: Vec<fn(&mut serde_json::Map<String, serde_json::Value>)>,
+        seen: std::cell::RefCell<Vec<agent::Request>>,
+    }
+
+    impl Wavering {
+        fn through(breaks: Vec<fn(&mut serde_json::Map<String, serde_json::Value>)>) -> Self {
+            Self {
+                breaks,
+                seen: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn document_passes(&self) -> usize {
+            self.seen
+                .borrow()
+                .iter()
+                .filter(|request| is_document_pass(request))
+                .count()
+        }
+    }
+
+    impl Agent for Wavering {
+        fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
+            self.seen.borrow_mut().push(request.clone());
+            let answer = document::stub_answer(request);
+            if !is_document_pass(request) {
+                return Ok(agent::Response::new(answer));
+            }
+            // The request just pushed is this pass, so the answers are counted
+            // from the one before it.
+            let Some(break_it) = self.breaks.get(self.document_passes() - 1) else {
+                return Ok(agent::Response::new(answer));
+            };
+            let mut parsed: serde_json::Value =
+                serde_json::from_str(&answer).expect("a document pass is answered with an object");
+            break_it(parsed.as_object_mut().expect("a fill is an object"));
+            Ok(agent::Response::new(parsed.to_string()))
+        }
+    }
+
+    const MENDED_ENTRY: &str = "An entry the second answer got right, over the cap and past \
+                                the minimum.";
+
+    fn files_of(
+        answer: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> &mut serde_json::Map<String, serde_json::Value> {
+        answer
+            .get_mut("files")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("a fill holds an entry per file")
+    }
+
+    fn without_writing(answer: &mut serde_json::Map<String, serde_json::Value>) {
+        files_of(answer).remove("writing.rs");
+    }
+
+    fn overlong_writing(answer: &mut serde_json::Map<String, serde_json::Value>) {
+        files_of(answer).insert(
+            "writing.rs".to_owned(),
+            serde_json::Value::String("x".repeat(OVERLONG)),
+        );
+    }
+
+    // What a repair pass is actually asked for: the named slot alone, with
+    // every slot nobody complained about left out of the answer entirely.
+    fn only_writing(answer: &mut serde_json::Map<String, serde_json::Value>) {
+        let mut files = serde_json::Map::new();
+        files.insert(
+            "writing.rs".to_owned(),
+            serde_json::Value::String(MENDED_ENTRY.to_owned()),
+        );
+        answer.clear();
+        answer.insert("files".to_owned(), serde_json::Value::Object(files));
+    }
+
+    fn three_files() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "reading.rs", "pub fn read() {}\n");
+        write(dir.path(), "writing.rs", "pub fn write() {}\n");
+        write(dir.path(), "shared.rs", "pub fn shared() {}\n");
+        dir
+    }
+
     fn named(root: &Path, path: &Path) -> String {
         relative_to(root, std::slice::from_ref(&path.to_path_buf()))
             .pop()
@@ -1783,6 +1871,81 @@ mod tests {
         assert_eq!(repairs.len(), 1, "{repairs:?}");
         assert_eq!(repairs[0].directory, src);
         assert_eq!(repairs[0].mend.field, "purpose");
+    }
+
+    #[test]
+    fn a_defect_that_moves_between_attempts_is_mended_rather_than_refused() {
+        let dir = three_files();
+        // Left out, supplied over the cap, left out again: the 2026-09-12
+        // answer, which a two-attempt loop turned into a refusal and took
+        // three grants down with it.
+        let agent = Wavering::through(vec![
+            without_writing,
+            overlong_writing,
+            without_writing,
+            overlong_writing,
+        ]);
+
+        let Pacted {
+            document, repairs, ..
+        } = pact_directory(dir.path(), &agent).expect("an oscillation is mended, not refused");
+
+        assert_eq!(
+            agent.document_passes(),
+            document::ATTEMPTS,
+            "every attempt was spent before warlock did it itself",
+        );
+        let text = fs::read_to_string(&document).expect("the document was written");
+        assert!(text.contains("`writing.rs`"), "{text}");
+        assert_eq!(
+            repairs
+                .iter()
+                .map(|repaired| (repaired.mend.field.as_str(), repaired.mend.done))
+                .collect::<Vec<_>>(),
+            [(
+                "files[\"writing.rs\"]",
+                document::Mended::Cut {
+                    from: OVERLONG,
+                    to: document::ENTRY_CHARS,
+                },
+            )],
+            "the slot that moved is the slot warlock settled, and it settled it \
+             out of the answer's own text: {repairs:?}",
+        );
+        assert!(
+            text.contains(&"x".repeat(document::ENTRY_CHARS)),
+            "the cut lands on the cap, not near it: {text}",
+        );
+        assert!(
+            !text.contains(&"x".repeat(document::ENTRY_CHARS + 1)),
+            "and not one character past it: {text}",
+        );
+    }
+
+    #[test]
+    fn a_repair_naming_one_slot_is_written_over_the_answer_it_repairs() {
+        let dir = three_files();
+        let agent = Wavering::through(vec![overlong_writing, only_writing]);
+
+        let Pacted {
+            document, repairs, ..
+        } = pact_directory(dir.path(), &agent).expect("a repaired answer is a document");
+
+        assert_eq!(
+            agent.document_passes(),
+            2,
+            "the second answer was clean, so there was nothing to ask a third time",
+        );
+        assert!(
+            repairs.is_empty(),
+            "the model fixed the slot, so warlock mended nothing: {repairs:?}",
+        );
+        let text = fs::read_to_string(&document).expect("the document was written");
+        assert!(text.contains(MENDED_ENTRY), "{text}");
+        assert!(
+            text.contains("`reading.rs`") && text.contains("`shared.rs`"),
+            "and the slots the repair said nothing about came from the first answer: {text}",
+        );
     }
 
     #[test]
