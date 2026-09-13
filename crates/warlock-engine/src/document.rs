@@ -1955,7 +1955,10 @@ mod tests {
     fn a_claim_names_a_file_a_child_or_a_word_some_file_here_actually_holds() {
         let mut fill = good();
         for name in ["lib.rs", "src", "subtree_hash", "pact"] {
-            fill.structure = vec![Entry::naming("a fact about this directory, spelt out", name)];
+            fill.structure = vec![Entry::naming(
+                "a fact about this directory, spelt out",
+                name,
+            )];
             assert_eq!(defects(&fill), [], "`{name}` is evidenced by the request");
         }
     }
@@ -1986,9 +1989,10 @@ mod tests {
         let expected = Expected::of(&request);
         let mut fill = good();
         fill.structure.clear();
-        let answer = fill
-            .to_json()
-            .replace("\"structure\": []", "\"structure\": [\"a line where an object was asked for\"]");
+        let answer = fill.to_json().replace(
+            "\"structure\": []",
+            "\"structure\": [\"a line where an object was asked for\"]",
+        );
 
         let accepted = accept(None, &answer, &expected);
 
@@ -2016,7 +2020,11 @@ mod tests {
         let mut bare = good();
         bare.structure = vec![Entry {
             line: "`lib.rs` re-exports `pact` for the crate.".to_owned(),
-            names: vec!["lib.rs".to_owned(), "pact".to_owned(), "subtree_hash".to_owned()],
+            names: vec![
+                "lib.rs".to_owned(),
+                "pact".to_owned(),
+                "subtree_hash".to_owned(),
+            ],
         }];
 
         assert_eq!(
