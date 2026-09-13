@@ -17,7 +17,7 @@ use std::path::Path;
 use std::time::Instant;
 use std::{fs, io};
 
-use warlock_engine::{Manifest, PactEntry, from_manifest_path, to_manifest_path};
+use warlock_engine::{from_manifest_path, to_manifest_path};
 use warlock_tui::{
     App, Edited, ScopeField, ScopePrompt, TemplateError, brief_template, missing_sections, size,
 };
@@ -31,8 +31,6 @@ const BRIEF_PREFIX: &str = "warlock-brief";
 const UNTITLED: &str = "untitled";
 
 const SLUG_MAX: usize = 60;
-
-const ROOT_MODULE: &str = ".";
 
 const NO_PATH: &str = "type a path for the document, or press Esc to write nothing";
 
@@ -65,7 +63,6 @@ pub(crate) fn write_opened(repo_root: &Path, directory: &str, reply: &str) -> Sc
 
 pub(crate) fn write_edit(
     app: &mut App,
-    manifest: &Manifest,
     repo_root: &Path,
     prompt: &ScopePrompt,
     edited: Edited,
@@ -75,7 +72,7 @@ pub(crate) fn write_edit(
         Edited::Open(field) => ScopePrompt::Open(field),
         Edited::Close => ScopePrompt::Closed,
         Edited::Submit => match prompt.field() {
-            Some(field) => write_submit(app, manifest, repo_root, field, now),
+            Some(field) => write_submit(app, repo_root, field, now),
             None => ScopePrompt::Closed,
         },
     }
@@ -94,7 +91,6 @@ pub(crate) fn write_edit(
 // with the rule under it and the typed text exactly where it was.
 pub(crate) fn write_submit(
     app: &mut App,
-    manifest: &Manifest,
     repo_root: &Path,
     field: &ScopeField,
     now: Instant,
@@ -104,8 +100,8 @@ pub(crate) fn write_submit(
         return refused(field, NO_PATH);
     }
     // The one spelling of the path, produced before anything is done with it:
-    // the bytes go to it, the line names it, and the ancestor walk climbs it,
-    // so all three are the same string and cannot come to disagree.
+    // the bytes go to it and the line names it, so both are the same string and
+    // cannot come to disagree.
     let stored = match to_manifest_path(repo_root, typed) {
         Ok(stored) => stored,
         // The engine's own wording about a path that is not inside the root,
@@ -150,9 +146,6 @@ pub(crate) fn write_submit(
     // a second way for this line to fail after the write succeeded.
     let bytes = u64::try_from(document.len()).unwrap_or(u64::MAX);
     app.panel_mut().note(wrote_line(&stored, bytes), now);
-    if let Some(module) = pacted_above(manifest, &stored) {
-        app.panel_mut().note(stale_line(module), now);
-    }
     ScopePrompt::Closed
 }
 
@@ -181,55 +174,8 @@ fn put(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::write(path, bytes)
 }
 
-// The walk starts at the file's own directory rather than at the file, because a
-// pact is on a directory and the file itself has just been created. Nearest wins
-// and the walk stops there: the directory that has to be described again is the
-// one whose document is closest to the new file, and naming every pact above it
-// would be a list of work nobody asked for.
-//
-// The name comes back off the entry rather than out of the walk, so the line
-// says the module exactly as `.warlock/pacts.toml` spells it — including `.` for
-// a repository pacted at its root.
-fn pacted_above<'manifest>(manifest: &'manifest Manifest, stored: &str) -> Option<&'manifest str> {
-    at_or_above(directory_of(stored))
-        .find_map(|module| manifest.entry(module).map(PactEntry::module))
-}
-
-fn directory_of(stored: &str) -> &str {
-    match stored.rsplit_once('/') {
-        Some((parent, _)) => parent,
-        None => ROOT_MODULE,
-    }
-}
-
-// `warlock_engine::scope`'s own walk, which is private to that module: the
-// engine decides what a scope covers, and this decides which pact a written file
-// staled. Copying eight lines is the cost of not opening a door in the engine
-// for the TUI to reach through, and it is the shape rather than the judgement
-// that is shared. Segments are cut at `/`, so a `docs-old` entry is never an
-// ancestor of `docs/adr/x.md` however much of a prefix it looks like.
-fn at_or_above(stored: &str) -> impl Iterator<Item = &str> {
-    let mut next = Some(stored);
-    std::iter::from_fn(move || {
-        let current = next?;
-        next = match current.rsplit_once('/') {
-            // A path with a parent segment: `docs` above `docs/adr`.
-            Some((parent, _)) => Some(parent),
-            // A single segment sits directly under the root, and the root sits
-            // under nothing.
-            None if current == ROOT_MODULE => None,
-            None => Some(ROOT_MODULE),
-        };
-        Some(current)
-    })
-}
-
 fn wrote_line(stored: &str, bytes: u64) -> String {
     format!("wrote {stored} — {}", size(bytes))
-}
-
-fn stale_line(module: &str) -> String {
-    format!("{module} is now stale")
 }
 
 fn taken_rule(stored: &str) -> String {
@@ -763,9 +709,7 @@ mod writes {
     use std::time::Instant;
 
     use tempfile::TempDir;
-    use warlock_engine::{
-        Manifest, Node, NodeState, PactEntry, Tree, manifest_path, to_manifest_path,
-    };
+    use warlock_engine::{Node, NodeState, Tree, manifest_path, to_manifest_path};
     use warlock_tui::{App, Line, ScopeField, ScopePrompt};
 
     use super::{NO_PATH, write_submit};
@@ -798,21 +742,6 @@ mod writes {
 
     fn field(path: &str) -> ScopeField {
         ScopeField::new("Write to", path)
-    }
-
-    fn entry(module: &str) -> PactEntry {
-        let document = if module == "." {
-            "WARLOCK.md".to_owned()
-        } else {
-            format!("{module}/WARLOCK.md")
-        };
-        PactEntry::new(".", module, document)
-            .expect("a relative module path is inside the root")
-            .with_grant("d0f5a1", "2026-08-19T07:32:00Z")
-    }
-
-    fn pacts(modules: &[&str]) -> Manifest {
-        Manifest::with_entries(modules.iter().map(|module| entry(module)))
     }
 
     fn notes(app: &App) -> Vec<String> {
@@ -873,20 +802,14 @@ mod writes {
     }
 
     #[test]
-    fn enter_writes_the_document_and_says_what_landed_and_what_it_staled() {
+    fn enter_writes_the_document_and_says_what_landed() {
         let repo = a_repo();
         // 1832 bytes on the nose, so the line's size is a fact rather than a
         // range: the panel's own spelling, one decimal under ten kilobytes.
         let reply = document_of(1832);
         let mut app = app_answering(repo.path(), &reply);
 
-        let prompt = write_submit(
-            &mut app,
-            &pacts(&["docs"]),
-            repo.path(),
-            &field(BRIEF),
-            now(),
-        );
+        let prompt = write_submit(&mut app, repo.path(), &field(BRIEF), now());
 
         assert_eq!(prompt, ScopePrompt::Closed, "the window is answered");
         assert_eq!(
@@ -894,14 +817,8 @@ mod writes {
             reply,
             "the bytes on disk are not the reply on the card"
         );
-        assert_eq!(
-            notes(&app),
-            [
-                format!("wrote {BRIEF} — 1.8 KB"),
-                "docs is now stale".to_owned(),
-            ]
-        );
-        // The two lines are the whole of what a write says. The footer is the
+        assert_eq!(notes(&app), [format!("wrote {BRIEF} — 1.8 KB")]);
+        // That one line is the whole of what a write says. The footer is the
         // last keystroke's, and nothing about the run state moved.
         assert_eq!(app.message(), Some(LAST_KEY));
         assert!(!app.is_pacting());
@@ -919,13 +836,7 @@ mod writes {
             let repo = a_repo();
             let mut app = app_answering(repo.path(), &document_of(bytes));
 
-            write_submit(
-                &mut app,
-                &Manifest::new(),
-                repo.path(),
-                &field(BRIEF),
-                now(),
-            );
+            write_submit(&mut app, repo.path(), &field(BRIEF), now());
 
             assert_eq!(notes(&app), [format!("wrote {BRIEF} — {said}")]);
         }
@@ -959,13 +870,7 @@ mod writes {
             shapeless(repo.path());
             let mut app = app_answering(repo.path(), reply);
 
-            write_submit(
-                &mut app,
-                &Manifest::new(),
-                repo.path(),
-                &field(BRIEF),
-                now(),
-            );
+            write_submit(&mut app, repo.path(), &field(BRIEF), now());
 
             assert_eq!(
                 fs::read_to_string(repo.path().join(BRIEF)).expect("the artifact reads back"),
@@ -980,17 +885,11 @@ mod writes {
         let repo = a_repo();
         let mut app = app_answering(repo.path(), WHOLE);
 
-        write_submit(
-            &mut app,
-            &pacts(&["docs", "."]),
-            repo.path(),
-            &field(BRIEF),
-            now(),
-        );
+        write_submit(&mut app, repo.path(), &field(BRIEF), now());
 
         // The output directory and the file in it, and that is the whole of the
         // repository: no transcript, no draft, and nothing warlock authored
-        // under `.warlock/` — the manifest was read and never written.
+        // under `.warlock/` — the ledger is never touched by a write.
         assert_eq!(everything_under(repo.path()), ["docs", BRIEF]);
     }
 
@@ -1000,7 +899,7 @@ mod writes {
         let mut app = app_answering(repo.path(), WHOLE);
         let deep = "docs/briefs/2026/warlock-brief-01-freshness.md";
 
-        let prompt = write_submit(&mut app, &Manifest::new(), repo.path(), &field(deep), now());
+        let prompt = write_submit(&mut app, repo.path(), &field(deep), now());
 
         assert_eq!(prompt, ScopePrompt::Closed);
         assert!(repo.path().join(deep).is_file(), "{deep} is not a file");
@@ -1015,7 +914,7 @@ mod writes {
         let before = app.clone();
         let typed = field(BRIEF);
 
-        let prompt = write_submit(&mut app, &pacts(&["docs"]), repo.path(), &typed, now());
+        let prompt = write_submit(&mut app, repo.path(), &typed, now());
 
         // The rule under the field and the typed path still in it, one keystroke
         // from being changed — and the file that was there is byte for byte the
@@ -1046,69 +945,10 @@ mod writes {
         fs::create_dir_all(repo.path().join(BRIEF)).expect("makes a directory of that name");
         let mut app = app_answering(repo.path(), WHOLE);
 
-        let prompt = write_submit(
-            &mut app,
-            &Manifest::new(),
-            repo.path(),
-            &field(BRIEF),
-            now(),
-        );
+        let prompt = write_submit(&mut app, repo.path(), &field(BRIEF), now());
 
         assert!(prompt.is_open(), "a directory was written over");
         assert!(notes(&app).is_empty());
-    }
-
-    #[test]
-    fn the_stale_line_names_the_nearest_pacted_ancestor_and_only_it() {
-        for (modules, said) in [
-            // The directory the file landed in, when it is the one with a pact.
-            (&["docs", "."][..], Some("docs is now stale")),
-            // The root, when nothing nearer is pacted: an outer pact still
-            // describes a subtree the new file is in.
-            (&["."][..], Some(". is now stale")),
-            // A pact beside it is not a pact above it, however much of a prefix
-            // it looks like.
-            (&["docs-old", "crates"][..], None),
-            // And a repository with no pacts at all has no ledger to stale.
-            (&[][..], None),
-        ] {
-            let repo = a_repo();
-            let mut app = app_answering(repo.path(), WHOLE);
-
-            write_submit(&mut app, &pacts(modules), repo.path(), &field(BRIEF), now());
-
-            let lines = notes(&app);
-            assert!(
-                lines[0].starts_with(&format!("wrote {BRIEF} — ")),
-                "{modules:?} said {lines:?}"
-            );
-            assert_eq!(
-                lines.get(1).map(String::as_str),
-                said,
-                "{modules:?} said {lines:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_file_written_beside_the_root_is_staled_by_the_root_pact() {
-        // No `/` in the path at all, which is the one case the ancestor walk
-        // has to reach the root from directly.
-        let repo = a_repo();
-        let mut app = app_answering(repo.path(), WHOLE);
-
-        write_submit(
-            &mut app,
-            &pacts(&["."]),
-            repo.path(),
-            &field("brief.md"),
-            now(),
-        );
-
-        assert_eq!(
-            notes(&app).get(1).map(String::as_str),
-            Some(". is now stale")
-        );
     }
 
     #[test]
@@ -1117,13 +957,7 @@ mod writes {
         let mut app = app_answering(repo.path(), WHOLE);
 
         for typed in ["", "   "] {
-            let prompt = write_submit(
-                &mut app,
-                &Manifest::new(),
-                repo.path(),
-                &field(typed),
-                now(),
-            );
+            let prompt = write_submit(&mut app, repo.path(), &field(typed), now());
 
             assert_eq!(
                 prompt.field().and_then(ScopeField::rule),
@@ -1143,13 +977,7 @@ mod writes {
         fs::create_dir_all(&root).expect("makes the repository");
         let mut app = app_answering(&root, WHOLE);
 
-        let prompt = write_submit(
-            &mut app,
-            &Manifest::new(),
-            &root,
-            &field("../outside/brief.md"),
-            now(),
-        );
+        let prompt = write_submit(&mut app, &root, &field("../outside/brief.md"), now());
 
         // The artifact belongs to the repository the ledger is about, so the
         // field stays up over the engine's own sentence and nothing lands
@@ -1174,13 +1002,7 @@ mod writes {
                        ## Constraints\n\n## Out of scope\n";
         let mut app = app_answering(repo.path(), dropped);
 
-        let prompt = write_submit(
-            &mut app,
-            &pacts(&["docs"]),
-            repo.path(),
-            &field(BRIEF),
-            now(),
-        );
+        let prompt = write_submit(&mut app, repo.path(), &field(BRIEF), now());
 
         // The window comes down rather than staying up over the field: what is
         // wrong is the document, and the field is not where a reader fixes one.
@@ -1207,13 +1029,7 @@ mod writes {
             "# Freshness\n\nProse.\n\n## Success criteria\n\n## Out of scope\n",
         );
 
-        write_submit(
-            &mut app,
-            &Manifest::new(),
-            repo.path(),
-            &field(BRIEF),
-            now(),
-        );
+        write_submit(&mut app, repo.path(), &field(BRIEF), now());
 
         assert_eq!(
             app.message(),
@@ -1235,13 +1051,7 @@ mod writes {
 
         // A document with warlock's own five sections and not this repository's.
         let mut app = app_answering(repo.path(), WHOLE);
-        write_submit(
-            &mut app,
-            &Manifest::new(),
-            repo.path(),
-            &field(BRIEF),
-            now(),
-        );
+        write_submit(&mut app, repo.path(), &field(BRIEF), now());
 
         assert_eq!(
             app.message(),
@@ -1252,13 +1062,7 @@ mod writes {
         // And the same document, once the shape asks for what it has.
         fs::write(&template, "# A title\n\n## Outcome\n").expect("rewrites the template");
         let mut app = app_answering(repo.path(), WHOLE);
-        write_submit(
-            &mut app,
-            &Manifest::new(),
-            repo.path(),
-            &field(BRIEF),
-            now(),
-        );
+        write_submit(&mut app, repo.path(), &field(BRIEF), now());
 
         assert_eq!(
             notes(&app),
@@ -1276,13 +1080,7 @@ mod writes {
         fs::create_dir_all(&template).expect("makes a directory where the file goes");
         let mut app = app_answering(repo.path(), WHOLE);
 
-        let prompt = write_submit(
-            &mut app,
-            &Manifest::new(),
-            repo.path(),
-            &field(BRIEF),
-            now(),
-        );
+        let prompt = write_submit(&mut app, repo.path(), &field(BRIEF), now());
 
         assert_eq!(prompt, ScopePrompt::Closed);
         let said = app.message().expect("a refusal says why");
@@ -1307,7 +1105,7 @@ mod writes {
             .expect("writes a file in the way of the output directory");
         let mut app = app_answering(repo.path(), WHOLE);
 
-        let prompt = write_submit(&mut app, &pacts(&["."]), repo.path(), &field(BRIEF), now());
+        let prompt = write_submit(&mut app, repo.path(), &field(BRIEF), now());
 
         // A line on the footer and the window down off it — never an error out
         // of the event loop, and never a line on the conversation claiming a
@@ -1337,13 +1135,7 @@ mod writes {
             NodeState::Unpacted,
         )));
 
-        let prompt = write_submit(
-            &mut app,
-            &Manifest::new(),
-            repo.path(),
-            &field(BRIEF),
-            now(),
-        );
+        let prompt = write_submit(&mut app, repo.path(), &field(BRIEF), now());
 
         assert_eq!(prompt, ScopePrompt::Closed);
         assert!(app.message().is_some_and(|line| !line.is_empty()));
@@ -1361,8 +1153,7 @@ mod writes {
 
         use super::super::{WRITE_HEADING, write_edit, write_opened};
         use super::{
-            App, Instant, Manifest, TempDir, a_repo, app_answering, everything_under, fs, notes,
-            now, pacts,
+            App, Instant, TempDir, a_repo, app_answering, everything_under, fs, notes, now,
         };
 
         const REPLY: &str = "# Scopes and sigils\n\nA boundary somebody drew.\n\n\
@@ -1379,7 +1170,6 @@ mod writes {
 
         fn round(
             app: &mut App,
-            manifest: &Manifest,
             repo: &TempDir,
             prompt: &ScopePrompt,
             code: KeyCode,
@@ -1389,7 +1179,7 @@ mod writes {
                 let field = prompt.field().expect("the window is still up");
                 edit_for(press(code), field)
             };
-            write_edit(app, manifest, repo.path(), prompt, edited, now)
+            write_edit(app, repo.path(), prompt, edited, now)
         }
 
         #[test]
@@ -1418,7 +1208,6 @@ mod writes {
             // screen rather than at the one warlock guessed.
             let repo = a_repo();
             let mut app = app_answering(repo.path(), REPLY);
-            let manifest = pacts(&["docs"]);
             let mut prompt = write_opened(repo.path(), DIRECTORY, REPLY);
 
             for code in [
@@ -1431,7 +1220,7 @@ mod writes {
                 KeyCode::Char('t'),
                 KeyCode::Enter,
             ] {
-                prompt = round(&mut app, &manifest, &repo, &prompt, code, now());
+                prompt = round(&mut app, &repo, &prompt, code, now());
             }
 
             let written = "docs/warlock-brief-01-scopes-and-sigils.txt";
@@ -1443,10 +1232,7 @@ mod writes {
             );
             assert_eq!(
                 notes(&app),
-                vec![
-                    format!("wrote {written} — {} bytes", REPLY.len()),
-                    "docs is now stale".to_owned(),
-                ]
+                vec![format!("wrote {written} — {} bytes", REPLY.len())]
             );
         }
 
@@ -1462,14 +1248,7 @@ mod writes {
             let before = app.clone();
             let prompt = write_opened(repo.path(), DIRECTORY, REPLY);
 
-            let prompt = round(
-                &mut app,
-                &pacts(&["docs"]),
-                &repo,
-                &prompt,
-                KeyCode::Esc,
-                now(),
-            );
+            let prompt = round(&mut app, &repo, &prompt, KeyCode::Esc, now());
 
             assert_eq!(prompt, ScopePrompt::Closed);
             assert_eq!(app, before, "Esc moved something on the app");
@@ -1489,13 +1268,12 @@ mod writes {
             // different question with a different answer.
             let repo = a_repo();
             let mut app = app_answering(repo.path(), REPLY);
-            let manifest = pacts(&["docs"]);
             let mut prompt = write_opened(repo.path(), DIRECTORY, REPLY);
             fs::create_dir_all(repo.path().join("docs")).expect("makes the output directory");
             fs::write(repo.path().join(PROPOSED), "somebody else's brief\n")
                 .expect("writes the file in the way");
 
-            prompt = round(&mut app, &manifest, &repo, &prompt, KeyCode::Enter, now());
+            prompt = round(&mut app, &repo, &prompt, KeyCode::Enter, now());
 
             let field = prompt
                 .field()
@@ -1520,7 +1298,7 @@ mod writes {
                 KeyCode::Char('d'),
                 KeyCode::Enter,
             ] {
-                prompt = round(&mut app, &manifest, &repo, &prompt, code, now());
+                prompt = round(&mut app, &repo, &prompt, code, now());
             }
 
             assert_eq!(prompt, ScopePrompt::Closed);
@@ -1544,7 +1322,6 @@ mod writes {
 
             let prompt = write_edit(
                 &mut app,
-                &pacts(&["docs"]),
                 repo.path(),
                 &ScopePrompt::Closed,
                 warlock_tui::Edited::Submit,
@@ -1578,7 +1355,6 @@ mod writes {
         use super::super::WRITE_HEADING;
         use super::{
             App, Instant, Node, NodeState, PathBuf, Tree, a_repo, everything_under, fs, notes, now,
-            pacts,
         };
         use warlock_tui::Converses;
 
@@ -1619,10 +1395,10 @@ mod writes {
                 None::<PathBuf>,
                 NodeState::Unpacted,
             )));
-            // The register the command is only allowed in, and the pact the
-            // written file is about to make stale.
+            // The register the command is only allowed in. Nothing else is
+            // arranged: the write path is handed the app, the root and the
+            // field, and the ledger is no part of it.
             app.panel_mut().set_mode(Mode::Brief);
-            let manifest = pacts(&["docs"]);
             // The conversation, rooted in that repository: where a brief goes
             // is its own now, settled at `/brief` and read at `/write` without
             // being looked at again.
@@ -1681,7 +1457,7 @@ mod writes {
             // And Enter in that window, through `edit_for` as `press_for` sends
             // it and `write_edit` as the loop's arm applies it.
             let edited = edit_for(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &field);
-            chat.write(&mut app, &manifest, edited, base);
+            chat.write(&mut app, edited, base);
 
             assert_eq!(
                 *chat.write_prompt(),
@@ -1693,10 +1469,7 @@ mod writes {
             assert_eq!(written, DOCUMENT, "the bytes are not the document answered");
             assert_eq!(
                 notes(&app),
-                [
-                    format!("wrote {PROPOSED} — {} bytes", written.len()),
-                    "docs is now stale".to_owned(),
-                ]
+                [format!("wrote {PROPOSED} — {} bytes", written.len())]
             );
             // The whole repository, after the whole path: the output directory
             // and the one file in it. No transcript, no draft of the brief, and
