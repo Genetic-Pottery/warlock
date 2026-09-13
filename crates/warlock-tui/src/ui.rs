@@ -25,7 +25,7 @@ use warlock_engine::{NodeState, scope};
 // live, and this module is the one place both are in scope.
 use crate::account::{Account, Line as Entry};
 use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
-use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
+use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
 use crate::composer::Composer;
 use crate::confirm::{Answer, QuitConfirm};
 use crate::panel::Mode;
@@ -542,8 +542,9 @@ fn pane_block(focused: bool) -> Block<'static> {
 
 fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     let below = app.panel().lines_below();
+    let conversation = app.panel().showing_thread();
     let mut block = pane_block(app.focus() == Focus::Panel);
-    if app.panel().showing_thread() {
+    if conversation {
         block = block.title_top(Line::from(thread_title(app.panel().mode())).bold());
     }
     if below > 0 {
@@ -567,7 +568,7 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
         .panel()
         .window(now)
         .iter()
-        .map(|line| panel_row(line, inner.width))
+        .map(|line| panel_row(line, inner.width, conversation))
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);
 }
@@ -725,13 +726,38 @@ fn scrollback(below: usize) -> String {
 // has already been broken into the rows it needs, under its own clock or marker
 // (see `crate::wrap`), so the truncation below is the last-resort cut for a row
 // that still does not fit and not the way long text is handled.
-fn panel_row(line: &Entry, width: u16) -> Line<'static> {
+//
+// `conversation` is which card is being drawn, and it is a parameter rather
+// than something read off the entry because the same variants mean different
+// things on different cards: a `Text` row is the model's answer on the thread
+// and a paragraph of a file on the document, and only the first of those is
+// coloured. The colour goes on the whole row, prefix included, so the marker in
+// front of what was answered belongs to the answer rather than sitting in a
+// span of its own.
+fn panel_row(line: &Entry, width: u16, conversation: bool) -> Line<'static> {
     let shape = shape(line);
     let row = Line::from(truncated(
         &format!("{}{}", shape.prefix, shape.text),
         usize::from(width),
     ));
-    if shape.heading { row.bold() } else { row }
+    let row = if shape.heading { row.bold() } else { row };
+    if conversation && !operators_own(line) {
+        row.fg(CONVERSATION_COLOUR)
+    } else {
+        row
+    }
+}
+
+// The split on the conversation card is by author, not by kind of row: what the
+// reader typed, and the rows the rest of it spilled onto, keep the terminal's
+// default foreground. `Wrapped` is a continuation with no variant left to it,
+// so its `heading` flag is what says whose it was — true only for `Said` here,
+// because the other two headings are account-card rows.
+const fn operators_own(line: &Entry) -> bool {
+    matches!(
+        line,
+        Entry::Said { .. } | Entry::Wrapped { heading: true, .. }
+    )
 }
 
 fn truncated(text: &str, width: usize) -> String {
@@ -1147,12 +1173,13 @@ mod tests {
     use crate::account::{Line as Entry, Outcome};
     use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
     use crate::claude::Activity;
-    use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
+    use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
     use crate::composer::Composer;
     use crate::confirm::{Answer, QuitConfirm};
     use crate::fixture;
     use crate::panel::Mode;
     use crate::prompt::{ScopeField, ScopePrompt};
+    use crate::thread::Ending;
 
     const MANY: usize = 20;
 
@@ -1303,6 +1330,20 @@ mod tests {
         let area = panel_area(buffer);
         (0..area.height)
             .map(|index| text_in(buffer, area, area.y + index))
+            .collect()
+    }
+
+    // The foreground of every cell a panel row wrote a glyph into, the row's
+    // own prefix included. It stops at the last glyph because a row's style
+    // reaches the text and not the blanks past the end of it, which the border
+    // cleared and which say nothing about whose row this is.
+    fn panel_row_colours(buffer: &Buffer, index: usize) -> Vec<Color> {
+        let area = panel_area(buffer);
+        let y = area.y + u16::try_from(index).expect("the panel is a few rows tall");
+        let written = u16::try_from(display_width(&text_in(buffer, area, y))).unwrap_or(area.width);
+
+        (area.x..area.x + written.min(area.width))
+            .map(|x| buffer[(x, y)].fg)
             .collect()
     }
 
@@ -4420,13 +4461,20 @@ mod tests {
             );
         }
 
-        // The answer's rows are plain: no colour, no modifier, nothing added to
-        // the left of them — where the question above them is bold, which is
-        // what a heading gets here and what no prose does.
+        // The answer's rows are unadorned but for their colour: no modifier
+        // anywhere across them — where the question above them is bold, which
+        // is what a heading gets here and what no prose does — and, on every
+        // cell the words themselves reach, the conversation's own foreground,
+        // which is what says they came back rather than having been typed. The
+        // blanks past the end of a row are left as the border cleared them.
         for index in 3..6 {
+            let written =
+                u16::try_from(display_width(&drawn[usize::from(index)])).unwrap_or(inner.width);
             for x in inner.x..inner.x + inner.width {
                 let cell = &buffer[(x, inner.y + index)];
-                assert_eq!(cell.fg, Color::Reset, "at ({x}, {index})");
+                if x < inner.x + written {
+                    assert_eq!(cell.fg, CONVERSATION_COLOUR, "at ({x}, {index})");
+                }
                 assert_eq!(cell.modifier, Modifier::empty(), "at ({x}, {index})");
             }
         }
@@ -4436,12 +4484,217 @@ mod tests {
         );
     }
 
+    const NOTE: &str = "no such command";
+    const SECOND_QUESTION: &str = "try it again";
+
+    #[test]
+    fn everything_on_the_conversation_but_the_readers_own_words_is_the_conversations_colour() {
+        // One whole turn, warlock's own voice after it, and a second turn that
+        // ended rather than answered: every kind of row the card has, in the
+        // order it files them.
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        app.panel_mut().start_turn(QUESTION, base);
+        app.panel_mut()
+            .record_turn(&Activity::Thinking, at(base, 1));
+        app.panel_mut().answer_turn(ANSWER, at(base, 2));
+        app.panel_mut().note(NOTE, at(base, 3));
+        app.panel_mut().start_turn(SECOND_QUESTION, at(base, 4));
+        app.panel_mut()
+            .record_turn(&Activity::Thinking, at(base, 5));
+        app.panel_mut().end_turn(&Ending::Cancelled, at(base, 6));
+
+        let buffer = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+
+        let drawn = panel_rows(&buffer);
+        assert_eq!(
+            drawn[..7],
+            [
+                format!("{SAID_MARKER}{QUESTION}"),
+                format!("{PANEL_INDENT}0:02 thinking"),
+                ANSWER.to_owned(),
+                format!("{NOTE_MARKER}{NOTE}"),
+                format!("{SAID_MARKER}{SECOND_QUESTION}"),
+                format!("{PANEL_INDENT}0:02 thinking"),
+                format!("{PANEL_INDENT}0:02 {}", Ending::Cancelled.line()),
+            ],
+        );
+
+        // The answer, both work lines, the ending the turn was closed with and
+        // warlock's note: every glyph of every one of them, clock and marker
+        // included, in the conversation's own foreground.
+        for index in [1, 2, 3, 5, 6] {
+            let colours = panel_row_colours(&buffer, index);
+            assert!(!colours.is_empty(), "row {index} was drawn blank");
+            for (column, fg) in colours.into_iter().enumerate() {
+                assert_eq!(fg, CONVERSATION_COLOUR, "at ({column}, {index})");
+            }
+        }
+        // And the two rows left out are the two the reader typed, which keep the
+        // terminal's own foreground: the split on this card is by author, so it
+        // takes both halves of one card to say it.
+        for index in [0, 4] {
+            let colours = panel_row_colours(&buffer, index);
+            assert!(!colours.is_empty(), "row {index} was drawn blank");
+            for (column, fg) in colours.into_iter().enumerate() {
+                assert_eq!(fg, Color::Reset, "at ({column}, {index})");
+            }
+        }
+    }
+
+    const LONG_QUESTION: &str = "what does the engine in the crates directory do all day";
+
+    #[test]
+    fn a_question_too_long_for_the_panel_keeps_the_default_foreground_on_every_row() {
+        // The same narrow terminal the wrapping above is pinned at: the panel
+        // gets half of forty columns, less its border, and the question is long
+        // enough to need four of those rows.
+        let narrow = 40;
+        let base = Instant::now();
+        let mut app = pacting_app(base, narrow, FIXTURE_HEIGHT);
+        app.panel_mut().start_turn(LONG_QUESTION, base);
+        app.panel_mut().answer_turn(ANSWER, at(base, 1));
+
+        let buffer = render_at(&app, narrow, FIXTURE_HEIGHT, at(base, 2));
+
+        assert_eq!(
+            panel_area(&buffer).width,
+            18,
+            "the terminal is the narrow one"
+        );
+        let drawn = panel_rows(&buffer);
+        assert_eq!(
+            drawn[..4],
+            [
+                format!("{SAID_MARKER}what does the"),
+                format!("{PANEL_INDENT}engine in the"),
+                format!("{PANEL_INDENT}crates directory"),
+                format!("{PANEL_INDENT}do all day"),
+            ],
+        );
+
+        // A message is one thing the reader typed however many rows it took, so
+        // the rows it spilled onto are the reader's too: no foreground of ours
+        // on the marked first row or on any continuation of it, which leaves
+        // every cell of them the terminal's own colour.
+        for index in 0..4 {
+            let colours = panel_row_colours(&buffer, index);
+            assert!(!colours.is_empty(), "row {index} was drawn blank");
+            for (column, fg) in colours.into_iter().enumerate() {
+                assert_eq!(fg, Color::Reset, "at ({column}, {index})");
+            }
+        }
+        // And the answer under them is still coloured, so the rows above are
+        // default because of whose they are and not because the card is.
+        assert!(
+            panel_row_colours(&buffer, 5)
+                .iter()
+                .all(|fg| *fg == CONVERSATION_COLOUR),
+            "{:?}",
+            panel_row_colours(&buffer, 5)
+        );
+    }
+
+    #[test]
+    fn the_conversations_colour_is_on_neither_the_account_nor_the_document() {
+        // All three cards filled at once: a run writing an account, a turn asked
+        // and answered with a note after it, and a file read.
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        let account = app.panel_mut().account_mut().expect("a pact has started");
+        account.open_section(SAME_WORDS, base);
+        account.record(&Activity::Thinking, at(base, 1));
+        app.panel_mut().start_turn(QUESTION, at(base, 2));
+        app.panel_mut().answer_turn(ANSWER, at(base, 3));
+        app.panel_mut().note(NOTE, at(base, 4));
+        app.panel_mut()
+            .show_document(["# The engine", "", ANSWER], false);
+
+        // The file came to the front the moment it was filled, so it is the card
+        // showing with nothing pressed...
+        let showing_document = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+        assert_eq!(panel_rows(&showing_document)[0], "# The engine");
+        // ...and the swap order is the conversation, the run, then the file, so
+        // two steps from the file reach the account.
+        app.swap_card();
+        app.swap_card();
+        let showing_account = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+        assert_eq!(
+            panel_rows(&showing_account)[..2],
+            [
+                SAME_WORDS.to_owned(),
+                format!("{PANEL_INDENT}0:09 thinking"),
+            ],
+        );
+
+        // Neither card is a conversation, so neither carries the conversation's
+        // colour anywhere — border, titles and the scrollback edge included,
+        // which is why this counts the whole pane rather than its rows.
+        for (card, buffer) in [("account", showing_account), ("document", showing_document)] {
+            let panel = areas(buffer.area, None).panel;
+            for y in panel.y..panel.y + panel.height {
+                for x in panel.x..panel.x + panel.width {
+                    assert_ne!(
+                        buffer[(x, y)].fg,
+                        CONVERSATION_COLOUR,
+                        "the {card} card is coloured at ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_conversations_colour_never_reaches_the_tree() {
+        // A conversation with every kind of row on it, showing, beside the tree:
+        // whatever the panel is drawing, the tree is drawn by what its rows are.
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        app.panel_mut().start_turn(QUESTION, base);
+        app.panel_mut()
+            .record_turn(&Activity::Thinking, at(base, 1));
+        app.panel_mut().answer_turn(ANSWER, at(base, 2));
+        app.panel_mut().note(NOTE, at(base, 3));
+        assert!(app.panel().showing_thread());
+
+        let buffer = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+
+        // Three node-state colours, the guides' own, and the blank the border
+        // cleared: that is every colour the tree has, and the conversation's is
+        // not among them.
+        let area = rows_area(&buffer);
+        let states: Vec<Color> = NodeState::ALL.into_iter().map(colour_for).collect();
+        assert!(!states.contains(&CONVERSATION_COLOUR));
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let fg = buffer[(x, y)].fg;
+                assert_ne!(
+                    fg, CONVERSATION_COLOUR,
+                    "the tree is coloured at ({x}, {y})"
+                );
+                assert!(
+                    fg == Color::Reset || fg == GUIDE_COLOUR || states.contains(&fg),
+                    "({x}, {y}) is drawn in {fg:?}, which is no tree colour"
+                );
+            }
+        }
+        // And each drawn row's own text is still its state's colour, so the rows
+        // are coloured by the tree's rule rather than left uncoloured.
+        let drawn = u16::try_from(app.rows().len())
+            .expect("the fixture tree is small")
+            .min(area.height);
+        for index in 0..drawn {
+            let state = app.rows()[usize::from(index)].state;
+            assert_eq!(first_glyph_colour(&buffer, index), colour_for(state));
+        }
+    }
+
     const ROW_WIDTH: u16 = 24;
 
-    fn row_drawn(line: &Entry) -> (String, bool) {
+    fn row_drawn(line: &Entry, conversation: bool) -> (String, bool) {
         let area = Rect::new(0, 0, ROW_WIDTH, 1);
         let mut buffer = Buffer::empty(area);
-        Paragraph::new(panel_row(line, ROW_WIDTH)).render(area, &mut buffer);
+        Paragraph::new(panel_row(line, ROW_WIDTH, conversation)).render(area, &mut buffer);
         let bold = (0..ROW_WIDTH).any(|x| buffer[(x, 0)].modifier.contains(Modifier::BOLD));
 
         (text_in(&buffer, area, 0), bold)
@@ -4451,16 +4704,25 @@ mod tests {
     fn a_note_is_drawn_as_neither_a_question_nor_a_work_line() {
         const WORDS: &str = "no such command";
 
-        let note = row_drawn(&Entry::Note {
-            text: WORDS.to_owned(),
-        });
-        let said = row_drawn(&Entry::Said {
-            text: WORDS.to_owned(),
-        });
-        let clocked = row_drawn(&Entry::Clocked {
-            clock: "0:09".to_owned(),
-            text: WORDS.to_owned(),
-        });
+        let note = row_drawn(
+            &Entry::Note {
+                text: WORDS.to_owned(),
+            },
+            true,
+        );
+        let said = row_drawn(
+            &Entry::Said {
+                text: WORDS.to_owned(),
+            },
+            true,
+        );
+        let clocked = row_drawn(
+            &Entry::Clocked {
+                clock: "0:09".to_owned(),
+                text: WORDS.to_owned(),
+            },
+            true,
+        );
 
         // Warlock's own marker and then the words, with nothing else on the
         // row: no clock, because a note is not work that took time, and nothing
