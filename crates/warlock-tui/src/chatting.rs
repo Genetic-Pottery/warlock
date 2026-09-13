@@ -18,7 +18,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Instant;
 
-use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, Manifest, briefs, load_briefs};
+use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs, load_briefs};
 use warlock_tui::{
     Activities, Activity, App, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, ChatAgent,
     Composed, Composer, Converses, Edited, Ending, Focus, Mode, Pasted, ScopePrompt, Submitted,
@@ -295,14 +295,8 @@ impl<C: Converses> Chat<C> {
         self.settle_field();
     }
 
-    pub(crate) fn write(
-        &mut self,
-        app: &mut App,
-        manifest: &Manifest,
-        edited: Edited,
-        now: Instant,
-    ) {
-        self.prompt = write_edit(app, manifest, &self.root, &self.prompt, edited, now);
+    pub(crate) fn write(&mut self, app: &mut App, edited: Edited, now: Instant) {
+        self.prompt = write_edit(app, &self.root, &self.prompt, edited, now);
     }
 }
 

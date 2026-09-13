@@ -859,7 +859,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
             // app was never told the question was asked. See
             // `writing::write_edit`.
             Pressed::Write(edited) => {
-                self.chat.write(&mut self.app, &self.manifest, edited, now);
+                self.chat.write(&mut self.app, edited, now);
             }
             // Somebody typing at the foot of the panel's column: a character more
             // or less in the draft, the keyboard handed back, or a draft offered
