@@ -25,9 +25,9 @@ carry_hash = "5cb1167c1e5342b97b5ebe50cb48c649cada9d679ac06679d54c1cf8f0e86b61"
 [[pact]]
 module = "crates/warlock-engine/src"
 document = "crates/warlock-engine/src/WARLOCK.md"
-granted_hash = "358ebe1918deb0679d2d47f65734a8465c4758478e30a3faecfac399d0627768"
-granted_at = "2026-09-12T15:23:00Z"
-carry_hash = "7d9f80286980cf8e9f90b1150d3b54117e609c6d128d51e4df26b7061d0a0922"
+granted_hash = "5fdd1d0f3845a0db6855358dc4f5235d828fbb60fcf2ecf5a9477dcb3dc2d707"
+granted_at = "2026-09-13T04:25:11Z"
+carry_hash = "56ff770b56adae21c11955941a7fd73483c20b7e9c569d056f37caa60a37ab9f"
 
 [[pact]]
 module = "crates/warlock-tui"

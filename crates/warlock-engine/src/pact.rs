@@ -2004,8 +2004,11 @@ mod tests {
         "writing.rs": "The writing half, which is a single unexported helper for now."
       },
       "directories": { "inner": "A child directory carrying a document of its own." },
-      "structure": ["Reading and writing are separate files and share no state."],
-      "rules": ["Anything binary stays out of the two source files."],
+      "structure": [{
+        "line": "Reading and writing are separate files and share no state.",
+        "names": ["reading.rs", "writing.rs"]
+      }],
+      "rules": [{ "line": "Anything binary stays out of the two source files.", "names": [] }],
       "lookups": [{ "for": "reading a record", "open": "reading.rs", "symbol": "read_one" }]
     }"#;
 

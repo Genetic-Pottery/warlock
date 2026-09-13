@@ -55,11 +55,67 @@ pub struct Fill {
     #[serde(default)]
     pub directories: BTreeMap<String, String>,
     #[serde(default)]
-    pub structure: Vec<String>,
+    pub structure: Vec<Entry>,
     #[serde(default)]
-    pub rules: Vec<String>,
+    pub rules: Vec<Entry>,
     #[serde(default)]
     pub lookups: Vec<Lookup>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "Stated")]
+pub struct Entry {
+    pub line: String,
+    #[serde(default)]
+    pub names: Vec<String>,
+}
+
+// A pass that answers a list entry with a bare string rather than the object
+// asked for is the commonest shape a model gets wrong, and reading it strictly
+// would answer that slip with `NotJson` — the one defect with nothing to repair
+// from, which throws away the whole pass and every grant above it. Read
+// leniently and the same slip is a claim naming nothing, which is a defect the
+// repair road already handles: asked about once, and dropped by `mend` if the
+// answer comes back no better.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Stated {
+    Line(String),
+    Entry {
+        #[serde(default)]
+        line: String,
+        #[serde(default)]
+        names: Vec<String>,
+    },
+}
+
+impl From<Stated> for Entry {
+    fn from(stated: Stated) -> Self {
+        match stated {
+            Stated::Line(line) => Self {
+                line,
+                names: Vec::new(),
+            },
+            Stated::Entry { line, names } => Self { line, names },
+        }
+    }
+}
+
+#[cfg(test)]
+impl Entry {
+    fn of(line: impl Into<String>) -> Self {
+        Self {
+            line: line.into(),
+            names: Vec::new(),
+        }
+    }
+
+    fn naming(line: impl Into<String>, name: &str) -> Self {
+        Self {
+            line: line.into(),
+            names: vec![name.to_owned()],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +264,19 @@ impl<'a> Expected<'a> {
     fn holds(&self, target: &str) -> bool {
         self.files.contains_key(target) || self.directories.contains_key(target)
     }
+
+    // A name warlock can find: a file or child directory it asked about, or a
+    // token some file it was shown actually contains. The second is the same
+    // evidence `route` verifies a lookup's symbol with, and it is containment
+    // rather than a declaration on purpose — a claim may name a lint, a
+    // manifest key or a constant that no language table declares.
+    fn knows(&self, name: &str) -> bool {
+        self.holds(name)
+            || self.files.values().any(|(_, shown)| match shown {
+                Shown::Text(text) => text.contains(name),
+                Shown::NotText | Shown::Unsent => false,
+            })
+    }
 }
 
 fn names_tool(text: &str) -> bool {
@@ -338,14 +407,18 @@ so. Every key is a file you were shown; add none and remove none.
 that should send a reader there. Write it from the subdirectory's own \
 WARLOCK.md, which follows below, and do not restate that document's contents.
 
-\"structure\": how the files here fit together, one fact per line: what calls \
+\"structure\": how the files here fit together, one fact per entry: what calls \
 what, in what order, which way a dependency runs. Only what the files you were \
-shown show. An empty list is fine.
+shown show. Each entry is {\"line\": ..., \"names\": [...]}: \"line\" is the fact \
+in prose, and \"names\" lists every file, directory, type, function or constant \
+the line refers to, spelt as the files spell it. A structure entry names at \
+least one. An empty list is fine.
 
-\"rules\": constraints this directory's own files state as rules, one per line: \
-an invariant a comment asserts, a check the code makes, a setting a manifest \
-pins. Not something inferred, and nothing taken from a subdirectory's document. \
-An empty list is fine.
+\"rules\": constraints this directory's own files state as rules, one per \
+entry: an invariant a comment asserts, a check the code makes, a setting a \
+manifest pins. Not something inferred, and nothing taken from a subdirectory's \
+document. The same {\"line\": ..., \"names\": [...]} shape, and a rule that \
+refers to nothing leaves \"names\" empty. An empty list is fine.
 
 \"lookups\": routes, each {\"for\": ..., \"open\": ..., \"symbol\": ...}. \"for\" \
 is a question or topic a reader might arrive with, in plain words. \"open\" is \
@@ -360,7 +433,8 @@ document disagree, the file is right.
 
 An answer is turned down and asked for again when a key is missing or \
 invented, a value is empty or spans lines or runs long, a list is over its cap, \
-or a lookup names a file or symbol that is not here.";
+or a lookup, a structure entry or a rule names a file, directory or symbol that \
+is not here.";
 
 #[must_use]
 pub fn instructions(expected: &Expected<'_>, rejected: &[Defect]) -> String {
@@ -685,8 +759,8 @@ fn check(fill: &Fill, expected: &Expected<'_>) -> Vec<Defect> {
     let children: Vec<&str> = expected.directories.keys().copied().collect();
     keyed("directories", &fill.directories, &children, &mut defects);
 
-    listed("structure", &fill.structure, &mut defects);
-    listed("rules", &fill.rules, &mut defects);
+    stated("structure", &fill.structure, true, expected, &mut defects);
+    stated("rules", &fill.rules, false, expected, &mut defects);
 
     if fill.lookups.len() > LIST_CAP {
         defects.push(Defect::TooMany {
@@ -731,7 +805,7 @@ fn values(fill: &Fill) -> Vec<(String, String)> {
         all.extend(
             list.iter()
                 .enumerate()
-                .map(|(i, v)| (format!("{name}[{i}]"), v.clone())),
+                .map(|(i, v)| (format!("{name}[{i}]"), v.line.clone())),
         );
     }
     for (i, lookup) in fill.lookups.iter().enumerate() {
@@ -792,7 +866,33 @@ fn keyed(name: &str, given: &BTreeMap<String, String>, wanted: &[&str], defects:
     }
 }
 
-fn listed(name: &str, given: &[String], defects: &mut Vec<Defect>) {
+// The claim is prose and goes unchecked; every name it makes is checked. Two
+// other roads were rejected and are worth naming, because both look cheaper
+// from a standing start.
+//
+// Asking the pass to backtick whatever it names, and validating the backticks,
+// leaves the check at the mercy of typography: across the six documents this
+// repository held when this was written, `## Structure` and `## Rules` carried
+// eight backticked tokens between them, so that check would have read almost
+// nothing and reported a clean section.
+//
+// Reading names back out of the prose instead makes an inconsistent writer the
+// authority on what gets checked, and a check that silently matches nothing is
+// exactly how a section ends up unverified with a green mark on it.
+//
+// So a claim carries its own targets, the way a lookup does, and the rendered
+// document is unchanged by any of it: `names` is validated and never printed.
+//
+// `structure` must name something — it is a statement about how the files here
+// fit together, and one that names no file is not that statement. A rule need
+// not: "no nightly-only options" names nothing and is still a rule.
+fn stated(
+    name: &str,
+    given: &[Entry],
+    must_name: bool,
+    expected: &Expected<'_>,
+    defects: &mut Vec<Defect>,
+) {
     if given.len() > LIST_CAP {
         defects.push(Defect::TooMany {
             field: name.to_owned(),
@@ -800,14 +900,32 @@ fn listed(name: &str, given: &[String], defects: &mut Vec<Defect>) {
             cap: LIST_CAP,
         });
     }
-    for (index, value) in given.iter().enumerate() {
+    for (index, entry) in given.iter().enumerate() {
         line(
             &format!("{name}[{index}]"),
-            value,
+            &entry.line,
             ENTRY_MINIMUM,
             ENTRY_CHARS,
             defects,
         );
+        if must_name && entry.names.is_empty() {
+            defects.push(Defect::Empty {
+                field: format!("{name}[{index}].names"),
+            });
+            continue;
+        }
+        for (which, named) in entry.names.iter().enumerate() {
+            let named = named.trim();
+            let field = format!("{name}[{index}].names[{which}]");
+            if named.is_empty() {
+                defects.push(Defect::Empty { field });
+            } else if !expected.knows(named) {
+                defects.push(Defect::UnknownTarget {
+                    field,
+                    open: named.to_owned(),
+                });
+            }
+        }
     }
 }
 
@@ -910,13 +1028,13 @@ pub fn render(name: &str, fill: &Fill, expected: &Expected<'_>, described: &Desc
     text
 }
 
-fn list(text: &mut String, heading: &str, entries: &[String]) {
+fn list(text: &mut String, heading: &str, entries: &[Entry]) {
     if entries.is_empty() {
         return;
     }
     let _ = write!(text, "\n## {heading}\n\n");
     for entry in entries {
-        let _ = writeln!(text, "- {}", entry.trim());
+        let _ = writeln!(text, "- {}", entry.line.trim());
     }
 }
 
@@ -1496,8 +1614,8 @@ fn target<'f>(fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
         Slot::Purpose => Some(&mut fill.purpose),
         Slot::File(key) => fill.files.get_mut(&key),
         Slot::Directory(key) => fill.directories.get_mut(&key),
-        Slot::Entry("structure", index) => fill.structure.get_mut(index),
-        Slot::Entry(_, index) => fill.rules.get_mut(index),
+        Slot::Entry("structure", index) => fill.structure.get_mut(index).map(|e| &mut e.line),
+        Slot::Entry(_, index) => fill.rules.get_mut(index).map(|e| &mut e.line),
         // The topic and nothing else: `.open` and `.symbol` carry no cap or
         // line rule, so no rewrite ever names them.
         Slot::Route(index) if matches!(field.rsplit_once('.'), Some((_, "for"))) => {
@@ -1510,7 +1628,7 @@ fn target<'f>(fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ATTEMPTS, Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Expected, Fill,
+        ATTEMPTS, Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Entry, Expected, Fill,
         LIST_CAP, Lookup, MEND_PASSES, Mend, Mended, PROMPT, PURPOSE_CHARS, Repair, STAMP, accept,
         check, fallback, human, instructions, mend, mended, names_tool, render,
         repair_instructions, skeleton, stub_answer,
@@ -1541,8 +1659,11 @@ mod tests {
     fn good() -> Fill {
         let mut fill = Fill::stub(&request());
         fill.purpose = "The engine crate: pacts, hashes and the manifest.".to_owned();
-        fill.structure = vec!["`lib.rs` re-exports `pact` for the crate.".to_owned()];
-        fill.rules = vec!["No `unsafe`, per the workspace lints.".to_owned()];
+        fill.structure = vec![Entry::naming(
+            "`lib.rs` re-exports `pact` for the crate.",
+            "lib.rs",
+        )];
+        fill.rules = vec![Entry::of("No `unsafe`, per the workspace lints.")];
         fill.lookups = vec![
             Lookup {
                 topic: "how a subtree is hashed".to_owned(),
@@ -1715,7 +1836,7 @@ mod tests {
             "lib.rs".to_owned(),
             "two\nlines, and long enough besides".to_owned(),
         );
-        fill.structure = vec!["x".repeat(ENTRY_CHARS + 1)];
+        fill.structure = vec![Entry::naming("x".repeat(ENTRY_CHARS + 1), "lib.rs")];
         let found = defects(&fill);
         assert!(found.contains(&Defect::Empty {
             field: "purpose".to_owned()
@@ -1743,8 +1864,8 @@ mod tests {
     #[test]
     fn a_list_over_the_cap_is_a_defect_and_so_is_each_bad_entry_in_it() {
         let mut fill = good();
-        fill.rules = vec!["a rule long enough to count".to_owned(); LIST_CAP + 1];
-        fill.rules[3] = String::new();
+        fill.rules = vec![Entry::of("a rule long enough to count"); LIST_CAP + 1];
+        fill.rules[3] = Entry::of(String::new());
         assert_eq!(
             defects(&fill),
             [
@@ -1813,10 +1934,107 @@ mod tests {
     }
 
     #[test]
+    fn a_claim_naming_something_that_is_not_here_is_a_defect() {
+        let mut fill = good();
+        fill.structure = vec![Entry {
+            line: "`load_tree` walks the repository from the crate root.".to_owned(),
+            names: vec!["load_tree".to_owned()],
+        }];
+
+        assert_eq!(
+            defects(&fill),
+            [Defect::UnknownTarget {
+                field: "structure[0].names[0]".to_owned(),
+                open: "load_tree".to_owned(),
+            }],
+            "no file in the request holds that name, so the claim is not checkable",
+        );
+    }
+
+    #[test]
+    fn a_claim_names_a_file_a_child_or_a_word_some_file_here_actually_holds() {
+        let mut fill = good();
+        for name in ["lib.rs", "src", "subtree_hash", "pact"] {
+            fill.structure = vec![Entry::naming("a fact about this directory, spelt out", name)];
+            assert_eq!(defects(&fill), [], "`{name}` is evidenced by the request");
+        }
+    }
+
+    #[test]
+    fn a_structure_entry_must_name_something_and_a_rule_need_not() {
+        let mut fill = good();
+        fill.rules = vec![Entry::of("No nightly-only options anywhere in here.")];
+        assert_eq!(
+            defects(&fill),
+            [],
+            "a rule that refers to nothing is still a rule",
+        );
+
+        fill.structure = vec![Entry::of("The files here fit together somehow.")];
+        assert_eq!(
+            defects(&fill),
+            [Defect::Empty {
+                field: "structure[0].names".to_owned(),
+            }],
+            "a statement about how files fit together that names no file is not that statement",
+        );
+    }
+
+    #[test]
+    fn an_entry_answered_as_a_bare_string_is_read_rather_than_refused() {
+        let request = request();
+        let expected = Expected::of(&request);
+        let mut fill = good();
+        fill.structure.clear();
+        let answer = fill
+            .to_json()
+            .replace("\"structure\": []", "\"structure\": [\"a line where an object was asked for\"]");
+
+        let accepted = accept(None, &answer, &expected);
+
+        // Not `NotJson`: that is the one defect with nothing to repair from, and
+        // spending a whole pass on a model's punctuation is what this avoids.
+        assert_eq!(
+            accepted,
+            Accepted::Defective {
+                fill: Fill {
+                    structure: vec![Entry::of("a line where an object was asked for")],
+                    ..fill
+                },
+                defects: vec![Defect::Empty {
+                    field: "structure[0].names".to_owned(),
+                }],
+            },
+        );
+    }
+
+    #[test]
+    fn the_names_a_claim_carries_are_checked_and_never_written_out() {
+        let request = request();
+        let expected = Expected::of(&request);
+        let described = Described::default();
+        let mut bare = good();
+        bare.structure = vec![Entry {
+            line: "`lib.rs` re-exports `pact` for the crate.".to_owned(),
+            names: vec!["lib.rs".to_owned(), "pact".to_owned(), "subtree_hash".to_owned()],
+        }];
+
+        assert_eq!(
+            render("engine", &bare, &expected, &described),
+            render("engine", &good(), &expected, &described),
+            "the document is the same bytes whatever a claim names: `names` is \
+             evidence for the check and never reaches the page",
+        );
+    }
+
+    #[test]
     fn naming_the_tool_is_a_defect_unless_the_files_name_it() {
         let mut fill = good();
         fill.purpose = "A toy ledger belonging to Warlock.".to_owned();
-        fill.structure = vec!["warlock-style grants, one per module".to_owned()];
+        fill.structure = vec![Entry::naming(
+            "warlock-style grants, one per module",
+            "lib.rs",
+        )];
         assert_eq!(
             defects(&fill),
             [
@@ -2509,7 +2727,7 @@ mod tests {
     fn a_list_over_its_cap_keeps_its_first_entries() {
         let mut fill = good();
         fill.rules = (0..LIST_CAP + 2)
-            .map(|index| format!("a rule long enough to count, the {index}th"))
+            .map(|index| Entry::of(format!("a rule long enough to count, the {index}th")))
             .collect();
         let (repaired, mends) = mend_of(&fill);
         assert_eq!(repaired.rules.len(), LIST_CAP);
@@ -2580,7 +2798,10 @@ mod tests {
             "lib.rs".to_owned(),
             "the crate root of the warlock engine, and long enough besides".to_owned(),
         );
-        fill.structure = vec!["warlock-style grants, one per module and then some".to_owned()];
+        fill.structure = vec![Entry::naming(
+            "warlock-style grants, one per module and then some",
+            "lib.rs",
+        )];
         // The purpose is the one slot with no next rule under it: a document
         // without one is not a document, so it falls straight to the fallback.
         fill.purpose = "A toy freshness ledger belonging to Warlock.".to_owned();
@@ -2677,8 +2898,8 @@ mod tests {
         fill.files
             .insert("app.rs".to_owned(), "x".repeat(ENTRY_CHARS + 1));
         fill.directories.insert("src".to_owned(), String::new());
-        fill.structure = vec![String::new(); LIST_CAP + 3];
-        fill.rules = vec!["r".to_owned(); LIST_CAP + 1];
+        fill.structure = vec![Entry::of(String::new()); LIST_CAP + 3];
+        fill.rules = vec![Entry::of("r"); LIST_CAP + 1];
         fill.lookups = (0..LIST_CAP + 4)
             .map(|index| Lookup {
                 topic: format!("route {index}"),
@@ -2717,7 +2938,7 @@ mod tests {
                 fill.files.remove("lib.rs");
             }),
             ("Empty", |fill| fill.purpose = "  ".to_owned()),
-            ("Empty", |fill| fill.rules.push("   ".to_owned())),
+            ("Empty", |fill| fill.rules.push(Entry::of("   "))),
             ("Multiline", |fill| {
                 fill.files.insert(
                     "Cargo.toml".to_owned(),
@@ -2729,13 +2950,14 @@ mod tests {
                     .insert("app.rs".to_owned(), "duplicate".to_owned());
             }),
             ("TooLong", |fill| {
-                fill.structure.push("x".repeat(ENTRY_CHARS + 40));
+                fill.structure
+                    .push(Entry::naming("x".repeat(ENTRY_CHARS + 40), "lib.rs"));
             }),
             ("TooLong", |fill| {
                 fill.purpose = "é".repeat(PURPOSE_CHARS + 9);
             }),
             ("TooMany", |fill| {
-                fill.rules = vec!["a rule long enough to count".to_owned(); LIST_CAP + 2];
+                fill.rules = vec![Entry::of("a rule long enough to count"); LIST_CAP + 2];
             }),
             ("TooMany", |fill| {
                 fill.lookups = (0..LIST_CAP + 3)
