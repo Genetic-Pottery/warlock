@@ -72,19 +72,16 @@ routing line written without its siblings routes as well as one written with
 them. Every document here was written the current way. That needs its own
 measurement, and this harness will run it unchanged once such documents exist.
 
-Two limits worth stating. Symbol accuracy is low for every arm (33% at best)
-because the gold name is often internal and `DECLARED_SHOWN` caps a file line at
-eight names — the file is the unit that routes, not the symbol. And the repomap
-was run over one directory with no repo-wide graph and no chat context, which is
-a fair reading of "a deterministic map of this directory at this budget" but is
-not how aider uses it in a session.
-
-## Running it again
-
-The harness is in the session scratchpad, not in this repository: `harness.py`
-(questions), `repomap.py` (the baseline arm), `run_eval.py`, `score.py`, and
-`pyrun.sh`, which exists only because scipy's wheel needs a libstdc++ that a
-NixOS venv has no path to. Aider needs Python 3.12; 3.14 cannot build it.
+Two limits worth stating. Symbol accuracy is low for every arm — 33% at best,
+against 92% for naming the file — because the gold name is often internal and a
+file line carries only its first `DECLARED_SHOWN` names. The follow-up below is
+what came of pulling on that. And the repomap was run over one directory with no
+repo-wide graph and no chat context, which is a fair reading of "a deterministic
+map of this directory at this budget" but is not how aider uses it in a session:
+its PageRank is built to rank a whole repository, personalised by the files and
+identifiers already in the conversation. Stripped of both, it is doing its
+weakest job. This measures enumeration against ranking for directory-scoped
+routing; it is not a verdict on aider.
 
 ## Follow-up: what the baseline suggested about `DECLARED_SHOWN`
 
@@ -114,3 +111,34 @@ more tokens. Past sixteen it reverses while the tokens keep climbing, which is
 the whole argument for a cap existing at all.
 
 `DECLARED_SHOWN` is now 16.
+
+## What changed, and the noise floor to hold later claims to
+
+`DECLARED_SHOWN` went from 8 to 16, and nothing else. The measurement argued for
+no change to what a pass is asked for, no change to the schema, and no change to
+the caps in `fitting.rs`: the written line already clears the free bar by 33
+points over a listing and 53 over the repomap, for one pass of about 45 seconds
+per directory at Sonnet/low.
+
+Every document in every repository renders differently from that one constant,
+so the first pass over any directory after it will produce a changed file. That
+is a re-render, not a re-judgement.
+
+The noise floor is the number to keep. Identical content scored 91.7% in the
+first experiment and 87.0% in the second — four answers in 108 apart, from
+nothing but rerunning. No claim from this harness smaller than about four
+answers is worth making, and the 8-to-16 file-routing difference is exactly that
+size, which is why it is reported as no change rather than as a gain.
+
+## Running it again
+
+The harness is in the session scratchpad, not in this repository: `harness.py`
+(questions), `repomap.py` (the baseline arm), `run_eval.py` and `run_variants.py`
+(the arms), `repeats.py` (the same arm three times, which is where the noise
+floor came from), `score.py`, and `pyrun.sh`, which exists only because scipy's
+wheel needs a libstdc++ that a NixOS venv has no path to. Aider needs Python
+3.12; 3.14 cannot build it.
+
+The question set (`questions.json`, 36 questions with their gold file and
+symbol) is the reusable part: rebuilding it costs 73 model calls and a third of
+them are thrown away by the leak filter.
