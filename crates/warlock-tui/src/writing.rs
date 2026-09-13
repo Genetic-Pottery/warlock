@@ -17,7 +17,7 @@ use std::path::Path;
 use std::time::Instant;
 use std::{fs, io};
 
-use warlock_engine::{Manifest, PactEntry, from_manifest_path, to_manifest_path};
+use warlock_engine::{Manifest, from_manifest_path, to_manifest_path};
 use warlock_tui::{
     App, Edited, ScopeField, ScopePrompt, TemplateError, brief_template, missing_sections, size,
 };
@@ -31,8 +31,6 @@ const BRIEF_PREFIX: &str = "warlock-brief";
 const UNTITLED: &str = "untitled";
 
 const SLUG_MAX: usize = 60;
-
-const ROOT_MODULE: &str = ".";
 
 const NO_PATH: &str = "type a path for the document, or press Esc to write nothing";
 
@@ -94,7 +92,7 @@ pub(crate) fn write_edit(
 // with the rule under it and the typed text exactly where it was.
 pub(crate) fn write_submit(
     app: &mut App,
-    manifest: &Manifest,
+    _manifest: &Manifest,
     repo_root: &Path,
     field: &ScopeField,
     now: Instant,
@@ -104,8 +102,8 @@ pub(crate) fn write_submit(
         return refused(field, NO_PATH);
     }
     // The one spelling of the path, produced before anything is done with it:
-    // the bytes go to it, the line names it, and the ancestor walk climbs it,
-    // so all three are the same string and cannot come to disagree.
+    // the bytes go to it and the line names it, so both are the same string and
+    // cannot come to disagree.
     let stored = match to_manifest_path(repo_root, typed) {
         Ok(stored) => stored,
         // The engine's own wording about a path that is not inside the root,
@@ -150,9 +148,6 @@ pub(crate) fn write_submit(
     // a second way for this line to fail after the write succeeded.
     let bytes = u64::try_from(document.len()).unwrap_or(u64::MAX);
     app.panel_mut().note(wrote_line(&stored, bytes), now);
-    if let Some(module) = pacted_above(manifest, &stored) {
-        app.panel_mut().note(stale_line(module), now);
-    }
     ScopePrompt::Closed
 }
 
@@ -181,55 +176,8 @@ fn put(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::write(path, bytes)
 }
 
-// The walk starts at the file's own directory rather than at the file, because a
-// pact is on a directory and the file itself has just been created. Nearest wins
-// and the walk stops there: the directory that has to be described again is the
-// one whose document is closest to the new file, and naming every pact above it
-// would be a list of work nobody asked for.
-//
-// The name comes back off the entry rather than out of the walk, so the line
-// says the module exactly as `.warlock/pacts.toml` spells it — including `.` for
-// a repository pacted at its root.
-fn pacted_above<'manifest>(manifest: &'manifest Manifest, stored: &str) -> Option<&'manifest str> {
-    at_or_above(directory_of(stored))
-        .find_map(|module| manifest.entry(module).map(PactEntry::module))
-}
-
-fn directory_of(stored: &str) -> &str {
-    match stored.rsplit_once('/') {
-        Some((parent, _)) => parent,
-        None => ROOT_MODULE,
-    }
-}
-
-// `warlock_engine::scope`'s own walk, which is private to that module: the
-// engine decides what a scope covers, and this decides which pact a written file
-// staled. Copying eight lines is the cost of not opening a door in the engine
-// for the TUI to reach through, and it is the shape rather than the judgement
-// that is shared. Segments are cut at `/`, so a `docs-old` entry is never an
-// ancestor of `docs/adr/x.md` however much of a prefix it looks like.
-fn at_or_above(stored: &str) -> impl Iterator<Item = &str> {
-    let mut next = Some(stored);
-    std::iter::from_fn(move || {
-        let current = next?;
-        next = match current.rsplit_once('/') {
-            // A path with a parent segment: `docs` above `docs/adr`.
-            Some((parent, _)) => Some(parent),
-            // A single segment sits directly under the root, and the root sits
-            // under nothing.
-            None if current == ROOT_MODULE => None,
-            None => Some(ROOT_MODULE),
-        };
-        Some(current)
-    })
-}
-
 fn wrote_line(stored: &str, bytes: u64) -> String {
     format!("wrote {stored} — {}", size(bytes))
-}
-
-fn stale_line(module: &str) -> String {
-    format!("{module} is now stale")
 }
 
 fn taken_rule(stored: &str) -> String {
@@ -873,7 +821,7 @@ mod writes {
     }
 
     #[test]
-    fn enter_writes_the_document_and_says_what_landed_and_what_it_staled() {
+    fn enter_writes_the_document_and_says_what_landed() {
         let repo = a_repo();
         // 1832 bytes on the nose, so the line's size is a fact rather than a
         // range: the panel's own spelling, one decimal under ten kilobytes.
@@ -894,15 +842,10 @@ mod writes {
             reply,
             "the bytes on disk are not the reply on the card"
         );
-        assert_eq!(
-            notes(&app),
-            [
-                format!("wrote {BRIEF} — 1.8 KB"),
-                "docs is now stale".to_owned(),
-            ]
-        );
-        // The two lines are the whole of what a write says. The footer is the
-        // last keystroke's, and nothing about the run state moved.
+        assert_eq!(notes(&app), [format!("wrote {BRIEF} — 1.8 KB")]);
+        // That one line is the whole of what a write says, whether or not the
+        // directory it landed in is pacted. The footer is the last keystroke's,
+        // and nothing about the run state moved.
         assert_eq!(app.message(), Some(LAST_KEY));
         assert!(!app.is_pacting());
         assert_eq!(app.pact_line(), None);
@@ -1059,18 +1002,16 @@ mod writes {
     }
 
     #[test]
-    fn the_stale_line_names_the_nearest_pacted_ancestor_and_only_it() {
-        for (modules, said) in [
-            // The directory the file landed in, when it is the one with a pact.
-            (&["docs", "."][..], Some("docs is now stale")),
-            // The root, when nothing nearer is pacted: an outer pact still
-            // describes a subtree the new file is in.
-            (&["."][..], Some(". is now stale")),
-            // A pact beside it is not a pact above it, however much of a prefix
-            // it looks like.
-            (&["docs-old", "crates"][..], None),
-            // And a repository with no pacts at all has no ledger to stale.
-            (&[][..], None),
+    fn a_write_says_the_one_line_whatever_is_pacted_above_it() {
+        // What is pacted around the new file is the ledger's business and never
+        // the card's: the same single line comes back from the directory the
+        // file landed in, from the root above it, from a pact beside it, and
+        // from a repository with no pacts at all.
+        for modules in [
+            &["docs", "."][..],
+            &["."][..],
+            &["docs-old", "crates"][..],
+            &[][..],
         ] {
             let repo = a_repo();
             let mut app = app_answering(repo.path(), WHOLE);
@@ -1078,37 +1019,12 @@ mod writes {
             write_submit(&mut app, &pacts(modules), repo.path(), &field(BRIEF), now());
 
             let lines = notes(&app);
+            assert_eq!(lines.len(), 1, "{modules:?} said {lines:?}");
             assert!(
                 lines[0].starts_with(&format!("wrote {BRIEF} — ")),
                 "{modules:?} said {lines:?}"
             );
-            assert_eq!(
-                lines.get(1).map(String::as_str),
-                said,
-                "{modules:?} said {lines:?}"
-            );
         }
-    }
-
-    #[test]
-    fn a_file_written_beside_the_root_is_staled_by_the_root_pact() {
-        // No `/` in the path at all, which is the one case the ancestor walk
-        // has to reach the root from directly.
-        let repo = a_repo();
-        let mut app = app_answering(repo.path(), WHOLE);
-
-        write_submit(
-            &mut app,
-            &pacts(&["."]),
-            repo.path(),
-            &field("brief.md"),
-            now(),
-        );
-
-        assert_eq!(
-            notes(&app).get(1).map(String::as_str),
-            Some(". is now stale")
-        );
     }
 
     #[test]
@@ -1443,10 +1359,7 @@ mod writes {
             );
             assert_eq!(
                 notes(&app),
-                vec![
-                    format!("wrote {written} — {} bytes", REPLY.len()),
-                    "docs is now stale".to_owned(),
-                ]
+                vec![format!("wrote {written} — {} bytes", REPLY.len())]
             );
         }
 
@@ -1619,8 +1532,9 @@ mod writes {
                 None::<PathBuf>,
                 NodeState::Unpacted,
             )));
-            // The register the command is only allowed in, and the pact the
-            // written file is about to make stale.
+            // The register the command is only allowed in, and a manifest with
+            // a pact over the directory the document lands in — which the write
+            // path does nothing with, and says nothing about.
             app.panel_mut().set_mode(Mode::Brief);
             let manifest = pacts(&["docs"]);
             // The conversation, rooted in that repository: where a brief goes
@@ -1693,10 +1607,7 @@ mod writes {
             assert_eq!(written, DOCUMENT, "the bytes are not the document answered");
             assert_eq!(
                 notes(&app),
-                [
-                    format!("wrote {PROPOSED} — {} bytes", written.len()),
-                    "docs is now stale".to_owned(),
-                ]
+                [format!("wrote {PROPOSED} — {} bytes", written.len())]
             );
             // The whole repository, after the whole path: the output directory
             // and the one file in it. No transcript, no draft of the brief, and
