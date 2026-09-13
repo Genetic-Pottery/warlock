@@ -25,7 +25,7 @@ use warlock_engine::{NodeState, scope};
 // live, and this module is the one place both are in scope.
 use crate::account::{Account, Line as Entry};
 use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
-use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
+use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
 use crate::composer::Composer;
 use crate::confirm::{Answer, QuitConfirm};
 use crate::panel::Mode;
@@ -542,8 +542,9 @@ fn pane_block(focused: bool) -> Block<'static> {
 
 fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     let below = app.panel().lines_below();
+    let conversation = app.panel().showing_thread();
     let mut block = pane_block(app.focus() == Focus::Panel);
-    if app.panel().showing_thread() {
+    if conversation {
         block = block.title_top(Line::from(thread_title(app.panel().mode())).bold());
     }
     if below > 0 {
@@ -567,7 +568,7 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
         .panel()
         .window(now)
         .iter()
-        .map(|line| panel_row(line, inner.width))
+        .map(|line| panel_row(line, inner.width, conversation))
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);
 }
@@ -725,13 +726,38 @@ fn scrollback(below: usize) -> String {
 // has already been broken into the rows it needs, under its own clock or marker
 // (see `crate::wrap`), so the truncation below is the last-resort cut for a row
 // that still does not fit and not the way long text is handled.
-fn panel_row(line: &Entry, width: u16) -> Line<'static> {
+//
+// `conversation` is which card is being drawn, and it is a parameter rather
+// than something read off the entry because the same variants mean different
+// things on different cards: a `Text` row is the model's answer on the thread
+// and a paragraph of a file on the document, and only the first of those is
+// coloured. The colour goes on the whole row, prefix included, so the marker in
+// front of what was answered belongs to the answer rather than sitting in a
+// span of its own.
+fn panel_row(line: &Entry, width: u16, conversation: bool) -> Line<'static> {
     let shape = shape(line);
     let row = Line::from(truncated(
         &format!("{}{}", shape.prefix, shape.text),
         usize::from(width),
     ));
-    if shape.heading { row.bold() } else { row }
+    let row = if shape.heading { row.bold() } else { row };
+    if conversation && !operators_own(line) {
+        row.fg(CONVERSATION_COLOUR)
+    } else {
+        row
+    }
+}
+
+// The split on the conversation card is by author, not by kind of row: what the
+// reader typed, and the rows the rest of it spilled onto, keep the terminal's
+// default foreground. `Wrapped` is a continuation with no variant left to it,
+// so its `heading` flag is what says whose it was — true only for `Said` here,
+// because the other two headings are account-card rows.
+const fn operators_own(line: &Entry) -> bool {
+    matches!(
+        line,
+        Entry::Said { .. } | Entry::Wrapped { heading: true, .. }
+    )
 }
 
 fn truncated(text: &str, width: usize) -> String {
@@ -1147,7 +1173,7 @@ mod tests {
     use crate::account::{Line as Entry, Outcome};
     use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
     use crate::claude::Activity;
-    use crate::colour::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
+    use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
     use crate::composer::Composer;
     use crate::confirm::{Answer, QuitConfirm};
     use crate::fixture;
@@ -4420,13 +4446,20 @@ mod tests {
             );
         }
 
-        // The answer's rows are plain: no colour, no modifier, nothing added to
-        // the left of them — where the question above them is bold, which is
-        // what a heading gets here and what no prose does.
+        // The answer's rows are unadorned but for their colour: no modifier
+        // anywhere across them — where the question above them is bold, which
+        // is what a heading gets here and what no prose does — and, on every
+        // cell the words themselves reach, the conversation's own foreground,
+        // which is what says they came back rather than having been typed. The
+        // blanks past the end of a row are left as the border cleared them.
         for index in 3..6 {
+            let written =
+                u16::try_from(display_width(&drawn[usize::from(index)])).unwrap_or(inner.width);
             for x in inner.x..inner.x + inner.width {
                 let cell = &buffer[(x, inner.y + index)];
-                assert_eq!(cell.fg, Color::Reset, "at ({x}, {index})");
+                if x < inner.x + written {
+                    assert_eq!(cell.fg, CONVERSATION_COLOUR, "at ({x}, {index})");
+                }
                 assert_eq!(cell.modifier, Modifier::empty(), "at ({x}, {index})");
             }
         }
@@ -4438,10 +4471,10 @@ mod tests {
 
     const ROW_WIDTH: u16 = 24;
 
-    fn row_drawn(line: &Entry) -> (String, bool) {
+    fn row_drawn(line: &Entry, conversation: bool) -> (String, bool) {
         let area = Rect::new(0, 0, ROW_WIDTH, 1);
         let mut buffer = Buffer::empty(area);
-        Paragraph::new(panel_row(line, ROW_WIDTH)).render(area, &mut buffer);
+        Paragraph::new(panel_row(line, ROW_WIDTH, conversation)).render(area, &mut buffer);
         let bold = (0..ROW_WIDTH).any(|x| buffer[(x, 0)].modifier.contains(Modifier::BOLD));
 
         (text_in(&buffer, area, 0), bold)
@@ -4451,16 +4484,25 @@ mod tests {
     fn a_note_is_drawn_as_neither_a_question_nor_a_work_line() {
         const WORDS: &str = "no such command";
 
-        let note = row_drawn(&Entry::Note {
-            text: WORDS.to_owned(),
-        });
-        let said = row_drawn(&Entry::Said {
-            text: WORDS.to_owned(),
-        });
-        let clocked = row_drawn(&Entry::Clocked {
-            clock: "0:09".to_owned(),
-            text: WORDS.to_owned(),
-        });
+        let note = row_drawn(
+            &Entry::Note {
+                text: WORDS.to_owned(),
+            },
+            true,
+        );
+        let said = row_drawn(
+            &Entry::Said {
+                text: WORDS.to_owned(),
+            },
+            true,
+        );
+        let clocked = row_drawn(
+            &Entry::Clocked {
+                clock: "0:09".to_owned(),
+                text: WORDS.to_owned(),
+            },
+            true,
+        );
 
         // Warlock's own marker and then the words, with nothing else on the
         // row: no clock, because a note is not work that took time, and nothing
