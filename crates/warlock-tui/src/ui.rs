@@ -106,10 +106,6 @@ const LIVE_KEY: &str = "G";
 
 const ROW_KEY: &str = "k/j: row";
 
-const PAGE_KEYS: &str = "PgUp/PgDn";
-
-const ENDS_KEY: &str = "g/G: ends";
-
 const FOLD_KEY: &str = "space: fold";
 
 const PACTS_KEY: &str = "o: pacts";
@@ -122,66 +118,34 @@ const REFRESH_KEY: &str = "r: refresh";
 
 const SCOPE_KEY: &str = "s: scope";
 
-const FOCUS_KEY: &str = "Tab: focus";
-
-const COMPOSE_KEYS: &str = "Enter/Alt+Enter: send/newline";
-
-const LEAVE_KEY: &str = "Esc: leave, draft kept";
-
-const COMMAND_KEY: &str = "/: command";
-
 const KEYS: &[&str] = &[
     ROW_KEY,
-    PAGE_KEYS,
-    ENDS_KEY,
     FOLD_KEY,
     PACTS_KEY,
     FILES_KEY,
     PACT_KEY,
     REFRESH_KEY,
     SCOPE_KEY,
-    FOCUS_KEY,
-    COMPOSE_KEYS,
-    LEAVE_KEY,
-    COMMAND_KEY,
 ];
 
 const KEY_GAP: &str = "    ";
 
-const MOUSE_OFF_KEY: &str = "m: mouse off";
-
-const MOUSE_ON_KEY: &str = "m: mouse on";
-
 const QUIT_KEY: &str = "q/Esc/Ctrl-C: quit";
-
-const VIEW_KEY: &str = "v: view";
-
-const EDIT_KEY: &str = "e: edit";
 
 // The order the footer gives keys up in as the terminal narrows, first named
 // first dropped. `QUIT_KEY` is deliberately absent, so it is the one piece that
 // survives every width: a reader who cannot see how to leave has no way to find
-// out. Names not on the footer at the time — the mouse key that is not the
-// current one, and keys no footer carries yet — are skipped rather than being
-// an error, which is what lets this be one list instead of one per key set.
+// out. Every other name on the footer is here: walking the tree first, because
+// a reader looking at a tree can guess at how to move through one, and the keys
+// that start a pass last, because nothing else on screen says they exist.
 const KEY_DROP_ORDER: &[&str] = &[
-    COMPOSE_KEYS,
-    LEAVE_KEY,
-    COMMAND_KEY,
-    FOCUS_KEY,
-    PAGE_KEYS,
-    ENDS_KEY,
     ROW_KEY,
     FILES_KEY,
     PACTS_KEY,
     FOLD_KEY,
-    MOUSE_OFF_KEY,
-    EDIT_KEY,
-    VIEW_KEY,
     SCOPE_KEY,
     REFRESH_KEY,
     PACT_KEY,
-    MOUSE_ON_KEY,
 ];
 
 fn laid_out_keys(width: usize, pieces: &[&str], drop_order: &[&str]) -> String {
@@ -223,15 +187,8 @@ fn clipped(text: &str, width: usize) -> String {
     text[..end].to_owned()
 }
 
-fn keys_line(mouse_captured: bool, width: usize) -> String {
-    let mouse = if mouse_captured {
-        MOUSE_OFF_KEY
-    } else {
-        MOUSE_ON_KEY
-    };
-
+fn keys_line(width: usize) -> String {
     let mut pieces = KEYS.to_vec();
-    pieces.push(mouse);
     pieces.push(QUIT_KEY);
     laid_out_keys(width, &pieces, KEY_DROP_ORDER)
 }
@@ -1027,7 +984,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let keys = Line::from(if app.is_pacting() {
         pacting_keys_line(width)
     } else {
-        keys_line(app.mouse_captured(), width)
+        keys_line(width)
     })
     .dim();
 
@@ -1172,20 +1129,19 @@ mod tests {
 
     use super::{
         Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, BRIEF_THREAD_TITLE,
-        CANCEL_KEY, COLLAPSE_KEY, COMMAND_KEY, COMPOSE_KEYS, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT,
-        CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS,
-        CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FOCUS_KEY, FOOTER_HEIGHT, GUIDE,
-        GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP,
-        KEYS, LEAVE_KEY, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOUSE_OFF_KEY,
-        MOUSE_ON_KEY, MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_QUIT_KEY,
-        PACTING_RUN, PAGE_KEYS, PANEL_INDENT, PATH_HEADING, PATH_RULES, QUIT_KEY, REFRESHING_RUN,
-        RUN_HEADER_HEIGHT, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES,
-        SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTION_MARKER, THREAD_TITLE,
-        TREE_MIN_WIDTH, TREE_PERCENT, areas, centred, composer_height, composer_on_screen,
-        confirm_area, confirm_size, display_width, draw, footer_text_area, guide_prefixes,
-        hit_test, keys_line, mark_area, pacting_keys_line, pane_inner, panel_height, panel_row,
-        panel_width, run_header_height, scope_size, tree_height, tree_rows_area, tree_width,
-        truncated,
+        CANCEL_KEY, COLLAPSE_KEY, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP,
+        CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS, CONFIRM_NO,
+        CONFIRM_QUESTION, CONFIRM_YES, ELLIPSIS, FILES_KEY, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH,
+        GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS,
+        LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOVE_KEYS, NO_MARKER, NOTE_MARKER,
+        PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT, PATH_HEADING, PATH_RULES,
+        QUIT_KEY, REFRESHING_RUN, ROW_KEY, RUN_HEADER_HEIGHT, SAID_MARKER, SCOPE_CURSOR,
+        SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS,
+        SCROLLBACK_ARROW, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, areas,
+        centred, composer_height, composer_on_screen, confirm_area, confirm_size, display_width,
+        draw, footer_text_area, guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line,
+        pane_inner, panel_height, panel_row, panel_width, run_header_height, scope_size,
+        tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::COMPOSER_MAX_ROWS;
     use crate::account::{Line as Entry, Outcome};
@@ -2578,9 +2534,8 @@ mod tests {
             // every line of it: the message line is blank while the app has
             // nothing to say, which is the whole of this walk.
             //
-            // The way out rather than a movement key, because this terminal is
-            // narrower than the whole keys line and the movement names are the
-            // first the layout gives up — see `KEY_DROP_ORDER`.
+            // The way out is the name looked for because it is the one name no
+            // width gives up — see `KEY_DROP_ORDER`.
             assert!(
                 footer.iter().any(|line| line.contains("unpacted"))
                     && footer.iter().any(|line| line.contains(QUIT_KEY)),
@@ -2667,39 +2622,15 @@ mod tests {
         // Every key, in full: equality rather than a bag of substrings, so a
         // line that has grown past the width it is drawn at fails here instead
         // of quietly losing whatever sat on the right-hand end of it.
+        assert_eq!(keys, keys_line(usize::from(KEYS_WIDTH)));
+        // And spelled out, so a key added to the footer has to be added here
+        // too: the seven keys the tree is walked and worked with, and the way
+        // out.
         assert_eq!(
             keys,
-            keys_line(app.mouse_captured(), usize::from(KEYS_WIDTH))
+            "k/j: row    space: fold    o: pacts    f: files    p: pact    \
+             r: refresh    s: scope    q/Esc/Ctrl-C: quit"
         );
-        // "p: pact" and not the bare "p", which "PgUp" would satisfy.
-        for key in [
-            "k/j: row",
-            // The page keys carry no label of their own: the word was already
-            // in the keys' names, and those columns bought `s: scope`.
-            "PgUp",
-            "PgDn",
-            "g/G: ends",
-            // Named, not left to be discovered: the three keys that change what
-            // there is to scroll through.
-            "space: fold",
-            "o: pacts",
-            "f: files",
-            "p: pact",
-            // The two keys that run passes, next to each other because the
-            // question they answer is the same one, and then the key that needs
-            // one of them to have been pressed already.
-            "r: refresh",
-            "s: scope",
-            // The mouse key, named by what pressing it does next rather than by
-            // the state it is in: see
-            // `the_keys_line_names_the_mouse_key_by_what_the_next_press_does`.
-            "m: mouse",
-            "q",
-            "Esc",
-            "Ctrl-C",
-        ] {
-            assert!(keys.contains(key), "footer {keys:?} is missing {key}");
-        }
         // And the lines either side of it are the footer's own, untouched by
         // the new key: the tally still counts the whole tree, and the message
         // line is blank because nothing has been said.
@@ -2912,10 +2843,7 @@ mod tests {
         // Byte for byte today's line with no pact running, and the pacting line
         // whole while one is: equality, so a line that outgrew the terminal it
         // is drawn on fails here rather than losing its right-hand end quietly.
-        assert_eq!(
-            footer_line(&idle, 1),
-            keys_line(app.mouse_captured(), footer_width(KEYS_WIDTH))
-        );
+        assert_eq!(footer_line(&idle, 1), keys_line(footer_width(KEYS_WIDTH)));
         assert_eq!(
             footer_line(&pacting, 1),
             pacting_keys_line(footer_width(KEYS_WIDTH))
@@ -2924,7 +2852,7 @@ mod tests {
         let said = footer_line(&pacting, 1);
         assert!(said.contains("Esc: cancel"), "{said:?}");
         assert!(!said.contains("Esc/Ctrl-C: quit"), "{said:?}");
-        assert!(keys_line(true, footer_width(KEYS_WIDTH)).contains("Esc/Ctrl-C: quit"));
+        assert!(keys_line(footer_width(KEYS_WIDTH)).contains("Esc/Ctrl-C: quit"));
 
         // The line is short enough to survive the narrow terminal the other
         // footer tests draw on whole, because it is the line that answers "how
@@ -2939,7 +2867,7 @@ mod tests {
         app.clear_pact_in_flight();
         assert_eq!(
             footer_line(&render(&app, KEYS_WIDTH, height), 1),
-            keys_line(app.mouse_captured(), footer_width(KEYS_WIDTH))
+            keys_line(footer_width(KEYS_WIDTH))
         );
     }
 
@@ -2994,17 +2922,6 @@ mod tests {
         }
     }
 
-    fn idle_keys(mouse_captured: bool) -> Vec<&'static str> {
-        let mut pieces = KEYS.to_vec();
-        pieces.push(if mouse_captured {
-            MOUSE_OFF_KEY
-        } else {
-            MOUSE_ON_KEY
-        });
-        pieces.push(QUIT_KEY);
-        pieces
-    }
-
     #[test]
     fn the_footer_keeps_the_whole_way_out_on_an_eighty_column_terminal() {
         let mut app = App::from_tree(&fixture::tree());
@@ -3013,131 +2930,77 @@ mod tests {
 
         // Eighty columns is narrower than the whole keys line, so this is a line
         // that has given names up — and the name it keeps is the one a stuck
-        // reader is looking for, whichever way the mouse key reads.
-        for captured in [true, false] {
-            app.set_mouse_captured(captured);
+        // reader is looking for.
+        let keys = footer_line(&render(&app, EIGHTY_COLUMNS, height), 1);
 
-            let keys = footer_line(&render(&app, EIGHTY_COLUMNS, height), 1);
-
-            // Whole, not the first few characters of it: `contains` of the
-            // entire name, with nothing after it on the line.
-            assert!(
-                keys.contains(QUIT_KEY),
-                "mouse captured {captured}: {keys:?}"
-            );
-            assert!(
-                keys.ends_with(QUIT_KEY),
-                "mouse captured {captured}: {keys:?}"
-            );
-            assert!(
-                display_width(&keys) <= columns,
-                "mouse captured {captured}: {keys:?}"
-            );
-            // And it really did have to give something up to keep it: this is
-            // not a width the whole line fits in.
-            assert!(
-                !keys.contains(PAGE_KEYS),
-                "mouse captured {captured}: {keys:?}"
-            );
-        }
+        // Whole, not the first few characters of it: `contains` of the entire
+        // name, with nothing after it on the line.
+        assert!(keys.contains(QUIT_KEY), "{keys:?}");
+        assert!(keys.ends_with(QUIT_KEY), "{keys:?}");
+        assert!(display_width(&keys) <= columns, "{keys:?}");
+        // And it really did have to give something up to keep it: this is not a
+        // width the whole line fits in, and movement is the first name gone.
+        assert!(!keys.contains(ROW_KEY), "{keys:?}");
 
         // While a pact runs the way out is `PACTING_QUIT_KEY` — Esc is spoken
         // for by `CANCEL_KEY` — and both of the line's answers to "how do I stop
         // this?" are on eighty columns whole.
         app.set_pact_in_flight("warlock/crates/engine", 3, 12);
-        for captured in [true, false] {
-            app.set_mouse_captured(captured);
 
-            let keys = footer_line(&render(&app, EIGHTY_COLUMNS, height), 1);
+        let keys = footer_line(&render(&app, EIGHTY_COLUMNS, height), 1);
 
-            assert!(
-                keys.contains(PACTING_QUIT_KEY),
-                "mouse captured {captured}: {keys:?}"
-            );
-            assert!(
-                keys.ends_with(PACTING_QUIT_KEY),
-                "mouse captured {captured}: {keys:?}"
-            );
-            assert!(
-                keys.contains(CANCEL_KEY),
-                "mouse captured {captured}: {keys:?}"
-            );
-            assert!(
-                display_width(&keys) <= columns,
-                "mouse captured {captured}: {keys:?}"
-            );
-        }
+        assert!(keys.contains(PACTING_QUIT_KEY), "{keys:?}");
+        assert!(keys.ends_with(PACTING_QUIT_KEY), "{keys:?}");
+        assert!(keys.contains(CANCEL_KEY), "{keys:?}");
+        assert!(display_width(&keys) <= columns, "{keys:?}");
     }
 
     #[test]
-    fn the_composers_names_are_the_first_the_eighty_column_footer_gives_up() {
-        let mut app = App::from_tree(&fixture::tree());
+    fn the_row_key_is_the_first_the_eighty_column_footer_gives_up() {
+        let app = App::from_tree(&fixture::tree());
         let height = 10;
         let columns = footer_width(EIGHTY_COLUMNS);
-        // In the order `KEY_DROP_ORDER` loses them, which is not the order
-        // `KEYS` lists them in.
-        let composer = [COMPOSE_KEYS, LEAVE_KEY, COMMAND_KEY, FOCUS_KEY];
+        let pieces: Vec<&str> = KEYS.iter().copied().chain([QUIT_KEY]).collect();
 
-        for captured in [true, false] {
-            app.set_mouse_captured(captured);
-            let pieces = idle_keys(captured);
+        let keys = footer_line(&render(&app, EIGHTY_COLUMNS, height), 1);
 
-            let keys = footer_line(&render(&app, EIGHTY_COLUMNS, height), 1);
+        // The names this width could not afford, in the order the line is
+        // documented to give them up in.
+        let dropped: Vec<&str> = KEY_DROP_ORDER
+            .iter()
+            .copied()
+            .filter(|name| pieces.contains(name) && !keys.contains(name))
+            .collect();
+        // Walking the tree goes first, because a reader looking at a tree can
+        // guess at how to move through one — and nothing else went before it:
+        // the names given up are a prefix of the order, so no name that
+        // outranks them was spent instead.
+        assert!(!dropped.is_empty(), "{keys:?} gave nothing up");
+        assert_eq!(
+            dropped,
+            KEY_DROP_ORDER[..dropped.len()].to_vec(),
+            "{keys:?} skipped a name in the drop order"
+        );
+        assert_eq!(dropped.first().copied(), Some(ROW_KEY), "{keys:?}");
+        assert!(!keys.contains(ROW_KEY), "{keys:?}");
 
-            // The names this width could not afford, in the order the line is
-            // documented to give them up in.
-            let dropped: Vec<&str> = KEY_DROP_ORDER
-                .iter()
-                .copied()
-                .filter(|name| pieces.contains(name) && !keys.contains(name))
-                .collect();
-            // The composer's three are the first names gone, and nothing else
-            // went before them: the names given up are a prefix of the order,
-            // so no name that outranks them was spent instead.
-            let order: Vec<&str> = KEY_DROP_ORDER
-                .iter()
-                .copied()
-                .filter(|name| pieces.contains(name))
-                .collect();
-            assert!(
-                dropped.len() >= composer.len(),
-                "captured {captured}: {keys:?} gave up less than the composer"
-            );
-            assert_eq!(
-                dropped,
-                order[..dropped.len()].to_vec(),
-                "captured {captured}: {keys:?} skipped a name in the drop order"
-            );
-            assert_eq!(
-                dropped[..composer.len()].to_vec(),
-                composer.to_vec(),
-                "captured {captured}: {keys:?}"
-            );
-            for name in composer {
-                assert!(!keys.contains(name), "captured {captured}: {keys:?}");
-            }
-
-            // What is left is whole names joined by `KEY_GAP` and nothing else
-            // — no half-drawn name, no leftover gap where one used to be.
-            let survivors: Vec<&str> = pieces
-                .iter()
-                .copied()
-                .filter(|name| !dropped.contains(name))
-                .collect();
-            assert_eq!(keys, survivors.join(KEY_GAP), "captured {captured}");
-            for name in &survivors {
-                assert!(keys.contains(name), "captured {captured}: {keys:?}");
-            }
-
-            // And the way out is on it, whole and at the end of it, inside the
-            // eighty columns the footer was given.
-            assert!(keys.contains(QUIT_KEY), "captured {captured}: {keys:?}");
-            assert!(keys.ends_with(QUIT_KEY), "captured {captured}: {keys:?}");
-            assert!(
-                display_width(&keys) <= columns,
-                "captured {captured}: {keys:?}"
-            );
+        // What is left is whole names joined by `KEY_GAP` and nothing else — no
+        // half-drawn name, no leftover gap where one used to be.
+        let survivors: Vec<&str> = pieces
+            .iter()
+            .copied()
+            .filter(|name| !dropped.contains(name))
+            .collect();
+        assert_eq!(keys, survivors.join(KEY_GAP));
+        for name in &survivors {
+            assert!(keys.contains(name), "{keys:?}");
         }
+
+        // And the way out is on it, whole and at the end of it, inside the
+        // eighty columns the footer was given.
+        assert!(keys.contains(QUIT_KEY), "{keys:?}");
+        assert!(keys.ends_with(QUIT_KEY), "{keys:?}");
+        assert!(display_width(&keys) <= columns, "{keys:?}");
     }
 
     #[test]
@@ -3145,10 +3008,9 @@ mod tests {
         let mut app = App::from_tree(&fixture::tree());
         let height = 10;
 
-        // Every width from one column up to wider than the whole line, in both
-        // mouse states and with a pact running and without: measured in columns
-        // by `display_width`, which is what the backend charges for the row,
-        // rather than in bytes.
+        // Every width from one column up to wider than the whole line, with a
+        // pact running and without: measured in columns by `display_width`,
+        // which is what the backend charges for the row, rather than in bytes.
         //
         // The line the layout produced and the line on screen, both: a row read
         // off the buffer fits the buffer whatever the widget did to it, so the
@@ -3158,123 +3020,98 @@ mod tests {
             if pacting {
                 app.set_pact_in_flight("warlock/crates/engine", 3, 12);
             }
-            for captured in [true, false] {
-                app.set_mouse_captured(captured);
-                for width in 1..=KEYS_WIDTH {
-                    let columns = footer_width(width);
-                    let laid_out = if pacting {
-                        pacting_keys_line(columns)
-                    } else {
-                        keys_line(captured, columns)
-                    };
+            for width in 1..=KEYS_WIDTH {
+                let columns = footer_width(width);
+                let laid_out = if pacting {
+                    pacting_keys_line(columns)
+                } else {
+                    keys_line(columns)
+                };
 
-                    let keys = footer_line(&render(&app, width, height), 1);
+                let keys = footer_line(&render(&app, width, height), 1);
 
-                    assert!(
-                        display_width(&laid_out) <= columns,
-                        "{width} columns, pacting {pacting}, captured {captured}: {laid_out:?}"
-                    );
-                    // Trailing blanks are trimmed off a row and off nothing
-                    // else, so the row is the line with its own tail intact.
-                    assert_eq!(
-                        keys,
-                        laid_out.trim_end(),
-                        "{width} columns, pacting {pacting}, captured {captured}"
-                    );
-                    assert!(
-                        display_width(&keys) <= columns,
-                        "{width} columns, pacting {pacting}, captured {captured}: {keys:?}"
-                    );
-                }
+                assert!(
+                    display_width(&laid_out) <= columns,
+                    "{width} columns, pacting {pacting}: {laid_out:?}"
+                );
+                // Trailing blanks are trimmed off a row and off nothing else,
+                // so the row is the line with its own tail intact.
+                assert_eq!(
+                    keys,
+                    laid_out.trim_end(),
+                    "{width} columns, pacting {pacting}"
+                );
+                assert!(
+                    display_width(&keys) <= columns,
+                    "{width} columns, pacting {pacting}: {keys:?}"
+                );
             }
         }
     }
 
     #[test]
     fn the_keys_line_gives_its_names_up_in_order_rather_than_losing_its_tail() {
-        for captured in [true, false] {
-            let pieces = idle_keys(captured);
-            let whole = pieces.join(KEY_GAP);
-            let full = display_width(&whole);
-            // A terminal with room for all of it gets all of it.
-            assert_eq!(keys_line(captured, full), whole, "captured {captured}");
+        let pieces: Vec<&str> = KEYS.iter().copied().chain([QUIT_KEY]).collect();
+        let whole = pieces.join(KEY_GAP);
+        let full = display_width(&whole);
+        // A terminal with room for all of it gets all of it.
+        assert_eq!(keys_line(full), whole);
 
-            // The order this line's names are expected to go in: the documented
-            // one, less the two reserved for keys that do not exist yet and the
-            // mouse name this state does not use.
-            let expected: Vec<&str> = KEY_DROP_ORDER
-                .iter()
-                .copied()
-                .filter(|name| pieces.contains(name))
-                .collect();
-            assert_eq!(
-                expected.iter().take(5).copied().collect::<Vec<&str>>(),
-                vec![COMPOSE_KEYS, LEAVE_KEY, COMMAND_KEY, FOCUS_KEY, PAGE_KEYS],
-                "the composer's names go first, then the page keys: {expected:?}"
-            );
+        // The order this line's names are expected to go in: the documented
+        // one, which names every key on the footer but the way out.
+        let expected: Vec<&str> = KEY_DROP_ORDER.to_vec();
+        assert_eq!(
+            expected.iter().take(2).copied().collect::<Vec<&str>>(),
+            vec![ROW_KEY, FILES_KEY],
+            "walking the tree goes first: {expected:?}"
+        );
 
-            // Column by column down from the whole line, noting each name as it
-            // disappears. What comes out is the order they went in.
-            let mut present = pieces.clone();
-            let mut dropped: Vec<&str> = Vec::new();
-            for width in (0..=full).rev() {
-                let line = keys_line(captured, width);
+        // Column by column down from the whole line, noting each name as it
+        // disappears. What comes out is the order they went in.
+        let mut present = pieces.clone();
+        let mut dropped: Vec<&str> = Vec::new();
+        for width in (0..=full).rev() {
+            let line = keys_line(width);
 
-                for name in &expected {
-                    if present.contains(name) && !line.contains(name) {
-                        dropped.push(name);
-                        present.retain(|kept| kept != name);
-                    }
-                }
-                assert!(
-                    display_width(&line) <= width,
-                    "{width} columns, captured {captured}: {line:?}"
-                );
-                // And the way out is whole at every width that could hold it,
-                // however much else has gone.
-                if width >= display_width(QUIT_KEY) {
-                    assert!(
-                        line.contains(QUIT_KEY),
-                        "{width} columns, captured {captured}: {line:?}"
-                    );
+            for name in &expected {
+                if present.contains(name) && !line.contains(name) {
+                    dropped.push(name);
+                    present.retain(|kept| kept != name);
                 }
             }
-            assert_eq!(dropped, expected, "captured {captured}");
-
-            // Which is a different line from the one a terminal that cut at its
-            // right-hand edge would draw: that line is a prefix of the whole,
-            // and this one is not — it kept its tail and lost its middle.
-            let narrow = keys_line(captured, usize::from(EIGHTY_COLUMNS));
-            assert!(
-                narrow.ends_with(QUIT_KEY),
-                "captured {captured}: {narrow:?}"
-            );
-            assert!(
-                !whole.starts_with(&narrow),
-                "captured {captured}: {narrow:?} is the whole line cut at the edge"
-            );
+            assert!(display_width(&line) <= width, "{width} columns: {line:?}");
+            // And the way out is whole at every width that could hold it,
+            // however much else has gone.
+            if width >= display_width(QUIT_KEY) {
+                assert!(line.contains(QUIT_KEY), "{width} columns: {line:?}");
+            }
         }
+        assert_eq!(dropped, expected);
+
+        // Which is a different line from the one a terminal that cut at its
+        // right-hand edge would draw: that line is a prefix of the whole, and
+        // this one is not — it kept its tail and lost its middle.
+        let narrow = keys_line(usize::from(EIGHTY_COLUMNS));
+        assert!(narrow.ends_with(QUIT_KEY), "{narrow:?}");
+        assert!(
+            !whole.starts_with(&narrow),
+            "{narrow:?} is the whole line cut at the edge"
+        );
     }
 
     #[test]
     fn the_way_out_is_cut_rather_than_dropped_on_a_terminal_narrower_than_its_name() {
         let quit = display_width(QUIT_KEY);
 
-        for captured in [true, false] {
-            // Exactly the width of the name and nothing to spare: the name, and
-            // only it.
-            assert_eq!(keys_line(captured, quit), QUIT_KEY, "captured {captured}");
+        // Exactly the width of the name and nothing to spare: the name, and
+        // only it.
+        assert_eq!(keys_line(quit), QUIT_KEY);
 
-            // Below that there is nothing left to give up, so the name is cut —
-            // the start of the way out rather than a blank line — down to the
-            // terminal a single column wide.
-            for width in 0..quit {
-                assert_eq!(
-                    keys_line(captured, width),
-                    QUIT_KEY[..width],
-                    "{width} columns, captured {captured}"
-                );
-            }
+        // Below that there is nothing left to give up, so the name is cut — the
+        // start of the way out rather than a blank line — down to the terminal a
+        // single column wide.
+        for width in 0..quit {
+            assert_eq!(keys_line(width), QUIT_KEY[..width], "{width} columns");
         }
 
         // And that is what is drawn, not just what is assembled: a terminal with
@@ -3345,7 +3182,11 @@ mod tests {
         assert_eq!(footer_line(&buffer, 0), tally.join("  "));
         assert_eq!(
             footer_line(&buffer, 1),
-            idle_keys(app.mouse_captured()).join(KEY_GAP)
+            KEYS.iter()
+                .copied()
+                .chain([QUIT_KEY])
+                .collect::<Vec<&str>>()
+                .join(KEY_GAP)
         );
         assert_eq!(footer_line(&buffer, 2), "nothing to refresh");
 
@@ -3371,33 +3212,29 @@ mod tests {
     }
 
     #[test]
-    fn the_keys_line_names_the_mouse_key_by_what_the_next_press_does() {
+    fn the_footer_says_nothing_about_the_mouse_whichever_way_the_toggle_is_left() {
         let mut app = App::from_tree(&fixture::tree());
         let height = 10;
 
-        // Reporting its mouse, which is how warlock starts: the key on offer is
-        // the one that stops it.
+        // Reporting its mouse, which is how warlock starts, and then not: the
+        // key still works, and the footer is the same line either way. It is a
+        // fact about the terminal rather than about the tree, and the footer
+        // holds the keys a reader reaches for rather than every key there is.
         app.set_mouse_captured(true);
         let capturing = render(&app, KEYS_WIDTH, height);
         let keys = footer_line(&capturing, 1);
-        assert_eq!(keys, keys_line(true, footer_width(KEYS_WIDTH)));
-        assert!(keys.contains(MOUSE_OFF_KEY), "{keys:?}");
-        assert!(!keys.contains(MOUSE_ON_KEY), "{keys:?}");
+        assert_eq!(keys, keys_line(footer_width(KEYS_WIDTH)));
+        assert!(!keys.contains("mouse"), "{keys:?}");
 
-        // And with capture off, the same key named by what it does now: turn it
-        // back on. This is the wording that matters — it is the only thing on
-        // screen that says the wheel is the terminal's for the moment.
         app.set_mouse_captured(false);
         let released = render(&app, KEYS_WIDTH, height);
         let keys = footer_line(&released, 1);
-        assert_eq!(keys, keys_line(false, footer_width(KEYS_WIDTH)));
-        assert!(keys.contains(MOUSE_ON_KEY), "{keys:?}");
-        assert!(!keys.contains(MOUSE_OFF_KEY), "{keys:?}");
+        assert_eq!(keys, keys_line(footer_width(KEYS_WIDTH)));
+        assert!(!keys.contains("mouse"), "{keys:?}");
 
-        // Nothing else on the screen moved: the toggle is a fact about the
-        // terminal, not about the tree, and it is not announced on the message
-        // line either — that line is blank in both frames, and every row above
-        // the keys line is the row it was.
+        // Nothing else on the screen moved either, and it is not announced on
+        // the message line: that line is blank in both frames, and every row
+        // above the keys line is the row it was.
         assert_eq!(footer_line(&capturing, FOOTER_HEIGHT - 1), "");
         assert_eq!(footer_line(&released, FOOTER_HEIGHT - 1), "");
         for row in 0..=(height - FOOTER_HEIGHT) {
