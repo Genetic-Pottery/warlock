@@ -3,24 +3,29 @@
 
 # warlock-engine
 
-warlock-engine is the crate that pacts a directory: running a model pass over its files and children's documents to fill in a WARLOCK.md, judging freshness by content hash, and persisting the result in a pact manifest.
+The warlock-engine crate: the domain logic for pacting a codebase's directories with WARLOCK.md documents, tracking freshness through hashes, and routing a model pass through fitting, validation and rendering, with no TUI, terminal, HTTP or network dependency of its own.
 
 ## Files
 
-- `Cargo.toml` (1.1 KB) — Crate manifest: no TUI/terminal/HTTP/Anthropic dependency belongs here, dependency edge runs TUI -> engine only; declares serde_json as the engine's JSON contract, plus serde_test/tempfile dev-deps.
+- `Cargo.toml` (1.1 KB) — The crate manifest; pins no TUI/terminal/HTTP/Anthropic dependency since the dependency edge runs TUI -> engine, declares serde/serde_json/toml as dependencies and serde_test/tempfile as dev-dependencies, and inherits `[lints]` from the workspace.
 
 ## Directories
 
-- `src/` — The crate's core modules: pacting, hashing, scoping, manifest and document schema; open for how a directory gets pacted or judged fresh/stale.
+- `src/` — The crate's core module: pact/refresh orchestration, freshness state, document schema and validation, request fitting, hashing, manifests, scopes and sigils; open it for how any of that logic works.
+
+## Structure
+
+- The crate's public API is entirely what `src` declares and re-exports.
 
 ## Rules
 
-- no TUI, terminal, HTTP or Anthropic dependency belongs here: the dependency edge runs TUI -> engine and never back
-- the shape a pass fills in is JSON, a fixed object the engine builds, hands over, reads back and checks (document); the engine owns that contract
-- lint configuration lives in the root workspace manifest, not here
-- dev-dependencies (serde_test, tempfile) are tests only
+- No TUI, terminal, HTTP or Anthropic dependency belongs here: the dependency edge runs TUI -> engine and never back.
+- The engine owns the JSON contract a pass fills in (`document`), including parsing it, since it builds, hands over and reads back that shape.
+- Lint configuration lives in the root manifest so every crate is held to the same bar; this crate just inherits `[workspace.lints]`.
+- `serde_test` and `tempfile` are dev-dependencies only, used to round-trip serde derives and to give manifest tests a throwaway directory.
 
 ## Where to look
 
-- what modules make up the engine and how they fit together → `src` `pact_subtree`
-- why the JSON schema parser lives in this crate rather than the CLI or TUI → `Cargo.toml` `serde_json`
+- what dependencies this crate declares and why → `Cargo.toml` `serde_json`
+- the actual pact/refresh/validate/render logic → `src` `pact_subtree`
+- why no rustup/HTTP dependency shows up here → `Cargo.toml`
