@@ -1179,6 +1179,7 @@ mod tests {
     use crate::fixture;
     use crate::panel::Mode;
     use crate::prompt::{ScopeField, ScopePrompt};
+    use crate::thread::Ending;
 
     const MANY: usize = 20;
 
@@ -1329,6 +1330,20 @@ mod tests {
         let area = panel_area(buffer);
         (0..area.height)
             .map(|index| text_in(buffer, area, area.y + index))
+            .collect()
+    }
+
+    // The foreground of every cell a panel row wrote a glyph into, the row's
+    // own prefix included. It stops at the last glyph because a row's style
+    // reaches the text and not the blanks past the end of it, which the border
+    // cleared and which say nothing about whose row this is.
+    fn panel_row_colours(buffer: &Buffer, index: usize) -> Vec<Color> {
+        let area = panel_area(buffer);
+        let y = area.y + u16::try_from(index).expect("the panel is a few rows tall");
+        let written = u16::try_from(display_width(&text_in(buffer, area, y))).unwrap_or(area.width);
+
+        (area.x..area.x + written.min(area.width))
+            .map(|x| buffer[(x, y)].fg)
             .collect()
     }
 
@@ -4467,6 +4482,211 @@ mod tests {
             buffer[(inner.x, inner.y)].modifier.contains(Modifier::BOLD),
             "the question should be bold"
         );
+    }
+
+    const NOTE: &str = "no such command";
+    const SECOND_QUESTION: &str = "try it again";
+
+    #[test]
+    fn everything_on_the_conversation_but_the_readers_own_words_is_the_conversations_colour() {
+        // One whole turn, warlock's own voice after it, and a second turn that
+        // ended rather than answered: every kind of row the card has, in the
+        // order it files them.
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        app.panel_mut().start_turn(QUESTION, base);
+        app.panel_mut()
+            .record_turn(&Activity::Thinking, at(base, 1));
+        app.panel_mut().answer_turn(ANSWER, at(base, 2));
+        app.panel_mut().note(NOTE, at(base, 3));
+        app.panel_mut().start_turn(SECOND_QUESTION, at(base, 4));
+        app.panel_mut()
+            .record_turn(&Activity::Thinking, at(base, 5));
+        app.panel_mut().end_turn(&Ending::Cancelled, at(base, 6));
+
+        let buffer = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+
+        let drawn = panel_rows(&buffer);
+        assert_eq!(
+            drawn[..7],
+            [
+                format!("{SAID_MARKER}{QUESTION}"),
+                format!("{PANEL_INDENT}0:02 thinking"),
+                ANSWER.to_owned(),
+                format!("{NOTE_MARKER}{NOTE}"),
+                format!("{SAID_MARKER}{SECOND_QUESTION}"),
+                format!("{PANEL_INDENT}0:02 thinking"),
+                format!("{PANEL_INDENT}0:02 {}", Ending::Cancelled.line()),
+            ],
+        );
+
+        // The answer, both work lines, the ending the turn was closed with and
+        // warlock's note: every glyph of every one of them, clock and marker
+        // included, in the conversation's own foreground.
+        for index in [1, 2, 3, 5, 6] {
+            let colours = panel_row_colours(&buffer, index);
+            assert!(!colours.is_empty(), "row {index} was drawn blank");
+            for (column, fg) in colours.into_iter().enumerate() {
+                assert_eq!(fg, CONVERSATION_COLOUR, "at ({column}, {index})");
+            }
+        }
+        // And the two rows left out are the two the reader typed, which keep the
+        // terminal's own foreground: the split on this card is by author, so it
+        // takes both halves of one card to say it.
+        for index in [0, 4] {
+            let colours = panel_row_colours(&buffer, index);
+            assert!(!colours.is_empty(), "row {index} was drawn blank");
+            for (column, fg) in colours.into_iter().enumerate() {
+                assert_eq!(fg, Color::Reset, "at ({column}, {index})");
+            }
+        }
+    }
+
+    const LONG_QUESTION: &str = "what does the engine in the crates directory do all day";
+
+    #[test]
+    fn a_question_too_long_for_the_panel_keeps_the_default_foreground_on_every_row() {
+        // The same narrow terminal the wrapping above is pinned at: the panel
+        // gets half of forty columns, less its border, and the question is long
+        // enough to need four of those rows.
+        let narrow = 40;
+        let base = Instant::now();
+        let mut app = pacting_app(base, narrow, FIXTURE_HEIGHT);
+        app.panel_mut().start_turn(LONG_QUESTION, base);
+        app.panel_mut().answer_turn(ANSWER, at(base, 1));
+
+        let buffer = render_at(&app, narrow, FIXTURE_HEIGHT, at(base, 2));
+
+        assert_eq!(
+            panel_area(&buffer).width,
+            18,
+            "the terminal is the narrow one"
+        );
+        let drawn = panel_rows(&buffer);
+        assert_eq!(
+            drawn[..4],
+            [
+                format!("{SAID_MARKER}what does the"),
+                format!("{PANEL_INDENT}engine in the"),
+                format!("{PANEL_INDENT}crates directory"),
+                format!("{PANEL_INDENT}do all day"),
+            ],
+        );
+
+        // A message is one thing the reader typed however many rows it took, so
+        // the rows it spilled onto are the reader's too: no foreground of ours
+        // on the marked first row or on any continuation of it, which leaves
+        // every cell of them the terminal's own colour.
+        for index in 0..4 {
+            let colours = panel_row_colours(&buffer, index);
+            assert!(!colours.is_empty(), "row {index} was drawn blank");
+            for (column, fg) in colours.into_iter().enumerate() {
+                assert_eq!(fg, Color::Reset, "at ({column}, {index})");
+            }
+        }
+        // And the answer under them is still coloured, so the rows above are
+        // default because of whose they are and not because the card is.
+        assert!(
+            panel_row_colours(&buffer, 5)
+                .iter()
+                .all(|fg| *fg == CONVERSATION_COLOUR),
+            "{:?}",
+            panel_row_colours(&buffer, 5)
+        );
+    }
+
+    #[test]
+    fn the_conversations_colour_is_on_neither_the_account_nor_the_document() {
+        // All three cards filled at once: a run writing an account, a turn asked
+        // and answered with a note after it, and a file read.
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        let account = app.panel_mut().account_mut().expect("a pact has started");
+        account.open_section(SAME_WORDS, base);
+        account.record(&Activity::Thinking, at(base, 1));
+        app.panel_mut().start_turn(QUESTION, at(base, 2));
+        app.panel_mut().answer_turn(ANSWER, at(base, 3));
+        app.panel_mut().note(NOTE, at(base, 4));
+        app.panel_mut()
+            .show_document(["# The engine", "", ANSWER], false);
+
+        // The file came to the front the moment it was filled, so it is the card
+        // showing with nothing pressed...
+        let showing_document = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+        assert_eq!(panel_rows(&showing_document)[0], "# The engine");
+        // ...and the swap order is the conversation, the run, then the file, so
+        // two steps from the file reach the account.
+        app.swap_card();
+        app.swap_card();
+        let showing_account = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+        assert_eq!(
+            panel_rows(&showing_account)[..2],
+            [
+                SAME_WORDS.to_owned(),
+                format!("{PANEL_INDENT}0:09 thinking"),
+            ],
+        );
+
+        // Neither card is a conversation, so neither carries the conversation's
+        // colour anywhere — border, titles and the scrollback edge included,
+        // which is why this counts the whole pane rather than its rows.
+        for (card, buffer) in [("account", showing_account), ("document", showing_document)] {
+            let panel = areas(buffer.area, None).panel;
+            for y in panel.y..panel.y + panel.height {
+                for x in panel.x..panel.x + panel.width {
+                    assert_ne!(
+                        buffer[(x, y)].fg,
+                        CONVERSATION_COLOUR,
+                        "the {card} card is coloured at ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_conversations_colour_never_reaches_the_tree() {
+        // A conversation with every kind of row on it, showing, beside the tree:
+        // whatever the panel is drawing, the tree is drawn by what its rows are.
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        app.panel_mut().start_turn(QUESTION, base);
+        app.panel_mut()
+            .record_turn(&Activity::Thinking, at(base, 1));
+        app.panel_mut().answer_turn(ANSWER, at(base, 2));
+        app.panel_mut().note(NOTE, at(base, 3));
+        assert!(app.panel().showing_thread());
+
+        let buffer = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+
+        // Three node-state colours, the guides' own, and the blank the border
+        // cleared: that is every colour the tree has, and the conversation's is
+        // not among them.
+        let area = rows_area(&buffer);
+        let states: Vec<Color> = NodeState::ALL.into_iter().map(colour_for).collect();
+        assert!(!states.contains(&CONVERSATION_COLOUR));
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let fg = buffer[(x, y)].fg;
+                assert_ne!(
+                    fg, CONVERSATION_COLOUR,
+                    "the tree is coloured at ({x}, {y})"
+                );
+                assert!(
+                    fg == Color::Reset || fg == GUIDE_COLOUR || states.contains(&fg),
+                    "({x}, {y}) is drawn in {fg:?}, which is no tree colour"
+                );
+            }
+        }
+        // And each drawn row's own text is still its state's colour, so the rows
+        // are coloured by the tree's rule rather than left uncoloured.
+        let drawn = u16::try_from(app.rows().len())
+            .expect("the fixture tree is small")
+            .min(area.height);
+        for index in 0..drawn {
+            let state = app.rows()[usize::from(index)].state;
+            assert_eq!(first_glyph_colour(&buffer, index), colour_for(state));
+        }
     }
 
     const ROW_WIDTH: u16 = 24;
