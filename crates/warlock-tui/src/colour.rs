@@ -1,4 +1,4 @@
-//! Indexed colours rather than named ones, all four of them. A named colour
+//! Indexed colours rather than named ones, every one of them. A named colour
 //! sits in the reader's theme and an indexed one overrides it; the override is
 //! taken because the whole message on this screen is carried by colour — stale
 //! has to be tellable from fresh from unpacted at a glance — and because a mix
@@ -41,12 +41,22 @@ pub(crate) const FOCUS_COLOUR: Color = Color::Indexed(45);
 // under every state colour, not so far as to disappear on a light background.
 pub(crate) const GUIDE_COLOUR: Color = Color::Indexed(240);
 
+// The conversation card is two voices and the split is by author, not by kind
+// of row: what the operator typed keeps the terminal's default foreground and
+// everything answered back — model text, work lines, warlock's own notes — is
+// drawn in this. A mauve because it belongs to none of the three states and is
+// not the focus cyan; muted so a long exchange reads as body text rather than
+// as three screens of alarm. Pinned and indexed like the rest, because a named
+// magenta is the reader's magenta and could land on any of the values the tests
+// below hold it apart from.
+pub(crate) const CONVERSATION_COLOUR: Color = Color::Indexed(139);
+
 #[cfg(test)]
 mod tests {
     use ratatui::style::Color;
     use warlock_engine::NodeState;
 
-    use super::{FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
+    use super::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
 
     #[test]
     fn unpacted_is_gray() {
@@ -95,6 +105,38 @@ mod tests {
         assert_ne!(
             GUIDE_COLOUR, FOCUS_COLOUR,
             "the indent guides share the focused border's colour"
+        );
+    }
+
+    #[test]
+    fn the_conversation_colour_is_a_flat_indexed_mauve() {
+        assert_eq!(CONVERSATION_COLOUR, Color::Indexed(139));
+    }
+
+    #[test]
+    fn the_conversation_colour_is_no_states_colour() {
+        for state in NodeState::ALL {
+            assert_ne!(
+                CONVERSATION_COLOUR,
+                colour_for(state),
+                "the conversation card shares {state:?}'s colour"
+            );
+        }
+    }
+
+    #[test]
+    fn the_conversation_colour_is_not_the_focus_colour() {
+        assert_ne!(
+            CONVERSATION_COLOUR, FOCUS_COLOUR,
+            "the conversation card shares the focused border's colour"
+        );
+    }
+
+    #[test]
+    fn the_conversation_colour_is_not_the_guide_colour() {
+        assert_ne!(
+            CONVERSATION_COLOUR, GUIDE_COLOUR,
+            "the conversation card shares the indent guides' colour"
         );
     }
 
