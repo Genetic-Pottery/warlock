@@ -14,7 +14,13 @@ pub const PURPOSE_CHARS: usize = 700;
 
 pub const LIST_CAP: usize = 12;
 
-pub const DECLARED_SHOWN: usize = 8;
+// Sixteen, measured rather than chosen. Eight and sixteen route to the right
+// file equally well — 87.0% against 90.7% over three runs of 36 routing
+// questions, a difference of four answers inside the run-to-run spread — but
+// naming the right symbol goes 33.3% to 45.4%, and that gap held in every run.
+// Thirty-two and sixty-four buy none of it back at a third and a half again the
+// tokens. See docs/warlock-aider-baseline-measurement.md.
+pub const DECLARED_SHOWN: usize = 16;
 
 // Four, and the three after the first are cheap: a repair pass is asked only
 // for the slots the last one got wrong and answers with a patch over it
@@ -1859,7 +1865,11 @@ mod tests {
                 ),
                 (
                     "app.rs".to_owned(),
-                    (0..10).map(|i| format!("draw{i}")).collect(),
+                    // Two past the cap, so the line below pins the truncation
+                    // itself rather than the number it happens to sit at.
+                    (0..super::DECLARED_SHOWN + 2)
+                        .map(|i| format!("draw{i}"))
+                        .collect(),
                 ),
             ]
             .into_iter()
@@ -1874,7 +1884,7 @@ mod tests {
              \n## Files\n\n\
              - `Cargo.lock` (4.0 MB) — not read by the pass; name and size only\n\
              - `Cargo.toml` (26 B) — a stand-in entry, filled by a test double\n\
-             - `app.rs` (878.9 KB) — a stand-in entry, filled by a test double · declares `draw0`, `draw1`, `draw2`, `draw3`, `draw4`, `draw5`, `draw6`, `draw7` (+2)\n\
+             - `app.rs` (878.9 KB) — a stand-in entry, filled by a test double · declares `draw0`, `draw1`, `draw2`, `draw3`, `draw4`, `draw5`, `draw6`, `draw7`, `draw8`, `draw9`, `draw10`, `draw11`, `draw12`, `draw13`, `draw14`, `draw15` (+2)\n\
              - `lib.rs` (39 B) — a stand-in entry, filled by a test double · declares `pact`, `subtree_hash`\n\
              - `logo.png` (5 B) — not text; name and size only\n\
              \n## Directories\n\n\

@@ -85,3 +85,32 @@ The harness is in the session scratchpad, not in this repository: `harness.py`
 (questions), `repomap.py` (the baseline arm), `run_eval.py`, `score.py`, and
 `pyrun.sh`, which exists only because scipy's wheel needs a libstdc++ that a
 NixOS venv has no path to. Aider needs Python 3.12; 3.14 cannot build it.
+
+## Follow-up: what the baseline suggested about `DECLARED_SHOWN`
+
+The repomap's one clear win was precision on what it covered — 14 of 14 when the
+gold file was in the map, against signatures rather than prose. The cheapest way
+to buy some of that is the `· declares` list, which is rendered from what warlock
+measured and costs no model pass to lengthen. So the same 36 questions were run
+against documents identical but for that cap.
+
+| declares | tokens | right file | right file + symbol |
+|---|---|---|---|
+| 8 | 5030 | 87.0% | 33.3% |
+| 16 | 5747 | 90.7% | **45.4%** |
+| 32 | 6673 | 91.7% | 44.4% |
+| 64 | 7878 | 91.7% | 41.7% |
+
+The 8 and 16 rows are three runs of 36 questions each; 32 and 64 are one run.
+
+File routing does not move: 87.0% against 90.7% is four answers in 108, inside
+the spread between runs of the same arm (31, 32, 31 against 33, 32, 33). The
+same arm rendered from the committed document scored 91.7% in the first
+experiment, which is the noise floor stated plainly.
+
+Naming the right symbol does move, and held in every run: 12, 12, 12 correct at
+eight names against 19, 15, 15 at sixteen. Twelve points for fourteen percent
+more tokens. Past sixteen it reverses while the tokens keep climbing, which is
+the whole argument for a cap existing at all.
+
+`DECLARED_SHOWN` is now 16.
