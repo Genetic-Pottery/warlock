@@ -3,23 +3,26 @@
 
 # crates
 
-The crates directory is the workspace root of warlock's Rust source: warlock-engine, the domain logic for pact/refresh/freshness/validation with no terminal dependency, and warlock-tui, the terminal front end shipping the warlock binary; open it for how the two crates divide domain logic from presentation.
+crates is the workspace root holding the two crates that make up the project: warlock-engine, the domain/lifecycle core, and warlock-tui, the terminal front end and CLI that ships the `warlock` binary.
 
 ## Directories
 
-- `warlock-engine/` — The domain crate: pact/refresh orchestration, freshness hashing, document schema/validation, request fitting, manifests, scopes and sigils, with no TUI/HTTP dependency of its own.
-- `warlock-tui/` — The terminal front end: the warlock binary plus the warlock_tui library of pure App/Account/Thread/Panel/Composer state, colours and wrapping, assembled by main.rs.
+- `warlock-engine/` — The pact/refresh/document lifecycle core: Agent port, manifest/scope/sigil schemas, tree/hash/freshness machinery — go here for domain logic free of any TUI dependency.
+- `warlock-tui/` — The terminal front end and CLI that ships the `warlock` binary — go here for panel, key-handling, subcommand or process-spawning questions.
 
 ## Structure
 
-- The dependency edge runs warlock-tui -> warlock-engine: the front end knows domain vocabulary, the engine knows nothing of terminals.
+- The dependency edge runs one way: warlock-tui depends on warlock-engine, never the reverse.
+- warlock-engine defines the domain and lifecycle types that warlock-tui's CLI subcommands and panel operate on.
 
 ## Rules
 
-- warlock-engine pins no TUI, terminal, HTTP or Anthropic dependency since that edge only ever runs from warlock-tui.
-- Lint configuration for both crates is inherited from the workspace's [workspace.lints] rather than set per crate.
+- warlock-engine forbids TUI, terminal, HTTP or Anthropic dependencies, keeping the dependency edge one-directional.
+- Lint configuration is shared from the workspace root manifest across both crates.
 
 ## Where to look
 
-- how the pact/refresh/validate/render logic works → `warlock-engine` `pact_subtree`
-- where the warlock binary starts and what state backs the panel → `warlock-tui` `main.rs`
+- where the core lifecycle logic for pact/refresh/document lives → `warlock-engine` `pact_subtree`
+- where the terminal UI and CLI subcommands live → `warlock-tui` `main.rs`
+- why a dependency is or isn't allowed in the core crate → `warlock-engine` `Cargo.toml`
+- how the `warlock` binary is built and what it depends on → `warlock-tui` `Cargo.toml`

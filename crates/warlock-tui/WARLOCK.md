@@ -3,36 +3,30 @@
 
 # warlock-tui
 
-The warlock-tui crate: the terminal front end of warlock, shipping the `warlock` binary and the warlock_tui library of pure state (App, Account, Thread, Panel, Composer, colours, wrapping) that the binary's main.rs assembles into the running panel.
+warlock-tui is the crate that ships the `warlock` binary: the terminal front end (panel, tree, composer, conversation cards) plus every CLI subcommand (check, config, pact, refresh, stale, fresh, unpact, scope add/remove), built on top of warlock-engine's domain types.
 
 ## Files
 
-- `Cargo.toml` (1.6 KB) — Package manifest for warlock-tui: names the `warlock` binary (src/main.rs) and the warlock_tui library (src/lib.rs), depends on warlock-engine plus clap, ctrlc, notify, ratatui, serde_json, and pulls tempfile only for warlock-config's headless tests.
+- `Cargo.toml` (1.6 KB) — Crate manifest: binary `warlock` (src/main.rs), library `warlock_tui` (src/lib.rs), dependencies clap/ctrlc/notify/ratatui/serde_json/warlock-engine, dev-dependency tempfile, workspace lints.
 
 ## Directories
 
-- `src/` — The front end minus the terminal: pure tree/panel/composer/scope-prompt state, colour and wrap logic, the claude.rs child-process adapter and watch.rs filesystem watcher, all assembled by main.rs.
+- `src/` — The front end and CLI's source: pure state/event modules, the impure claude and watch seams, all behind lib.rs's re-exports — go here for any panel, key-handling, subcommand or process-spawning question.
 
 ## Structure
 
-- Cargo.toml's [lib] path points at src/lib.rs, which re-exports the pure state both the binary and tests use
-- Cargo.toml's [[bin]] path points at src/main.rs, the thin shell wrapping the library
-- dependency edge runs warlock-tui -> warlock-engine: the front end knows domain vocabulary, the engine knows nothing of terminals
-- ctrlc is pressed into service only by src/running.rs for headless `warlock pact` runs
-- tempfile is a dev-dependency only, used by warlock-config tests writing to a throwaway home directory
+- The dependency edge runs TUI -> engine: warlock-tui knows terminal and domain vocabulary, warlock-engine knows neither.
+- The library exposes the pure app-state and colour logic as ordinary reachable API, while src/main.rs is the thin binary shell around it.
+- Only headless runs in src/running.rs use ctrlc, since a warlock pact has no panel to press Esc in.
+- Tests write a real config file into a throwaway home directory using tempfile, matching the engine's explicit home parameter.
 
 ## Rules
 
-- the executable ships as `warlock` even though the crate is named warlock-tui
-- the library exposes the pure state-to-colour and app-state logic as ordinary reachable API, not crate-private code
-- the TUI-to-engine dependency direction is fixed: the engine must know nothing about terminals
-- ctrlc is only ever pulled in from src/running.rs, nowhere else in the crate
-- lint configuration is not set here; it is inherited from the workspace's [workspace.lints]
+- The crate is named warlock-tui but the binary it ships is named `warlock`.
+- Lint configuration is inherited from the workspace root rather than set locally.
 
 ## Where to look
 
-- what binary does this crate produce and where does it start → `src` `main.rs`
-- why Ctrl-C exists as a dependency here → `Cargo.toml` `ctrlc`
-- which crate the TUI depends on for domain logic → `Cargo.toml` `warlock-engine`
-- how config tests avoid touching a real home directory → `Cargo.toml` `tempfile`
-- the pure state, colours, wrapping and panel logic behind the binary → `src` `lib.rs`
+- which files make up the terminal UI versus the CLI subcommands → `src` `main.rs`
+- why ctrlc is a dependency here at all → `Cargo.toml` `ctrlc`
+- how tests avoid touching a developer's real config → `Cargo.toml` `tempfile`
