@@ -180,7 +180,19 @@ pub fn stub_answer(request: &Request) -> String {
     const PROSE: &str = "A stand-in account of some contents, written by a test double that read \
                          none of them: records and pins, listed one after another with no code \
                          among them.";
-    if request.prompt().starts_with(PROMPT) {
+    const LINE: &str = "A stand-in line about one file, written by a test double that read none \
+                        of it.";
+    // Three kinds of pass and one test double, told apart the only way they can
+    // be from the outside: by what they were asked. A double that answered a
+    // per-file pass with a whole fill would be testing the parser and not the
+    // pipeline.
+    if request.prompt().starts_with(FILE_PROMPT) {
+        format!("{{\"line\": {LINE:?}}}")
+    } else if request.prompt().starts_with(SYNTHESIS_PROMPT) {
+        let mut fill = Fill::stub(request);
+        fill.files.clear();
+        fill.to_json()
+    } else if request.prompt().starts_with(PROMPT) {
         Fill::stub(request).to_json()
     } else {
         PROSE.to_owned()
@@ -550,6 +562,10 @@ lines spell it. A structure entry names at least one. An empty list is fine.
 {\"line\": ..., \"names\": [...]} shape. A rule that refers to nothing leaves \
 \"names\" empty. Not something inferred. An empty list is fine.
 
+\"directories\": one line per key. What is under it and the kind of question \\
+that should send a reader there. Write it from the subdirectory's own \\
+WARLOCK.md, which follows below, and do not restate that document's contents.
+
 \"lookups\": routes, each {\"for\": ..., \"open\": ..., \"symbol\": ...}. \
 \"for\" is a question a reader might arrive with, in plain words. \"open\" is \
 exactly one of the filenames below. \"symbol\" is optional and must be a name \
@@ -564,6 +580,7 @@ shown.";
 pub fn synthesis_instructions(
     name: &str,
     lines: &BTreeMap<String, String>,
+    expected: &Expected<'_>,
     rejected: &[Defect],
 ) -> String {
     let mut text = SYNTHESIS_PROMPT.to_owned();
@@ -585,10 +602,18 @@ pub fn synthesis_instructions(
     for (path, line) in lines {
         let _ = write!(text, "\n- `{path}` — {line}");
     }
+    for (child, document) in &expected.directories {
+        let _ = write!(
+            text,
+            "\n\nThe directory `{child}/` holds this document:\n\n{}",
+            document.trim()
+        );
+    }
     text.push_str(
         "\n\nReturn exactly this object with every empty string filled in and the lists \
          populated, as JSON, with no code fence and nothing before or after it:\n\n\
-         {\"purpose\": \"\", \"structure\": [], \"rules\": [], \"lookups\": []}",
+         {\"purpose\": \"\", \"directories\": {}, \"structure\": [], \"rules\": [], \
+         \"lookups\": []}",
     );
     text
 }

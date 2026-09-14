@@ -284,6 +284,10 @@ impl PactEntry {
         self
     }
 
+    pub(crate) fn set_lines(&mut self, lines: BTreeMap<String, String>) {
+        self.lines = Some(lines);
+    }
+
     #[must_use]
     pub fn without_grant(mut self) -> Self {
         self.granted_hash = None;
