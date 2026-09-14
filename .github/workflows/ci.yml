@@ -20,11 +20,18 @@ jobs:
       - name: Cache the cargo registry and target directory
         uses: Swatinem/rust-cache@v2
 
+      # `if: always()` on the two below, so one misplaced import cannot end the
+      # job before anything has been compiled. A formatting slip is the cheapest
+      # failure there is and it was hiding the expensive ones: a run that stops
+      # at fmt reports nothing about whether the code builds, lints or passes,
+      # which buys a second push to find out.
       - name: cargo fmt --all --check
         run: cargo fmt --all --check
 
       - name: cargo clippy --workspace --all-targets -- -D warnings
+        if: always()
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test --workspace
+        if: always()
         run: cargo test --workspace
