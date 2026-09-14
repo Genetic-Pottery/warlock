@@ -1380,10 +1380,10 @@ mod tests {
         pactable_directories, refresh_subtree, unpact_ignored, unpact_subtree, view_file,
     };
     use crate::document::{self, STAMP};
-    use crate::ignores;
     use crate::fitting::{
         Gathered, Omission, PER_FILE_BYTE_CAP, REQUEST_BYTE_CAP, byte_count, gather_request,
     };
+    use crate::ignores;
     use crate::{
         Agent, Loaded, Manifest, NodeState, PactEntry, agent, decide_state, from_manifest_path,
         load_tree, manifest, subtree_hash,
