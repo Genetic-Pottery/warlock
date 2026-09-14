@@ -3,87 +3,73 @@
 
 # src
 
-The warlock-tui front end minus the terminal: pure event/state modules driving the panel, tree, composer and conversation cards, plus the impure `claude` child-process seam and the `watch` filesystem watcher, all assembled behind lib.rs's public re-exports.
+The terminal front end for warlock: a panel over a repository's pact state, driven by keypresses and filesystem watches, plus the headless subcommands (check, config, stale, fresh, pact, refresh, unpact, scope) that share its boundary and session logic.
 
 ## Files
 
-- `account.rs` (69.2 KB) — Account, Section, Log, Line, Voice, Outcome — the clocked, ordered record of what one pact did per directory, plus size/money formatting helpers. · declares `THINKING`, `WAITING`, `WRITING`, `Log`, `opened_at`, `started`, `closed_at`, `is_closed`, `row_count`, `freeze`, `push`, `extend_or_open`, `rewrite_or_open`, `rows`, `Outcome`, `Section` (+40)
-- `app.rs` (287.8 KB) — App, Row, walk_of/reflow — flattens the engine's Tree into drawable rows, holds selection, collapse and filter state. · declares `Row`, `new`
-- `boundary.rs` (10.3 KB) — Reach, Verdict, verdict() — the one shared function judging whether an operator's sigils open a scope, used by both the panel and the shell. · declares `Reach`, `Verdict`, `message`, `verdict`, `closed_scope_message`, `blocking_scopes_message`
-- `chatting.rs` (108.4 KB) — Chat, the conversation register (chat/brief) and worker dispatch for /brief, /chat and /write commands. · declares `TURN_LOST`, `BRIEF_COMMAND`, `CHAT_COMMAND`, `WRITE_COMMAND`, `BRIEF_NOTE`, `CHAT_NOTE`, `ALREADY_CHATTING`, `NOT_BRIEFING`
-- `check.rs` (23.0 KB) — warlock check subcommand: prints which scope covers a path and whether this machine's sigils open it. · declares `check`, `CHECK`, `PATH`, `SCOPE`, `SIGILS`, `OPENS`, `Checked`, `checked_onto`, `checked`, `prose`, `covering_line`, `holding_line`, `verdict_line`, `sigils_value`
-- `claude.rs` (165.5 KB) — ClaudeAgent, Cancel, Activity, Wired — spawns and streams the `claude` CLI child process; the crate's one process-spawning module. · declares `INVOCATION_TIMEOUT`, `BRIEF_EFFORT`, `BRIEF_MODEL`, `PROGRAM`, `ARGS`, `MODEL`, `CONTEXT_TOKENS`, `EFFORT`
-- `colour.rs` (6.7 KB) — colour_for and the pinned indexed Color constants (FOCUS_COLOUR, SYSTEM_COLOUR, GUIDE_COLOUR, CONVERSATION_COLOUR) for node states and voices. · declares `colour_for`, `FOCUS_COLOUR`, `SYSTEM_COLOUR`, `GUIDE_COLOUR`, `CONVERSATION_COLOUR`
-- `composer.rs` (83.0 KB) — Composer, Pasted, compose_for — the multi-line draft field at the foot of the panel and its keystroke/paste handling. · declares `COMPOSER_MAX_ROWS`, `Composer`, `MARGIN`, `CHORD`
-- `config.rs` (23.8 KB) — warlock config subcommand: prompts for and writes this machine's sigils under the home directory. · declares `configure`, `PROMPT`, `NOTHING`, `RULES`, `prompted`, `Held`, `held_for`, `preamble`, `fmt`, `holding`, `sigils_in`, `hold`, `read_line`
-- `confirm.rs` (11.6 KB) — QuitConfirm, Answer, Answered, answer_for — the Esc-to-quit Yes/No confirmation dialog. · declares `Answer`, `QuitConfirm`, `is_open`, `highlighted`, `Answered`, `answer_for`
-- `descent.rs` (11.1 KB) — Descent enum and descend() — the one shared pact/refresh/unpact descent and single manifest save used by both panel and shell. · declares `Descent`, `wanted`, `descend`, `carry_on`
-- `editing.rs` (32.5 KB) — edit_press — the `e` key, spawning $EDITOR on the selected file and reloading the tree afterward. · declares `edit_press`, `EDITOR_VAR`, `NO_EDITOR`, `Editor`, `came_back`, `edit_target`, `editor_command`, `run_editor`
-- `edits.rs` (55.1 KB) — Opened, unpact/scope_add/scope_remove — the headless boundary-gated manifest writes. · declares `Opened`, `new`, `repo_root`, `manifest`, `target`, `opened`, `unpact`, `scope_add`, `scope_remove`, `unpacted`, `scoped`, `unscoped`, `scope_on`, `unpacted_line`, `scoped_line`, `unscoped_line`
-- `error.rs` (24.3 KB) — Error enum and its Display — the one-line error vocabulary shared by every subcommand and the panel's footer. · declares `Error`, `from_problems`, `one_line`, `fmt`, `source`, `from`
-- `fixture.rs` (12.4 KB) — tree() and tree_after_a_run() — hand-written Tree fixtures used by app/ui tests. · declares `tree`, `tree_after_a_run`, `files`
-- `input.rs` (146.8 KB) — Action, action_for/press_for/mouse_action — turns key and mouse events into intentions. · declares `Action`, `action_for`
-- `lib.rs` (2.6 KB) — Crate root: module declarations and the full list of public re-exports.
-- `main.rs` (91.6 KB) — Binary entry point: CLI parsing, subcommand dispatch, and the terminal event loop.
-- `pacting.rs` (243.9 KB) — Pact, PactEvent, Work — the worker thread and channel driving the `p`/`r` keys' long-running pact/refresh runs. · declares `Pact`, `Reloaded`, `PACT_LOST`, `PACT_CANCELLED`
-- `panel.rs` (31.0 KB) — Panel, Card, Showing, Mode — the right-hand pane holding the account, thread and document cards and their scroll windows. · declares `Panel`, `Showing`, `Mode`, `panel_offset_for`, `showing`, `window_of`, `document_lines`, `show`, `open_account`, `show_document`, `has_content`, `next_card`, `write_run`, `refill_document`, `start_turn`, `note` (+31)
-- `prompt.rs` (19.5 KB) — ScopePrompt, ScopeField, Edited, edit_for — the scope-editing text field and its keystroke handling. · declares `ScopeField`, `new`, `refused`, `directory`, `text`, `rule`, `ScopePrompt`, `is_open`, `field`, `Edited`, `edit_for`, `CHORD`
-- `query.rs` (18.7 KB) — Listing, list() — warlock stale/fresh subcommands and the shared JSON envelope() helper. · declares `Listing`, `list`, `spelled`, `envelope`, `write_object`, `COMMAND`, `DIRECTORIES`, `wanted`, `word`, `Listed`, `state_word`, `listed_onto`, `listed`, `listing`
-- `running.rs` (52.9 KB) — Progress, Report, started/descended — warlock pact and warlock refresh subcommands with Ctrl-C handling. · declares `pact`, `refresh`, `Progress`, `new`, `total`, `say`, `starting`, `repaired`, `documented`, `unchanged`, `skipped`, `named`, `Report`, `onto`, `status`, `report` (+6)
-- `scoping.rs` (40.5 KB) — scope_press/scope_edit/scope_submit — the `s` key's full path from press to saved pacts.toml. · declares `scope_press`, `scope_edit`, `scope_submit`, `with_scope_on`, `no_pact_message`
-- `session.rs` (23.4 KB) — Scope, Watched, load_app/reload_tree/closed_scope — how the tree on screen is loaded, reloaded and kept boundary-checked. · declares `NOT_REFRESHED`, `NOT_WATCHING`, `reload_tree`, `note`, `Scope`, `Watched`, `start`, `off_note`, `round`, `caught_up`, `start_watching`, `closed_scope`, `sigils_under`, `load_manifest`, `load_app`, `sigils_held`
-- `standing.rs` (8.7 KB) — Standing — resolves the repository root, working directory and home directory a subcommand stands on. · declares `FOR_CLAUDE_MD`, `FOR_SIGILS`, `FOR_CHECK`, `FOR_LISTING`, `FOR_UNPACT`, `FOR_SCOPE_ADD`, `FOR_SCOPE_REMOVE`, `FOR_PACT`, `FOR_REFRESH`, `Standing`, `here`, `at`, `repo_root`, `target`, `manifest`, `home` (+3)
-- `stubs.rs` (1.4 KB) — Passing and Saying — test-only stand-in Agent/Converses implementations. · declares `Passing`, `filling`, `Saying`, `answering`, `run`, `wired`, `turn`, `raised`
-- `submission.rs` (8.3 KB) — Submitted, submitted_for — parses a composer draft into /brief, /write, /chat, Message or Refused. · declares `Submitted`, `refusal`, `submitted_for`, `REFUSAL`
-- `template.rs` (19.0 KB) — DEFAULT_TEMPLATE, brief_template, missing_sections — the brief document shape and its section-completeness check. · declares `DEFAULT_TEMPLATE`, `brief_template`, `Error`, `missing_sections`, `TEMPLATE_FILE`, `template_path`, `fmt`, `source`, `sections_of`, `carries`
-- `terminal.rs` (7.5 KB) — Screen trait, TerminalGuard, install_panic_hook — raw mode, alternate screen and mouse/paste lifecycle management. · declares `Screen`, `TerminalGuard`, `enter`, `install_panic_hook`, `size`, `draw`, `suspended`, `report_mouse`, `take_terminal`, `drop`, `restore_terminal`
-- `thread.rs` (44.2 KB) — Thread, Turn, Ending, ending_for — the conversation card's ordered turns and notes. · declares `Ending`, `line`, `ending_for`, `Turn`, `message`, `answer`, `ending`, `started`, `is_closed`, `Thread`, `new`, `ask`, `note`, `record`, `end`, `turns` (+18)
-- `ui.rs` (281.0 KB) — draw() and the measuring entry points (tree_height, panel_height, hit_test, etc.) — the one frame-drawing function. · declares `INDENT`, `GUIDE`, `GUIDE_BRANCH`, `GUIDE_LAST`, `SELECTION_MARKER`, `COLLAPSED_MARKER`, `EXPANDED_MARKER`, `NO_MARKER`, `MARK`
-- `viewing.rs` (18.1 KB) — view_press — the `v` key, reading a file's lines onto the document card. · declares `view_press`
-- `watch.rs` (30.5 KB) — NodeSet, WatchPolicy, Watch, Watching — the filesystem watcher and its debounce/coalescing policy. · declares `QUIET_PERIOD`, `RELOAD_CEILING`, `COALESCED_RELOADS`, `NodeSet`, `from_tree`, `accepts`, `len`, `is_empty`, `WatchPolicy`, `new`, `follow`, `watched`, `saw`, `accepted`, `due`, `reload_started` (+9)
-- `wrap.rs` (24.3 KB) — Shape, shape(), rows(), wrapped(), folded() — word-wrapping for the panel versus column-filling for the composer field. · declares `Shape`, `shape`, `rows`, `wrapped`, `folded`, `continued`, `filled`, `break_at`, `first_character`
-- `writing.rs` (57.9 KB) — the `/write` window: proposed_path proposes a filename from a reply's `# ` title and the directory's next number, write_submit writes the path shown at Enter, unfenced strips a wrapping code fence, missing_sections gates it against brief_template. · declares `WRITE_HEADING`, `proposed_path`, `write_opened`, `write_edit`, `write_submit`, `unfenced`, `slug_of`, `BRIEF_PREFIX`, `UNTITLED`, `SLUG_MAX`, `NO_PATH`, `NOTHING_TO_WRITE`, `refused`, `document`, `document_on`, `put` (+13)
+- `account.rs` (73.7 KB) — Account and Section: a pact's ordered per-directory Log of clocked lines, the Outcome wording, size/money/clock formatting, and Line/Voice for panel rows. · declares `THINKING`, `WAITING`, `WRITING`, `DESCRIBING`, `Log`, `opened_at`, `started`, `closed_at`, `is_closed`, `row_count`, `freeze`, `push`, `extend_or_open`, `rewrite_or_open`, `rows`, `Outcome` (+42)
+- `app.rs` (290.7 KB) — App, Row, PactIntent, Focus, Sigils, Chrome and RunHeader: the flattened tree state, its row filters (reflow, reseat_on), and pact/refresh/view intents. · declares `Row`, `new`, `file`, `with_child_count`, `with_ignored`, `with_document_row`, `with_scope`, `has_children`, `is_file`, `is_document`, `is_ignored`, `PactToggle`, `PactIntent`, `Run`, `RunHeader`, `run` (+121)
+- `boundary.rs` (10.3 KB) — verdict()/Verdict/Reach: one boundary check shared by panel keys and headless doors, plus closed_scope_message and blocking_scopes_message for the refusal text · declares `Reach`, `Verdict`, `message`, `verdict`, `closed_scope_message`, `blocking_scopes_message`
+- `chatting.rs` (108.4 KB) — Chat<C>: the one turn in flight, its draft and mode; run_turn, apply_turn and Asked route an answer or a document back to the panel. · declares `Chat`, `new`, `with_agent`, `composer`, `set_composer_width`, `write_prompt`, `directory`, `answering`, `ask`, `say`, `stop`, `compose`, `paste`, `keep_up`, `write`, `Chatting` (+23)
+- `check.rs` (23.0 KB) — warlock check <path>: prints which scope covers a path, what sigils this machine holds, and whether they meet (Checked, checked, prose, object) · declares `check`, `CHECK`, `PATH`, `SCOPE`, `SIGILS`, `OPENS`, `Checked`, `checked_onto`, `checked`, `prose`, `covering_line`, `holding_line`, `verdict_line`, `sigils_value`
+- `claude.rs` (165.3 KB) — Spawns and drives `claude` as a child process: `ClaudeAgent` runs one pass, `ChatAgent` holds a resumable `Session`, `Cancel` and `Activities` report progress, streaming stdout via the `stream` module. · declares `INVOCATION_TIMEOUT`, `BRIEF_EFFORT`, `BRIEF_MODEL`, `brief_instruction`, `CHAT_INSTRUCTION`, `WRITE_INSTRUCTION`, `Cancel`, `cancel`, `is_cancelled`, `Activity`, `Activities`, `none`, `report`, `Wired`, `Converses`, `ClaudeAgent` (+65)
+- `colour.rs` (6.7 KB) — Pinned indexed colours for node states and UI voice: colour_for(NodeState), FOCUS_COLOUR, SYSTEM_COLOUR, GUIDE_COLOUR, CONVERSATION_COLOUR. · declares `colour_for`, `FOCUS_COLOUR`, `SYSTEM_COLOUR`, `GUIDE_COLOUR`, `CONVERSATION_COLOUR`
+- `composer.rs` (83.0 KB) — Multi-line draft field: Composer holds draft/cursor/width/muted, compose_for and paste_for map keys and pastes to Composed/Pasted, window() gives the scrolled ComposerWindow to draw. · declares `COMPOSER_MAX_ROWS`, `Composer`, `new`, `at`, `cursor`, `set_width`, `width`, `set_muted`, `is_muted`, `draft`, `is_submittable`, `height`, `window`, `ComposerWindow`, `Composed`, `compose_for` (+8)
+- `config.rs` (23.8 KB) — `warlock config`: prompts for a line of sigils, replacing what's held for the repo via hold/sigils_in/read_line and validate_sigil, writing nothing inside the checkout. · declares `configure`, `PROMPT`, `NOTHING`, `RULES`, `prompted`, `Held`, `held_for`, `preamble`, `fmt`, `holding`, `sigils_in`, `hold`, `read_line`
+- `confirm.rs` (11.6 KB) — QuitConfirm/Answer state machine for the quit dialog: Open/Closed variants, answer_for() maps key presses to Answered (Open/Close/Leave), Esc always answers No. · declares `Answer`, `QuitConfirm`, `is_open`, `highlighted`, `Answered`, `answer_for`
+- `descent.rs` (11.1 KB) — Descent enum (Pact, Refresh, Unpact) and descend(), the single point where a subtree walk runs and the manifest is saved exactly once; carry_on() maps Cancel to Pacting. · declares `Descent`, `wanted`, `descend`, `carry_on`
+- `editing.rs` (32.5 KB) — The `e` key: hands the selected file to `$EDITOR` as a foreground child (`edit_press`, `run_editor`, `editor_command`), reloads the tree on return via `came_back`. · declares `edit_press`, `EDITOR_VAR`, `NO_EDITOR`, `Editor`, `came_back`, `edit_target`, `editor_command`, `run_editor`
+- `edits.rs` (55.1 KB) — Opened, the boundary-gated handle for `warlock unpact`, `scope add` and `scope remove`, plus the writes and success-line formatters (unpacted_line, scoped_line, unscoped_line) they call. · declares `Opened`, `new`, `repo_root`, `manifest`, `target`, `opened`, `unpact`, `scope_add`, `scope_remove`, `unpacted`, `scoped`, `unscoped`, `scope_on`, `unpacted_line`, `scoped_line`, `unscoped_line`
+- `error.rs` (24.3 KB) — One `Error` enum for panel and subcommands alike, with `one_line` flattening every message to a single line and `Display`/`source` impls covering variants like ClosedScope, Scope, NoPact, Failures and Cancelled. · declares `Error`, `from_problems`, `one_line`, `fmt`, `source`, `from`
+- `fixture.rs` (12.4 KB) — Hand-written fixture Tree via tree() and tree_after_a_run(), fixed test trees of Node/NodeState covering pacted/unpacted, fresh/stale, and multi-level nesting for app and draw tests. · declares `tree`, `tree_after_a_run`, `files`
+- `input.rs` (146.8 KB) — Turns key and mouse events into intentions via action_for, press_for and mouse_action, with Action, Pressed and MouseAction the enums naming them. · declares `Action`, `action_for`, `Pressed`, `press_for`, `MouseAction`, `mouse_action`, `is_ctrl_c`, `is_tab`, `WHEEL_NOTCH`, `wheel`, `click`
+- `lib.rs` (2.6 KB) — Crate root; declares modules and re-exports the public surface (App, Panel, Composer, Thread, Watch, ui::draw and friends) for the terminal-free front end.
+- `main.rs` (91.6 KB) — Binary entry point: parses the `Cli`/`Command` subcommands (Init, Config, Stale, Fresh, Check, Unpact, Pact, Refresh, Scope), dispatches before touching the terminal, and runs the `Session` event loop in `run`. · declares `POLL_INTERVAL`, `CREATED`, `UPDATED`, `Cli`, `Command`, `ScopeCommand`, `main`, `status_for`, `CANCELLED`, `init`, `run`, `Session`, `size`, `draw`, `point`, `press` (+3)
+- `pacting.rs` (256.5 KB) — Drives the `p` and `r` keys as a worker thread and PactEvent channel; Pact, Running, Work, PactEvent, and apply_toggle turn a press into a run and one final reload. · declares `Pact`, `Reloaded`, `new`, `with_run`, `with_agent`, `running`, `stop`, `press`, `keep_up`, `Running`, `Work`, `path`, `descent`, `kind`, `CancelGuard`, `handle` (+37)
+- `panel.rs` (31.0 KB) — Panel: three cards (account, thread, document) with Showing/Mode enums, Card<T> windowing, and panel_offset_for scroll math. · declares `Panel`, `Showing`, `Mode`, `panel_offset_for`, `showing`, `window_of`, `document_lines`, `show`, `open_account`, `show_document`, `has_content`, `next_card`, `write_run`, `refill_document`, `start_turn`, `note` (+31)
+- `prompt.rs` (19.5 KB) — Scope prompt state: ScopeField (directory, text, rule) and ScopePrompt (Closed/Open), with edit_for turning a KeyEvent into Edited::Open/Close/Submit. · declares `ScopeField`, `new`, `refused`, `directory`, `text`, `rule`, `ScopePrompt`, `is_open`, `field`, `Edited`, `edit_for`, `CHORD`
+- `query.rs` (18.7 KB) — Implements `warlock stale`/`warlock fresh` listing via `Listing`, `list`, `state_word`, `spelled` and `envelope`, rooting rows against the repo path rather than the cwd. · declares `Listing`, `list`, `spelled`, `envelope`, `write_object`, `COMMAND`, `DIRECTORIES`, `wanted`, `word`, `Listed`, `state_word`, `listed_onto`, `listed`, `listing`
+- `running.rs` (54.0 KB) — implements `warlock pact` and `warlock refresh`: `ran`, `listening`, `ending`, `started`, `descended` and the `Progress`/`Report` types that drive and log a headless spending run · declares `pact`, `refresh`, `Progress`, `new`, `total`, `say`, `starting`, `repaired`, `documented`, `unchanged`, `skipped`, `named`, `Report`, `onto`, `status`, `report` (+6)
+- `scoping.rs` (40.5 KB) — Handles the `s` key: scope_press opens a ScopePrompt, scope_submit validates and writes a scope into pacts.toml via with_scope_on, an entry rebuild shared with `warlock scope add/remove`. · declares `scope_press`, `scope_edit`, `scope_submit`, `with_scope_on`, `no_pact_message`
+- `session.rs` (36.7 KB) — Owns Scope, Watched and load_app/reload_tree/closed_scope: resolves the two roots and sigils once, then reloads the tree and gates edits against the same boundary verdict. · declares `NOT_REFRESHED`, `NOT_WATCHING`, `NOT_CLEANED`, `reload_tree`, `note`, `Scope`, `Watched`, `start`, `off_note`, `round`, `caught_up`, `start_watching`, `closed_scope`, `sigils_under`, `load_manifest`, `load_app` (+4)
+- `standing.rs` (8.7 KB) — Standing captures working dir + repo root for a subcommand; here/home/at build it, target/manifest/spelled/repo_root answer with it, and FOR_* constants name what each command wanted a repository for. · declares `FOR_CLAUDE_MD`, `FOR_SIGILS`, `FOR_CHECK`, `FOR_LISTING`, `FOR_UNPACT`, `FOR_SCOPE_ADD`, `FOR_SCOPE_REMOVE`, `FOR_PACT`, `FOR_REFRESH`, `Standing`, `here`, `at`, `repo_root`, `target`, `manifest`, `home` (+3)
+- `stubs.rs` (1.4 KB) — Test-only stub Agent and Converses impls, Passing and Saying, that ignore cancellation and activities so real adapter tests carry those facts instead. · declares `Passing`, `filling`, `Saying`, `answering`, `run`, `wired`, `turn`, `raised`
+- `submission.rs` (8.3 KB) — Classifies a submitted draft via submitted_for into Submitted (Brief, Write, Chat, Message, Refused), refusing anything but the three bare slash-commands with Submitted::refusal's one-line message. · declares `Submitted`, `refusal`, `submitted_for`, `REFUSAL`
+- `template.rs` (19.0 KB) — Loads brief_template from brief-template.md beside the manifest, falling back to DEFAULT_TEMPLATE when absent and erroring when unreadable; missing_sections checks a document against a template's ## headings. · declares `DEFAULT_TEMPLATE`, `brief_template`, `Error`, `missing_sections`, `TEMPLATE_FILE`, `template_path`, `fmt`, `source`, `sections_of`, `carries`
+- `terminal.rs` (7.5 KB) — Screen trait and TerminalGuard: enters/restores raw mode, alternate screen, bracketed paste and mouse capture via take_terminal/restore_terminal, plus install_panic_hook. · declares `Screen`, `TerminalGuard`, `enter`, `install_panic_hook`, `size`, `draw`, `suspended`, `report_mouse`, `take_terminal`, `drop`, `restore_terminal`
+- `thread.rs` (44.2 KB) — Chat conversation card: Thread appends Turn and note Entry values in order, with Ending, ending_for, Turn::ask/record/answer/end and Thread::lines/window rendering them. · declares `Ending`, `line`, `ending_for`, `Turn`, `message`, `answer`, `ending`, `started`, `is_closed`, `Thread`, `new`, `ask`, `note`, `record`, `end`, `turns` (+18)
+- `ui.rs` (288.9 KB) — Renders one frame from its arguments alone via `draw`, with layout measured through `areas`, `tree_height`, `panel_height`, `composer_height`, `panel_width` and `hit_test`. · declares `PANEL_INDENT`, `SAID_MARKER`, `NOTE_MARKER`, `draw`, `composer_on_screen`, `tree_height`, `panel_height`, `run_header_height`, `composer_height`, `panel_width`, `Hit`, `hit_test`, `display_width`, `INDENT`, `GUIDE`, `GUIDE_BRANCH` (+110)
+- `viewing.rs` (18.1 KB) — Handles the view key: view_press resolves App::view_target and calls view_file, feeding lines to App::show_document or a one-line error to the footer. · declares `view_press`
+- `watch.rs` (30.5 KB) — Filesystem watching: NodeSet filters events to walked paths, WatchPolicy decides when a reload is owed (QUIET_PERIOD, RELOAD_CEILING, COALESCED_RELOADS), Watch/Watching drive notify. · declares `QUIET_PERIOD`, `RELOAD_CEILING`, `COALESCED_RELOADS`, `NodeSet`, `from_tree`, `accepts`, `len`, `is_empty`, `WatchPolicy`, `new`, `follow`, `watched`, `saw`, `accepted`, `due`, `reload_started` (+9)
+- `wrap.rs` (24.3 KB) — Wraps a Line into rows for the panel via Shape/shape/rows/wrapped (word-break, for display), and folded/filled/break_at for byte-preserving field fill under a caret. · declares `Shape`, `shape`, `rows`, `wrapped`, `folded`, `continued`, `filled`, `break_at`, `first_character`
+- `writing.rs` (57.9 KB) — The `/write` command's rules and `write_submit`, which writes the on-screen path to disk after `unfenced`, `slug_of` and `missing_sections` judge it. · declares `WRITE_HEADING`, `proposed_path`, `write_opened`, `write_edit`, `write_submit`, `unfenced`, `slug_of`, `BRIEF_PREFIX`, `UNTITLED`, `SLUG_MAX`, `NO_PATH`, `NOTHING_TO_WRITE`, `refused`, `document`, `document_on`, `put` (+13)
 
 ## Structure
 
-- main.rs owns the terminal and event loop and is the only caller of most other modules' entry points.
-- account.rs and thread.rs both build on the shared Log clock rule, which panel.rs and wrap.rs consume via the Shown trait and rows_of.
-- boundary.rs's verdict() is called by session.rs's closed_scope for the panel and by edits.rs's Opened::new for the shell, so both doors refuse the same way.
-- descent.rs's descend() is called by both pacting.rs (panel worker) and running.rs (shell), saving the manifest exactly once per run.
-- edits.rs's Opened gates running.rs's ran(), so a pact or refresh cannot proceed without the boundary already having been asked.
-- input.rs's action_for and press_for consult composer.rs, confirm.rs and prompt.rs to decide which window claims a keystroke.
-- scoping.rs and writing.rs both reuse edit_for from prompt.rs and the same ScopePrompt/ScopeField shape for their own text fields.
-- check.rs, query.rs and edits.rs all funnel their JSON output through query.rs's envelope() and write_object().
-- session.rs's load_app and reload_tree are the two places a Tree reaches app.rs's reseat_on, keeping row state stable across reloads.
-- ui.rs draws Line values produced by account.rs, thread.rs and panel.rs, wrapping them through wrap.rs's rows().
-- chatting.rs drives claude.rs's ChatAgent/Converses seam and writes results through writing.rs's write_submit.
-
-## Rules
-
-- Nothing in this crate opens a terminal, reads a key, or owns an event loop except main.rs; claude.rs and watch.rs are the two deliberate exceptions that reach past that.
-- account.rs never calls Instant::now — every entry point takes the instant it happened at, which is what keeps its clock tests exact.
-- The clock rule is Log::shown_at: a line shows the next line's arrival instant, or the log's freeze instant, or now.
-- reflow is meant to be the only thing turning all_rows into rows; App::insert_file_row is the sole exception and must apply the same three filters in the same order.
-- Esc always answers No in the quit confirmation, so the key meaning 'not this' cannot also be the key that leaves.
-- Colours are indexed, never named, so the panel's state-versus-fresh-versus-stale signalling can't drift under a reader's terminal theme.
-- colour_for and Line::voice have no catch-all match arm, so a new NodeState or Line variant breaks the build rather than silently taking a fallback colour.
-- $EDITOR is split on whitespace only, never handed to a shell, so quoting or injection via a shell is impossible.
-- A boundary an operator does not open exits with status 3, never 1, because re-running would never fix it; there is no --force.
-- Ctrl-C is answered above raw mode, never inside confirm.rs or prompt.rs, so it cannot be swallowed as text.
-- write_submit writes the path shown on screen at Enter, never the originally proposed one, and unfenced is the same function used to build both the proposal and the write.
-- The terminal's raw mode, alternate screen, bracketed paste and mouse capture are restored on every exit path including a panic on any thread.
+- App, Row, PactIntent, Focus, Sigils, Chrome and RunHeader: the flattened tree state, its row filters (reflow, reseat_on), and pact/refresh/view intents.
+- verdict()/Verdict/Reach: one boundary check shared by panel keys and headless doors, plus closed_scope_message and blocking_scopes_message for the refusal text
+- Session owns Scope, Watched and load_app/reload_tree/closed_scope: resolves the two roots and sigils once, then reloads the tree and gates edits against the same boundary verdict.
+- Panel: three cards (account, thread, document) with Showing/Mode enums, Card<T> windowing, and panel_offset_for scroll math.
+- Renders one frame from its arguments alone via draw, with layout measured through areas, tree_height, panel_height, composer_height, panel_width and hit_test.
+- Binary entry point: parses the Cli/Command subcommands (Init, Config, Stale, Fresh, Check, Unpact, Pact, Refresh, Scope), dispatches before touching the terminal, and runs the Session event loop in run.
+- Descent enum (Pact, Refresh, Unpact) and descend(), the single point where a subtree walk runs and the manifest is saved exactly once; carry_on() maps Cancel to Pacting.
+- Drives the p and r keys as a worker thread and PactEvent channel; Pact, Running, Work, PactEvent, and apply_toggle turn a press into a run and one final reload.
+- Chat<C>: the one turn in flight, its draft and mode; run_turn, apply_turn and Asked route an answer or a document back to the panel.
+- Spawns and drives `claude` as a child process: ClaudeAgent runs one pass, ChatAgent holds a resumable Session, Cancel and Activities report progress, streaming stdout via the stream module.
+- Classifies a submitted draft via submitted_for into Submitted (Brief, Write, Chat, Message, Refused), refusing anything but the three bare slash-commands with Submitted::refusal's one-line message.
+- Filesystem watching: NodeSet filters events to walked paths, WatchPolicy decides when a reload is owed (QUIET_PERIOD, RELOAD_CEILING, COALESCED_RELOADS), Watch/Watching drive notify.
 
 ## Where to look
 
-- why a run's cost sometimes shows 'no cost reported' → `account.rs` `spend`
-- how a keystroke becomes a tree action versus text typed into a field → `input.rs` `press_for`
-- why un-pacting a directory can be refused even though the directory itself is open → `boundary.rs` `blocking_scopes_message`
-- how the panel decides which of the three cards is drawn → `panel.rs` `Showing`
-- why the panel refuses actions during a run → `pacting.rs` `Pact::press`
-- how a brief's proposed filename and number are chosen → `writing.rs` `proposed_path`
-- why editing a WARLOCK.md immediately restales its directory → `editing.rs` `came_back`
-- how live filesystem updates are debounced and coalesced → `watch.rs` `WatchPolicy`
-- what happens to a long line that doesn't fit the panel width → `wrap.rs` `rows`
-- how JSON output for CLI subcommands is shaped consistently → `query.rs` `envelope`
-- why /brief and /chat change so little about the conversation → `panel.rs` `Mode`
-- how a scope string typed into the panel is validated and saved → `scoping.rs` `scope_submit`
+- what happens when a boundary check refuses an edit → `boundary.rs` `Verdict`
+- how does the panel decide what to reload after a run → `descent.rs` `descend`
+- where do keypresses become actions → `input.rs` `action_for`
+- how is warlock check implemented → `check.rs`
+- how does the app talk to the claude CLI → `claude.rs` `ClaudeAgent`
+- where does /write validate a document before saving → `writing.rs` `write_submit`
+- what turns a slash command into a chat turn → `submission.rs` `Submitted`
+- how is scroll position computed for a card → `panel.rs` `panel_offset_for`
+- where does the CLI parse subcommands → `main.rs` `Command`
+- how does the terminal get restored on exit → `terminal.rs` `TerminalGuard`
+- what decides a filesystem reload is owed → `watch.rs` `WatchPolicy`
+- where is the quit confirmation dialog handled → `confirm.rs` `QuitConfirm`

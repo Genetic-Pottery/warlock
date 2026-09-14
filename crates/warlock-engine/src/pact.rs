@@ -8,10 +8,10 @@ use std::str::Utf8Error;
 
 use ignore::WalkBuilder;
 
-use crate::document::{self, ATTEMPTS, Accepted, Defect, Fill};
+use crate::document::{self, Defect};
 use crate::fitting::{
-    Fitted, PER_FILE_BYTE_CAP, Problem, byte_count, carried_bytes, carry_hash, fit, measured,
-    one_file, own_files,
+    PER_FILE_BYTE_CAP, Problem, byte_count, carry_hash, child_documents, measured, one_file,
+    own_files,
 };
 use crate::ignores;
 use crate::manifest::{ROOT_MODULE, temp_file_name, write_and_sync};
@@ -29,7 +29,7 @@ pub(crate) const DOCUMENT_FILE: &str = "WARLOCK.md";
 /// use std::fs;
 /// use warlock_engine::{
 ///     Agent, Manifest, NodeState, PactedSubtree, Unwatched, agent, decide_state,
-///     document::Fill, pact_subtree, subtree_hash,
+///     document, pact_subtree, subtree_hash,
 /// };
 ///
 /// /// The engine's own tests reach a model exactly like this: they don't.
@@ -37,7 +37,7 @@ pub(crate) const DOCUMENT_FILE: &str = "WARLOCK.md";
 ///
 /// impl Agent for Canned {
 ///     fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
-///         Ok(agent::Response::new(Fill::stub(request).to_json()))
+///         Ok(agent::Response::new(document::stub_answer(request)))
 ///     }
 /// }
 ///
@@ -79,6 +79,7 @@ pub fn pact_subtree(
         &directories,
         root,
         &BTreeMap::new(),
+        &BTreeMap::new(),
         AboveFailure::Describe,
         agent,
         observer,
@@ -97,7 +98,7 @@ pub fn pact_subtree(
 /// use std::fs;
 /// use warlock_engine::{
 ///     Agent, Manifest, NodeState, PactedSubtree, Unwatched, agent, decide_state,
-///     document::Fill, pact_subtree, refresh_subtree, subtree_hash,
+///     document, pact_subtree, refresh_subtree, subtree_hash,
 /// };
 ///
 /// /// The engine's own tests reach a model exactly like this: they don't.
@@ -108,7 +109,7 @@ pub fn pact_subtree(
 /// impl Agent for Canned {
 ///     fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
 ///         self.passes.set(self.passes.get() + 1);
-///         Ok(agent::Response::new(Fill::stub(request).to_json()))
+///         Ok(agent::Response::new(document::stub_answer(request)))
 ///     }
 /// }
 ///
@@ -123,12 +124,14 @@ pub fn pact_subtree(
 /// // A pact first, to have something to refresh: both directories go green.
 /// let PactedSubtree { manifest, .. } =
 ///     pact_subtree(&engine, repo.path(), &Manifest::new(), &agent, &mut Unwatched)?;
-/// assert_eq!(agent.passes.get(), 2, "one pass each, children before parents");
+/// // One pass per file, then one over the lines to say how they fit together:
+/// // `src` has a file and the directory above it has none, so three.
+/// assert_eq!(agent.passes.get(), 3, "children before parents");
 ///
 /// // Nothing has moved, so a refresh describes nothing and costs nothing.
 /// let PactedSubtree { manifest, .. } =
 ///     refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)?;
-/// assert_eq!(agent.passes.get(), 2, "nothing stale, no pass");
+/// assert_eq!(agent.passes.get(), 3, "nothing stale, no pass");
 ///
 /// // Now a file changes in the parent directory only.
 /// let below = manifest.entry("crates/engine/src").expect("the child is pacted").clone();
@@ -138,7 +141,9 @@ pub fn pact_subtree(
 ///     refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)?;
 ///
 /// assert!(failures.is_empty());
-/// assert_eq!(agent.passes.get(), 3, "the changed directory, and not the one below it");
+/// // One new file to describe, and one pass over the lines to place it. The
+/// // directory below is untouched and costs nothing, which is the whole prize.
+/// assert_eq!(agent.passes.get(), 5, "the changed directory, and not the one below it");
 /// assert_eq!(manifest.entry("crates/engine/src"), Some(&below), "skipped, grant and all");
 /// let entry = manifest.entry("crates/engine").expect("the described directory is pacted");
 /// assert_eq!(decide_state(Some(entry), &subtree_hash(&engine)?), NodeState::PactedFresh);
@@ -169,12 +174,32 @@ pub fn refresh_subtree(
         })
         .collect();
 
+    // Read here, where the manifest is, for the same reason the carry hashes
+    // are: `describe_and_grant` is handed what a directory was last known to
+    // hold and keeps knowing nothing about manifests.
+    let line_hashes: BTreeMap<PathBuf, BTreeMap<String, String>> = stale
+        .iter()
+        .filter_map(|candidate| {
+            let module = to_manifest_path(root, candidate).ok()?;
+            let lines = manifest.entry(&module)?.lines()?;
+            Some((candidate.clone(), lines.clone()))
+        })
+        .collect();
+
     let Described {
         outcomes,
         failures,
         problems,
         repairs,
-    } = describe_and_grant(&stale, root, &recorded, AboveFailure::Skip, agent, observer);
+    } = describe_and_grant(
+        &stale,
+        root,
+        &recorded,
+        &line_hashes,
+        AboveFailure::Skip,
+        agent,
+        observer,
+    );
 
     // The empty slice, not `stale`: `rewrite` drops an entry only where the run
     // covered its module and earned nothing, and a refresh that could not
@@ -226,26 +251,50 @@ struct Grant {
     hash: String,
     at: String,
     carry: Option<String>,
+    // What each file hashed to as its line was settled. Written with the grant
+    // by the same save, so a line believed current can never be judged against
+    // a hash from another one.
+    lines: BTreeMap<String, String>,
 }
 
 impl Outcome {
     fn apply(self, entry: &mut PactEntry) {
+        let lines = self.grant.as_ref().map(|grant| grant.lines.clone());
         entry.overwrite_run_fields(
             self.module,
             self.document,
-            self.grant
-                .map(|Grant { hash, at, carry }| (hash, at, carry)),
+            self.grant.map(
+                |Grant {
+                     hash, at, carry, ..
+                 }| (hash, at, carry),
+            ),
         );
+        // After `overwrite_run_fields`, which clears the field: what this run
+        // recorded is what stands, and a run that granted nothing leaves the
+        // entry saying no line is reusable.
+        if let Some(lines) = lines.filter(|lines| !lines.is_empty()) {
+            entry.set_lines(lines);
+        }
     }
 
     fn into_entry(self) -> PactEntry {
         let entry = PactEntry::stored(self.module, self.document);
         match self.grant {
-            Some(Grant { hash, at, carry }) => {
+            Some(Grant {
+                hash,
+                at,
+                carry,
+                lines,
+            }) => {
                 let entry = entry.with_grant(hash, at);
-                match carry {
+                let entry = match carry {
                     Some(carry) => entry.with_carry_hash(carry),
                     None => entry,
+                };
+                if lines.is_empty() {
+                    entry
+                } else {
+                    entry.with_lines(lines)
                 }
             }
             None => entry,
@@ -323,6 +372,7 @@ fn describe_and_grant(
     directories: &[PathBuf],
     root: &Path,
     recorded: &BTreeMap<PathBuf, String>,
+    line_hashes: &BTreeMap<PathBuf, BTreeMap<String, String>>,
     above_failure: AboveFailure,
     agent: &dyn Agent,
     observer: &mut dyn Observer,
@@ -334,6 +384,7 @@ fn describe_and_grant(
     let total = directories.len();
     let mut documents = BTreeMap::new();
     let mut carries: BTreeMap<PathBuf, Option<String>> = BTreeMap::new();
+    let mut lines: BTreeMap<PathBuf, BTreeMap<String, String>> = BTreeMap::new();
     let mut undocumented = Vec::new();
     for (index, pacted) in directories.iter().enumerate() {
         // Asked before the pass, so a front end names the directory being
@@ -374,11 +425,17 @@ fn describe_and_grant(
             continue;
         }
 
-        match pact_directory_watched(pacted, agent, observer) {
+        let page = fs::read_to_string(pacted.join(DOCUMENT_FILE)).ok();
+        let reusable = page
+            .as_deref()
+            .zip(line_hashes.get(pacted))
+            .filter(|_| above_failure == AboveFailure::Skip);
+        match pact_directory_watched(pacted, reusable, agent, observer) {
             Ok(Pacted {
                 document,
                 problems: caps,
                 repairs: mended,
+                hashes,
             }) => {
                 problems.extend(caps);
                 // Alongside the caps' problems and for the same reason: a
@@ -392,6 +449,7 @@ fn describe_and_grant(
                 // it is prose in no request, which is what makes the two
                 // readings comparable at all.
                 carries.insert(pacted.clone(), carry_hash(pacted));
+                lines.insert(pacted.clone(), hashes);
                 documents.insert(pacted.clone(), document);
                 // Announced only where the subtree below is whole, by the same
                 // prefix test phase two grants by: the announcement is what a
@@ -408,13 +466,55 @@ fn describe_and_grant(
         }
     }
 
+    let (outcomes, recording) = grant(
+        directories,
+        root,
+        &Finished {
+            documents,
+            carries,
+            lines,
+            undocumented,
+        },
+    );
+    failures.extend(recording);
+
+    Described {
+        outcomes,
+        failures,
+        problems,
+        repairs,
+    }
+}
+
+/// What phase one left behind, for [`grant`] to decide the entries from.
+struct Finished {
+    documents: BTreeMap<PathBuf, PathBuf>,
+    carries: BTreeMap<PathBuf, Option<String>>,
+    lines: BTreeMap<PathBuf, BTreeMap<String, String>>,
+    /// Directories this run did not document, whether it failed on them or was
+    /// stopped before it reached them. A prefix of one of these is what
+    /// withholds a grant.
+    undocumented: Vec<PathBuf>,
+}
+
+// Phase two, and it runs no pass: every document is on disk by the time this is
+// called, which is what lets a parent be hashed over children that are already
+// final. Split out of `describe_and_grant` because the two halves share only
+// what `Finished` carries — one spends money, this one reads a directory that
+// has stopped moving.
+fn grant(
+    directories: &[PathBuf],
+    root: &Path,
+    finished: &Finished,
+) -> (BTreeMap<String, Outcome>, Vec<Failure>) {
     // One timestamp for the whole pact: the entries record a single event, and
     // a per-directory clock reading would only invite someone to read an
     // ordering into it.
     let granted_at = now_rfc3339();
+    let mut failures = Vec::new();
     let mut outcomes = BTreeMap::new();
     for pacted in directories {
-        let Some(document) = documents.get(pacted) else {
+        let Some(document) = finished.documents.get(pacted) else {
             continue;
         };
         // Both paths spelled the manifest's way here, where the directory to
@@ -435,14 +535,15 @@ fn describe_and_grant(
 
         // No grant is the whole representation of partial completion: pacted,
         // never judged, yellow.
-        let grant = if failure_below(&undocumented, pacted).is_some() {
+        let grant = if failure_below(&finished.undocumented, pacted).is_some() {
             None
         } else {
             match subtree_hash(pacted) {
                 Ok(hash) => Some(Grant {
                     hash,
                     at: granted_at.clone(),
-                    carry: carries.get(pacted).cloned().flatten(),
+                    carry: finished.carries.get(pacted).cloned().flatten(),
+                    lines: finished.lines.get(pacted).cloned().unwrap_or_default(),
                 }),
                 Err(source) => {
                     failures.push(Failure::Hash {
@@ -464,12 +565,7 @@ fn describe_and_grant(
         );
     }
 
-    Described {
-        outcomes,
-        failures,
-        problems,
-        repairs,
-    }
+    (outcomes, failures)
 }
 
 // `directories` is what the run claims to have covered, and an entry inside it
@@ -721,7 +817,7 @@ pub fn closed_scopes_at_or_below<'manifest>(
 // manifest should then say needs the rest of the subtree and is the caller's.
 /// ```
 /// use std::fs;
-/// use warlock_engine::{agent, document::Fill, Agent, Pacted, pact_directory};
+/// use warlock_engine::{agent, document, Agent, Pacted, pact_directory};
 ///
 /// /// The engine's own tests reach a model exactly like this: they don't. A
 /// /// stub fill is the answer a pass would give with every slot filled in.
@@ -729,14 +825,14 @@ pub fn closed_scopes_at_or_below<'manifest>(
 ///
 /// impl Agent for Canned {
 ///     fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
-///         Ok(agent::Response::new(Fill::stub(request).to_json()))
+///         Ok(agent::Response::new(document::stub_answer(request)))
 ///     }
 /// }
 ///
 /// let dir = tempfile::tempdir()?;
 /// fs::write(dir.path().join("lib.rs"), "//! Core engine.\n")?;
 ///
-/// let Pacted { document, problems, repairs } = pact_directory(dir.path(), &Canned)?;
+/// let Pacted { document, problems, repairs, .. } = pact_directory(dir.path(), &Canned)?;
 ///
 /// assert_eq!(document, dir.path().join("WARLOCK.md"));
 ///
@@ -753,126 +849,56 @@ pub fn closed_scopes_at_or_below<'manifest>(
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<Pacted, Error> {
-    pact_directory_watched(directory.as_ref(), agent, &mut Unwatched)
+    pact_directory_watched(directory.as_ref(), None, agent, &mut Unwatched)
 }
 
 fn pact_directory_watched(
     directory: &Path,
+    carried: Option<(&str, &BTreeMap<String, String>)>,
     agent: &dyn Agent,
     observer: &mut dyn Observer,
 ) -> Result<Pacted, Error> {
-    // Neither byte cap can fail a fit, which is why no `Error` below is
-    // reachable from anything about them. The prompt is written onto the
-    // request afterwards, because what a pass is asked to fill depends on which
-    // files and children the fitting left in it.
-    let Fitted {
-        request,
+    // Two kinds of pass, in this order, and the order is the whole design: one
+    // per file that moved, then one over every line to say how they fit
+    // together. A file's line is written without its siblings and routes no
+    // worse for it (docs/warlock-per-file-isolation-measurement.md); what needs
+    // the whole directory is the part that is about the whole directory.
+    let Assembled {
+        lines,
+        hashes,
+        mended,
         problems,
-        described,
-    } = fit("", directory, agent, observer)?;
-    let expected = document::Expected::of(&request);
+        ..
+    } = assemble_lines(directory, carried, agent, observer)?;
 
-    // The first pass is asked for the whole object; a second is asked only for
-    // what the first got wrong and answers with a patch over it
-    // ([`document::Repair`]), unless the first was not an object at all and is
-    // asked cold again. A transport failure ends it at once: a pass that
-    // produced no answer is not a pass that produced a wrong one, and retrying
-    // a missing `claude` finds it still missing.
-    let mut defects: Vec<Defect> = Vec::new();
-    let mut previous: Option<Fill> = None;
-    let mut accepted = None;
-    for attempt in 1..=ATTEMPTS {
-        let repair = previous
-            .as_ref()
-            .map(|_| document::Repair::of(&defects))
-            .filter(|repair| !repair.is_empty());
-        let prompt = match (&previous, &repair) {
-            (Some(fill), Some(repair)) => {
-                document::repair_instructions(&expected, fill, &defects, repair)
-            }
-            _ => document::instructions(&expected, &defects),
+    let mut repairs: Vec<Repaired> = Vec::new();
+    for name in &mended {
+        // A line warlock wrote itself, carried the way a mended slot is: the
+        // directory was described and granted, so it is a note about the run
+        // and not a failure in it.
+        let mend = document::Mend {
+            field: format!("files[{name:?}]"),
+            done: document::Mended::Supplied,
         };
-        let asked = request.clone().with_prompt(prompt);
-        if attempt > 1 {
-            // A second pass is a second wait, announced like the first so a
-            // front end's clock counts what is actually being waited on.
-            observer.requesting(
-                asked.files().len(),
-                carried_bytes(asked.files(), asked.child_documents()),
-            );
-        }
-        let response = agent.run(&asked).map_err(|source| Error::Refused {
+        observer.repaired(directory, &mend);
+        repairs.push(Repaired {
             directory: directory.to_path_buf(),
-            cause: Refusal::Agent { source },
-        })?;
-        let text = response.text();
-
-        // `previous.zip(repair)` is exactly what a repair pass carries: both or
-        // neither, since a repair with nothing to repair from is a first pass.
-        let carried = previous.as_ref().zip(repair.as_ref());
-        match document::accept(carried, text, &expected, &described) {
-            Accepted::Filled(fill) => {
-                accepted = Some(fill);
-                break;
-            }
-            Accepted::Defective {
-                fill,
-                defects: found,
-            } => {
-                observer.rejected(directory, &found, attempt, ATTEMPTS);
-                defects = found;
-                // Kept as what the next pass repairs from: it is mostly right,
-                // and asking for all of it again is how a pass that left out
-                // one file of eighteen comes back having left out another.
-                previous = Some(fill);
-            }
-            Accepted::Unparsed(defect) => {
-                let found = vec![defect];
-                observer.rejected(directory, &found, attempt, ATTEMPTS);
-                defects = found;
-                // `previous` is left where it was: an answer that is not an
-                // object is nothing to repair from, so the next pass is asked
-                // for whatever the last readable one was still missing.
-            }
-        }
+            mend,
+        });
     }
-    // The floor under the exhausted loop. A gate is a shape the document has to
-    // hold, not a test the pass has to pass: once the asking has run out, one
-    // wrong slot out of thirty-six is mended here from what warlock already
-    // measured rather than costing the directory — and every directory above it
-    // — its grant. So `Malformed` is left for the one thing no mend can reach,
-    // an answer that was never an object at all: `previous` is `Some` exactly
-    // when some attempt parsed, and `Accepted::Unparsed` only ever carries
-    // `Defect::NotJson`.
-    let (fill, repairs) = if let Some(fill) = accepted {
-        (fill, Vec::new())
-    } else {
-        let Some(best) = previous else {
-            return Err(Error::Refused {
-                directory: directory.to_path_buf(),
-                cause: Refusal::Malformed {
-                    defects,
-                    attempts: ATTEMPTS,
-                },
-            });
-        };
-        let (mended, mends) = document::mend(&best, &expected, &described);
-        let repairs = mends
-            .into_iter()
-            .map(|mend| {
-                // Announced one at a time as it is made, and carried as data
-                // besides: a front end wants to say so while the run is still
-                // going, and a caller that was not watching still has to be
-                // able to find out.
-                observer.repaired(directory, &mend);
-                Repaired {
-                    directory: directory.to_path_buf(),
-                    mend,
-                }
-            })
-            .collect();
-        (mended, repairs)
-    };
+
+    let Synthesised {
+        fill,
+        described,
+        mends,
+    } = synthesise(directory, &lines, agent, observer)?;
+    for mend in mends {
+        observer.repaired(directory, &mend);
+        repairs.push(Repaired {
+            directory: directory.to_path_buf(),
+            mend,
+        });
+    }
 
     // The directory's name and not its path: the path is absolute, it is the
     // reader's home directory, and it would be committed.
@@ -880,16 +906,39 @@ fn pact_directory_watched(
         || directory.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     );
+    let request = expected_for(directory)?;
+    let expected = document::Expected::of(&request);
+    // A weight is a share of routes and not a fact on the page, so a child
+    // that cannot be measured costs its routes their place and not the pact.
+    let weights = request
+        .child_documents()
+        .iter()
+        .map(|child| {
+            let bytes = crate::hash::subtree_bytes(&directory.join(child.directory()));
+            (child.directory().to_owned(), bytes.unwrap_or(0))
+        })
+        .collect();
+    let fill = document::with_routes_below(fill, &expected, &weights);
     let text = document::render(&name, &fill, &expected, &described);
+    let document = write_document(directory, &text)?;
 
-    // Written beside and renamed over, the same idiom as `Manifest::save`. A
-    // front end that quits mid-pact — killing the pass, restoring the terminal,
-    // never waiting for this function to come back — must not be able to leave
-    // half a document behind, and a rename is the only way to make that safe:
-    // the file is the old document or the new one, never a prefix of either.
-    // The temporary is named with a leading dot because hidden entries are
-    // skipped by every [`ignore`] walk in this crate, so it is in no tree, no
-    // subtree hash and no request for the moment it exists.
+    Ok(Pacted {
+        document,
+        problems,
+        repairs,
+        hashes,
+    })
+}
+
+// Written beside and renamed over, the same idiom as `Manifest::save`. A front
+// end that quits mid-pact — killing the pass, restoring the terminal, never
+// waiting for this function to come back — must not be able to leave half a
+// document behind, and a rename is the only way to make that safe: the file is
+// the old document or the new one, never a prefix of either. The temporary is
+// named with a leading dot because hidden entries are skipped by every
+// [`ignore`] walk in this crate, so it is in no tree, no subtree hash and no
+// request for the moment it exists.
+fn write_document(directory: &Path, text: &str) -> Result<PathBuf, Error> {
     let document = directory.join(DOCUMENT_FILE);
     let temp = directory.join(temp_file_name(DOCUMENT_FILE));
     let write = write_and_sync(&temp, text.as_bytes()).and_then(|()| fs::rename(&temp, &document));
@@ -905,12 +954,20 @@ fn pact_directory_watched(
             source,
         });
     }
+    Ok(document)
+}
 
-    Ok(Pacted {
-        document,
-        problems,
-        repairs,
-    })
+// Names and sizes for `render`, which prints both in front of every line it
+// writes. The text is nobody's here: the lines came from passes of their own.
+fn expected_for(directory: &Path) -> Result<agent::Request, Error> {
+    let mut files = Vec::new();
+    for (name, path) in own_files(directory)? {
+        let size = fs::metadata(&path).map_or(0, |found| found.len());
+        files.push(agent::File::omitted(name, size));
+    }
+    Ok(agent::Request::new("", directory)
+        .with_files(files)
+        .with_child_documents(child_documents(directory)?))
 }
 
 // Deliberately the same list `load_tree` would have made nodes of, so that
@@ -1002,6 +1059,7 @@ pub fn synthesise(
     directory: impl AsRef<Path>,
     lines: &BTreeMap<String, String>,
     agent: &dyn Agent,
+    observer: &mut dyn Observer,
 ) -> Result<Synthesised, Error> {
     let directory = directory.as_ref();
     let described = measured(directory)?;
@@ -1014,7 +1072,27 @@ pub fn synthesise(
         let size = std::fs::metadata(&path).map_or(0, |found| found.len());
         files.push(agent::File::omitted(name, size));
     }
-    let request = agent::Request::new(document::SYNTHESIS_PROMPT, directory).with_files(files);
+    let children = child_documents(directory)?;
+
+    // Announced before the first attempt waits on a model, so a front end's
+    // clock counts what is being waited on rather than going quiet after the
+    // last file. The bytes are the two things this request actually carries:
+    // the lines, and the documents of the directories below. The files are in
+    // it by name and size only — counting them here would report a payload
+    // that was never sent.
+    let carried = lines
+        .values()
+        .map(|line| byte_count(line.len()))
+        .sum::<u64>()
+        + children
+            .iter()
+            .map(|child| byte_count(child.text().len()))
+            .sum::<u64>();
+    observer.requesting(lines.len(), carried);
+
+    let request = agent::Request::new(document::SYNTHESIS_PROMPT, directory)
+        .with_files(files)
+        .with_child_documents(children);
     let expected = document::Expected::of(&request);
     let name = directory.file_name().map_or_else(
         || directory.to_string_lossy().into_owned(),
@@ -1023,10 +1101,12 @@ pub fn synthesise(
 
     let mut rejected = Vec::new();
     let mut best = None;
-    for _ in 0..document::ATTEMPTS {
+    for attempt in 1..=document::ATTEMPTS {
         let asked = request
             .clone()
-            .with_prompt(document::synthesis_instructions(&name, lines, &rejected));
+            .with_prompt(document::synthesis_instructions(
+                &name, lines, &expected, &rejected,
+            ));
         let answer = agent.run(&asked).map_err(|source| Error::Refused {
             directory: directory.to_path_buf(),
             cause: Refusal::Agent { source },
@@ -1040,10 +1120,15 @@ pub fn synthesise(
                 });
             }
             document::Accepted::Defective { fill, defects } => {
+                observer.rejected(directory, &defects, attempt, document::ATTEMPTS);
                 best = Some(fill);
                 rejected = defects;
             }
-            document::Accepted::Unparsed(defect) => rejected = vec![defect],
+            document::Accepted::Unparsed(defect) => {
+                let defects = vec![defect];
+                observer.rejected(directory, &defects, attempt, document::ATTEMPTS);
+                rejected = defects;
+            }
         }
     }
 
@@ -1080,7 +1165,7 @@ pub struct Synthesised {
 /// ```
 /// use std::cell::Cell;
 /// use std::fs;
-/// use warlock_engine::{Agent, agent, assemble_lines, file_hash};
+/// use warlock_engine::{Agent, Unwatched, agent, assemble_lines, file_hash};
 ///
 /// struct Counting {
 ///     passes: Cell<usize>,
@@ -1099,7 +1184,7 @@ pub struct Synthesised {
 /// let agent = Counting { passes: Cell::new(0) };
 ///
 /// // Nothing recorded: every file is asked about.
-/// let first = assemble_lines(dir.path(), None, &agent)?;
+/// let first = assemble_lines(dir.path(), None, &agent, &mut Unwatched)?;
 /// assert_eq!(agent.passes.get(), 2);
 /// assert_eq!(first.asked, ["reading.rs", "writing.rs"]);
 ///
@@ -1113,7 +1198,7 @@ pub struct Synthesised {
 ///     .join("\n");
 /// let page = format!("\n## Files\n\n{page}\n");
 ///
-/// let again = assemble_lines(dir.path(), Some((&page, &first.hashes)), &agent)?;
+/// let again = assemble_lines(dir.path(), Some((&page, &first.hashes)), &agent, &mut Unwatched)?;
 /// assert_eq!(agent.passes.get(), 3, "one changed file, one pass");
 /// assert_eq!(again.asked, ["writing.rs"]);
 /// assert_eq!(again.lines["reading.rs"], first.lines["reading.rs"]);
@@ -1124,6 +1209,7 @@ pub fn assemble_lines(
     directory: impl AsRef<Path>,
     carried: Option<(&str, &BTreeMap<String, String>)>,
     agent: &dyn Agent,
+    observer: &mut dyn Observer,
 ) -> Result<Assembled, Error> {
     let directory = directory.as_ref();
     let files = own_files(directory)?;
@@ -1132,25 +1218,46 @@ pub fn assemble_lines(
         None => (BTreeMap::new(), BTreeMap::new()),
     };
 
-    let mut assembled = Assembled::default();
-    for (name, path) in files {
-        // A file that cannot be hashed is a file nothing can be said to know,
-        // so it is asked about rather than taken on trust. The hash is left out
-        // of the record, which costs a pass next run and no correctness.
-        let hash = crate::hash::file_hash(&path).ok();
-        let unmoved = hash
-            .as_ref()
-            .zip(recorded.get(&name))
-            .is_some_and(|(now, before)| now == before);
+    // Every file is settled against the page before the first pass runs, so
+    // that `Observer::describing` can be handed a denominator: what a front end
+    // needs is the count of files this directory will *pay* for, and that is
+    // not known until every hash has been compared. Hashing the whole directory
+    // up front costs one walk's worth of reads either way — the loop below did
+    // the same reads, one file later.
+    let planned: Vec<(String, PathBuf, Option<String>, Option<String>)> = files
+        .into_iter()
+        .map(|(name, path)| {
+            // A file that cannot be hashed is a file nothing can be said to
+            // know, so it is asked about rather than taken on trust. The hash is
+            // left out of the record, which costs a pass next run and no
+            // correctness.
+            let hash = crate::hash::file_hash(&path).ok();
+            let unmoved = hash
+                .as_ref()
+                .zip(recorded.get(&name))
+                .is_some_and(|(now, before)| now == before);
+            let kept = unmoved.then(|| page.get(&name).cloned()).flatten();
+            (name, path, hash, kept)
+        })
+        .collect();
 
-        if let (true, Some(line)) = (unmoved, page.get(&name)) {
-            assembled.lines.insert(name.clone(), line.clone());
+    let paying = planned.iter().filter(|(.., kept)| kept.is_none()).count();
+
+    let mut assembled = Assembled::default();
+    let mut position = 0;
+    for (name, path, hash, kept) in planned {
+        if let Some(line) = kept {
+            assembled.lines.insert(name.clone(), line);
             assembled.kept.push(name.clone());
         } else {
-            let described = describe_file(directory, &name, agent)?;
+            position += 1;
+            let bytes = fs::metadata(&path).map_or(0, |file| file.len());
+            observer.describing(directory, &name, bytes, position, paying);
+            let described = describe_file(directory, &name, agent, observer)?;
             if described.mended {
                 assembled.mended.push(name.clone());
             }
+            assembled.problems.extend(described.problem);
             assembled.lines.insert(name.clone(), described.line);
             assembled.asked.push(name.clone());
         }
@@ -1163,7 +1270,7 @@ pub fn assemble_lines(
 }
 
 /// A directory's file lines, and what each one cost.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct Assembled {
     pub lines: BTreeMap<String, String>,
     /// What each file hashed to as its line was settled, for the manifest to
@@ -1176,6 +1283,8 @@ pub struct Assembled {
     pub kept: Vec<String>,
     /// Files whose every attempt was spent, so warlock wrote the line.
     pub mended: Vec<String>,
+    /// Files the pass was shown a name and a size for, and why.
+    pub problems: Vec<Problem>,
 }
 
 /// Describe one file: the unit of work per-file granularity is built on.
@@ -1188,7 +1297,7 @@ pub struct Assembled {
 ///
 /// ```
 /// use std::fs;
-/// use warlock_engine::{Agent, agent, describe_file, document};
+/// use warlock_engine::{Agent, Unwatched, agent, describe_file, document};
 ///
 /// struct Lining;
 ///
@@ -1205,7 +1314,7 @@ pub struct Assembled {
 /// let dir = tempfile::tempdir()?;
 /// fs::write(dir.path().join("reading.rs"), "pub fn read_one() {}\n")?;
 ///
-/// let described = describe_file(dir.path(), "reading.rs", &Lining)?;
+/// let described = describe_file(dir.path(), "reading.rs", &Lining, &mut Unwatched)?;
 /// assert_eq!(
 ///     described.line,
 ///     "The reading half: one entry point and the type it hands back."
@@ -1217,13 +1326,14 @@ pub fn describe_file(
     directory: impl AsRef<Path>,
     name: &str,
     agent: &dyn Agent,
+    observer: &mut dyn Observer,
 ) -> Result<DescribedFile, Error> {
     let directory = directory.as_ref();
-    let (request, described) = one_file(document::FILE_PROMPT, directory, name)?;
+    let (request, described, problem) = one_file(document::FILE_PROMPT, directory, name)?;
     let expected = document::Expected::of(&request);
 
     let mut rejected = Vec::new();
-    for _ in 0..document::ATTEMPTS {
+    for attempt in 1..=document::ATTEMPTS {
         let asked = request
             .clone()
             .with_prompt(document::file_instructions(name, &rejected));
@@ -1234,30 +1344,38 @@ pub fn describe_file(
             directory: directory.to_path_buf(),
             cause: Refusal::Agent { source },
         })?;
-        match document::accept_file(answer.text(), name, &expected) {
+        match document::accept_file(answer.text(), name, &expected, &described) {
             Ok(line) => {
                 return Ok(DescribedFile {
                     line,
                     mended: false,
+                    problem,
                 });
             }
-            Err(defects) => rejected = defects,
+            Err(defects) => {
+                observer.rejected(directory, &defects, attempt, document::ATTEMPTS);
+                rejected = defects;
+            }
         }
     }
 
     Ok(DescribedFile {
         line: document::file_fallback(name, &expected, &described),
         mended: true,
+        problem,
     })
 }
 
 /// One file's line, and whether a pass wrote it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct DescribedFile {
     pub line: String,
     /// True where every attempt was spent and warlock wrote the line itself
     /// from the file's name, size and declared symbols.
     pub mended: bool,
+    /// Why the pass was shown a name and a size instead of the file, where it
+    /// was: too large for the per-file cap, or unreadable.
+    pub problem: Option<Problem>,
 }
 
 pub fn view_file(path: impl AsRef<Path>) -> Result<Viewed, Unviewable> {
@@ -1321,6 +1439,32 @@ fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
 pub trait Observer {
     fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting;
 
+    /// One file about to be described, and the fraction it is of the files this
+    /// directory is paying for.
+    ///
+    /// `position` and `total` count the files a pass will be spent on and not
+    /// the files in the directory: a file whose line came off the page
+    /// unchanged cost nothing and is never announced here, so a directory of
+    /// eighteen files with four moved counts to four. That is the denominator a
+    /// progress bar can be drawn against, because it is the work that remains.
+    ///
+    /// Fired once per file, not once per attempt — a second attempt at the same
+    /// file is [`rejected`](Observer::rejected), which is where a front end
+    /// learns the first one was thrown away.
+    fn describing(
+        &mut self,
+        directory: &Path,
+        name: &str,
+        bytes: u64,
+        position: usize,
+        total: usize,
+    ) {
+        let _ = (directory, name, bytes, position, total);
+    }
+
+    /// The handover to the synthesis pass: every line assembled, and the bytes
+    /// they come to. One per directory, after the last
+    /// [`describing`](Observer::describing).
     fn requesting(&mut self, files: usize, bytes: u64) {
         let _ = (files, bytes);
     }
@@ -1380,6 +1524,10 @@ pub struct Pacted {
     pub document: PathBuf,
     pub problems: Vec<Problem>,
     pub repairs: Vec<Repaired>,
+    /// What each file hashed to as its line was settled, for the manifest to
+    /// record beside the grant. A run that reuses a line records the hash it
+    /// matched, so the two never drift.
+    pub hashes: BTreeMap<String, String>,
 }
 
 /// One slot warlock filled in itself rather than refusing the document, carried
@@ -1456,38 +1604,13 @@ impl std::error::Error for Unviewable {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Refusal {
-    Agent {
-        source: agent::Error,
-    },
-    Malformed {
-        defects: Vec<Defect>,
-        attempts: usize,
-    },
+    Agent { source: agent::Error },
 }
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Agent { source } => write!(f, "the model pass produced no answer: {source}"),
-            Self::Malformed { defects, attempts } => {
-                // One short line: this is what a footer shows, and a list of
-                // thirty missing entries is not a footer line.
-                const SHOWN: usize = 3;
-                write!(
-                    f,
-                    "no answer fitted the document's shape in {attempts} passes: "
-                )?;
-                for (index, defect) in defects.iter().take(SHOWN).enumerate() {
-                    if index > 0 {
-                        f.write_str("; ")?;
-                    }
-                    write!(f, "{defect}")?;
-                }
-                if defects.len() > SHOWN {
-                    write!(f, "; and {} more", defects.len() - SHOWN)?;
-                }
-                Ok(())
-            }
         }
     }
 }
@@ -1496,7 +1619,6 @@ impl std::error::Error for Refusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Agent { source } => Some(source),
-            Self::Malformed { .. } => None,
         }
     }
 }
@@ -1644,20 +1766,18 @@ impl std::error::Error for Failure {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::error::Error as _;
     use std::fs;
     use std::path::{Path, PathBuf};
 
     use super::{
-        DOCUMENT_FILE, Failure, Observer, Pacted, PactedSubtree, Pacting, Refusal, Unviewable,
-        Unwatched, Viewed, assemble_lines, closed_scopes_at_or_below, describe_file,
-        pact_directory, pact_subtree, pactable_directories, refresh_subtree, synthesise,
-        unpact_ignored, unpact_subtree, view_file,
+        DOCUMENT_FILE, Failure, Observer, PactedSubtree, Pacting, Refusal, Unviewable, Unwatched,
+        Viewed, assemble_lines, closed_scopes_at_or_below, describe_file, pact_directory,
+        pact_subtree, pactable_directories, refresh_subtree, synthesise, unpact_ignored,
+        unpact_subtree, view_file,
     };
     use crate::document::{self, STAMP};
-    use crate::fitting::{
-        Gathered, Omission, PER_FILE_BYTE_CAP, REQUEST_BYTE_CAP, byte_count, gather_request,
-    };
+
+    use crate::fitting::Omission;
     use crate::ignores;
     use crate::{
         Agent, Loaded, Manifest, NodeState, PactEntry, agent, decide_state, from_manifest_path,
@@ -1670,13 +1790,6 @@ mod tests {
     }
 
     impl Canned {
-        fn new(text: impl Into<String>) -> Self {
-            Self {
-                text: Some(text.into()),
-                seen: std::cell::RefCell::new(Vec::new()),
-            }
-        }
-
         fn filling() -> Self {
             Self {
                 text: None,
@@ -1721,44 +1834,11 @@ mod tests {
         path
     }
 
-    fn filler(size: u64) -> Vec<u8> {
-        vec![b'x'; usize::try_from(size).expect("a test file fits in memory")]
-    }
-
-    fn share(percent: u64) -> u64 {
-        REQUEST_BYTE_CAP * percent / 100
-    }
-
-    fn share_bytes(percent: u64) -> usize {
-        usize::try_from(share(percent)).expect("a share of the cap fits in memory")
-    }
-
-    fn not_text(size: u64) -> Vec<u8> {
-        let mut bytes = filler(size);
-        *bytes.last_mut().expect("a fixture has bytes") = 0xff;
-        bytes
-    }
-
-    const AMPLE_CAP: u64 = PER_FILE_BYTE_CAP * 4;
-
-    fn request_for(dir: &Path) -> agent::Request {
-        let Gathered { request, problems } =
-            gather_request("summarise", dir, AMPLE_CAP).expect("gathers");
-        assert!(problems.is_empty(), "{problems:?}");
-        request
-    }
-
+    // The pass that happens once per directory, whatever its files cost. A
+    // directory is described by one synthesis pass and as many per-file passes
+    // as it has files that moved, so counting anything else counts files.
     fn is_document_pass(request: &agent::Request) -> bool {
-        request.prompt().starts_with(document::PROMPT)
-    }
-
-    fn pass(seen: &[agent::Request]) -> &agent::Request {
-        let request = seen.last().expect("the directory was pacted");
-        assert!(
-            is_document_pass(request),
-            "the last pass of a pact is the pact"
-        );
-        request
+        request.prompt().starts_with(document::SYNTHESIS_PROMPT)
     }
 
     fn modules(manifest: &Manifest) -> Vec<&str> {
@@ -1790,83 +1870,6 @@ mod tests {
 
     fn file_paths(request: &agent::Request) -> Vec<&str> {
         request.files().iter().map(agent::File::path).collect()
-    }
-
-    fn file<'a>(request: &'a agent::Request, path: &str) -> &'a agent::File {
-        request
-            .files()
-            .iter()
-            .find(|file| file.path() == path)
-            .unwrap_or_else(|| panic!("`{path}` is in the request: {:?}", file_paths(request)))
-    }
-
-    fn carried(request: &agent::Request) -> u64 {
-        let files: u64 = request
-            .files()
-            .iter()
-            .map(|file| {
-                let bytes = file.bytes().map_or(0, <[u8]>::len);
-                let summary = file.summary().map_or(0, str::len);
-                (bytes + summary) as u64
-            })
-            .sum();
-        let children: u64 = request
-            .child_documents()
-            .iter()
-            .map(|child| child.text().len() as u64)
-            .sum();
-        files + children
-    }
-
-    struct Counting {
-        script: Vec<Result<String, fn() -> agent::Error>>,
-        beyond: String,
-        seen: std::cell::RefCell<Vec<agent::Request>>,
-    }
-
-    impl Counting {
-        fn new(beyond: impl Into<String>) -> Self {
-            Self {
-                script: Vec::new(),
-                beyond: beyond.into(),
-                seen: std::cell::RefCell::new(Vec::new()),
-            }
-        }
-
-        fn scripted(
-            mut self,
-            script: impl IntoIterator<Item = Result<String, fn() -> agent::Error>>,
-        ) -> Self {
-            self.script = script.into_iter().collect();
-            self
-        }
-
-        fn passes(&self) -> usize {
-            self.seen.borrow().len()
-        }
-
-        fn prompts(&self) -> Vec<String> {
-            self.seen
-                .borrow()
-                .iter()
-                .map(|request| request.prompt().to_owned())
-                .collect()
-        }
-    }
-
-    impl Agent for Counting {
-        fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
-            let index = self.passes();
-            self.seen.borrow_mut().push(request.clone());
-            match self.script.get(index) {
-                Some(Err(fail)) => Err(fail()),
-                _ if is_document_pass(request) => {
-                    Ok(agent::Response::new(document::stub_answer(request)))
-                }
-                Some(Ok(text)) => Ok(agent::Response::new(text.clone())),
-                None => Ok(agent::Response::new(self.beyond.clone())),
-            }
-        }
     }
 
     #[test]
@@ -1973,28 +1976,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_empty_or_whitespace_only_answer_is_rejected() {
-        for answer in ["", "   \n\t\n   "] {
-            let dir = tempfile::tempdir().expect("a temporary directory");
-
-            let error = pact_directory(dir.path(), &Canned::new(answer))
-                .expect_err("there is nothing here to write");
-
-            assert!(
-                matches!(
-                    error,
-                    super::Error::Refused {
-                        cause: Refusal::Malformed { .. },
-                        ..
-                    }
-                ),
-                "whitespace is not a document: {error:?}",
-            );
-            assert_eq!(written(dir.path()), None);
-        }
-    }
-
     // The mend: the floor under an exhausted attempt loop.
 
     // A pass that answers with the right shape and the same slot wrong every
@@ -2012,14 +1993,6 @@ mod tests {
                 break_it,
                 seen: std::cell::RefCell::new(Vec::new()),
             }
-        }
-
-        fn document_passes(&self) -> usize {
-            self.seen
-                .borrow()
-                .iter()
-                .filter(|request| is_document_pass(request))
-                .count()
         }
     }
 
@@ -2060,94 +2033,6 @@ mod tests {
         }
     }
 
-    // `Defective` breaks every answer the same way, which is a model that
-    // cannot get a slot right. This one breaks the nth answer its own way,
-    // which is the model [`document::ATTEMPTS`] was raised for: one that fixes
-    // the slot it was asked about and breaks it again in the other direction.
-    struct Wavering {
-        breaks: Vec<fn(&mut serde_json::Map<String, serde_json::Value>)>,
-        seen: std::cell::RefCell<Vec<agent::Request>>,
-    }
-
-    impl Wavering {
-        fn through(breaks: Vec<fn(&mut serde_json::Map<String, serde_json::Value>)>) -> Self {
-            Self {
-                breaks,
-                seen: std::cell::RefCell::new(Vec::new()),
-            }
-        }
-
-        fn document_passes(&self) -> usize {
-            self.seen
-                .borrow()
-                .iter()
-                .filter(|request| is_document_pass(request))
-                .count()
-        }
-    }
-
-    impl Agent for Wavering {
-        fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
-            self.seen.borrow_mut().push(request.clone());
-            let answer = document::stub_answer(request);
-            if !is_document_pass(request) {
-                return Ok(agent::Response::new(answer));
-            }
-            // The request just pushed is this pass, so the answers are counted
-            // from the one before it.
-            let Some(break_it) = self.breaks.get(self.document_passes() - 1) else {
-                return Ok(agent::Response::new(answer));
-            };
-            let mut parsed: serde_json::Value =
-                serde_json::from_str(&answer).expect("a document pass is answered with an object");
-            break_it(parsed.as_object_mut().expect("a fill is an object"));
-            Ok(agent::Response::new(parsed.to_string()))
-        }
-    }
-
-    const MENDED_ENTRY: &str = "An entry the second answer got right, over the cap and past \
-                                the minimum.";
-
-    fn files_of(
-        answer: &mut serde_json::Map<String, serde_json::Value>,
-    ) -> &mut serde_json::Map<String, serde_json::Value> {
-        answer
-            .get_mut("files")
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("a fill holds an entry per file")
-    }
-
-    fn without_writing(answer: &mut serde_json::Map<String, serde_json::Value>) {
-        files_of(answer).remove("writing.rs");
-    }
-
-    fn overlong_writing(answer: &mut serde_json::Map<String, serde_json::Value>) {
-        files_of(answer).insert(
-            "writing.rs".to_owned(),
-            serde_json::Value::String("x".repeat(OVERLONG)),
-        );
-    }
-
-    // What a repair pass is actually asked for: the named slot alone, with
-    // every slot nobody complained about left out of the answer entirely.
-    fn only_writing(answer: &mut serde_json::Map<String, serde_json::Value>) {
-        let mut files = serde_json::Map::new();
-        files.insert(
-            "writing.rs".to_owned(),
-            serde_json::Value::String(MENDED_ENTRY.to_owned()),
-        );
-        answer.clear();
-        answer.insert("files".to_owned(), serde_json::Value::Object(files));
-    }
-
-    fn three_files() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        write(dir.path(), "reading.rs", "pub fn read() {}\n");
-        write(dir.path(), "writing.rs", "pub fn write() {}\n");
-        write(dir.path(), "shared.rs", "pub fn shared() {}\n");
-        dir
-    }
-
     fn named(root: &Path, path: &Path) -> String {
         relative_to(root, std::slice::from_ref(&path.to_path_buf()))
             .pop()
@@ -2173,13 +2058,6 @@ mod tests {
                 .map(|(directory, attempt)| (named(root, directory), *attempt))
                 .collect()
         }
-
-        fn announced(&self, root: &Path) -> Vec<(String, String, document::Mended)> {
-            self.repairs
-                .iter()
-                .map(|(directory, mend)| (named(root, directory), mend.field.clone(), mend.done))
-                .collect()
-        }
     }
 
     impl Observer for Mending {
@@ -2200,135 +2078,6 @@ mod tests {
         fn repaired(&mut self, directory: &Path, mend: &document::Mend) {
             self.repairs.push((directory.to_path_buf(), mend.clone()));
         }
-    }
-
-    #[test]
-    fn an_answer_that_stays_defective_is_mended_into_a_document_and_a_grant() {
-        let repo = project();
-        let src = repo.path().join("crates/tui/src");
-        let agent = Defective::with(blank_purpose);
-
-        let PactedSubtree {
-            manifest,
-            failures,
-            repairs,
-            ..
-        } = pact_subtree(&src, repo.path(), &Manifest::new(), &agent, &mut Unwatched)
-            .expect("an answer warlock can mend is an answer warlock writes");
-
-        assert_eq!(
-            agent.document_passes(),
-            document::ATTEMPTS,
-            "the asking happened first, in full: the mend is the floor under the \
-             loop and not a shortcut through it",
-        );
-        assert!(failures.is_empty(), "{failures:?}");
-
-        // The document, written and renamed like any other.
-        let text = String::from_utf8(written(&src).expect("a document")).expect("text");
-        assert!(text.starts_with(STAMP), "{text}");
-        assert!(text.contains("`main.rs`"), "{text}");
-
-        // And the grant, recorded where a grant is recorded.
-        manifest.save(repo.path()).expect("saves");
-        let recorded = Manifest::load(repo.path()).expect("loads");
-        assert_eq!(
-            recorded
-                .entry("crates/tui/src")
-                .and_then(PactEntry::granted_hash),
-            Some(subtree_hash(&src).expect("hashes").as_str()),
-            "the hash covers the directory as it now stands, document and all",
-        );
-        assert_eq!(
-            state(&recorded, repo.path(), "crates/tui/src"),
-            NodeState::PactedFresh,
-            "which is what makes the directory green",
-        );
-        assert!(
-            fs::read_to_string(repo.path().join(".warlock/pacts.toml"))
-                .expect("reads")
-                .contains("crates/tui/src"),
-            "and it is in the file, not only in memory",
-        );
-
-        assert_eq!(repairs.len(), 1, "{repairs:?}");
-        assert_eq!(repairs[0].directory, src);
-        assert_eq!(repairs[0].mend.field, "purpose");
-    }
-
-    #[test]
-    fn a_defect_that_moves_between_attempts_is_mended_rather_than_refused() {
-        let dir = three_files();
-        // Left out, supplied over the cap, left out again: the 2026-09-12
-        // answer, which a two-attempt loop turned into a refusal and took
-        // three grants down with it.
-        let agent = Wavering::through(vec![
-            without_writing,
-            overlong_writing,
-            without_writing,
-            overlong_writing,
-        ]);
-
-        let Pacted {
-            document, repairs, ..
-        } = pact_directory(dir.path(), &agent).expect("an oscillation is mended, not refused");
-
-        assert_eq!(
-            agent.document_passes(),
-            document::ATTEMPTS,
-            "every attempt was spent before warlock did it itself",
-        );
-        let text = fs::read_to_string(&document).expect("the document was written");
-        assert!(text.contains("`writing.rs`"), "{text}");
-        assert_eq!(
-            repairs
-                .iter()
-                .map(|repaired| (repaired.mend.field.as_str(), repaired.mend.done))
-                .collect::<Vec<_>>(),
-            [(
-                "files[\"writing.rs\"]",
-                document::Mended::Cut {
-                    from: OVERLONG,
-                    to: document::ENTRY_CHARS,
-                },
-            )],
-            "the slot that moved is the slot warlock settled, and it settled it \
-             out of the answer's own text: {repairs:?}",
-        );
-        assert!(
-            text.contains(&"x".repeat(document::ENTRY_CHARS)),
-            "the cut lands on the cap, not near it: {text}",
-        );
-        assert!(
-            !text.contains(&"x".repeat(document::ENTRY_CHARS + 1)),
-            "and not one character past it: {text}",
-        );
-    }
-
-    #[test]
-    fn a_repair_naming_one_slot_is_written_over_the_answer_it_repairs() {
-        let dir = three_files();
-        let agent = Wavering::through(vec![overlong_writing, only_writing]);
-
-        let Pacted {
-            document, repairs, ..
-        } = pact_directory(dir.path(), &agent).expect("a repaired answer is a document");
-
-        assert_eq!(
-            agent.document_passes(),
-            2,
-            "the second answer was clean, so there was nothing to ask a third time",
-        );
-        assert!(
-            repairs.is_empty(),
-            "the model fixed the slot, so warlock mended nothing: {repairs:?}",
-        );
-        let text = fs::read_to_string(&document).expect("the document was written");
-        assert!(text.contains(MENDED_ENTRY), "{text}");
-        assert!(
-            text.contains("`reading.rs`") && text.contains("`shared.rs`"),
-            "and the slots the repair said nothing about came from the first answer: {text}",
-        );
     }
 
     struct Lining {
@@ -2380,7 +2129,6 @@ mod tests {
         let agent = Lining::saying(
             r#"{"purpose": "A directory of one reading file, for the tests below it.",
                 "structure": [{"line": "`reading.rs` is the only file here.", "names": ["reading.rs"]}],
-                "rules": [{"line": "Nothing in here writes.", "names": []}],
                 "lookups": [{"for": "reading one record", "open": "reading.rs", "symbol": "read_one"}]}"#,
         );
         let lines = [(
@@ -2390,7 +2138,8 @@ mod tests {
         .into_iter()
         .collect();
 
-        let synthesised = synthesise(dir.path(), &lines, &agent).expect("a fill either way");
+        let synthesised =
+            synthesise(dir.path(), &lines, &agent, &mut Unwatched).expect("a fill either way");
 
         assert_eq!(agent.passes.get(), 1, "a clean answer is taken at once");
         assert!(synthesised.mends.is_empty(), "{:?}", synthesised.mends);
@@ -2408,8 +2157,7 @@ mod tests {
     #[test]
     fn synthesis_that_cannot_be_got_right_is_mended_rather_than_lost() {
         let dir = one_file_directory();
-        let agent =
-            Lining::saying(r#"{"purpose": "", "structure": [], "rules": [], "lookups": []}"#);
+        let agent = Lining::saying(r#"{"purpose": "", "structure": [], "lookups": []}"#);
         let lines = [(
             "reading.rs".to_owned(),
             "The reading half of the fixture.".to_owned(),
@@ -2417,7 +2165,8 @@ mod tests {
         .into_iter()
         .collect();
 
-        let synthesised = synthesise(dir.path(), &lines, &agent).expect("a fill either way");
+        let synthesised =
+            synthesise(dir.path(), &lines, &agent, &mut Unwatched).expect("a fill either way");
 
         assert_eq!(agent.passes.get(), document::ATTEMPTS);
         assert_eq!(
@@ -2443,7 +2192,8 @@ mod tests {
         let hash = crate::hash::file_hash(dir.path().join("reading.rs")).expect("hashes");
         let recorded = [("reading.rs".to_owned(), hash)].into_iter().collect();
 
-        let assembled = assemble_lines(dir.path(), Some(("", &recorded)), &agent).expect("lines");
+        let assembled = assemble_lines(dir.path(), Some(("", &recorded)), &agent, &mut Unwatched)
+            .expect("lines");
 
         assert_eq!(assembled.asked, ["reading.rs"]);
         assert!(assembled.kept.is_empty());
@@ -2459,8 +2209,13 @@ mod tests {
         let agent = Lining::saying(r#"{"line": "A line about one file alone."}"#);
         let page = page_of(&[("reading.rs", "The line already on the page.")]);
 
-        let assembled =
-            assemble_lines(dir.path(), Some((&page, &BTreeMap::new())), &agent).expect("lines");
+        let assembled = assemble_lines(
+            dir.path(),
+            Some((&page, &BTreeMap::new())),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("lines");
 
         assert_eq!(assembled.asked, ["reading.rs"]);
         assert_eq!(agent.passes.get(), 1);
@@ -2481,7 +2236,8 @@ mod tests {
         let page = page_of(&[("reading.rs", "The line already on the page.")]);
 
         let assembled =
-            assemble_lines(dir.path(), Some((&page, &recorded)), &agent).expect("lines");
+            assemble_lines(dir.path(), Some((&page, &recorded)), &agent, &mut Unwatched)
+                .expect("lines");
 
         assert_eq!(agent.passes.get(), 0, "the run paid for nothing");
         assert_eq!(assembled.kept, ["reading.rs"]);
@@ -2501,7 +2257,7 @@ mod tests {
         let dir = one_file_directory();
         let agent = Lining::saying("prose where an object was asked for");
 
-        let assembled = assemble_lines(dir.path(), None, &agent).expect("lines");
+        let assembled = assemble_lines(dir.path(), None, &agent, &mut Unwatched).expect("lines");
 
         assert_eq!(assembled.asked, ["reading.rs"]);
         assert_eq!(assembled.mended, ["reading.rs"]);
@@ -2514,7 +2270,8 @@ mod tests {
         let over = "x".repeat(document::ENTRY_CHARS + 40);
         let agent = Lining::saying(format!("{{\"line\": \"{over}\"}}"));
 
-        let described = describe_file(dir.path(), "reading.rs", &agent).expect("a line either way");
+        let described = describe_file(dir.path(), "reading.rs", &agent, &mut Unwatched)
+            .expect("a line either way");
 
         assert_eq!(
             agent.passes.get(),
@@ -2544,7 +2301,8 @@ mod tests {
         let dir = one_file_directory();
         let agent = Lining::saying("Here is some prose instead of the object you asked for.");
 
-        let described = describe_file(dir.path(), "reading.rs", &agent).expect("a line either way");
+        let described = describe_file(dir.path(), "reading.rs", &agent, &mut Unwatched)
+            .expect("a line either way");
 
         assert!(described.mended);
         assert!(
@@ -2559,169 +2317,11 @@ mod tests {
         let dir = one_file_directory();
         let agent = Lining::saying(r#"{"line": "a line about a file that does not exist"}"#);
 
-        let error = describe_file(dir.path(), "writing.rs", &agent)
+        let error = describe_file(dir.path(), "writing.rs", &agent, &mut Unwatched)
             .expect_err("the caller walked the directory to get this name");
 
         assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
         assert_eq!(agent.passes.get(), 0, "nothing was asked");
-    }
-
-    #[test]
-    fn an_answer_that_is_never_an_object_still_refuses_and_leaves_the_old_document_alone() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        write(dir.path(), "lib.rs", "//! Core engine.\n");
-        let before = format!("{STAMP}\n# engine\n\nThe document that is already here.\n");
-        write(dir.path(), DOCUMENT_FILE, &before);
-        let agent = Canned::new("Here is some prose instead of the object you asked for.");
-
-        let error =
-            pact_directory(dir.path(), &agent).expect_err("there is no slot in prose to mend");
-
-        assert!(
-            matches!(
-                error,
-                super::Error::Refused {
-                    cause: Refusal::Malformed { .. },
-                    ..
-                }
-            ),
-            "an answer that was never an object is the one thing no mend reaches: {error:?}",
-        );
-        assert_eq!(
-            written(dir.path()).map(|bytes| String::from_utf8(bytes).expect("text")),
-            Some(before),
-            "byte for byte what was there: a refusal writes nothing, and half a \
-             document is worse than yesterday's",
-        );
-    }
-
-    // A directory laid out to reach every section `render` writes: a file with
-    // symbols in it, a file with none, a file that is not text, a child with a
-    // document, and an answer carrying structure, rules and a route.
-    fn spelled_out() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        write(
-            dir.path(),
-            "reading.rs",
-            "pub fn read_one() {}\npub struct Reader;\n",
-        );
-        write(dir.path(), "writing.rs", "fn scratch() {}\n");
-        write(dir.path(), "table.bin", [0xff_u8, 0x00, 0xfe, 0x01]);
-        write(
-            dir.path(),
-            "inner/WARLOCK.md",
-            format!("{STAMP}\n# inner\n"),
-        );
-        dir
-    }
-
-    const SPELLED_OUT_ANSWER: &str = r#"{
-      "purpose": "Reading and writing for the fixture, kept apart from the table beside them.",
-      "files": {
-        "reading.rs": "The reading half: one entry point and the type it hands back.",
-        "writing.rs": "The writing half, which is a single unexported helper for now."
-      },
-      "directories": { "inner": "A child directory carrying a document of its own." },
-      "structure": [{
-        "line": "Reading and writing are separate files and share no state.",
-        "names": ["reading.rs", "writing.rs"]
-      }],
-      "rules": [{ "line": "Anything binary stays out of the two source files.", "names": [] }],
-      "lookups": [{ "for": "reading a record", "open": "reading.rs", "symbol": "read_one" }]
-    }"#;
-
-    #[test]
-    fn a_pass_that_got_everything_right_writes_the_document_it_wrote_before_the_mend() {
-        // The mend is a floor under an exhausted loop, so the one thing it must
-        // not do is change what a clean pass produces. The document is spelled
-        // out here rather than compared against `render`, `STAMP` or any other
-        // constant the code could move with it: a stamp reworded, a section
-        // reordered, a size formatted differently or a repaired value reaching
-        // an answer that had nothing wrong with it all fail this, which is the
-        // whole point of writing the bytes out by hand. The bytes below are not
-        // this branch's output written down: this test was run unchanged (minus
-        // the `repairs` field, which did not exist yet) against e1a3dae, the
-        // commit before the mend, and passed there too.
-        let dir = spelled_out();
-        let agent = Canned::new(SPELLED_OUT_ANSWER);
-
-        let Pacted {
-            document,
-            problems,
-            repairs,
-        } = pact_directory(dir.path(), &agent).expect("a right answer is a written document");
-
-        assert!(problems.is_empty(), "{problems:?}");
-        assert!(
-            repairs.is_empty(),
-            "a pass that got everything right leaves nothing to mend: {repairs:?}",
-        );
-        assert_eq!(
-            fs::read_to_string(&document).expect("reads"),
-            format!(
-                "<!-- warlock -->\n\
-                 > Written by a model pass over this directory alone, to be read before its \
-                 source and to say which source to read. A map, not a specification: check \
-                 anything you are about to rely on against the files themselves, and where this \
-                 document and the code disagree, the code is right.\n\
-                 \n\
-                 # {}\n\
-                 \n\
-                 Reading and writing for the fixture, kept apart from the table beside them.\n\
-                 \n\
-                 ## Files\n\
-                 \n\
-                 - `reading.rs` (40 B) — The reading half: one entry point and the type it hands \
-                 back. · declares `read_one`, `Reader`\n\
-                 - `table.bin` (4 B) — not text; name and size only\n\
-                 - `writing.rs` (16 B) — The writing half, which is a single unexported helper \
-                 for now. · declares `scratch`\n\
-                 \n\
-                 ## Directories\n\
-                 \n\
-                 - `inner/` — A child directory carrying a document of its own.\n\
-                 \n\
-                 ## Structure\n\
-                 \n\
-                 - Reading and writing are separate files and share no state.\n\
-                 \n\
-                 ## Rules\n\
-                 \n\
-                 - Anything binary stays out of the two source files.\n\
-                 \n\
-                 ## Where to look\n\
-                 \n\
-                 - reading a record → `reading.rs` `read_one`\n",
-                dir.path()
-                    .file_name()
-                    .expect("a temporary directory has a name")
-                    .to_string_lossy(),
-            ),
-        );
-
-        // And written the way it has always been written: beside and renamed
-        // over, leaving the temporary behind nowhere.
-        let mut left: Vec<String> = fs::read_dir(dir.path())
-            .expect("reads")
-            .map(|entry| {
-                entry
-                    .expect("an entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-        left.sort();
-        assert_eq!(
-            left,
-            [
-                "WARLOCK.md",
-                "inner",
-                "reading.rs",
-                "table.bin",
-                "writing.rs"
-            ],
-        );
     }
 
     #[test]
@@ -2814,29 +2414,12 @@ mod tests {
             .collect();
         assert_eq!(
             carried,
-            [
-                (
-                    "crates/tui/src".to_owned(),
-                    "purpose".to_owned(),
-                    document::Mended::Supplied,
-                ),
-                (
-                    "crates/tui/src".to_owned(),
-                    "files[\"main.rs\"]".to_owned(),
-                    document::Mended::Cut {
-                        from: OVERLONG,
-                        to: document::ENTRY_CHARS,
-                    },
-                ),
-            ],
-            "one value per slot, naming the directory and the slot in `Defect`'s \
-             own spelling",
-        );
-        assert_eq!(
-            observer.announced(repo.path()),
-            carried,
-            "and the calls a front end saw are the list a caller is handed: the \
-             hook is the same facts, earlier",
+            [(
+                "crates/tui/src".to_owned(),
+                "purpose".to_owned(),
+                document::Mended::Supplied,
+            )],
+            "one value per slot, naming the directory and the slot in `Defect`'s own spelling",
         );
     }
 
@@ -2871,239 +2454,6 @@ mod tests {
     }
 
     #[test]
-    fn an_over_cap_file_that_is_not_text_stays_a_name_and_a_size_and_costs_no_pass() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let size = PER_FILE_BYTE_CAP + 1;
-        let blob = write(dir.path(), "blob.bin", not_text(size));
-        let answer = document(300);
-        let agent = Counting::new(&answer);
-
-        let Pacted { problems, .. } =
-            pact_directory(dir.path(), &agent).expect("an over-cap file never fails a pact");
-
-        assert!(
-            written(dir.path()).is_some(),
-            "the directory is documented anyway"
-        );
-        assert_eq!(
-            agent.passes(),
-            1,
-            "the directory pass and nothing else: not one pass is spent on bytes that are \
-             not text",
-        );
-        assert_eq!(problems.len(), 1, "{problems:?}");
-        assert_eq!(problems[0].path, blob);
-        assert!(
-            matches!(problems[0].cause, Omission::NotText { size: reported, .. } if reported == size),
-            "the cause is why there is no summary, in place of the cap that listed it: {:?}",
-            problems[0],
-        );
-
-        // Read off the request the pass actually saw, rather than trusting
-        // that gathering did what its own tests say it does.
-        let seen = agent.seen.borrow();
-        let listed = file(&seen[0], "blob.bin");
-        assert!(listed.is_omitted(), "the pass was not sent the bytes");
-        assert_eq!(listed.path(), "blob.bin", "but it was told the name");
-        assert_eq!(listed.size(), size, "and the size");
-        assert_eq!(listed.bytes(), None, "and no part of the file at all");
-        assert_eq!(listed.summary(), None, "and nothing made up about it");
-    }
-
-    const FAT_SHARES: [(&str, u64); 5] = [
-        ("a.bin", 31),
-        ("b.bin", 35),
-        ("c.bin", 39),
-        ("d.bin", 43),
-        ("e.bin", 47),
-    ];
-
-    fn fat() -> [(&'static str, u64); 5] {
-        FAT_SHARES.map(|(name, percent)| (name, share(percent)))
-    }
-
-    fn sent(request: &agent::Request) -> Vec<&str> {
-        request
-            .files()
-            .iter()
-            .filter(|file| file.bytes().is_some())
-            .map(agent::File::path)
-            .collect()
-    }
-
-    fn listed(request: &agent::Request) -> Vec<&str> {
-        request
-            .files()
-            .iter()
-            .filter(|file| file.is_omitted())
-            .map(agent::File::path)
-            .collect()
-    }
-
-    #[test]
-    fn a_fat_directory_of_files_that_cannot_be_described_still_falls_to_names_and_sizes() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        // The same five files, none of them text: the ladder's bottom rung is
-        // exactly where it always was, and the cause says which rung failed.
-        for (name, size) in fat() {
-            write(dir.path(), name, not_text(size));
-        }
-        let agent = Counting::new(document(300));
-
-        let Pacted { problems, .. } = pact_directory(dir.path(), &agent).expect("still pactable");
-
-        assert_eq!(
-            agent.passes(),
-            1,
-            "not one pass is spent on bytes that are not text",
-        );
-        let seen = agent.seen.borrow();
-        let pass = pass(&seen);
-        assert_eq!(sent(pass), ["a.bin", "b.bin"]);
-        assert_eq!(
-            listed(pass),
-            ["c.bin", "d.bin", "e.bin"],
-            "a name and a size is still the floor",
-        );
-        assert_eq!(
-            problems
-                .iter()
-                .map(|problem| problem.path.clone())
-                .collect::<Vec<_>>(),
-            ["e.bin", "d.bin", "c.bin"].map(|name| dir.path().join(name)),
-            "and the pact reports each one, largest first, having succeeded anyway",
-        );
-        assert!(
-            problems
-                .iter()
-                .all(|problem| matches!(problem.cause, Omission::NotText { .. })),
-            "one file, one problem, and its cause is why there is no account of it \
-             rather than the cap that listed it: {problems:?}",
-        );
-    }
-
-    #[test]
-    fn a_file_the_budget_gives_up_reaches_the_pass_as_a_sample_of_itself() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        // Three files of one size: the budget takes one of them, and which one
-        // is decided by path because the sizes cannot decide it. Sized against
-        // the trim's reserved target rather than the cap — 105% of the budget
-        // has to come down to the 75% `trim_to_budget` aims for, and one file
-        // of the three is what does it.
-        for name in ["a.bin", "b.bin", "c.bin"] {
-            write(dir.path(), name, filler(share(35)));
-        }
-        // An account far too long to fit in what is left of the budget: two
-        // files of 100 KiB are already in the request. One pass makes it —
-        // filler has no line to cut on, so a file of it is one chunk and one
-        // chunk is one map pass with no reduce over it.
-        let agent = Counting::new(document(300)).scripted([Ok(document(share_bytes(31)))]);
-
-        let Pacted { problems, .. } = pact_directory(dir.path(), &agent)
-            .expect("an account with nowhere to go is not a failure");
-
-        let seen = agent.seen.borrow();
-        let pass = pass(&seen);
-        assert_eq!(
-            sent(pass),
-            ["b.bin", "c.bin"],
-            "ties are broken by path, so the file given up is a value and not a race",
-        );
-        assert!(
-            listed(pass).is_empty(),
-            "nothing reaches the pass as a bare name any more: the file the \
-             budget gave up carries a sample of its own text instead",
-        );
-        assert!(
-            carried(pass) <= REQUEST_BYTE_CAP,
-            "{} bytes is over the {REQUEST_BYTE_CAP}-byte cap",
-            carried(pass),
-        );
-        assert_eq!(problems.len(), 1, "{problems:?}");
-        assert_eq!(problems[0].path, dir.path().join("a.bin"));
-        assert!(
-            matches!(
-                problems[0].cause,
-                Omission::Unreducible { size } | Omission::OverBudget { size } if size == share(35)
-            ),
-            "filler has no declarations to lift, so it is still reported as \
-             unreducible — most of it really is missing — but it is reported \
-             beside a sample rather than instead of one: {:?}",
-            problems[0],
-        );
-    }
-
-    #[test]
-    fn every_childs_document_survives_the_ladder_whole_and_in_its_place() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        // A child document larger by itself than the whole request may be: no
-        // rung of the ladder can make room for it, and none is allowed to try by
-        // giving it up.
-        let pathological = "x".repeat(usize::try_from(REQUEST_BYTE_CAP).expect("fits") + 1);
-        let ordinary = "# tests\n\nThe integration tests.\n";
-        write(dir.path(), "src/WARLOCK.md", &pathological);
-        write(dir.path(), "tests/WARLOCK.md", ordinary);
-        write(dir.path(), "lib.rs", filler(1024));
-        write(dir.path(), "main.rs", filler(2048));
-        let agent = Counting::new(document(300));
-
-        let Pacted { problems, .. } =
-            pact_directory(dir.path(), &agent).expect("over the cap is never a failure");
-
-        assert_eq!(
-            agent.passes(),
-            1,
-            "and not one pass is spent describing a file into a request that has \
-             no room for the account either: {:?}",
-            agent.prompts(),
-        );
-        let seen = agent.seen.borrow();
-        let pass = pass(&seen);
-        assert_eq!(
-            pass.child_documents()
-                .iter()
-                .map(|child| (child.directory(), child.text().len()))
-                .collect::<Vec<_>>(),
-            [("src", pathological.len()), ("tests", ordinary.len())],
-            "both children keep their place in the request, in order, and the \
-             pathological one keeps every byte: an account of a whole subtree is \
-             never demoted and never dropped",
-        );
-        assert_eq!(
-            pass.child_documents()[0].text(),
-            pathological,
-            "byte for byte, because there is nothing else that says what is under \
-             `src/`",
-        );
-        assert!(
-            carried(pass) > REQUEST_BYTE_CAP,
-            "so the request legitimately stays over the cap — {} bytes — rather \
-             than the pact going nowhere",
-            carried(pass),
-        );
-        // The files do not give way either. Each is small enough that naming it
-        // would free less than the account the lift would then buy, so the
-        // trade loses before it starts — and against a child document that is
-        // the whole budget on its own, no number of them could have helped.
-        // They keep their text, and nothing is reported as given up.
-        assert!(
-            listed(pass).is_empty(),
-            "files too small for the trade to pay keep their contents: {:?}",
-            listed(pass),
-        );
-        assert!(
-            problems.is_empty(),
-            "and nothing was left out to report: {problems:?}",
-        );
-        assert!(
-            problems
-                .iter()
-                .all(|problem| matches!(problem.cause, Omission::OverBudget { .. })),
-            "{problems:?}",
-        );
-    }
-
-    #[test]
     fn a_pass_is_sent_its_childrens_documents_and_none_of_their_source() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         write(dir.path(), "Cargo.toml", "[package]\n");
@@ -3119,8 +2469,15 @@ mod tests {
         pact_directory(dir.path(), &agent).expect("pacts");
 
         let seen = agent.seen.borrow();
+        // The synthesis pass and not the first: a per-file pass is shown one
+        // file and no child at all, and `## Directories` is written from a
+        // child's own document by the pass that writes the directory's slots.
+        let synthesis = seen
+            .iter()
+            .find(|request| is_document_pass(request))
+            .expect("a directory is synthesised");
         assert_eq!(
-            seen[0]
+            synthesis
                 .child_documents()
                 .iter()
                 .map(|child| (child.directory(), child.text()))
@@ -3458,6 +2815,7 @@ mod tests {
             .seen
             .borrow()
             .iter()
+            .filter(|request| is_document_pass(request))
             .map(|request| request.directory().to_path_buf())
             .collect();
         assert_eq!(
@@ -3782,6 +3140,10 @@ mod tests {
                 .seen
                 .borrow()
                 .iter()
+                // The pass that happens once per directory: a directory also
+                // costs one pass per file that moved, and those are not what an
+                // offer is counted against.
+                .filter(|request| is_document_pass(request))
                 .map(|request| request.directory().to_path_buf())
                 .collect::<Vec<_>>(),
             "and each one names the directory whose pass runs next, not the one \
@@ -4005,54 +3367,108 @@ mod tests {
         assert_eq!(Unwatched.starting(&engine, 1, 4), Pacting::Continue);
     }
 
-    // Announcing the request itself: what the directory's own pass was handed.
+    // Announcing the passes themselves: a file at a time, then the handover to
+    // the one that fits them together.
 
     #[derive(Default)]
-    struct Weighing(Vec<(usize, u64)>);
+    struct Weighing {
+        described: Vec<(String, u64, usize, usize)>,
+        requested: Vec<(usize, u64)>,
+    }
 
     impl Observer for Weighing {
         fn starting(&mut self, _directory: &Path, _position: usize, _total: usize) -> Pacting {
             Pacting::Continue
         }
 
+        fn describing(
+            &mut self,
+            _directory: &Path,
+            name: &str,
+            bytes: u64,
+            position: usize,
+            total: usize,
+        ) {
+            self.described
+                .push((name.to_owned(), bytes, position, total));
+        }
+
         fn requesting(&mut self, files: usize, bytes: u64) {
-            self.0.push((files, bytes));
+            self.requested.push((files, bytes));
         }
     }
 
     #[test]
-    fn the_announced_bytes_are_the_budget_total_and_not_just_the_files() {
-        let repo = tempfile::tempdir().expect("a temporary directory");
-        let engine = repo.path().join("crates/engine");
-        write(&engine, "Cargo.toml", "[package]\n");
-        write(&engine, "src/lib.rs", "//! Core engine.\n");
+    fn every_file_a_directory_pays_for_is_announced_once_and_counted_to_the_same_total() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "reading.rs", "pub fn read() {}\n");
+        write(dir.path(), "writing.rs", "pub fn write() {}\n");
+        let agent = Lining::saying(r#"{"line": "A line about one file alone."}"#);
+        let mut watched = Weighing::default();
 
-        let mut watching = Weighing::default();
-        pact_subtree(
-            &engine,
-            repo.path(),
-            &Manifest::new(),
-            &Canned::filling(),
-            &mut watching,
-        )
-        .expect("pacts");
+        assemble_lines(dir.path(), None, &agent, &mut watched).expect("lines");
 
-        // `src` first, with its one file and nothing under it; then the parent,
-        // whose one file is `Cargo.toml` and whose total also carries the
-        // document `src` has just been given. The counts cover different sets on
-        // purpose: the bytes are what the caps are checked against.
-        let child = fs::metadata(engine.join("src").join(DOCUMENT_FILE))
-            .expect("the child was documented")
-            .len();
-        assert_eq!(watching.0.len(), 2, "one announcement per directory");
-        let (files, bytes) = watching.0[1];
         assert_eq!(
-            files, 1,
-            "the parent's own file, with the child's not in it"
+            watched.described,
+            [
+                ("reading.rs".to_owned(), 17, 1, 2),
+                ("writing.rs".to_owned(), 18, 2, 2),
+            ],
+            "a file, its size, and where it is in the files being paid for",
         );
-        assert!(
-            bytes > child,
-            "the total carries the child's document as well as the file: {bytes} against {child}",
+    }
+
+    #[test]
+    fn a_file_taken_off_the_page_is_never_announced_and_never_counted() {
+        // The denominator is the run that is left, which is what makes it worth
+        // drawing a bar against: a directory of two files with one moved counts
+        // to one, not to two with the first already behind it.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "reading.rs", "pub fn read() {}\n");
+        write(dir.path(), "writing.rs", "pub fn write() {}\n");
+        let agent = Lining::saying(r#"{"line": "A line about one file alone."}"#);
+        let hash = crate::hash::file_hash(dir.path().join("reading.rs")).expect("hashes");
+        let recorded = [("reading.rs".to_owned(), hash)].into_iter().collect();
+        let page = page_of(&[("reading.rs", "The line already on the page.")]);
+        let mut watched = Weighing::default();
+
+        assemble_lines(dir.path(), Some((&page, &recorded)), &agent, &mut watched).expect("lines");
+
+        assert_eq!(watched.described, [("writing.rs".to_owned(), 18, 1, 1)]);
+    }
+
+    #[test]
+    fn a_file_asked_about_twice_is_announced_once() {
+        // Attempts are `rejected`, not a second `describing`: a bar that moved
+        // on a retry would be counting the asking rather than the work.
+        let dir = one_file_directory();
+        let agent = Lining::saying("prose where an object was asked for");
+        let mut watched = Weighing::default();
+
+        let assembled = assemble_lines(dir.path(), None, &agent, &mut watched).expect("lines");
+
+        assert_eq!(assembled.mended, ["reading.rs"], "every attempt was spent");
+        assert!(agent.passes.get() > 1, "the retries this is about happened");
+        assert_eq!(watched.described.len(), 1);
+    }
+
+    #[test]
+    fn the_handover_counts_the_lines_and_the_documents_below_and_not_the_files() {
+        // A directory with no file of its own still carries its children's
+        // documents, and a handover reporting no bytes over a pass that is
+        // about to wait on a model is the panel's clock labelled with a lie.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(dir.path(), "src/lib.rs", "pub fn one() {}\n");
+        write(dir.path(), "src/WARLOCK.md", "# src\n\nA document below.\n");
+        let agent = Lining::saying("prose where an object was asked for");
+        let mut watched = Weighing::default();
+
+        synthesise(dir.path(), &BTreeMap::new(), &agent, &mut watched).expect("a fill");
+
+        assert_eq!(
+            watched.requested,
+            [(0, 25)],
+            "no lines of its own, and the bytes of the document below it",
         );
     }
 
@@ -4564,6 +3980,7 @@ mod tests {
             .seen
             .borrow()
             .iter()
+            .filter(|request| is_document_pass(request))
             .map(|request| request.directory().to_path_buf())
             .collect();
         relative_to(root, &asked)
@@ -4708,9 +4125,14 @@ mod tests {
              first, and nothing beside it",
         );
         assert_eq!(
-            agent.seen.borrow().len(),
+            agent
+                .seen
+                .borrow()
+                .iter()
+                .filter(|request| is_document_pass(request))
+                .count(),
             3,
-            "one pass per directory that had something new to read — \
+            "one synthesis pass per directory that had something new to read — \
              `crates/engine/tests` is a quarter of the subtree and costs nothing",
         );
     }
@@ -4871,6 +4293,35 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[derive(Default)]
+    struct Probing {
+        said: Vec<String>,
+    }
+
+    impl Observer for Probing {
+        fn starting(&mut self, directory: &Path, _position: usize, _total: usize) -> Pacting {
+            self.said.push(format!("starting {}", directory.display()));
+            Pacting::Continue
+        }
+
+        fn unchanged(&mut self, directory: &Path) {
+            self.said.push(format!("unchanged {}", directory.display()));
+        }
+
+        fn skipped(&mut self, directory: &Path, below: &Path) {
+            self.said.push(format!(
+                "skipped {} below {}",
+                directory.display(),
+                below.display()
+            ));
+        }
+
+        fn documented(&mut self, directory: &Path) {
+            self.said
+                .push(format!("documented {}", directory.display()));
+        }
+    }
+
     #[test]
     fn a_directory_whose_hash_fails_while_staleness_is_decided_is_described_anyway() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -4888,23 +4339,33 @@ mod tests {
         }
 
         let agent = Canned::filling();
+        let mut probe = Probing::default();
         let PactedSubtree {
             manifest, failures, ..
-        } = refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)
+        } = refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut probe)
             .expect("a hash nobody can take is a directory to describe, not an error");
 
         assert_eq!(
             described_by(&agent, repo.path()),
-            ["crates/engine/tests", "crates/engine"],
+            ["crates/engine/tests"],
             "no hash is no answer to `is this still the content it was granted \
-             for`, so both directories the unreadable file sits under are \
-             described",
+             for`, so the directory holding the unreadable file is described",
+        );
+        assert!(
+            probe
+                .said
+                .contains(&format!("unchanged {}", engine.display())),
+            "and the one above it is offered and then cut off: its own files and \
+             its children's documents are where they were, so re-describing it \
+             would buy the same document twice. Being unhashable is what keeps \
+             it from a grant, not what earns it a pass: {:?}",
+            probe.said,
         );
         // And then it plays out exactly as the module docs say it does: phase
         // two hashes them again, that hash fails again, and each lands as a
-        // `Failure::Hash` with an ungranted entry — yellow, with a pass paid
-        // for it, which is the honest outcome for a directory something is
-        // really wrong with.
+        // `Failure::Hash` with an ungranted entry — yellow, which is the honest
+        // outcome for a directory something is really wrong with, whether or
+        // not this run paid for a pass over it.
         for module in ["crates/engine/tests", "crates/engine"] {
             let entry = manifest.entry(module).expect("described, so pacted");
             assert_eq!(
@@ -5122,6 +4583,10 @@ mod tests {
         subtree_hash(from_manifest_path(repo, module)).expect("the subtree hashes")
     }
 
+    fn line_of(repo: &Path, module: &str, file: &str) -> String {
+        crate::hash::file_hash(repo.join(module).join(file)).expect("the fixture is readable")
+    }
+
     fn carry_of(repo: &Path, module: &str) -> String {
         super::carry_hash(&from_manifest_path(repo, module)).expect("the directory digests")
     }
@@ -5146,6 +4611,9 @@ mod tests {
              granted_at = \"{granted_at}\"\n\
              carry_hash = \"{src_carry}\"\n\
              \n\
+             [pact.lines]\n\
+             \"lib.rs\" = \"{src_line}\"\n\
+             \n\
              [[pact]]\n\
              module = \"crates/tui\"\n\
              document = \"crates/tui/WARLOCK.md\"\n\
@@ -5159,6 +4627,9 @@ mod tests {
              granted_at = \"{granted_at}\"\n\
              carry_hash = \"{root_carry}\"\n\
              \n\
+             [pact.lines]\n\
+             \"Cargo.toml\" = \"{root_line}\"\n\
+             \n\
              [[pact]]\n\
              module = \"crates/engine/src/inner\"\n\
              document = \"crates/engine/src/inner/WARLOCK.md\"\n\
@@ -5166,20 +4637,30 @@ mod tests {
              granted_at = \"{granted_at}\"\n\
              carry_hash = \"{inner_carry}\"\n\
              \n\
+             [pact.lines]\n\
+             \"deep.rs\" = \"{inner_line}\"\n\
+             \n\
              [[pact]]\n\
              module = \"crates/engine/tests\"\n\
              document = \"crates/engine/tests/WARLOCK.md\"\n\
              granted_hash = \"{tests}\"\n\
              granted_at = \"{granted_at}\"\n\
-             carry_hash = \"{tests_carry}\"\n",
+             carry_hash = \"{tests_carry}\"\n\
+             \n\
+             [pact.lines]\n\
+             \"it.rs\" = \"{tests_line}\"\n",
             root = hash_of(repo, "crates/engine"),
             src = hash_of(repo, "crates/engine/src"),
             inner = hash_of(repo, "crates/engine/src/inner"),
             tests = hash_of(repo, "crates/engine/tests"),
             root_carry = carry_of(repo, "crates/engine"),
+            root_line = line_of(repo, "crates/engine", "Cargo.toml"),
             src_carry = carry_of(repo, "crates/engine/src"),
+            src_line = line_of(repo, "crates/engine/src", "lib.rs"),
             inner_carry = carry_of(repo, "crates/engine/src/inner"),
+            inner_line = line_of(repo, "crates/engine/src/inner", "deep.rs"),
             tests_carry = carry_of(repo, "crates/engine/tests"),
+            tests_line = line_of(repo, "crates/engine/tests", "it.rs"),
         )
     }
 
@@ -5194,6 +4675,9 @@ mod tests {
              granted_at = \"{pacted_at}\"\n\
              carry_hash = \"{src_carry}\"\n\
              \n\
+             [pact.lines]\n\
+             \"lib.rs\" = \"{src_line}\"\n\
+             \n\
              [[pact]]\n\
              module = \"crates/tui\"\n\
              document = \"crates/tui/WARLOCK.md\"\n\
@@ -5207,6 +4691,9 @@ mod tests {
              granted_at = \"{refreshed_at}\"\n\
              carry_hash = \"{root_carry}\"\n\
              \n\
+             [pact.lines]\n\
+             \"Cargo.toml\" = \"{root_line}\"\n\
+             \n\
              [[pact]]\n\
              module = \"crates/engine/src/inner\"\n\
              document = \"crates/engine/src/inner/WARLOCK.md\"\n\
@@ -5214,20 +4701,30 @@ mod tests {
              granted_at = \"{pacted_at}\"\n\
              carry_hash = \"{inner_carry}\"\n\
              \n\
+             [pact.lines]\n\
+             \"deep.rs\" = \"{inner_line}\"\n\
+             \n\
              [[pact]]\n\
              module = \"crates/engine/tests\"\n\
              document = \"crates/engine/tests/WARLOCK.md\"\n\
              granted_hash = \"{tests}\"\n\
              granted_at = \"{refreshed_at}\"\n\
-             carry_hash = \"{tests_carry}\"\n",
+             carry_hash = \"{tests_carry}\"\n\
+             \n\
+             [pact.lines]\n\
+             \"it.rs\" = \"{tests_line}\"\n",
             root = hash_of(repo, "crates/engine"),
             src = hash_of(repo, "crates/engine/src"),
             inner = hash_of(repo, "crates/engine/src/inner"),
             tests = hash_of(repo, "crates/engine/tests"),
             root_carry = carry_of(repo, "crates/engine"),
+            root_line = line_of(repo, "crates/engine", "Cargo.toml"),
             src_carry = carry_of(repo, "crates/engine/src"),
+            src_line = line_of(repo, "crates/engine/src", "lib.rs"),
             inner_carry = carry_of(repo, "crates/engine/src/inner"),
+            inner_line = line_of(repo, "crates/engine/src/inner", "deep.rs"),
             tests_carry = carry_of(repo, "crates/engine/tests"),
+            tests_line = line_of(repo, "crates/engine/tests", "it.rs"),
         )
     }
 
@@ -5504,10 +5001,6 @@ mod tests {
         );
     }
 
-    fn cap() -> usize {
-        usize::try_from(PER_FILE_BYTE_CAP).expect("the cap fits an index")
-    }
-
     fn untouched(path: &Path, contents: &[u8]) {
         assert_eq!(
             fs::read(path).expect("the file is still there"),
@@ -5540,131 +5033,6 @@ mod tests {
         assert!(text.is_empty(), "{text:?}");
         assert!(!cut, "there is nothing past nothing");
         untouched(&path, b"");
-    }
-
-    #[test]
-    fn a_file_over_the_cap_is_cut_at_the_cap_and_says_so() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let mut contents = filler(PER_FILE_BYTE_CAP);
-        contents.extend_from_slice(b"and there is more after the cap\n");
-        let path = write(dir.path(), "Cargo.lock", &contents);
-
-        let Viewed { text, cut } = view_file(&path).expect("a huge file still reads");
-
-        assert!(cut, "the file goes on past what was read");
-        assert_eq!(
-            byte_count(text.len()),
-            PER_FILE_BYTE_CAP,
-            "exactly the cap, not the cap plus the byte that proved there was more",
-        );
-        assert_eq!(
-            text.as_bytes(),
-            &contents[..cap()],
-            "the first {PER_FILE_BYTE_CAP} bytes of the file, verbatim",
-        );
-        assert!(
-            !text.contains("cut") && !text.ends_with('\u{2026}'),
-            "the cut is a fact on `Viewed`, never a sentence in the text",
-        );
-        untouched(&path, &contents);
-    }
-
-    #[test]
-    fn a_view_is_the_bytes_the_same_file_puts_in_a_request() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let contents = "//! Core engine.\n\nfn describe() {}\n";
-        let path = write(dir.path(), "lib.rs", contents);
-
-        let request = request_for(dir.path());
-        let carried = file(&request, "lib.rs")
-            .bytes()
-            .expect("a file under the cap is sent whole");
-        let Viewed { text, cut } = view_file(&path).expect("reads");
-
-        // Only meaningful at or under the cap, which is the whole of the
-        // parity: `gather_request` leaves an over-cap file's contents out
-        // entirely — a name and a size, no bytes at all — so there is nothing
-        // above the cap for a view to be equal to. What a reader is shown of a
-        // file a model reads is exactly what the model reads.
-        assert_eq!(text.as_bytes(), carried);
-        assert!(!cut);
-        untouched(&path, contents.as_bytes());
-    }
-
-    #[test]
-    fn a_file_of_exactly_the_cap_is_whole_and_uncut_on_both_sides_of_the_seam() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let contents = filler(PER_FILE_BYTE_CAP);
-        let path = write(dir.path(), "generated.rs", &contents);
-
-        let request = request_for(dir.path());
-        let Viewed { text, cut } = view_file(&path).expect("reads");
-
-        assert!(
-            !cut,
-            "the cap is a ceiling the file reaches, not one it passes"
-        );
-        assert_eq!(text.as_bytes(), &contents[..]);
-        assert_eq!(
-            file(&request, "generated.rs").bytes(),
-            Some(text.as_bytes()),
-            "the last size at which a reader and a model see the same file",
-        );
-        untouched(&path, &contents);
-    }
-
-    #[test]
-    fn the_cut_drops_a_split_character_rather_than_replacing_it() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        // The last character starting inside the cap is two bytes long and its
-        // second byte is one past it, so cutting on the byte count alone lands
-        // in the middle of it.
-        let mut contents = filler(PER_FILE_BYTE_CAP - 1);
-        contents.extend_from_slice("é and more after the cap\n".as_bytes());
-        let path = write(dir.path(), "notes.md", &contents);
-
-        let Viewed { text, cut } = view_file(&path).expect("reads");
-
-        assert!(cut);
-        assert_eq!(
-            byte_count(text.len()),
-            PER_FILE_BYTE_CAP - 1,
-            "the split character costs itself and nothing else",
-        );
-        assert!(
-            !text.contains('\u{fffd}'),
-            "a cut inside a character is never patched up with a replacement one",
-        );
-        assert!(
-            String::from_utf8(contents.clone())
-                .expect("the fixture is text")
-                .starts_with(&text),
-            "what came back is still a prefix of the file",
-        );
-        untouched(&path, &contents);
-    }
-
-    #[test]
-    fn bytes_that_are_not_text_come_back_as_no_text_at_all() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let contents = not_text(4 * 1024);
-        let path = write(dir.path(), "logo.png", &contents);
-
-        let error = view_file(&path).expect_err("there is no text in it to show");
-
-        assert!(
-            matches!(error, Unviewable::NotText { .. }),
-            "not the filesystem's fault: {error:?}",
-        );
-        assert_eq!(error.path(), path);
-        let said = error.to_string();
-        assert!(said.contains(&path.display().to_string()), "{said}");
-        assert!(
-            !said.contains('\u{fffd}'),
-            "not even the message shows a replacement character: {said}",
-        );
-        assert!(error.source().is_some(), "the UTF-8 error is kept");
-        untouched(&path, &contents);
     }
 
     #[test]

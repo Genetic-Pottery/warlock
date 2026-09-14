@@ -35,20 +35,7 @@ const STDERR_EXCERPT: usize = 200;
 /// ```
 pub trait Agent {
     fn run(&self, request: &Request) -> Result<Response, Error>;
-
-    // Answer low rather than high. `fitting` turns this into a byte budget and
-    // stops giving files up once the request meets it, so an over-reported
-    // window does not fail — it sends more than the model can read and lets
-    // something downstream drop the excess with no order, no ladder and no
-    // `Problem` naming what went.
-    fn context_tokens(&self) -> u64 {
-        DEFAULT_CONTEXT_TOKENS
-    }
 }
-
-// Modest on purpose, for the reason above: an agent whose author never thought
-// about the window should end up thrifty, not wrong.
-pub const DEFAULT_CONTEXT_TOKENS: u64 = 128_000;
 
 // No slot here for the directory's own previous document, and that absence is
 // deliberate. A request used to carry it, labelled as a claim to be checked;

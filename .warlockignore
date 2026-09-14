@@ -8,3 +8,5 @@
 
 # Images and other binary content no summary is written from.
 /assets/
+
+/evals/

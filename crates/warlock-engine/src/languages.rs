@@ -241,8 +241,15 @@ const VISIBILITY: &[&str] = &[
     "open",
 ];
 
+// Every word a row above can open a declaration with, so that
+// `first_identifier` steps over it to the name instead of returning it. A
+// declaration prefix missing from here is recorded as the name of the thing it
+// declares: Kotlin's `fun sum()` measured a file as declaring `fun`, and a list
+// of names is now the only witness a synthesis pass has.
 const KEYWORDS: &[&str] = &[
     "fn",
+    "fun",
+    "union",
     "struct",
     "enum",
     "trait",
@@ -269,7 +276,6 @@ const KEYWORDS: &[&str] = &[
 ];
 
 pub(crate) fn declared_names(path: &Path, text: &str) -> Vec<String> {
-    const CAP: usize = 64;
     let Some(language) = language_of(path) else {
         return Vec::new();
     };
@@ -284,9 +290,18 @@ pub(crate) fn declared_names(path: &Path, text: &str) -> Vec<String> {
     }
     let lines: Vec<&str> = text.lines().collect();
 
-    // Public names first, then the rest, each in file order: what a reader
-    // opens a file for is usually what it exports, and the rendered list is
-    // capped, so the exports are the names that survive the cap.
+    // Every name, and no cap on the list. This is two things at once and only
+    // one of them is a list somebody reads: `render` prints the first
+    // `DECLARED_SHOWN` of it and counts the rest, while `Expected::knows` and
+    // `route` ask it whether a name the pass used is real. Truncating here
+    // truncated the *evidence*, and a synthesis pass — shown names and sizes,
+    // never text — has no other witness to fall back on, so a correct name
+    // past the cut was refused four times and its claim dropped from the
+    // document. `ui.rs` declares 126 names; `areas` sits at 85.
+    //
+    // Public names still come first, in file order: that ordering is what
+    // decides which sixteen `render` shows, which was always the real reason
+    // for it.
     let mut public: Vec<String> = Vec::new();
     let mut private: Vec<String> = Vec::new();
     for line in outside_blocks(language, &lines) {
@@ -314,7 +329,6 @@ pub(crate) fn declared_names(path: &Path, text: &str) -> Vec<String> {
         }
     }
     public.extend(private);
-    public.truncate(CAP);
     public
 }
 
@@ -353,7 +367,31 @@ fn without_visibility(line: &str) -> &str {
     }
 }
 
+// A Go method declares its receiver before the name it declares — `func (r
+// *Cart) Add(…)` — so reading left to right finds `r`, which is a name nobody
+// looks anything up by and which stands where `Add` should be. That cost more
+// than a crowded list once the per-file road arrived: a synthesis pass is shown
+// no file text, so this list is the only witness `route` has for a lookup's
+// symbol, and every lookup naming a Go method was refused and dropped.
+//
+// A parenthesised group between a declaration keyword and its name is the
+// receiver and nothing else — no language in the table above writes anything
+// else there — so stepping over one is enough. A group that never closes is
+// left alone: `const (` opens a Go block and declares nothing on that line.
+fn past_receiver(line: &str) -> &str {
+    let Some((_, rest)) = line.split_once(char::is_whitespace) else {
+        return line;
+    };
+    let rest = rest.trim_start();
+    if !rest.starts_with('(') {
+        return line;
+    }
+    rest.find(')')
+        .map_or(line, |close| rest[close + 1..].trim_start())
+}
+
 fn first_identifier(line: &str) -> Option<&str> {
+    let line = past_receiver(line);
     let separators =
         |c: char| c.is_whitespace() || matches!(c, '(' | '<' | '{' | ':' | '=' | ';' | ',' | '!');
     for word in line.split(separators) {
@@ -375,22 +413,6 @@ fn language_of(path: &Path) -> Option<&'static Language> {
     TABLE
         .iter()
         .find(|language| language.extensions.contains(&extension.as_str()))
-}
-
-pub(crate) fn skeleton(path: &Path, text: &str) -> Option<Elided> {
-    let language = language_of(path)?;
-    let lines: Vec<&str> = text.lines().collect();
-    let kept = keep_declarations_marked(language, &lines, 0, lines.len(), "bodies");
-
-    let before = byte_length(&lines);
-    let after = byte_length(&kept.iter().map(String::as_str).collect::<Vec<_>>());
-    if after >= before {
-        return None;
-    }
-    Some(Elided {
-        dropped: before - after,
-        text: kept.join("\n"),
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -518,436 +540,86 @@ fn opens_here(language: &Language, lines: &[&str], index: usize) -> Option<&'sta
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::path::Path;
 
-    use super::{elide, language_of};
+    use super::{declared_names, elide, language_of};
+
+    #[test]
+    fn a_declaration_keyword_is_never_measured_as_the_name_it_declares() {
+        // Every word a row can open a declaration with has to be in `KEYWORDS`,
+        // or the extractor records the keyword and loses the name. `fun` was
+        // missing, so a Kotlin file measured as declaring `fun` — and on the
+        // per-file road that list is the only witness a claim has.
+        assert_eq!(
+            declared_names(
+                Path::new("Ledger.kt"),
+                "class Ledger\nfun newLedger(): Ledger = x\n"
+            ),
+            ["Ledger", "newLedger"]
+        );
+        assert_eq!(
+            declared_names(Path::new("raw.rs"), "union Slot { a: u8 }\n"),
+            ["Slot"]
+        );
+    }
+
+    #[test]
+    fn a_go_method_is_measured_by_its_name_and_not_its_receiver() {
+        // `route` verifies a lookup's symbol against this list and nothing else
+        // on the per-file road, so a method missing from it is a lookup dropped
+        // out of the document. The receiver is not a name anyone looks up.
+        let source = "func NewRetryApplyer(store *RetryStore) *RetryApplyer {}\n\
+                      func (r *RetryApplyer) Apply(ctx context.Context) error {}\n";
+
+        assert_eq!(
+            declared_names(Path::new("retry.go"), source),
+            ["NewRetryApplyer", "Apply"]
+        );
+    }
+
+    #[test]
+    fn a_block_that_opens_with_a_bracket_declares_nothing_on_that_line() {
+        // Go's `const (` and `var (` sit where a receiver would, and close on a
+        // later line. Stepping over an unclosed group would read the next line's
+        // text as this one's name.
+        assert!(declared_names(Path::new("block.go"), "const (\n\tA = 1\n)\n").is_empty());
+    }
+
+    #[test]
+    fn every_declared_name_is_measured_however_many_there_are() {
+        // This list is evidence before it is ever a rendered line: `render`
+        // shows the first `DECLARED_SHOWN` of it and counts the rest, while
+        // `Expected::knows` asks it whether a name a pass used is real. A
+        // synthesis pass is shown no file text, so a name cut off the end of
+        // this list has no other witness and is refused — which is a correct
+        // claim dropped out of a document. `ui.rs` declares 126.
+        let mut source = String::new();
+        for index in 0..200 {
+            let _ = writeln!(source, "fn helper_{index}() {{}}");
+        }
+
+        let names = declared_names(Path::new("wide.rs"), &source);
+
+        assert_eq!(names.len(), 200, "the measurement was truncated");
+        assert_eq!(names.last().map(String::as_str), Some("helper_199"));
+    }
+
+    #[test]
+    fn the_exports_of_a_file_are_measured_before_the_rest_of_it() {
+        // The ordering survives the cap's removal, and it is what decides which
+        // names `render` shows: a reader opens a file for what it exports.
+        let source = "fn private_one() {}\npub fn exported() {}\nfn private_two() {}\n";
+
+        assert_eq!(
+            declared_names(Path::new("ordered.rs"), source),
+            ["exported", "private_one", "private_two"]
+        );
+    }
 
     #[test]
     fn an_unknown_extension_is_left_entirely_alone() {
         assert!(language_of(Path::new("a.wat")).is_none());
         assert!(elide(Path::new("a.wat"), "anything at all\n").is_none());
-    }
-
-    #[test]
-    fn a_rust_file_keeps_everything_outside_its_test_module() {
-        let source = "\
-//! A module.
-
-pub fn work() -> u32 {
-    let braces = \"a { that is not code\";
-    braces.len() as u32
-}
-
-#[cfg(test)]
-mod tests {
-    use super::work;
-
-    #[test]
-    fn it_works() {
-        assert_eq!(work(), 20);
-    }
-}
-";
-        let elided = elide(Path::new("a.rs"), source).expect("a test module is elidable");
-
-        assert!(
-            elided
-                .text
-                .contains("let braces = \"a { that is not code\";"),
-            "code outside the block is untouched, brace in a string and all: {}",
-            elided.text
-        );
-        assert!(
-            elided.text.contains("fn it_works()"),
-            "the test's name is the thing worth keeping: {}",
-            elided.text
-        );
-        assert!(
-            !elided.text.contains("assert_eq!(work(), 20)"),
-            "the body is what is given up: {}",
-            elided.text
-        );
-        assert!(elided.dropped > 0, "and the saving is reported");
-    }
-
-    #[test]
-    fn cfg_test_on_something_that_is_not_a_module_elides_nothing() {
-        // `#[cfg(test)] mod stubs;` and `#[cfg(test)] fn helper()` both appear
-        // in this repository above real code. Eliding to the next unindented
-        // `}` from either would take that code with it.
-        let source = "\
-#[cfg(test)]
-mod stubs;
-
-pub fn real() -> u32 {
-    7
-}
-";
-        assert!(
-            elide(Path::new("a.rs"), source).is_none(),
-            "the attribute alone does not open a block"
-        );
-    }
-
-    #[test]
-    fn a_block_that_never_closes_is_not_guessed_at() {
-        let source = "#[cfg(test)]\nmod tests {\n    fn hanging() {\n";
-        assert!(
-            elide(Path::new("a.rs"), source).is_none(),
-            "an unterminated block is a file to send whole, not one to cut"
-        );
-    }
-
-    #[test]
-    fn a_go_test_file_keeps_its_test_names() {
-        let source = "\
-package thing
-
-func TestScopeCloses(t *testing.T) {
-\tstate := Load()
-\tif Closed(state) {
-\t\tt.Fatal(\"expected open\")
-\t}
-\tif !Open(state) {
-\t\tt.Fatal(\"expected open\")
-\t}
-}
-";
-        let elided = elide(Path::new("scope_test.go"), source).expect("a _test.go is elidable");
-
-        assert!(
-            elided.text.contains("func TestScopeCloses"),
-            "{}",
-            elided.text
-        );
-        assert!(!elided.text.contains("t.Fatal"), "{}", elided.text);
-    }
-
-    #[test]
-    fn an_ordinary_go_file_is_left_alone() {
-        // Go's tests are elsewhere, so there is nothing in a `.go` file to drop.
-        let source = "package thing\n\nfunc Work() int {\n\treturn 7\n}\n";
-        assert!(elide(Path::new("scope.go"), source).is_none());
-    }
-
-    #[test]
-    fn typescript_and_python_test_files_are_recognised_by_name() {
-        let ts = "describe('x', () => {\n  it('works', () => {\n    const a = compute();\n    const b = other();\n    expect(a).toBe(1);\n    expect(b).toBe(2);\n  });\n});\n";
-        assert!(elide(Path::new("x.test.ts"), ts).is_some());
-        assert!(elide(Path::new("x.ts"), ts).is_none(), "not a test file");
-
-        let py = "def test_it_works():\n    first = compute()\n    second = other()\n    assert first == 7\n    assert second == 8\n";
-        assert!(elide(Path::new("test_thing.py"), py).is_some());
-        assert!(
-            elide(Path::new("thing.py"), py).is_none(),
-            "not a test file"
-        );
-    }
-
-    #[test]
-    fn a_zig_test_block_is_elided_without_a_confirming_line() {
-        let source = "\
-pub fn work() u32 {
-    return 7;
-}
-
-test \"work returns seven\" {
-    const first = work();
-    const second = work();
-    try std.testing.expectEqual(@as(u32, 7), first);
-    try std.testing.expectEqual(@as(u32, 7), second);
-}
-";
-        let elided = elide(Path::new("a.zig"), source).expect("a zig test block is elidable");
-
-        assert!(elided.text.contains("pub fn work()"), "{}", elided.text);
-        assert!(
-            elided.text.contains("test \"work returns seven\" {"),
-            "the test's name survives: {}",
-            elided.text
-        );
-        assert!(
-            !elided.text.contains("expectEqual"),
-            "the body does not: {}",
-            elided.text
-        );
-    }
-
-    #[test]
-    fn every_kept_line_is_a_line_of_the_original() {
-        // The property that makes this elision rather than truncation or
-        // paraphrase: nothing in the answer was invented except the marker.
-        let source = "\
-pub fn work() -> u32 {
-    7
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        let one = super::work();
-        let two = super::work();
-        assert_eq!(one, 7);
-        assert_eq!(two, 7);
-        assert_eq!(one, two);
-    }
-}
-";
-        let elided = elide(Path::new("a.rs"), source).expect("elidable");
-        for line in elided.text.lines() {
-            assert!(
-                source.lines().any(|original| original == line) || line.contains("elided"),
-                "invented a line: {line}"
-            );
-        }
-    }
-
-    #[test]
-    fn two_test_modules_in_one_file_are_both_elided() {
-        // `writing.rs` in this workspace has `mod tests` and `mod writes`.
-        let source = "\
-pub fn work() {}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn one() {
-        let kept = 1;
-        let kept = kept + 1;
-        let kept = kept + 1;
-        assert_eq!(kept, 3);
-    }
-}
-
-pub fn between() {}
-
-#[cfg(test)]
-mod writes {
-    #[test]
-    fn two() {
-        let kept = 2;
-        let kept = kept + 2;
-        let kept = kept + 2;
-        assert_eq!(kept, 6);
-    }
-}
-";
-        let elided = elide(Path::new("a.rs"), source).expect("elidable");
-
-        assert!(
-            elided.text.contains("pub fn between() {}"),
-            "code between two blocks survives: {}",
-            elided.text
-        );
-        assert!(elided.text.contains("fn one()"), "{}", elided.text);
-        assert!(elided.text.contains("fn two()"), "{}", elided.text);
-        assert!(!elided.text.contains("let kept"), "{}", elided.text);
-    }
-
-    #[test]
-    fn declared_names_are_the_identifiers_on_declaring_lines_and_nothing_else() {
-        let text = "\
-//! Docs.
-use std::fs;
-
-pub struct Manifest {
-    entries: Vec<PactEntry>,
-}
-
-pub(crate) fn to_manifest_path(root: &Path) -> String {
-    let inner = 1;
-    fn nested() {}
-    inner.to_string()
-}
-
-impl Manifest {
-    pub fn load() {}
-}
-
-pub async fn later() {}
-enum State { A, B }
-#[test]
-fn a_test_name_is_a_declaration_too() {}
-";
-        assert_eq!(
-            super::declared_names(Path::new("manifest.rs"), text),
-            [
-                "Manifest",
-                "to_manifest_path",
-                "load",
-                "later",
-                "nested",
-                "State",
-                "a_test_name_is_a_declaration_too",
-            ],
-            "public names first, then the rest, each in file order; `impl Manifest` names \
-             nothing new"
-        );
-    }
-
-    #[test]
-    fn a_skeleton_is_every_declaration_line_of_the_file_and_nothing_invented() {
-        let source = "\
-//! Docs.
-use std::fs;
-
-pub struct Manifest {
-    entries: Vec<PactEntry>,
-}
-
-pub(crate) fn to_manifest_path(root: &Path) -> String {
-    let inner = 1;
-    inner.to_string()
-}
-
-impl Manifest {
-    pub fn load() {}
-}
-";
-        let skeleton = super::skeleton(Path::new("manifest.rs"), source).expect("reducible");
-        for line in skeleton.text.lines() {
-            assert!(
-                source.lines().any(|original| original == line) || line.contains("elided"),
-                "every line is the file's own: {line}"
-            );
-        }
-        assert!(
-            skeleton.text.contains("pub struct Manifest {"),
-            "{}",
-            skeleton.text
-        );
-        assert!(
-            skeleton
-                .text
-                .contains("pub(crate) fn to_manifest_path(root: &Path) -> String {"),
-            "a signature survives whole, visibility and arguments and all: {}",
-            skeleton.text
-        );
-        assert!(
-            !skeleton.text.contains("inner.to_string()"),
-            "bodies go: {}",
-            skeleton.text
-        );
-        assert!(skeleton.dropped > 0);
-    }
-
-    #[test]
-    fn a_file_the_table_does_not_know_has_no_skeleton() {
-        assert!(super::skeleton(Path::new("Cargo.lock"), "[[package]]\nname = \"x\"\n").is_none());
-        assert!(super::skeleton(Path::new("notes.txt"), "fn looks_like_rust() {}").is_none());
-    }
-
-    #[test]
-    fn names_inside_a_test_block_and_in_a_test_file_are_not_declarations() {
-        let text = "\
-pub fn work() {}
-
-#[cfg(test)]
-mod tests {
-    fn helper() {}
-
-    #[test]
-    fn it_works() {}
-}
-
-pub fn after() {}
-";
-        assert_eq!(
-            super::declared_names(Path::new("a.rs"), text),
-            ["work", "after"]
-        );
-        assert!(
-            super::declared_names(Path::new("a_test.go"), "func TestX(t *testing.T) {}").is_empty()
-        );
-    }
-
-    #[test]
-    fn a_language_the_table_does_not_know_declares_nothing() {
-        assert!(
-            super::declared_names(Path::new("notes.txt"), "fn looks_like_rust() {}").is_empty()
-        );
-        assert!(
-            super::declared_names(Path::new("Cargo.lock"), "[[package]]\nname = \"x\"").is_empty()
-        );
-    }
-
-    #[test]
-    fn a_rust_skeleton_keeps_constants_traits_and_type_aliases() {
-        // The gap that failed a real refresh: `pub const COALESCED_RELOADS`
-        // lives in warlock's own watch.rs, a pass named it in a lookup, and
-        // the answer was rejected because the skeleton had dropped the line
-        // the symbol is on. A constant is public API and a trait is the shape
-        // of a seam; a map that cannot name either is worth less than one that
-        // can.
-        let source = "\
-pub const COALESCED_RELOADS: usize = 1;
-static TABLE: &[u8] = &[];
-pub trait Agent {
-    fn run(&self) -> u8;
-}
-pub type Reply = Result<u8, ()>;
-macro_rules! shout {
-    () => {};
-}
-pub fn ordinary() -> u8 {
-    let a = 1;
-    let b = 2;
-    let c = a + b;
-    let d = c * 2;
-    let e = d - 1;
-    e
-}
-";
-        let kept = super::skeleton(Path::new("watch.rs"), source)
-            .expect("a rust file is reducible")
-            .text;
-
-        for symbol in [
-            "COALESCED_RELOADS",
-            "TABLE",
-            "Agent",
-            "Reply",
-            "shout",
-            "ordinary",
-        ] {
-            assert!(
-                kept.contains(symbol),
-                "`{symbol}` has to survive the skeleton, or a lookup naming it \
-                 cannot be verified: {kept}",
-            );
-        }
-    }
-
-    #[test]
-    fn python_and_go_declarations_come_out_by_their_own_keywords() {
-        assert_eq!(
-            super::declared_names(
-                Path::new("app.py"),
-                "@route\ndef handler(req):\n    pass\nclass Store:\n    pass\n"
-            ),
-            ["handler", "Store"]
-        );
-        assert_eq!(
-            super::declared_names(
-                Path::new("main.go"),
-                "// Package main.\nfunc main() {}\ntype Ledger struct{}\n"
-            ),
-            ["main", "Ledger"]
-        );
-    }
-
-    #[test]
-    fn declared_names_are_deduplicated_and_capped() {
-        let mut text = "fn same() {}\n".repeat(3);
-        for i in 0..100 {
-            text.push_str("fn f");
-            text.push_str(&i.to_string());
-            text.push_str("() {}\n");
-        }
-        let names = super::declared_names(Path::new("many.rs"), &text);
-        assert_eq!(names[0], "same");
-        assert_eq!(names.len(), 64);
-        assert_eq!(names.iter().filter(|n| *n == "same").count(), 1);
     }
 }

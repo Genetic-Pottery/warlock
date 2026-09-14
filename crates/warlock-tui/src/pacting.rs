@@ -247,6 +247,11 @@ pub(crate) enum PactEvent {
         files: usize,
         bytes: u64,
     },
+    Describing {
+        position: usize,
+        total: usize,
+        bytes: u64,
+    },
     Rejected {
         defects: Vec<String>,
         attempt: usize,
@@ -299,6 +304,25 @@ impl pact::Observer for Reporting<'_> {
             total,
         });
         Pacting::Continue
+    }
+
+    // The directory is dropped rather than carried, as it is for a repair: the
+    // section a file's progress belongs under is the one the `Starting` before
+    // it opened, and the name of the file is the engine's business. What the
+    // panel does with this is a fraction, and the fraction is all of it.
+    fn describing(
+        &mut self,
+        _directory: &Path,
+        _name: &str,
+        bytes: u64,
+        position: usize,
+        total: usize,
+    ) {
+        let _ = self.events.send(PactEvent::Describing {
+            position,
+            total,
+            bytes,
+        });
     }
 
     fn requesting(&mut self, files: usize, bytes: u64) {
@@ -605,6 +629,20 @@ fn drain(
             Ok(PactEvent::Requesting { files, bytes }) => {
                 app.panel_mut()
                     .write_run(|account| account.record_waiting(files, bytes, now));
+            }
+            // Both places again, and for the same reason `Starting` is both: the
+            // panel keeps the stretch of file passes as one reworded line, and
+            // the footer's bar fills by it. The bar is the only reason this
+            // reaches the footer at all — the line there still names the
+            // directory of how many, because that is the question it answers.
+            Ok(PactEvent::Describing {
+                position,
+                total,
+                bytes,
+            }) => {
+                app.panel_mut()
+                    .write_run(|account| account.record_describing(position, total, bytes, now));
+                app.set_files_in_flight(position, total);
             }
             // The panel only, and one line, filed like the request line above
             // it: why this directory is about to cost a second pass, or why it
@@ -987,15 +1025,14 @@ mod tests {
 
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Sender};
     use std::time::{Duration, Instant};
     use std::{env, fs, process};
 
     use warlock_engine::{
-        Agent, Fill, Loaded, Manifest, Node, NodeState, PactEntry, Tree, Unwatched, agent,
-        decide_state,
-        document::{ATTEMPTS, ENTRY_CHARS},
+        Agent, Loaded, Manifest, Node, NodeState, PactEntry, Tree, Unwatched, agent, decide_state,
+        document::{ATTEMPTS, ENTRY_CHARS, FILE_PROMPT},
         load_tree, repository_root, stub_answer, subtree_hash,
     };
     use warlock_tui::{
@@ -1062,13 +1099,13 @@ mod tests {
             self
         }
 
-        /// The other way an answer can be wrong: an object of the right shape
-        /// with every file entry over `ENTRY_CHARS`. It is turned down on every
-        /// attempt — the answer never changes, so the repair passes find the
-        /// same slots too long — which is how the loop is made to run out and
-        /// the engine to mend the fill instead of refusing the directory. The
-        /// defect is built out of the engine's own public `Fill` rather than
-        /// out of its error types, which are `#[non_exhaustive]`.
+        /// The other way an answer can be wrong: the right shape, over
+        /// `ENTRY_CHARS` long. It is turned down on every attempt — the answer
+        /// never changes, so every re-ask finds the same line too long — which
+        /// is how the loop is made to run out and the engine to mend the line
+        /// instead of refusing the directory. The defect is built out of the
+        /// engine's own public shapes rather than out of its error types, which
+        /// are `#[non_exhaustive]`.
         fn answering_over_the_cap(
             mut self,
             directories: impl IntoIterator<Item = &'static str>,
@@ -1132,12 +1169,11 @@ mod tests {
                 cancel.cancel();
             }
             if self.refused.iter().any(|name| Path::new(name) == relative) {
-                // Not the object the engine asked for, so it is turned down —
-                // on every attempt, since the answer never changes: the
-                // cheapest way to fail one directory of a pact for real,
-                // rather than by reaching into the engine's error types, which
-                // are `#[non_exhaustive]` and cannot be built from here.
-                return Ok(agent::Response::new("no."));
+                // A pass that produced no answer at all, which is the only way
+                // a directory fails now: an answer the engine cannot use is
+                // mended from what warlock measured rather than refused, so a
+                // double that merely answers badly fails nothing.
+                return Err(agent::Error::EmptyOutput);
             }
             if self
                 .over_the_cap
@@ -1156,29 +1192,37 @@ mod tests {
     const OVER_THE_CAP: usize = ENTRY_CHARS + 140;
 
     fn over_the_cap(request: &agent::Request) -> String {
-        let mut fill = Fill::stub(request);
+        // Only the per-file passes answer badly. The synthesis over the lines
+        // they came to gets the ordinary stub, because what these tests are
+        // about is a directory whose *files* had to be mended — a synthesis
+        // mending as well would put a fourth repair in every count below.
+        if !request.prompt().starts_with(FILE_PROMPT) {
+            return stub_answer(request);
+        }
+
         // One line, ASCII, and no mention of the tool: the only thing wrong
-        // with it is its length, so every entry is mended the same way — cut —
-        // and no second defect rides along.
+        // with it is its length, so no second defect rides along.
         let long: String = "a stand-in entry that runs on past the cap. "
             .chars()
             .cycle()
             .take(OVER_THE_CAP)
             .collect();
-        for value in fill.files.values_mut() {
-            value.clone_from(&long);
-        }
-        fill.to_json()
+        format!("{{\"line\": {long:?}}}")
     }
 
-    /// The sentence the engine makes of one cut entry.
+    /// The sentence the engine makes of one mended line.
+    ///
+    /// A file's line is never cut the way a directory's slot was: the attempts
+    /// run out and `describe_file` writes the line itself, from the name, the
+    /// size and what the file declares. So every per-file mend reads the same
+    /// whatever was wrong with the answer.
     fn mended(file: &str) -> String {
-        format!("files[{file:?}] was {OVER_THE_CAP} characters and was cut to {ENTRY_CHARS}")
+        format!("files[{file:?}] was not answered and was filled in from what warlock measured")
     }
 
     /// The same sentence as the panel files it: one line of the section the
     /// pass that needed mending opened.
-    fn cut(file: &str) -> String {
+    fn supplied(file: &str) -> String {
         format!("repaired · {}", mended(file))
     }
 
@@ -1426,11 +1470,14 @@ mod tests {
         )
         .expect("a subtree that walks and a manifest that writes");
 
-        // Two passes ran, and neither of them found a manifest: a save per
-        // directory would have left one on disk for the second to see.
+        // Three passes ran — `src` pays for its one file and then for the
+        // synthesis over it, and `engine` has no file of its own — and none of
+        // them found a manifest: a save per directory would have left one on
+        // disk for the rest to see.
         assert_eq!(
             agent.directories(),
             [
+                PathBuf::from("crates/engine/src"),
                 PathBuf::from("crates/engine/src"),
                 PathBuf::from("crates/engine")
             ],
@@ -1476,7 +1523,7 @@ mod tests {
             !scratch.path("crates/tui").join(DOCUMENT_FILE).exists(),
             "a directory outside the pact was written to"
         );
-        assert_eq!(agent.directories().len(), 2, "and no pass ran for it");
+        assert_eq!(agent.directories().len(), 3, "and no pass ran for it");
     }
 
     #[test]
@@ -1601,7 +1648,7 @@ mod tests {
         }
         assert_eq!(
             agent.directories().len(),
-            2,
+            3,
             "un-pacting runs no model passes"
         );
     }
@@ -1718,6 +1765,7 @@ mod tests {
                     position, total, ..
                 } => Some((*position, *total)),
                 PactEvent::Doing(_)
+                | PactEvent::Describing { .. }
                 | PactEvent::Requesting { .. }
                 | PactEvent::Rejected { .. }
                 | PactEvent::Repaired { .. }
@@ -1740,6 +1788,7 @@ mod tests {
                         .to_path_buf(),
                 ),
                 PactEvent::Doing(_)
+                | PactEvent::Describing { .. }
                 | PactEvent::Requesting { .. }
                 | PactEvent::Rejected { .. }
                 | PactEvent::Repaired { .. }
@@ -1815,6 +1864,15 @@ mod tests {
                 position: 1,
                 total: 2,
             },
+            // The two halves of a directory with a file in it, in order: the
+            // file, then the handover to the pass that fits the lines
+            // together. The parent below has no file of its own, so it reports
+            // only the second.
+            PactEvent::Describing {
+                position: 1,
+                total: 1,
+                ..
+            },
             PactEvent::Requesting { .. },
             PactEvent::Documented {
                 directory: first_done,
@@ -1846,7 +1904,7 @@ mod tests {
             "documented names the pass that delivered"
         );
         assert_eq!(second_done, second);
-        assert_eq!(agent.directories().len(), 2, "and it ran both passes");
+        assert_eq!(agent.directories().len(), 3, "and it ran every pass");
         // The outcome that reaches the loop is the one that reached disk:
         // saved once, at the end, by the worker itself.
         assert_eq!(
@@ -1891,13 +1949,21 @@ mod tests {
                 position: 1,
                 total: 2,
             },
-            PactEvent::Requesting { .. },
+            // The file pass and then the synthesis, each reporting its own
+            // activities between the directory it belongs to and the next: a
+            // per-file directory reports two passes' worth, in order, and
+            // nothing of either lands under its neighbour.
+            PactEvent::Describing { .. },
             PactEvent::Doing(Activity::Tool {
                 name: first_tool,
                 detail: Some(first_detail),
             }),
             PactEvent::Doing(Activity::Thinking),
             PactEvent::Doing(Activity::Cost { usd: first_cost }),
+            PactEvent::Requesting { .. },
+            PactEvent::Doing(Activity::Tool { .. }),
+            PactEvent::Doing(Activity::Thinking),
+            PactEvent::Doing(Activity::Cost { .. }),
             PactEvent::Documented { .. },
             PactEvent::Starting {
                 directory: second,
@@ -1980,12 +2046,16 @@ mod tests {
         // test made itself would prove only that the test can call
         // `activity_port`.
         let scratch = one_crate("spawned-activities");
-        // The object the engine accepts for the one directory this run covers
-        // — the leaf, so a single canned answer fits every pass — escaped as
-        // the contents of a JSON string, which is how a result line carries
-        // it. The quotes inside become `\"`, and the shell's single quotes
-        // around the whole line leave them alone.
+        // An object both acceptors take, because a per-file run asks two
+        // different questions and this stand-in answers every one of them with
+        // the same bytes: `line` is what a file pass wants, `purpose` and
+        // `files` are what the synthesis over it wants, and each acceptor
+        // ignores the keys the other asked for. Escaped as the contents of a
+        // JSON string, which is how a result line carries it — the quotes
+        // inside become `\"`, and the shell's single quotes around the whole
+        // line leave them alone.
         let fill = serde_json::json!({
+            "line": "the crate root of the engine library",
             "purpose": "The source of the engine crate.",
             "files": {"lib.rs": "the crate root of the engine library"},
         })
@@ -2017,12 +2087,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // One directory, and its pass says two things: the tool it used, with
-        // its one whitelisted detail, and what it cost.
+        // One directory of one file, so two passes — the file's and the
+        // synthesis over the line it came to — and each says two things: the
+        // tool it used, with its one whitelisted detail, and what it cost.
         assert_eq!(
             activities.len(),
-            2,
-            "the pass reported through the port `spawn_pact` attached: {events:?}"
+            4,
+            "the passes reported through the port `spawn_pact` attached: {events:?}"
         );
         assert!(
             activities.iter().all(|activity| matches!(
@@ -2869,17 +2940,16 @@ mod tests {
             PathBuf::from("crates/alpha"),
         ];
         assert_eq!(announced(&events, &scratch), worked);
-        // The refused directory costs a pass for every attempt — the engine
-        // asks again with the defects listed, up to `document::ATTEMPTS` times,
-        // before giving up — so it is seen once per attempt.
+        // `alpha/src` refuses on its very first pass — the one for `lib.rs` —
+        // and a refusal ends the directory there, so it is seen once and the
+        // synthesis it would have fed never runs. `beta/src` is the ordinary
+        // shape: the file, then the synthesis.
         assert_eq!(
             agent.directories(),
             [
                 PathBuf::from("crates/beta/src"),
+                PathBuf::from("crates/beta/src"),
                 PathBuf::from("crates/beta"),
-                PathBuf::from("crates/alpha/src"),
-                PathBuf::from("crates/alpha/src"),
-                PathBuf::from("crates/alpha/src"),
                 PathBuf::from("crates/alpha/src"),
                 PathBuf::from("crates/alpha"),
             ]
@@ -3096,7 +3166,19 @@ mod tests {
             PathBuf::from("crates"),
         ];
         assert_eq!(announced(&events, &scratch), stale);
-        assert_eq!(agent.directories(), stale);
+        // What each of them cost, which is not the same list: the two holding
+        // a file that moved pay for it and then for the synthesis over it,
+        // while `beta` has no file of its own and pays once.
+        assert_eq!(
+            agent.directories(),
+            [
+                PathBuf::from("crates/beta/src"),
+                PathBuf::from("crates/beta/src"),
+                PathBuf::from("crates/beta"),
+                PathBuf::from("crates"),
+                PathBuf::from("crates"),
+            ]
+        );
         // And the fraction counts the run rather than the subtree: three of
         // three, from the engine's observer, with five directories under the
         // key that was pressed.
@@ -3256,7 +3338,7 @@ mod tests {
                 "0:30 Read crates/alpha".to_owned(),
                 "1:00 thinking".to_owned(),
                 "1:00 cancelled — $0.25 spent".to_owned(),
-                "pact finished — 4 directories, 4:00, $1.00".to_owned(),
+                "pact finished — 4 directories, 5:20, $1.50".to_owned(),
             ],
             "the cancel is recorded in the section it happened in"
         );
@@ -4167,13 +4249,23 @@ mod tests {
             panel_text(&app, at(base, 10_000)),
             [
                 "crates/engine/src".to_owned(),
-                // The request that pass was handed: the one file in
-                // `crates/engine/src`, seventeen bytes of it.
-                "0:20 waiting · 1 file, 17 bytes".to_owned(),
+                // The two halves of a per-file directory, and the two lines
+                // they come to. First the file passes: one file of the one
+                // being paid for, seventeen bytes of it, on a line that would
+                // have been reworded had there been a second file rather than
+                // filed again.
+                "0:20 describing · 1/1 file, 17 bytes".to_owned(),
                 "0:30 Read crates/engine/src".to_owned(),
-                "1:00 thinking".to_owned(),
+                "0:50 thinking".to_owned(),
+                // Then the handover to the pass that fits the lines together,
+                // carrying the one line the file came to and no file text at
+                // all — which is why this weighs more than the file above it
+                // and reads as a different kind of wait.
+                "1:00 waiting · 1 file, 78 bytes".to_owned(),
+                "1:10 Read crates/engine/src".to_owned(),
+                "1:40 thinking".to_owned(),
                 format!(
-                    "1:00 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.25",
+                    "1:40 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.50",
                     document_bytes(&scratch, "crates/engine/src")
                 ),
                 "crates/engine".to_owned(),
@@ -4190,18 +4282,18 @@ mod tests {
                     "1:00 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
                     document_bytes(&scratch, "crates/engine")
                 ),
-                // Thirteen frames of ten seconds: the run started with the
-                // first and ended with the thirteenth. The total is the two
-                // passes added up, and there is no `incomplete` on it because
-                // both of them said what they cost.
-                "pact finished — 2 directories, 2:00, $0.50".to_owned(),
+                // The total is the three passes added up — two for the
+                // directory with a file in it, one for the parent — and there
+                // is no `incomplete` on it because every one of them said what
+                // it cost.
+                "pact finished — 2 directories, 2:40, $0.75".to_owned(),
             ],
             "each section is closed with its own document and its own cost"
         );
 
         // And the account of a run that is over is still all there and still
         // all reachable: three lines of panel, and the reader can walk the
-        // eleven the run wrote a screenful at a time.
+        // fourteen the run wrote a screenful at a time.
         app.toggle_focus();
         app.panel_mut().set_height(3);
         app.select_first();
@@ -4213,7 +4305,7 @@ mod tests {
             }
             app.select_page_down();
         }
-        // Eleven lines do not divide into pages of three, so the last page
+        // Fourteen lines do not divide into pages of three, so the last page
         // overlaps the one before it: a panel scrolled to the bottom shows the
         // last three lines whatever it showed a moment ago. A line walked past
         // twice is not a line missed, which is what this is about, so the
@@ -4254,22 +4346,18 @@ mod tests {
         );
 
         let lines = panel_text(&app, at(base, 10_000));
-        // The refused directory's section: its first request, the pass, the
-        // engine turning the answer down, then the same four lines again for
-        // every repair attempt, and the refusal. The repairs in the middle are
-        // counted rather than spelled, so the shape here follows
-        // `document::ATTEMPTS` instead of pinning it.
+        // The refused directory's section is four lines and no more: the file
+        // it started on, the pass reading and thinking, and the refusal. There
+        // is no ladder of attempts under it, because the failure here is a pass
+        // that produced no answer — a transport failure is not retried, and an
+        // answer the engine merely cannot use is mended rather than refused.
+        // The refusal lands on the file pass, so the synthesis that would have
+        // followed it never gets a line.
         let [
             first,
+            describing,
             _,
             _,
-            _,
-            rejected_once,
-            repairs @ ..,
-            _,
-            _,
-            _,
-            rejected_last,
             refused,
             second,
             _,
@@ -4284,20 +4372,8 @@ mod tests {
         assert_eq!(first, "crates/engine/src");
         assert_eq!(second, "crates/engine");
         assert_eq!(
-            repairs.len(),
-            (ATTEMPTS - 2) * 4,
-            "four lines for every attempt between the first and the last — a \
-             request, the read, the wait, the rejection: {repairs:?}",
-        );
-        assert!(
-            rejected_once.starts_with(&format!(
-                "1:00 rejected · attempt 1/{ATTEMPTS}: the answer is not a JSON object"
-            )),
-            "the first answer is turned down in the engine's words: {rejected_once}"
-        );
-        assert!(
-            rejected_last.contains(&format!("rejected · attempt {ATTEMPTS}/{ATTEMPTS}: ")),
-            "and so is the last: {rejected_last}"
+            describing, "0:20 describing · 1/1 file, 17 bytes",
+            "the section says which file the refused pass was spent on"
         );
 
         let reason = refused.split_once(" refused — ").map_or_else(
@@ -4333,20 +4409,10 @@ mod tests {
                 .exists(),
             "the refused directory really has no document"
         );
-        // One pass per attempt on the refused directory and one for the
-        // parent, each reporting what it cost, and fifty seconds of run for
-        // every attempt after the first.
-        // In cents, so the arithmetic stays integer: the fixture charges a
-        // quarter for every pass, and there is one per attempt plus the
-        // parent's.
-        let cents = 25 * (ATTEMPTS + 1);
-        let spent = format!("${}.{:02}", cents / 100, cents % 100);
-        let seconds = 160 + (ATTEMPTS - 2) * 50;
-        let elapsed = format!("{}:{:02}", seconds / 60, seconds % 60);
-        assert_eq!(
-            summary,
-            &format!("pact finished — 2 directories, {elapsed}, {spent}")
-        );
+        // Two passes in the whole run, each reporting what it cost: the file
+        // pass that refused, and the parent's synthesis. The refused directory
+        // never reached a synthesis of its own.
+        assert_eq!(summary, "pact finished — 2 directories, 1:40, $0.50");
     }
 
     #[test]
@@ -4418,67 +4484,59 @@ mod tests {
         );
 
         let lines = panel_text(&app, at(base, 10_000));
-        // The mended directory's section: its first request, the pass, the
-        // engine turning the answer down, the same four lines again for every
-        // attempt after it, then one line per mend and the document. The
-        // attempts in the middle are counted rather than spelled, so the shape
-        // follows `document::ATTEMPTS` instead of pinning it.
-        let [
-            first,
-            _,
-            _,
-            _,
-            rejected_once,
-            attempts @ ..,
-            _,
-            _,
-            _,
-            rejected_last,
-            cut_first,
-            cut_second,
-            cut_third,
-            wrote_mended,
-            second,
-            _,
-            _,
-            _,
-            wrote_parent,
-            summary,
-        ] = lines.as_slice()
-        else {
-            panic!("a two-directory run reads as two sections and a summary: {lines:?}");
-        };
-        assert_eq!(first, "crates/engine/src");
-        assert_eq!(second, "crates/engine");
+        assert_eq!(lines[0], "crates/engine/src");
+
+        // The mended directory's section, a file at a time: the line saying
+        // which file the run is paying for, then the read, the wait and the
+        // rejection for each attempt, until the asking runs out. The attempts
+        // are counted rather than spelled, so the shape follows
+        // `document::ATTEMPTS` instead of pinning it.
+        let files = ["lib.rs", "pacting.rs", "writing.rs"];
+        let stretch = 1 + ATTEMPTS * 3;
+        for (index, file) in files.into_iter().enumerate() {
+            let opened = 1 + index * stretch;
+            assert!(
+                said_in(&lines[opened]).starts_with(&format!(
+                    "describing · {}/{} files, ",
+                    index + 1,
+                    files.len()
+                )),
+                "the section says which file it is paying for: {:?}",
+                lines[opened]
+            );
+            for attempt in 1..=ATTEMPTS {
+                assert_eq!(
+                    said_in(&lines[opened + attempt * 3]),
+                    format!(
+                        "rejected · attempt {attempt}/{ATTEMPTS}: \
+                         files[{file:?}] is {OVER_THE_CAP} characters, \
+                         over the cap of {ENTRY_CHARS}"
+                    ),
+                    "every attempt is turned down in the engine's own words"
+                );
+            }
+        }
+
+        // Then one line per mend, filed together once the last file's asking
+        // ran out. The clocks are dropped and nothing else is: what is asserted
+        // here is the wording and where it lands.
+        let repaired = 1 + files.len() * stretch;
         assert_eq!(
-            attempts.len(),
-            (ATTEMPTS - 2) * 4,
-            "four lines for every attempt between the first and the last — a \
-             request, the read, the wait, the rejection: {attempts:?}",
-        );
-        assert!(
-            rejected_once.contains(&format!("rejected · attempt 1/{ATTEMPTS}: ")),
-            "the first answer is turned down: {rejected_once}"
-        );
-        assert!(
-            rejected_last.contains(&format!("rejected · attempt {ATTEMPTS}/{ATTEMPTS}: ")),
-            "and so is the last, which is what runs the asking out: {rejected_last}"
+            [
+                said_in(&lines[repaired]),
+                said_in(&lines[repaired + 1]),
+                said_in(&lines[repaired + 2]),
+            ],
+            files.map(supplied),
+            "one line per mend, in the order the files were read"
         );
 
-        // The clocks are dropped and nothing else is: what is asserted here is
-        // the wording, and where it lands, and both are `ATTEMPTS` away from
-        // the start of the run.
+        // One pass per attempt on every file, and one more for the synthesis
+        // over the lines they came to, each charging a quarter — and the
+        // section still closes on the document it wrote.
+        let cents = 25 * (files.len() * ATTEMPTS + 1);
         assert_eq!(
-            [cut_first, cut_second, cut_third].map(|line| said_in(line)),
-            [cut("lib.rs"), cut("pacting.rs"), cut("writing.rs")],
-            "one line per mend, in the order the check reads the slots"
-        );
-
-        // One pass per attempt on the mended directory, each charging a
-        // quarter, and the section still closes on the document it wrote.
-        let cents = 25 * ATTEMPTS;
-        assert_eq!(
-            said_in(wrote_mended),
+            said_in(&lines[repaired + 6]),
             format!(
                 "wrote crates/engine/src/WARLOCK.md — {} bytes, ${}.{:02}",
                 document_bytes(&scratch, "crates/engine/src"),
@@ -4487,6 +4545,11 @@ mod tests {
             ),
             "a mended directory closes on its document like any other"
         );
+
+        let [second, _, _, _, wrote_parent, summary] = &lines[repaired + 7..] else {
+            panic!("the parent's section is five lines and a summary: {lines:?}");
+        };
+        assert_eq!(second, "crates/engine");
         assert_eq!(
             said_in(wrote_parent),
             format!(
@@ -4564,7 +4627,7 @@ mod tests {
         assert_eq!(
             lines
                 .iter()
-                .filter(|line| said_in(line) == cut("lib.rs"))
+                .filter(|line| said_in(line) == supplied("lib.rs"))
                 .count(),
             1,
             "the run really did mend a directory: {lines:?}"
@@ -4657,13 +4720,9 @@ mod tests {
         replay(&mut app, &mut manifest, &scope, guard, said, base);
 
         let lines = panel_text(&app, at(base, 10_000));
+        assert_eq!(lines.len(), 27, "four sections and a summary: {lines:?}");
         assert_eq!(
-            lines.len(),
-            21,
-            "four sections of five lines and a summary: {lines:?}"
-        );
-        assert_eq!(
-            &lines[15..],
+            &lines[21..],
             [
                 "crates/alpha".to_owned(),
                 // What the pass that was stopped had been handed: no file of
@@ -4677,20 +4736,43 @@ mod tests {
                 "1:00 cancelled — $0.25 spent".to_owned(),
                 // Four directories and not the five the subtree holds: the
                 // descent stopped, and the account counts what it reached.
-                "pact finished — 4 directories, 4:00, $1.00".to_owned(),
+                "pact finished — 4 directories, 5:20, $1.50".to_owned(),
             ],
             "the cancel is recorded in the section it happened in"
         );
-        // Everything above it is exactly what a finished pass leaves.
-        for (index, directory) in ["crates/beta/src", "crates/beta", "crates/alpha/src"]
-            .into_iter()
-            .enumerate()
-        {
-            assert_eq!(&lines[index * 5], directory);
+        // Everything above it is exactly what a finished pass leaves. The
+        // offsets are spelled out rather than stepped, because the sections are
+        // no longer all one length: a directory with a file in it is eight
+        // lines — the heading, the file pass and its three, the handover and
+        // its three — and one holding only documents is five.
+        for (heading, closing, directory, ending) in [
+            (
+                0,
+                7,
+                "crates/beta/src",
+                "1:40 wrote crates/beta/src/WARLOCK.md",
+            ),
+            (8, 12, "crates/beta", "1:00 wrote crates/beta/WARLOCK.md"),
+            (
+                13,
+                20,
+                "crates/alpha/src",
+                "1:40 wrote crates/alpha/src/WARLOCK.md",
+            ),
+        ] {
+            assert_eq!(&lines[heading], directory);
+            // Two passes for a directory with a file in it and one for a
+            // directory of documents, so the spend differs and the clock the
+            // section closes at differs with it.
+            let spent = if directory.ends_with("/src") {
+                "$0.50"
+            } else {
+                "$0.25"
+            };
             assert_eq!(
-                lines[index * 5 + 4],
+                lines[closing],
                 format!(
-                    "1:00 wrote {directory}/WARLOCK.md — {} bytes, $0.25",
+                    "{ending} — {} bytes, {spent}",
                     document_bytes(&scratch, directory)
                 ),
                 "a section above the cancel keeps the ending it earned"
@@ -5095,11 +5177,14 @@ mod tests {
             card,
             [
                 "crates/engine/src".to_owned(),
-                "0:20 waiting · 1 file, 17 bytes".to_owned(),
+                "0:20 describing · 1/1 file, 17 bytes".to_owned(),
                 "0:30 Read crates/engine/src".to_owned(),
-                "1:00 thinking".to_owned(),
+                "0:50 thinking".to_owned(),
+                "1:00 waiting · 1 file, 78 bytes".to_owned(),
+                "1:10 Read crates/engine/src".to_owned(),
+                "1:40 thinking".to_owned(),
                 format!(
-                    "1:00 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.25",
+                    "1:40 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.50",
                     document_bytes(&scratch, "crates/engine/src")
                 ),
                 "crates/engine".to_owned(),
@@ -5113,7 +5198,7 @@ mod tests {
                     "1:00 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
                     document_bytes(&scratch, "crates/engine")
                 ),
-                "pact finished — 2 directories, 2:00, $0.50".to_owned(),
+                "pact finished — 2 directories, 2:40, $0.75".to_owned(),
             ],
             "the conversation is not holding the whole run"
         );
@@ -5579,7 +5664,7 @@ mod tests {
         assert_eq!(
             lines.last().map(String::as_str),
             Some(
-                "pact finished — 7 directories, 3:30, $0.00 (incomplete: 7 passes reported no cost)"
+                "pact finished — 7 directories, 4:10, $0.00 (incomplete: 7 passes reported no cost)"
             ),
             "the summary counts the run: {lines:?}"
         );
@@ -5603,11 +5688,16 @@ mod tests {
 
     #[test]
     fn a_pass_that_never_said_what_it_cost_leaves_the_total_incomplete() {
-        // The first pass's result line carries no cost — WAR-24 reports none
-        // rather than a zero — and the port drops it on the floor exactly as
-        // a result line without the field would. What the run spent is then
-        // one pass's worth and the total says so, rather than adding a zero
-        // that was never measured and under-reporting the run.
+        // The first directory's result lines carry no cost — WAR-24 reports
+        // none rather than a zero — and the port drops them on the floor
+        // exactly as result lines without the field would. What the run spent
+        // is then one directory's worth and the total says so, rather than
+        // adding a zero that was never measured and under-reporting the run.
+        //
+        // Both of that directory's passes are swallowed and not just the
+        // first: a section counts as having reported its cost if any pass in
+        // it did, so leaving the synthesis its quarter would make this a run
+        // with nothing missing from it.
         let scratch = one_crate_to_load("no-cost");
         let (mut app, scope) = load(&scratch);
         let mut manifest = Manifest::new();
@@ -5616,10 +5706,16 @@ mod tests {
 
         let said = recorded(&scratch, "crates/engine", &Cancel::new(), |events| {
             let events = events.clone();
-            let swallowed = AtomicBool::new(false);
+            // The passes of `crates/engine/src`: the one for its file, and the
+            // synthesis over the line that file came to.
+            let swallow = AtomicUsize::new(2);
             let port = Activities::new(move |activity| {
                 if matches!(activity, Activity::Cost { .. })
-                    && !swallowed.swap(true, Ordering::Relaxed)
+                    && swallow
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                            (left > 0).then(|| left - 1)
+                        })
+                        .is_ok()
                 {
                     return;
                 }
@@ -5642,11 +5738,18 @@ mod tests {
                 "crates/engine/src".to_owned(),
                 // The one file of `one_crate`, seventeen bytes of it, on the
                 // line that says what the silence after it was made of.
-                "0:20 waiting · 1 file, 17 bytes".to_owned(),
+                "0:20 describing · 1/1 file, 17 bytes".to_owned(),
                 "0:30 Read crates/engine/src".to_owned(),
-                "0:50 thinking".to_owned(),
+                // Twenty seconds rather than the thirty a reported pass takes,
+                // here and again below: the cost this run swallows is an event
+                // that never arrives, so the frame it would have taken is one
+                // the clock never counts.
+                "0:40 thinking".to_owned(),
+                "0:50 waiting · 1 file, 78 bytes".to_owned(),
+                "1:00 Read crates/engine/src".to_owned(),
+                "1:20 thinking".to_owned(),
                 format!(
-                    "0:50 wrote crates/engine/src/WARLOCK.md — {} bytes, no cost reported",
+                    "1:20 wrote crates/engine/src/WARLOCK.md — {} bytes, no cost reported",
                     document_bytes(&scratch, "crates/engine/src")
                 ),
                 "crates/engine".to_owned(),
@@ -5660,7 +5763,7 @@ mod tests {
                     "1:00 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
                     document_bytes(&scratch, "crates/engine")
                 ),
-                "pact finished — 2 directories, 1:50, \
+                "pact finished — 2 directories, 2:20, \
                      $0.25 (incomplete: 1 pass reported no cost)"
                     .to_owned(),
             ],

@@ -3,26 +3,29 @@
 
 # crates
 
-crates is the workspace root holding the two crates that make up the project: warlock-engine, the domain/lifecycle core, and warlock-tui, the terminal front end and CLI that ships the `warlock` binary.
+The workspace's two crates: warlock-engine, which walks a repository into a freshness ledger and fills/renders WARLOCK.md documents, and warlock-tui, the terminal front end and headless subcommands built on it.
 
 ## Directories
 
-- `warlock-engine/` — The pact/refresh/document lifecycle core: Agent port, manifest/scope/sigil schemas, tree/hash/freshness machinery — go here for domain logic free of any TUI dependency.
-- `warlock-tui/` — The terminal front end and CLI that ships the `warlock` binary — go here for panel, key-handling, subcommand or process-spawning questions.
+- `warlock-engine/` — The engine crate: ledger, decide.rs state rule, manifest/pact machinery, document fill/render, scope/sigil/ignore boundaries; go there for how state, pacts or documents are computed.
+- `warlock-tui/` — The warlock binary and warlock_tui library: panel, keypress handling, filesystem watching, headless subcommands; go there for how a key or run becomes screen state or output.
 
 ## Structure
 
-- The dependency edge runs one way: warlock-tui depends on warlock-engine, never the reverse.
-- warlock-engine defines the domain and lifecycle types that warlock-tui's CLI subcommands and panel operate on.
-
-## Rules
-
-- warlock-engine forbids TUI, terminal, HTTP or Anthropic dependencies, keeping the dependency edge one-directional.
-- Lint configuration is shared from the workspace root manifest across both crates.
+- Manifest for warlock-engine: blake3, ignore, serde/serde_json and toml deps, kept free of TUI/terminal/HTTP/Anthropic crates by design.
+- Manifest for the warlock-tui crate: builds the `warlock` binary from src/main.rs and the warlock_tui library from src/lib.rs, wiring clap, ratatui, notify, ctrlc and warlock-engine.
 
 ## Where to look
 
-- where the core lifecycle logic for pact/refresh/document lives → `warlock-engine` `pact_subtree`
-- where the terminal UI and CLI subcommands live → `warlock-tui` `main.rs`
-- why a dependency is or isn't allowed in the core crate → `warlock-engine` `Cargo.toml`
-- how the `warlock` binary is built and what it depends on → `warlock-tui` `Cargo.toml`
+- what decides whether a file is stale or fresh → `warlock-engine` `decide_state`
+- what crate builds the warlock binary → `warlock-tui` `warlock`
+- where is WARLOCK.md actually written and merged into CLAUDE.md → `warlock-engine` `write_claude_md`
+- what dependencies does the tui pull in → `warlock-tui`
+- how are two clones of the same repo verified to agree → `warlock-engine` `subtree_hash`
+- where is the terminal-free library surface defined → `warlock-tui` `warlock_tui`
+- where does the model-pass request/response shape live → `warlock-engine` `Request`
+- how does the ledger tree get built from disk → `warlock-engine` `load_tree`
+- where are pacts.toml entries read and saved → `warlock-engine` `Manifest`
+- what performs a pact or refresh over a subtree → `warlock-engine` `pact_subtree`
+- where do sigils get resolved to a config directory → `warlock-engine` `sigils_path`
+- how is a directory excluded via .warlockignore → `warlock-engine` `is_ignored`
