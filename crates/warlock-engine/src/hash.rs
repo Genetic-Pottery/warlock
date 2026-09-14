@@ -115,6 +115,14 @@ pub fn subtree_hash(dir: impl AsRef<Path>) -> Result<String, Error> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+pub(crate) fn subtree_bytes(dir: &Path) -> Result<u64, Error> {
+    Ok(files_under(dir)?
+        .values()
+        .filter_map(|path| fs::metadata(path).ok())
+        .map(|found| found.len())
+        .sum())
+}
+
 /// A [`BTreeMap`] because the key order *is* the hash order: whatever sequence
 /// the walker produced is thrown away here, which is what keeps the digest
 /// independent of the filesystem.

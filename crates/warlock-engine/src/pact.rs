@@ -908,6 +908,17 @@ fn pact_directory_watched(
     );
     let request = expected_for(directory)?;
     let expected = document::Expected::of(&request);
+    // A weight is a share of routes and not a fact on the page, so a child
+    // that cannot be measured costs its routes their place and not the pact.
+    let weights = request
+        .child_documents()
+        .iter()
+        .map(|child| {
+            let bytes = crate::hash::subtree_bytes(&directory.join(child.directory()));
+            (child.directory().to_owned(), bytes.unwrap_or(0))
+        })
+        .collect();
+    let fill = document::with_routes_below(fill, &expected, &weights);
     let text = document::render(&name, &fill, &expected, &described);
     let document = write_document(directory, &text)?;
 

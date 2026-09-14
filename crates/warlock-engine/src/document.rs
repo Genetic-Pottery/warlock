@@ -697,8 +697,8 @@ shown show. Each entry is {\"line\": ..., \"names\": [...]}, where \"names\" \
 lists every file, type, function or constant the line refers to, spelt as the \
 lines spell it. A structure entry names at least one. An empty list is fine.
 
-\"directories\": one line per key. What is under it and the kind of question \\
-that should send a reader there. Write it from the subdirectory's own \\
+\"directories\": one line per key. What is under it and the kind of question \
+that should send a reader there. Write it from the subdirectory's own \
 WARLOCK.md, which follows below, and do not restate that document's contents.
 
 \"lookups\": routes, each {\"for\": ..., \"open\": ..., \"symbol\": ...}. \
@@ -884,6 +884,143 @@ fn file_row(row: &str) -> Option<(String, String)> {
         return None;
     }
     Some((path.to_owned(), entry.to_owned()))
+}
+
+/// Read the routes back out of a document warlock wrote, the way [`lines_of`]
+/// reads the file lines.
+///
+/// ```
+/// use warlock_engine::document::routes_of;
+///
+/// let page = "\n## Where to look\n\n\
+///     - where a tree is walked → `load.rs` `load_tree`\n\
+///     - what the license is → `LICENSE`\n";
+///
+/// let routes = routes_of(page);
+/// assert_eq!(routes.len(), 2);
+/// assert_eq!(routes[0].open, "load.rs");
+/// assert_eq!(routes[0].symbol.as_deref(), Some("load_tree"));
+/// assert_eq!(routes[1].symbol, None);
+/// ```
+#[must_use]
+pub fn routes_of(document: &str) -> Vec<Lookup> {
+    let mut routes = Vec::new();
+    let mut in_routes = false;
+    for row in document.lines() {
+        if let Some(heading) = row.strip_prefix("## ") {
+            in_routes = heading.trim() == "Where to look";
+            continue;
+        }
+        if in_routes && let Some(route) = route_row(row) {
+            routes.push(route);
+        }
+    }
+    routes
+}
+
+// ``- topic → `open` `symbol` ``, which is what `render` writes. Split from the
+// right: a topic is a model's prose and may hold an arrow of its own, and an
+// open or a symbol never does.
+fn route_row(row: &str) -> Option<Lookup> {
+    let rest = row.strip_prefix("- ")?;
+    let (topic, target) = rest.rsplit_once(" → `")?;
+    let target = target.strip_suffix('`')?;
+    let (open, symbol) = match target.split_once("` `") {
+        Some((open, symbol)) => (open, Some(symbol.to_owned())),
+        None => (target, None),
+    };
+    if topic.trim().is_empty() || open.is_empty() {
+        return None;
+    }
+    Some(Lookup {
+        topic: topic.trim().to_owned(),
+        open: open.to_owned(),
+        symbol,
+    })
+}
+
+/// A directory's `## Where to look`: the synthesis pass's routes into its own
+/// files, and the routes of every child document re-aimed at that child.
+///
+/// A synthesis pass is never asked to route into a child, and prompting it to
+/// was the road not taken: a child's routes were already checked when its
+/// document was written, one level down, against files that pass could see.
+/// Re-aiming one keeps its symbol, which the child's document spells, so it
+/// passes the same witness [`check`] would have asked.
+///
+/// The slots are shared by the bytes each side stands for, one at a time to
+/// whichever is furthest below its share. `weights` is keyed by child; a child
+/// missing from it weighs nothing and is served only once the rest run out.
+/// The result interleaves the sides, so a parent taking a prefix of these
+/// routes in its turn takes some of each.
+#[must_use]
+pub fn with_routes_below(
+    mut fill: Fill,
+    expected: &Expected<'_>,
+    weights: &BTreeMap<String, u64>,
+) -> Fill {
+    let own: Vec<Lookup> = fill
+        .lookups
+        .drain(..)
+        .filter(|lookup| expected.files.contains_key(lookup.open.trim()))
+        .collect();
+    let mut sources = vec![(
+        expected.files.values().map(|(size, _)| *size).sum::<u64>(),
+        own,
+    )];
+    for (child, document) in &expected.directories {
+        let routes = routes_of(document)
+            .into_iter()
+            .map(|route| Lookup {
+                open: (*child).to_owned(),
+                ..route
+            })
+            .collect();
+        sources.push((weights.get(*child).copied().unwrap_or(0), routes));
+    }
+
+    let counts: Vec<(u64, usize)> = sources
+        .iter()
+        .map(|(weight, routes)| (*weight, routes.len()))
+        .collect();
+    let shares = shares(&counts, LIST_CAP);
+    let mut taken: Vec<_> = sources
+        .into_iter()
+        .zip(shares)
+        .map(|((_, routes), share)| routes.into_iter().take(share))
+        .collect();
+    loop {
+        let before = fill.lookups.len();
+        fill.lookups.extend(taken.iter_mut().filter_map(Iterator::next));
+        if fill.lookups.len() == before {
+            break;
+        }
+    }
+    fill
+}
+
+fn shares(sources: &[(u64, usize)], cap: usize) -> Vec<usize> {
+    let mut shares = vec![0; sources.len()];
+    let total = sources.iter().map(|(_, count)| count).sum::<usize>();
+    for _ in 0..total.min(cap) {
+        let mut best: Option<usize> = None;
+        for (index, (weight, count)) in sources.iter().enumerate() {
+            if shares[index] == *count {
+                continue;
+            }
+            let ahead = best.is_some_and(|best| {
+                let (best_weight, _) = sources[best];
+                u128::from(best_weight) * (shares[index] as u128 + 1)
+                    >= u128::from(*weight) * (shares[best] as u128 + 1)
+            });
+            if !ahead {
+                best = Some(index);
+            }
+        }
+        let Some(best) = best else { break };
+        shares[best] += 1;
+    }
+    shares
 }
 
 // The per-file pass: one file in, one line out.
@@ -2133,8 +2270,8 @@ mod tests {
         ATTEMPTS, Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Entry, Evidence,
         Expected, Fill, LIST_CAP, Lookup, MEND_PASSES, Mend, Mended, PROMPT, PURPOSE_CHARS, Repair,
         STAMP, Target, accept, accept_synthesis, check, fallback, human, instructions, lines_of,
-        mend, mended, names_tool, render, repair_instructions, skeleton, stub_answer,
-        synthesis_instructions,
+        mend, mended, names_tool, render, repair_instructions, routes_of, shares, skeleton,
+        stub_answer, synthesis_instructions, with_routes_below,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -4268,5 +4405,86 @@ mod tests {
             &expected,
             &Described::default(),
         ));
+    }
+
+    #[test]
+    fn the_routes_render_writes_are_the_routes_routes_of_reads() {
+        let request = request();
+        let expected = Expected::of(&request);
+        let mut fill = good();
+        fill.lookups.push(Lookup {
+            topic: "why a → sits in a question".to_owned(),
+            open: "lib.rs".to_owned(),
+            symbol: Some("pact".to_owned()),
+        });
+        let text = render("engine", &fill, &expected, &Described::default());
+        assert_eq!(routes_of(&text), fill.lookups);
+    }
+
+    #[test]
+    fn a_child_route_is_aimed_at_the_child_and_still_passes_the_check() {
+        let request = request();
+        let expected = Expected::of(&request);
+        let weights = [("src".to_owned(), 10)].into_iter().collect();
+        let fill = with_routes_below(good(), &expected, &weights);
+        assert_eq!(
+            fill.lookups,
+            vec![
+                Lookup {
+                    topic: "how a subtree is hashed".to_owned(),
+                    open: "lib.rs".to_owned(),
+                    symbol: Some("subtree_hash".to_owned()),
+                },
+                Lookup {
+                    topic: "hashing".to_owned(),
+                    open: "src".to_owned(),
+                    symbol: Some("subtree_hash".to_owned()),
+                },
+            ],
+            "the pass's own route into `src` gives way to the one `src` wrote"
+        );
+        let defects = check(&fill, &expected, &Described::default());
+        assert!(
+            !defects
+                .iter()
+                .any(|defect| defect.to_string().contains("lookups")),
+            "{defects:?}"
+        );
+    }
+
+    #[test]
+    fn the_routes_are_shared_by_bytes_and_interleaved_under_the_cap() {
+        let routes = |child: &str| {
+            (0..LIST_CAP)
+                .map(|i| format!("- question {i} about {child} → `{child}{i}.rs` `f{i}`"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let request = Request::new("", "/repo/crates").with_child_documents([
+            ChildDocument::new("big", format!("## Where to look\n\n{}\n", routes("big"))),
+            ChildDocument::new("small", format!("## Where to look\n\n{}\n", routes("small"))),
+        ]);
+        let expected = Expected::of(&request);
+        let weights = [("big".to_owned(), 300), ("small".to_owned(), 100)]
+            .into_iter()
+            .collect();
+        let opened: Vec<String> = with_routes_below(Fill::default(), &expected, &weights)
+            .lookups
+            .into_iter()
+            .map(|lookup| lookup.open)
+            .collect();
+        assert_eq!(opened.len(), LIST_CAP);
+        assert_eq!(opened.iter().filter(|open| *open == "small").count(), 3);
+        assert_eq!(&opened[..4], ["big", "small", "big", "small"]);
+    }
+
+    #[test]
+    fn a_share_follows_its_weight_until_its_routes_run_out() {
+        assert_eq!(shares(&[(1_000, 5), (700_000, 12)], 12), [0, 12]);
+        assert_eq!(shares(&[(1_000, 5), (700_000, 4)], 12), [5, 4]);
+        assert_eq!(shares(&[(10, 12), (10, 12)], 12), [6, 6]);
+        assert_eq!(shares(&[(0, 3), (5, 2)], 12), [3, 2]);
+        assert_eq!(shares(&[(0, 3), (5, 20)], 12), [0, 12]);
+        assert_eq!(shares(&[], 12), Vec::<usize>::new());
     }
 }

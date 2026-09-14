@@ -3,7 +3,7 @@
 
 # warlock-engine
 
-The engine crate: walks a repo into a freshness ledger, decides pact state per directory, runs model passes to fill and render WARLOCK.md documents, and persists manifests, scopes and sigils to disk.
+The engine crate: walks a repository into a freshness ledger, tracks pacted/unpacted/stale state against a manifest, fills and renders WARLOCK.md documents through a model-pass Agent port, and manages scopes, sigils and ignores that bound where pacts apply, kept free of TUI, terminal, HTTP or Anthropic dependencies.
 
 ## Files
 
@@ -11,7 +11,7 @@ The engine crate: walks a repo into a freshness ledger, decides pact state per d
 
 ## Directories
 
-- `src/` — The crate's source: tree walking, freshness decisions, document filling and rendering, and manifest/scope/sigil persistence.
+- `src/` — the crate's source: Tree/Node ledger, decide.rs state rule, manifest and pact machinery, document fill/render, scope/sigil/ignore boundaries
 
 ## Structure
 
@@ -19,15 +19,15 @@ The engine crate: walks a repo into a freshness ledger, decides pact state per d
 
 ## Where to look
 
-- how is a directory's freshness state determined → `src` `decide_state`
-- how does the repo tree get walked and built → `src` `load_tree`
-- what does a WARLOCK.md pact request look like before it hits the model → `src`
-- what shape does a model implementation have to satisfy → `src` `Agent`
-- how is CLAUDE.md's warlock section written or updated → `src` `write_claude_md`
-- where are per-directory pact grants stored → `src` `Manifest`
-- how is a subtree's content hashed for staleness checks → `src` `subtree_hash`
-- how does .warlockignore affect a directory's own visibility → `src` `is_ignored`
-- how are scopes and sigils validated against each other → `src` `scope_opens_to`
-- where do sigils get loaded or saved per checkout → `src` `load_sigils`
-- how does pacting a directory run per-file then synthesis passes → `src` `pact_subtree`
-- what dependencies does the engine crate declare → `Cargo.toml`
+- what decides whether a file is stale or fresh → `src` `decide_state`
+- where is WARLOCK.md actually written and merged into CLAUDE.md → `src` `write_claude_md`
+- how are two clones of the same repo verified to agree → `src` `subtree_hash`
+- where does the model-pass request/response shape live → `src` `Request`
+- how does the ledger tree get built from disk → `src` `load_tree`
+- where are pacts.toml entries read and saved → `src` `Manifest`
+- what performs a pact or refresh over a subtree → `src` `pact_subtree`
+- where do sigils get resolved to a config directory → `src` `sigils_path`
+- how is a directory excluded via .warlockignore → `src` `is_ignored`
+- where are the freshness states enumerated → `src` `NodeState`
+- how is a fill turned into rendered WARLOCK.md content → `src` `render`
+- where do per-language test/declaration rules live → `src` `TABLE`

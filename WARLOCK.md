@@ -3,7 +3,7 @@
 
 # warlock
 
-Repository root of the warlock workspace, holding the two-crate build (warlock-engine, warlock-tui), its dependency lockfile, license, and shared rustfmt config.
+The workspace root for warlock, holding the crates/ workspace (warlock-engine and warlock-tui) plus shared build, lockfile, license and formatting configuration.
 
 ## Files
 
@@ -14,19 +14,26 @@ Repository root of the warlock workspace, holding the two-crate build (warlock-e
 
 ## Directories
 
-- `crates/` — Holds the warlock-engine and warlock-tui crates; go there for engine decisions, tree walking, or the TUI panel and binary.
+- `crates/` — The workspace's two crates, engine and tui; go there for how state, pacts, documents, or screen output are computed.
 
 ## Structure
 
 - Auto-generated lockfile pinning exact versions and checksums for every crate dependency of warlock-engine and warlock-tui; not hand-edited.
 - Workspace manifest for warlock-engine and warlock-tui: shared lints, package metadata, and pinned dependencies (serde, ratatui, ignore, blake3, notify, clap, ctrlc).
+- Full text of the Apache License, Version 2.0, governing use and redistribution of the repository's contents.
 - rustfmt.toml — workspace formatting config: pins edition 2024, style_edition 2024, LF newlines, and struct field-init shorthand.
 
 ## Where to look
 
-- what license governs this repository → `LICENSE`
-- what versions of dependencies are actually locked in → `Cargo.lock`
-- what crates make up the workspace and what they depend on → `Cargo.toml`
-- how is code formatted across the workspace → `rustfmt.toml`
-- where does the engine crate for freshness decisions live → `Cargo.toml` `warlock-engine`
-- where does the terminal panel crate live → `Cargo.toml` `warlock-tui`
+- what decides whether a file is stale or fresh → `crates` `decide_state`
+- what crate builds the warlock binary → `crates` `warlock`
+- where is WARLOCK.md actually written and merged into CLAUDE.md → `crates` `write_claude_md`
+- what dependencies does the tui pull in → `crates`
+- how are two clones of the same repo verified to agree → `crates` `subtree_hash`
+- where is the terminal-free library surface defined → `crates` `warlock_tui`
+- where does the model-pass request/response shape live → `crates` `Request`
+- how does the ledger tree get built from disk → `crates` `load_tree`
+- where are pacts.toml entries read and saved → `crates` `Manifest`
+- what performs a pact or refresh over a subtree → `crates` `pact_subtree`
+- where do sigils get resolved to a config directory → `crates` `sigils_path`
+- how is a directory excluded via .warlockignore → `crates` `is_ignored`
