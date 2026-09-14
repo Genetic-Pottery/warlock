@@ -28,6 +28,7 @@ pub use account::Account;
 pub use account::Line;
 pub use account::Outcome;
 pub use account::Section;
+pub use account::Voice;
 pub use account::size;
 pub use app::App;
 pub use app::Chrome;

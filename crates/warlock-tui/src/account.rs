@@ -322,7 +322,54 @@ pub enum Line {
         /// Whether the line this continues is drawn bold, so one line broken
         /// over two rows is not bold on one and plain on the other.
         heading: bool,
+        /// Whose line this continues, so one line broken over two rows is not
+        /// two colours. `heading` cannot answer this: it separates bold from
+        /// plain, which is two of the three voices on one side of it.
+        voice: Voice,
     },
+}
+
+/// Who a row belongs to, which is what decides its colour.
+///
+/// Not the kind of row: a work line and a summary line look nothing alike and
+/// are both warlock accounting for its own work, while `Text` is the only
+/// variant that is the model's own words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Voice {
+    /// What the operator typed.
+    Operator,
+    /// The model's answer, and only that.
+    Model,
+    /// Warlock accounting for its own work: directories, work lines,
+    /// summaries, its own notes.
+    Warlock,
+}
+
+impl Line {
+    /// ```
+    /// use warlock_tui::{Line, Voice};
+    ///
+    /// let said = Line::Said { text: "pact this".to_owned() };
+    /// let work = Line::Clocked { clock: "0:04".to_owned(), text: "Reading".to_owned() };
+    ///
+    /// assert_eq!(said.voice(), Voice::Operator);
+    /// assert_eq!(work.voice(), Voice::Warlock);
+    /// ```
+    #[must_use]
+    pub const fn voice(&self) -> Voice {
+        // No catch-all arm, for the reason `colour_for` has none: a variant
+        // added here has to break this match rather than be drawn in whichever
+        // voice a fallback picked.
+        match self {
+            Self::Said { .. } => Voice::Operator,
+            Self::Text { .. } => Voice::Model,
+            Self::Directory { .. }
+            | Self::Clocked { .. }
+            | Self::Summary { .. }
+            | Self::Note { .. } => Voice::Warlock,
+            Self::Wrapped { voice, .. } => *voice,
+        }
+    }
 }
 
 /// Everything one pact did, from the key press to the summary line.

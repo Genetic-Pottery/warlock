@@ -33,7 +33,20 @@ pub const fn colour_for(state: NodeState) -> Color {
 // state, and which pane the keys are driving is not something a node can be. A
 // theme's cyan could drift towards any of the three, so this is pinned for the
 // same reason they are.
+//
+// It is no longer worn by the focused border alone — `SYSTEM_COLOUR` below is
+// the same value — so focus is told apart by weight and position rather than by
+// hue: the border is the only cyan thing that is a border, and it is the only
+// cyan thing drawn bold.
 pub(crate) const FOCUS_COLOUR: Color = Color::Indexed(45);
+
+// Deliberately the focus colour and not a near neighbour. Everything warlock
+// says about its own work — the pacting card's directories and work lines, its
+// notes in the conversation, the run header and its bar — is one instrument
+// talking, and a second blue a few steps away would read as a second meaning
+// rather than as one voice. What it must stay apart from is the three states
+// and the model's own words, which the tests below hold it to.
+pub(crate) const SYSTEM_COLOUR: Color = FOCUS_COLOUR;
 
 // `DIM` is the obvious way to ask for a quieter line and is not taken: it is
 // honoured inconsistently, so a guide would vanish on one terminal and shout on
@@ -41,14 +54,13 @@ pub(crate) const FOCUS_COLOUR: Color = Color::Indexed(45);
 // under every state colour, not so far as to disappear on a light background.
 pub(crate) const GUIDE_COLOUR: Color = Color::Indexed(240);
 
-// The conversation card is two voices and the split is by author, not by kind
-// of row: what the operator typed keeps the terminal's default foreground and
-// everything answered back — model text, work lines, warlock's own notes — is
-// drawn in this. A mauve because it belongs to none of the three states and is
-// not the focus cyan; muted so a long exchange reads as body text rather than
-// as three screens of alarm. Pinned and indexed like the rest, because a named
-// magenta is the reader's magenta and could land on any of the values the tests
-// below hold it apart from.
+// The model's own words, and nothing else: what the operator typed keeps the
+// terminal's default foreground, and the work lines and notes around the answer
+// are warlock's voice in `SYSTEM_COLOUR`. A mauve because it belongs to none of
+// the three states and is not the cyan those two share; muted so a long
+// exchange reads as body text rather than as three screens of alarm. Pinned and
+// indexed like the rest, because a named magenta is the reader's magenta and
+// could land on any of the values the tests below hold it apart from.
 pub(crate) const CONVERSATION_COLOUR: Color = Color::Indexed(139);
 
 #[cfg(test)]
@@ -56,7 +68,7 @@ mod tests {
     use ratatui::style::Color;
     use warlock_engine::NodeState;
 
-    use super::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
+    use super::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 
     #[test]
     fn unpacted_is_gray() {
@@ -137,6 +149,33 @@ mod tests {
         assert_ne!(
             CONVERSATION_COLOUR, GUIDE_COLOUR,
             "the conversation card shares the indent guides' colour"
+        );
+    }
+
+    #[test]
+    fn the_system_colour_is_the_focus_colour() {
+        assert_eq!(
+            SYSTEM_COLOUR, FOCUS_COLOUR,
+            "warlock's own voice and the focused border are one colour on purpose",
+        );
+    }
+
+    #[test]
+    fn the_system_colour_is_no_states_colour() {
+        for state in NodeState::ALL {
+            assert_ne!(
+                SYSTEM_COLOUR,
+                colour_for(state),
+                "warlock's own voice shares {state:?}'s colour"
+            );
+        }
+    }
+
+    #[test]
+    fn the_system_colour_is_not_the_model_s_own_words() {
+        assert_ne!(
+            SYSTEM_COLOUR, CONVERSATION_COLOUR,
+            "warlock talking about its work is drawn as the model talking",
         );
     }
 

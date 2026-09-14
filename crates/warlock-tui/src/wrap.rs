@@ -60,7 +60,7 @@ pub(crate) fn shape(line: &Line) -> Shape {
             text: text.clone(),
             heading: false,
         },
-        Line::Wrapped { text, heading } => Shape {
+        Line::Wrapped { text, heading, .. } => Shape {
             prefix: String::new(),
             text: text.clone(),
             heading: *heading,
@@ -82,9 +82,11 @@ pub(crate) fn rows(line: &Line, width: usize) -> Vec<Line> {
     let mut pieces = pieces.into_iter();
     let first = pieces.next().unwrap_or_default();
     rows.push(continued(line, &first, &shape));
+    let voice = line.voice();
     rows.extend(pieces.map(|piece| Line::Wrapped {
         text: format!("{blanks}{piece}"),
         heading: shape.heading,
+        voice,
     }));
     rows
 }
@@ -112,6 +114,7 @@ fn continued(line: &Line, first: &str, shape: &Shape) -> Line {
         Line::Directory { .. } | Line::Wrapped { .. } => Line::Wrapped {
             text: first.to_owned(),
             heading: shape.heading,
+            voice: line.voice(),
         },
     }
 }
@@ -249,6 +252,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{Line, first_character, folded, rows, shape, wrapped};
+    use crate::account::Voice;
     use crate::ui::display_width;
 
     // Narrow enough that the clock column is a visible share of it.
@@ -326,14 +330,17 @@ mod tests {
                 Line::Wrapped {
                     text: "       crates/warl".to_owned(),
                     heading: false,
+                    voice: Voice::Warlock,
                 },
                 Line::Wrapped {
                     text: "       ock-engine/".to_owned(),
                     heading: false,
+                    voice: Voice::Warlock,
                 },
                 Line::Wrapped {
                     text: "       src/pact.rs".to_owned(),
                     heading: false,
+                    voice: Voice::Warlock,
                 },
             ],
         );
@@ -357,6 +364,7 @@ mod tests {
                 Line::Wrapped {
                     text: "  engine do?".to_owned(),
                     heading: true,
+                    voice: Voice::Operator,
                 },
             ],
         );
@@ -384,10 +392,12 @@ mod tests {
                 Line::Wrapped {
                     text: "  /brief, /write".to_owned(),
                     heading: false,
+                    voice: Voice::Warlock,
                 },
                 Line::Wrapped {
                     text: "  and /chat".to_owned(),
                     heading: false,
+                    voice: Voice::Warlock,
                 },
             ],
         );
@@ -410,10 +420,12 @@ mod tests {
                 Line::Wrapped {
                     text: "crates/warlock-eng".to_owned(),
                     heading: true,
+                    voice: Voice::Warlock,
                 },
                 Line::Wrapped {
                     text: "ine/src".to_owned(),
                     heading: true,
+                    voice: Voice::Warlock,
                 },
             ],
         );

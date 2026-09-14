@@ -23,9 +23,9 @@ use warlock_engine::{NodeState, scope};
 // Renamed on the way in: `Line` here is ratatui's, the thing a row is drawn as,
 // and the account's `Line` is what a row says. Both names are right where they
 // live, and this module is the one place both are in scope.
-use crate::account::{Account, Line as Entry};
+use crate::account::{Account, Line as Entry, Voice};
 use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
-use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
+use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
 use crate::confirm::{Answer, QuitConfirm};
 use crate::panel::Mode;
@@ -578,7 +578,11 @@ fn draw_run_header(frame: &mut Frame<'_>, area: Rect, header: &RunHeader) {
     // blank one under it (see [`RUN_HEADER_HEIGHT`]): one line drawn into two
     // rows leaves the second one as the border cleared it, which is the gap.
     frame.render_widget(
-        Paragraph::new(Line::from(run_header_line(header, usize::from(area.width))).bold()),
+        Paragraph::new(
+            Line::from(run_header_line(header, usize::from(area.width)))
+                .bold()
+                .fg(SYSTEM_COLOUR),
+        ),
         area,
     );
 }
@@ -728,12 +732,12 @@ fn scrollback(below: usize) -> String {
 // that still does not fit and not the way long text is handled.
 //
 // `conversation` is which card is being drawn, and it is a parameter rather
-// than something read off the entry because the same variants mean different
+// than something read off the entry because the same variant means different
 // things on different cards: a `Text` row is the model's answer on the thread
-// and a paragraph of a file on the document, and only the first of those is
-// coloured. The colour goes on the whole row, prefix included, so the marker in
-// front of what was answered belongs to the answer rather than sitting in a
-// span of its own.
+// and a paragraph of a file on the document, and only the first of those is the
+// model speaking. The colour goes on the whole row, prefix included, so the
+// marker in front of a line belongs to whoever the line belongs to rather than
+// sitting in a span of its own.
 fn panel_row(line: &Entry, width: u16, conversation: bool) -> Line<'static> {
     let shape = shape(line);
     let row = Line::from(truncated(
@@ -741,23 +745,14 @@ fn panel_row(line: &Entry, width: u16, conversation: bool) -> Line<'static> {
         usize::from(width),
     ));
     let row = if shape.heading { row.bold() } else { row };
-    if conversation && !operators_own(line) {
-        row.fg(CONVERSATION_COLOUR)
-    } else {
-        row
+    match line.voice() {
+        Voice::Model if conversation => row.fg(CONVERSATION_COLOUR),
+        // The reader's own words keep the terminal's foreground, and so does a
+        // paragraph of a file on the document card: text being read is not the
+        // model talking about it.
+        Voice::Operator | Voice::Model => row,
+        Voice::Warlock => row.fg(SYSTEM_COLOUR),
     }
-}
-
-// The split on the conversation card is by author, not by kind of row: what the
-// reader typed, and the rows the rest of it spilled onto, keep the terminal's
-// default foreground. `Wrapped` is a continuation with no variant left to it,
-// so its `heading` flag is what says whose it was — true only for `Said` here,
-// because the other two headings are account-card rows.
-const fn operators_own(line: &Entry) -> bool {
-    matches!(
-        line,
-        Entry::Said { .. } | Entry::Wrapped { heading: true, .. }
-    )
 }
 
 fn truncated(text: &str, width: usize) -> String {
@@ -1173,7 +1168,9 @@ mod tests {
     use crate::account::{Line as Entry, Outcome};
     use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
     use crate::claude::Activity;
-    use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, colour_for};
+    use crate::colour::{
+        CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for,
+    };
     use crate::composer::Composer;
     use crate::confirm::{Answer, QuitConfirm};
     use crate::fixture;
@@ -4488,7 +4485,7 @@ mod tests {
     const SECOND_QUESTION: &str = "try it again";
 
     #[test]
-    fn everything_on_the_conversation_but_the_readers_own_words_is_the_conversations_colour() {
+    fn the_conversation_card_is_three_voices_and_draws_each_in_its_own() {
         // One whole turn, warlock's own voice after it, and a second turn that
         // ended rather than answered: every kind of row the card has, in the
         // order it files them.
@@ -4520,14 +4517,22 @@ mod tests {
             ],
         );
 
-        // The answer, both work lines, the ending the turn was closed with and
-        // warlock's note: every glyph of every one of them, clock and marker
-        // included, in the conversation's own foreground.
-        for index in [1, 2, 3, 5, 6] {
+        // The answer is the model speaking and is the only row that is: every
+        // glyph of it, marker included, in the conversation's own foreground.
+        let colours = panel_row_colours(&buffer, 2);
+        assert!(!colours.is_empty(), "the answer was drawn blank");
+        for (column, fg) in colours.into_iter().enumerate() {
+            assert_eq!(fg, CONVERSATION_COLOUR, "at ({column}, 2)");
+        }
+
+        // Both work lines, warlock's note and the ending a turn was closed with
+        // are warlock accounting for its own work, not the model answering, so
+        // they are drawn in the voice the focused border wears.
+        for index in [1, 3, 5, 6] {
             let colours = panel_row_colours(&buffer, index);
             assert!(!colours.is_empty(), "row {index} was drawn blank");
             for (column, fg) in colours.into_iter().enumerate() {
-                assert_eq!(fg, CONVERSATION_COLOUR, "at ({column}, {index})");
+                assert_eq!(fg, SYSTEM_COLOUR, "at ({column}, {index})");
             }
         }
         // And the two rows left out are the two the reader typed, which keep the
@@ -4640,6 +4645,40 @@ mod tests {
                         "the {card} card is coloured at ({x}, {y})"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn the_account_card_is_warlock_accounting_for_itself_and_is_drawn_that_way() {
+        // Every row this card has is warlock's own voice: the directory it is
+        // working, and the work lines under it. There is no second author here
+        // the way there is on the conversation, so the whole card is one colour.
+        let base = Instant::now();
+        let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
+        let account = app.panel_mut().account_mut().expect("a pact has started");
+        account.open_section(SAME_WORDS, base);
+        account.record(&Activity::Thinking, at(base, 1));
+        // The swap order is the conversation, the run, then the file, so two
+        // steps from the file reach the account — the same walk the test below
+        // makes.
+        app.swap_card();
+        app.swap_card();
+
+        let buffer = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+        assert_eq!(
+            panel_rows(&buffer)[..2],
+            [
+                SAME_WORDS.to_owned(),
+                format!("{PANEL_INDENT}0:09 thinking"),
+            ],
+        );
+
+        for index in [0, 1] {
+            let colours = panel_row_colours(&buffer, index);
+            assert!(!colours.is_empty(), "row {index} was drawn blank");
+            for (column, fg) in colours.into_iter().enumerate() {
+                assert_eq!(fg, SYSTEM_COLOUR, "at ({column}, {index})");
             }
         }
     }
