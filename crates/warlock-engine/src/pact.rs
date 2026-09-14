@@ -808,7 +808,8 @@ fn pact_directory_watched(
 
         // `previous.zip(repair)` is exactly what a repair pass carries: both or
         // neither, since a repair with nothing to repair from is a first pass.
-        match document::accept(previous.as_ref().zip(repair.as_ref()), text, &expected) {
+        let carried = previous.as_ref().zip(repair.as_ref());
+        match document::accept(carried, text, &expected, &described) {
             Accepted::Filled(fill) => {
                 accepted = Some(fill);
                 break;

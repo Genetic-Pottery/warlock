@@ -265,13 +265,29 @@ impl<'a> Expected<'a> {
         self.files.contains_key(target) || self.directories.contains_key(target)
     }
 
-    // A name warlock can find: a file or child directory it asked about, or a
-    // token some file it was shown actually contains. The second is the same
-    // evidence `route` verifies a lookup's symbol with, and it is containment
-    // rather than a declaration on purpose — a claim may name a lint, a
-    // manifest key or a constant that no language table declares.
-    fn knows(&self, name: &str) -> bool {
+    // A name warlock can find, asked of two witnesses because the request is
+    // not always one of them.
+    //
+    // The request is the better witness where it has the file: a token in a
+    // file's own text is the same evidence `route` verifies a lookup's symbol
+    // with, and it is containment rather than a declaration on purpose — a
+    // claim may name a lint, a manifest key or a constant that no language
+    // table declares.
+    //
+    // `Described` is warlock's own measurement of the directory, taken while
+    // the request was built and true of the directory whatever the request
+    // ended up carrying. It is what keeps this check working for a pass that
+    // was shown something other than the files: a directory too big to send
+    // whole, or a pass over assembled file lines rather than source. Without
+    // it such a pass would have every real name refused, which is the shape
+    // per-file granularity would arrive in.
+    fn knows(&self, name: &str, described: &Described) -> bool {
         self.holds(name)
+            || described.declared.contains_key(name)
+            || described
+                .declared
+                .values()
+                .any(|names| names.iter().any(|declared| declared == name))
             || self.files.values().any(|(_, shown)| match shown {
                 Shown::Text(text) => text.contains(name),
                 Shown::NotText | Shown::Unsent => false,
@@ -501,6 +517,7 @@ pub fn accept(
     carried: Option<(&Fill, &Repair)>,
     answer: &str,
     expected: &Expected<'_>,
+    described: &Described,
 ) -> Accepted {
     let parsed = match parse(answer) {
         Ok(parsed) => parsed,
@@ -513,7 +530,7 @@ pub fn accept(
     let (previous, repair) = carried.unwrap_or((&parsed, &blank));
 
     let fill = repair.apply(previous, &parsed, expected);
-    let defects = check(&fill, expected);
+    let defects = check(&fill, expected, described);
     if defects.is_empty() {
         Accepted::Filled(fill)
     } else {
@@ -743,7 +760,7 @@ fn parse_object<T: serde::de::DeserializeOwned>(answer: &str) -> Result<T, Defec
     })
 }
 
-fn check(fill: &Fill, expected: &Expected<'_>) -> Vec<Defect> {
+fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Defect> {
     let mut defects = Vec::new();
 
     line(
@@ -759,8 +776,22 @@ fn check(fill: &Fill, expected: &Expected<'_>) -> Vec<Defect> {
     let children: Vec<&str> = expected.directories.keys().copied().collect();
     keyed("directories", &fill.directories, &children, &mut defects);
 
-    stated("structure", &fill.structure, true, expected, &mut defects);
-    stated("rules", &fill.rules, false, expected, &mut defects);
+    stated(
+        "structure",
+        &fill.structure,
+        true,
+        expected,
+        described,
+        &mut defects,
+    );
+    stated(
+        "rules",
+        &fill.rules,
+        false,
+        expected,
+        described,
+        &mut defects,
+    );
 
     if fill.lookups.len() > LIST_CAP {
         defects.push(Defect::TooMany {
@@ -891,6 +922,7 @@ fn stated(
     given: &[Entry],
     must_name: bool,
     expected: &Expected<'_>,
+    described: &Described,
     defects: &mut Vec<Defect>,
 ) {
     if given.len() > LIST_CAP {
@@ -919,7 +951,7 @@ fn stated(
             let field = format!("{name}[{index}].names[{which}]");
             if named.is_empty() {
                 defects.push(Defect::Empty { field });
-            } else if !expected.knows(named) {
+            } else if !expected.knows(named, described) {
                 defects.push(Defect::UnknownTarget {
                     field,
                     open: named.to_owned(),
@@ -1300,7 +1332,7 @@ fn mended(fill: &Fill, expected: &Expected<'_>, described: &Described) -> (Fill,
     let mut mends = Vec::new();
     let mut passes = 0;
     for _ in 0..MEND_PASSES {
-        let defects = check(&fill, expected);
+        let defects = check(&fill, expected, described);
         if defects.is_empty() {
             break;
         }
@@ -1681,10 +1713,15 @@ mod tests {
 
     fn defects(fill: &Fill) -> Vec<Defect> {
         let request = request();
-        accept(None, &fill.to_json(), &Expected::of(&request))
-            .settled()
-            .err()
-            .unwrap_or_default()
+        accept(
+            None,
+            &fill.to_json(),
+            &Expected::of(&request),
+            &Described::default(),
+        )
+        .settled()
+        .err()
+        .unwrap_or_default()
     }
 
     #[test]
@@ -1713,18 +1750,28 @@ mod tests {
         let asked = request
             .clone()
             .with_prompt(instructions(&Expected::of(&request), &[]));
-        let fill = accept(None, &stub_answer(&asked), &Expected::of(&asked))
-            .settled()
-            .expect("accepted");
+        let fill = accept(
+            None,
+            &stub_answer(&asked),
+            &Expected::of(&asked),
+            &Described::default(),
+        )
+        .settled()
+        .expect("accepted");
         assert_eq!(fill.files.len(), 3);
 
         let bare = Request::new("x", "/repo/empty");
         let bare = bare
             .clone()
             .with_prompt(instructions(&Expected::of(&bare), &[]));
-        accept(None, &stub_answer(&bare), &Expected::of(&bare))
-            .settled()
-            .expect("accepted too");
+        accept(
+            None,
+            &stub_answer(&bare),
+            &Expected::of(&bare),
+            &Described::default(),
+        )
+        .settled()
+        .expect("accepted too");
 
         // Anything that is not a directory pass gets plain prose.
         assert!(!stub_answer(&request).trim_start().starts_with('{'));
@@ -1744,7 +1791,7 @@ mod tests {
             format!("```json\n{json}\n```"),
             format!("Here is the object:\n\n{json}\n\nLet me know if you need more."),
         ] {
-            accept(None, &wrapped, &expected)
+            accept(None, &wrapped, &expected, &Described::default())
                 .settled()
                 .expect("read from the outermost braces");
         }
@@ -1761,7 +1808,7 @@ mod tests {
             "[1, 2]",
             "{",
         ] {
-            let outcome = accept(None, answer, &expected);
+            let outcome = accept(None, answer, &expected, &Described::default());
             assert!(
                 matches!(outcome, Accepted::Unparsed(Defect::NotJson { .. })),
                 "{answer:?}: {outcome:?}"
@@ -1800,9 +1847,14 @@ mod tests {
         // Taken out rather than turned down: no answer could make an entry for
         // a file that is not here right, so it costs no pass and the rest of
         // the answer stands.
-        let accepted = accept(None, &fill.to_json(), &Expected::of(&request))
-            .settled()
-            .expect("the invented entry is dropped, not refused");
+        let accepted = accept(
+            None,
+            &fill.to_json(),
+            &Expected::of(&request),
+            &Described::default(),
+        )
+        .settled()
+        .expect("the invented entry is dropped, not refused");
         assert!(!accepted.files.contains_key("Cargo.lock"));
         assert_eq!(accepted.files.len(), 3);
     }
@@ -1964,6 +2016,68 @@ mod tests {
     }
 
     #[test]
+    fn a_name_the_request_cannot_vouch_for_is_taken_from_what_warlock_measured() {
+        // A file the request could not carry — too big for the budget, or a
+        // pass shown assembled lines rather than source. The request holds the
+        // name and none of the text, so the claim's symbol is unfindable there.
+        let request = Request::new("describe", "/repo/crates/engine")
+            .with_files([File::omitted("huge.rs", 9_000_000)]);
+        let expected = Expected::of(&request);
+        let mut fill = Fill::stub(&request);
+        fill.purpose = "The engine crate, in one line about what it is for.".to_owned();
+        fill.structure = vec![Entry {
+            line: "`huge.rs` hands every row through `walk_one_deep`.".to_owned(),
+            names: vec!["walk_one_deep".to_owned()],
+        }];
+
+        assert_eq!(
+            check(&fill, &expected, &Described::default()),
+            [Defect::UnknownTarget {
+                field: "structure[0].names[0]".to_owned(),
+                open: "walk_one_deep".to_owned(),
+            }],
+            "nothing witnesses the name: not the request, and nothing measured",
+        );
+
+        let measured = Described {
+            declared: [("huge.rs".to_owned(), vec!["walk_one_deep".to_owned()])]
+                .into_iter()
+                .collect(),
+        };
+        assert_eq!(
+            check(&fill, &expected, &measured),
+            [],
+            "warlock walked the directory and found the name, which is evidence \
+             whatever the request ended up carrying",
+        );
+    }
+
+    #[test]
+    fn a_name_neither_witness_has_ever_seen_is_still_refused() {
+        let request = request();
+        let expected = Expected::of(&request);
+        let measured = Described {
+            declared: [("lib.rs".to_owned(), vec!["subtree_hash".to_owned()])]
+                .into_iter()
+                .collect(),
+        };
+        let mut fill = good();
+        fill.structure = vec![Entry {
+            line: "`lib.rs` hands the tree to `load_tree` on the way past.".to_owned(),
+            names: vec!["load_tree".to_owned()],
+        }];
+
+        assert_eq!(
+            check(&fill, &expected, &measured),
+            [Defect::UnknownTarget {
+                field: "structure[0].names[0]".to_owned(),
+                open: "load_tree".to_owned(),
+            }],
+            "a second witness widens the evidence and does not retire the check",
+        );
+    }
+
+    #[test]
     fn a_structure_entry_must_name_something_and_a_rule_need_not() {
         let mut fill = good();
         fill.rules = vec![Entry::of("No nightly-only options anywhere in here.")];
@@ -1994,7 +2108,7 @@ mod tests {
             "\"structure\": [\"a line where an object was asked for\"]",
         );
 
-        let accepted = accept(None, &answer, &expected);
+        let accepted = accept(None, &answer, &expected, &Described::default());
 
         // Not `NotJson`: that is the one defect with nothing to repair from, and
         // spending a whole pass on a model's punctuation is what this avoids.
@@ -2062,10 +2176,15 @@ mod tests {
         let mut fill = Fill::stub(&parent);
         fill.purpose = "Warlock's source, in one crate.".to_owned();
         assert!(matches!(
-            accept(None, &fill.to_json(), &Expected::of(&parent))
-                .settled()
-                .expect_err("refused")
-                .as_slice(),
+            accept(
+                None,
+                &fill.to_json(),
+                &Expected::of(&parent),
+                &Described::default()
+            )
+            .settled()
+            .expect_err("refused")
+            .as_slice(),
             [Defect::ToolNamed { .. }]
         ));
 
@@ -2074,9 +2193,14 @@ mod tests {
             .with_files([File::present("lib.rs", *b"//! Core engine for warlock.\n")]);
         let mut fill = Fill::stub(&own);
         fill.purpose = "Warlock's engine crate, in one line.".to_owned();
-        accept(None, &fill.to_json(), &Expected::of(&own))
-            .settled()
-            .expect("accepted");
+        accept(
+            None,
+            &fill.to_json(),
+            &Expected::of(&own),
+            &Described::default(),
+        )
+        .settled()
+        .expect("accepted");
     }
 
     #[test]
@@ -2296,7 +2420,7 @@ mod tests {
         );
         assert_eq!(mended.rules, previous.rules);
         assert_eq!(
-            accept(None, &mended.to_json(), &expected),
+            accept(None, &mended.to_json(), &expected, &Described::default()),
             Accepted::Filled(mended.clone())
         );
     }
@@ -2557,7 +2681,7 @@ mod tests {
             .collect(),
             ..Fill::default()
         };
-        assert_eq!(check(&fill, &expected), []);
+        assert_eq!(check(&fill, &expected, &Described::default()), []);
 
         // Where the files use the word the rule has stood down, and the facts
         // go in whole.
@@ -2603,7 +2727,7 @@ mod tests {
         let expected = Expected::of(&request);
         let (repaired, mends) = mend(fill, &expected, &declared());
         assert_eq!(
-            check(&repaired, &expected),
+            check(&repaired, &expected, &Described::default()),
             [],
             "a mended fill is not itself defective: {mends:?}"
         );
@@ -2885,7 +3009,7 @@ mod tests {
         fill.files
             .insert("lib.rs".to_owned(), format!("warlock{}", "x".repeat(400)));
         let (repaired, mends, passes) = mended(&fill, &expected, &declared());
-        assert_eq!(check(&repaired, &expected), []);
+        assert_eq!(check(&repaired, &expected, &Described::default()), []);
         assert_eq!(
             mends.iter().map(|mend| mend.done).collect::<Vec<_>>(),
             [Mended::Dropped, Mended::Supplied],
@@ -2916,7 +3040,7 @@ mod tests {
             })
             .collect();
         let (repaired, _, passes) = mended(&fill, &expected, &declared());
-        assert_eq!(check(&repaired, &expected), []);
+        assert_eq!(check(&repaired, &expected, &Described::default()), []);
         assert!(passes <= MEND_PASSES, "{passes}");
     }
 
@@ -3028,13 +3152,13 @@ mod tests {
                     applied.push(name);
                 }
             }
-            let defects = check(&fill, &expected);
+            let defects = check(&fill, &expected, &Described::default());
             for defect in &defects {
                 covered.insert(variant(defect));
             }
             let (repaired, mends, passes) = mended(&fill, &expected, &described);
             assert_eq!(
-                check(&repaired, &expected),
+                check(&repaired, &expected, &Described::default()),
                 [],
                 "{applied:?} left {mends:?} and still a defect"
             );
