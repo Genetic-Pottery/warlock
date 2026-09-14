@@ -79,6 +79,11 @@ const BAR_GAP: &str = " ";
 
 const BAR_MIN_WIDTH: usize = 4;
 
+/// Columns kept for the percentage beside the bar, which is `{:>3}%` — so the
+/// bar is the same width at 7% as at 100% instead of shrinking by a column
+/// twice on the way up.
+const PERCENT_WIDTH: usize = 4;
+
 const HEADER_GAP: &str = " — ";
 
 pub(crate) const PANEL_INDENT: &str = "  ";
@@ -598,12 +603,21 @@ fn run_header_line(header: &RunHeader, width: usize) -> String {
 
     let room = width
         .saturating_sub(display_width(&words))
-        .saturating_sub(display_width(BAR_GAP));
+        .saturating_sub(display_width(BAR_GAP) * 2)
+        .saturating_sub(PERCENT_WIDTH);
     if room < BAR_MIN_WIDTH {
         return truncated(&words, width);
     }
 
-    truncated(&format!("{words}{BAR_GAP}{}", bar(header, room)), width)
+    let (done, total) = fraction(header);
+    truncated(
+        &format!(
+            "{words}{BAR_GAP}{}{BAR_GAP}{:>3}%",
+            bar(done, total, room),
+            share(done, total, 100),
+        ),
+        width,
+    )
 }
 
 const fn run_word(run: Run) -> &'static str {
@@ -613,17 +627,49 @@ const fn run_word(run: Run) -> &'static str {
     }
 }
 
-fn bar(header: &RunHeader, columns: usize) -> String {
+/// How far through the run the bar and the percentage both are, in whatever
+/// unit is the finest the run has reported.
+///
+/// Directories while a directory is all the engine has said, and files once it
+/// has: a run of five directories working the second of them, four files in of
+/// eight, is `1 * 8 + 4` of `5 * 8`. Scaling the whole run by *this*
+/// directory's file count is deliberate and is why the denominator moves — the
+/// alternative is knowing every directory's file count before the run starts,
+/// which costs a walk of the whole subtree to answer a question about a
+/// progress bar. What the reader gets instead is a bar that advances inside a
+/// directory and is exact at every directory boundary, which is the property
+/// that matters: it never goes backwards past one.
+///
+/// Saturating rather than checked because the products are small — a run is
+/// directories times files, both of them counts of things on a disk — and a
+/// saturated total still divides.
+fn fraction(header: &RunHeader) -> (usize, usize) {
     // What the run has finished, not what it has started: see
-    // [`RunHeader::completed`]. Both guards feed the subtraction below, which
-    // would panic without them: a run counted at zero nodes has nothing to
-    // divide by, and the count is a caller's to report, past `total` included.
-    let filled = header
-        .completed()
-        .saturating_mul(columns)
-        .checked_div(header.total())
+    // [`RunHeader::completed`].
+    match header.files() {
+        Some((position, total)) if total > 0 => (
+            header
+                .completed()
+                .saturating_mul(total)
+                .saturating_add(position),
+            header.total().saturating_mul(total),
+        ),
+        _ => (header.completed(), header.total()),
+    }
+}
+
+/// `done / total` of `whole`, floored, and never past `whole`. The guard is the
+/// division: a run counted at zero nodes has nothing to divide by, and the
+/// count is a caller's to report, past `total` included.
+fn share(done: usize, total: usize, whole: usize) -> usize {
+    done.saturating_mul(whole)
+        .checked_div(total)
         .unwrap_or(0)
-        .min(columns);
+        .min(whole)
+}
+
+fn bar(done: usize, total: usize, columns: usize) -> String {
+    let filled = share(done, total, columns);
 
     format!(
         "{}{}",
@@ -1157,13 +1203,13 @@ mod tests {
         GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS,
         LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOVE_KEYS, NO_MARKER, NOTE_MARKER,
         PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT, PATH_HEADING, PATH_RULES,
-        QUIT_KEY, REFRESHING_RUN, ROW_KEY, RUN_HEADER_HEIGHT, SAID_MARKER, SCOPE_CURSOR,
-        SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS,
+        PERCENT_WIDTH, QUIT_KEY, REFRESHING_RUN, ROW_KEY, RUN_HEADER_HEIGHT, SAID_MARKER,
+        SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS,
         SCROLLBACK_ARROW, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, areas,
         centred, composer_height, composer_on_screen, confirm_area, confirm_size, display_width,
         draw, footer_text_area, guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line,
-        pane_inner, panel_height, panel_row, panel_width, run_header_height, scope_size,
-        tree_height, tree_rows_area, tree_width, truncated,
+        pane_inner, panel_height, panel_row, panel_width, run_header_height, run_header_line,
+        scope_size, tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::COMPOSER_MAX_ROWS;
     use crate::account::{Line as Entry, Outcome};
@@ -5278,6 +5324,115 @@ mod tests {
         // header, and there is no frame in which it is full.
         assert_eq!(filled, (total - 1) * columns / total);
         assert!(filled < columns);
+    }
+
+    #[test]
+    fn the_bar_fills_by_the_file_and_is_exact_where_a_directory_ends() {
+        // The whole point of reporting files: a directory of eighteen is no
+        // longer one jump of the bar with several minutes of nothing either
+        // side of it.
+        let base = Instant::now();
+        let (total, files) = (4, 8);
+        let mut app = running_app(base, WIDTH, HEIGHT, Run::Pact, 2, total);
+        fill_account(&mut app, base, usize::from(HEIGHT) * 2);
+
+        let columns = {
+            let row = run_header_row(&app, WIDTH, HEIGHT, at(base, 99));
+            row.matches(BAR_FILLED).count() + row.matches(BAR_EMPTY).count()
+        };
+
+        // Inside the second directory of four: the bar starts where the first
+        // directory left it and walks to where the second one ends, a file at
+        // a time and never backwards.
+        let mut drawn = 0;
+        for file in 1..=files {
+            app.set_files_in_flight(file, files);
+            let row = run_header_row(&app, WIDTH, HEIGHT, at(base, 99));
+            let now = row.matches(BAR_FILLED).count();
+
+            assert!(now >= drawn, "the bar fell back at file {file}/{files}");
+            assert_eq!(
+                now,
+                (columns * (files + file)) / (total * files),
+                "at file {file}/{files} of directory 2/{total}"
+            );
+            drawn = now;
+        }
+
+        // And the last file of the directory leaves the bar exactly where the
+        // next directory's `starting` would put it, so nothing jumps when one
+        // hands over to the other.
+        app.set_run_in_flight(Run::Pact, RUNNING_ON, 3, total);
+        assert_eq!(
+            run_header_row(&app, WIDTH, HEIGHT, at(base, 99))
+                .matches(BAR_FILLED)
+                .count(),
+            drawn,
+            "the bar moved at the boundary the fraction was built to line up"
+        );
+    }
+
+    #[test]
+    fn a_directory_that_pays_for_no_file_leaves_the_bar_counting_directories() {
+        // A refresh where every line came off the page unchanged reports no
+        // file at all. There is nothing finer to count by, so the bar is what
+        // it always was rather than stuck at zero.
+        let base = Instant::now();
+        let mut app = running_app(base, WIDTH, HEIGHT, Run::Pact, 3, 4);
+        fill_account(&mut app, base, usize::from(HEIGHT) * 2);
+
+        let row = run_header_row(&app, WIDTH, HEIGHT, at(base, 99));
+        let columns = row.matches(BAR_FILLED).count() + row.matches(BAR_EMPTY).count();
+        assert_eq!(row.matches(BAR_FILLED).count(), columns * 2 / 4);
+        assert!(row.ends_with(" 50%"), "{row:?}");
+    }
+
+    #[test]
+    fn the_percentage_beside_the_bar_is_the_same_fraction_the_bar_is() {
+        // Two readings of one number. The bar is columns and rounds hard at a
+        // narrow width; the percentage is what a reader quotes.
+        let base = Instant::now();
+        let total = 5;
+        let mut app = running_app(base, WIDTH, HEIGHT, Run::Pact, 1, total);
+        fill_account(&mut app, base, usize::from(HEIGHT) * 2);
+
+        // Nothing finished, and the run is not over: a bar at either end is a
+        // claim, so both ends have to be reachable and neither by accident.
+        assert!(
+            run_header_row(&app, WIDTH, HEIGHT, at(base, 99)).ends_with("  0%"),
+            "a run that has finished nothing reads as nothing"
+        );
+
+        for (position, file, files, percent) in
+            [(1, 4, 8, 10), (2, 0, 0, 20), (3, 2, 4, 50), (5, 7, 8, 97)]
+        {
+            app.set_run_in_flight(Run::Pact, RUNNING_ON, position, total);
+            if files > 0 {
+                app.set_files_in_flight(file, files);
+            }
+            let row = run_header_row(&app, WIDTH, HEIGHT, at(base, 99));
+            assert!(
+                row.ends_with(&format!("{percent:>3}%")),
+                "at {position}/{total} and file {file}/{files}: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrow_header_drops_the_bar_and_the_percentage_together() {
+        // Half a bar with no number beside it, or a number with two columns of
+        // bar, would both read as a rendering fault. The words are what the
+        // line is for, so they are what survives.
+        let base = Instant::now();
+        let app = running_app(base, WIDTH, HEIGHT, Run::Pact, 2, 5);
+        let header = app.run_header().expect("a run in flight has a header");
+
+        let words = format!("{PACTING_RUN} {RUNNING_LABEL} (1/5)");
+        let full = run_header_line(&header, words.len() + 1 + BAR_MIN_WIDTH + 1 + PERCENT_WIDTH);
+        assert!(full.contains(BAR_EMPTY) && full.ends_with('%'), "{full:?}");
+
+        let cramped = run_header_line(&header, words.len() + BAR_MIN_WIDTH + PERCENT_WIDTH);
+        assert_eq!(cramped, words, "{cramped:?}");
     }
 
     #[test]

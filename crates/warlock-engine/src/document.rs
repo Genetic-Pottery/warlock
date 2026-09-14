@@ -57,8 +57,6 @@ pub struct Fill {
     #[serde(default)]
     pub structure: Vec<Entry>,
     #[serde(default)]
-    pub rules: Vec<Entry>,
-    #[serde(default)]
     pub lookups: Vec<Lookup>,
 }
 
@@ -128,9 +126,78 @@ pub struct Lookup {
     pub symbol: Option<String>,
 }
 
+/// What warlock measured of a directory itself, as against what it sent.
+///
+/// [`Expected::knows`] and [`route`] check a claim's names against the request
+/// first and against this second. That used to be a convenience; since the
+/// per-file road it is the whole of the evidence, because a synthesis request
+/// carries names and sizes and no text at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Described {
     pub declared: BTreeMap<String, Vec<String>>,
+    /// Every identifier written in each file, whether or not it is declared
+    /// there.
+    ///
+    /// `declared` is a prefix table's reading of a file and will never cover
+    /// every language: stripping `public` off a Java method leaves `long
+    /// total()`, which opens with a type rather than a keyword and matches no
+    /// row, so `Invoice.java` measures as declaring only `Invoice`. Adding rows
+    /// does not fix the shape of that, and the cost of the gap is a real claim
+    /// refused and dropped out of the document.
+    ///
+    /// So this is the witness the per-file road took away, put back without
+    /// putting the text back: `knows` used to accept a name that any sent
+    /// file's text contained. Kept per file because [`route`] asks about one
+    /// named file and not about the directory.
+    pub tokens: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Described {
+    /// Whether `path` writes `name` — every identifier in `name`, that is, so
+    /// that a qualified name like `Pipeline.Stage` is met by a file writing
+    /// both halves. Containment is what the old witness did, and cutting the
+    /// name into identifiers is what keeps this stricter than it was: a file
+    /// writing `AuditApplyer` no longer witnesses a claim about `Apply`.
+    #[must_use]
+    pub fn writes(&self, path: &str, name: &str) -> bool {
+        self.tokens
+            .get(path)
+            .is_some_and(|tokens| written(name, tokens))
+    }
+
+    /// The same question asked of the whole directory, for a claim that names
+    /// something without saying which file it is in.
+    #[must_use]
+    pub fn written_anywhere(&self, name: &str) -> bool {
+        self.tokens.values().any(|tokens| written(name, tokens))
+    }
+
+    /// Whether any file here writes the tool's own name, which is what stands
+    /// the [`Defect::ToolNamed`] guard down.
+    #[must_use]
+    pub fn mentions_tool(&self) -> bool {
+        self.tokens
+            .values()
+            .any(|tokens| tokens.iter().any(|token| names_tool(token)))
+    }
+}
+
+fn written(name: &str, tokens: &BTreeSet<String>) -> bool {
+    let mut parts = identifiers(name).peekable();
+    parts.peek().is_some() && parts.all(|part| tokens.contains(part))
+}
+
+/// The identifiers in a piece of text, which is what both a file's tokens and a
+/// claim's name are cut into so that the two can be compared. Deliberately
+/// crude: anything that is not a letter, a digit or an underscore separates,
+/// and a run that does not open like an identifier is dropped.
+pub fn identifiers(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|word| {
+            word.chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
+        })
 }
 
 impl Fill {
@@ -164,7 +231,6 @@ impl Fill {
                 })
                 .collect(),
             structure: Vec::new(),
-            rules: Vec::new(),
             lookups: Vec::new(),
         }
     }
@@ -251,59 +317,109 @@ impl<'a> Expected<'a> {
             .map(|(path, _)| *path)
     }
 
-    fn checkable(&self, target: &str) -> Option<&'a str> {
-        if let Some((_, shown)) = self.files.get(target) {
-            return match shown {
-                Shown::Text(text) => Some(text),
-                Shown::NotText | Shown::Unsent => None,
-            };
+    fn holds(&self, target: &str) -> bool {
+        self.files.contains_key(target) || self.directories.contains_key(target)
+    }
+}
+
+/// The two witnesses to a directory, which are only ever asked together.
+///
+/// [`Expected`] is built from a request and can answer nothing but what the
+/// request carried. [`Described`] is warlock's own reading of the directory and
+/// answers what is true of it. Those were the same thing while a request
+/// carried every file's text; a synthesis request carries names and sizes, and
+/// six separate bugs came of asking the first where the second was meant —
+/// every one of them silent, because a witness that has lost its evidence
+/// answers "no" rather than failing.
+///
+/// So every witness-shaped question lives here and none on `Expected`, which
+/// keeps only what is honestly about the request: `holds`, `asked`, the files
+/// and the children. A new check that forgets the second witness does not
+/// compile, rather than passing its tests and thinning every document.
+/// `the_road_without_the_text_checks_no_more_weakly_than_the_road_with_it` is
+/// the same invariant asserted from the outside.
+#[derive(Debug, Clone, Copy)]
+pub struct Evidence<'a> {
+    expected: &'a Expected<'a>,
+    described: &'a Described,
+}
+
+impl<'a> Evidence<'a> {
+    #[must_use]
+    pub const fn new(expected: &'a Expected<'a>, described: &'a Described) -> Self {
+        Self {
+            expected,
+            described,
         }
-        self.directories.get(target).copied()
     }
 
+    #[must_use]
+    pub const fn expected(&self) -> &'a Expected<'a> {
+        self.expected
+    }
+
+    // A name warlock can find, asked of both witnesses because the request is
+    // not always one of them.
+    //
+    // The request is the better witness where it has the file: containment
+    // rather than a declaration on purpose — a claim may name a lint, a
+    // manifest key or a constant that no language table declares.
+    //
+    // `Described` is warlock's own measurement, taken while the request was
+    // built and true of the directory whatever the request ended up carrying.
+    // It is what keeps this working for a pass shown something other than the
+    // files: a directory too big to send whole, or one shown assembled lines
+    // rather than source. Without it such a pass has every real name refused.
+    fn knows(&self, name: &str) -> bool {
+        self.expected.holds(name)
+            || self.described.declared.contains_key(name)
+            || self
+                .described
+                .declared
+                .values()
+                .any(|names| names.iter().any(|declared| declared == name))
+            || self.described.written_anywhere(name)
+            || self.expected.files.values().any(|(_, shown)| match shown {
+                Shown::Text(text) => text.contains(name),
+                Shown::NotText | Shown::Unsent => false,
+            })
+    }
+
+    // A symbol in the one file a lookup sends the reader to, which is why this
+    // asks about that file and not the directory: sending someone to the wrong
+    // file is a wrong answer, not an imprecise one.
+    fn verifies(&self, open: &str, symbol: &str) -> bool {
+        let sent = match self.expected.files.get(open) {
+            Some((_, Shown::Text(text))) => Some(*text),
+            Some(_) => None,
+            None => self.expected.directories.get(open).copied(),
+        };
+        sent.is_some_and(|text| text.contains(symbol))
+            || self
+                .described
+                .declared
+                .get(open)
+                .is_some_and(|names| names.iter().any(|name| name == symbol))
+            || self.described.writes(open, symbol)
+    }
+
+    // Whether the directory itself uses the tool's name, which is what stands
+    // the [`Defect::ToolNamed`] guard down. A leaf directory sends no text and
+    // has no child document, so the request half answers `false` for every one
+    // of them — which, in warlock's own repository, refused every true claim
+    // about warlock until the second witness was asked here.
     fn mentions_tool(&self) -> bool {
-        let in_files = self.files.values().any(|(_, shown)| match shown {
+        let in_files = self.expected.files.values().any(|(_, shown)| match shown {
             Shown::Text(text) => names_tool(text),
             Shown::NotText | Shown::Unsent => false,
         });
         in_files
             || self
+                .expected
                 .directories
                 .values()
                 .any(|text| names_tool(text.strip_prefix(STAMP).unwrap_or(text)))
-    }
-
-    fn holds(&self, target: &str) -> bool {
-        self.files.contains_key(target) || self.directories.contains_key(target)
-    }
-
-    // A name warlock can find, asked of two witnesses because the request is
-    // not always one of them.
-    //
-    // The request is the better witness where it has the file: a token in a
-    // file's own text is the same evidence `route` verifies a lookup's symbol
-    // with, and it is containment rather than a declaration on purpose — a
-    // claim may name a lint, a manifest key or a constant that no language
-    // table declares.
-    //
-    // `Described` is warlock's own measurement of the directory, taken while
-    // the request was built and true of the directory whatever the request
-    // ended up carrying. It is what keeps this check working for a pass that
-    // was shown something other than the files: a directory too big to send
-    // whole, or a pass over assembled file lines rather than source. Without
-    // it such a pass would have every real name refused, which is the shape
-    // per-file granularity would arrive in.
-    fn knows(&self, name: &str, described: &Described) -> bool {
-        self.holds(name)
-            || described.declared.contains_key(name)
-            || described
-                .declared
-                .values()
-                .any(|names| names.iter().any(|declared| declared == name))
-            || self.files.values().any(|(_, shown)| match shown {
-                Shown::Text(text) => text.contains(name),
-                Shown::NotText | Shown::Unsent => false,
-            })
+            || self.described.mentions_tool()
     }
 }
 
@@ -320,6 +436,22 @@ fn shown(file: &File) -> Shown<'_> {
         Some(Err(_)) => Shown::NotText,
         None => Shown::Unsent,
     }
+}
+
+/// Which of the two name rules a [`Defect::UnknownTarget`] came from.
+///
+/// They share a variant because the repair road treats them the same way — the
+/// entry is dropped, there being nothing factual to put in its place — and they
+/// differ in the sentence a pass is shown, which is the thing a retry has to
+/// act on. A claim's `names` may point at anything the directory demonstrably
+/// holds, a declared symbol included; a lookup's `open` is a file the reader is
+/// being sent to open, and a symbol is not one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// `lookups[i].open`: checked by `Expected::holds`.
+    Opened,
+    /// `structure[i].names[j]`: checked by `Expected::knows`.
+    Named,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,6 +487,7 @@ pub enum Defect {
     UnknownTarget {
         field: String,
         open: String,
+        target: Target,
     },
     ToolNamed {
         field: String,
@@ -392,9 +525,22 @@ impl fmt::Display for Defect {
                 "{field} names warlock, which is the tool writing this document and not \
                  something the files mention"
             ),
-            Self::UnknownTarget { field, open } => write!(
+            Self::UnknownTarget {
+                field,
+                open,
+                target: Target::Opened,
+            } => write!(
                 f,
                 "{field} opens `{open}`, which is not a file or subdirectory here"
+            ),
+            Self::UnknownTarget {
+                field,
+                open,
+                target: Target::Named,
+            } => write!(
+                f,
+                "{field} names `{open}`, which is not a file, a subdirectory, or a name \
+                 declared in one of them"
             ),
             Self::UnverifiedSymbol {
                 field,
@@ -441,12 +587,6 @@ shown show. Each entry is {\"line\": ..., \"names\": [...]}: \"line\" is the fac
 in prose, and \"names\" lists every file, directory, type, function or constant \
 the line refers to, spelt as the files spell it. A structure entry names at \
 least one. An empty list is fine.
-
-\"rules\": constraints this directory's own files state as rules, one per \
-entry: an invariant a comment asserts, a check the code makes, a setting a \
-manifest pins. Not something inferred, and nothing taken from a subdirectory's \
-document. The same {\"line\": ..., \"names\": [...]} shape, and a rule that \
-refers to nothing leaves \"names\" empty. An empty list is fine.
 
 \"lookups\": routes, each {\"for\": ..., \"open\": ..., \"symbol\": ...}. \"for\" \
 is a question or topic a reader might arrive with, in plain words. \"open\" is \
@@ -501,7 +641,6 @@ pub fn skeleton(expected: &Expected<'_>) -> String {
             .map(|name| ((*name).to_owned(), String::new()))
             .collect(),
         structure: Vec::new(),
-        rules: Vec::new(),
         lookups: Vec::new(),
     };
     blank.to_json()
@@ -528,8 +667,8 @@ impl Accepted {
 // one file in it, written from the lines and not from the source.
 //
 // Per-file granularity has no pass that reads the whole directory, so nothing
-// is left to write `purpose`, `## Structure`, `## Rules` and `## Where to look`
-// from except the lines already written. What makes that safe to check rather
+// is left to write `purpose`, `## Structure` and `## Where to look` from except
+// the lines already written. What makes that safe to check rather
 // than merely cheap is the second witness: `check` asks `Described` for a name
 // the request cannot vouch for, and a synthesis request carries no file text at
 // all.
@@ -557,10 +696,6 @@ what, in what order, which way a dependency runs. Only what the lines you were \
 shown show. Each entry is {\"line\": ..., \"names\": [...]}, where \"names\" \
 lists every file, type, function or constant the line refers to, spelt as the \
 lines spell it. A structure entry names at least one. An empty list is fine.
-
-\"rules\": constraints the files state as rules, one per entry, in the same \
-{\"line\": ..., \"names\": [...]} shape. A rule that refers to nothing leaves \
-\"names\" empty. Not something inferred. An empty list is fine.
 
 \"directories\": one line per key. What is under it and the kind of question \\
 that should send a reader there. Write it from the subdirectory's own \\
@@ -609,11 +744,27 @@ pub fn synthesis_instructions(
             document.trim()
         );
     }
-    text.push_str(
-        "\n\nReturn exactly this object with every empty string filled in and the lists \
-         populated, as JSON, with no code fence and nothing before or after it:\n\n\
-         {\"purpose\": \"\", \"directories\": {}, \"structure\": [], \"rules\": [], \
-         \"lookups\": []}",
+    // The children by name, so the pass fills a key in rather than inventing
+    // one. An empty `{}` here left the spelling to be guessed from the prose
+    // above, which writes a directory as `crates/` — and a key nothing asked
+    // for is a `## Directories` line lost. `files` is left out of the shape
+    // altogether rather than shown empty: this pass is not asked about them,
+    // and a slot on screen is an invitation to fill it.
+    let shape = serde_json::json!({
+        "purpose": "",
+        "directories": expected
+            .directories
+            .keys()
+            .map(|child| ((*child).to_owned(), String::new()))
+            .collect::<BTreeMap<String, String>>(),
+        "structure": [],
+        "lookups": [],
+    });
+    let _ = write!(
+        text,
+        "\n\nReturn exactly this object with every empty string filled in and the \
+         lists populated, as JSON, with no code fence and nothing before or after \
+         it:\n\n{shape}",
     );
     text
 }
@@ -630,14 +781,35 @@ pub fn accept_synthesis(
     expected: &Expected<'_>,
     described: &Described,
 ) -> Accepted {
-    let parsed = match parse(answer) {
+    let mut parsed = match parse(answer) {
         Ok(parsed) => parsed,
         Err(defect) => return Accepted::Unparsed(defect),
     };
 
     // Checked without the lines and answered with them. The pass was asked
-    // about no file, so a file entry reaching `check` would be an entry nothing
-    // asked for; each line was checked as it was accepted, by `accept_file`.
+    // about no file — a synthesis request carries names and sizes, never text,
+    // so `Expected::asked` is empty — and each line was checked as it was
+    // accepted, by `accept_file`.
+    //
+    // The children it *is* asked about are kept, under the key the request
+    // spells them with. `render` writes a child as `crates/`, and every
+    // synthesis pass is shown its children's documents, so a pass that has read
+    // one offers the trailing slash back; a child directory's key is a single
+    // path segment and never carries one, so correcting it keeps a real
+    // `## Directories` line that would otherwise be dropped on the floor.
+    //
+    // Anything still unasked for is taken out rather than faulted, the same
+    // road `Repair::apply` takes with an entry for a file the request does not
+    // hold: no re-ask could make it right, because there was no question.
+    // Leaving one in place would put a key nothing wanted in front of `keyed`,
+    // which trips its debug assertion.
+    parsed.files.clear();
+    parsed.directories = parsed
+        .directories
+        .into_iter()
+        .map(|(child, line)| (child.trim_end_matches('/').to_owned(), line))
+        .filter(|(child, _)| expected.directories.contains_key(child.as_str()))
+        .collect();
     let defects = check(&parsed, expected, described);
     let fill = Fill {
         files: lines.clone(),
@@ -669,11 +841,11 @@ pub fn accept_synthesis(
 /// let page = "\n## Files\n\n\
 ///     - `reading.rs` (40 B) — The reading half. · declares `read_one`\n\
 ///     - `table.bin` (4 B) — not text; name and size only\n\
-///     \n## Rules\n\n- Something else entirely.\n";
+///     \n## Where to look\n\n- a question → `reading.rs` `read_one`\n";
 ///
 /// let lines = lines_of(page);
 /// assert_eq!(lines.get("reading.rs").map(String::as_str), Some("The reading half."));
-/// assert_eq!(lines.len(), 2, "the rules are not a file");
+/// assert_eq!(lines.len(), 2, "only `## Files` holds file lines");
 /// ```
 #[must_use]
 pub fn lines_of(document: &str) -> BTreeMap<String, String> {
@@ -774,6 +946,7 @@ pub fn accept_file(
     answer: &str,
     path: &str,
     expected: &Expected<'_>,
+    described: &Described,
 ) -> Result<String, Vec<Defect>> {
     let field = format!("files[{path:?}]");
     let parsed: serde_json::Value = match serde_json::from_str(answer) {
@@ -790,7 +963,7 @@ pub fn accept_file(
 
     let mut defects = Vec::new();
     self::line(&field, line, ENTRY_MINIMUM, ENTRY_CHARS, &mut defects);
-    if !expected.mentions_tool() && names_tool(line) {
+    if !Evidence::new(expected, described).mentions_tool() && names_tool(line) {
         defects.push(Defect::ToolNamed { field });
     }
     if defects.is_empty() {
@@ -872,7 +1045,7 @@ impl Repair {
         let (slot, rest) = field.split_once('[').unwrap_or((field, ""));
         match slot {
             "purpose" => self.purpose = true,
-            "structure" | "rules" | "lookups" => {
+            "structure" | "lookups" => {
                 if !self.lists.iter().any(|list| list == slot) {
                     self.lists.push(slot.to_owned());
                 }
@@ -923,7 +1096,7 @@ impl Repair {
                 object.insert(name.to_owned(), serde_json::Value::Object(entries));
             }
         }
-        for name in ["structure", "rules", "lookups"] {
+        for name in ["structure", "lookups"] {
             if self.asks_list(name) {
                 object.insert(name.to_owned(), serde_json::Value::Array(Vec::new()));
             }
@@ -956,11 +1129,6 @@ impl Repair {
             } else {
                 Vec::new()
             },
-            rules: if self.asks_list("rules") {
-                previous.rules.clone()
-            } else {
-                Vec::new()
-            },
             lookups: if self.asks_list("lookups") {
                 previous.lookups.clone()
             } else {
@@ -990,9 +1158,6 @@ impl Repair {
         }
         if self.asks_list("structure") {
             fill.structure.clone_from(&patch.structure);
-        }
-        if self.asks_list("rules") {
-            fill.rules.clone_from(&patch.rules);
         }
         if self.asks_list("lookups") {
             fill.lookups.clone_from(&patch.lookups);
@@ -1077,15 +1242,6 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
     stated(
         "structure",
         &fill.structure,
-        true,
-        expected,
-        described,
-        &mut defects,
-    );
-    stated(
-        "rules",
-        &fill.rules,
-        false,
         expected,
         described,
         &mut defects,
@@ -1107,7 +1263,7 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
     // mentions warlock called it "a toy freshness ledger belonging to
     // Warlock". The instructions say the name is the tool's; this is the check
     // behind the sentence, and it stands down the moment the files use it.
-    if !expected.mentions_tool() {
+    if !Evidence::new(expected, described).mentions_tool() {
         for (field, value) in values(fill) {
             if names_tool(&value) {
                 defects.push(Defect::ToolNamed { field });
@@ -1130,13 +1286,12 @@ fn values(fill: &Fill) -> Vec<(String, String)> {
             .iter()
             .map(|(k, v)| (format!("directories[{k:?}]"), v.clone())),
     );
-    for (name, list) in [("structure", &fill.structure), ("rules", &fill.rules)] {
-        all.extend(
-            list.iter()
-                .enumerate()
-                .map(|(i, v)| (format!("{name}[{i}]"), v.line.clone())),
-        );
-    }
+    all.extend(
+        fill.structure
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (format!("structure[{i}]"), v.line.clone())),
+    );
     for (i, lookup) in fill.lookups.iter().enumerate() {
         all.push((format!("lookups[{i}].for"), lookup.topic.clone()));
     }
@@ -1201,9 +1356,9 @@ fn keyed(name: &str, given: &BTreeMap<String, String>, wanted: &[&str], defects:
 //
 // Asking the pass to backtick whatever it names, and validating the backticks,
 // leaves the check at the mercy of typography: across the six documents this
-// repository held when this was written, `## Structure` and `## Rules` carried
-// eight backticked tokens between them, so that check would have read almost
-// nothing and reported a clean section.
+// repository held when this was written, the claim sections carried eight
+// backticked tokens between them, so that check would have read almost nothing
+// and reported a clean section.
 //
 // Reading names back out of the prose instead makes an inconsistent writer the
 // authority on what gets checked, and a check that silently matches nothing is
@@ -1218,7 +1373,6 @@ fn keyed(name: &str, given: &BTreeMap<String, String>, wanted: &[&str], defects:
 fn stated(
     name: &str,
     given: &[Entry],
-    must_name: bool,
     expected: &Expected<'_>,
     described: &Described,
     defects: &mut Vec<Defect>,
@@ -1238,7 +1392,7 @@ fn stated(
             ENTRY_CHARS,
             defects,
         );
-        if must_name && entry.names.is_empty() {
+        if entry.names.is_empty() {
             defects.push(Defect::Empty {
                 field: format!("{name}[{index}].names"),
             });
@@ -1249,10 +1403,11 @@ fn stated(
             let field = format!("{name}[{index}].names[{which}]");
             if named.is_empty() {
                 defects.push(Defect::Empty { field });
-            } else if !expected.knows(named, described) {
+            } else if !Evidence::new(expected, described).knows(named) {
                 defects.push(Defect::UnknownTarget {
                     field,
                     open: named.to_owned(),
+                    target: Target::Named,
                 });
             }
         }
@@ -1284,6 +1439,7 @@ fn route(
         defects.push(Defect::UnknownTarget {
             field: format!("lookups[{index}].open"),
             open: open.to_owned(),
+            target: Target::Opened,
         });
         return;
     }
@@ -1295,18 +1451,7 @@ fn route(
         defects.push(Defect::Empty { field });
         return;
     }
-    // Two witnesses, the same as `knows`: the file's own text where the request
-    // carried it, and warlock's own measurement of the directory where it did
-    // not. A route into a file too big to send, or one named by a pass shown
-    // assembled lines rather than source, is checkable either way.
-    let verified = expected
-        .checkable(open)
-        .is_some_and(|text| text.contains(symbol))
-        || described
-            .declared
-            .get(open)
-            .is_some_and(|names| names.iter().any(|name| name == symbol));
-    if !verified {
+    if !Evidence::new(expected, described).verifies(open, symbol) {
         defects.push(Defect::UnverifiedSymbol {
             field,
             symbol: symbol.to_owned(),
@@ -1361,7 +1506,6 @@ pub fn render(name: &str, fill: &Fill, expected: &Expected<'_>, described: &Desc
     }
 
     list(&mut text, "Structure", &fill.structure);
-    list(&mut text, "Rules", &fill.rules);
 
     if !fill.lookups.is_empty() {
         text.push_str("\n## Where to look\n\n");
@@ -1441,7 +1585,7 @@ mod fallback {
     // pass it, was rejected on the two grounds above. Do not dress this line up
     // into something that sounds like it read the file.
     pub(super) fn file(path: &str, expected: &Expected<'_>, described: &Described) -> String {
-        let guarded = !expected.mentions_tool();
+        let guarded = !super::Evidence::new(expected, described).mentions_tool();
         let size = expected.files.get(path).map(|(size, _)| human(*size));
         let named = !(path.is_empty() || guarded && names_tool(path));
         let mut line = match (size, named) {
@@ -1483,8 +1627,8 @@ mod fallback {
 
     // A purpose: the directory's own name and how much is under it. What it is
     // for is exactly what a pass that did not answer never said.
-    pub(super) fn purpose(name: &str, expected: &Expected<'_>) -> String {
-        let guarded = !expected.mentions_tool();
+    pub(super) fn purpose(name: &str, expected: &Expected<'_>, described: &Described) -> String {
+        let guarded = !super::Evidence::new(expected, described).mentions_tool();
         let subject = if name.is_empty() || (guarded && names_tool(name)) {
             "This directory".to_owned()
         } else {
@@ -1501,8 +1645,8 @@ mod fallback {
     // A `directories` entry: the child's name and nothing else. Its own
     // document says what is under it, and restating that here would be a
     // second-hand claim.
-    pub(super) fn directory(child: &str, expected: &Expected<'_>) -> String {
-        let guarded = !expected.mentions_tool();
+    pub(super) fn directory(child: &str, expected: &Expected<'_>, described: &Described) -> String {
+        let guarded = !super::Evidence::new(expected, described).mentions_tool();
         let line = if child.is_empty() || (guarded && names_tool(child)) {
             "A subdirectory of this directory.".to_owned()
         } else {
@@ -1641,10 +1785,30 @@ fn mended(fill: &Fill, expected: &Expected<'_>, described: &Described) -> (Fill,
     // reason: an entry for something the request does not hold is nothing a
     // repair could make right, and `keyed`'s debug assertion forbids one
     // reaching the check at all.
-    let asked: Vec<&str> = expected.asked().collect();
-    fill.files.retain(|key, _| asked.contains(&key.as_str()));
+    fill.files.retain(|key, _| expected.holds(key));
     fill.directories
         .retain(|key, _| expected.directories.contains_key(key.as_str()));
+
+    // What is left is split by whether this pass was *asked* about it, which is
+    // not the same question as whether the request holds it. `keyed` wants
+    // exactly `Expected::asked` — the files whose text went over — and a
+    // synthesis pass is shown no text at all, so every one of its lines is a
+    // key nothing asked for.
+    //
+    // Those lines are carried around the check rather than through it. They are
+    // already settled: each was written by its own pass and checked by
+    // `accept_file` as it was accepted, and there is nothing here that could
+    // improve one. Testing them against `asked` instead of `holds` is what this
+    // line used to do, and on the synthesis road — the only road there is — it
+    // emptied `files` every time the mend was reached, so a directory whose
+    // answer needed repairing lost every line the run had paid for and rendered
+    // them all as `not read by the pass`.
+    let asked: Vec<&str> = expected.asked().collect();
+    let (checked, carried): (BTreeMap<String, String>, BTreeMap<String, String>) = fill
+        .files
+        .into_iter()
+        .partition(|(key, _)| asked.contains(&key.as_str()));
+    fill.files = checked;
 
     let mut mends = Vec::new();
     let mut passes = 0;
@@ -1656,6 +1820,8 @@ fn mended(fill: &Fill, expected: &Expected<'_>, described: &Described) -> (Fill,
         passes += 1;
         sweep(&mut fill, &defects, expected, described, &mut mends);
     }
+
+    fill.files.extend(carried);
     (fill, mends, passes)
 }
 
@@ -1730,10 +1896,9 @@ struct Plan {
     dropped_files: BTreeSet<String>,
     dropped_directories: BTreeSet<String>,
     dropped_structure: BTreeSet<usize>,
-    dropped_rules: BTreeSet<usize>,
     dropped_lookups: BTreeSet<usize>,
     // The lists to cut back to `LIST_CAP`, by the names `check` and `Slot`
-    // spell them: "structure", "rules", "lookups".
+    // spell them: "structure", "lookups".
     cut: BTreeSet<&'static str>,
 }
 
@@ -1778,10 +1943,7 @@ impl Plan {
             // A list entry has no name, size or symbols behind it, and the
             // prompt says an empty list is fine, so there is nothing to fall
             // back to and nothing lost by the gap.
-            Slot::Entry("structure", index) => {
-                (self.dropped_structure.insert(index), Mended::Dropped)
-            }
-            Slot::Entry(_, index) => (self.dropped_rules.insert(index), Mended::Dropped),
+            Slot::Entry(index) => (self.dropped_structure.insert(index), Mended::Dropped),
             Slot::Route(index) => (self.dropped_lookups.insert(index), Mended::Dropped),
             Slot::List(_) | Slot::Unknown => (false, Mended::Dropped),
         };
@@ -1807,8 +1969,7 @@ impl Plan {
             Slot::Directory(key) => {
                 !self.dropped_directories.contains(&key) && self.filled_directories.insert(key)
             }
-            Slot::Entry("structure", index) => self.dropped_structure.insert(index),
-            Slot::Entry(_, index) => self.dropped_rules.insert(index),
+            Slot::Entry(index) => self.dropped_structure.insert(index),
             Slot::Route(index) => self.dropped_lookups.insert(index),
             Slot::List(_) | Slot::Unknown => false,
         };
@@ -1836,11 +1997,8 @@ impl Plan {
             Slot::Directory(key) => {
                 self.dropped_directories.contains(&key) || self.filled_directories.contains(&key)
             }
-            Slot::Entry("structure", index) => {
+            Slot::Entry(index) => {
                 self.dropped_structure.contains(&index) || self.cut_off("structure", index)
-            }
-            Slot::Entry(_, index) => {
-                self.dropped_rules.contains(&index) || self.cut_off("rules", index)
             }
             Slot::Route(index) => {
                 self.dropped_lookups.contains(&index) || self.cut_off("lookups", index)
@@ -1857,7 +2015,7 @@ impl Plan {
 
     fn carry_out(self, fill: &mut Fill, expected: &Expected<'_>, described: &Described) {
         if self.purpose {
-            fill.purpose = fallback::purpose(&expected.name, expected);
+            fill.purpose = fallback::purpose(&expected.name, expected, described);
         }
         for key in &self.filled_files {
             fill.files
@@ -1865,7 +2023,7 @@ impl Plan {
         }
         for key in &self.filled_directories {
             fill.directories
-                .insert(key.clone(), fallback::directory(key, expected));
+                .insert(key.clone(), fallback::directory(key, expected, described));
         }
         fill.files
             .retain(|key, _| !self.dropped_files.contains(key));
@@ -1875,14 +2033,9 @@ impl Plan {
         // Dropped by the index the defects named, then cut to the cap: both
         // read the same pre-pass list, so they are applied in that order and
         // an index is never used after the list has moved under it.
-        for (name, list, dropped) in [
-            ("structure", &mut fill.structure, &self.dropped_structure),
-            ("rules", &mut fill.rules, &self.dropped_rules),
-        ] {
-            drop_indexes(list, dropped);
-            if self.cut.contains(name) {
-                list.truncate(LIST_CAP);
-            }
+        drop_indexes(&mut fill.structure, &self.dropped_structure);
+        if self.cut.contains("structure") {
+            fill.structure.truncate(LIST_CAP);
         }
         drop_indexes(&mut fill.lookups, &self.dropped_lookups);
         if self.cut.contains("lookups") {
@@ -1911,7 +2064,9 @@ enum Slot {
     File(String),
     Directory(String),
     List(&'static str),
-    Entry(&'static str, usize),
+    /// One entry of `structure`, by index. Carried a list name until `rules`
+    /// went: there is one list of entries now, and `lookups` has `Route`.
+    Entry(usize),
     Route(usize),
     Unknown,
 }
@@ -1920,7 +2075,6 @@ fn slot(field: &str) -> Slot {
     match field {
         "purpose" => return Slot::Purpose,
         "structure" => return Slot::List("structure"),
-        "rules" => return Slot::List("rules"),
         "lookups" => return Slot::List("lookups"),
         _ => {}
     }
@@ -1941,14 +2095,14 @@ fn slot(field: &str) -> Slot {
                 Slot::Directory(key)
             }
         }
-        "structure" | "rules" | "lookups" => {
+        "structure" | "lookups" => {
             let Ok(index) = inside.parse::<usize>() else {
                 return Slot::Unknown;
             };
-            match head {
-                "structure" => Slot::Entry("structure", index),
-                "rules" => Slot::Entry("rules", index),
-                _ => Slot::Route(index),
+            if head == "structure" {
+                Slot::Entry(index)
+            } else {
+                Slot::Route(index)
             }
         }
         _ => Slot::Unknown,
@@ -1963,8 +2117,7 @@ fn target<'f>(fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
         Slot::Purpose => Some(&mut fill.purpose),
         Slot::File(key) => fill.files.get_mut(&key),
         Slot::Directory(key) => fill.directories.get_mut(&key),
-        Slot::Entry("structure", index) => fill.structure.get_mut(index).map(|e| &mut e.line),
-        Slot::Entry(_, index) => fill.rules.get_mut(index).map(|e| &mut e.line),
+        Slot::Entry(index) => fill.structure.get_mut(index).map(|e| &mut e.line),
         // The topic and nothing else: `.open` and `.symbol` carry no cap or
         // line rule, so no rewrite ever names them.
         Slot::Route(index) if matches!(field.rsplit_once('.'), Some((_, "for"))) => {
@@ -1977,10 +2130,11 @@ fn target<'f>(fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ATTEMPTS, Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Entry, Expected, Fill,
-        LIST_CAP, Lookup, MEND_PASSES, Mend, Mended, PROMPT, PURPOSE_CHARS, Repair, STAMP, accept,
-        check, fallback, human, instructions, lines_of, mend, mended, names_tool, render,
-        repair_instructions, skeleton, stub_answer,
+        ATTEMPTS, Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Entry, Evidence,
+        Expected, Fill, LIST_CAP, Lookup, MEND_PASSES, Mend, Mended, PROMPT, PURPOSE_CHARS, Repair,
+        STAMP, Target, accept, accept_synthesis, check, fallback, human, instructions, lines_of,
+        mend, mended, names_tool, render, repair_instructions, skeleton, stub_answer,
+        synthesis_instructions,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -2012,7 +2166,6 @@ mod tests {
             "`lib.rs` re-exports `pact` for the crate.",
             "lib.rs",
         )];
-        fill.rules = vec![Entry::of("No `unsafe`, per the workspace lints.")];
         fill.lookups = vec![
             Lookup {
                 topic: "how a subtree is hashed".to_owned(),
@@ -2039,6 +2192,53 @@ mod tests {
         .settled()
         .err()
         .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_synthesis_answer_that_fills_files_anyway_is_taken_at_its_lines() {
+        // The model was asked for everything but the file lines, and answered
+        // with them too. They are not a defect and they are not kept: the
+        // document's `## Files` is the lines that were assembled and checked
+        // one at a time, and an entry nothing asked for has no question behind
+        // it to ask again.
+        let request = Request::new("synthesise", "/repo/crates/engine")
+            .with_files([File::omitted("lib.rs", 38)])
+            .with_child_documents([ChildDocument::new("src", "# src\n\nA document below.\n")]);
+        let lines = [(
+            "lib.rs".to_owned(),
+            "The crate root, and what it re-exports.".to_owned(),
+        )]
+        .into_iter()
+        .collect();
+
+        let answer = Fill {
+            purpose: "The engine crate: pacts, hashes and the manifest.".to_owned(),
+            directories: [(
+                "src".to_owned(),
+                "Where the hashing and the manifest live.".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            files: [(
+                "lib.rs".to_owned(),
+                "a line the synthesis pass was never asked for".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Fill::default()
+        };
+
+        let accepted = accept_synthesis(
+            &answer.to_json(),
+            &lines,
+            &Expected::of(&request),
+            &Described::default(),
+        );
+
+        let Accepted::Filled(fill) = accepted else {
+            panic!("the answer was turned down: {accepted:?}");
+        };
+        assert_eq!(fill.files, lines, "the assembled lines, not the answer's");
     }
 
     #[test]
@@ -2233,18 +2433,19 @@ mod tests {
     #[test]
     fn a_list_over_the_cap_is_a_defect_and_so_is_each_bad_entry_in_it() {
         let mut fill = good();
-        fill.rules = vec![Entry::of("a rule long enough to count"); LIST_CAP + 1];
-        fill.rules[3] = Entry::of(String::new());
+        fill.structure =
+            vec![Entry::naming("an entry long enough to count", "lib.rs"); LIST_CAP + 1];
+        fill.structure[3] = Entry::naming(String::new(), "lib.rs");
         assert_eq!(
             defects(&fill),
             [
                 Defect::TooMany {
-                    field: "rules".to_owned(),
+                    field: "structure".to_owned(),
                     count: LIST_CAP + 1,
                     cap: LIST_CAP
                 },
                 Defect::Empty {
-                    field: "rules[3]".to_owned()
+                    field: "structure[3]".to_owned()
                 }
             ]
         );
@@ -2285,7 +2486,8 @@ mod tests {
             [
                 Defect::UnknownTarget {
                     field: "lookups[0].open".to_owned(),
-                    open: "../tui/src/app.rs".to_owned()
+                    open: "../tui/src/app.rs".to_owned(),
+                    target: Target::Opened,
                 },
                 Defect::UnverifiedSymbol {
                     field: "lookups[1].symbol".to_owned(),
@@ -2314,6 +2516,7 @@ mod tests {
             declared: [("app.rs".to_owned(), vec!["draw".to_owned()])]
                 .into_iter()
                 .collect(),
+            ..Described::default()
         };
         let fill = good();
 
@@ -2359,6 +2562,7 @@ mod tests {
             [Defect::UnknownTarget {
                 field: "structure[0].names[0]".to_owned(),
                 open: "load_tree".to_owned(),
+                target: Target::Named,
             }],
             "no file in the request holds that name, so the claim is not checkable",
         );
@@ -2396,6 +2600,7 @@ mod tests {
             [Defect::UnknownTarget {
                 field: "structure[0].names[0]".to_owned(),
                 open: "walk_one_deep".to_owned(),
+                target: Target::Named,
             }],
             "nothing witnesses the name: not the request, and nothing measured",
         );
@@ -2404,6 +2609,7 @@ mod tests {
             declared: [("huge.rs".to_owned(), vec!["walk_one_deep".to_owned()])]
                 .into_iter()
                 .collect(),
+            ..Described::default()
         };
         assert_eq!(
             check(&fill, &expected, &measured),
@@ -2421,6 +2627,7 @@ mod tests {
             declared: [("lib.rs".to_owned(), vec!["subtree_hash".to_owned()])]
                 .into_iter()
                 .collect(),
+            ..Described::default()
         };
         let mut fill = good();
         fill.structure = vec![Entry {
@@ -2433,21 +2640,15 @@ mod tests {
             [Defect::UnknownTarget {
                 field: "structure[0].names[0]".to_owned(),
                 open: "load_tree".to_owned(),
+                target: Target::Named,
             }],
             "a second witness widens the evidence and does not retire the check",
         );
     }
 
     #[test]
-    fn a_structure_entry_must_name_something_and_a_rule_need_not() {
+    fn a_structure_entry_must_name_something() {
         let mut fill = good();
-        fill.rules = vec![Entry::of("No nightly-only options anywhere in here.")];
-        assert_eq!(
-            defects(&fill),
-            [],
-            "a rule that refers to nothing is still a rule",
-        );
-
         fill.structure = vec![Entry::of("The files here fit together somehow.")];
         assert_eq!(
             defects(&fill),
@@ -2585,6 +2786,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            ..Described::default()
         };
         let text = render("engine", &good(), &expected, &described);
         assert!(text.starts_with(STAMP), "{text}");
@@ -2602,8 +2804,6 @@ mod tests {
              - `src/` — a stand-in entry, filled by a test double\n\
              \n## Structure\n\n\
              - `lib.rs` re-exports `pact` for the crate.\n\
-             \n## Rules\n\n\
-             - No `unsafe`, per the workspace lints.\n\
              \n## Where to look\n\n\
              - how a subtree is hashed → `lib.rs` `subtree_hash`\n\
              - the code itself → `src`\n"
@@ -2620,13 +2820,7 @@ mod tests {
             text.strip_prefix(STAMP),
             Some("\n# empty\n\nNothing here yet, but the directory exists.\n")
         );
-        for heading in [
-            "## Files",
-            "## Directories",
-            "## Structure",
-            "## Rules",
-            "## Where",
-        ] {
+        for heading in ["## Files", "## Directories", "## Structure", "## Where"] {
             assert!(!text.contains(heading), "{text}");
         }
     }
@@ -2650,6 +2844,486 @@ mod tests {
             text.contains("- `lib.rs` (39 B) — padded, but long enough\n"),
             "{text}"
         );
+    }
+
+    fn writing(files: [(&str, &str); 2]) -> Described {
+        Described {
+            tokens: files
+                .into_iter()
+                .map(|(path, text)| {
+                    (
+                        path.to_owned(),
+                        super::identifiers(text).map(str::to_owned).collect(),
+                    )
+                })
+                .collect(),
+            ..Described::default()
+        }
+    }
+
+    #[test]
+    fn the_road_without_the_text_checks_no_more_weakly_than_the_road_with_it() {
+        // The invariant six bugs broke, in one test. Every one of them had the
+        // same shape: a question about the *directory* answered from the
+        // *request*. Before per-file a request carried every file's text, so
+        // `Expected`'s witnesses were complete and the two were the same thing.
+        // A synthesis request carries names and sizes, so each of those
+        // witnesses silently answers "nothing", and every caller that trusted
+        // one changed behaviour without a single test failing.
+        //
+        // So: the same directory, measured the same way, must reach the same
+        // verdict whether or not the text went over. A new witness-shaped
+        // question on `Expected` that forgets `Described` fails here.
+        // `subtree_hash` is declared; `Digest` and `finalize` are only
+        // *written*, which is the Java-method case — a prefix table reads no
+        // declaration for them, so only the tokens witness them. Both kinds are
+        // named below, so reverting either witness fails this test.
+        let source = "pub fn subtree_hash() -> Digest {\n    hasher.finalize()\n}\n\
+                      // Warlock grants a pact over a directory.\n";
+        let described = Described {
+            declared: [("hash.rs".to_owned(), vec!["subtree_hash".to_owned()])]
+                .into_iter()
+                .collect(),
+            tokens: [(
+                "hash.rs".to_owned(),
+                super::identifiers(source).map(str::to_owned).collect(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let with_text = Request::new("describe", "/repo/crates/warlock-engine/src")
+            .with_files([File::present("hash.rs", source.as_bytes().to_vec())]);
+        let without = Request::new("synthesise", "/repo/crates/warlock-engine/src")
+            .with_files([File::omitted("hash.rs", source.len() as u64)]);
+
+        // The file lines are the one honest difference: the road with the text
+        // is asked for them, the road without has them already. Everything
+        // below the `## Files` line is what has to agree.
+        let directory_wide = Fill {
+            purpose: "Hashing for warlock's pacts: one digest per subtree.".to_owned(),
+            structure: vec![
+                Entry::naming(
+                    "`subtree_hash` digests everything at and below a directory.",
+                    "subtree_hash",
+                ),
+                Entry::naming("The digest comes back as a `Digest`.", "Digest"),
+            ],
+            lookups: vec![Lookup {
+                topic: "how a digest is closed out".to_owned(),
+                open: "hash.rs".to_owned(),
+                symbol: Some("finalize".to_owned()),
+            }],
+            ..Fill::default()
+        };
+        let lined = Fill {
+            files: [(
+                "hash.rs".to_owned(),
+                "Digests a directory and everything below it.".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            ..directory_wide.clone()
+        };
+
+        assert_eq!(
+            check(&lined, &Expected::of(&with_text), &described),
+            [],
+            "the road with the text turned down a true claim"
+        );
+        assert_eq!(
+            check(&directory_wide, &Expected::of(&without), &described),
+            [],
+            "the road without the text is weaker: a name, a symbol, or the \
+             tool's own name went unwitnessed"
+        );
+
+        // And neither road is merely permissive: a name the directory does not
+        // hold is refused on both.
+        let invented = Fill {
+            structure: vec![Entry::naming(
+                "`load_tree` reads the repository.",
+                "load_tree",
+            )],
+            ..directory_wide
+        };
+        let refused = [Defect::UnknownTarget {
+            field: "structure[0].names[0]".to_owned(),
+            open: "load_tree".to_owned(),
+            target: Target::Named,
+        }];
+        assert_eq!(
+            check(&invented, &Expected::of(&without), &described),
+            refused
+        );
+        assert_eq!(
+            check(
+                &Fill {
+                    files: lined.files.clone(),
+                    ..invented
+                },
+                &Expected::of(&with_text),
+                &described
+            ),
+            refused,
+        );
+    }
+
+    #[test]
+    fn a_leaf_that_writes_the_tools_name_may_say_so() {
+        // Found on warlock's own repository. `Expected::mentions_tool` reads
+        // `Shown::Text`, and a synthesis request carries no text — so a leaf,
+        // having no child document either, always read as never mentioning
+        // warlock and had every honest claim about it refused. The two leaf
+        // `src` directories lost nine claims between them; their parents, which
+        // do have child documents, lost none.
+        let request = Request::new("synthesise", "/repo/crates/warlock-engine/src")
+            .with_files([File::omitted("pact.rs", 900)]);
+        let expected = Expected::of(&request);
+        assert!(
+            !Evidence::new(&expected, &Described::default()).mentions_tool(),
+            "the request alone cannot know, which is the whole problem"
+        );
+
+        let described = writing([
+            (
+                "pact.rs",
+                "// Warlock grants a pact over a directory.\npub fn pact_subtree() {}",
+            ),
+            ("hash.rs", "pub fn subtree_hash() {}"),
+        ]);
+        let fill = Fill {
+            purpose: "Pacts and refreshes a subtree, recording what warlock granted.".to_owned(),
+            ..Fill::default()
+        };
+
+        assert_eq!(
+            check(&fill, &expected, &described),
+            [],
+            "a directory whose own files write the name may use it"
+        );
+        assert_eq!(
+            check(&fill, &expected, &Described::default()),
+            [Defect::ToolNamed {
+                field: "purpose".to_owned(),
+            }],
+            "and one whose files never mention it still may not",
+        );
+    }
+
+    #[test]
+    fn a_name_a_file_writes_witnesses_a_claim_the_table_cannot_read() {
+        // The case the token witness exists for. A prefix table reads
+        // `public class Invoice` and stops: strip the visibility off a Java
+        // method and `long total()` opens with a type, which matches no row. So
+        // `declared` holds only `Invoice`, and on the per-file road — where no
+        // file's text is in the request — a true claim about `total` had no
+        // witness at all and was dropped out of the document.
+        let request = Request::new("synthesise", "/repo/services/billing")
+            .with_files([File::omitted("Invoice.java", 400)]);
+        let expected = Expected::of(&request);
+        let described = writing([
+            (
+                "Invoice.java",
+                "public class Invoice { public long total() {} }",
+            ),
+            ("Ledger.kt", "class Ledger { fun sum(): Long = 0 }"),
+        ]);
+
+        let fill = Fill {
+            purpose: "Billing types: invoices, ledgers and what they total.".to_owned(),
+            structure: vec![Entry::naming(
+                "`total` sums the lines of an invoice.",
+                "total",
+            )],
+            ..Fill::default()
+        };
+
+        assert_eq!(
+            check(&fill, &expected, &described),
+            [],
+            "a name the file plainly writes was refused"
+        );
+        assert_eq!(
+            check(&fill, &expected, &Described::default()),
+            [Defect::UnknownTarget {
+                field: "structure[0].names[0]".to_owned(),
+                open: "total".to_owned(),
+                target: Target::Named,
+            }],
+            "and without the measurement there is nothing to witness it",
+        );
+    }
+
+    #[test]
+    fn a_lookups_symbol_is_witnessed_by_the_file_it_points_at_and_no_other() {
+        // `route` asks about one named file, which is why the tokens are kept
+        // per file rather than pooled: sending a reader to `Ledger.kt` for
+        // something only `Invoice.java` writes is the wrong answer, not a
+        // slightly imprecise one.
+        let request = Request::new("synthesise", "/repo/services/billing").with_files([
+            File::omitted("Invoice.java", 400),
+            File::omitted("Ledger.kt", 200),
+        ]);
+        let expected = Expected::of(&request);
+        let described = writing([
+            (
+                "Invoice.java",
+                "public class Invoice { public long total() {} }",
+            ),
+            ("Ledger.kt", "class Ledger { fun sum(): Long = 0 }"),
+        ]);
+
+        let here = Fill {
+            purpose: "Billing types: invoices, ledgers and what they total.".to_owned(),
+            lookups: vec![Lookup {
+                topic: "how an invoice is totalled".to_owned(),
+                open: "Invoice.java".to_owned(),
+                symbol: Some("total".to_owned()),
+            }],
+            ..Fill::default()
+        };
+        assert_eq!(check(&here, &expected, &described), []);
+
+        let elsewhere = Fill {
+            lookups: vec![Lookup {
+                open: "Ledger.kt".to_owned(),
+                ..here.lookups[0].clone()
+            }],
+            ..here.clone()
+        };
+        assert_eq!(
+            check(&elsewhere, &expected, &described),
+            [Defect::UnverifiedSymbol {
+                field: "lookups[0].symbol".to_owned(),
+                symbol: "total".to_owned(),
+                open: "Ledger.kt".to_owned(),
+            }],
+            "the file that does not write it is no witness for it",
+        );
+    }
+
+    #[test]
+    fn a_name_merely_contained_in_a_longer_one_is_not_witnessed() {
+        // Stricter than the witness it replaces, on purpose. The old road
+        // accepted any name a file's text *contained*, so a file full of
+        // `AuditApplyer` witnessed a claim about `Apply` — a route to a symbol
+        // that is not there.
+        let request = Request::new("synthesise", "/repo/monolith")
+            .with_files([File::omitted("audit.go", 900)]);
+        let described = writing([
+            ("audit.go", "type AuditApplyer struct{}"),
+            ("other.go", "package monolith"),
+        ]);
+        let fill = Fill {
+            purpose: "Audit persistence wrappers, one per verb, over a shared store.".to_owned(),
+            structure: vec![Entry::naming("`Apply` stamps and saves.", "Apply")],
+            ..Fill::default()
+        };
+
+        assert_eq!(
+            check(&fill, &Expected::of(&request), &described),
+            [Defect::UnknownTarget {
+                field: "structure[0].names[0]".to_owned(),
+                open: "Apply".to_owned(),
+                target: Target::Named,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_qualified_name_is_met_by_a_file_writing_both_halves() {
+        // Elixir and the like name a module and a function together. Cutting
+        // the claim into identifiers the same way the file was cut is what lets
+        // `Pipeline.Stage` be witnessed without loosening the check back into
+        // substring containment.
+        let request = Request::new("synthesise", "/repo/pipeline")
+            .with_files([File::omitted("stage.ex", 300)]);
+        let described = writing([
+            (
+                "stage.ex",
+                "defmodule Pipeline.Stage do\n  def sum(items), do: items\nend",
+            ),
+            ("stage_test.exs", "defmodule Pipeline.StageTest do\nend"),
+        ]);
+        let fill = Fill {
+            purpose: "The pipeline stage that sums the items handed to it.".to_owned(),
+            structure: vec![Entry::naming(
+                "`Pipeline.Stage` sums the items it is given.",
+                "Pipeline.Stage",
+            )],
+            ..Fill::default()
+        };
+
+        assert_eq!(check(&fill, &Expected::of(&request), &described), []);
+    }
+
+    #[test]
+    fn a_mend_keeps_the_lines_the_run_paid_for() {
+        // The synthesis road, which is the only road: every file is in the
+        // request by name and size, none by text, so `Expected::asked` is empty
+        // and every assembled line is a key the pass was never asked about.
+        // They still have to come out the other side — they are the document's
+        // whole `## Files`, and each was settled by `accept_file` already.
+        let request = Request::new("synthesise", "/repo/crates/engine")
+            .with_files([File::omitted("lib.rs", 38), File::omitted("pact.rs", 90)])
+            .with_child_documents([ChildDocument::new("src", "# src\n\nThe code.\n")]);
+        let lines: BTreeMap<String, String> = [
+            (
+                "lib.rs".to_owned(),
+                "The crate root and what it re-exports.".to_owned(),
+            ),
+            (
+                "pact.rs".to_owned(),
+                "Granting, refreshing and un-pacting a subtree.".to_owned(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        // An answer bad enough to reach the mend: the purpose is too short, so
+        // the attempts run out and `synthesise` falls through to here.
+        let unusable = Fill {
+            purpose: "Too short.".to_owned(),
+            files: lines.clone(),
+            ..Fill::default()
+        };
+
+        let (repaired, mends) = mend(&unusable, &Expected::of(&request), &Described::default());
+
+        assert!(!mends.is_empty(), "the mend this is about did not happen");
+        assert_eq!(
+            repaired.files, lines,
+            "the mend dropped the lines the run paid for"
+        );
+    }
+
+    #[test]
+    fn a_refused_name_is_told_which_of_the_two_rules_it_broke() {
+        // One variant, two rules, and the sentence is the only part a retry can
+        // act on. A claim naming a symbol is told symbols are allowed and this
+        // is not one of them; a lookup is told to point at something openable.
+        // Telling a claim it must name "a file or subdirectory" — which is what
+        // both used to say — sends the next pass looking for the wrong thing.
+        assert_eq!(
+            Defect::UnknownTarget {
+                field: "structure[0].names[8]".to_owned(),
+                open: "areas".to_owned(),
+                target: Target::Named,
+            }
+            .to_string(),
+            "structure[0].names[8] names `areas`, which is not a file, a subdirectory, \
+             or a name declared in one of them"
+        );
+        assert_eq!(
+            Defect::UnknownTarget {
+                field: "lookups[0].open".to_owned(),
+                open: "areas".to_owned(),
+                target: Target::Opened,
+            }
+            .to_string(),
+            "lookups[0].open opens `areas`, which is not a file or subdirectory here"
+        );
+    }
+
+    #[test]
+    fn the_synthesis_is_shown_the_child_it_must_key_by_and_is_never_shown_files() {
+        // The shape the pass is told to return carries the children by name, so
+        // there is a key to fill in rather than one to invent from the prose —
+        // which spells a directory `crates/`, the way a rendered document does.
+        // And no `files` slot at all: this pass is not asked about them.
+        let request = Request::new("synthesise", "/repo")
+            .with_child_documents([ChildDocument::new("crates", "# crates\n\nThe code.\n")]);
+        let lines = [(
+            "Cargo.toml".to_owned(),
+            "The workspace manifest.".to_owned(),
+        )]
+        .into_iter()
+        .collect();
+
+        let text = synthesis_instructions("repo", &lines, &Expected::of(&request), &[]);
+
+        assert!(
+            text.ends_with(
+                "{\"purpose\":\"\",\"directories\":{\"crates\":\"\"},\
+                 \"structure\":[],\"lookups\":[]}"
+            ),
+            "the shape is last and carries the child: {text}"
+        );
+        assert!(
+            !text.contains("\"files\""),
+            "a slot nobody asked about: {text}"
+        );
+    }
+
+    #[test]
+    fn a_child_keyed_the_way_a_document_renders_it_is_corrected_and_kept() {
+        // `render` writes a child as `crates/`, and every synthesis pass is
+        // shown its children's documents — so the trailing slash comes back. It
+        // used to reach `keyed` as a key nothing asked for, which is a panic in
+        // a debug build and a dropped `## Directories` line in any build.
+        let request = Request::new("synthesise", "/repo")
+            .with_child_documents([ChildDocument::new("crates", "# crates\n\nThe code.\n")]);
+        let answer = Fill {
+            purpose: "The workspace root: two crates and the files that wire them.".to_owned(),
+            directories: [(
+                "crates/".to_owned(),
+                "Both workspace members live here.".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Fill::default()
+        };
+
+        let accepted = accept_synthesis(
+            &answer.to_json(),
+            &BTreeMap::new(),
+            &Expected::of(&request),
+            &Described::default(),
+        );
+
+        let Accepted::Filled(fill) = accepted else {
+            panic!("the answer was turned down: {accepted:?}");
+        };
+        assert_eq!(
+            fill.directories.keys().collect::<Vec<_>>(),
+            ["crates"],
+            "the slash is corrected rather than the line dropped"
+        );
+    }
+
+    #[test]
+    fn a_child_nothing_asked_about_is_dropped_and_not_faulted() {
+        let request = Request::new("synthesise", "/repo")
+            .with_child_documents([ChildDocument::new("crates", "# crates\n\nThe code.\n")]);
+        let answer = Fill {
+            purpose: "The workspace root: two crates and the files that wire them.".to_owned(),
+            directories: [
+                (
+                    "crates".to_owned(),
+                    "Both workspace members live here.".to_owned(),
+                ),
+                (
+                    "docs".to_owned(),
+                    "A directory with no document of its own.".to_owned(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..Fill::default()
+        };
+
+        let accepted = accept_synthesis(
+            &answer.to_json(),
+            &BTreeMap::new(),
+            &Expected::of(&request),
+            &Described::default(),
+        );
+
+        let Accepted::Filled(fill) = accepted else {
+            panic!("an unasked child was faulted rather than dropped: {accepted:?}");
+        };
+        assert_eq!(fill.directories.keys().collect::<Vec<_>>(), ["crates"]);
     }
 
     #[test]
@@ -2779,7 +3453,6 @@ mod tests {
             mended.lookups.is_empty(),
             "a list asked for again is replaced whole"
         );
-        assert_eq!(mended.rules, previous.rules);
         assert_eq!(
             accept(None, &mended.to_json(), &expected, &Described::default()),
             Accepted::Filled(mended.clone())
@@ -2824,7 +3497,7 @@ mod tests {
                 field: "purpose".to_owned(),
             },
             Defect::Multiline {
-                field: "rules[0]".to_owned(),
+                field: "structure[0]".to_owned(),
             },
             Defect::TooShort {
                 field: "files[\"c\"]".to_owned(),
@@ -2844,6 +3517,7 @@ mod tests {
             Defect::UnknownTarget {
                 field: "lookups[0].open".to_owned(),
                 open: "x".to_owned(),
+                target: Target::Opened,
             },
             Defect::ToolNamed {
                 field: "purpose".to_owned(),
@@ -2877,6 +3551,7 @@ mod tests {
             declared: [("a.rs".to_owned(), vec!["one".to_owned()])]
                 .into_iter()
                 .collect(),
+            ..Described::default()
         };
         assert_eq!(described.declared["a.rs"], ["one"]);
         assert_eq!(Described::default().declared, BTreeMap::new());
@@ -2896,6 +3571,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            ..Described::default()
         }
     }
 
@@ -2928,17 +3604,17 @@ mod tests {
         // The purpose is the directory's name and what is in it: five files,
         // one child. No sentence about what any of it is for.
         assert_eq!(
-            fallback::purpose("engine", &expected),
+            fallback::purpose("engine", &expected, &Described::default()),
             "`engine` holds 5 files and 1 subdirectory."
         );
         assert_eq!(
-            fallback::directory("src", &expected),
+            fallback::directory("src", &expected, &Described::default()),
             "A subdirectory named `src`."
         );
 
         let bare = Request::new("describe", "/repo/empty");
         assert_eq!(
-            fallback::purpose("empty", &Expected::of(&bare)),
+            fallback::purpose("empty", &Expected::of(&bare), &Described::default()),
             "`empty` holds no files and no subdirectories."
         );
     }
@@ -2964,8 +3640,8 @@ mod tests {
             holds_the_shape(&fallback::file(path, &expected, &described));
         }
         for name in ["engine", "a", ""] {
-            holds_the_shape(&fallback::purpose(name, &expected));
-            holds_the_shape(&fallback::directory(name, &expected));
+            holds_the_shape(&fallback::purpose(name, &expected, &Described::default()));
+            holds_the_shape(&fallback::directory(name, &expected, &Described::default()));
         }
 
         // The symbol list stops at the cap rather than being cut through a
@@ -2977,6 +3653,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            ..Described::default()
         };
         let line = fallback::file("lib.rs", &expected, &long);
         holds_the_shape(&line);
@@ -3009,7 +3686,10 @@ mod tests {
             *b"pub fn draw() {}\npub fn run() {}\n",
         )]);
         let expected = Expected::of(&request);
-        assert!(!expected.mentions_tool(), "the rule is live here");
+        assert!(
+            !Evidence::new(&expected, &Described::default()).mentions_tool(),
+            "the rule is live here"
+        );
         let described = Described {
             declared: [(
                 "warlock.rs".to_owned(),
@@ -3017,6 +3697,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            ..Described::default()
         };
 
         let line = fallback::file("warlock.rs", &expected, &described);
@@ -3024,8 +3705,8 @@ mod tests {
         assert!(line.contains("`draw`"), "the other symbols stay: {line}");
         holds_the_shape(&line);
         for named in [
-            fallback::purpose("warlock", &expected),
-            fallback::directory("warlock-tui", &expected),
+            fallback::purpose("warlock", &expected, &Described::default()),
+            fallback::directory("warlock-tui", &expected, &Described::default()),
         ] {
             assert!(!names_tool(&named), "{named}");
             holds_the_shape(&named);
@@ -3033,7 +3714,7 @@ mod tests {
 
         // And the rule the caller applies cannot fire on a fill built of them.
         let fill = Fill {
-            purpose: fallback::purpose("crates", &expected),
+            purpose: fallback::purpose("crates", &expected, &Described::default()),
             files: [(
                 "warlock.rs".to_owned(),
                 fallback::file("warlock.rs", &expected, &described),
@@ -3049,12 +3730,12 @@ mod tests {
         let own = Request::new("describe", "/repo")
             .with_files([File::present("warlock.rs", *b"//! The warlock engine.\n")]);
         let own = Expected::of(&own);
-        assert!(own.mentions_tool());
+        assert!(Evidence::new(&own, &Described::default()).mentions_tool());
         let line = fallback::file("warlock.rs", &own, &described);
         assert!(line.contains("`warlock.rs`"), "{line}");
         assert!(line.contains("`warlock_run`"), "{line}");
         assert!(
-            fallback::purpose("warlock", &own).contains("`warlock`"),
+            fallback::purpose("warlock", &own, &Described::default()).contains("`warlock`"),
             "the directory names itself too"
         );
     }
@@ -3067,8 +3748,8 @@ mod tests {
         let lines = [
             fallback::file("lib.rs", &expected, &described),
             fallback::file("logo.png", &expected, &described),
-            fallback::purpose("engine", &expected),
-            fallback::directory("src", &expected),
+            fallback::purpose("engine", &expected, &Described::default()),
+            fallback::directory("src", &expected, &Described::default()),
         ];
         // `Fill::stub` is a test double's wording; a repaired document says
         // what warlock measured, and never that.
@@ -3125,10 +3806,13 @@ mod tests {
         fill.purpose = "   ".to_owned();
         fill.directories.insert("src".to_owned(), String::new());
         let (repaired, mends) = mend_of(&fill);
-        assert_eq!(repaired.purpose, fallback::purpose("engine", &expected));
+        assert_eq!(
+            repaired.purpose,
+            fallback::purpose("engine", &expected, &Described::default())
+        );
         assert_eq!(
             repaired.directories["src"],
-            fallback::directory("src", &expected)
+            fallback::directory("src", &expected, &Described::default())
         );
         assert_eq!(
             mends,
@@ -3219,16 +3903,21 @@ mod tests {
     #[test]
     fn a_list_over_its_cap_keeps_its_first_entries() {
         let mut fill = good();
-        fill.rules = (0..LIST_CAP + 2)
-            .map(|index| Entry::of(format!("a rule long enough to count, the {index}th")))
+        fill.structure = (0..LIST_CAP + 2)
+            .map(|index| {
+                Entry::naming(
+                    format!("an entry long enough to count, the {index}th"),
+                    "lib.rs",
+                )
+            })
             .collect();
         let (repaired, mends) = mend_of(&fill);
-        assert_eq!(repaired.rules.len(), LIST_CAP);
-        assert_eq!(repaired.rules, fill.rules[..LIST_CAP]);
+        assert_eq!(repaired.structure.len(), LIST_CAP);
+        assert_eq!(repaired.structure, fill.structure[..LIST_CAP]);
         assert_eq!(
             mends,
             [Mend {
-                field: "rules".to_owned(),
+                field: "structure".to_owned(),
                 done: Mended::Shortened {
                     from: LIST_CAP + 2,
                     to: LIST_CAP
@@ -3300,7 +3989,10 @@ mod tests {
         fill.purpose = "A toy freshness ledger belonging to Warlock.".to_owned();
         let (repaired, mends) = mend_of(&fill);
         assert_eq!(repaired.files["lib.rs"], measured("lib.rs"));
-        assert_eq!(repaired.purpose, fallback::purpose("engine", &expected));
+        assert_eq!(
+            repaired.purpose,
+            fallback::purpose("engine", &expected, &Described::default())
+        );
         assert!(
             repaired.structure.is_empty(),
             "a list entry has no fallback"
@@ -3392,7 +4084,6 @@ mod tests {
             .insert("app.rs".to_owned(), "x".repeat(ENTRY_CHARS + 1));
         fill.directories.insert("src".to_owned(), String::new());
         fill.structure = vec![Entry::of(String::new()); LIST_CAP + 3];
-        fill.rules = vec![Entry::of("r"); LIST_CAP + 1];
         fill.lookups = (0..LIST_CAP + 4)
             .map(|index| Lookup {
                 topic: format!("route {index}"),
@@ -3431,7 +4122,9 @@ mod tests {
                 fill.files.remove("lib.rs");
             }),
             ("Empty", |fill| fill.purpose = "  ".to_owned()),
-            ("Empty", |fill| fill.rules.push(Entry::of("   "))),
+            ("Empty", |fill| {
+                fill.structure.push(Entry::naming("   ", "lib.rs"));
+            }),
             ("Multiline", |fill| {
                 fill.files.insert(
                     "Cargo.toml".to_owned(),
@@ -3450,7 +4143,8 @@ mod tests {
                 fill.purpose = "é".repeat(PURPOSE_CHARS + 9);
             }),
             ("TooMany", |fill| {
-                fill.rules = vec![Entry::of("a rule long enough to count"); LIST_CAP + 2];
+                fill.structure =
+                    vec![Entry::naming("an entry long enough to count", "lib.rs"); LIST_CAP + 2];
             }),
             ("TooMany", |fill| {
                 fill.lookups = (0..LIST_CAP + 3)
@@ -3559,6 +4253,7 @@ mod tests {
             declared: [(name.clone(), vec![symbol.clone(), symbol])]
                 .into_iter()
                 .collect(),
+            ..Described::default()
         };
 
         // No panic, and the count is characters rather than bytes.
@@ -3567,7 +4262,11 @@ mod tests {
         assert_eq!(line.chars().count(), ENTRY_CHARS);
         assert!(line.len() > ENTRY_CHARS, "multibyte: {} bytes", line.len());
 
-        holds_the_shape(&fallback::purpose(&name, &expected));
-        holds_the_shape(&fallback::directory(&name, &expected));
+        holds_the_shape(&fallback::purpose(&name, &expected, &Described::default()));
+        holds_the_shape(&fallback::directory(
+            &name,
+            &expected,
+            &Described::default(),
+        ));
     }
 }

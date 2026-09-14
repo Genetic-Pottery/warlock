@@ -29,6 +29,10 @@ pub(crate) const WAITING: &str = "waiting";
 
 pub(crate) const WRITING: &str = "writing";
 
+/// Opens the line [`Account::record_describing`] rewords: one file of this
+/// directory's per-file passes is in flight.
+pub(crate) const DESCRIBING: &str = "describing";
+
 /// Opens the line [`Account::record_rejected`] files: the engine turned an
 /// answer down, so the wait that follows is a second one.
 const REJECTED: &str = "rejected";
@@ -242,6 +246,11 @@ pub struct Section {
     /// [`Account::finish`] leaves it out of the `incomplete` count rather than
     /// reporting a pass nobody made as one that forgot to say what it cost.
     passless: bool,
+    /// What this directory's per-file passes have been handed so far, summed as
+    /// each `describing` arrives. Kept on the section rather than recomputed
+    /// from the line already on screen, which would mean parsing back a string
+    /// this module just formatted.
+    described_bytes: u64,
 }
 
 impl Section {
@@ -430,6 +439,7 @@ impl Account {
             cost: None,
             has_outcome: false,
             passless: false,
+            described_bytes: 0,
         });
     }
 
@@ -475,13 +485,15 @@ impl Account {
         }
     }
 
-    /// `waiting · 11 files, 1.6 MB`, filed at the handover to the pass. Both
-    /// numbers are already known there, so nothing is measured for this line.
+    /// `waiting · 11 files, 1.6 MB`, filed at the handover to the synthesis
+    /// pass. Both numbers are already known there, so nothing is measured for
+    /// this line.
     ///
-    /// The text is deliberately not the bare `waiting` constant, so
-    /// `Log::extend_or_open` cannot fold it into a neighbouring line. Pushed
-    /// rather than extended because a handover happens once per pass. Same
-    /// silence as [`Account::record`] when there is no live section.
+    /// Pushed rather than reworded, and this is the line that separates the two
+    /// halves of a per-file run: the [`DESCRIBING`] line above it counts the
+    /// files being read, this one counts the lines they came to. A directory
+    /// reaches this once, after its last file. Same silence as
+    /// [`Account::record`] when there is no live section.
     pub fn record_waiting(&mut self, files: usize, bytes: u64, at: Instant) {
         let Some(section) = self.sections.last_mut() else {
             return;
@@ -494,6 +506,33 @@ impl Account {
         section
             .log
             .push(format!("{WAITING} · {files}, {}", size(bytes)), at);
+    }
+
+    /// `describing · 4/18 files, 12 KB`, reworded in place as each file's pass
+    /// goes out rather than filed one line per file.
+    ///
+    /// A directory of eighteen moved files is eighteen passes and would be
+    /// eighteen identical-looking lines in the run's record, which is a column
+    /// of noise standing in for one fact. Reworded the way
+    /// [`Activity::Writing`] is, so the clock on it counts the whole stretch of
+    /// file passes from the first, and what it freezes at is what the directory
+    /// came to. Same silence as [`Account::record`] when there is no live
+    /// section.
+    pub fn record_describing(&mut self, position: usize, total: usize, bytes: u64, at: Instant) {
+        let Some(section) = self.sections.last_mut() else {
+            return;
+        };
+        if section.is_closed() {
+            return;
+        }
+
+        section.described_bytes = section.described_bytes.saturating_add(bytes);
+        let text = format!(
+            "{DESCRIBING} · {position}/{total} {}, {}",
+            if total == 1 { "file" } else { "files" },
+            size(section.described_bytes)
+        );
+        section.log.rewrite_or_open(DESCRIBING, &text, at);
     }
 
     /// Not an [`Activity`]: the stream reported an answer and it was warlock
@@ -1284,6 +1323,71 @@ mod tests {
         // under it exactly as it stops with anything else.
         account.open_section("crates/tui", at(base, 80));
         assert_eq!(said(&account, at(base, 4_000))[3], "1:20 writing");
+    }
+
+    #[test]
+    fn the_files_of_one_directory_are_one_line_that_counts_up() {
+        // A directory of eighteen moved files would be eighteen near-identical
+        // lines in the run's record if each were filed. One line instead,
+        // reworded where it stands, so the clock on it counts the whole stretch
+        // of file passes rather than restarting at every one.
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        account.open_section("crates/engine/src", base);
+        account.record_describing(1, 3, 1_024, at(base, 10));
+        // Ticking, because nothing newer has landed.
+        assert_eq!(
+            said(&account, at(base, 25))[1],
+            "0:25 describing · 1/3 files, 1.0 KB"
+        );
+
+        // The rewording keeps the entry that is already on screen, instant and
+        // all, and the bytes are the ones this directory has been handed so
+        // far rather than the newest file's alone.
+        account.record_describing(2, 3, 1_024, at(base, 40));
+        account.record_describing(3, 3, 2_048, at(base, 70));
+        assert_eq!(
+            said(&account, at(base, 90)),
+            [
+                "crates/engine/src".to_owned(),
+                "1:30 describing · 3/3 files, 4.0 KB".to_owned(),
+            ],
+            "the stretch is one line, clocked from the first file"
+        );
+
+        // And the handover to the synthesis is a line of its own, not a fourth
+        // rewording: it is a different kind of wait, and it freezes the stretch
+        // above it where that stretch stopped.
+        account.record_waiting(3, 194, at(base, 100));
+        assert_eq!(
+            said(&account, at(base, 300)),
+            [
+                "crates/engine/src".to_owned(),
+                "1:40 describing · 3/3 files, 4.0 KB".to_owned(),
+                "5:00 waiting · 3 files, 194 bytes".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_files_of_the_next_directory_open_a_line_of_their_own() {
+        // The running total is the section's, not the account's: a new section
+        // starts its count at nothing, or the second directory would report the
+        // first one's bytes as well as its own.
+        let base = Instant::now();
+        let mut account = Account::new(base);
+
+        account.open_section("crates/engine/src", base);
+        account.record_describing(1, 1, 4_096, at(base, 10));
+        account.open_section("crates/tui/src", at(base, 30));
+        account.record_describing(1, 1, 1_024, at(base, 40));
+
+        assert_eq!(
+            said(&account, at(base, 60))[3],
+            "0:30 describing · 1/1 file, 1.0 KB",
+            "the second directory counted the first one's bytes"
+        );
     }
 
     #[test]

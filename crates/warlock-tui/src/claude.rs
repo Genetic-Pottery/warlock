@@ -78,8 +78,8 @@ const CHAT_SYSTEM_PROMPT: &str = "You are answering questions inside warlock, a 
 terminal program that shows one repository as a tree of directories. A pacted \
 directory has a WARLOCK.md describing it, laid out the same way everywhere: a \
 purpose, one line per file under `## Files`, one per subdirectory under \
-`## Directories`, and where there is anything to say `## Structure`, `## Rules` \
-and `## Where to look`, which maps a question to the file and the name in it to \
+`## Directories`, and where there is anything to say `## Structure` and \
+`## Where to look`, which maps a question to the file and the name in it to \
 open. Warlock draws that directory green while the document is newer than \
 everything beneath it, yellow once anything under it has moved, and grey for a \
 directory nobody has pacted. Use the documents to narrow, never to answer: \

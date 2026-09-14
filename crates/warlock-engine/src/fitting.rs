@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
@@ -8,7 +8,7 @@ use std::str::Utf8Error;
 
 use ignore::WalkBuilder;
 
-use crate::document::Described;
+use crate::document::{self, Described};
 use crate::hash::length;
 use crate::ignores;
 use crate::languages;
@@ -65,10 +65,19 @@ pub(crate) fn measured(directory: &Path) -> Result<Described, Error> {
         };
         let names = languages::declared_names(&path, text);
         if !names.is_empty() {
-            described.declared.insert(name, names);
+            described.declared.insert(name.clone(), names);
         }
+        described.tokens.insert(name, tokens_of(text));
     }
     Ok(described)
+}
+
+// Read whole rather than capped, and for the same reason the declared list is
+// no longer capped: this is evidence and not a rendered line. Nothing here
+// reaches a document or a request — it is compared against, and the comparison
+// is the only thing standing between a true claim and a dropped one.
+fn tokens_of(text: &str) -> BTreeSet<String> {
+    document::identifiers(text).map(str::to_owned).collect()
 }
 
 // One file, reduced the way the same file would be inside a directory's
@@ -124,6 +133,7 @@ pub(crate) fn one_file(
         if !names.is_empty() {
             described.declared.insert(name.to_owned(), names);
         }
+        described.tokens.insert(name.to_owned(), tokens_of(text));
     }
 
     Ok((

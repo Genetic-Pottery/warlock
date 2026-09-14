@@ -163,6 +163,12 @@ struct InFlight {
     reached: usize,
     total: usize,
     run: Run,
+    // How far through the current directory's per-file passes the run is, once
+    // it has told us. `None` until the first file, and again for every
+    // directory that pays for no file at all — a refresh where every line came
+    // off the page unchanged never reports one, and the bar falls back to
+    // counting whole directories, which is what it counted before.
+    files: Option<(usize, usize)>,
 }
 
 impl InFlight {
@@ -191,6 +197,7 @@ pub struct RunHeader {
     directory: String,
     position: usize,
     total: usize,
+    files: Option<(usize, usize)>,
 }
 
 impl RunHeader {
@@ -221,6 +228,14 @@ impl RunHeader {
     #[must_use]
     pub const fn completed(&self) -> usize {
         self.position.saturating_sub(1)
+    }
+
+    /// Files described of files this directory is paying for, straight from
+    /// the engine's `Observer::describing`. `None` before the first file of a
+    /// directory, and for a directory that pays for none.
+    #[must_use]
+    pub const fn files(&self) -> Option<(usize, usize)> {
+        self.files
     }
 }
 
@@ -491,7 +506,24 @@ impl App {
             reached,
             total,
             run,
+            // Cleared rather than carried: this is a new directory, and the
+            // fraction that was on screen belonged to the last one.
+            files: None,
         });
+    }
+
+    /// Where the directory in flight is through its own files, for the bar to
+    /// fill between one directory and the next.
+    ///
+    /// Dropped when no run is in flight rather than remembered against the next
+    /// one: a fraction of a directory nobody is working is not a fact about
+    /// anything. Monotonic within a directory because the engine counts up and
+    /// `set_run_in_flight` clears this on the way in, so nothing here has to
+    /// guard a fraction going backwards the way `reached` does.
+    pub fn set_files_in_flight(&mut self, position: usize, total: usize) {
+        if let Some(in_flight) = self.status.in_flight.as_mut() {
+            in_flight.files = Some((position, total));
+        }
     }
 
     pub fn clear_pact_in_flight(&mut self) {
@@ -552,6 +584,7 @@ impl App {
             directory: self.label_for(&in_flight.path),
             position: in_flight.reached,
             total: in_flight.total,
+            files: in_flight.files,
         })
     }
 

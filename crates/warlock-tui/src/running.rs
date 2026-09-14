@@ -714,8 +714,14 @@ mod tests {
 
         let run = run(repo.path(), home.path(), Descent::Pact, ".").expect("nothing is scoped");
 
-        // One pass per directory, and one document beside each of them.
-        assert_eq!(run.agent.directories(), ["beta", "alpha", "."]);
+        // Two passes for a directory holding one file — the file's own, then
+        // the synthesis over the line it came to — and one for the root, which
+        // has no file of its own to pay for and is written from its children's
+        // documents. One document beside each of the three.
+        assert_eq!(
+            run.agent.directories(),
+            ["beta", "beta", "alpha", "alpha", "."]
+        );
         assert!(
             run.subtree.failures.is_empty(),
             "{:?}",
@@ -844,10 +850,12 @@ mod tests {
             "{:?}",
             run.subtree.failures
         );
-        // Asked once per attempt, because every attempt got the same blank
-        // slot back: the count follows `document::ATTEMPTS` rather than pinning
-        // it.
-        let mut offered = vec!["beta"];
+        // `alpha`'s file pass answers once and is taken; it is the synthesis
+        // over that line that comes back blank, and that is asked once per
+        // attempt until the asking runs out — so the count follows
+        // `document::ATTEMPTS` rather than pinning it. The blank is a slot of
+        // the directory's own fill, which is why the file pass never sees it.
+        let mut offered = vec!["beta", "beta", "alpha"];
         offered.extend(iter::repeat_n("alpha", document::ATTEMPTS));
         offered.push(".");
         assert_eq!(run.agent.directories(), offered);
@@ -948,7 +956,7 @@ mod tests {
         let run = run(repo.path(), home.path(), Descent::Pact, "alpha")
             .expect("this machine holds the boundary over `alpha`");
 
-        assert_eq!(run.agent.directories(), ["alpha"]);
+        assert_eq!(run.agent.directories(), ["alpha", "alpha"]);
         assert!(repo.path().join("alpha").join("WARLOCK.md").is_file());
         // And the boundary the run passed through is still on the entry it was
         // written on: a run describes a directory, it does not re-decide whose
@@ -979,8 +987,10 @@ mod tests {
         let run = run(repo.path(), home.path(), Descent::Refresh, ".").expect("nothing is scoped");
 
         // The engine's own judgement of what is stale, unnarrowed and
-        // unwidened: `alpha` costs no pass.
-        assert_eq!(run.agent.directories(), ["beta", "."]);
+        // unwidened: `alpha` costs no pass. `beta` costs two — the file that
+        // moved, then the synthesis — and the root one, having no file of its
+        // own.
+        assert_eq!(run.agent.directories(), ["beta", "beta", "."]);
         assert!(
             run.subtree.failures.is_empty(),
             "{:?}",
@@ -1011,8 +1021,10 @@ mod tests {
             .expect("a refused pass fails one directory, not the run");
 
         // The run happened: every directory was offered a pass, and the two the
-        // model answered have their documents.
-        assert_eq!(run.agent.directories(), ["beta", "alpha", "."]);
+        // model answered have their documents. `alpha` is asked once and not
+        // twice — its file pass is the one that refuses, and a refusal ends the
+        // directory before there is anything to synthesise.
+        assert_eq!(run.agent.directories(), ["beta", "beta", "alpha", "."]);
         assert!(repo.path().join("beta").join("WARLOCK.md").is_file());
         assert!(!repo.path().join("alpha").join("WARLOCK.md").exists());
         // And the manifest was saved anyway, holding what the rest of the
@@ -1179,10 +1191,11 @@ mod tests {
         let run = run_cancelling(repo.path(), home.path(), Descent::Pact, ".", &[], "alpha")
             .expect("a cancelled run is still a run");
 
-        // Two passes of the three the run offered, and the third never asked
-        // for: the descent ended at a directory boundary rather than part way
+        // Two directories of the three the run offered, both paid for in full
+        // — a file pass and a synthesis each — and the third never asked for:
+        // the descent ended at a directory boundary rather than part way
         // through a directory.
-        assert_eq!(run.agent.directories(), ["beta", "alpha"]);
+        assert_eq!(run.agent.directories(), ["beta", "beta", "alpha", "alpha"]);
         assert!(
             !run.lines
                 .iter()
@@ -1247,7 +1260,9 @@ mod tests {
         )
         .expect("a cancelled run is still a run");
 
-        assert_eq!(run.agent.directories(), ["beta", "alpha"]);
+        // `alpha` once: the pass the cancel killed is its file pass, and the
+        // synthesis it would have fed never ran.
+        assert_eq!(run.agent.directories(), ["beta", "beta", "alpha"]);
         // There is a failure to report, and the run has the report — this is
         // not a run that happens to have nothing to say.
         assert_eq!(run.subtree.failures.len(), 1, "{:?}", run.subtree.failures);

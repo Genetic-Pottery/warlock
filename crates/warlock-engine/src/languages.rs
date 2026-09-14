@@ -241,8 +241,15 @@ const VISIBILITY: &[&str] = &[
     "open",
 ];
 
+// Every word a row above can open a declaration with, so that
+// `first_identifier` steps over it to the name instead of returning it. A
+// declaration prefix missing from here is recorded as the name of the thing it
+// declares: Kotlin's `fun sum()` measured a file as declaring `fun`, and a list
+// of names is now the only witness a synthesis pass has.
 const KEYWORDS: &[&str] = &[
     "fn",
+    "fun",
+    "union",
     "struct",
     "enum",
     "trait",
@@ -269,7 +276,6 @@ const KEYWORDS: &[&str] = &[
 ];
 
 pub(crate) fn declared_names(path: &Path, text: &str) -> Vec<String> {
-    const CAP: usize = 64;
     let Some(language) = language_of(path) else {
         return Vec::new();
     };
@@ -284,9 +290,18 @@ pub(crate) fn declared_names(path: &Path, text: &str) -> Vec<String> {
     }
     let lines: Vec<&str> = text.lines().collect();
 
-    // Public names first, then the rest, each in file order: what a reader
-    // opens a file for is usually what it exports, and the rendered list is
-    // capped, so the exports are the names that survive the cap.
+    // Every name, and no cap on the list. This is two things at once and only
+    // one of them is a list somebody reads: `render` prints the first
+    // `DECLARED_SHOWN` of it and counts the rest, while `Expected::knows` and
+    // `route` ask it whether a name the pass used is real. Truncating here
+    // truncated the *evidence*, and a synthesis pass — shown names and sizes,
+    // never text — has no other witness to fall back on, so a correct name
+    // past the cut was refused four times and its claim dropped from the
+    // document. `ui.rs` declares 126 names; `areas` sits at 85.
+    //
+    // Public names still come first, in file order: that ordering is what
+    // decides which sixteen `render` shows, which was always the real reason
+    // for it.
     let mut public: Vec<String> = Vec::new();
     let mut private: Vec<String> = Vec::new();
     for line in outside_blocks(language, &lines) {
@@ -314,7 +329,6 @@ pub(crate) fn declared_names(path: &Path, text: &str) -> Vec<String> {
         }
     }
     public.extend(private);
-    public.truncate(CAP);
     public
 }
 
@@ -353,7 +367,31 @@ fn without_visibility(line: &str) -> &str {
     }
 }
 
+// A Go method declares its receiver before the name it declares — `func (r
+// *Cart) Add(…)` — so reading left to right finds `r`, which is a name nobody
+// looks anything up by and which stands where `Add` should be. That cost more
+// than a crowded list once the per-file road arrived: a synthesis pass is shown
+// no file text, so this list is the only witness `route` has for a lookup's
+// symbol, and every lookup naming a Go method was refused and dropped.
+//
+// A parenthesised group between a declaration keyword and its name is the
+// receiver and nothing else — no language in the table above writes anything
+// else there — so stepping over one is enough. A group that never closes is
+// left alone: `const (` opens a Go block and declares nothing on that line.
+fn past_receiver(line: &str) -> &str {
+    let Some((_, rest)) = line.split_once(char::is_whitespace) else {
+        return line;
+    };
+    let rest = rest.trim_start();
+    if !rest.starts_with('(') {
+        return line;
+    }
+    rest.find(')')
+        .map_or(line, |close| rest[close + 1..].trim_start())
+}
+
 fn first_identifier(line: &str) -> Option<&str> {
+    let line = past_receiver(line);
     let separators =
         |c: char| c.is_whitespace() || matches!(c, '(' | '<' | '{' | ':' | '=' | ';' | ',' | '!');
     for word in line.split(separators) {
@@ -502,9 +540,82 @@ fn opens_here(language: &Language, lines: &[&str], index: usize) -> Option<&'sta
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::path::Path;
 
-    use super::{elide, language_of};
+    use super::{declared_names, elide, language_of};
+
+    #[test]
+    fn a_declaration_keyword_is_never_measured_as_the_name_it_declares() {
+        // Every word a row can open a declaration with has to be in `KEYWORDS`,
+        // or the extractor records the keyword and loses the name. `fun` was
+        // missing, so a Kotlin file measured as declaring `fun` — and on the
+        // per-file road that list is the only witness a claim has.
+        assert_eq!(
+            declared_names(
+                Path::new("Ledger.kt"),
+                "class Ledger\nfun newLedger(): Ledger = x\n"
+            ),
+            ["Ledger", "newLedger"]
+        );
+        assert_eq!(
+            declared_names(Path::new("raw.rs"), "union Slot { a: u8 }\n"),
+            ["Slot"]
+        );
+    }
+
+    #[test]
+    fn a_go_method_is_measured_by_its_name_and_not_its_receiver() {
+        // `route` verifies a lookup's symbol against this list and nothing else
+        // on the per-file road, so a method missing from it is a lookup dropped
+        // out of the document. The receiver is not a name anyone looks up.
+        let source = "func NewRetryApplyer(store *RetryStore) *RetryApplyer {}\n\
+                      func (r *RetryApplyer) Apply(ctx context.Context) error {}\n";
+
+        assert_eq!(
+            declared_names(Path::new("retry.go"), source),
+            ["NewRetryApplyer", "Apply"]
+        );
+    }
+
+    #[test]
+    fn a_block_that_opens_with_a_bracket_declares_nothing_on_that_line() {
+        // Go's `const (` and `var (` sit where a receiver would, and close on a
+        // later line. Stepping over an unclosed group would read the next line's
+        // text as this one's name.
+        assert!(declared_names(Path::new("block.go"), "const (\n\tA = 1\n)\n").is_empty());
+    }
+
+    #[test]
+    fn every_declared_name_is_measured_however_many_there_are() {
+        // This list is evidence before it is ever a rendered line: `render`
+        // shows the first `DECLARED_SHOWN` of it and counts the rest, while
+        // `Expected::knows` asks it whether a name a pass used is real. A
+        // synthesis pass is shown no file text, so a name cut off the end of
+        // this list has no other witness and is refused — which is a correct
+        // claim dropped out of a document. `ui.rs` declares 126.
+        let mut source = String::new();
+        for index in 0..200 {
+            let _ = writeln!(source, "fn helper_{index}() {{}}");
+        }
+
+        let names = declared_names(Path::new("wide.rs"), &source);
+
+        assert_eq!(names.len(), 200, "the measurement was truncated");
+        assert_eq!(names.last().map(String::as_str), Some("helper_199"));
+    }
+
+    #[test]
+    fn the_exports_of_a_file_are_measured_before_the_rest_of_it() {
+        // The ordering survives the cap's removal, and it is what decides which
+        // names `render` shows: a reader opens a file for what it exports.
+        let source = "fn private_one() {}\npub fn exported() {}\nfn private_two() {}\n";
+
+        assert_eq!(
+            declared_names(Path::new("ordered.rs"), source),
+            ["exported", "private_one", "private_two"]
+        );
+    }
 
     #[test]
     fn an_unknown_extension_is_left_entirely_alone() {
