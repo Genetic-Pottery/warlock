@@ -3,7 +3,7 @@
 
 # src
 
-The terminal front end for warlock: a panel over a repository's pact state, driven by keypresses and filesystem watches, plus the headless subcommands (check, config, stale, fresh, pact, refresh, unpact, scope) that share its boundary and session logic.
+The terminal-free front end for the panel and its subcommands: app state, panel rendering, boundary-gated edits, and the headless pact/refresh/check/scope/config/stale/fresh commands, tied together by main.rs and lib.rs.
 
 ## Files
 
@@ -12,7 +12,7 @@ The terminal front end for warlock: a panel over a repository's pact state, driv
 - `boundary.rs` (10.3 KB) — verdict()/Verdict/Reach: one boundary check shared by panel keys and headless doors, plus closed_scope_message and blocking_scopes_message for the refusal text · declares `Reach`, `Verdict`, `message`, `verdict`, `closed_scope_message`, `blocking_scopes_message`
 - `chatting.rs` (108.4 KB) — Chat<C>: the one turn in flight, its draft and mode; run_turn, apply_turn and Asked route an answer or a document back to the panel. · declares `Chat`, `new`, `with_agent`, `composer`, `set_composer_width`, `write_prompt`, `directory`, `answering`, `ask`, `say`, `stop`, `compose`, `paste`, `keep_up`, `write`, `Chatting` (+23)
 - `check.rs` (23.0 KB) — warlock check <path>: prints which scope covers a path, what sigils this machine holds, and whether they meet (Checked, checked, prose, object) · declares `check`, `CHECK`, `PATH`, `SCOPE`, `SIGILS`, `OPENS`, `Checked`, `checked_onto`, `checked`, `prose`, `covering_line`, `holding_line`, `verdict_line`, `sigils_value`
-- `claude.rs` (165.3 KB) — Spawns and drives `claude` as a child process: `ClaudeAgent` runs one pass, `ChatAgent` holds a resumable `Session`, `Cancel` and `Activities` report progress, streaming stdout via the `stream` module. · declares `INVOCATION_TIMEOUT`, `BRIEF_EFFORT`, `BRIEF_MODEL`, `brief_instruction`, `CHAT_INSTRUCTION`, `WRITE_INSTRUCTION`, `Cancel`, `cancel`, `is_cancelled`, `Activity`, `Activities`, `none`, `report`, `Wired`, `Converses`, `ClaudeAgent` (+65)
+- `claude.rs` (165.2 KB) — Spawns and drives `claude` as a child process: `ClaudeAgent` runs a pass, `ChatAgent` runs a turn, `Cancel` stops one in flight, `Activities`/`Activity` report progress, avoiding the three deadlocks of piping to and from a subprocess. · declares `INVOCATION_TIMEOUT`, `BRIEF_EFFORT`, `BRIEF_MODEL`, `brief_instruction`, `CHAT_INSTRUCTION`, `WRITE_INSTRUCTION`, `Cancel`, `cancel`, `is_cancelled`, `Activity`, `Activities`, `none`, `report`, `Wired`, `Converses`, `ClaudeAgent` (+65)
 - `colour.rs` (6.7 KB) — Pinned indexed colours for node states and UI voice: colour_for(NodeState), FOCUS_COLOUR, SYSTEM_COLOUR, GUIDE_COLOUR, CONVERSATION_COLOUR. · declares `colour_for`, `FOCUS_COLOUR`, `SYSTEM_COLOUR`, `GUIDE_COLOUR`, `CONVERSATION_COLOUR`
 - `composer.rs` (83.0 KB) — Multi-line draft field: Composer holds draft/cursor/width/muted, compose_for and paste_for map keys and pastes to Composed/Pasted, window() gives the scrolled ComposerWindow to draw. · declares `COMPOSER_MAX_ROWS`, `Composer`, `new`, `at`, `cursor`, `set_width`, `width`, `set_muted`, `is_muted`, `draft`, `is_submittable`, `height`, `window`, `ComposerWindow`, `Composed`, `compose_for` (+8)
 - `config.rs` (23.8 KB) — `warlock config`: prompts for a line of sigils, replacing what's held for the repo via hold/sigils_in/read_line and validate_sigil, writing nothing inside the checkout. · declares `configure`, `PROMPT`, `NOTHING`, `RULES`, `prompted`, `Held`, `held_for`, `preamble`, `fmt`, `holding`, `sigils_in`, `hold`, `read_line`
@@ -46,30 +46,15 @@ The terminal front end for warlock: a panel over a repository's pact state, driv
 
 ## Structure
 
-- App, Row, PactIntent, Focus, Sigils, Chrome and RunHeader: the flattened tree state, its row filters (reflow, reseat_on), and pact/refresh/view intents.
-- verdict()/Verdict/Reach: one boundary check shared by panel keys and headless doors, plus closed_scope_message and blocking_scopes_message for the refusal text
-- Session owns Scope, Watched and load_app/reload_tree/closed_scope: resolves the two roots and sigils once, then reloads the tree and gates edits against the same boundary verdict.
-- Panel: three cards (account, thread, document) with Showing/Mode enums, Card<T> windowing, and panel_offset_for scroll math.
-- Renders one frame from its arguments alone via draw, with layout measured through areas, tree_height, panel_height, composer_height, panel_width and hit_test.
-- Binary entry point: parses the Cli/Command subcommands (Init, Config, Stale, Fresh, Check, Unpact, Pact, Refresh, Scope), dispatches before touching the terminal, and runs the Session event loop in run.
-- Descent enum (Pact, Refresh, Unpact) and descend(), the single point where a subtree walk runs and the manifest is saved exactly once; carry_on() maps Cancel to Pacting.
-- Drives the p and r keys as a worker thread and PactEvent channel; Pact, Running, Work, PactEvent, and apply_toggle turn a press into a run and one final reload.
-- Chat<C>: the one turn in flight, its draft and mode; run_turn, apply_turn and Asked route an answer or a document back to the panel.
-- Spawns and drives `claude` as a child process: ClaudeAgent runs one pass, ChatAgent holds a resumable Session, Cancel and Activities report progress, streaming stdout via the stream module.
-- Classifies a submitted draft via submitted_for into Submitted (Brief, Write, Chat, Message, Refused), refusing anything but the three bare slash-commands with Submitted::refusal's one-line message.
-- Filesystem watching: NodeSet filters events to walked paths, WatchPolicy decides when a reload is owed (QUIET_PERIOD, RELOAD_CEILING, COALESCED_RELOADS), Watch/Watching drive notify.
-
-## Where to look
-
-- what happens when a boundary check refuses an edit → `boundary.rs` `Verdict`
-- how does the panel decide what to reload after a run → `descent.rs` `descend`
-- where do keypresses become actions → `input.rs` `action_for`
-- how is warlock check implemented → `check.rs`
-- how does the app talk to the claude CLI → `claude.rs` `ClaudeAgent`
-- where does /write validate a document before saving → `writing.rs` `write_submit`
-- what turns a slash command into a chat turn → `submission.rs` `Submitted`
-- how is scroll position computed for a card → `panel.rs` `panel_offset_for`
-- where does the CLI parse subcommands → `main.rs` `Command`
-- how does the terminal get restored on exit → `terminal.rs` `TerminalGuard`
-- what decides a filesystem reload is owed → `watch.rs` `WatchPolicy`
-- where is the quit confirmation dialog handled → `confirm.rs` `QuitConfirm`
+- lib.rs — Crate root; declares modules and re-exports the public surface (App, Panel, Composer, Thread, Watch, ui::draw and friends) for the terminal-free front end.
+- main.rs — Binary entry point: parses the `Cli`/`Command` subcommands (Init, Config, Stale, Fresh, Check, Unpact, Pact, Refresh, Scope), dispatches before touching the terminal, and runs the `Session` event loop in `run`.
+- app.rs — App, Row, PactIntent, Focus, Sigils, Chrome and RunHeader: the flattened tree state, its row filters (reflow, reseat_on), and pact/refresh/view intents.
+- session.rs — Owns Scope, Watched and load_app/reload_tree/closed_scope: resolves the two roots and sigils once, then reloads the tree and gates edits against the same boundary verdict.
+- boundary.rs — verdict()/Verdict/Reach: one boundary check shared by panel keys and headless doors, plus closed_scope_message and blocking_scopes_message for the refusal text
+- ui.rs — Renders one frame from its arguments alone via `draw`, with layout measured through `areas`, `tree_height`, `panel_height`, `composer_height`, `panel_width` and `hit_test`.
+- panel.rs — Panel: three cards (account, thread, document) with Showing/Mode enums, Card<T> windowing, and panel_offset_for scroll math.
+- chatting.rs — Chat<C>: the one turn in flight, its draft and mode; run_turn, apply_turn and Asked route an answer or a document back to the panel.
+- claude.rs — Spawns and drives `claude` as a child process: `ClaudeAgent` runs a pass, `ChatAgent` runs a turn, `Cancel` stops one in flight, `Activities`/`Activity` report progress.
+- descent.rs — Descent enum (Pact, Refresh, Unpact) and descend(), the single point where a subtree walk runs and the manifest is saved exactly once; carry_on() maps Cancel to Pacting.
+- pacting.rs — Drives the `p` and `r` keys as a worker thread and PactEvent channel; Pact, Running, Work, PactEvent, and apply_toggle turn a press into a run and one final reload.
+- watch.rs — Filesystem watching: NodeSet filters events to walked paths, WatchPolicy decides when a reload is owed (QUIET_PERIOD, RELOAD_CEILING, COALESCED_RELOADS), Watch/Watching drive notify.

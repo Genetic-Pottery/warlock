@@ -292,8 +292,8 @@ pub(crate) fn declared_names(path: &Path, text: &str) -> Vec<String> {
 
     // Every name, and no cap on the list. This is two things at once and only
     // one of them is a list somebody reads: `render` prints the first
-    // `DECLARED_SHOWN` of it and counts the rest, while `Expected::knows` and
-    // `route` ask it whether a name the pass used is real. Truncating here
+    // `DECLARED_SHOWN` of it and counts the rest, while `Evidence::knows` asks
+    // it whether a name the pass used is real. Truncating here
     // truncated the *evidence*, and a synthesis pass — shown names and sizes,
     // never text — has no other witness to fall back on, so a correct name
     // past the cut was refused four times and its claim dropped from the
@@ -369,10 +369,10 @@ fn without_visibility(line: &str) -> &str {
 
 // A Go method declares its receiver before the name it declares — `func (r
 // *Cart) Add(…)` — so reading left to right finds `r`, which is a name nobody
-// looks anything up by and which stands where `Add` should be. That cost more
-// than a crowded list once the per-file road arrived: a synthesis pass is shown
-// no file text, so this list is the only witness `route` has for a lookup's
-// symbol, and every lookup naming a Go method was refused and dropped.
+// looks anything up by and which stands where `Add` should be. This list is
+// what a document prints as `· declares`, which is the part of a file line
+// measured to carry a reader to the right symbol, so a receiver there is a
+// slot spent on nothing.
 //
 // A parenthesised group between a declaration keyword and its name is the
 // receiver and nothing else — no language in the table above writes anything
@@ -566,9 +566,8 @@ mod tests {
 
     #[test]
     fn a_go_method_is_measured_by_its_name_and_not_its_receiver() {
-        // `route` verifies a lookup's symbol against this list and nothing else
-        // on the per-file road, so a method missing from it is a lookup dropped
-        // out of the document. The receiver is not a name anyone looks up.
+        // The receiver is not a name anyone looks up, and this list is what
+        // `· declares` prints.
         let source = "func NewRetryApplyer(store *RetryStore) *RetryApplyer {}\n\
                       func (r *RetryApplyer) Apply(ctx context.Context) error {}\n";
 

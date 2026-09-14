@@ -3,7 +3,7 @@
 
 # warlock-engine
 
-The engine crate: walks a repository into a freshness ledger, tracks pacted/unpacted/stale state against a manifest, fills and renders WARLOCK.md documents through a model-pass Agent port, and manages scopes, sigils and ignores that bound where pacts apply, kept free of TUI, terminal, HTTP or Anthropic dependencies.
+The engine crate: walks a repo into a freshness-tracked tree, runs model passes to fill and mend WARLOCK.md documents, and persists pact state, scopes and sigils, kept free of TUI/terminal/HTTP/Anthropic deps.
 
 ## Files
 
@@ -11,23 +11,8 @@ The engine crate: walks a repository into a freshness ledger, tracks pacted/unpa
 
 ## Directories
 
-- `src/` — the crate's source: Tree/Node ledger, decide.rs state rule, manifest and pact machinery, document fill/render, scope/sigil/ignore boundaries
+- `src/` — The crate's source: tree walking, pact/manifest state, document fill/mend/render, scope and sigil logic — go here for any implementation question.
 
 ## Structure
 
 - Manifest for warlock-engine: blake3, ignore, serde/serde_json and toml deps, kept free of TUI/terminal/HTTP/Anthropic crates by design.
-
-## Where to look
-
-- what decides whether a file is stale or fresh → `src` `decide_state`
-- where is WARLOCK.md actually written and merged into CLAUDE.md → `src` `write_claude_md`
-- how are two clones of the same repo verified to agree → `src` `subtree_hash`
-- where does the model-pass request/response shape live → `src` `Request`
-- how does the ledger tree get built from disk → `src` `load_tree`
-- where are pacts.toml entries read and saved → `src` `Manifest`
-- what performs a pact or refresh over a subtree → `src` `pact_subtree`
-- where do sigils get resolved to a config directory → `src` `sigils_path`
-- how is a directory excluded via .warlockignore → `src` `is_ignored`
-- where are the freshness states enumerated → `src` `NodeState`
-- how is a fill turned into rendered WARLOCK.md content → `src` `render`
-- where do per-language test/declaration rules live → `src` `TABLE`

@@ -115,11 +115,11 @@ def per_file(rel: str) -> str:
     return "\n".join(out).replace("\n\n\n", "\n\n") + "\n"
 
 
-def without_synthesis(text: str, drop_purpose: bool = False) -> str:
+def without_synthesis(text: str, drop_purpose: bool = False, sections=SECTIONS) -> str:
     out, skipping = [], False
     for line in text.splitlines():
         if line.startswith("## "):
-            skipping = line.strip() in SECTIONS
+            skipping = line.strip() in sections
         if not skipping:
             out.append(line)
     text = "\n".join(out) + "\n"
@@ -179,6 +179,8 @@ def build(rel: str, names: list[str]) -> dict[str, str]:
             made[name] = isolated(rel)
         elif name == "per_file":
             made[name] = per_file(rel)
+        elif name == "no_routes":
+            made[name] = without_synthesis(declares(rel, 16), sections=("## Where to look",))
         elif name == "document_no_synthesis":
             made[name] = without_synthesis(declares(rel, 16))
         elif name == "isolated_no_synthesis":

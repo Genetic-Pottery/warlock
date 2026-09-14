@@ -908,17 +908,6 @@ fn pact_directory_watched(
     );
     let request = expected_for(directory)?;
     let expected = document::Expected::of(&request);
-    // A weight is a share of routes and not a fact on the page, so a child
-    // that cannot be measured costs its routes their place and not the pact.
-    let weights = request
-        .child_documents()
-        .iter()
-        .map(|child| {
-            let bytes = crate::hash::subtree_bytes(&directory.join(child.directory()));
-            (child.directory().to_owned(), bytes.unwrap_or(0))
-        })
-        .collect();
-    let fill = document::with_routes_below(fill, &expected, &weights);
     let text = document::render(&name, &fill, &expected, &described);
     let document = write_document(directory, &text)?;
 
@@ -1065,7 +1054,7 @@ pub fn synthesise(
     let described = measured(directory)?;
 
     // Names and sizes, and no text: the lines are the evidence and the files
-    // are here so that a lookup can name one. `Expected` reads the sizes for
+    // are here so that a claim can name one. `Expected` reads the sizes for
     // the fallback line, which is why they are measured rather than invented.
     let mut files = Vec::new();
     for (name, path) in own_files(directory)? {
@@ -2128,8 +2117,8 @@ mod tests {
         let dir = one_file_directory();
         let agent = Lining::saying(
             r#"{"purpose": "A directory of one reading file, for the tests below it.",
-                "structure": [{"line": "`reading.rs` is the only file here.", "names": ["reading.rs"]}],
-                "lookups": [{"for": "reading one record", "open": "reading.rs", "symbol": "read_one"}]}"#,
+                "structure": [{"line": "`reading.rs` is the only file here.", "names": ["reading.rs"]},
+                              {"line": "`read_one` reads a single record.", "names": ["read_one"]}]}"#,
         );
         let lines = [(
             "reading.rs".to_owned(),
@@ -2148,8 +2137,8 @@ mod tests {
             "the lines are the caller's and pass through untouched",
         );
         assert_eq!(
-            synthesised.fill.lookups[0].symbol.as_deref(),
-            Some("read_one"),
+            synthesised.fill.structure[1].names,
+            ["read_one"],
             "a symbol no line spells is still checkable against the walk",
         );
     }
@@ -2157,7 +2146,7 @@ mod tests {
     #[test]
     fn synthesis_that_cannot_be_got_right_is_mended_rather_than_lost() {
         let dir = one_file_directory();
-        let agent = Lining::saying(r#"{"purpose": "", "structure": [], "lookups": []}"#);
+        let agent = Lining::saying(r#"{"purpose": "", "structure": []}"#);
         let lines = [(
             "reading.rs".to_owned(),
             "The reading half of the fixture.".to_owned(),
