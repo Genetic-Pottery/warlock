@@ -13,7 +13,7 @@
 //! [`descend`] saves the manifest once, after the whole descent, so until that
 //! save lands disk still holds the pre-run record. Re-reading the tree mid-run
 //! would re-derive every row from it and wipe the green the run has been
-//! painting; the single `reload_tree` at the foot of [`drain`] is not an
+//! painting; the single `reload` at the foot of [`drain`] is not an
 //! optimisation but the only point at which disk is the honest account.
 
 use std::path::{Path, PathBuf};
@@ -22,9 +22,7 @@ use std::time::Instant;
 use std::{fs, io, thread};
 
 use warlock_engine::{
-    Agent, Manifest, NodeState, PactedSubtree, Pacting, Tree,
-    document::{self, Defect},
-    fitting, pact, to_manifest_path,
+    Agent, DOCUMENT_FILE, Manifest, NodeState, PactedSubtree, Tree, fitting, pact, to_manifest_path,
 };
 use warlock_tui::{
     Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactIntent, PactToggle, Run, Section,
@@ -32,9 +30,9 @@ use warlock_tui::{
 };
 
 use crate::boundary::{Reach, Verdict, verdict};
-use crate::descent::{Descent, carry_on, descend};
+use crate::descent::{Descent, RunEvent, descend};
 use crate::error::one_line;
-use crate::session::{Scope, closed_scope, reload_tree};
+use crate::session::{Scope, closed_scope, reload};
 
 // The worker reports on every path it takes itself, so the only way the channel
 // closes without a `Finished` is a panic. The hook has already printed it; what
@@ -237,43 +235,8 @@ impl Drop for CancelGuard {
 
 #[derive(Debug)]
 pub(crate) enum PactEvent {
-    Starting {
-        directory: PathBuf,
-        position: usize,
-        total: usize,
-    },
+    Run(RunEvent),
     Doing(Activity),
-    Requesting {
-        files: usize,
-        bytes: u64,
-    },
-    Describing {
-        position: usize,
-        total: usize,
-        bytes: u64,
-    },
-    Rejected {
-        defects: Vec<String>,
-        attempt: usize,
-        attempts: usize,
-    },
-    // One mend, flattened to the engine's own sentence about it exactly as
-    // `Rejected` flattens a `Defect`: the panel says what happened, and the
-    // types that say why belong to the engine.
-    Repaired {
-        directory: PathBuf,
-        mend: String,
-    },
-    Documented {
-        directory: PathBuf,
-    },
-    Unchanged {
-        directory: PathBuf,
-    },
-    Skipped {
-        directory: PathBuf,
-        below: PathBuf,
-    },
     Finished(Result<Toggled, String>),
 }
 
@@ -282,86 +245,6 @@ fn activity_port(events: &Sender<PactEvent>) -> Activities {
     Activities::new(move |activity| {
         let _ = events.send(PactEvent::Doing(activity));
     })
-}
-
-struct Reporting<'a> {
-    events: &'a Sender<PactEvent>,
-    cancel: &'a Cancel,
-}
-
-impl pact::Observer for Reporting<'_> {
-    // The one place a run is asked to stop between passes, and the reason the
-    // cancel is read here rather than in the loop below: the engine offers this
-    // hook before each directory, and a pass that has already started is the
-    // agent's own to give up on.
-    fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
-        if carry_on(self.cancel) == Pacting::Stop {
-            return Pacting::Stop;
-        }
-        let _ = self.events.send(PactEvent::Starting {
-            directory: directory.to_path_buf(),
-            position,
-            total,
-        });
-        Pacting::Continue
-    }
-
-    // The directory is dropped rather than carried, as it is for a repair: the
-    // section a file's progress belongs under is the one the `Starting` before
-    // it opened, and the name of the file is the engine's business. What the
-    // panel does with this is a fraction, and the fraction is all of it.
-    fn describing(
-        &mut self,
-        _directory: &Path,
-        _name: &str,
-        bytes: u64,
-        position: usize,
-        total: usize,
-    ) {
-        let _ = self.events.send(PactEvent::Describing {
-            position,
-            total,
-            bytes,
-        });
-    }
-
-    fn requesting(&mut self, files: usize, bytes: u64) {
-        let _ = self.events.send(PactEvent::Requesting { files, bytes });
-    }
-
-    fn rejected(&mut self, _directory: &Path, defects: &[Defect], attempt: usize, attempts: usize) {
-        let _ = self.events.send(PactEvent::Rejected {
-            defects: defects.iter().map(ToString::to_string).collect(),
-            attempt,
-            attempts,
-        });
-    }
-
-    fn repaired(&mut self, directory: &Path, mend: &document::Mend) {
-        let _ = self.events.send(PactEvent::Repaired {
-            directory: directory.to_path_buf(),
-            mend: mend.to_string(),
-        });
-    }
-
-    fn documented(&mut self, directory: &Path) {
-        let _ = self.events.send(PactEvent::Documented {
-            directory: directory.to_path_buf(),
-        });
-    }
-
-    fn unchanged(&mut self, directory: &Path) {
-        let _ = self.events.send(PactEvent::Unchanged {
-            directory: directory.to_path_buf(),
-        });
-    }
-
-    fn skipped(&mut self, directory: &Path, below: &Path) {
-        let _ = self.events.send(PactEvent::Skipped {
-            directory: directory.to_path_buf(),
-            below: below.to_path_buf(),
-        });
-    }
 }
 
 pub(crate) fn spawn_pact<P: Wired + Agent>(
@@ -411,13 +294,11 @@ fn run_pact(
     cancel: &Cancel,
     events: &Sender<PactEvent>,
 ) {
-    let outcome = apply_toggle(
-        manifest,
-        repo_root,
-        work,
-        agent,
-        &mut Reporting { events, cancel },
-    );
+    let outcome = apply_toggle(manifest, repo_root, work, agent, cancel, &mut |event| {
+        // Ignored: a receiver that has gone away is an application that is
+        // quitting.
+        let _ = events.send(PactEvent::Run(event));
+    });
     // Every run that spends minutes on model passes is stoppable, and both of
     // them are: a refresh is reworded here exactly as a pact is. The one run
     // that is not is an un-pact — see [`Work::is_cancellable`].
@@ -425,8 +306,6 @@ fn run_pact(
         Ok(toggled) if work.is_cancellable() && cancel.is_cancelled() => Ok(cancelled(toggled)),
         outcome => outcome,
     };
-    // Ignored for the same reason `Reporting`'s sends are: a receiver that has
-    // gone away is an application that is quitting.
     let _ = events.send(PactEvent::Finished(outcome));
 }
 
@@ -567,11 +446,11 @@ fn drain(
 
     let outcome = loop {
         match running.events.try_recv() {
-            Ok(PactEvent::Starting {
+            Ok(PactEvent::Run(RunEvent::Starting {
                 directory,
                 position,
                 total,
-            }) => {
+            })) => {
                 // Two places, one fact, and they are two because they are read
                 // at two different speeds: the footer says which directory of
                 // how many is being worked *now* and replaces itself every time,
@@ -626,7 +505,7 @@ fn drain(
             // request went over, while the placeholder counts from the section
             // opening and would label a multi-pass directory's whole wait with
             // it. See `Account::record_waiting`.
-            Ok(PactEvent::Requesting { files, bytes }) => {
+            Ok(PactEvent::Run(RunEvent::Requesting { files, bytes })) => {
                 app.panel_mut()
                     .write_run(|account| account.record_waiting(files, bytes, now));
             }
@@ -635,11 +514,11 @@ fn drain(
             // the footer's bar fills by it. The bar is the only reason this
             // reaches the footer at all — the line there still names the
             // directory of how many, because that is the question it answers.
-            Ok(PactEvent::Describing {
+            Ok(PactEvent::Run(RunEvent::Describing {
                 position,
                 total,
                 bytes,
-            }) => {
+            })) => {
                 app.panel_mut()
                     .write_run(|account| account.record_describing(position, total, bytes, now));
                 app.set_files_in_flight(position, total);
@@ -647,11 +526,11 @@ fn drain(
             // The panel only, and one line, filed like the request line above
             // it: why this directory is about to cost a second pass, or why it
             // is about to fail, in the engine's own words.
-            Ok(PactEvent::Rejected {
+            Ok(PactEvent::Run(RunEvent::Rejected {
                 defects,
                 attempt,
                 attempts,
-            }) => {
+            })) => {
                 app.panel_mut()
                     .write_run(|account| account.record_rejected(&defects, attempt, attempts, now));
             }
@@ -666,7 +545,7 @@ fn drain(
             // events should have to infer which. Nothing is done with it here:
             // the line lands where every line of a pass lands, in the section
             // the `Starting` before it opened, which is that same directory's.
-            Ok(PactEvent::Repaired { directory, mend }) => {
+            Ok(PactEvent::Run(RunEvent::Repaired { directory, mend })) => {
                 let _ = directory;
                 app.panel_mut()
                     .write_run(|account| account.record_repaired(&mend, now));
@@ -680,7 +559,7 @@ fn drain(
             // the end repaints from the manifest either way, which is what
             // catches the one thing this preview cannot know: a hash that
             // fails in phase two.
-            Ok(PactEvent::Documented { directory }) => {
+            Ok(PactEvent::Run(RunEvent::Documented { directory })) => {
                 app.set_subtree_state(&directory, NodeState::PactedFresh);
                 // The document the pass just wrote, put on screen where it was
                 // written: beside the directory, in the colour the paint above
@@ -707,7 +586,7 @@ fn drain(
             // afterwards whether the document on disk was written by this run
             // or kept from the last, and the section's closing line turns on
             // exactly that.
-            Ok(PactEvent::Unchanged { directory }) => {
+            Ok(PactEvent::Run(RunEvent::Unchanged { directory })) => {
                 app.set_subtree_state(&directory, NodeState::PactedFresh);
                 app.insert_file_row(directory.join(DOCUMENT_FILE));
                 running.unchanged.push(directory);
@@ -717,7 +596,7 @@ fn drain(
             // the colour it should be. Remembered so its section can close
             // saying what happened rather than reading the document on disk and
             // calling it a write.
-            Ok(PactEvent::Skipped { directory, below }) => {
+            Ok(PactEvent::Run(RunEvent::Skipped { directory, below })) => {
                 running.skipped.push((directory, below));
             }
             Ok(PactEvent::Finished(outcome)) => break Some(outcome),
@@ -811,10 +690,8 @@ fn drain(
     // The run is over and everything it recorded is on disk, so the rows on
     // screen are one load out of date whichever arm above ran. Saying so is the
     // whole of what is left owed outside this module.
-    Some(Reloaded(reload_tree(app, scope)))
+    Some(Reloaded(reload(app, scope, manifest)))
 }
-
-const DOCUMENT_FILE: &str = "WARLOCK.md";
 
 fn close_account(
     app: &mut App,
@@ -936,7 +813,8 @@ fn apply_toggle(
     repo_root: &Path,
     work: &Work,
     agent: &dyn Agent,
-    observer: &mut dyn pact::Observer,
+    cancel: &Cancel,
+    sink: &mut dyn FnMut(RunEvent),
 ) -> Result<Toggled, String> {
     // The descent and the one save are [`descend`]'s, shared with the shell's
     // `warlock pact` and `warlock refresh` — see [`mod@crate::descent`]. What is
@@ -949,7 +827,8 @@ fn apply_toggle(
         repo_root,
         manifest,
         agent,
-        observer,
+        cancel,
+        sink,
     )
     .map_err(|error| one_line(&error.to_string()))?;
 
@@ -1031,7 +910,7 @@ mod tests {
     use std::{env, fs, process};
 
     use warlock_engine::{
-        Agent, Loaded, Manifest, Node, NodeState, PactEntry, Tree, Unwatched, agent, decide_state,
+        Agent, Loaded, Manifest, Node, NodeState, PactEntry, Tree, agent, decide_state,
         document::{ATTEMPTS, ENTRY_CHARS, FILE_PROMPT},
         load_tree, repository_root, stub_answer, subtree_hash,
     };
@@ -1047,6 +926,7 @@ mod tests {
         activity_port, apply_toggle, run_pact, spawn_pact,
     };
     use crate::chatting::Chat;
+    use crate::descent::RunEvent;
     use crate::session::{NOT_REFRESHED, Scope};
 
     fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PactToggle> {
@@ -1425,7 +1305,8 @@ mod tests {
             &scratch.root,
             &toggle(&scratch, "crates/engine", true),
             &agent,
-            &mut Unwatched,
+            &Cancel::new(),
+            &mut |_| {},
         )
         .expect("a subtree that walks and a manifest that writes");
 
@@ -1466,7 +1347,8 @@ mod tests {
             &scratch.root,
             &toggle(&scratch, "crates/engine", true),
             &agent,
-            &mut Unwatched,
+            &Cancel::new(),
+            &mut |_| {},
         )
         .expect("a subtree that walks and a manifest that writes");
 
@@ -1512,7 +1394,8 @@ mod tests {
             &scratch.root,
             &toggle(&scratch, "crates/engine", true),
             &agent,
-            &mut Unwatched,
+            &Cancel::new(),
+            &mut |_| {},
         )
         .expect("a subtree that walks and a manifest that writes");
 
@@ -1541,7 +1424,8 @@ mod tests {
             &scratch.root,
             &toggle(&scratch, "crates/engine", true),
             &agent,
-            &mut Unwatched,
+            &Cancel::new(),
+            &mut |_| {},
         )
         .expect("half a pact is still a manifest worth writing");
 
@@ -1582,7 +1466,8 @@ mod tests {
             &scratch.root,
             &toggle(&scratch, "crates/engine", true),
             &agent,
-            &mut Unwatched,
+            &Cancel::new(),
+            &mut |_| {},
         )
         .expect("a pact that documented nothing still saves");
 
@@ -1610,7 +1495,8 @@ mod tests {
             &scratch.root,
             &toggle(&scratch, "crates/engine", true),
             &agent,
-            &mut Unwatched,
+            &Cancel::new(),
+            &mut |_| {},
         )
         .expect("a subtree that walks and a manifest that writes")
         .manifest;
@@ -1625,7 +1511,8 @@ mod tests {
             &scratch.root,
             &toggle(&scratch, "crates/engine", false),
             &agent,
-            &mut Unwatched,
+            &Cancel::new(),
+            &mut |_| {},
         )
         .expect("dropping entries needs nothing but the manifest");
 
@@ -1668,7 +1555,8 @@ mod tests {
             Path::new(ROOT),
             &outside,
             &Canned::new(&scratch, []),
-            &mut Unwatched,
+            &Cancel::new(),
+            &mut |_| {},
         )
         .expect_err("a path outside the root has no manifest spelling");
 
@@ -1709,7 +1597,8 @@ mod tests {
             &scratch.root,
             &toggle(&scratch, "crates/engine", true),
             &agent,
-            &mut Unwatched,
+            &Cancel::new(),
+            &mut |_| {},
         )
         .expect_err("a manifest directory nobody can write to");
 
@@ -1761,17 +1650,19 @@ mod tests {
         events
             .iter()
             .filter_map(|event| match event {
-                PactEvent::Starting {
+                PactEvent::Run(RunEvent::Starting {
                     position, total, ..
-                } => Some((*position, *total)),
+                }) => Some((*position, *total)),
                 PactEvent::Doing(_)
-                | PactEvent::Describing { .. }
-                | PactEvent::Requesting { .. }
-                | PactEvent::Rejected { .. }
-                | PactEvent::Repaired { .. }
-                | PactEvent::Documented { .. }
-                | PactEvent::Unchanged { .. }
-                | PactEvent::Skipped { .. }
+                | PactEvent::Run(
+                    RunEvent::Describing { .. }
+                    | RunEvent::Requesting { .. }
+                    | RunEvent::Rejected { .. }
+                    | RunEvent::Repaired { .. }
+                    | RunEvent::Documented { .. }
+                    | RunEvent::Unchanged { .. }
+                    | RunEvent::Skipped { .. },
+                )
                 | PactEvent::Finished(_) => None,
             })
             .collect()
@@ -1781,20 +1672,22 @@ mod tests {
         events
             .iter()
             .filter_map(|event| match event {
-                PactEvent::Starting { directory, .. } => Some(
+                PactEvent::Run(RunEvent::Starting { directory, .. }) => Some(
                     directory
                         .strip_prefix(&scratch.root)
                         .unwrap_or(directory)
                         .to_path_buf(),
                 ),
                 PactEvent::Doing(_)
-                | PactEvent::Describing { .. }
-                | PactEvent::Requesting { .. }
-                | PactEvent::Rejected { .. }
-                | PactEvent::Repaired { .. }
-                | PactEvent::Documented { .. }
-                | PactEvent::Unchanged { .. }
-                | PactEvent::Skipped { .. }
+                | PactEvent::Run(
+                    RunEvent::Describing { .. }
+                    | RunEvent::Requesting { .. }
+                    | RunEvent::Rejected { .. }
+                    | RunEvent::Repaired { .. }
+                    | RunEvent::Documented { .. }
+                    | RunEvent::Unchanged { .. }
+                    | RunEvent::Skipped { .. },
+                )
                 | PactEvent::Finished(_) => None,
             })
             .collect()
@@ -1834,7 +1727,8 @@ mod tests {
             &scratch.root,
             &toggle(scratch, relative, true),
             &Canned::new(scratch, []),
-            &mut Unwatched,
+            &Cancel::new(),
+            &mut |_| {},
         )
         .expect("a subtree that walks and a manifest that writes");
         assert!(granted, "the subtree a refresh test starts from is fresh");
@@ -1859,33 +1753,33 @@ mod tests {
         // pass is handed it and answered by the word that its pass delivered,
         // and then exactly one outcome and nothing after it.
         let [
-            PactEvent::Starting {
+            PactEvent::Run(RunEvent::Starting {
                 directory: first,
                 position: 1,
                 total: 2,
-            },
+            }),
             // The two halves of a directory with a file in it, in order: the
             // file, then the handover to the pass that fits the lines
             // together. The parent below has no file of its own, so it reports
             // only the second.
-            PactEvent::Describing {
+            PactEvent::Run(RunEvent::Describing {
                 position: 1,
                 total: 1,
                 ..
-            },
-            PactEvent::Requesting { .. },
-            PactEvent::Documented {
+            }),
+            PactEvent::Run(RunEvent::Requesting { .. }),
+            PactEvent::Run(RunEvent::Documented {
                 directory: first_done,
-            },
-            PactEvent::Starting {
+            }),
+            PactEvent::Run(RunEvent::Starting {
                 directory: second,
                 position: 2,
                 total: 2,
-            },
-            PactEvent::Requesting { .. },
-            PactEvent::Documented {
+            }),
+            PactEvent::Run(RunEvent::Requesting { .. }),
+            PactEvent::Run(RunEvent::Documented {
                 directory: second_done,
-            },
+            }),
             PactEvent::Finished(Ok(Toggled {
                 manifest,
                 granted: true,
@@ -1944,40 +1838,40 @@ mod tests {
         // arrive whole and unaltered — this channel carries them, it does not
         // interpret them.
         let [
-            PactEvent::Starting {
+            PactEvent::Run(RunEvent::Starting {
                 directory: first,
                 position: 1,
                 total: 2,
-            },
+            }),
             // The file pass and then the synthesis, each reporting its own
             // activities between the directory it belongs to and the next: a
             // per-file directory reports two passes' worth, in order, and
             // nothing of either lands under its neighbour.
-            PactEvent::Describing { .. },
+            PactEvent::Run(RunEvent::Describing { .. }),
             PactEvent::Doing(Activity::Tool {
                 name: first_tool,
                 detail: Some(first_detail),
             }),
             PactEvent::Doing(Activity::Thinking),
             PactEvent::Doing(Activity::Cost { usd: first_cost }),
-            PactEvent::Requesting { .. },
+            PactEvent::Run(RunEvent::Requesting { .. }),
             PactEvent::Doing(Activity::Tool { .. }),
             PactEvent::Doing(Activity::Thinking),
             PactEvent::Doing(Activity::Cost { .. }),
-            PactEvent::Documented { .. },
-            PactEvent::Starting {
+            PactEvent::Run(RunEvent::Documented { .. }),
+            PactEvent::Run(RunEvent::Starting {
                 directory: second,
                 position: 2,
                 total: 2,
-            },
-            PactEvent::Requesting { .. },
+            }),
+            PactEvent::Run(RunEvent::Requesting { .. }),
             PactEvent::Doing(Activity::Tool {
                 detail: Some(second_detail),
                 ..
             }),
             PactEvent::Doing(Activity::Thinking),
             PactEvent::Doing(Activity::Cost { .. }),
-            PactEvent::Documented { .. },
+            PactEvent::Run(RunEvent::Documented { .. }),
             PactEvent::Finished(Ok(Toggled { granted: true, .. })),
         ] = events.as_slice()
         else {
@@ -3082,7 +2976,7 @@ mod tests {
         let carried: Vec<PathBuf> = events
             .iter()
             .filter_map(|event| match event {
-                PactEvent::Unchanged { directory } => Some(
+                PactEvent::Run(RunEvent::Unchanged { directory }) => Some(
                     directory
                         .strip_prefix(&scratch.root)
                         .unwrap_or(directory)
@@ -3102,7 +2996,7 @@ mod tests {
         let documented: Vec<PathBuf> = events
             .iter()
             .filter_map(|event| match event {
-                PactEvent::Documented { directory } => Some(
+                PactEvent::Run(RunEvent::Documented { directory }) => Some(
                     directory
                         .strip_prefix(&scratch.root)
                         .unwrap_or(directory)
@@ -3407,11 +3301,11 @@ mod tests {
 
         // Still going: the worker has named a directory and nothing more.
         events
-            .send(PactEvent::Starting {
+            .send(PactEvent::Run(RunEvent::Starting {
                 directory: PathBuf::from("/repo/crates/engine"),
                 position: 1,
                 total: 1,
-            })
+            }))
             .expect("the loop is still listening");
         assert!(
             pact.keep_up(&mut app, &mut manifest, &nowhere(), base)
@@ -3460,11 +3354,11 @@ mod tests {
         // The first directory, on its own: the run has reached it and the
         // pass has not said anything yet.
         events
-            .send(PactEvent::Starting {
+            .send(PactEvent::Run(RunEvent::Starting {
                 directory: PathBuf::from("/repo/crates/engine"),
                 position: 1,
                 total: 2,
-            })
+            }))
             .expect("the loop is still listening");
         pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
 
@@ -3552,11 +3446,11 @@ mod tests {
         let mut pact = Pact::with_run(running);
 
         events
-            .send(PactEvent::Starting {
+            .send(PactEvent::Run(RunEvent::Starting {
                 directory: PathBuf::from("/repo/crates/engine"),
                 position: 1,
                 total: 1,
-            })
+            }))
             .expect("the loop is still listening");
         pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
         assert_eq!(
@@ -3567,10 +3461,10 @@ mod tests {
 
         // Twenty seconds of reading files, and then the handover.
         events
-            .send(PactEvent::Requesting {
+            .send(PactEvent::Run(RunEvent::Requesting {
                 files: 11,
                 bytes: 34 * 1024,
-            })
+            }))
             .expect("the loop is still listening");
         pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 20));
 
@@ -3610,11 +3504,11 @@ mod tests {
         let mut pact = Pact::with_run(running);
 
         events
-            .send(PactEvent::Starting {
+            .send(PactEvent::Run(RunEvent::Starting {
                 directory: PathBuf::from("/repo/crates/engine"),
                 position: 1,
                 total: 2,
-            })
+            }))
             .expect("the loop is still listening");
         pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
         events
@@ -3629,11 +3523,11 @@ mod tests {
         // section above it stops where the run left it — seventy seconds in,
         // which is where its last line stays however long the run goes on.
         events
-            .send(PactEvent::Starting {
+            .send(PactEvent::Run(RunEvent::Starting {
                 directory: PathBuf::from("/repo/crates/tui"),
                 position: 2,
                 total: 2,
-            })
+            }))
             .expect("the loop is still listening");
         pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 70));
         events
@@ -3729,19 +3623,19 @@ mod tests {
         // The deepest directory's pass delivers, and the run moves on to the
         // one above it without ending.
         for event in [
-            PactEvent::Starting {
+            PactEvent::Run(RunEvent::Starting {
                 directory: PathBuf::from("/repo/crates/engine/src"),
                 position: 1,
                 total: 3,
-            },
-            PactEvent::Documented {
+            }),
+            PactEvent::Run(RunEvent::Documented {
                 directory: PathBuf::from("/repo/crates/engine/src"),
-            },
-            PactEvent::Starting {
+            }),
+            PactEvent::Run(RunEvent::Starting {
                 directory: PathBuf::from("/repo/crates/engine"),
                 position: 2,
                 total: 3,
-            },
+            }),
         ] {
             events.send(event).expect("the loop is still listening");
         }
@@ -3815,9 +3709,9 @@ mod tests {
         let on_screen: Vec<_> = app.rows().iter().map(|row| row.path.clone()).collect();
 
         events
-            .send(PactEvent::Documented {
+            .send(PactEvent::Run(RunEvent::Documented {
                 directory: PathBuf::from("/repo/crates/engine"),
-            })
+            }))
             .expect("the loop is still listening");
         pact.keep_up(&mut app, &mut manifest, &nowhere(), Instant::now());
 
@@ -3879,9 +3773,9 @@ mod tests {
 
         for _ in 0..2 {
             events
-                .send(PactEvent::Documented {
+                .send(PactEvent::Run(RunEvent::Documented {
                     directory: PathBuf::from("/repo/crates/engine"),
-                })
+                }))
                 .expect("the loop is still listening");
         }
         pact.keep_up(&mut app, &mut manifest, &nowhere(), Instant::now());
@@ -3911,9 +3805,9 @@ mod tests {
         let (events, mut pact) = running_over(&app, pact_of("/repo/crates"));
 
         events
-            .send(PactEvent::Documented {
+            .send(PactEvent::Run(RunEvent::Documented {
                 directory: PathBuf::from("/repo/docs/adr"),
-            })
+            }))
             .expect("the loop is still listening");
         pact.keep_up(&mut app, &mut manifest, &nowhere(), Instant::now());
 
@@ -3942,9 +3836,9 @@ mod tests {
 
         for directory in ["/repo/crates/engine/src", "/repo/crates/engine"] {
             events
-                .send(PactEvent::Documented {
+                .send(PactEvent::Run(RunEvent::Documented {
                     directory: PathBuf::from(directory),
-                })
+                }))
                 .expect("the loop is still listening");
         }
         pact.keep_up(&mut app, &mut manifest, &nowhere(), Instant::now());
@@ -4019,11 +3913,11 @@ mod tests {
         // The first directory, and then the three keys that shape the tree.
         let mut round = |now: Instant, directory: &str, position: usize, app: &mut App| {
             events
-                .send(PactEvent::Starting {
+                .send(PactEvent::Run(RunEvent::Starting {
                     directory: PathBuf::from(directory),
                     position,
                     total: 2,
-                })
+                }))
                 .expect("the loop is still listening");
             events
                 .send(PactEvent::Doing(Activity::Thinking))
@@ -4089,11 +3983,11 @@ mod tests {
         });
 
         events
-            .send(PactEvent::Starting {
+            .send(PactEvent::Run(RunEvent::Starting {
                 directory: PathBuf::from("/repo/crates/engine"),
                 position: 1,
                 total: 2,
-            })
+            }))
             .expect("the loop is still listening");
         events
             .send(PactEvent::Doing(Activity::Thinking))
@@ -4845,11 +4739,11 @@ mod tests {
 
         // A directory opening a section, and then a line under it.
         events
-            .send(PactEvent::Starting {
+            .send(PactEvent::Run(RunEvent::Starting {
                 directory: PathBuf::from("/repo/crates/engine"),
                 position: 1,
                 total: 1,
-            })
+            }))
             .expect("the loop is still listening");
         pact.keep_up(&mut app, &mut manifest, &nowhere(), base);
         assert_eq!(
@@ -4987,11 +4881,11 @@ mod tests {
             reading_a_file(&mut app);
 
             events
-                .send(PactEvent::Starting {
+                .send(PactEvent::Run(RunEvent::Starting {
                     directory: PathBuf::from("/repo/crates/engine"),
                     position: 1,
                     total: 2,
-                })
+                }))
                 .expect("the loop is still listening");
             events
                 .send(PactEvent::Doing(Activity::Thinking))
@@ -5416,11 +5310,11 @@ mod tests {
             let mut pact = Pact::with_run(running);
 
             events
-                .send(PactEvent::Starting {
+                .send(PactEvent::Run(RunEvent::Starting {
                     directory: PathBuf::from("/repo/crates/engine"),
                     position: 1,
                     total: 2,
-                })
+                }))
                 .expect("the loop is still listening");
             events
                 .send(PactEvent::Doing(Activity::Thinking))
@@ -5798,11 +5692,11 @@ mod tests {
         });
 
         events
-            .send(PactEvent::Starting {
+            .send(PactEvent::Run(RunEvent::Starting {
                 directory: PathBuf::from("/repo/crates"),
                 position: 1,
                 total: 1,
-            })
+            }))
             .expect("the loop is still listening");
         pact.keep_up(&mut app, &mut manifest, &nowhere(), Instant::now());
 
@@ -5911,7 +5805,8 @@ mod tests {
             &scratch.root,
             &toggle(&scratch, "crates", true),
             &agent,
-            &mut Unwatched,
+            &Cancel::new(),
+            &mut |_| {},
         )
         .expect("a subtree that walks and a manifest that writes");
 
@@ -5973,7 +5868,8 @@ mod tests {
             &scratch.root,
             &toggle(&scratch, "crates/engine", true),
             &agent,
-            &mut Unwatched,
+            &Cancel::new(),
+            &mut |_| {},
         )
         .expect("a subtree that walks and a manifest that writes");
 
@@ -6141,7 +6037,8 @@ mod tests {
             &scratch.root,
             &toggle(&scratch, "crates/engine", true),
             &agent,
-            &mut Unwatched,
+            &Cancel::new(),
+            &mut |_| {},
         )
         .expect("a subtree that walks and a manifest that writes");
 
@@ -6213,7 +6110,7 @@ mod tests {
 
         use super::{
             CancelGuard, Canned, Loaded, Manifest, NodeState, Pact, PactEntry, PactEvent, Reloaded,
-            Running, Scope, Scratch, Toggled, Unwatched, apply_toggle, fs, load, load_tree, mpsc,
+            Running, Scope, Scratch, Toggled, apply_toggle, fs, load, load_tree, mpsc,
             one_crate_to_load, pact_of, state_of, toggle,
         };
         use crate::POLL_INTERVAL;
@@ -6278,7 +6175,8 @@ mod tests {
                 &scratch.root,
                 &toggle(&scratch, "crates", true),
                 &agent,
-                &mut Unwatched,
+                &warlock_tui::Cancel::new(),
+                &mut |_| {},
             )
             .expect("a subtree that walks and a manifest that writes");
 
@@ -6314,11 +6212,17 @@ mod tests {
             watched.policy.accepted(saved_at);
 
             assert!(
-                !watched.round(&mut app, &scope, false, saved_at),
+                !watched.round(&mut app, &scope, &mut Manifest::new(), false, saved_at),
                 "read the tree before the disk had gone quiet"
             );
             assert!(
-                watched.round(&mut app, &scope, false, saved_at + QUIET_PERIOD),
+                watched.round(
+                    &mut app,
+                    &scope,
+                    &mut Manifest::new(),
+                    false,
+                    saved_at + QUIET_PERIOD
+                ),
                 "the disk went quiet and the tree was never read"
             );
 
@@ -6369,7 +6273,7 @@ mod tests {
             for round in 1..=ROUNDS {
                 let at = base + QUIET_PERIOD * round;
                 assert!(
-                    !watched.round(&mut app, &scope, true, at),
+                    !watched.round(&mut app, &scope, &mut Manifest::new(), true, at),
                     "the tree was read under a run in flight, {at:?} in"
                 );
             }
@@ -6429,6 +6333,7 @@ mod tests {
                 !watched.round(
                     &mut app,
                     &scope,
+                    &mut Manifest::new(),
                     false,
                     ended + RELOAD_CEILING + QUIET_PERIOD
                 ),
@@ -6442,8 +6347,8 @@ mod tests {
             // would rewrite are the same file, so a cleanup that ran mid-run
             // would be a lost update — one of the two writes wins. Nothing
             // guards against that except the order inside `round`: `in_flight`
-            // returns before `reload_tree` is reached, and the cleanup lives
-            // inside `reload_tree`. This is the test that keeps that ordering
+            // returns before `reload` is reached, and the cleanup lives
+            // inside `reload`. This is the test that keeps that ordering
             // from being refactored into a lock or a queue.
 
             const ROUNDS: u32 = 12;
@@ -6460,7 +6365,7 @@ mod tests {
             for round in 1..=ROUNDS {
                 let at = base + QUIET_PERIOD * round;
                 assert!(
-                    !watched.round(&mut app, &scope, true, at),
+                    !watched.round(&mut app, &scope, &mut Manifest::new(), true, at),
                     "the tree was read under a run in flight, {at:?} in"
                 );
             }
@@ -6483,7 +6388,13 @@ mod tests {
             // makes the assertion above about the run rather than about a
             // repository that had nothing to drop.
             assert!(
-                watched.round(&mut app, &scope, false, base + QUIET_PERIOD * (ROUNDS + 1)),
+                watched.round(
+                    &mut app,
+                    &scope,
+                    &mut Manifest::new(),
+                    false,
+                    base + QUIET_PERIOD * (ROUNDS + 1)
+                ),
                 "the disk went quiet, the run ended, and the tree was never read"
             );
             assert_eq!(
@@ -6512,7 +6423,13 @@ mod tests {
             let base = Instant::now();
             watched.policy.accepted(base);
             assert!(
-                watched.round(&mut app, &scope, false, base + QUIET_PERIOD),
+                watched.round(
+                    &mut app,
+                    &scope,
+                    &mut Manifest::new(),
+                    false,
+                    base + QUIET_PERIOD
+                ),
                 "the disk went quiet and the tree was never read"
             );
             assert_eq!(
@@ -6532,7 +6449,13 @@ mod tests {
             let saved_at = base + Duration::from_secs(1);
             watched.policy.accepted(saved_at);
             assert!(
-                watched.round(&mut app, &scope, false, saved_at + QUIET_PERIOD),
+                watched.round(
+                    &mut app,
+                    &scope,
+                    &mut Manifest::new(),
+                    false,
+                    saved_at + QUIET_PERIOD
+                ),
                 "the cleanup's own save was never answered by a reload"
             );
 
@@ -6555,7 +6478,7 @@ mod tests {
             for round in 1..=ROUNDS {
                 let at = saved_at + RELOAD_CEILING + QUIET_PERIOD * round;
                 assert!(
-                    !watched.round(&mut app, &scope, false, at),
+                    !watched.round(&mut app, &scope, &mut Manifest::new(), false, at),
                     "the reloads are chasing their own saves, {at:?} in"
                 );
             }
@@ -6605,7 +6528,13 @@ mod tests {
             app.set_message(REFUSED);
             let base = Instant::now();
             for round in 0..20 {
-                watched.round(&mut app, &scope, false, base + POLL_INTERVAL * round);
+                watched.round(
+                    &mut app,
+                    &scope,
+                    &mut Manifest::new(),
+                    false,
+                    base + POLL_INTERVAL * round,
+                );
             }
             assert_eq!(
                 app.message(),

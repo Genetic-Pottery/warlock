@@ -234,21 +234,14 @@ fn render(request: &agent::Request) -> String {
             );
             continue;
         }
-        match (file.bytes().map(str::from_utf8), file.summary()) {
-            (Some(Ok(text)), _) => {
+        match file.bytes().map(str::from_utf8) {
+            Some(Ok(text)) => {
                 let _ = write!(rendered, "\n\n--- {path} ({size} bytes) ---\n\n{text}");
             }
-            (Some(Err(_)), _) => {
+            Some(Err(_)) => {
                 let _ = write!(rendered, "\n\n--- {path} ({size} bytes, not text) ---");
             }
-            (None, Some(summary)) => {
-                let _ = write!(
-                    rendered,
-                    "\n\n--- {path} ({size} bytes, summarised — the text below is prose about \
-                     this file, not any part of it) ---\n\n{summary}"
-                );
-            }
-            (None, None) => {
+            None => {
                 let _ = write!(
                     rendered,
                     "\n\n--- {path} ({size} bytes, contents not sent) ---"
@@ -1566,11 +1559,10 @@ mod tests {
     }
 
     #[test]
-    fn each_of_a_files_three_states_renders_as_the_prompt_says_it_will() {
+    fn each_of_a_files_states_renders_as_the_prompt_says_it_will() {
         let request = agent::Request::new("describe this directory", "/repo").with_files(vec![
             agent::File::present("small.rs", &b"fn small() {}\n"[..]),
             agent::File::omitted("huge.bin", 4_200_000),
-            agent::File::summarised("vendor/schema.json", 900_000, "A JSON Schema: 180 objects."),
         ]);
 
         let rendered = render(&request);
@@ -1582,19 +1574,6 @@ mod tests {
         assert!(
             rendered.contains("huge.bin (4200000 bytes, contents not sent)"),
             "{rendered}"
-        );
-        // Described: the account, said to be an account so it is never quoted
-        // as the file's own words.
-        assert!(
-            rendered.contains("A JSON Schema: 180 objects."),
-            "{rendered}"
-        );
-        let summarised = rendered
-            .find("vendor/schema.json")
-            .expect("the summarised file is named");
-        assert!(
-            rendered[summarised..].starts_with("vendor/schema.json (900000 bytes, summarised"),
-            "an account has to say it is one:\n{rendered}"
         );
     }
 

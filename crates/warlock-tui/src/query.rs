@@ -110,7 +110,8 @@ fn listed_onto<W: Write>(
     let repo_root = standing.repo_root();
     let root = path.map_or_else(|| repo_root.to_path_buf(), |path| standing.target(path));
 
-    let Loaded { tree, problems } = load_tree(&root).map_err(|source| Error::Load { source })?;
+    let Loaded { tree, problems, .. } =
+        load_tree(&root).map_err(|source| Error::Load { source })?;
     // Refused rather than reported around, as the startup load refuses them:
     // the nodes above an unreadable file are coloured stale on no evidence, and
     // a script reading this listing cannot tell such a line from a verdict. See

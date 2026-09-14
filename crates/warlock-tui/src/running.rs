@@ -2,7 +2,7 @@
 //! spend anything, hence their own file rather than two more arms of
 //! [`mod@crate::edits`].
 //!
-//! [`ran`] takes an [`Opened`], so the boundary is asked before the walk. Asked
+//! [`descended`] takes an [`Opened`], so the boundary is asked before the walk. Asked
 //! afterwards it would have listed somebody else's directories before refusing;
 //! asked after the first directory it would have spent a pass and overwritten a
 //! `WARLOCK.md` that no exit status puts back. Which directories a refresh
@@ -14,33 +14,32 @@
 //! more" throws away the only list of what to go and look at. A cancelled run
 //! names none of its own, because nothing tells the killed pass apart from a
 //! real failure. The environment is read in [`started`] alone; everything under
-//! it takes the repository, agent, observer and say-when as parameters, which
-//! is the seam the tests run through.
+//! it takes the repository, agent, writers and say-when as parameters, which is
+//! the seam the tests run through.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use warlock_engine::{Agent, PactedSubtree, Pacting, document, pact, to_manifest_path};
+use warlock_engine::{Agent, PactedSubtree, pact, to_manifest_path};
 use warlock_tui::{Cancel, ClaudeAgent};
 
 use crate::CANCELLED;
-use crate::descent::{Descent, carry_on, descend};
+use crate::descent::{Descent, RunEvent, descend};
 use crate::edits::{Opened, opened};
 use crate::error::{Error, one_line};
 
-// The headless counterpart of [`Reporting`](crate::pacting), and much smaller:
-// no channel, no thread and no screen, so where that one forwards five kinds of
-// event to an event loop, this writes the two a person watching a pipe can act
-// on.
+// The headless counterpart of the panel's channel, and much smaller: no thread
+// and no screen, so where the panel draws every event, this writes the few a
+// person watching a pipe can act on.
 //
 // Generic over the writer rather than reaching for `io::stdout` itself, for the
 // reason every other seam in this crate is a parameter: the tests assert on the
 // exact lines a run produces, in order, and a function that printed could only
 // be tested by spawning a process to read the output of.
 //
-// A write that fails is ignored — the same shrug `Reporting` gives a send into a
+// A write that fails is ignored — the same shrug the panel gives a send into a
 // closed channel, for a stronger reason. A closed stdout is
 // `warlock pact . | head -1`, and failing a run of model passes because the
 // thing reading its progress went away would be spending minutes of somebody's
@@ -48,10 +47,6 @@ use crate::error::{Error, one_line};
 struct Progress<W: Write> {
     root: PathBuf,
     out: W,
-    // Read rather than written here: this port has no opinion about when a run
-    // should end, it only carries somebody else's to the one place the engine
-    // asks.
-    cancel: Cancel,
     // Kept because the failure report needs it and nothing else has it: the
     // `PactedSubtree` carries the failures but not the size of the run they
     // happened in, and "3 failed" without "of 100" is the illegible half of the
@@ -67,11 +62,10 @@ struct Progress<W: Write> {
 }
 
 impl<W: Write> Progress<W> {
-    const fn new(root: PathBuf, out: W, cancel: Cancel) -> Self {
+    const fn new(root: PathBuf, out: W) -> Self {
         Self {
             root,
             out,
-            cancel,
             total: 0,
         }
     }
@@ -84,64 +78,59 @@ impl<W: Write> Progress<W> {
         // Ignored on purpose; see the type's doc.
         let _ = writeln!(self.out, "warlock: {fact}");
     }
-}
 
-impl<W: Write> pact::Observer for Progress<W> {
-    // The say-when is read before anything is printed, so a cancelled run
-    // neither announces a directory it will not describe nor describes it. This
-    // is the only question the engine asks that a run can be stopped at, which
-    // is what makes a stop leave whole documents behind rather than half of one.
-    //
-    // The fraction is the engine's own, unaltered and one-based, and its
-    // denominator does not move for the length of the run — so `[3/12]` is a
-    // thing a reader can watch rather than a running total that redefines
-    // itself. It is on this line and not the completion line because this is
-    // where it means something: it counts the directories offered.
-    fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
-        if carry_on(&self.cancel) == Pacting::Stop {
-            return Pacting::Stop;
+    fn on(&mut self, event: RunEvent) {
+        match event {
+            // The fraction is the engine's own, unaltered and one-based, and its
+            // denominator does not move for the length of the run — so `[3/12]`
+            // is a thing a reader can watch rather than a running total that
+            // redefines itself. It is on this line and not the completion line
+            // because this is where it means something: it counts the
+            // directories offered.
+            RunEvent::Starting {
+                directory,
+                position,
+                total,
+            } => {
+                self.total = total;
+                let named = named(&self.root, &directory);
+                self.say(&format!("[{position}/{total}] documenting {named}"));
+            }
+            // On stdout with the progress and not on stderr with the report,
+            // because a mended slot is a document that was written, not a
+            // directory that was missed: the failure report is the list of
+            // things to go and look at, and a repair belongs to the story of the
+            // run. A log read tomorrow should still be able to tell a repaired
+            // entry from a written one, so it says which slot and what was done
+            // to it.
+            RunEvent::Repaired { directory, mend } => {
+                let named = named(&self.root, &directory);
+                self.say(&format!("{named} — {mend}"));
+            }
+            RunEvent::Documented { directory } => {
+                let named = named(&self.root, &directory);
+                self.say(&format!("documented {named}"));
+            }
+            RunEvent::Unchanged { directory } => {
+                let named = named(&self.root, &directory);
+                self.say(&format!("unchanged {named}"));
+            }
+            // Both names on the line. A headless run is read in a log after the
+            // fact, often by whoever has to explain why a directory is still
+            // yellow, and `skipped crates/tui` on its own is the half of the
+            // answer that does not help.
+            RunEvent::Skipped { directory, below } => {
+                let (named, below) = (named(&self.root, &directory), named(&self.root, &below));
+                self.say(&format!(
+                    "skipped {named} — {below} below it was not documented"
+                ));
+            }
+            // A pipe is read a line per directory; the panel's per-file
+            // fractions and retries would bury those lines.
+            RunEvent::Describing { .. }
+            | RunEvent::Requesting { .. }
+            | RunEvent::Rejected { .. } => {}
         }
-        // Remembered as well as printed, and remembered every time rather than
-        // only the first: the engine states one denominator for a run, so the
-        // last thing it said and the first are the same number, and a port that
-        // only recorded one of them would be a port with a rule about which.
-        self.total = total;
-        let named = named(&self.root, directory);
-        self.say(&format!("[{position}/{total}] documenting {named}"));
-        Pacting::Continue
-    }
-
-    // On stdout with the progress and not on stderr with the report, because a
-    // mended slot is a document that was written, not a directory that was
-    // missed: the failure report is the list of things to go and look at, and a
-    // repair belongs to the story of the run. It costs the run nothing — no
-    // status, no `failed`, no `total` — but a log read tomorrow should still be
-    // able to tell a repaired entry from a written one, so it says which slot
-    // and what was done to it.
-    fn repaired(&mut self, directory: &Path, mend: &document::Mend) {
-        let named = named(&self.root, directory);
-        self.say(&format!("{named} — {mend}"));
-    }
-
-    fn documented(&mut self, directory: &Path) {
-        let named = named(&self.root, directory);
-        self.say(&format!("documented {named}"));
-    }
-
-    fn unchanged(&mut self, directory: &Path) {
-        let named = named(&self.root, directory);
-        self.say(&format!("unchanged {named}"));
-    }
-
-    // Both names on the line. A headless run is read in a log after the fact,
-    // often by whoever has to explain why a directory is still yellow, and
-    // `skipped crates/tui` on its own is the half of the answer that does not
-    // help.
-    fn skipped(&mut self, directory: &Path, below: &Path) {
-        let (named, below) = (named(&self.root, directory), named(&self.root, below));
-        self.say(&format!(
-            "skipped {named} — {below} below it was not documented"
-        ));
     }
 }
 
@@ -211,33 +200,6 @@ fn report(root: &Path, failures: &[pact::Failure], total: usize) -> Option<Repor
         lines,
         total,
     })
-}
-
-// The whole of `warlock pact` and `warlock refresh` below the gate. `opened` is
-// the proof the boundary was asked — it cannot be built any other way — so this
-// does not ask it again, and there is no arrangement of the arguments in which
-// it could be skipped.
-//
-// The manifest is saved inside `descend`, once, after the descent and whatever
-// it came to: a run in which some directories failed still earned the grants of
-// the ones that did not, and throwing them away would mean paying for them
-// again. What comes back is the `PactedSubtree` whole, as a value rather than as
-// something printed, so the report a run's failures deserve is a thing a test
-// can hold up.
-fn ran(
-    opened: &Opened,
-    descent: Descent,
-    agent: &dyn Agent,
-    observer: &mut dyn pact::Observer,
-) -> Result<PactedSubtree, Error> {
-    descend(
-        descent,
-        opened.target(),
-        opened.repo_root(),
-        opened.manifest(),
-        agent,
-        observer,
-    )
 }
 
 // The whole of the signal handling, and it is a flag and two lines. Two presses
@@ -326,7 +288,7 @@ fn started(descent: Descent, path: &Path) -> Result<(), Error> {
     .outcome
 }
 
-// The observer is handed back still holding what it wrote and the denominator it
+// The progress is handed back still holding what it wrote and the denominator it
 // counted against, because a caller that gave it a `Vec<u8>` wants both. On the
 // real road the writer is stdout and nobody reads either again. No `Debug`,
 // because [`Progress`] has none: a writer is not a value to print.
@@ -346,10 +308,10 @@ struct Descended<W: Write> {
 // because the order is the load-bearing part. Four things have to be true
 // together, and are true here:
 //
-// * The observer and the agent answer to one `Cancel`. The handle handed in is
-//   cloned into `Progress`, and the caller has already given the same one to the
-//   agent — so a single Ctrl-C kills the pass in flight *and* stops the descent
-//   at the next directory, rather than doing one and not the other.
+// * The descent and the agent answer to one `Cancel`. The handle handed in goes
+//   to `descend`, and the caller has already given the same one to the agent —
+//   so a single Ctrl-C kills the pass in flight *and* stops the descent at the
+//   next directory, rather than doing one and not the other.
 // * The manifest is saved before anything has an opinion. That happens inside
 //   `descend`, which is what makes `Error::Failures` "completed with failures"
 //   rather than a failure, and a cancel a run that recorded what it finished.
@@ -366,8 +328,18 @@ fn descended<O: Write, E: Write>(
     out: O,
     err: &mut E,
 ) -> Result<Descended<O>, Error> {
-    let mut progress = Progress::new(opened.repo_root().to_path_buf(), out, cancel.clone());
-    let subtree = ran(opened, descent, agent, &mut progress)?;
+    // `opened` is the proof the boundary was asked — it cannot be built any other
+    // way — so this does not ask it again.
+    let mut progress = Progress::new(opened.repo_root().to_path_buf(), out);
+    let subtree = descend(
+        descent,
+        opened.target(),
+        opened.repo_root(),
+        opened.manifest(),
+        agent,
+        cancel,
+        &mut |event| progress.on(event),
+    )?;
 
     let report = report(opened.repo_root(), &subtree.failures, progress.total());
     let outcome = ending(cancel.is_cancelled(), report.as_ref(), err);

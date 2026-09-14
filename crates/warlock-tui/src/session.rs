@@ -68,14 +68,24 @@ pub(crate) const NOT_CLEANED: &str = "entries under an ignored directory are sti
 // The tree that was read comes back because this function is the only thing that
 // has it, and the watcher's filter has to be rebuilt from the walk that produced
 // what is now on screen.
-pub(crate) fn reload_tree(app: &mut App, scope: &Scope) -> Option<Tree> {
+//
+// The manifest is replaced from the same load, and this is the only place a
+// session's copy is refreshed from disk. A copy kept across a reload is what a
+// `git pull` or a `warlock scope add` in another terminal is lost to: the rows
+// show the new entries while every key judges and saves the old ones.
+pub(crate) fn reload(app: &mut App, scope: &Scope, manifest: &mut Manifest) -> Option<Tree> {
     if let Some(line) = clean_ignored(&scope.repo_root, &scope.root) {
         note(app, line);
     }
 
     match load_tree(&scope.root) {
-        Ok(Loaded { tree, problems }) => {
+        Ok(Loaded {
+            tree,
+            manifest: loaded,
+            problems,
+        }) => {
             *app = reseat_on(app, &tree);
+            *manifest = loaded;
             // The same count, in the same words, as the startup load that
             // refuses to draw a tree with problems in it: one problem quoted
             // and the rest counted. A node the engine could not hash is
@@ -209,6 +219,7 @@ impl Watched {
         &mut self,
         app: &mut App,
         scope: &Scope,
+        manifest: &mut Manifest,
         in_flight: bool,
         now: Instant,
     ) -> bool {
@@ -223,7 +234,7 @@ impl Watched {
         if in_flight || !self.policy.due(now) {
             return false;
         }
-        let tree = reload_tree(app, scope);
+        let tree = reload(app, scope, manifest);
         // The clock is read again, and this is the one place in the loop that
         // does: everything else in a round is over in microseconds, while the
         // load between these two lines is a walk and a hash per pacted subtree.
@@ -348,19 +359,19 @@ pub(crate) fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
 // The tree comes back as well as the app because the app is not a tree: its rows
 // are filtered by what the reader has toggled, while the directories one walk
 // produced are what the watcher's filter is. Handing it over here is what keeps
-// that filter and the rows on screen born of the same walk. The two paths come
-// back for the same reason they are resolved here — finding the repository root
-// is a walk up the filesystem that should happen once, and the tree's root is the
-// path the engine came back rooted at, which a later load must be given rather
-// than guess.
+// that filter and the rows on screen born of the same walk, and the manifest
+// comes back from that same load for the reason `reload` gives. The two paths
+// come back because finding the repository root is a walk up the filesystem that
+// should happen once, and the tree's root is the path the engine came back rooted
+// at, which a later load must be given rather than guess.
 //
 // A load that reported problems is refused rather than drawn: the problems are
 // files warlock could not read, so the nodes above them are coloured stale on no
 // evidence, and drawing that would put a colour on screen nothing on disk backs
 // up. That is a startup rule and stays one — mid-session, with a tree already
-// showing and a run's documents already written, `reload_tree` takes the same
+// showing and a run's documents already written, `reload` takes the same
 // problems.
-pub(crate) fn load_app() -> Result<(App, Scope, Tree), Error> {
+pub(crate) fn load_app() -> Result<(App, Scope, Tree, Manifest), Error> {
     let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
     load_app_in(&working_dir)
 }
@@ -369,7 +380,7 @@ pub(crate) fn load_app() -> Result<(App, Scope, Tree), Error> {
 // without calling `env::set_current_dir`, which is process-wide and would reach
 // into every other test running beside it. `load_app` is still the only caller
 // outside this module and still reads the directory itself.
-fn load_app_in(working_dir: &Path) -> Result<(App, Scope, Tree), Error> {
+fn load_app_in(working_dir: &Path) -> Result<(App, Scope, Tree, Manifest), Error> {
     // Asked before the load rather than after it, because the cleanup has to
     // run first and it is written under this root. A working directory with no
     // repository above it is not refused here — `load_tree` is the one place
@@ -379,8 +390,11 @@ fn load_app_in(working_dir: &Path) -> Result<(App, Scope, Tree), Error> {
         .as_deref()
         .and_then(|repo_root| clean_ignored(repo_root, working_dir));
 
-    let Loaded { tree, problems } =
-        load_tree(working_dir).map_err(|source| Error::Load { source })?;
+    let Loaded {
+        tree,
+        manifest,
+        problems,
+    } = load_tree(working_dir).map_err(|source| Error::Load { source })?;
     if let Some(error) = Error::from_problems(&problems) {
         return Err(error);
     }
@@ -401,14 +415,14 @@ fn load_app_in(working_dir: &Path) -> Result<(App, Scope, Tree), Error> {
     // sigil is written with warlock not running — so it is built once, kept
     // beside the roots it was built from, and handed to the renderer every
     // frame. A reload does not touch it, which is why `reseat_on` no longer
-    // carries it and `reload_tree` no longer puts it back afterwards.
+    // carries it and `reload` no longer puts it back afterwards.
     let chrome = Chrome::of(&repo_root, tree.root_path()).with_sigils(sigils_held(&repo_root));
     let scope = Scope {
         root: tree.root_path().to_path_buf(),
         repo_root,
         chrome,
     };
-    Ok((app, scope, tree))
+    Ok((app, scope, tree, manifest))
 }
 
 #[cfg(test)]
@@ -420,7 +434,7 @@ mod tests {
     use warlock_engine::{Manifest, PactEntry, manifest_path, save_sigils, sigils_path};
     use warlock_tui::{App, Chrome, Sigils};
 
-    use super::{NOT_CLEANED, Scope, load_app_in, load_manifest, reload_tree, sigils_under};
+    use super::{NOT_CLEANED, Scope, load_app_in, load_manifest, reload, sigils_under};
     use crate::error::Error;
 
     #[test]
@@ -434,7 +448,7 @@ mod tests {
         // What changed is how it is kept true. It used to be `reseat_on`
         // remembering to carry two more fields; it is now that the fact is not
         // on the app at all, so there is nothing for a reload to carry or drop.
-        // `reload_tree` reads `scope.chrome` and writes it nowhere.
+        // `reload` reads `scope.chrome` and writes it nowhere.
         let scope = Scope {
             root: PathBuf::from("/repo/crates"),
             repo_root: PathBuf::from("/repo"),
@@ -446,7 +460,7 @@ mod tests {
         // keeps the tree already drawn — and the arm that would be the last
         // chance to lose a header if one could still be lost here.
         let mut app = warlock_tui::App::default();
-        assert_eq!(super::reload_tree(&mut app, &scope), None);
+        assert_eq!(super::reload(&mut app, &scope, &mut Manifest::new()), None);
 
         assert_eq!(scope.chrome.header(), "crates");
         assert_eq!(
@@ -641,7 +655,7 @@ mod tests {
         let mut app = App::default();
 
         assert!(
-            reload_tree(&mut app, &a_scope(&scratch)).is_some(),
+            reload(&mut app, &a_scope(&scratch), &mut Manifest::new()).is_some(),
             "the tree was not read"
         );
 
@@ -674,7 +688,7 @@ mod tests {
         let mut app = App::default();
 
         assert!(
-            reload_tree(&mut app, &a_scope(&scratch)).is_some(),
+            reload(&mut app, &a_scope(&scratch), &mut Manifest::new()).is_some(),
             "the tree was not read"
         );
 
@@ -699,7 +713,7 @@ mod tests {
         scratch.write(".warlock/pacts.toml", "not a manifest\n");
         let mut app = App::default();
 
-        reload_tree(&mut app, &a_scope(&scratch));
+        reload(&mut app, &a_scope(&scratch), &mut Manifest::new());
 
         let message = app
             .message()
@@ -727,7 +741,7 @@ mod tests {
             .expect("chmods the manifest directory read-only");
         let mut app = App::default();
 
-        let tree = reload_tree(&mut app, &a_scope(&scratch));
+        let tree = reload(&mut app, &a_scope(&scratch), &mut Manifest::new());
 
         // Back to writable before anything can fail, so the scratch repository
         // can still be removed.
@@ -765,7 +779,8 @@ mod tests {
             .save(&scratch.root)
             .expect("a manifest that writes");
 
-        let (app, scope, _tree) = load_app_in(&scratch.root).expect("a repository that loads");
+        let (app, scope, _tree, _manifest) =
+            load_app_in(&scratch.root).expect("a repository that loads");
 
         assert_eq!(
             modules_on_disk(&scratch),
@@ -805,7 +820,7 @@ mod tests {
         // can still be removed.
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).expect("chmods it back");
 
-        let (app, _scope, _tree) =
+        let (app, _scope, _tree, _manifest) =
             started.expect("a cleanup that could not save ended the session");
         let message = app
             .message()
@@ -835,7 +850,7 @@ mod tests {
         let scope = a_scope(&scratch);
         let mut app = App::default();
 
-        reload_tree(&mut app, &scope);
+        reload(&mut app, &scope, &mut Manifest::new());
         assert!(
             app.message()
                 .is_some_and(|line| line.starts_with(NOT_CLEANED)),
@@ -845,7 +860,7 @@ mod tests {
             .save(&scratch.root)
             .expect("a manifest that writes");
 
-        reload_tree(&mut app, &scope);
+        reload(&mut app, &scope, &mut Manifest::new());
 
         assert_eq!(
             modules_on_disk(&scratch),

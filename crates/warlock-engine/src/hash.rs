@@ -2,18 +2,13 @@
 //! agree: nothing but the sorted relative paths and the file bytes goes into
 //! the digest.
 
-use std::collections::BTreeMap;
-use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
-use ignore::WalkBuilder;
-
-use crate::ignores;
-use crate::{manifest, to_manifest_path};
-
-const MANIFEST_DIR: &str = ".warlock";
+use crate::manifest;
+use crate::walk::{self, DOCUMENT_FILE};
 
 // The rule for the `v1` below: the version moves when a repository that changed
 // nothing would hash differently, and not otherwise. Not when this file
@@ -26,20 +21,6 @@ const MANIFEST_DIR: &str = ".warlock";
 // plain blake3 of the same bytes taken for some other purpose.
 const HASH_CONTEXT: &str = "warlock subtree hash v1 2026-08-19";
 
-/// ```
-/// use std::fs;
-/// use warlock_engine::subtree_hash;
-///
-/// let dir = tempfile::tempdir()?;
-/// fs::write(dir.path().join("WARLOCK.md"), "# module\n")?;
-///
-/// let before = subtree_hash(dir.path())?;
-/// assert_eq!(before, subtree_hash(dir.path())?, "the same bytes hash the same");
-///
-/// fs::write(dir.path().join("WARLOCK.md"), "# module, revised\n")?;
-/// assert_ne!(before, subtree_hash(dir.path())?);
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
 // The digest of one file's bytes, for the per-file record in a `PactEntry`.
 //
 // Its own context and not `HASH_CONTEXT`: this hashes bytes where the subtree
@@ -70,24 +51,39 @@ pub fn file_hash(path: impl AsRef<Path>) -> Result<String, Error> {
         path: path.to_path_buf(),
         source,
     })?;
-    let mut hasher = blake3::Hasher::new_derive_key(FILE_CONTEXT);
-    hasher.update(&length(bytes.len()).to_le_bytes());
-    hasher.update(&bytes);
-    Ok(hasher.finalize().to_hex().to_string())
+    Ok(bytes_hash(&bytes))
 }
 
+pub(crate) fn bytes_hash(bytes: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key(FILE_CONTEXT);
+    hasher.update(&length(bytes.len()).to_le_bytes());
+    hasher.update(bytes);
+    hasher.finalize().to_hex().to_string()
+}
+
+/// ```
+/// use std::fs;
+/// use warlock_engine::subtree_hash;
+///
+/// let dir = tempfile::tempdir()?;
+/// fs::write(dir.path().join("WARLOCK.md"), "# module\n")?;
+///
+/// let before = subtree_hash(dir.path())?;
+/// assert_eq!(before, subtree_hash(dir.path())?, "the same bytes hash the same");
+///
+/// fs::write(dir.path().join("WARLOCK.md"), "# module, revised\n")?;
+/// assert_ne!(before, subtree_hash(dir.path())?);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn subtree_hash(dir: impl AsRef<Path>) -> Result<String, Error> {
     let dir = dir.as_ref();
     let mut hasher = blake3::Hasher::new_derive_key(HASH_CONTEXT);
 
-    // A walker never applies the rules to the root it was handed, so ask
-    // separately: without this, selecting an excluded directory directly would
-    // hash the very content the repository asked Warlock to keep out.
-    if ignores::is_ignored(dir).map_err(|source| Error::Walk { source })? {
-        return Ok(hasher.finalize().to_hex().to_string());
-    }
-
-    for (relative, path) in files_under(dir)? {
+    let files = walk::subtree_files(dir).map_err(|source| match source {
+        walk::Error::Walk(source) => Error::Walk { source },
+        walk::Error::Path { path, source } => Error::Path { path, source },
+    })?;
+    for (relative, path) in files {
         // Length-prefixed, so no arrangement of names and contents can be
         // mistaken for another: `a/b` holding `c` and `a` holding `bc` are
         // different inputs and must be different digests.
@@ -115,47 +111,53 @@ pub fn subtree_hash(dir: impl AsRef<Path>) -> Result<String, Error> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-/// A [`BTreeMap`] because the key order *is* the hash order: whatever sequence
-/// the walker produced is thrown away here, which is what keeps the digest
-/// independent of the filesystem.
-fn files_under(dir: &Path) -> Result<BTreeMap<String, PathBuf>, Error> {
-    let walker = WalkBuilder::new(dir)
-        // The same three settings the loader walks by, for the same reasons: a
-        // symlinked cycle has to terminate, a fixture carrying a `.gitignore`
-        // and no `.git` still has to be ignored, and `.warlock/` is Warlock's
-        // own bookkeeping rather than content of the module.
-        .follow_links(false)
-        .require_git(false)
-        .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR))
-        .add_custom_ignore_filename(ignores::FILENAME)
-        .build();
+const CARRY_HASH_CONTEXT: &str = "warlock carry hash v1 2026-09-06";
 
-    let mut files = BTreeMap::new();
-    for entry in walker {
-        let entry = entry.map_err(|source| Error::Walk { source })?;
-        // An ignore file the walker could not use is reported beside the
-        // directory it sits in rather than in place of it. Taking that as "no
-        // rules" would hash the content the repository excluded, so it is
-        // promoted to the failure it is.
-        if let Some(source) = entry.error() {
-            return Err(Error::Walk {
-                source: source.clone(),
-            });
-        }
-        // With `follow_links(false)` a symlink reports as a symlink, so this
-        // drops it: its target is already hashed if it is inside the subtree,
-        // and is not the subtree's content if it is not.
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-            continue;
-        }
-        let path = entry.into_path();
-        let relative = to_manifest_path(dir, &path).map_err(|source| Error::Path {
-            path: path.clone(),
-            source: Box::new(source),
-        })?;
-        files.insert(relative, path);
+// The digest of exactly what a directory's pass would be shown, taken before and
+// after it: a match with the recorded one is the early cutoff. `None` wherever
+// anything could not be read, which never matches and so always runs the pass.
+pub(crate) fn carry_hash(directory: &Path) -> Option<String> {
+    let found = walk::own(directory).ok()?;
+    let mut hasher = blake3::Hasher::new_derive_key(CARRY_HASH_CONTEXT);
+
+    // Two sections, each length-prefixed and each announced by its count, so no
+    // arrangement of one can be read as the other: a directory holding a file
+    // named `x` and one holding a child `x` with a document are different
+    // inputs and must be different digests.
+    hasher.update(&length(found.files.len()).to_le_bytes());
+    for (relative, path) in &found.files {
+        hasher.update(&length(relative.len()).to_le_bytes());
+        hasher.update(relative.as_bytes());
+        let bytes = fs::read(path).ok()?;
+        hasher.update(&length(bytes.len()).to_le_bytes());
+        hasher.update(&bytes);
     }
-    Ok(files)
+
+    hasher.update(&length(found.child_documents.len()).to_le_bytes());
+    for (child, path) in &found.child_documents {
+        hasher.update(&length(child.len()).to_le_bytes());
+        hasher.update(child.as_bytes());
+        let bytes = fs::read(path).ok()?;
+        hasher.update(&length(bytes.len()).to_le_bytes());
+        hasher.update(&bytes);
+    }
+
+    // The third section: the document itself, absent and empty told apart by
+    // the marker byte, so a directory with no document cannot digest as one
+    // holding a document of nothing.
+    match fs::read(directory.join(DOCUMENT_FILE)) {
+        Ok(bytes) => {
+            hasher.update(&[1]);
+            hasher.update(&length(bytes.len()).to_le_bytes());
+            hasher.update(&bytes);
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            hasher.update(&[0]);
+        }
+        Err(_) => return None,
+    }
+
+    Some(hasher.finalize().to_hex().to_string())
 }
 
 /// Saturating rather than fallible or panicking: the clamp is unreachable on

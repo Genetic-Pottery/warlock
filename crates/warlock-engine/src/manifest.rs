@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-const MANIFEST_DIR: &str = ".warlock";
+use crate::walk::MANIFEST_DIR;
 
 const MANIFEST_FILE: &str = "pacts.toml";
 

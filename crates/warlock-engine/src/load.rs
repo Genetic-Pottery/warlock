@@ -1,20 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-use ignore::WalkBuilder;
-
+use crate::walk::{self, DOCUMENT_FILE};
 use crate::{
     Manifest, Node, NodeState, Tree, decide_state, hash, ignores, manifest, scope, subtree_hash,
     to_manifest_path, validate_scope,
 };
 
 const GIT_DIR: &str = ".git";
-
-const MANIFEST_DIR: &str = ".warlock";
-
-const DOCUMENT_FILE: &str = "WARLOCK.md";
 
 /// ```
 /// use std::fs;
@@ -25,7 +19,7 @@ const DOCUMENT_FILE: &str = "WARLOCK.md";
 /// fs::create_dir_all(repo.path().join("crates/engine/src"))?;
 /// fs::write(repo.path().join("crates/engine/WARLOCK.md"), "# engine\n")?;
 ///
-/// let Loaded { tree, problems } = load_tree(repo.path())?;
+/// let Loaded { tree, problems, .. } = load_tree(repo.path())?;
 /// let paths: Vec<_> = tree.walk().map(|(node, _)| node.path.clone()).collect();
 ///
 /// // Every directory the walk reached is a node, documented or not.
@@ -70,6 +64,7 @@ pub fn load_tree(working_dir: impl AsRef<Path>) -> Result<Loaded, Error> {
     let root = builder.node(&working_dir, &mut problems);
     Ok(Loaded {
         tree: Tree::new(root),
+        manifest: builder.manifest,
         problems,
     })
 }
@@ -77,6 +72,10 @@ pub fn load_tree(working_dir: impl AsRef<Path>) -> Result<Loaded, Error> {
 #[derive(Debug)]
 pub struct Loaded {
     pub tree: Tree,
+    // The manifest the tree was coloured from, from the same read. A front end
+    // that kept a copy of its own from another read would judge boundaries and
+    // save runs against entries the screen is not showing.
+    pub manifest: Manifest,
     pub problems: Vec<Problem>,
 }
 
@@ -138,7 +137,7 @@ pub fn repository_root(start: impl AsRef<Path>) -> Option<PathBuf> {
 
 fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
     let mut directories: BTreeMap<PathBuf, Directory> = BTreeMap::new();
-    for entry in builder(root).build() {
+    for entry in walk::listing(root).build() {
         let entry = entry.map_err(|source| Error::Walk { source })?;
         let file_type = entry.file_type();
         let path = entry.into_path();
@@ -168,28 +167,6 @@ fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
     Ok(directories)
 }
 
-// One builder for both passes so that the pass which finds the directories and
-// the pass which decides which of them are excluded differ in exactly one
-// setting — the custom ignore filename — and cannot drift into differing in
-// another.
-fn builder(root: &Path) -> WalkBuilder {
-    let mut builder = WalkBuilder::new(root);
-    builder
-        // Not merely the crate's default: a symlinked directory walked as a
-        // symlink is never descended into, which is what makes a cycle of them
-        // terminate.
-        .follow_links(false)
-        // Fixtures and freshly-unpacked source trees have a `.gitignore` and no
-        // `.git`; honouring the file either way is what keeps a skip list out
-        // of this crate.
-        .require_git(false)
-        // By name rather than by relying on the hidden-file rule, so `.warlock/`
-        // stays out even if it holds a document and even if hidden directories
-        // are ever let back in.
-        .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR));
-    builder
-}
-
 // `.warlockignore` marks directories here and prunes none of them, which is the
 // one place in the crate where those rules do not remove content. Registering
 // the file on the walk above — the obvious simplification — was rejected: it
@@ -213,10 +190,7 @@ fn mark_excluded(root: &Path, directories: &mut BTreeMap<PathBuf, Directory>) ->
     }
 
     let mut kept: BTreeSet<PathBuf> = BTreeSet::new();
-    for entry in builder(root)
-        .add_custom_ignore_filename(ignores::FILENAME)
-        .build()
-    {
+    for entry in walk::honouring_ignores(root).build() {
         let entry = entry.map_err(|source| Error::Walk { source })?;
         if entry.file_type().is_some_and(|kind| kind.is_dir()) {
             kept.insert(entry.into_path());
@@ -463,7 +437,7 @@ mod tests {
     }
 
     fn tree_of(dir: impl AsRef<Path>) -> Tree {
-        let Loaded { tree, problems } = load_tree(dir).expect("loads");
+        let Loaded { tree, problems, .. } = load_tree(dir).expect("loads");
         assert!(problems.is_empty(), "{problems:?}");
         tree
     }
@@ -693,7 +667,7 @@ mod tests {
         // `.git/` — there is no `.warlock/` anywhere to find instead.
         let repo = git_only_fixture(&["crates/engine", "crates/engine/src"]);
 
-        let Loaded { tree, problems } = load_tree(repo.path().join("crates"))
+        let Loaded { tree, problems, .. } = load_tree(repo.path().join("crates"))
             .expect("a `.git/` and nothing else is still a repository");
 
         assert_eq!(
@@ -1173,7 +1147,8 @@ mod tests {
             return;
         }
 
-        let Loaded { tree, problems } = load_tree(repo.path()).expect("a bad file is not fatal");
+        let Loaded { tree, problems, .. } =
+            load_tree(repo.path()).expect("a bad file is not fatal");
 
         assert_eq!(
             tree.find(&module)
@@ -1433,7 +1408,7 @@ mod tests {
             write_file(&module.join("adr.md"), "a decision\n");
             hand_write_scoped_manifest(repo.path(), &[("docs", not_a_scope)]);
 
-            let Loaded { tree, problems } =
+            let Loaded { tree, problems, .. } =
                 load_tree(repo.path()).expect("a scope that is not one is not fatal");
 
             let docs = tree
@@ -1502,7 +1477,7 @@ mod tests {
             &[("docs", "Data-Plane"), ("crates/engine", "billing")],
         );
 
-        let Loaded { tree, problems } = load_tree(repo.path()).expect("loads");
+        let Loaded { tree, problems, .. } = load_tree(repo.path()).expect("loads");
 
         assert_eq!(
             tree.find(repo.path().join("docs")).expect("a node").scope,
