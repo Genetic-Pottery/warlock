@@ -512,6 +512,102 @@ impl Accepted {
     }
 }
 
+// The per-file pass: one file in, one line out.
+//
+// A separate prompt rather than `PROMPT` with one key in "files", because the
+// two ask for different things. `PROMPT` asks a pass to describe a directory,
+// where a file's line is written knowing what sits beside it; this asks about
+// one file with no siblings to place it among, and the wording says so instead
+// of implying a directory the pass cannot see.
+pub const FILE_PROMPT: &str = "\
+Describe the one file that follows these instructions, and output the filled \
+object and nothing else.
+
+The line you write becomes one row of the WARLOCK.md for the directory this \
+file sits in. That document is read by a model, not a person, before any \
+source file is opened, and its one job is routing: to say what is here and \
+which file to open for a given question. Warlock is the tool that lays the \
+document out from your answer; it is not the project being described, and its \
+name belongs in the line only if the file itself uses it.
+
+\"line\": what the file is and what it holds, naming the types, functions or \
+constants a reader would come to it for, spelt as the file spells them. A file \
+that is small, generated, or a re-export gets a line saying so. Write about \
+the file in its own voice: no first person, nothing about this request or \
+about what you were or were not shown, and no guess at what the rest of the \
+directory holds — you have not been shown it.
+
+You are given the file's name and size, and its text with function bodies \
+elided where that was needed to fit. Where the name and the text disagree, the \
+text is right.";
+
+#[must_use]
+pub fn file_instructions(path: &str, rejected: &[Defect]) -> String {
+    let mut text = FILE_PROMPT.to_owned();
+    if !rejected.is_empty() {
+        text.push_str(
+            "\n\nA previous answer to exactly this request was turned down. Do not repeat \
+             these defects:",
+        );
+        for defect in rejected {
+            let _ = write!(text, "\n- {defect}");
+        }
+    }
+    let _ = write!(
+        text,
+        "\n\nBetween {ENTRY_MINIMUM} and {ENTRY_CHARS} characters, on one line.\n\n\
+         Return exactly this object, as JSON, with no code fence and nothing before or \
+         after it:\n\n{{\"line\": \"\"}}\n\nThe file is `{path}`."
+    );
+    text
+}
+
+/// The answer to a per-file pass: the line, or what is wrong with it.
+///
+/// No repair road of its own. A line is one slot, so there is nothing to patch
+/// around it the way [`Repair`] patches the slots a directory's answer got
+/// right — a defective line is asked for again whole, and [`file_fallback`] is
+/// the floor when the asking runs out.
+pub fn accept_file(
+    answer: &str,
+    path: &str,
+    expected: &Expected<'_>,
+) -> Result<String, Vec<Defect>> {
+    let field = format!("files[{path:?}]");
+    let parsed: serde_json::Value = match serde_json::from_str(answer) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Err(vec![Defect::NotJson {
+                detail: error.to_string(),
+            }]);
+        }
+    };
+    let Some(line) = parsed.get("line").and_then(serde_json::Value::as_str) else {
+        return Err(vec![Defect::Missing { field }]);
+    };
+
+    let mut defects = Vec::new();
+    self::line(&field, line, ENTRY_MINIMUM, ENTRY_CHARS, &mut defects);
+    if !expected.mentions_tool() && names_tool(line) {
+        defects.push(Defect::ToolNamed { field });
+    }
+    if defects.is_empty() {
+        Ok(line.trim().to_owned())
+    } else {
+        Err(defects)
+    }
+}
+
+/// The line warlock writes itself when a per-file pass never produced one.
+///
+/// The same builder a mended directory answer falls to, for the same reason:
+/// it is the file's own name, size and declared symbols, and nothing that
+/// sounds like it read the file.
+#[must_use]
+pub fn file_fallback(path: &str, expected: &Expected<'_>, described: &Described) -> String {
+    fallback::file(path, expected, described)
+}
+
 #[must_use]
 pub fn accept(
     carried: Option<(&Fill, &Repair)>,

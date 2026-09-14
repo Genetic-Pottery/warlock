@@ -117,6 +117,53 @@ fn elided_or_whole(path: &Path, relative: String, size: u64, bytes: Vec<u8>) -> 
     }
 }
 
+// One file, reduced the way the same file would be inside a directory's
+// request: the per-file cap still applies, `elide` still takes the bodies out,
+// and the declared names are still measured here rather than guessed at later.
+//
+// No budget ladder and no `Problem`s. The ladder exists because a directory is
+// a sum that need not fit; one file either fits under `PER_FILE_BYTE_CAP` or is
+// sent as a name and a size, and there is nothing to demote it in favour of.
+pub(crate) fn one_file(
+    prompt: &str,
+    directory: &Path,
+    name: &str,
+) -> Result<(agent::Request, Described), Error> {
+    let path = directory.join(name);
+    let size = fs::metadata(&path)
+        .map_err(|source| Error::Walk {
+            directory: directory.to_path_buf(),
+            source: source.into(),
+        })?
+        .len();
+
+    let file = if size > PER_FILE_BYTE_CAP {
+        agent::File::omitted(name.to_owned(), size)
+    } else {
+        match fs::read(&path) {
+            Ok(bytes) => elided_or_whole(&path, name.to_owned(), size, bytes),
+            Err(_) => agent::File::omitted(name.to_owned(), size),
+        }
+    };
+
+    let mut described = Described::default();
+    let text = file.kept().or_else(|| {
+        file.bytes()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+    });
+    if let Some(text) = text {
+        let names = languages::declared_names(&path, text);
+        if !names.is_empty() {
+            described.declared.insert(name.to_owned(), names);
+        }
+    }
+
+    Ok((
+        agent::Request::new(prompt, directory).with_files([file]),
+        described,
+    ))
+}
+
 fn trim_to_budget(
     files: &mut [agent::File],
     on_disk: &[PathBuf],

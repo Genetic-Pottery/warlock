@@ -10,7 +10,7 @@ use ignore::WalkBuilder;
 
 use crate::document::{self, ATTEMPTS, Accepted, Defect, Fill};
 use crate::fitting::{
-    Fitted, PER_FILE_BYTE_CAP, Problem, byte_count, carried_bytes, carry_hash, fit,
+    Fitted, PER_FILE_BYTE_CAP, Problem, byte_count, carried_bytes, carry_hash, fit, one_file,
 };
 use crate::ignores;
 use crate::manifest::{ROOT_MODULE, temp_file_name, write_and_sync};
@@ -987,6 +987,88 @@ pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
 /// assert!(!cut);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+/// Describe one file: the unit of work per-file granularity is built on.
+///
+/// The asking is [`document::ATTEMPTS`] deep like a directory's, and ends the
+/// same way — with a line warlock wrote itself rather than a refusal, because
+/// one unusable answer about one file is no reason to lose the directory it
+/// sits in. What it cannot do is invent a file: a name that is not there is an
+/// error, since the caller walked the directory to get it.
+///
+/// ```
+/// use std::fs;
+/// use warlock_engine::{Agent, agent, describe_file, document};
+///
+/// struct Lining;
+///
+/// impl Agent for Lining {
+///     fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
+///         assert!(request.prompt().starts_with(document::FILE_PROMPT));
+///         assert_eq!(request.files().len(), 1, "one file, one pass");
+///         Ok(agent::Response::new(
+///             r#"{"line": "The reading half: one entry point and the type it hands back."}"#,
+///         ))
+///     }
+/// }
+///
+/// let dir = tempfile::tempdir()?;
+/// fs::write(dir.path().join("reading.rs"), "pub fn read_one() {}\n")?;
+///
+/// let described = describe_file(dir.path(), "reading.rs", &Lining)?;
+/// assert_eq!(
+///     described.line,
+///     "The reading half: one entry point and the type it hands back."
+/// );
+/// assert!(!described.mended, "the pass answered, so warlock wrote nothing");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn describe_file(
+    directory: impl AsRef<Path>,
+    name: &str,
+    agent: &dyn Agent,
+) -> Result<DescribedFile, Error> {
+    let directory = directory.as_ref();
+    let (request, described) = one_file(document::FILE_PROMPT, directory, name)?;
+    let expected = document::Expected::of(&request);
+
+    let mut rejected = Vec::new();
+    for _ in 0..document::ATTEMPTS {
+        let asked = request
+            .clone()
+            .with_prompt(document::file_instructions(name, &rejected));
+        // A transport failure ends it at once, the same as a directory's pass:
+        // a pass that produced no answer is not a pass that produced a wrong
+        // one, and retrying a missing `claude` finds it still missing.
+        let answer = agent.run(&asked).map_err(|source| Error::Refused {
+            directory: directory.to_path_buf(),
+            cause: Refusal::Agent { source },
+        })?;
+        match document::accept_file(answer.text(), name, &expected) {
+            Ok(line) => {
+                return Ok(DescribedFile {
+                    line,
+                    mended: false,
+                });
+            }
+            Err(defects) => rejected = defects,
+        }
+    }
+
+    Ok(DescribedFile {
+        line: document::file_fallback(name, &expected, &described),
+        mended: true,
+    })
+}
+
+/// One file's line, and whether a pass wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribedFile {
+    pub line: String,
+    /// True where every attempt was spent and warlock wrote the line itself
+    /// from the file's name, size and declared symbols.
+    pub mended: bool,
+}
+
 pub fn view_file(path: impl AsRef<Path>) -> Result<Viewed, Unviewable> {
     let path = path.as_ref();
     let mut bytes = read_capped(path).map_err(|source| Unviewable::Unreadable {
@@ -1377,7 +1459,7 @@ mod tests {
 
     use super::{
         DOCUMENT_FILE, Failure, Observer, Pacted, PactedSubtree, Pacting, Refusal, Unviewable,
-        Unwatched, Viewed, closed_scopes_at_or_below, pact_directory, pact_subtree,
+        Unwatched, Viewed, closed_scopes_at_or_below, describe_file, pact_directory, pact_subtree,
         pactable_directories, refresh_subtree, unpact_ignored, unpact_subtree, view_file,
     };
     use crate::document::{self, STAMP};
@@ -2055,6 +2137,95 @@ mod tests {
             text.contains("`reading.rs`") && text.contains("`shared.rs`"),
             "and the slots the repair said nothing about came from the first answer: {text}",
         );
+    }
+
+    struct Lining {
+        answer: String,
+        passes: std::cell::Cell<usize>,
+    }
+
+    impl Lining {
+        fn saying(answer: impl Into<String>) -> Self {
+            Self {
+                answer: answer.into(),
+                passes: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl Agent for Lining {
+        fn run(&self, _request: &agent::Request) -> Result<agent::Response, agent::Error> {
+            self.passes.set(self.passes.get() + 1);
+            Ok(agent::Response::new(self.answer.clone()))
+        }
+    }
+
+    fn one_file_directory() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        write(
+            dir.path(),
+            "reading.rs",
+            "pub fn read_one() -> Reader { Reader }\n",
+        );
+        dir
+    }
+
+    #[test]
+    fn a_file_whose_line_is_never_usable_is_written_by_warlock_rather_than_refused() {
+        let dir = one_file_directory();
+        let over = "x".repeat(document::ENTRY_CHARS + 40);
+        let agent = Lining::saying(format!("{{\"line\": \"{over}\"}}"));
+
+        let described = describe_file(dir.path(), "reading.rs", &agent).expect("a line either way");
+
+        assert_eq!(
+            agent.passes.get(),
+            document::ATTEMPTS,
+            "asked in full first"
+        );
+        assert!(described.mended);
+        assert!(
+            described.line.contains("reading.rs"),
+            "{:?}",
+            described.line
+        );
+        assert!(
+            described.line.contains("read_one"),
+            "the fallback is the file's own declared names: {:?}",
+            described.line,
+        );
+    }
+
+    #[test]
+    fn a_file_answered_with_prose_is_mended_where_a_directory_would_be_refused() {
+        // `pact_directory` refuses an answer that was never an object, because
+        // there is no slot in prose to repair from and the whole document is at
+        // stake. One file is not: warlock knows its name, its size and what it
+        // declares, so losing the directory over one file's punctuation is the
+        // trade brief 16 was written against.
+        let dir = one_file_directory();
+        let agent = Lining::saying("Here is some prose instead of the object you asked for.");
+
+        let described = describe_file(dir.path(), "reading.rs", &agent).expect("a line either way");
+
+        assert!(described.mended);
+        assert!(
+            described.line.contains("reading.rs"),
+            "{:?}",
+            described.line
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_there_is_an_error_and_not_a_line_about_nothing() {
+        let dir = one_file_directory();
+        let agent = Lining::saying(r#"{"line": "a line about a file that does not exist"}"#);
+
+        let error = describe_file(dir.path(), "writing.rs", &agent)
+            .expect_err("the caller walked the directory to get this name");
+
+        assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
+        assert_eq!(agent.passes.get(), 0, "nothing was asked");
     }
 
     #[test]
