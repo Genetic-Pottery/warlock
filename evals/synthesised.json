@@ -1,0 +1,456 @@
+{
+  "crates/warlock-engine/src": {
+    "purpose": "This is warlock's core crate source: it walks a repository into a tree, decides each directory's freshness state, gathers and budgets files into a pass request, fills and renders a WARLOCK.md document, and writes the pacts, manifest, sigils and scope config that record and bound the result.",
+    "structure": [
+      {
+        "line": "load_tree builds a Tree of Node values, each carrying a NodeState and scope, which pact.rs then pacts into WARLOCK.md and manifest.rs persists as PactEntry rows.",
+        "names": [
+          "load.rs",
+          "load_tree",
+          "Tree",
+          "Node",
+          "NodeState",
+          "pact.rs",
+          "manifest.rs",
+          "PactEntry"
+        ]
+      },
+      {
+        "line": "decide_state compares a PactEntry's recorded hash (from manifest.rs) against a freshly computed subtree_hash (from hash.rs) to settle NodeState.",
+        "names": [
+          "decide.rs",
+          "decide_state",
+          "PactEntry",
+          "manifest.rs",
+          "subtree_hash",
+          "hash.rs",
+          "NodeState"
+        ]
+      },
+      {
+        "line": "fitting.rs's fit walks and budgets files (using languages.rs's skeleton/elide to shrink over-cap files) into a Request defined in agent.rs, which an Agent runs.",
+        "names": [
+          "fitting.rs",
+          "fit",
+          "languages.rs",
+          "skeleton",
+          "elide",
+          "agent.rs",
+          "Request",
+          "Agent"
+        ]
+      },
+      {
+        "line": "document.rs's accept/mend/render turn an Agent Response into a Fill and then into the WARLOCK.md body that claude_md.rs and pact.rs write to disk.",
+        "names": [
+          "document.rs",
+          "accept",
+          "mend",
+          "render",
+          "Fill",
+          "agent.rs",
+          "Response",
+          "claude_md.rs",
+          "pact.rs"
+        ]
+      },
+      {
+        "line": "scope.rs's validate_scope/validate_sigil and scope_opens_to govern the scopes stored on Node/PactEntry and the sigils sigils.rs loads/saves.",
+        "names": [
+          "scope.rs",
+          "validate_scope",
+          "validate_sigil",
+          "scope_opens_to",
+          "tree.rs",
+          "Node",
+          "manifest.rs",
+          "PactEntry",
+          "sigils.rs",
+          "load_sigils",
+          "save_sigils"
+        ]
+      },
+      {
+        "line": "briefs.rs's load_briefs reads briefs.toml beside the manifest that manifest.rs locates via manifest_path.",
+        "names": [
+          "briefs.rs",
+          "load_briefs",
+          "manifest.rs",
+          "manifest_path"
+        ]
+      },
+      {
+        "line": "ignores.rs's is_ignored and clock.rs's now_rfc3339 are small standalone helpers used elsewhere in this directory (file walking and timestamping).",
+        "names": [
+          "ignores.rs",
+          "is_ignored",
+          "clock.rs",
+          "now_rfc3339"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "line": "briefs.rs's check_relative rejects absolute or parent-component directories for briefs.",
+        "names": [
+          "briefs.rs",
+          "check_relative"
+        ]
+      },
+      {
+        "line": "hash.rs's subtree_hash honors .warlock and ignore rules via files_under when hashing a directory.",
+        "names": [
+          "hash.rs",
+          "subtree_hash",
+          "files_under"
+        ]
+      },
+      {
+        "line": "document.rs pins caps: ENTRY_CHARS, ENTRY_MINIMUM, PURPOSE_CHARS, LIST_CAP.",
+        "names": [
+          "document.rs",
+          "ENTRY_CHARS",
+          "ENTRY_MINIMUM",
+          "PURPOSE_CHARS",
+          "LIST_CAP"
+        ]
+      },
+      {
+        "line": "fitting.rs bounds a request's size via REQUEST_BYTE_CAP and PER_FILE_BYTE_CAP.",
+        "names": [
+          "fitting.rs",
+          "REQUEST_BYTE_CAP",
+          "PER_FILE_BYTE_CAP"
+        ]
+      },
+      {
+        "line": "scope.rs's wildcard \"*\" opens every scope per scope_opens_to.",
+        "names": [
+          "scope.rs",
+          "WILDCARD",
+          "scope_opens_to"
+        ]
+      },
+      {
+        "line": "tree.rs's Tree.walk() visits DepthFirst with parents before children.",
+        "names": [
+          "tree.rs",
+          "Tree",
+          "walk",
+          "DepthFirst"
+        ]
+      },
+      {
+        "line": "clock.rs clamps to MIN_REPRESENTABLE/MAX_REPRESENTABLE rather than mis-spelling absurd dates.",
+        "names": [
+          "clock.rs",
+          "MIN_REPRESENTABLE",
+          "MAX_REPRESENTABLE"
+        ]
+      }
+    ],
+    "lookups": [
+      {
+        "for": "how freshness (stale vs fresh) is decided for a directory",
+        "open": "decide.rs",
+        "symbol": "decide_state"
+      },
+      {
+        "for": "where the byte/token budget for a pass request comes from",
+        "open": "fitting.rs",
+        "symbol": "REQUEST_BYTE_CAP"
+      },
+      {
+        "for": "how a file gets shrunk to fit the budget",
+        "open": "languages.rs",
+        "symbol": "elide"
+      },
+      {
+        "for": "how WARLOCK.md's begin/end block gets spliced into CLAUDE.md",
+        "open": "claude_md.rs",
+        "symbol": "splice"
+      },
+      {
+        "for": "where scope and sigil string syntax is validated",
+        "open": "scope.rs",
+        "symbol": "validate_scope"
+      },
+      {
+        "for": "where the .warlock manifest and pacts.toml are read and written",
+        "open": "manifest.rs",
+        "symbol": "Manifest"
+      },
+      {
+        "for": "how a repository's git root and .warlock dir are located",
+        "open": "load.rs",
+        "symbol": "repository_root"
+      },
+      {
+        "for": "what fields describe a single pass to or from an Agent",
+        "open": "agent.rs",
+        "symbol": "Response"
+      },
+      {
+        "for": "where briefs.toml is found and parsed",
+        "open": "briefs.rs",
+        "symbol": "load_briefs"
+      },
+      {
+        "for": "how a document's Fill is validated and repaired before rendering",
+        "open": "document.rs",
+        "symbol": "mend"
+      },
+      {
+        "for": "where machine-side sigil names are persisted",
+        "open": "sigils.rs",
+        "symbol": "save_sigils"
+      },
+      {
+        "for": "how .warlockignore is applied when walking a directory",
+        "open": "ignores.rs",
+        "symbol": "is_ignored"
+      }
+    ]
+  },
+  "crates/warlock-tui/src": {
+    "purpose": "The src directory is warlock's engine and TUI: it drives runs (pact/refresh) over a repo tree, enforces scope/sigil boundaries, chats with a claude agent to produce documents, and renders the tree/panel/composer interface handling input, drawing, and state.",
+    "structure": [
+      {
+        "line": "main.rs is the CLI entry and TUI event loop, parsing Cli/Command and driving Session's draw/point/press/paste/keep_up.",
+        "names": [
+          "main.rs",
+          "Cli",
+          "Command",
+          "Session"
+        ]
+      },
+      {
+        "line": "pacting.rs runs and drives a pact (Pact, Work, Running, spawn_pact, run_pact), calling into running.rs's pact/refresh entry points.",
+        "names": [
+          "pacting.rs",
+          "Pact",
+          "spawn_pact",
+          "run_pact",
+          "running.rs",
+          "pact",
+          "refresh"
+        ]
+      },
+      {
+        "line": "running.rs's Progress narrates each directory during a run and Report summarises failures, called via ran, descended.",
+        "names": [
+          "running.rs",
+          "Progress",
+          "Report",
+          "ran",
+          "descended"
+        ]
+      },
+      {
+        "line": "edits.rs's Opened checks boundary access against Manifest scopes, and boundary.rs's verdict()/Reach/Verdict decide the actual scope access logic edits.rs relies on.",
+        "names": [
+          "edits.rs",
+          "Opened",
+          "Manifest",
+          "boundary.rs",
+          "verdict",
+          "Reach",
+          "Verdict"
+        ]
+      },
+      {
+        "line": "chatting.rs's Chat<C> drives a turn (ask/say, spawn_turn/run_turn/apply_turn) using claude.rs's ClaudeAgent/ChatAgent/Converses as the agent.",
+        "names": [
+          "chatting.rs",
+          "Chat",
+          "ask",
+          "say",
+          "spawn_turn",
+          "run_turn",
+          "apply_turn",
+          "claude.rs",
+          "ClaudeAgent",
+          "ChatAgent",
+          "Converses"
+        ]
+      },
+      {
+        "line": "panel.rs's Panel/Showing/Card<T> display Account (account.rs), Thread (thread.rs), and Document content, and thread.rs's Thread/Turn model the chat conversation shown there.",
+        "names": [
+          "panel.rs",
+          "Panel",
+          "Showing",
+          "Card",
+          "account.rs",
+          "Account",
+          "thread.rs",
+          "Thread",
+          "Turn"
+        ]
+      },
+      {
+        "line": "ui.rs's draw() lays out the tree pane, panel, composer.rs's Composer, and footer, and hit_test maps points back to rows for input.rs's mouse_action.",
+        "names": [
+          "ui.rs",
+          "draw",
+          "composer.rs",
+          "Composer",
+          "hit_test",
+          "input.rs",
+          "mouse_action"
+        ]
+      },
+      {
+        "line": "scoping.rs's scope_press/scope_edit/scope_submit build prompt.rs's ScopePrompt and write edits back to the manifest.",
+        "names": [
+          "scoping.rs",
+          "scope_press",
+          "scope_edit",
+          "scope_submit",
+          "prompt.rs",
+          "ScopePrompt"
+        ]
+      },
+      {
+        "line": "watch.rs's Watch/WatchPolicy drive a debounced reload loop that session.rs's reload_tree and start_watching consume.",
+        "names": [
+          "watch.rs",
+          "Watch",
+          "WatchPolicy",
+          "session.rs",
+          "reload_tree",
+          "start_watching"
+        ]
+      },
+      {
+        "line": "writing.rs's write_opened/write_edit/write_submit drive ScopePrompt (from prompt.rs) to produce a brief file via slug_of/next_number.",
+        "names": [
+          "writing.rs",
+          "write_opened",
+          "write_edit",
+          "write_submit",
+          "ScopePrompt",
+          "prompt.rs",
+          "slug_of",
+          "next_number"
+        ]
+      },
+      {
+        "line": "descent.rs's descend()/carry_on() drive a Pact/un-pact run over a subtree, tying into pacting.rs's Pact.",
+        "names": [
+          "descent.rs",
+          "descend",
+          "carry_on",
+          "pacting.rs",
+          "Pact"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "line": "COMPOSER_MAX_ROWS caps how much the composer can grow.",
+        "names": [
+          "composer.rs",
+          "COMPOSER_MAX_ROWS"
+        ]
+      },
+      {
+        "line": "submission.rs refuses any submitted draft after the three commands /brief, /write, /chat with a single-line REFUSAL.",
+        "names": [
+          "submission.rs",
+          "REFUSAL",
+          "submitted_for"
+        ]
+      },
+      {
+        "line": "watch.rs coalesces filesystem events into reloads via QUIET_PERIOD/RELOAD_CEILING/COALESCED_RELOADS.",
+        "names": [
+          "watch.rs",
+          "QUIET_PERIOD",
+          "RELOAD_CEILING",
+          "COALESCED_RELOADS"
+        ]
+      },
+      {
+        "line": "boundary.rs's Verdict renders a refusal for a closed scope or a hypothesis-only message for a blocking scope, per verdict().",
+        "names": [
+          "boundary.rs",
+          "Verdict",
+          "verdict",
+          "closed_scope_message",
+          "blocking_scopes_message"
+        ]
+      },
+      {
+        "line": "edits.rs refuses edits across a closed boundary when granting or clearing a scope.",
+        "names": [
+          "edits.rs",
+          "scope_add",
+          "scope_remove"
+        ]
+      }
+    ],
+    "lookups": [
+      {
+        "for": "why is my edit or scope change being refused",
+        "open": "boundary.rs",
+        "symbol": "Verdict"
+      },
+      {
+        "for": "how does the app decide what to do on a keypress or mouse click",
+        "open": "input.rs",
+        "symbol": "action_for"
+      },
+      {
+        "for": "where does the brief file get named and written",
+        "open": "writing.rs",
+        "symbol": "slug_of"
+      },
+      {
+        "for": "how does the interactive sigil configuration prompt work",
+        "open": "config.rs",
+        "symbol": "configure"
+      },
+      {
+        "for": "how is filesystem change detection debounced",
+        "open": "watch.rs",
+        "symbol": "WatchPolicy"
+      },
+      {
+        "for": "what does `warlock check` report",
+        "open": "check.rs",
+        "symbol": "checked"
+      },
+      {
+        "for": "how does a chat turn actually get sent to the agent and parsed back",
+        "open": "claude.rs",
+        "symbol": "Activities"
+      },
+      {
+        "for": "where do panel line-wrapping rules live",
+        "open": "wrap.rs",
+        "symbol": "rows"
+      },
+      {
+        "for": "how is the tree/panel frame actually drawn",
+        "open": "ui.rs",
+        "symbol": "draw"
+      },
+      {
+        "for": "what happens when you press 'v' on a row",
+        "open": "viewing.rs",
+        "symbol": "view_press"
+      },
+      {
+        "for": "how does the editor integration ($EDITOR) work",
+        "open": "editing.rs",
+        "symbol": "run_editor"
+      },
+      {
+        "for": "where does the brief-template.md fallback and section diff logic live",
+        "open": "template.rs",
+        "symbol": "missing_sections"
+      }
+    ]
+  }
+}

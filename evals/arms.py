@@ -79,6 +79,42 @@ def isolated(rel: str, shown: int = 16) -> str:
     return "\n".join(out) + "\n"
 
 
+def per_file(rel: str) -> str:
+    """A whole document as per-file granularity would produce one.
+
+    Isolated file lines, and the cross-file sections written by a pass that saw
+    only those lines — no pass in this document ever read the source. Assembled
+    the way `document::render` lays it out, so the only difference from the
+    committed document is who wrote what.
+    """
+    synthesised = load("synthesised.json")[rel]
+    text = isolated(rel)
+
+    head, _, rest = text.partition("\n## Files")
+    # The stamp, then the blank, then `# name`: everything down to the heading
+    # is warlock's and stays, and the purpose under it is the pass's to replace.
+    lines = head.splitlines()
+    heading = lines[: next(i for i, line in enumerate(lines) if line.startswith("# ")) + 1]
+    kept = []
+    for line in rest.splitlines():
+        if line.startswith("## ") and line.strip() in SECTIONS:
+            break
+        kept.append(line)
+
+    out = heading + ["", synthesised["purpose"].strip(), "## Files"] + kept[1:]
+    for name, entries in (("Structure", synthesised["structure"]), ("Rules", synthesised["rules"])):
+        if entries:
+            out += ["", f"## {name}", ""]
+            out += [f"- {entry['line'].strip()}" for entry in entries]
+    if synthesised["lookups"]:
+        out += ["", "## Where to look", ""]
+        for route in synthesised["lookups"]:
+            symbol = route.get("symbol")
+            tail = f" `{symbol}`" if symbol else ""
+            out.append(f"- {route['for'].strip()} → `{route['open'].strip()}`{tail}")
+    return "\n".join(out).replace("\n\n\n", "\n\n") + "\n"
+
+
 def without_synthesis(text: str, drop_purpose: bool = False) -> str:
     out, skipping = [], False
     for line in text.splitlines():
@@ -141,6 +177,8 @@ def build(rel: str, names: list[str]) -> dict[str, str]:
             made[name] = declares(rel, int(name.removeprefix("declares")))
         elif name == "isolated":
             made[name] = isolated(rel)
+        elif name == "per_file":
+            made[name] = per_file(rel)
         elif name == "document_no_synthesis":
             made[name] = without_synthesis(declares(rel, 16))
         elif name == "isolated_no_synthesis":
