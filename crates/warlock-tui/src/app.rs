@@ -165,8 +165,17 @@ struct InFlight {
     run: Run,
 }
 
-/// The run in flight, as the header draws it. [`RunHeader::position`] is the
-/// furthest node this run has reached, not the one it is on.
+/// The run in flight, as the header draws it.
+///
+/// [`RunHeader::position`] is the furthest node this run has reached, which is
+/// the one it is working now — it is what the `(3/12)` on the header counts, so
+/// it is 1 the moment the first directory starts.
+///
+/// [`RunHeader::completed`] is what the bar fills to, and it is that number
+/// less the one in flight. A directory being described is not a directory
+/// described: counting it would draw a full bar over a run that has finished
+/// nothing, which is what a single-directory pact used to look like from the
+/// keystroke to the document.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RunHeader {
     run: Run,
@@ -194,6 +203,15 @@ impl RunHeader {
     #[must_use]
     pub const fn total(&self) -> usize {
         self.total
+    }
+
+    /// How many directories this run has finished: [`Self::position`] less the
+    /// one being worked. Zero before anything is done, and never `total` — the
+    /// header belongs to a run in flight, and a run with nothing left in flight
+    /// has no header to draw.
+    #[must_use]
+    pub const fn completed(&self) -> usize {
+        self.position.saturating_sub(1)
     }
 }
 

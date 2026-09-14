@@ -614,11 +614,12 @@ const fn run_word(run: Run) -> &'static str {
 }
 
 fn bar(header: &RunHeader, columns: usize) -> String {
-    // Both guards feed the subtraction below, which would panic without them: a
-    // run counted at zero nodes has nothing to divide by, and `position` is the
-    // furthest node reached, which a caller is free to report past `total`.
+    // What the run has finished, not what it has started: see
+    // [`RunHeader::completed`]. Both guards feed the subtraction below, which
+    // would panic without them: a run counted at zero nodes has nothing to
+    // divide by, and the count is a caller's to report, past `total` included.
     let filled = header
-        .position()
+        .completed()
         .saturating_mul(columns)
         .checked_div(header.total())
         .unwrap_or(0)
@@ -5248,8 +5249,10 @@ mod tests {
         assert!(columns >= BAR_MIN_WIDTH, "{first:?}");
         assert_eq!(first.matches(BAR_FILLED).count(), 0, "{first:?}");
 
-        // Filling to exactly `position/total` of it as the run reports its way
-        // through, never less than it was...
+        // Filling to what the run has finished as it reports its way through,
+        // never less than it was. The count beside it is the directory being
+        // worked, so the two deliberately disagree by one: `(1/5)` is the first
+        // directory started and nothing finished.
         let mut filled = 0;
         for position in 1..=total {
             app.set_run_in_flight(Run::Pact, RUNNING_ON, position, total);
@@ -5257,14 +5260,36 @@ mod tests {
             let drawn = row.matches(BAR_FILLED).count();
 
             assert!(drawn >= filled, "the bar fell back at {position}/{total}");
-            assert_eq!(drawn, position * columns / total, "at {position}/{total}");
+            assert_eq!(
+                drawn,
+                (position - 1) * columns / total,
+                "at {position}/{total}"
+            );
             assert_eq!(row.matches(BAR_EMPTY).count(), columns - drawn);
             assert!(row.contains(&format!("({position}/{total})")), "{row:?}");
             filled = drawn;
         }
 
-        // ...and full at the end of it, and only there.
-        assert_eq!(filled, columns);
+        // The last directory is being described, not described, so the bar is
+        // one node short of full and stays there: the run ends by clearing the
+        // header, and there is no frame in which it is full.
+        assert_eq!(filled, (total - 1) * columns / total);
+        assert!(filled < columns);
+    }
+
+    #[test]
+    fn a_run_over_one_directory_draws_an_empty_bar_until_it_is_over() {
+        // The case the fraction used to get wrong: one directory is `(1/1)` the
+        // moment it starts, and counting the one in flight drew a full bar over
+        // a run that had finished nothing.
+        let base = Instant::now();
+        let mut app = running_app(base, WIDTH, HEIGHT, Run::Pact, 1, 1);
+        fill_account(&mut app, base, usize::from(HEIGHT) * 2);
+
+        let row = run_header_row(&app, WIDTH, HEIGHT, at(base, 9));
+        assert!(row.contains("(1/1)"), "{row:?}");
+        assert_eq!(row.matches(BAR_FILLED).count(), 0, "{row:?}");
+        assert!(row.matches(BAR_EMPTY).count() >= BAR_MIN_WIDTH, "{row:?}");
     }
 
     #[test]
