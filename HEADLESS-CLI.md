@@ -1,0 +1,167 @@
+# The headless CLI
+
+Warlock with no subcommand opens the tree. With one, it does that one thing and
+exits, and none of the subcommands goes near the terminal: no alternate screen,
+no raw mode, nothing drawn. What each has to say is lines on stdout, so a
+script, a CI job or an agent reads the answer through a pipe rather than into a
+repaint.
+
+| Command | What it does | What it spends |
+| --- | --- | --- |
+| `warlock init` | Write warlock's section of `CLAUDE.md` at the repository root | nothing |
+| `warlock config` | Print the sigils this machine holds here, and read a line replacing them | nothing |
+| `warlock stale [path]` | List the pacted directories at or below `path` that are stale | nothing |
+| `warlock fresh [path]` | The same for the fresh ones | nothing |
+| `warlock check <path>` | Say which scope covers `path`, what this machine holds, and whether the two meet | nothing |
+| `warlock unpact <path>` | Drop the pact on a directory and every pact below it | one manifest write |
+| `warlock scope add <path> <scope>` | Write a scope onto a pacted directory | one manifest write |
+| `warlock scope remove <path>` | Clear the scope on a pacted directory | one manifest write |
+| `warlock pact <path>` | Describe a directory and everything below it, a `WARLOCK.md` each | a model pass per directory |
+| `warlock refresh <path>` | The same over only the directories that are not fresh | a model pass per stale directory |
+
+The two listings take the repository root when the path is left off. Every other
+path is required, and on `unpact` and `pact` that is the point rather than an
+omission: the largest thing warlock can do to a repository must not also be the
+thing an absent argument does by itself. `warlock pact .` is somebody having
+said so.
+
+`init` and `config` are the two that are about the checkout rather than the
+ledger. `warlock init` writes warlock's section of the `CLAUDE.md` at the
+repository root and says which file it wrote, and whether it was created or
+updated. `warlock config` prints the repository, the file this machine keeps
+sigils in and what is held now, then reads one line: the sigils on it replace
+everything held for this repository, a blank line clears it, and Ctrl-C or EOF
+changes nothing. It is the only road to a sigil, and a sigil is the only thing
+that opens a scope.
+
+### Asking
+
+`stale`, `fresh` and `check` only read. None of them writes to
+`.warlock/pacts.toml`, none spawns a process and none runs a model pass, so
+asking costs no tokens, no minutes and no risk of a manifest left in a state
+nobody asked for — which is what makes them safe to put in a CI job or an
+agent's hands. What they read is what the tree itself reads: the same walk, the
+same staleness rule, the same coverage, never a second opinion written on the
+shell side.
+
+The listings print one path a line and nothing else on the line, relative to the
+repository root and spelled the way the manifest spells them:
+
+```sh
+$ warlock stale
+.
+crates
+crates/warlock-engine
+crates/warlock-engine/src
+
+# nothing under the engine is behind its code
+$ test -z "$(warlock stale crates/warlock-engine)"
+```
+
+`check` walks up from one path and answers in three lines — the scope covering
+it, what this machine holds, and whether the two meet:
+
+```sh
+$ warlock check crates
+nothing scopes `crates`
+holding `data-plane`
+an unscoped path is open to anyone, so this machine may work here
+```
+
+All three take `--json` and answer as one object on one line instead:
+
+```sh
+$ warlock stale --json
+{"command":"stale","directories":[{"path":".","state":"stale"}]}
+
+$ warlock check crates --json
+{"command":"check","path":"crates","scope":null,"sigils":["data-plane"],"opens":true}
+```
+
+The verdict is a field and never a status. A closed scope is the answer to the
+question rather than a failure to reach one, so `check` exits 0 either way,
+which is what leaves the exit status free:
+`warlock check <path> --json | jq -e '.opens'` spends `jq`'s status on the
+verdict and warlock spends none of its own on saying no. The same goes for an
+empty listing — nothing stale is an answer, and it is a 0.
+
+## Writing
+
+`unpact`, `scope add` and `scope remove` are `.warlock/pacts.toml` rewritten and
+nothing else. No terminal, no process, no model pass, and every `WARLOCK.md`
+left exactly where it was — un-pacting drops the record, not the documents.
+
+All three ask the boundary first, before they look at whether the path has an
+entry at all, so a command aimed inside a scope this machine does not hold
+answers with the refusal and never with what the manifest holds. A refusal is
+one line on stderr and **exit 3**, with the file byte-identical to what was
+read. There is no `--force` and no environment variable past it:
+`warlock config` is the one road, here exactly as it is in the panel.
+
+An un-pact has a second refusal that is not that one. When the boundary over the
+path itself is open but something *below* it carries a scope this machine does
+not hold, what is being refused is the blast radius rather than the place — so
+it is an ordinary **1**, and the sentence offers the road that needs no sigil:
+un-pact the parts you hold.
+
+## Running
+
+`pact` and `refresh` are the two subcommands that spend anything: minutes, one
+`claude --print` per directory, a `WARLOCK.md` written beside each of them, and
+one manifest save at the end. They pass the same gate the cheap writes do, asked
+before a single directory is walked — a boundary asked any later would be asked
+after somebody's tokens were spent and somebody else's prose overwritten, and no
+exit status puts that back.
+
+Which directories a `refresh` describes is the engine's judgement, the same one
+the `r` key gets: the ones that are not fresh, no wider and no narrower.
+
+Progress is two lines a directory on stdout, and the denominator does not move
+for the length of the run:
+
+```
+warlock: [3/6] documenting crates/warlock-engine/src
+warlock: documented crates/warlock-engine/src
+```
+
+A directory whose pass failed never gets its second line. What it gets instead
+is stderr, where every failing directory is named, one line each, and then
+counted:
+
+```
+warlock: crates/warlock-tui/src — nothing was written for `/repo/crates/warlock-tui/src`: the model pass produced no answer: …
+warlock: 1 of 6 directories failed — the manifest holds what the rest earned
+```
+
+That run exits **4**, and the manifest is saved either way: the grants the rest
+of the subtree earned are on disk, so the thing to do about a 4 is re-run over
+what failed rather than buy the whole descent again. The split between the two
+streams is what makes it readable — `warlock pact . > run.log` puts the descent
+in the file and leaves what went wrong on the terminal.
+
+Ctrl-C is the only key a headless run has, and it is the panel's two answers in
+order. The first press is Esc: the `claude` in flight is killed, so the stop
+takes milliseconds rather than the rest of a five-minute pass, the descent ends
+at the next directory rather than part way through one, and everything that
+finished is hashed, granted and saved before the process leaves with **130**.
+The second press is `q`: it exits at once, saving nothing and printing nothing.
+Nothing is corrupted by taking it — every document and the manifest are written
+beside and renamed over, so what is on disk is always a whole file.
+
+## Exit statuses
+
+| Status | What it means |
+| --- | --- |
+| `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — an empty listing and a scope closed to this machine included |
+| `1` | Warlock could not do it: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling. The line on stderr is the thing to go and read |
+| `2` | The command line was never a request. Clap's status and its wording, for a word warlock has no place for |
+| `3` | Refused, with nothing spent: this machine's sigils do not open the scope covering the path. No byte moved, retrying changes nothing, and the road out is `warlock config` |
+| `4` | Completed with failures: a run wrote the documents it could and saved the manifest, and the lines above the count name the directories that did not come out of it |
+| `130` | Cancelled: somebody pressed Ctrl-C during a run, and what had finished by then is saved and granted. 128 plus SIGINT, so a shell, `make` and CI read it as interrupted without being told anything about warlock |
+
+The three that are not 1 are not 1 because they want different things done about
+them. A 3 says this checkout is outside that boundary, so stop and go and get
+the sigil. A 4 says the work is partly on disk, so re-run over the part that is
+not. A 130 says somebody decided to stop it, so nothing should retry it at all.
+Telling those apart by their wording would be telling them apart by parsing
+prose.
