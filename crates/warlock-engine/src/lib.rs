@@ -56,6 +56,7 @@ pub use pact::closed_scopes_at_or_below;
 pub use pact::pact_directory;
 pub use pact::pact_subtree;
 pub use pact::refresh_subtree;
+pub use pact::unpact_ignored;
 pub use pact::unpact_subtree;
 pub use pact::view_file;
 pub use scope::scope_covering;

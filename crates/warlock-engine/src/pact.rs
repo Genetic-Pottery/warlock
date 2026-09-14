@@ -16,8 +16,8 @@ use crate::ignores;
 use crate::manifest::{ROOT_MODULE, temp_file_name, write_and_sync};
 use crate::scope::valid_scope;
 use crate::{
-    Agent, Manifest, NodeState, PactEntry, agent, decide_state, hash, manifest, now_rfc3339,
-    scope_opens_to, subtree_hash, to_manifest_path,
+    Agent, Manifest, NodeState, PactEntry, agent, decide_state, from_manifest_path, hash, manifest,
+    now_rfc3339, scope_opens_to, subtree_hash, to_manifest_path,
 };
 
 pub(crate) const MANIFEST_DIR: &str = ".warlock";
@@ -539,6 +539,113 @@ pub fn unpact_subtree(
             .filter(|entry| !at_or_below(entry.module(), &selected))
             .cloned(),
     ))
+}
+
+// Pure: the manifest comes back changed and nothing is saved, because the
+// caller owns the one write of `pacts.toml`.
+//
+// Scope is not consulted, and that is the whole difference from a keypress. A
+// scope lives on an entry, so this drops boundaries along with the entries that
+// held them — but the repository itself said the content is out, in a file that
+// is committed beside the scopes, so there is no machine-side sigil to ask.
+/// ```
+/// use std::fs;
+/// use warlock_engine::{Manifest, PactEntry, unpact_ignored};
+///
+/// let repo = tempfile::tempdir()?;
+/// fs::create_dir_all(repo.path().join("vendor").join("acme"))?;
+/// fs::create_dir_all(repo.path().join("crates"))?;
+/// fs::write(repo.path().join(".warlockignore"), "vendor/\n")?;
+///
+/// let entry = |module: &str| PactEntry::new(".", module, format!("{module}/WARLOCK.md"));
+/// let manifest = Manifest::with_entries([
+///     entry("crates")?,
+///     entry("vendor")?.with_scope("third-party"),
+///     entry("vendor/acme")?,
+/// ]);
+///
+/// let manifest = unpact_ignored(&manifest, repo.path(), repo.path())?;
+///
+/// let modules: Vec<&str> = manifest.entries().iter().map(PactEntry::module).collect();
+/// assert_eq!(modules, ["crates"], "the scoped entry goes with the rest of the subtree");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn unpact_ignored(
+    manifest: &Manifest,
+    root: impl AsRef<Path>,
+    loaded: impl AsRef<Path>,
+) -> Result<Manifest, Error> {
+    let (root, loaded) = (root.as_ref(), loaded.as_ref());
+    let loaded_module = to_manifest_path(root, loaded).map_err(|source| Error::Path {
+        directory: loaded.to_path_buf(),
+        path: loaded.to_path_buf(),
+        source: Box::new(source),
+    })?;
+
+    let mut verdicts: BTreeMap<&str, bool> = BTreeMap::new();
+    let mut excluded: BTreeSet<&str> = BTreeSet::new();
+    for entry in manifest.entries() {
+        // An entry above or beside the root this session loaded is left alone
+        // even when the rules would exclude it. `refresh_subtree` already
+        // refuses to reach past the loaded root, and reaching further here
+        // would act on `.warlockignore` files this session never read. Dropping
+        // a pact is the un-pact direction, which the mutating keys refuse
+        // without a covering scope — so it is the direction to be narrow in.
+        if !at_or_below(entry.module(), &loaded_module) {
+            continue;
+        }
+        // `is_ignored` answers for a directory's own name only, so the
+        // ancestors are asked too: gitignore does not let a rule re-include
+        // anything below an excluded directory, and a walk that starts inside
+        // one would never see the rule that removed it.
+        for module in ancestry(entry.module(), &loaded_module) {
+            let ignored = if let Some(&known) = verdicts.get(module) {
+                known
+            } else {
+                let directory = from_manifest_path(root, module);
+                let ignored = ignores::is_ignored(&directory)
+                    .map_err(|source| Error::Walk { directory, source })?;
+                verdicts.insert(module, ignored);
+                ignored
+            };
+            if ignored {
+                excluded.insert(module);
+                break;
+            }
+        }
+    }
+
+    let mut kept = manifest.clone();
+    for module in excluded {
+        // `unpact_subtree` and nothing that walks: `pactable_directories`
+        // returns an empty vector for a root `is_ignored` calls excluded, so a
+        // walk-driven removal would find nothing to remove on exactly the
+        // directories this function exists for.
+        kept = unpact_subtree(from_manifest_path(root, module), root, &kept).map_err(|source| {
+            Error::Path {
+                directory: loaded.to_path_buf(),
+                path: from_manifest_path(root, module),
+                source: Box::new(source),
+            }
+        })?;
+    }
+    Ok(kept)
+}
+
+// Stops at the loaded root, and at `ROOT_MODULE` whatever the root: without the
+// second stop a module with no `/` left to cut would name the repository root
+// forever.
+fn ancestry<'module>(module: &'module str, loaded: &str) -> Vec<&'module str> {
+    let mut candidates = vec![module];
+    let mut current = module;
+    while current != loaded && current != ROOT_MODULE {
+        current = match current.rsplit_once('/') {
+            Some((above, _)) => above,
+            None => ROOT_MODULE,
+        };
+        candidates.push(current);
+    }
+    candidates
 }
 
 // String work on the manifest's own stored paths, never a question for the
@@ -1270,12 +1377,13 @@ mod tests {
     use super::{
         DOCUMENT_FILE, Failure, Observer, Pacted, PactedSubtree, Pacting, Refusal, Unviewable,
         Unwatched, Viewed, closed_scopes_at_or_below, pact_directory, pact_subtree,
-        pactable_directories, refresh_subtree, unpact_subtree, view_file,
+        pactable_directories, refresh_subtree, unpact_ignored, unpact_subtree, view_file,
     };
     use crate::document::{self, STAMP};
     use crate::fitting::{
         Gathered, Omission, PER_FILE_BYTE_CAP, REQUEST_BYTE_CAP, byte_count, gather_request,
     };
+    use crate::ignores;
     use crate::{
         Agent, Loaded, Manifest, NodeState, PactEntry, agent, decide_state, from_manifest_path,
         load_tree, manifest, subtree_hash,
@@ -3546,6 +3654,134 @@ mod tests {
             unpact_subtree("/elsewhere/crates", "/repo", &manifest),
             Err(manifest::Error::PathOutsideRoot { .. })
         ));
+    }
+
+    // The directories are made for real, because `is_ignored` reads an absent
+    // path as not excluded: a fixture of names alone would have every one of
+    // these tests pass without a rule ever being consulted.
+    fn ignoring(rules: &str, directories: &[&str]) -> tempfile::TempDir {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        for directory in directories {
+            fs::create_dir_all(repo.path().join(directory)).expect("creates a fixture directory");
+        }
+        write(repo.path(), ignores::FILENAME, rules);
+        repo
+    }
+
+    #[test]
+    fn an_excluded_entry_goes_and_takes_its_scope_with_it() {
+        let repo = ignoring("vendor/\n", &["vendor", "crates/engine"]);
+        let manifest = with_scopes(
+            &pacted(&["crates/engine", "vendor"]),
+            &[("vendor", "third-party")],
+        );
+
+        let left = unpact_ignored(&manifest, repo.path(), repo.path()).expect("the rules are read");
+
+        assert_eq!(
+            scopes(&left),
+            [("crates/engine", None)],
+            "the repository said the content is out, and a scope is no reason \
+             to keep the entry that held it",
+        );
+    }
+
+    #[test]
+    fn an_entry_below_an_excluded_directory_goes_though_that_directory_has_no_entry() {
+        let repo = ignoring("vendor/\n", &["vendor/acme/src", "crates"]);
+        let manifest = pacted(&["crates", "vendor/acme", "vendor/acme/src"]);
+
+        let left = unpact_ignored(&manifest, repo.path(), repo.path()).expect("the rules are read");
+
+        assert_eq!(
+            modules(&left),
+            ["crates"],
+            "the rule names an ancestor nothing pacted, so the ancestors are \
+             what gets asked, not the entries alone",
+        );
+    }
+
+    #[test]
+    fn a_negated_rule_keeps_the_directory_it_re_includes() {
+        // The negation sits beside the exclusion rather than under it: gitignore
+        // will not re-include anything below a directory already excluded.
+        let repo = ignoring("vendor/*\n!vendor/keep\n", &["vendor/acme", "vendor/keep"]);
+        let manifest = pacted(&["vendor/acme", "vendor/keep"]);
+
+        let left = unpact_ignored(&manifest, repo.path(), repo.path()).expect("the rules are read");
+
+        assert_eq!(
+            modules(&left),
+            ["vendor/keep"],
+            "exclusion is whatever the matcher says, negation included",
+        );
+    }
+
+    #[test]
+    fn a_manifest_with_nothing_excluded_comes_back_equal() {
+        let repo = ignoring("target/\n", &["crates/engine", "crates/tui", "target"]);
+        let manifest = with_scopes(
+            &pacted(&["crates/engine", "crates/tui"]),
+            &[("crates/engine", "data-plane")],
+        );
+
+        let left = unpact_ignored(&manifest, repo.path(), repo.path()).expect("the rules are read");
+
+        assert_eq!(
+            left, manifest,
+            "grant and scope intact: a rule that matches nothing pacted is not \
+             an edit to the manifest",
+        );
+    }
+
+    #[test]
+    fn an_excluded_entry_outside_the_loaded_root_is_left_alone() {
+        let repo = ignoring("vendor/\n", &["vendor", "crates/engine"]);
+        let manifest = pacted(&["crates/engine", "vendor"]);
+
+        let left = unpact_ignored(&manifest, repo.path(), repo.path().join("crates"))
+            .expect("the rules are read");
+
+        assert_eq!(
+            modules(&left),
+            ["crates/engine", "vendor"],
+            "`vendor` is excluded and stays anyway: this session loaded \
+             `crates` and never read the rules above it",
+        );
+    }
+
+    #[test]
+    fn removing_entries_writes_nothing_to_disk() {
+        let repo = ignoring("vendor/\n", &["vendor", "crates"]);
+        let manifest = pacted(&["crates", "vendor"]);
+        manifest.save(repo.path()).expect("saves");
+        let path = repo.path().join(".warlock").join("pacts.toml");
+        let before = fs::read(&path).expect("a readable manifest");
+
+        let left = unpact_ignored(&manifest, repo.path(), repo.path()).expect("the rules are read");
+
+        assert_eq!(modules(&left), ["crates"], "an entry really was removed");
+        assert_eq!(
+            fs::read(&path).expect("a readable manifest"),
+            before,
+            "and the file on disk is byte-identical: the caller owns the write",
+        );
+    }
+
+    #[test]
+    fn rules_that_cannot_be_used_fail_rather_than_guessing() {
+        // A range that runs backwards: a glob the matcher will not compile.
+        let repo = ignoring("a[z-a]\n", &["crates/engine"]);
+        let manifest = pacted(&["crates/engine"]);
+
+        let error = unpact_ignored(&manifest, repo.path(), repo.path())
+            .expect_err("a manifest cannot be cleaned against rules that cannot be read");
+
+        assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
+        assert!(
+            error.to_string().contains(ignores::FILENAME),
+            "the one line back names the file to go and fix: {error}",
+        );
     }
 
     fn scoped(modules: &[(&str, Option<&str>)]) -> Manifest {
