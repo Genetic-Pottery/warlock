@@ -20,11 +20,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, io};
 
-use warlock_engine::{Viewed, view_file};
+use warlock_engine::{Manifest, Viewed, view_file};
 use warlock_tui::App;
 
 use crate::error::one_line;
-use crate::session::{Scope, note, reload_tree};
+use crate::session::{Scope, note, reload};
 use crate::terminal::Screen;
 
 const EDITOR_VAR: &str = "EDITOR";
@@ -66,6 +66,7 @@ pub(crate) fn edit_press(
     app: &mut App,
     screen: &mut impl Screen,
     scope: &Scope,
+    manifest: &mut Manifest,
     showing: Option<&Path>,
     mouse: bool,
     in_flight: bool,
@@ -86,7 +87,7 @@ pub(crate) fn edit_press(
     if let Some(line) = screen.suspended(mouse, || run_editor(&editor, &path))? {
         app.set_message(line);
     }
-    came_back(app, scope, &path, showing);
+    came_back(app, scope, manifest, &path, showing);
     Ok(())
 }
 
@@ -106,10 +107,16 @@ pub(crate) fn edit_press(
 // repository once more a round later; that is a harmless price for this function
 // not reaching into the watcher. Compare `watched.caught_up`, which is how a run
 // discharges the same debt from inside the loop.
-fn came_back(app: &mut App, scope: &Scope, edited: &Path, showing: Option<&Path>) {
+fn came_back(
+    app: &mut App,
+    scope: &Scope,
+    manifest: &mut Manifest,
+    edited: &Path,
+    showing: Option<&Path>,
+) {
     // The tree it read is not kept: nothing here filters on a walk, and the
     // watcher's own filter is caught up by the reload it does for itself.
-    let _ = reload_tree(app, scope);
+    let _ = reload(app, scope, manifest);
 
     if showing != Some(edited) {
         return;
@@ -563,7 +570,7 @@ mod tests {
         }
 
         fn loaded(repo: &TempDir) -> (App, Scope) {
-            let Loaded { tree, problems } =
+            let Loaded { tree, problems, .. } =
                 load_tree(repo.path()).expect("a scratch repository with a `.git/` loads");
             assert!(problems.is_empty(), "the fixture does not read cleanly");
             let repo_root =
@@ -631,7 +638,7 @@ mod tests {
 
             // What the editor did while warlock had no screen.
             fs::write(&edited, REWRITTEN).expect("the document rewrites");
-            came_back(&mut app, &scope, &edited, None);
+            came_back(&mut app, &scope, &mut Manifest::new(), &edited, None);
 
             // The tree was read again on the way in: the subtree hashes
             // differently now, so the row says so without the reader having to
@@ -653,7 +660,13 @@ mod tests {
             assert!(is_document(&app, now), "the fixture is not on the document");
 
             fs::write(&edited, REWRITTEN).expect("the document rewrites");
-            came_back(&mut app, &scope, &edited, Some(&edited));
+            came_back(
+                &mut app,
+                &scope,
+                &mut Manifest::new(),
+                &edited,
+                Some(&edited),
+            );
 
             assert!(
                 is_document(&app, now),
@@ -681,7 +694,13 @@ mod tests {
             assert!(!is_document(&app, now), "the fixture is not on the run");
 
             fs::write(&edited, REWRITTEN).expect("the document rewrites");
-            came_back(&mut app, &scope, &edited, Some(&edited));
+            came_back(
+                &mut app,
+                &scope,
+                &mut Manifest::new(),
+                &edited,
+                Some(&edited),
+            );
 
             // The panel is exactly where the reader left it: a file being
             // saved in an editor is not a reason to take a run off the screen.
@@ -711,7 +730,13 @@ mod tests {
             let parked = app.panel().scroll_offset();
 
             fs::write(&edited, REWRITTEN).expect("the document rewrites");
-            came_back(&mut app, &scope, &edited, Some(&notes));
+            came_back(
+                &mut app,
+                &scope,
+                &mut Manifest::new(),
+                &edited,
+                Some(&notes),
+            );
 
             assert!(is_document(&app, now), "the re-read flipped the panel");
             assert_eq!(
@@ -737,7 +762,7 @@ mod tests {
             let edited = repo.path().join("crates/engine/WARLOCK.md");
 
             fs::write(&edited, REWRITTEN).expect("the document rewrites");
-            came_back(&mut app, &scope, &edited, None);
+            came_back(&mut app, &scope, &mut Manifest::new(), &edited, None);
 
             assert!(
                 !app.panel().has_document(),
@@ -758,7 +783,13 @@ mod tests {
             // An editor that took the file with it, which is the same failure
             // a `v` over a vanished path meets.
             fs::remove_file(&edited).expect("the document goes");
-            came_back(&mut app, &scope, &edited, Some(&edited));
+            came_back(
+                &mut app,
+                &scope,
+                &mut Manifest::new(),
+                &edited,
+                Some(&edited),
+            );
 
             assert_eq!(
                 shown(&app, now),

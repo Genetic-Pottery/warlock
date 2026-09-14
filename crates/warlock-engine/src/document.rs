@@ -22,19 +22,12 @@ pub const LIST_CAP: usize = 12;
 // tokens. See docs/warlock-aider-baseline-measurement.md.
 pub const DECLARED_SHOWN: usize = 16;
 
-// Four, and the three after the first are cheap: a repair pass is asked only
-// for the slots the last one got wrong and answers with a patch over it
-// ([`Repair`]), so it re-sends the directory but writes back a few hundred
-// bytes against the first answer's several thousand.
-//
 // Two was the old number, on the reasoning that a model shown its own defects
 // either fixes the slot or cannot. It does not hold: the observed failure is a
-// model that overshoots in the other direction — a file left out of `files`,
-// then supplied at 300 characters against a cap of 280 — and with one repair
-// that oscillation is a refusal. A refusal is the expensive outcome, not the
-// repair: it throws away the whole first pass, and every directory above it
-// loses its grant and has to be described again on the next run. Three more
-// repairs cost less than one of those.
+// model that overshoots in the other direction — a slot left empty, then
+// filled at 300 characters against a cap of 280 — and with two attempts that
+// oscillation ends in the mend, which keeps nothing the model wrote for the
+// slot.
 pub const ATTEMPTS: usize = 4;
 
 // No date in here, though every instinct says to put one: `granted_at` in
@@ -225,7 +218,7 @@ pub fn stub_answer(request: &Request) -> String {
                          among them.";
     const LINE: &str = "A stand-in line about one file, written by a test double that read none \
                         of it.";
-    // Three kinds of pass and one test double, told apart the only way they can
+    // Two kinds of pass and one test double, told apart the only way they can
     // be from the outside: by what they were asked. A double that answered a
     // per-file pass with a whole fill would be testing the parser and not the
     // pipeline.
@@ -235,8 +228,6 @@ pub fn stub_answer(request: &Request) -> String {
         let mut fill = Fill::stub(request);
         fill.files.clear();
         fill.to_json()
-    } else if request.prompt().starts_with(PROMPT) {
-        Fill::stub(request).to_json()
     } else {
         PROSE.to_owned()
     }
@@ -473,103 +464,11 @@ impl fmt::Display for Defect {
 
 impl std::error::Error for Defect {}
 
-pub(crate) const PROMPT: &str = "\
-Fill in the JSON object at the end of these instructions, describing the \
-directory whose contents follow them, and output the filled object and nothing \
-else.
-
-You are filling in the WARLOCK.md for one directory of a codebase. It is read \
-by a model, not a person, before any source file is opened, and its one job is \
-routing: to say what is here and which file or subdirectory to open for a given \
-question. Warlock is the tool that lays the document out from your answer; it \
-is not the project being described, and its name belongs in no value unless \
-the files themselves use it. Write only the values.
-
-\"purpose\": one to three sentences. What this directory is and what it does, \
-in the words a question about it would use. Name the product or subsystem it \
-belongs to when the files say what that is.
-
-\"files\": one line per key. What the file is and what it holds, naming the \
-types, functions or constants a reader would come to it for, spelt as the file \
-spells them. A file that is small, generated, or a re-export gets a line saying \
-so. Every key is a file you were shown; add none and remove none.
-
-\"directories\": one line per key. What is under it and the kind of question \
-that should send a reader there. Write it from the subdirectory's own \
-WARLOCK.md, which follows below, and do not restate that document's contents.
-
-\"structure\": how the files here fit together, one fact per entry: what calls \
-what, in what order, which way a dependency runs. Only what the files you were \
-shown show. Each entry is {\"line\": ..., \"names\": [...]}: \"line\" is the fact \
-in prose, and \"names\" lists every file, directory, type, function or constant \
-the line refers to, spelt as the files spell it. A structure entry names at \
-least one. An empty list is fine.
-
-Every value is one line. Write about the directory in its own voice: no first \
-person, nothing about this request or about what you were or were not shown, \
-and no guesses about files whose text is not here. Where a file and any \
-document disagree, the file is right.
-
-An answer is turned down and asked for again when a key is missing or \
-invented, a value is empty or spans lines or runs long, a list is over its cap, \
-or a structure entry names a file, directory or symbol that is not here.";
-
-#[must_use]
-pub fn instructions(expected: &Expected<'_>, rejected: &[Defect]) -> String {
-    let mut text = PROMPT.to_owned();
-    if !rejected.is_empty() {
-        text.push_str(
-            "\n\nA previous answer to exactly this request was turned down. Do not repeat \
-             these defects:",
-        );
-        for defect in rejected {
-            let _ = write!(text, "\n- {defect}");
-        }
-    }
-    let _ = write!(
-        text,
-        "\n\nCaps: {ENTRY_MINIMUM} to {ENTRY_CHARS} characters per value, {PURPOSE_CHARS} for the \
-         purpose, {LIST_CAP} entries per list.\n\n\
-         Return exactly this object with every empty string filled in and the lists \
-         populated, as JSON, with no code fence and nothing before or after it:\n\n{}",
-        skeleton(expected)
-    );
-    text
-}
-
-#[must_use]
-pub fn skeleton(expected: &Expected<'_>) -> String {
-    let blank = Fill {
-        purpose: String::new(),
-        files: expected
-            .asked()
-            .map(|path| (path.to_owned(), String::new()))
-            .collect(),
-        directories: expected
-            .directories
-            .keys()
-            .map(|name| ((*name).to_owned(), String::new()))
-            .collect(),
-        structure: Vec::new(),
-    };
-    blank.to_json()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Accepted {
     Filled(Fill),
     Defective { fill: Fill, defects: Vec<Defect> },
     Unparsed(Defect),
-}
-
-impl Accepted {
-    pub fn settled(self) -> Result<Fill, Vec<Defect>> {
-        match self {
-            Self::Filled(fill) => Ok(fill),
-            Self::Defective { defects, .. } => Err(defects),
-            Self::Unparsed(defect) => Err(vec![defect]),
-        }
-    }
 }
 
 // The synthesis pass: the slots that are about a directory rather than about
@@ -699,11 +598,10 @@ pub fn accept_synthesis(
     // path segment and never carries one, so correcting it keeps a real
     // `## Directories` line that would otherwise be dropped on the floor.
     //
-    // Anything still unasked for is taken out rather than faulted, the same
-    // road `Repair::apply` takes with an entry for a file the request does not
-    // hold: no re-ask could make it right, because there was no question.
-    // Leaving one in place would put a key nothing wanted in front of `keyed`,
-    // which trips its debug assertion.
+    // Anything still unasked for is taken out rather than faulted: no re-ask
+    // could make it right, because there was no question. Leaving one in place
+    // would put a key nothing wanted in front of `keyed`, which trips its debug
+    // assertion.
     parsed.files.clear();
     parsed.directories = parsed
         .directories
@@ -787,13 +685,6 @@ fn file_row(row: &str) -> Option<(String, String)> {
     Some((path.to_owned(), entry.to_owned()))
 }
 
-// The per-file pass: one file in, one line out.
-//
-// A separate prompt rather than `PROMPT` with one key in "files", because the
-// two ask for different things. `PROMPT` asks a pass to describe a directory,
-// where a file's line is written knowing what sits beside it; this asks about
-// one file with no siblings to place it among, and the wording says so instead
-// of implying a directory the pass cannot see.
 pub const FILE_PROMPT: &str = "\
 Describe the one file that follows these instructions, and output the filled \
 object and nothing else.
@@ -837,12 +728,8 @@ pub fn file_instructions(path: &str, rejected: &[Defect]) -> String {
     text
 }
 
-/// The answer to a per-file pass: the line, or what is wrong with it.
-///
-/// No repair road of its own. A line is one slot, so there is nothing to patch
-/// around it the way [`Repair`] patches the slots a directory's answer got
-/// right — a defective line is asked for again whole, and [`file_fallback`] is
-/// the floor when the asking runs out.
+/// A defective line is asked for again whole, and [`file_fallback`] is the
+/// floor when the asking runs out.
 pub fn accept_file(
     answer: &str,
     path: &str,
@@ -884,213 +771,6 @@ pub fn file_fallback(path: &str, expected: &Expected<'_>, described: &Described)
     fallback::file(path, expected, described)
 }
 
-#[must_use]
-pub fn accept(
-    carried: Option<(&Fill, &Repair)>,
-    answer: &str,
-    expected: &Expected<'_>,
-    described: &Described,
-) -> Accepted {
-    let parsed = match parse(answer) {
-        Ok(parsed) => parsed,
-        Err(defect) => return Accepted::Unparsed(defect),
-    };
-    // Nothing carried is the same operation with nothing to write over: the
-    // answer is its own base, and an empty repair changes no slot — it is here
-    // for the entries it drops, which is what both roads share.
-    let blank = Repair::default();
-    let (previous, repair) = carried.unwrap_or((&parsed, &blank));
-
-    let fill = repair.apply(previous, &parsed, expected);
-    let defects = check(&fill, expected, described);
-    if defects.is_empty() {
-        Accepted::Filled(fill)
-    } else {
-        Accepted::Defective { fill, defects }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Repair {
-    pub purpose: bool,
-    pub files: Vec<String>,
-    pub directories: Vec<String>,
-    pub lists: Vec<String>,
-}
-
-impl Repair {
-    #[must_use]
-    pub fn of(defects: &[Defect]) -> Self {
-        let mut repair = Self::default();
-        for defect in defects {
-            let field = match defect {
-                // Nothing to ask: there is no slot, only an answer that was
-                // not an object.
-                Defect::NotJson { .. } => continue,
-                Defect::Missing { field }
-                | Defect::Empty { field }
-                | Defect::Multiline { field }
-                | Defect::TooShort { field, .. }
-                | Defect::TooLong { field, .. }
-                | Defect::TooMany { field, .. }
-                | Defect::UnknownTarget { field, .. }
-                | Defect::ToolNamed { field } => field.as_str(),
-            };
-            repair.note(field);
-        }
-        repair
-    }
-
-    fn note(&mut self, field: &str) {
-        let (slot, rest) = field.split_once('[').unwrap_or((field, ""));
-        match slot {
-            "purpose" => self.purpose = true,
-            "structure" => {
-                if !self.lists.iter().any(|list| list == slot) {
-                    self.lists.push(slot.to_owned());
-                }
-            }
-            "files" | "directories" => {
-                let key: String =
-                    serde_json::from_str(rest.trim_end_matches(']')).unwrap_or_default();
-                let list = if slot == "files" {
-                    &mut self.files
-                } else {
-                    &mut self.directories
-                };
-                if !key.is_empty() && !list.contains(&key) {
-                    list.push(key);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        !self.purpose
-            && self.files.is_empty()
-            && self.directories.is_empty()
-            && self.lists.is_empty()
-    }
-
-    fn asks_list(&self, name: &str) -> bool {
-        self.lists.iter().any(|list| list == name)
-    }
-
-    #[must_use]
-    pub fn skeleton(&self) -> String {
-        let mut object = serde_json::Map::new();
-        if self.purpose {
-            object.insert(
-                "purpose".to_owned(),
-                serde_json::Value::String(String::new()),
-            );
-        }
-        for (name, keys) in [("files", &self.files), ("directories", &self.directories)] {
-            if !keys.is_empty() {
-                let entries = keys
-                    .iter()
-                    .map(|key| (key.clone(), serde_json::Value::String(String::new())))
-                    .collect();
-                object.insert(name.to_owned(), serde_json::Value::Object(entries));
-            }
-        }
-        if self.asks_list("structure") {
-            object.insert("structure".to_owned(), serde_json::Value::Array(Vec::new()));
-        }
-        serde_json::to_string_pretty(&serde_json::Value::Object(object))
-            .expect("a map of strings and arrays serialises")
-    }
-
-    fn previously(&self, previous: &Fill) -> String {
-        let patch = Fill {
-            purpose: if self.purpose {
-                previous.purpose.clone()
-            } else {
-                String::new()
-            },
-            files: previous
-                .files
-                .iter()
-                .filter(|(key, _)| self.files.contains(key))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            directories: previous
-                .directories
-                .iter()
-                .filter(|(key, _)| self.directories.contains(key))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            structure: if self.asks_list("structure") {
-                previous.structure.clone()
-            } else {
-                Vec::new()
-            },
-        };
-        patch.to_json()
-    }
-
-    #[must_use]
-    pub fn apply(&self, previous: &Fill, patch: &Fill, expected: &Expected<'_>) -> Fill {
-        let mut fill = previous.clone();
-        // A keyed slot the patch left out keeps what it had — and keeps its
-        // defect, which the check reports honestly — rather than being blanked.
-        if self.purpose && !patch.purpose.trim().is_empty() {
-            fill.purpose.clone_from(&patch.purpose);
-        }
-        for key in &self.files {
-            if let Some(value) = patch.files.get(key) {
-                fill.files.insert(key.clone(), value.clone());
-            }
-        }
-        for key in &self.directories {
-            if let Some(value) = patch.directories.get(key) {
-                fill.directories.insert(key.clone(), value.clone());
-            }
-        }
-        if self.asks_list("structure") {
-            fill.structure.clone_from(&patch.structure);
-        }
-        let asked: Vec<&str> = expected.asked().collect();
-        fill.files.retain(|key, _| asked.contains(&key.as_str()));
-        fill.directories
-            .retain(|key, _| expected.directories.contains_key(key.as_str()));
-        fill
-    }
-}
-
-#[must_use]
-pub fn repair_instructions(
-    expected: &Expected<'_>,
-    previous: &Fill,
-    defects: &[Defect],
-    repair: &Repair,
-) -> String {
-    let _ = expected;
-    let mut text = PROMPT.to_owned();
-    text.push_str(
-        "\n\nYour previous answer to exactly this request was turned down for the defects \
-         below. Everything else in it is kept. Return a JSON object holding ONLY the slots in \
-         the skeleton at the end, corrected: for \"files\" and \"directories\", the entries \
-         named; for a list, the whole list again, corrected.",
-    );
-    text.push_str("\n\nThe defects:");
-    for defect in defects {
-        let _ = write!(text, "\n- {defect}");
-    }
-    let _ = write!(
-        text,
-        "\n\nWhat you wrote for those slots:\n\n{}\n\nCaps: {ENTRY_CHARS} characters per value, \
-         {PURPOSE_CHARS} for the purpose, {LIST_CAP} entries per list.\n\n\
-         Return exactly this object filled in, as JSON, with no code fence and nothing before \
-         or after it:\n\n{}",
-        repair.previously(previous),
-        repair.skeleton()
-    );
-    text
-}
-
 fn parse(answer: &str) -> Result<Fill, Defect> {
     parse_object(answer)
 }
@@ -1113,6 +793,10 @@ fn parse_object<T: serde::de::DeserializeOwned>(answer: &str) -> Result<T, Defec
     })
 }
 
+// `files` is never looked at here. Every line in it was checked by `accept_file`
+// as it was accepted, and a synthesis request sends no text, so
+// `Expected::asked` is empty and keying the lines against it would report every
+// one of them as a slot nothing asked for.
 fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Defect> {
     let mut defects = Vec::new();
 
@@ -1124,8 +808,6 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
         &mut defects,
     );
 
-    let asked: Vec<&str> = expected.asked().collect();
-    keyed("files", &fill.files, &asked, &mut defects);
     let children: Vec<&str> = expected.directories.keys().copied().collect();
     keyed("directories", &fill.directories, &children, &mut defects);
 
@@ -1155,11 +837,6 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
 
 fn values(fill: &Fill) -> Vec<(String, String)> {
     let mut all = vec![("purpose".to_owned(), fill.purpose.clone())];
-    all.extend(
-        fill.files
-            .iter()
-            .map(|(k, v)| (format!("files[{k:?}]"), v.clone())),
-    );
     all.extend(
         fill.directories
             .iter()
@@ -1214,9 +891,8 @@ fn keyed(name: &str, given: &BTreeMap<String, String>, wanted: &[&str], defects:
     }
     for (key, value) in given {
         // An entry for something the request does not hold cannot reach here:
-        // it is taken out by `Repair::apply` before the check, because no
-        // answer could make it right and a pass spent asking for one is a pass
-        // wasted. See [`accept`].
+        // `accept_synthesis` and `mended` take it out before the check, because
+        // no answer could make it right.
         debug_assert!(
             wanted.contains(&key.as_str()),
             "{name}[{key:?}] was never asked for"
@@ -1523,14 +1199,9 @@ mod fallback {
 // spin between two rules instead of writing a document.
 pub const MEND_PASSES: usize = 4;
 
-// One repair, named the way the defect behind it was. `field` is the slot in
-// `Defect`'s own spelling — `files["writing.rs"]`, `purpose`, `structure` — so a
-// caller can line a mend up against the defect it answers without parsing
-// prose.
-//
-// Distinct from [`Repair`], which is the other half of this: a `Repair` is the
-// list of slots a *model* is asked about again, and a `Mend` is what warlock
-// did to one of them itself when the asking ran out.
+// `field` is the slot in `Defect`'s own spelling — `files["writing.rs"]`,
+// `purpose`, `structure` — so a caller can line a mend up against the defect it
+// answers without parsing prose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mend {
     pub field: String,
@@ -1598,34 +1269,8 @@ pub fn mend(fill: &Fill, expected: &Expected<'_>, described: &Described) -> (Fil
 // the bound is the only caller that has any use for it.
 fn mended(fill: &Fill, expected: &Expected<'_>, described: &Described) -> (Fill, Vec<Mend>, usize) {
     let mut fill = fill.clone();
-    // The same normalisation `accept` makes before its check, for the same
-    // reason: an entry for something the request does not hold is nothing a
-    // repair could make right, and `keyed`'s debug assertion forbids one
-    // reaching the check at all.
-    fill.files.retain(|key, _| expected.holds(key));
     fill.directories
         .retain(|key, _| expected.directories.contains_key(key.as_str()));
-
-    // What is left is split by whether this pass was *asked* about it, which is
-    // not the same question as whether the request holds it. `keyed` wants
-    // exactly `Expected::asked` — the files whose text went over — and a
-    // synthesis pass is shown no text at all, so every one of its lines is a
-    // key nothing asked for.
-    //
-    // Those lines are carried around the check rather than through it. They are
-    // already settled: each was written by its own pass and checked by
-    // `accept_file` as it was accepted, and there is nothing here that could
-    // improve one. Testing them against `asked` instead of `holds` is what this
-    // line used to do, and on the synthesis road — the only road there is — it
-    // emptied `files` every time the mend was reached, so a directory whose
-    // answer needed repairing lost every line the run had paid for and rendered
-    // them all as `not read by the pass`.
-    let asked: Vec<&str> = expected.asked().collect();
-    let (checked, carried): (BTreeMap<String, String>, BTreeMap<String, String>) = fill
-        .files
-        .into_iter()
-        .partition(|(key, _)| asked.contains(&key.as_str()));
-    fill.files = checked;
 
     let mut mends = Vec::new();
     let mut passes = 0;
@@ -1638,7 +1283,6 @@ fn mended(fill: &Fill, expected: &Expected<'_>, described: &Described) -> (Fill,
         sweep(&mut fill, &defects, expected, described, &mut mends);
     }
 
-    fill.files.extend(carried);
     (fill, mends, passes)
 }
 
@@ -1708,9 +1352,7 @@ fn sweep(
 #[derive(Debug, Default)]
 struct Plan {
     purpose: bool,
-    filled_files: BTreeSet<String>,
     filled_directories: BTreeSet<String>,
-    dropped_files: BTreeSet<String>,
     dropped_directories: BTreeSet<String>,
     dropped_structure: BTreeSet<usize>,
     // The lists to cut back to `LIST_CAP`, by the names `check` and `Slot`
@@ -1752,7 +1394,6 @@ impl Plan {
                 !std::mem::replace(&mut self.purpose, true),
                 Mended::Supplied,
             ),
-            Slot::File(key) => (self.dropped_files.insert(key), Mended::Dropped),
             Slot::Directory(key) => (self.dropped_directories.insert(key), Mended::Dropped),
             // A list entry has no name, size or symbols behind it, and the
             // prompt says an empty list is fine, so there is nothing to fall
@@ -1778,7 +1419,6 @@ impl Plan {
         };
         let recorded = match slot(field) {
             Slot::Purpose => !std::mem::replace(&mut self.purpose, true),
-            Slot::File(key) => !self.dropped_files.contains(&key) && self.filled_files.insert(key),
             Slot::Directory(key) => {
                 !self.dropped_directories.contains(&key) && self.filled_directories.insert(key)
             }
@@ -1788,7 +1428,7 @@ impl Plan {
         if recorded {
             // A list entry is dropped rather than filled, and says so.
             let done = match slot(field) {
-                Slot::Purpose | Slot::File(_) | Slot::Directory(_) => Mended::Supplied,
+                Slot::Purpose | Slot::Directory(_) => Mended::Supplied,
                 _ => Mended::Dropped,
             };
             mends.push(Mend {
@@ -1803,9 +1443,6 @@ impl Plan {
     fn covers(&self, field: &str) -> bool {
         match slot(field) {
             Slot::Purpose => self.purpose,
-            Slot::File(key) => {
-                self.dropped_files.contains(&key) || self.filled_files.contains(&key)
-            }
             Slot::Directory(key) => {
                 self.dropped_directories.contains(&key) || self.filled_directories.contains(&key)
             }
@@ -1826,16 +1463,10 @@ impl Plan {
         if self.purpose {
             fill.purpose = fallback::purpose(&expected.name, expected, described);
         }
-        for key in &self.filled_files {
-            fill.files
-                .insert(key.clone(), fallback::file(key, expected, described));
-        }
         for key in &self.filled_directories {
             fill.directories
                 .insert(key.clone(), fallback::directory(key, expected, described));
         }
-        fill.files
-            .retain(|key, _| !self.dropped_files.contains(key));
         fill.directories
             .retain(|key, _| !self.dropped_directories.contains(key));
 
@@ -1866,7 +1497,6 @@ fn drop_indexes<T>(list: &mut Vec<T>, dropped: &BTreeSet<usize>) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Slot {
     Purpose,
-    File(String),
     Directory(String),
     List(&'static str),
     Entry(usize),
@@ -1886,15 +1516,11 @@ fn slot(field: &str) -> Slot {
     match head {
         // `check` writes a key with `{key:?}`, which is JSON's own escaping of
         // a string, so serde reads it back.
-        "files" | "directories" => {
+        "directories" => {
             let Ok(key) = serde_json::from_str::<String>(inside) else {
                 return Slot::Unknown;
             };
-            if head == "files" {
-                Slot::File(key)
-            } else {
-                Slot::Directory(key)
-            }
+            Slot::Directory(key)
         }
         "structure" => {
             let Ok(index) = inside.parse::<usize>() else {
@@ -1910,7 +1536,6 @@ fn slot(field: &str) -> Slot {
 fn target<'f>(fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
     match slot(field) {
         Slot::Purpose => Some(&mut fill.purpose),
-        Slot::File(key) => fill.files.get_mut(&key),
         Slot::Directory(key) => fill.directories.get_mut(&key),
         Slot::Entry(index) => fill.structure.get_mut(index).map(|e| &mut e.line),
         Slot::List(_) | Slot::Unknown => None,
@@ -1920,11 +1545,10 @@ fn target<'f>(fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ATTEMPTS, Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Entry, Evidence,
-        Expected, Fill, LIST_CAP, MEND_PASSES, Mend, Mended, PROMPT, PURPOSE_CHARS, Repair,
-        STAMP, accept, accept_synthesis, check, fallback, human, instructions, lines_of,
-        mend, mended, names_tool, render, repair_instructions, skeleton, stub_answer,
-        synthesis_instructions,
+        Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Entry, Evidence, Expected,
+        FILE_PROMPT, Fill, LIST_CAP, MEND_PASSES, Mend, Mended, PURPOSE_CHARS, STAMP,
+        SYNTHESIS_PROMPT, accept_file, accept_synthesis, check, fallback, human, lines_of, mend,
+        mended, names_tool, render, stub_answer, synthesis_instructions,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1961,15 +1585,7 @@ mod tests {
 
     fn defects(fill: &Fill) -> Vec<Defect> {
         let request = request();
-        accept(
-            None,
-            &fill.to_json(),
-            &Expected::of(&request),
-            &Described::default(),
-        )
-        .settled()
-        .err()
-        .unwrap_or_default()
+        check(fill, &Expected::of(&request), &Described::default())
     }
 
     #[test]
@@ -2020,55 +1636,34 @@ mod tests {
     }
 
     #[test]
-    fn the_slots_are_the_files_shown_and_the_children_handed_over() {
-        let request = request();
-        let text = skeleton(&Expected::of(&request));
-        let blank: Fill = serde_json::from_str(&text).expect("the skeleton is a fill");
-        let keys: Vec<&str> = blank.files.keys().map(String::as_str).collect();
-        assert_eq!(
-            keys,
-            ["Cargo.toml", "app.rs", "lib.rs"],
-            "a file whose text was shown, whole or reduced; not the over-cap or non-text ones",
-        );
-        let children: Vec<&str> = blank.directories.keys().map(String::as_str).collect();
-        assert_eq!(children, ["src"]);
-        assert!(blank.files.values().all(String::is_empty));
-        assert!(blank.purpose.is_empty());
-    }
-
-    #[test]
     fn a_stub_is_accepted_for_any_request() {
-        // As a pass sees it: the prompt a directory pass runs under is the
-        // one `instructions` builds, and that is what tells a stand-in which
-        // shape to answer in.
+        // As a pass sees it: the prompt a pass runs under is what tells a
+        // stand-in which shape to answer in.
         let request = request();
-        let asked = request
-            .clone()
-            .with_prompt(instructions(&Expected::of(&request), &[]));
-        let fill = accept(
-            None,
-            &stub_answer(&asked),
-            &Expected::of(&asked),
-            &Described::default(),
-        )
-        .settled()
-        .expect("accepted");
-        assert_eq!(fill.files.len(), 3);
+        let expected = Expected::of(&request);
+        let synthesis = request.clone().with_prompt(SYNTHESIS_PROMPT);
+        let lines = BTreeMap::new();
+        assert!(matches!(
+            accept_synthesis(
+                &stub_answer(&synthesis),
+                &lines,
+                &expected,
+                &Described::default()
+            ),
+            Accepted::Filled(_)
+        ));
 
-        let bare = Request::new("x", "/repo/empty");
-        let bare = bare
-            .clone()
-            .with_prompt(instructions(&Expected::of(&bare), &[]));
-        accept(
-            None,
-            &stub_answer(&bare),
-            &Expected::of(&bare),
+        let one = Request::new(FILE_PROMPT, "/repo/crates/engine")
+            .with_files([File::present("lib.rs", *b"pub mod pact;\n")]);
+        accept_file(
+            &stub_answer(&one),
+            "lib.rs",
+            &Expected::of(&one),
             &Described::default(),
         )
-        .settled()
         .expect("accepted too");
 
-        // Anything that is not a directory pass gets plain prose.
+        // Anything that is neither kind of pass gets plain prose.
         assert!(!stub_answer(&request).trim_start().starts_with('{'));
     }
 
@@ -2086,9 +1681,12 @@ mod tests {
             format!("```json\n{json}\n```"),
             format!("Here is the object:\n\n{json}\n\nLet me know if you need more."),
         ] {
-            accept(None, &wrapped, &expected, &Described::default())
-                .settled()
-                .expect("read from the outermost braces");
+            let accepted =
+                accept_synthesis(&wrapped, &BTreeMap::new(), &expected, &Described::default());
+            assert!(
+                matches!(accepted, Accepted::Filled(_)),
+                "read from the outermost braces: {accepted:?}"
+            );
         }
     }
 
@@ -2103,71 +1701,32 @@ mod tests {
             "[1, 2]",
             "{",
         ] {
-            let outcome = accept(None, answer, &expected, &Described::default());
+            let outcome =
+                accept_synthesis(answer, &BTreeMap::new(), &expected, &Described::default());
             assert!(
                 matches!(outcome, Accepted::Unparsed(Defect::NotJson { .. })),
                 "{answer:?}: {outcome:?}"
             );
-            let found = outcome.settled().expect_err("turned down");
-            assert_eq!(found.len(), 1, "{answer:?}: {found:?}");
         }
-    }
-
-    #[test]
-    fn a_missing_key_is_named_and_an_invented_one_is_dropped() {
-        let mut fill = good();
-        fill.files.remove("lib.rs");
-        fill.files
-            .insert("main.rs".to_owned(), "invented, and not here".to_owned());
-
-        // The slot that is missing is the one a second pass can do something
-        // about, so it is the only one reported.
-        assert_eq!(
-            defects(&fill),
-            [Defect::Missing {
-                field: "files[\"lib.rs\"]".to_owned()
-            }]
-        );
-    }
-
-    #[test]
-    fn a_file_the_pass_was_not_shown_is_not_a_slot_it_may_fill() {
-        let request = request();
-        let mut fill = good();
-        fill.files.insert(
-            "Cargo.lock".to_owned(),
-            "the lockfile, presumably".to_owned(),
-        );
-
-        // Taken out rather than turned down: no answer could make an entry for
-        // a file that is not here right, so it costs no pass and the rest of
-        // the answer stands.
-        let accepted = accept(
-            None,
-            &fill.to_json(),
-            &Expected::of(&request),
-            &Described::default(),
-        )
-        .settled()
-        .expect("the invented entry is dropped, not refused");
-        assert!(!accepted.files.contains_key("Cargo.lock"));
-        assert_eq!(accepted.files.len(), 3);
     }
 
     #[test]
     fn a_bare_word_is_a_skipped_slot_and_not_an_entry() {
         // Measured: a pass answered `"duplicate"` for `clock.rs`, one word with
         // no fact in it, and every check of the day passed.
-        let mut fill = good();
-        fill.files
-            .insert("lib.rs".to_owned(), "duplicate".to_owned());
+        let request = request();
         assert_eq!(
-            defects(&fill),
-            [Defect::TooShort {
+            accept_file(
+                r#"{"line": "duplicate"}"#,
+                "lib.rs",
+                &Expected::of(&request),
+                &Described::default()
+            ),
+            Err(vec![Defect::TooShort {
                 field: "files[\"lib.rs\"]".to_owned(),
                 chars: 9,
                 minimum: ENTRY_MINIMUM
-            }]
+            }])
         );
     }
 
@@ -2175,8 +1734,8 @@ mod tests {
     fn every_value_is_one_line_under_its_cap() {
         let mut fill = good();
         fill.purpose = "   ".to_owned();
-        fill.files.insert(
-            "lib.rs".to_owned(),
+        fill.directories.insert(
+            "src".to_owned(),
             "two\nlines, and long enough besides".to_owned(),
         );
         fill.structure = vec![Entry::naming("x".repeat(ENTRY_CHARS + 1), "lib.rs")];
@@ -2185,7 +1744,7 @@ mod tests {
             field: "purpose".to_owned()
         }));
         assert!(found.contains(&Defect::Multiline {
-            field: "files[\"lib.rs\"]".to_owned()
+            field: "directories[\"src\"]".to_owned()
         }));
         assert!(found.contains(&Defect::TooLong {
             field: "structure[0]".to_owned(),
@@ -2193,6 +1752,22 @@ mod tests {
             cap: ENTRY_CHARS
         }));
         assert_eq!(found.len(), 3, "{found:?}");
+
+        let request = request();
+        assert_eq!(
+            accept_file(
+                &format!("{{\"line\": \"{}\"}}", "x".repeat(ENTRY_CHARS + 1)),
+                "lib.rs",
+                &Expected::of(&request),
+                &Described::default()
+            ),
+            Err(vec![Defect::TooLong {
+                field: "files[\"lib.rs\"]".to_owned(),
+                chars: ENTRY_CHARS + 1,
+                cap: ENTRY_CHARS
+            }]),
+            "a file's line is held to the same cap by the pass that writes it"
+        );
     }
 
     #[test]
@@ -2388,7 +1963,7 @@ mod tests {
             "\"structure\": [\"a line where an object was asked for\"]",
         );
 
-        let accepted = accept(None, &answer, &expected, &Described::default());
+        let accepted = accept_synthesis(&answer, &fill.files, &expected, &Described::default());
 
         // Not `NotJson`: that is the one defect with nothing to repair from, and
         // spending a whole pass on a model's punctuation is what this avoids.
@@ -2456,15 +2031,7 @@ mod tests {
         let mut fill = Fill::stub(&parent);
         fill.purpose = "Warlock's source, in one crate.".to_owned();
         assert!(matches!(
-            accept(
-                None,
-                &fill.to_json(),
-                &Expected::of(&parent),
-                &Described::default()
-            )
-            .settled()
-            .expect_err("refused")
-            .as_slice(),
+            check(&fill, &Expected::of(&parent), &Described::default()).as_slice(),
             [Defect::ToolNamed { .. }]
         ));
 
@@ -2473,14 +2040,7 @@ mod tests {
             .with_files([File::present("lib.rs", *b"//! Core engine for warlock.\n")]);
         let mut fill = Fill::stub(&own);
         fill.purpose = "Warlock's engine crate, in one line.".to_owned();
-        accept(
-            None,
-            &fill.to_json(),
-            &Expected::of(&own),
-            &Described::default(),
-        )
-        .settled()
-        .expect("accepted");
+        assert_eq!(check(&fill, &Expected::of(&own), &Described::default()), []);
     }
 
     #[test]
@@ -2544,11 +2104,13 @@ mod tests {
     fn values_are_trimmed_on_the_way_out_and_not_on_the_way_in() {
         let request = request();
         let mut fill = good();
+        fill.directories
+            .insert("src".to_owned(), "  padded, but long enough  ".to_owned());
+        assert_eq!(defects(&fill), [], "padding is not a defect");
         fill.files.insert(
             "lib.rs".to_owned(),
             "  padded, but long enough  ".to_owned(),
         );
-        assert_eq!(defects(&fill), [], "padding is not a defect");
         let text = render(
             "engine",
             &fill,
@@ -2557,6 +2119,10 @@ mod tests {
         );
         assert!(
             text.contains("- `lib.rs` (39 B) — padded, but long enough\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("- `src/` — padded, but long enough\n"),
             "{text}"
         );
     }
@@ -2976,160 +2542,26 @@ mod tests {
     }
 
     #[test]
-    fn the_instructions_carry_the_skeleton_and_any_rejection() {
-        let request = request();
-        let expected = Expected::of(&request);
-        let first = instructions(&expected, &[]);
-        assert!(first.starts_with(PROMPT));
-        assert!(
-            first.ends_with(&skeleton(&expected)),
-            "the skeleton is last"
-        );
-        assert!(!first.contains("turned down. Do not repeat"));
-        assert!(first.contains(&format!(
-            "{ENTRY_MINIMUM} to {ENTRY_CHARS} characters per value"
-        )));
-
-        let second = instructions(
-            &expected,
-            &[Defect::Missing {
-                field: "files[\"lib.rs\"]".to_owned(),
-            }],
-        );
-        assert!(
-            second.contains(
-                "turned down. Do not repeat these defects:\n- files[\"lib.rs\"] is missing"
-            )
-        );
-        assert!(second.ends_with(&skeleton(&expected)));
-    }
-
-    #[test]
     fn the_prompt_says_warlock_is_the_tool_and_not_the_project() {
         // Measured on a scratch crate that never mentions warlock: two of its
         // three documents called it "a toy freshness ledger belonging to
         // Warlock", because the instructions name warlock and ask for the
         // product the directory belongs to.
-        assert!(
-            PROMPT.contains("it is not the project being described"),
-            "{PROMPT}"
-        );
-        assert!(
-            PROMPT.contains("its name belongs in no value unless the files themselves use it"),
-            "{PROMPT}"
-        );
-    }
-
-    #[test]
-    fn a_repair_asks_again_for_exactly_the_slots_at_fault() {
-        let found = [
-            Defect::Missing {
-                field: "files[\"tree.rs\"]".to_owned(),
-            },
-            Defect::TooLong {
-                field: "files[\"lib.rs\"]".to_owned(),
-                chars: 300,
-                cap: ENTRY_CHARS,
-            },
-            Defect::UnknownTarget {
-                field: "structure[2].names[0]".to_owned(),
-                name: "x".to_owned(),
-            },
-        ];
-        let repair = Repair::of(&found);
-        assert_eq!(
-            repair,
-            Repair {
-                purpose: false,
-                files: vec!["tree.rs".to_owned(), "lib.rs".to_owned()],
-                directories: Vec::new(),
-                lists: vec!["structure".to_owned()],
-            },
-            "a list is re-asked whole"
-        );
-        assert_eq!(
-            repair.skeleton(),
-            "{\n  \"files\": {\n    \"tree.rs\": \"\",\n    \"lib.rs\": \"\"\n  },\n  \"structure\": []\n}"
-        );
-        assert!(
-            Repair::of(&[Defect::NotJson {
-                detail: "expected value".to_owned()
-            }])
-            .is_empty(),
-            "an answer that is not an object names no slot to ask again for"
-        );
-    }
-
-    #[test]
-    fn a_patch_is_written_over_the_slots_at_fault_and_nothing_else() {
-        let request = request();
-        let expected = Expected::of(&request);
-        let mut previous = good();
-        previous
-            .files
-            .insert("ghost.rs".to_owned(), "not here at all".to_owned());
-        previous.files.remove("lib.rs");
-        let repair = Repair {
-            files: vec!["lib.rs".to_owned()],
-            lists: vec!["structure".to_owned()],
-            ..Repair::default()
-        };
-        let patch = Fill {
-            purpose: "ignored: not asked for".to_owned(),
-            files: [(
-                "lib.rs".to_owned(),
-                "the crate root, repaired by a patch".to_owned(),
-            )]
-            .into_iter()
-            .collect(),
-            ..Fill::default()
-        };
-        let mended = repair.apply(&previous, &patch, &expected);
-        assert_eq!(
-            mended.purpose, previous.purpose,
-            "a slot not asked for keeps its value"
-        );
-        assert_eq!(
-            mended.files["lib.rs"],
-            "the crate root, repaired by a patch"
-        );
-        assert!(
-            !mended.files.contains_key("ghost.rs"),
-            "an entry for a file that is not here goes"
-        );
-        assert!(
-            mended.structure.is_empty(),
-            "a list asked for again is replaced whole"
-        );
-        assert_eq!(
-            accept(None, &mended.to_json(), &expected, &Described::default()),
-            Accepted::Filled(mended.clone())
-        );
-    }
-
-    #[test]
-    fn the_repair_instructions_show_what_was_written_and_ask_for_the_slots_alone() {
-        let request = request();
-        let expected = Expected::of(&request);
-        let previous = good();
-        let found = [Defect::TooLong {
-            field: "files[\"lib.rs\"]".to_owned(),
-            chars: 300,
-            cap: ENTRY_CHARS,
-        }];
-        let repair = Repair::of(&found);
-        let text = repair_instructions(&expected, &previous, &found, &repair);
-        assert!(text.starts_with(PROMPT));
-        assert!(text.contains("holding ONLY the slots"));
-        assert!(text.contains("- files[\"lib.rs\"] is 300 characters"));
-        assert!(
-            text.contains("\"lib.rs\": \"a stand-in entry, filled by a test double\""),
-            "what it wrote: {text}"
-        );
-        assert!(text.ends_with(&repair.skeleton()));
-        const {
-            assert!(ATTEMPTS >= 2, "there is a second attempt to show these to");
+        for prompt in [SYNTHESIS_PROMPT, FILE_PROMPT] {
+            assert!(
+                prompt.contains("it is not the project being described"),
+                "{prompt}"
+            );
         }
+        assert!(
+            SYNTHESIS_PROMPT
+                .contains("its name belongs in no value unless the files themselves use it"),
+            "{SYNTHESIS_PROMPT}"
+        );
+        assert!(
+            FILE_PROMPT.contains("its name belongs in the line only if the file itself uses it"),
+            "{FILE_PROMPT}"
+        );
     }
 
     #[test]
@@ -3418,28 +2850,6 @@ mod tests {
         (repaired, mends)
     }
 
-    fn measured(path: &str) -> String {
-        let request = request();
-        fallback::file(path, &Expected::of(&request), &declared())
-    }
-
-    #[test]
-    fn a_missing_entry_falls_back_to_what_warlock_measured() {
-        let mut fill = good();
-        fill.files.remove("lib.rs");
-        let (repaired, mends) = mend_of(&fill);
-        assert_eq!(repaired.files["lib.rs"], measured("lib.rs"));
-        assert_eq!(
-            mends,
-            [Mend {
-                field: "files[\"lib.rs\"]".to_owned(),
-                done: Mended::Supplied
-            }]
-        );
-        assert_eq!(repaired.purpose, fill.purpose, "nothing else was touched");
-        assert_eq!(repaired.structure, fill.structure);
-    }
-
     #[test]
     fn an_empty_value_falls_back_to_what_warlock_measured() {
         let request = request();
@@ -3473,11 +2883,15 @@ mod tests {
 
     #[test]
     fn a_value_under_the_floor_falls_back_to_what_warlock_measured() {
+        let request = request();
         let mut fill = good();
-        fill.files
-            .insert("lib.rs".to_owned(), "duplicate".to_owned());
+        fill.directories
+            .insert("src".to_owned(), "duplicate".to_owned());
         let (repaired, mends) = mend_of(&fill);
-        assert_eq!(repaired.files["lib.rs"], measured("lib.rs"));
+        assert_eq!(
+            repaired.directories["src"],
+            fallback::directory("src", &Expected::of(&request), &Described::default())
+        );
         assert_eq!(mends.first().map(|mend| mend.done), Some(Mended::Supplied));
         assert_eq!(mends.len(), 1, "{mends:?}");
     }
@@ -3485,33 +2899,33 @@ mod tests {
     #[test]
     fn a_value_over_more_than_one_line_keeps_the_first() {
         let mut fill = good();
-        fill.files.insert(
-            "lib.rs".to_owned(),
-            "\nthe crate root, in one line\nand a second the cap would have allowed".to_owned(),
+        fill.directories.insert(
+            "src".to_owned(),
+            "\nthe source tree, in one line\nand a second the cap would have allowed".to_owned(),
         );
         let (repaired, mends) = mend_of(&fill);
-        assert_eq!(repaired.files["lib.rs"], "the crate root, in one line");
+        assert_eq!(repaired.directories["src"], "the source tree, in one line");
         assert_eq!(
             mends,
             [Mend {
-                field: "files[\"lib.rs\"]".to_owned(),
+                field: "directories[\"src\"]".to_owned(),
                 done: Mended::FirstLine
             }]
         );
         assert_eq!(
             mends[0].to_string(),
-            "files[\"lib.rs\"] ran to more than one line and keeps its first"
+            "directories[\"src\"] ran to more than one line and keeps its first"
         );
     }
 
     #[test]
     fn a_value_over_its_cap_is_cut_to_it_counting_characters() {
         let mut fill = good();
-        fill.files
-            .insert("lib.rs".to_owned(), "x".repeat(ENTRY_CHARS + 20));
+        fill.directories
+            .insert("src".to_owned(), "x".repeat(ENTRY_CHARS + 20));
         fill.purpose = "é".repeat(PURPOSE_CHARS + 1);
         let (repaired, mends) = mend_of(&fill);
-        assert_eq!(repaired.files["lib.rs"].chars().count(), ENTRY_CHARS);
+        assert_eq!(repaired.directories["src"].chars().count(), ENTRY_CHARS);
         // Characters, and a character boundary: the purpose is multibyte, so a
         // byte cut would either panic or land inside an `é`.
         assert_eq!(repaired.purpose.chars().count(), PURPOSE_CHARS);
@@ -3527,7 +2941,7 @@ mod tests {
                     }
                 },
                 Mend {
-                    field: "files[\"lib.rs\"]".to_owned(),
+                    field: "directories[\"src\"]".to_owned(),
                     done: Mended::Cut {
                         from: ENTRY_CHARS + 20,
                         to: ENTRY_CHARS
@@ -3537,7 +2951,7 @@ mod tests {
         );
         assert_eq!(
             mends[1].to_string(),
-            "files[\"lib.rs\"] was 300 characters and was cut to 280",
+            "directories[\"src\"] was 300 characters and was cut to 280",
             "the line a run reports, from the brief"
         );
     }
@@ -3573,9 +2987,9 @@ mod tests {
         let request = request();
         let expected = Expected::of(&request);
         let mut fill = good();
-        fill.files.insert(
-            "lib.rs".to_owned(),
-            "the crate root of the warlock engine, and long enough besides".to_owned(),
+        fill.directories.insert(
+            "src".to_owned(),
+            "the source of the warlock engine, and long enough besides".to_owned(),
         );
         fill.structure = vec![Entry::naming(
             "warlock-style grants, one per module and then some",
@@ -3585,7 +2999,10 @@ mod tests {
         // without one is not a document, so it falls straight to the fallback.
         fill.purpose = "A toy freshness ledger belonging to Warlock.".to_owned();
         let (repaired, mends) = mend_of(&fill);
-        assert_eq!(repaired.files["lib.rs"], measured("lib.rs"));
+        assert_eq!(
+            repaired.directories["src"],
+            fallback::directory("src", &expected, &Described::default())
+        );
         assert_eq!(
             repaired.purpose,
             fallback::purpose("engine", &expected, &Described::default())
@@ -3602,7 +3019,7 @@ mod tests {
                     done: Mended::Supplied
                 },
                 Mend {
-                    field: "files[\"lib.rs\"]".to_owned(),
+                    field: "directories[\"src\"]".to_owned(),
                     done: Mended::Dropped
                 },
                 Mend {
@@ -3610,7 +3027,7 @@ mod tests {
                     done: Mended::Dropped
                 },
                 Mend {
-                    field: "files[\"lib.rs\"]".to_owned(),
+                    field: "directories[\"src\"]".to_owned(),
                     done: Mended::Supplied
                 },
             ],
@@ -3621,22 +3038,20 @@ mod tests {
     #[test]
     fn an_entry_the_request_never_asked_for_is_gone_before_the_first_check() {
         let mut fill = good();
-        fill.files.insert(
-            "elsewhere.rs".to_owned(),
-            "a file of another crate".to_owned(),
-        );
         fill.directories.insert(
             "target".to_owned(),
             "the build directory, unasked for".to_owned(),
         );
-        // The same removal `Repair::apply` makes, for the same reason, and so
-        // not a mend: nothing was repaired, an answer to a question nobody
+        // Not a mend: nothing was repaired, an answer to a question nobody
         // asked was thrown away. Were it left in, `keyed`'s debug assertion
         // would fire on the mend's own first `check`.
         let (repaired, mends) = mend_of(&fill);
-        assert!(!repaired.files.contains_key("elsewhere.rs"));
         assert!(!repaired.directories.contains_key("target"));
-        assert_eq!(repaired.files, good().files, "the asked-for entries stay");
+        assert_eq!(
+            repaired.directories,
+            good().directories,
+            "the asked-for entries stay"
+        );
         assert_eq!(mends, []);
     }
 
@@ -3656,8 +3071,8 @@ mod tests {
         // the drop left, and the third look finds nothing — the two rules do
         // not hand the slot back and forth.
         let mut fill = good();
-        fill.files
-            .insert("lib.rs".to_owned(), format!("warlock{}", "x".repeat(400)));
+        fill.directories
+            .insert("src".to_owned(), format!("warlock{}", "x".repeat(400)));
         let (repaired, mends, passes) = mended(&fill, &expected, &declared());
         assert_eq!(check(&repaired, &expected, &Described::default()), []);
         assert_eq!(
@@ -3674,15 +3089,12 @@ mod tests {
         // Every rule at once, on every slot, still settles inside the bound.
         let mut fill = good();
         fill.purpose = "Warlock's own\nledger.".to_owned();
-        fill.files.remove("lib.rs");
-        fill.files
-            .insert("Cargo.toml".to_owned(), "warlock's manifest".to_owned());
-        fill.files
-            .insert("app.rs".to_owned(), "x".repeat(ENTRY_CHARS + 1));
         fill.directories.insert("src".to_owned(), String::new());
         fill.structure = vec![Entry::of(String::new()); LIST_CAP + 3];
-        fill.structure
-            .push(Entry::naming("a claim about a name that is not here", "missing"));
+        fill.structure.push(Entry::naming(
+            "a claim about a name that is not here",
+            "missing",
+        ));
         let (repaired, _, passes) = mended(&fill, &expected, &declared());
         assert_eq!(check(&repaired, &expected, &Described::default()), []);
         assert!(passes <= MEND_PASSES, "{passes}");
@@ -3710,21 +3122,20 @@ mod tests {
     fn mutations() -> [Mutation; 11] {
         [
             ("Missing", |fill| {
-                fill.files.remove("lib.rs");
+                fill.directories.remove("src");
             }),
             ("Empty", |fill| fill.purpose = "  ".to_owned()),
             ("Empty", |fill| {
                 fill.structure.push(Entry::naming("   ", "lib.rs"));
             }),
             ("Multiline", |fill| {
-                fill.files.insert(
-                    "Cargo.toml".to_owned(),
-                    "a manifest, and long enough\nand a second line".to_owned(),
+                fill.directories.insert(
+                    "src".to_owned(),
+                    "the source, and long enough\nand a second line".to_owned(),
                 );
             }),
             ("TooShort", |fill| {
-                fill.files
-                    .insert("app.rs".to_owned(), "duplicate".to_owned());
+                fill.purpose = "duplicate".to_owned();
             }),
             ("TooLong", |fill| {
                 fill.structure
@@ -3744,10 +3155,10 @@ mod tests {
                 ));
             }),
             ("ToolNamed", |fill| {
-                fill.files.insert(
-                    "lib.rs".to_owned(),
-                    "the crate root of the warlock engine, and long enough".to_owned(),
-                );
+                fill.structure.push(Entry::naming(
+                    "the crate root of the warlock engine, and long enough",
+                    "lib.rs",
+                ));
             }),
             ("ToolNamed", |fill| {
                 fill.directories.insert(

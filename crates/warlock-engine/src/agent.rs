@@ -80,25 +80,13 @@ impl Request {
     ///
     /// let request = agent::Request::new("summarise this module", "crates/engine")
     ///     .with_files([agent::File::present("src/lib.rs", *b"//! Core engine.\n")])
-    ///     .with_files([agent::File::omitted("Cargo.lock", 4_200_000)])
-    ///     .with_files([agent::File::summarised(
-    ///         "src/schema.rs",
-    ///         900_000,
-    ///         "Generated request and response types for the public API.",
-    ///     )]);
+    ///     .with_files([agent::File::omitted("Cargo.lock", 4_200_000)]);
     ///
-    /// assert_eq!(request.files().len(), 3);
+    /// assert_eq!(request.files().len(), 2);
     /// assert_eq!(request.files()[0].bytes(), Some(&b"//! Core engine.\n"[..]));
     /// // An omitted file is still listed, by name and size, never truncated.
     /// assert_eq!(request.files()[1].bytes(), None);
     /// assert_eq!(request.files()[1].size(), 4_200_000);
-    /// // A summarised file adds an account of its contents — and still no bytes.
-    /// assert_eq!(
-    ///     request.files()[2].summary(),
-    ///     Some("Generated request and response types for the public API."),
-    /// );
-    /// assert_eq!(request.files()[2].bytes(), None);
-    /// assert_eq!(request.files()[2].size(), 900_000);
     /// ```
     #[must_use]
     pub fn with_files(mut self, files: impl IntoIterator<Item = File>) -> Self {
@@ -167,19 +155,16 @@ pub struct File {
     content: Content,
 }
 
-// Four states, and no fifth: there is no truncated file. Sending the first n
-// bytes of a source file was rejected because it invites confident wrong
-// conclusions about the part that never arrived, where a name and a size is
-// accurate. `Elided` is the file's own lines with named regions dropped on
-// line boundaries, so it may be quoted; `Summarised` is prose *about* the file
-// and may not be, which is why the two come back through separate accessors and
-// why neither is reachable through `File::bytes`.
+// There is no truncated file. Sending the first n bytes of a source file was
+// rejected because it invites confident wrong conclusions about the part that
+// never arrived, where a name and a size is accurate. `Elided` is the file's own
+// lines with named regions dropped on line boundaries, which is why it comes
+// back through `File::kept` and is never reachable through `File::bytes`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Content {
     Bytes(Vec<u8>),
     Omitted(u64),
     Elided { size: u64, kept: String },
-    Summarised { size: u64, summary: String },
 }
 
 impl File {
@@ -210,7 +195,6 @@ impl File {
     ///
     /// assert_eq!(file.size(), 40_000, "the size on disk, not the size sent");
     /// assert!(file.kept().is_some_and(|text| text.contains("pub fn covering")));
-    /// assert_eq!(file.summary(), None, "kept text is not prose about the file");
     /// assert!(!file.is_omitted(), "nothing about it is a bare name");
     /// ```
     #[must_use]
@@ -224,30 +208,6 @@ impl File {
         }
     }
 
-    /// ```
-    /// use warlock_engine::agent;
-    ///
-    /// let file = agent::File::summarised(
-    ///     "vendor/schema.json",
-    ///     2_400_000,
-    ///     "A JSON Schema for the public API: 180 object definitions, no code.",
-    /// );
-    ///
-    /// assert_eq!(file.size(), 2_400_000);
-    /// assert!(file.summary().is_some_and(|said| said.contains("JSON Schema")));
-    /// assert_eq!(file.bytes(), None, "an account of a file is not its text");
-    /// ```
-    #[must_use]
-    pub fn summarised(path: impl Into<String>, size: u64, summary: impl Into<String>) -> Self {
-        Self {
-            path: path.into(),
-            content: Content::Summarised {
-                size,
-                summary: summary.into(),
-            },
-        }
-    }
-
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
@@ -257,7 +217,7 @@ impl File {
     pub fn bytes(&self) -> Option<&[u8]> {
         match &self.content {
             Content::Bytes(bytes) => Some(bytes),
-            Content::Omitted(_) | Content::Elided { .. } | Content::Summarised { .. } => None,
+            Content::Omitted(_) | Content::Elided { .. } => None,
         }
     }
 
@@ -265,7 +225,7 @@ impl File {
     pub fn kept(&self) -> Option<&str> {
         match &self.content {
             Content::Elided { kept, .. } => Some(kept),
-            Content::Bytes(_) | Content::Omitted(_) | Content::Summarised { .. } => None,
+            Content::Bytes(_) | Content::Omitted(_) => None,
         }
     }
 
@@ -273,17 +233,7 @@ impl File {
     pub fn size(&self) -> u64 {
         match &self.content {
             Content::Bytes(bytes) => bytes.len() as u64,
-            Content::Omitted(size)
-            | Content::Elided { size, .. }
-            | Content::Summarised { size, .. } => *size,
-        }
-    }
-
-    #[must_use]
-    pub fn summary(&self) -> Option<&str> {
-        match &self.content {
-            Content::Summarised { summary, .. } => Some(summary),
-            Content::Bytes(_) | Content::Omitted(_) | Content::Elided { .. } => None,
+            Content::Omitted(size) | Content::Elided { size, .. } => *size,
         }
     }
 
@@ -556,11 +506,6 @@ mod tests {
         assert_eq!(files[0].size(), 17);
         assert!(!files[0].is_omitted());
         assert_eq!(
-            files[0].summary(),
-            None,
-            "a file sent whole needs no account"
-        );
-        assert_eq!(
             files[1].bytes(),
             Some(&[0x89, b'P', b'N', b'G', 0x00, 0xff][..]),
             "bytes, not text: a file in a directory need not be UTF-8"
@@ -581,71 +526,36 @@ mod tests {
             None,
             "never truncated: an omitted file has no bytes at all, not some of them"
         );
-        assert_eq!(
-            file.summary(),
-            None,
-            "nobody has read it, so there is nothing to say about it"
-        );
     }
 
     #[test]
-    fn a_summarised_file_is_a_name_a_size_and_an_account_of_its_contents() {
-        let request = Request::new("summarise", "/repo").with_files([File::summarised(
-            "vendor/schema.json",
-            2_400_000,
-            "A JSON Schema for the public API: 180 object definitions, no code.",
-        )]);
-
-        let file = &request.files()[0];
-        assert_eq!(file.path(), "vendor/schema.json");
-        assert_eq!(
-            file.size(),
-            2_400_000,
-            "the size on disk, not the length of the account of it"
-        );
-        assert_eq!(
-            file.summary(),
-            Some("A JSON Schema for the public API: 180 object definitions, no code."),
-        );
-        assert_eq!(
-            file.bytes(),
-            None,
-            "an account of a file is prose about it, never a piece of it"
-        );
-        assert!(
-            !file.is_omitted(),
-            "a summarised file is not an omitted one: a pass read the whole thing"
-        );
-    }
-
-    #[test]
-    fn the_three_states_answer_the_same_four_questions_differently() {
+    fn the_states_answer_the_same_questions_differently() {
         // One table, so no state can quietly start answering like another.
         let present = File::present("src/lib.rs", *b"//! Core engine.\n");
         let omitted = File::omitted("Cargo.lock", 4_200_000);
-        let summarised = File::summarised("Cargo.lock", 4_200_000, "The locked dependency graph.");
+        let elided = File::elided("scope.rs", 40_000, "pub fn covering() {}\n");
 
         assert_eq!(
             [
                 present.bytes().is_some(),
                 omitted.bytes().is_some(),
-                summarised.bytes().is_some(),
+                elided.bytes().is_some(),
             ],
             [true, false, false]
         );
         assert_eq!(
-            [present.size(), omitted.size(), summarised.size()],
-            [17, 4_200_000, 4_200_000]
+            [present.size(), omitted.size(), elided.size()],
+            [17, 4_200_000, 40_000]
         );
         assert_eq!(
-            [present.summary(), omitted.summary(), summarised.summary(),],
-            [None, None, Some("The locked dependency graph.")]
+            [present.kept(), omitted.kept(), elided.kept()],
+            [None, None, Some("pub fn covering() {}\n")]
         );
         assert_eq!(
             [
                 present.is_omitted(),
                 omitted.is_omitted(),
-                summarised.is_omitted(),
+                elided.is_omitted(),
             ],
             [false, true, false]
         );

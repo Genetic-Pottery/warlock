@@ -1,21 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
-use std::str::Utf8Error;
-
-use ignore::WalkBuilder;
 
 use crate::document::{self, Described};
-use crate::hash::length;
-use crate::ignores;
-use crate::languages;
-use crate::pact::{DOCUMENT_FILE, Error, MANIFEST_DIR};
-use crate::{agent, to_manifest_path};
-
-const WALK_DEPTH: usize = 2;
+use crate::{agent, hash, languages, walk};
 
 pub const PER_FILE_BYTE_CAP: u64 = 1024 * 1024;
 
@@ -29,47 +18,148 @@ fn elided_or_whole(path: &Path, relative: String, size: u64, bytes: Vec<u8>) -> 
     }
 }
 
-// The files a directory's document holds a line for: its own, one level deep,
-// prose excluded — the same set `gather_request` sends, decided by the same
-// walk so the two cannot disagree about what is in a directory.
-pub(crate) fn own_files(directory: &Path) -> Result<BTreeMap<String, PathBuf>, Error> {
-    Ok(walk(directory)?.files)
+// One reading of a directory, and every question its document is written
+// against answered from it. The synthesis pass is checked, mended and rendered
+// through the same `Expected` and the same `Described`, so a file that appears
+// or changes while a run is paying for passes cannot make the check and the page
+// disagree about what the directory holds.
+#[derive(Debug)]
+pub(crate) struct Snapshot {
+    name: String,
+    request: agent::Request,
+    described: Described,
+    files: BTreeMap<String, Measured>,
 }
 
-// The documents of the directories below this one, which a synthesis pass needs
-// for the same reason a whole-directory pass does: `## Directories` is written
-// from a child's own document and from nothing else.
-pub(crate) fn child_documents(directory: &Path) -> Result<Vec<agent::ChildDocument>, Error> {
-    let mut found = Vec::new();
-    for (child, path) in walk(directory)?.child_documents {
-        if let Ok(text) = fs::read_to_string(&path) {
-            found.push(agent::ChildDocument::new(child, text));
-        }
-    }
-    Ok(found)
+#[derive(Debug)]
+pub(crate) struct Measured {
+    pub(crate) size: u64,
+    // `None` for a file that could not be read, which is a file nothing can be
+    // said to know: its line is asked for again and no hash is recorded.
+    pub(crate) hash: Option<String>,
 }
 
-// What warlock knows about a directory without sending any of it: the declared
-// names of every file the document holds a line for. It is the second witness
-// `check` asks when the request carries something other than the files — a
-// synthesis pass over assembled lines, where no file's text is in the request
-// at all and every real name would otherwise be refused.
-pub(crate) fn measured(directory: &Path) -> Result<Described, Error> {
-    let mut described = Described::default();
-    for (name, path) in own_files(directory)? {
-        let Ok(bytes) = fs::read(&path) else {
-            continue;
-        };
-        let Ok(text) = str::from_utf8(&bytes) else {
-            continue;
-        };
-        let names = languages::declared_names(&path, text);
-        if !names.is_empty() {
-            described.declared.insert(name.clone(), names);
+impl Snapshot {
+    pub(crate) fn take(directory: &Path) -> Result<Self, walk::Error> {
+        let own = walk::own(directory)?;
+
+        let mut described = Described::default();
+        let mut files = BTreeMap::new();
+        let mut omitted = Vec::new();
+        for (name, path) in own.files {
+            let measured = match fs::read(&path) {
+                Ok(bytes) => {
+                    if let Ok(text) = str::from_utf8(&bytes) {
+                        let names = languages::declared_names(&path, text);
+                        if !names.is_empty() {
+                            described.declared.insert(name.clone(), names);
+                        }
+                        described.tokens.insert(name.clone(), tokens_of(text));
+                    }
+                    Measured {
+                        size: byte_count(bytes.len()),
+                        hash: Some(hash::bytes_hash(&bytes)),
+                    }
+                }
+                Err(_) => Measured {
+                    size: fs::metadata(&path).map_or(0, |found| found.len()),
+                    hash: None,
+                },
+            };
+            omitted.push(agent::File::omitted(name.clone(), measured.size));
+            files.insert(name, measured);
         }
-        described.tokens.insert(name, tokens_of(text));
+
+        let mut children = Vec::new();
+        for (child, path) in own.child_documents {
+            if let Ok(text) = fs::read_to_string(&path) {
+                children.push(agent::ChildDocument::new(child, text));
+            }
+        }
+
+        // The name and not the path: the path is absolute, it is the reader's
+        // home directory, and it would be committed.
+        let name = directory.file_name().map_or_else(
+            || directory.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        Ok(Self {
+            name,
+            request: agent::Request::new(document::SYNTHESIS_PROMPT, directory)
+                .with_files(omitted)
+                .with_child_documents(children),
+            described,
+            files,
+        })
     }
-    Ok(described)
+
+    pub(crate) fn directory(&self) -> &Path {
+        self.request.directory()
+    }
+
+    pub(crate) fn files(&self) -> &BTreeMap<String, Measured> {
+        &self.files
+    }
+
+    pub(crate) fn synthesis_request(
+        &self,
+        lines: &BTreeMap<String, String>,
+        rejected: &[document::Defect],
+    ) -> agent::Request {
+        let instructions = document::synthesis_instructions(
+            &self.name,
+            lines,
+            &document::Expected::of(&self.request),
+            rejected,
+        );
+        self.request.clone().with_prompt(instructions)
+    }
+
+    pub(crate) fn accept_synthesis(
+        &self,
+        answer: &str,
+        lines: &BTreeMap<String, String>,
+    ) -> document::Accepted {
+        document::accept_synthesis(
+            answer,
+            lines,
+            &document::Expected::of(&self.request),
+            &self.described,
+        )
+    }
+
+    pub(crate) fn mend(&self, fill: &document::Fill) -> (document::Fill, Vec<document::Mend>) {
+        document::mend(
+            fill,
+            &document::Expected::of(&self.request),
+            &self.described,
+        )
+    }
+
+    pub(crate) fn render(&self, fill: &document::Fill) -> String {
+        document::render(
+            &self.name,
+            fill,
+            &document::Expected::of(&self.request),
+            &self.described,
+        )
+    }
+
+    // What the synthesis request carries: the lines, and the documents of the
+    // directories below. The files are in it by name and size only, so counting
+    // them would report a payload that was never sent.
+    pub(crate) fn carried_bytes(&self, lines: &BTreeMap<String, String>) -> u64 {
+        lines
+            .values()
+            .map(|line| byte_count(line.len()))
+            .sum::<u64>()
+            + self
+                .request
+                .child_documents()
+                .iter()
+                .map(|child| byte_count(child.text().len()))
+                .sum::<u64>()
+    }
 }
 
 // Read whole rather than capped, and for the same reason the declared list is
@@ -80,24 +170,17 @@ fn tokens_of(text: &str) -> BTreeSet<String> {
     document::identifiers(text).map(str::to_owned).collect()
 }
 
-// One file, reduced the way the same file would be inside a directory's
-// request: the per-file cap still applies, `elide` still takes the bodies out,
-// and the declared names are still measured here rather than guessed at later.
-//
-// No budget ladder and no `Problem`s. The ladder exists because a directory is
-// a sum that need not fit; one file either fits under `PER_FILE_BYTE_CAP` or is
-// sent as a name and a size, and there is nothing to demote it in favour of.
+// No budget ladder. The ladder existed because a directory is a sum that need
+// not fit; one file either fits under `PER_FILE_BYTE_CAP` or is sent as a name
+// and a size, and there is nothing to demote it in favour of.
 pub(crate) fn one_file(
     prompt: &str,
     directory: &Path,
     name: &str,
-) -> Result<(agent::Request, Described, Option<Problem>), Error> {
+) -> Result<(agent::Request, Described, Option<Problem>), walk::Error> {
     let path = directory.join(name);
     let size = fs::metadata(&path)
-        .map_err(|source| Error::Walk {
-            directory: directory.to_path_buf(),
-            source: source.into(),
-        })?
+        .map_err(|source| walk::Error::Walk(source.into()))?
         .len();
 
     // Reported rather than passed over in silence, the same as a file a
@@ -143,130 +226,6 @@ pub(crate) fn one_file(
     ))
 }
 
-const PROSE_EXTENSIONS: &[&str] = &["md", "markdown", "mdx"];
-
-fn is_prose(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            PROSE_EXTENSIONS
-                .iter()
-                .any(|prose| extension.eq_ignore_ascii_case(prose))
-        })
-}
-
-const CARRY_HASH_CONTEXT: &str = "warlock carry hash v1 2026-09-06";
-
-pub(crate) fn carry_hash(directory: &Path) -> Option<String> {
-    let found = walk(directory).ok()?;
-    let mut hasher = blake3::Hasher::new_derive_key(CARRY_HASH_CONTEXT);
-
-    // Two sections, each length-prefixed and each announced by its count, so no
-    // arrangement of one can be read as the other: a directory holding a file
-    // named `x` and one holding a child `x` with a document are different
-    // inputs and must be different digests.
-    hasher.update(&length(found.files.len()).to_le_bytes());
-    for (relative, path) in &found.files {
-        hasher.update(&length(relative.len()).to_le_bytes());
-        hasher.update(relative.as_bytes());
-        let bytes = fs::read(path).ok()?;
-        hasher.update(&length(bytes.len()).to_le_bytes());
-        hasher.update(&bytes);
-    }
-
-    hasher.update(&length(found.child_documents.len()).to_le_bytes());
-    for (child, path) in &found.child_documents {
-        hasher.update(&length(child.len()).to_le_bytes());
-        hasher.update(child.as_bytes());
-        let bytes = fs::read(path).ok()?;
-        hasher.update(&length(bytes.len()).to_le_bytes());
-        hasher.update(&bytes);
-    }
-
-    // The third section: the document itself, absent and empty told apart by
-    // the marker byte, so a directory with no document cannot digest as one
-    // holding a document of nothing.
-    match fs::read(directory.join(DOCUMENT_FILE)) {
-        Ok(bytes) => {
-            hasher.update(&[1]);
-            hasher.update(&length(bytes.len()).to_le_bytes());
-            hasher.update(&bytes);
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            hasher.update(&[0]);
-        }
-        Err(_) => return None,
-    }
-
-    Some(hasher.finalize().to_hex().to_string())
-}
-
-struct Found {
-    files: BTreeMap<String, PathBuf>,
-    child_documents: BTreeMap<String, PathBuf>,
-}
-
-fn walk(dir: &Path) -> Result<Found, Error> {
-    let walker = WalkBuilder::new(dir)
-        // The same three rules as `load` and `hash`, for the same reasons: a
-        // symlinked cycle has to terminate, a fixture with a `.gitignore` and
-        // no `.git` still has to be ignored properly, and `.warlock/` is
-        // Warlock's own bookkeeping rather than content of the module.
-        .follow_links(false)
-        .require_git(false)
-        .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR))
-        .add_custom_ignore_filename(ignores::FILENAME)
-        .max_depth(Some(WALK_DEPTH))
-        .build();
-
-    let mut found = Found {
-        files: BTreeMap::new(),
-        child_documents: BTreeMap::new(),
-    };
-    for entry in walker {
-        let entry = entry.map_err(|source| Error::Walk {
-            directory: dir.to_path_buf(),
-            source,
-        })?;
-        // Rules that could not be read are the failure they are rather than a
-        // verdict of "nothing is excluded"; see `pactable_directories`.
-        if let Some(source) = entry.error() {
-            return Err(Error::Walk {
-                directory: dir.to_path_buf(),
-                source: source.clone(),
-            });
-        }
-        let depth = entry.depth();
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-            continue;
-        }
-        let path = entry.into_path();
-
-        if depth == 1 {
-            // Prose is excluded, and that deliberately takes the directory's
-            // own `WARLOCK.md` with it: a previous pass's claim about this
-            // directory is not evidence about it. See `agent::Request`.
-            if !is_prose(&path) {
-                found.files.insert(relative(dir, &path)?, path);
-            }
-        } else if depth == WALK_DEPTH && path.file_name() == Some(OsStr::new(DOCUMENT_FILE)) {
-            let Some(child) = path.parent().map(Path::to_path_buf) else {
-                continue;
-            };
-            found.child_documents.insert(relative(dir, &child)?, path);
-        }
-    }
-    Ok(found)
-}
-
-fn relative(dir: &Path, path: &Path) -> Result<String, Error> {
-    to_manifest_path(dir, path).map_err(|source| Error::Path {
-        directory: dir.to_path_buf(),
-        path: path.to_path_buf(),
-        source: Box::new(source),
-    })
-}
-
 pub(crate) fn byte_count(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
@@ -281,10 +240,7 @@ pub struct Problem {
 #[non_exhaustive]
 pub enum Omission {
     TooLarge { size: u64 },
-    OverBudget { size: u64 },
     Unreadable { source: std::io::Error },
-    NotText { size: u64, source: Utf8Error },
-    Unreducible { size: u64 },
 }
 
 impl fmt::Display for Omission {
@@ -295,26 +251,7 @@ impl fmt::Display for Omission {
                 "{size} bytes is over the {PER_FILE_BYTE_CAP}-byte per-file cap, so it is listed \
                  by name and size"
             ),
-            // No number named, unlike the per-file cap above: the request
-            // budget is derived from the agent's context window, so no one
-            // figure is true of every run and quoting a stale one would be
-            // worse than quoting none.
-            Self::OverBudget { size } => write!(
-                f,
-                "the directory is over the request budget, so this file of {size} bytes is \
-                 listed by name and size"
-            ),
             Self::Unreadable { source } => write!(f, "it could not be read: {source}"),
-            Self::NotText { size, source } => write!(
-                f,
-                "its {size} bytes are not text ({source}), so there is nothing to reduce and it \
-                 is listed by name and size"
-            ),
-            Self::Unreducible { size } => write!(
-                f,
-                "there is nothing of its {size} bytes to lift — warlock has no reader for this \
-                 kind of file — so it is listed by name and size"
-            ),
         }
     }
 }
@@ -323,8 +260,7 @@ impl std::error::Error for Omission {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Unreadable { source } => Some(source),
-            Self::NotText { source, .. } => Some(source),
-            Self::TooLarge { .. } | Self::OverBudget { .. } | Self::Unreducible { .. } => None,
+            Self::TooLarge { .. } => None,
         }
     }
 }
@@ -348,6 +284,7 @@ impl std::error::Error for Problem {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::error::Error as _;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -360,6 +297,21 @@ mod tests {
         fs::create_dir_all(path.parent().expect("a file has a parent")).expect("creates parents");
         fs::write(&path, contents).expect("writes a file");
         path
+    }
+
+    fn own_files(dir: &Path) -> Result<BTreeMap<String, u64>, crate::walk::Error> {
+        Ok(super::Snapshot::take(dir)?
+            .files()
+            .iter()
+            .map(|(name, measured)| (name.clone(), measured.size))
+            .collect())
+    }
+
+    fn child_documents(dir: &Path) -> Result<Vec<agent::ChildDocument>, crate::walk::Error> {
+        Ok(super::Snapshot::take(dir)?
+            .request
+            .child_documents()
+            .to_vec())
     }
 
     fn request_for(dir: &Path, name: &str) -> agent::Request {
@@ -412,11 +364,6 @@ mod tests {
             file.bytes(),
             None,
             "what survives elision is not the file's bytes and never answers as them"
-        );
-        assert_eq!(
-            file.summary(),
-            None,
-            "nor is it prose about the file: it is the file's own lines"
         );
     }
 
@@ -495,7 +442,7 @@ mod tests {
         write(dir.path(), "src/inner/WARLOCK.md", "# inner\n");
         write(dir.path(), "tests/it.rs", "#[test] fn works() {}\n");
 
-        let files = super::own_files(dir.path()).expect("walks");
+        let files = own_files(dir.path()).expect("walks");
 
         assert_eq!(
             files.keys().collect::<Vec<_>>(),
@@ -509,7 +456,7 @@ mod tests {
             "and a file asked about carries its bytes",
         );
 
-        let children = super::child_documents(dir.path()).expect("walks");
+        let children = child_documents(dir.path()).expect("walks");
         assert_eq!(
             children
                 .iter()
@@ -537,8 +484,8 @@ mod tests {
         write(dir.path(), "zeta/WARLOCK.md", "# zeta\n");
         write(dir.path(), "alpha/WARLOCK.md", "# alpha\n");
 
-        let files = super::own_files(dir.path()).expect("walks");
-        let children = super::child_documents(dir.path()).expect("walks");
+        let files = own_files(dir.path()).expect("walks");
+        let children = child_documents(dir.path()).expect("walks");
 
         assert_eq!(files.keys().collect::<Vec<_>>(), ["alpha.rs", "zeta.rs"]);
         assert_eq!(
@@ -550,7 +497,7 @@ mod tests {
         );
         assert_eq!(
             files,
-            super::own_files(dir.path()).expect("walks"),
+            own_files(dir.path()).expect("walks"),
             "two walks, one value",
         );
     }
@@ -564,26 +511,18 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("lib.rs"), dir.path().join("alias.rs"))
             .expect("links to a file");
 
-        let files = super::own_files(dir.path()).expect("walks");
+        let files = own_files(dir.path()).expect("walks");
 
         assert_eq!(files.keys().collect::<Vec<_>>(), ["lib.rs"]);
-        assert!(
-            super::child_documents(dir.path())
-                .expect("walks")
-                .is_empty()
-        );
+        assert!(child_documents(dir.path()).expect("walks").is_empty());
     }
 
     #[test]
     fn an_empty_directory_is_a_request_with_nothing_in_it() {
         let dir = tempfile::tempdir().expect("a temporary directory");
 
-        assert!(super::own_files(dir.path()).expect("walks").is_empty());
-        assert!(
-            super::child_documents(dir.path())
-                .expect("walks")
-                .is_empty()
-        );
+        assert!(own_files(dir.path()).expect("walks").is_empty());
+        assert!(child_documents(dir.path()).expect("walks").is_empty());
     }
 
     #[test]
@@ -592,10 +531,6 @@ mod tests {
             Problem {
                 path: PathBuf::from("/repo/Cargo.lock"),
                 cause: Omission::TooLarge { size: 4_200_000 },
-            },
-            Problem {
-                path: PathBuf::from("/repo/data.json"),
-                cause: Omission::OverBudget { size: 90_000 },
             },
             Problem {
                 path: PathBuf::from("/repo/secret.rs"),
@@ -619,20 +554,20 @@ mod tests {
             problems[0],
         );
         assert!(
-            problems[2].to_string().contains("permission denied"),
+            problems[1].to_string().contains("permission denied"),
             "{}",
-            problems[2],
+            problems[1],
         );
         assert_eq!(
             problems
                 .iter()
                 .filter(|problem| problem.source().is_some())
                 .count(),
-            3,
+            2,
             "every problem's cause is reachable as a source",
         );
         assert!(
-            problems[2]
+            problems[1]
                 .source()
                 .and_then(std::error::Error::source)
                 .is_some(),

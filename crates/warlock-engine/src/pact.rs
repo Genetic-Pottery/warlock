@@ -1,29 +1,21 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
 
-use ignore::WalkBuilder;
-
 use crate::document::{self, Defect};
-use crate::fitting::{
-    PER_FILE_BYTE_CAP, Problem, byte_count, carry_hash, child_documents, measured, one_file,
-    own_files,
-};
+use crate::fitting::{Measured, PER_FILE_BYTE_CAP, Problem, Snapshot, byte_count, one_file};
+use crate::hash::carry_hash;
 use crate::ignores;
 use crate::manifest::{ROOT_MODULE, temp_file_name, write_and_sync};
 use crate::scope::valid_scope;
+use crate::walk::{self, DOCUMENT_FILE};
 use crate::{
     Agent, Manifest, NodeState, PactEntry, agent, decide_state, from_manifest_path, hash, manifest,
     now_rfc3339, scope_opens_to, subtree_hash, to_manifest_path,
 };
-
-pub(crate) const MANIFEST_DIR: &str = ".warlock";
-
-pub(crate) const DOCUMENT_FILE: &str = "WARLOCK.md";
 
 /// ```
 /// use std::fs;
@@ -858,6 +850,9 @@ fn pact_directory_watched(
     agent: &dyn Agent,
     observer: &mut dyn Observer,
 ) -> Result<Pacted, Error> {
+    let snapshot =
+        Snapshot::take(directory).map_err(|source| Error::from_walk(directory, source))?;
+
     // Two kinds of pass, in this order, and the order is the whole design: one
     // per file that moved, then one over every line to say how they fit
     // together. A file's line is written without its siblings and routes no
@@ -869,13 +864,10 @@ fn pact_directory_watched(
         mended,
         problems,
         ..
-    } = assemble_lines(directory, carried, agent, observer)?;
+    } = assemble_lines(&snapshot, carried, agent, observer)?;
 
     let mut repairs: Vec<Repaired> = Vec::new();
     for name in &mended {
-        // A line warlock wrote itself, carried the way a mended slot is: the
-        // directory was described and granted, so it is a note about the run
-        // and not a failure in it.
         let mend = document::Mend {
             field: format!("files[{name:?}]"),
             done: document::Mended::Supplied,
@@ -887,11 +879,7 @@ fn pact_directory_watched(
         });
     }
 
-    let Synthesised {
-        fill,
-        described,
-        mends,
-    } = synthesise(directory, &lines, agent, observer)?;
+    let Synthesised { fill, mends } = synthesise(&snapshot, &lines, agent, observer)?;
     for mend in mends {
         observer.repaired(directory, &mend);
         repairs.push(Repaired {
@@ -900,16 +888,7 @@ fn pact_directory_watched(
         });
     }
 
-    // The directory's name and not its path: the path is absolute, it is the
-    // reader's home directory, and it would be committed.
-    let name = directory.file_name().map_or_else(
-        || directory.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
-    let request = expected_for(directory)?;
-    let expected = document::Expected::of(&request);
-    let text = document::render(&name, &fill, &expected, &described);
-    let document = write_document(directory, &text)?;
+    let document = write_document(directory, &snapshot.render(&fill))?;
 
     Ok(Pacted {
         document,
@@ -946,165 +925,38 @@ fn write_document(directory: &Path, text: &str) -> Result<PathBuf, Error> {
     Ok(document)
 }
 
-// Names and sizes for `render`, which prints both in front of every line it
-// writes. The text is nobody's here: the lines came from passes of their own.
-fn expected_for(directory: &Path) -> Result<agent::Request, Error> {
-    let mut files = Vec::new();
-    for (name, path) in own_files(directory)? {
-        let size = fs::metadata(&path).map_or(0, |found| found.len());
-        files.push(agent::File::omitted(name, size));
-    }
-    Ok(agent::Request::new("", directory)
-        .with_files(files)
-        .with_child_documents(child_documents(directory)?))
-}
-
-// Deliberately the same list `load_tree` would have made nodes of, so that
-// "everything under here" means on screen what it means here. Nothing is
-// filtered on top: no "already has a `WARLOCK.md`" test and no "has source in
-// it" test, because an undocumented directory is exactly the one a pact exists
-// to give a document to. Crate-private for the same reason — callers outside
-// the crate have `load_tree`.
 pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
-    // Asked separately because the walker below will not apply the rules to the
-    // root it is handed. A directory the repository excluded has no pactable
-    // directories at all, itself included.
-    let ignored = ignores::is_ignored(root).map_err(|source| Error::Walk {
-        directory: root.to_path_buf(),
-        source,
-    })?;
-    if ignored {
-        return Ok(Vec::new());
-    }
-
-    let walker = WalkBuilder::new(root)
-        // The same three rules as `load` and `hash`, for the same reasons: a
-        // symlinked cycle has to terminate, a fixture with a `.gitignore` and
-        // no `.git` still has to be ignored, and `.warlock/` is Warlock's own
-        // bookkeeping rather than content of the module.
-        .follow_links(false)
-        .require_git(false)
-        .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR))
-        // The same matcher that reads `.gitignore`, so that what a pact covers
-        // is what a tree shows and what a hash judges.
-        .add_custom_ignore_filename(ignores::FILENAME)
-        .build();
-
-    // A set, so whatever order the walker offered is discarded rather than
-    // reversed: the ordering below is a property of the paths, not of the
-    // filesystem.
-    let mut directories = BTreeSet::new();
-    for entry in walker {
-        let entry = entry.map_err(|source| Error::Walk {
-            directory: root.to_path_buf(),
-            source,
-        })?;
-        // A rule file the walker could not use is reported beside its
-        // directory rather than in place of it, and taking that as "no rules"
-        // would pact the content the repository excluded.
-        if let Some(source) = entry.error() {
-            return Err(Error::Walk {
-                directory: root.to_path_buf(),
-                source: source.clone(),
-            });
-        }
-        // With `follow_links(false)` a symlinked directory reports as a
-        // symlink, so it is neither descended into nor pacted as its target.
-        if entry.file_type().is_some_and(|kind| kind.is_dir()) {
-            directories.insert(entry.into_path());
-        }
-    }
-    // Children before parents, and the `.rev()` is the whole of it: every
-    // descendant sorts after its own ancestor. A parent's request carries its
-    // children's documents, so pacting a parent first would hand the pass a
-    // stale account of the subtree. Sibling order is arbitrary but fixed.
-    Ok(directories.into_iter().rev().collect())
+    walk::pactable_directories(root).map_err(|source| Error::from_walk(root, source))
 }
 
-/// ```
-/// use std::fs;
-/// use warlock_engine::{Viewed, view_file};
-///
-/// let dir = tempfile::tempdir()?;
-/// let path = dir.path().join("WARLOCK.md");
-/// fs::write(&path, "# engine\n\nThe core.\n")?;
-///
-/// let Viewed { text, cut } = view_file(&path)?;
-/// assert_eq!(text, "# engine\n\nThe core.\n");
-/// assert!(!cut);
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
-/// The directory-wide slots, written from the assembled lines.
-///
-/// The second half of a per-file document. It is shown the lines and never the
-/// source, and what it says is checked against warlock's own walk of the
-/// directory rather than against the request — see `Expected::knows`, which is
-/// what makes a pass that was shown no files checkable at all.
-///
-/// Ends in a fill either way, like every other road here: [`document::mend`] is
-/// the floor under an exhausted loop, so a directory is never lost because its
-/// synthesis could not be got right.
-pub fn synthesise(
-    directory: impl AsRef<Path>,
+// Shown the lines and never the source. Ends in a fill either way: the mend is
+// the floor under an exhausted loop, so a directory is never lost because its
+// synthesis could not be got right.
+fn synthesise(
+    snapshot: &Snapshot,
     lines: &BTreeMap<String, String>,
     agent: &dyn Agent,
     observer: &mut dyn Observer,
 ) -> Result<Synthesised, Error> {
-    let directory = directory.as_ref();
-    let described = measured(directory)?;
-
-    // Names and sizes, and no text: the lines are the evidence and the files
-    // are here so that a claim can name one. `Expected` reads the sizes for
-    // the fallback line, which is why they are measured rather than invented.
-    let mut files = Vec::new();
-    for (name, path) in own_files(directory)? {
-        let size = std::fs::metadata(&path).map_or(0, |found| found.len());
-        files.push(agent::File::omitted(name, size));
-    }
-    let children = child_documents(directory)?;
+    let directory = snapshot.directory();
 
     // Announced before the first attempt waits on a model, so a front end's
     // clock counts what is being waited on rather than going quiet after the
-    // last file. The bytes are the two things this request actually carries:
-    // the lines, and the documents of the directories below. The files are in
-    // it by name and size only — counting them here would report a payload
-    // that was never sent.
-    let carried = lines
-        .values()
-        .map(|line| byte_count(line.len()))
-        .sum::<u64>()
-        + children
-            .iter()
-            .map(|child| byte_count(child.text().len()))
-            .sum::<u64>();
-    observer.requesting(lines.len(), carried);
-
-    let request = agent::Request::new(document::SYNTHESIS_PROMPT, directory)
-        .with_files(files)
-        .with_child_documents(children);
-    let expected = document::Expected::of(&request);
-    let name = directory.file_name().map_or_else(
-        || directory.to_string_lossy().into_owned(),
-        |name| name.to_string_lossy().into_owned(),
-    );
+    // last file.
+    observer.requesting(lines.len(), snapshot.carried_bytes(lines));
 
     let mut rejected = Vec::new();
     let mut best = None;
     for attempt in 1..=document::ATTEMPTS {
-        let asked = request
-            .clone()
-            .with_prompt(document::synthesis_instructions(
-                &name, lines, &expected, &rejected,
-            ));
+        let asked = snapshot.synthesis_request(lines, &rejected);
         let answer = agent.run(&asked).map_err(|source| Error::Refused {
             directory: directory.to_path_buf(),
             cause: Refusal::Agent { source },
         })?;
-        match document::accept_synthesis(answer.text(), lines, &expected, &described) {
+        match snapshot.accept_synthesis(answer.text(), lines) {
             document::Accepted::Filled(fill) => {
                 return Ok(Synthesised {
                     fill,
-                    described,
                     mends: Vec::new(),
                 });
             }
@@ -1125,21 +977,14 @@ pub fn synthesise(
         files: lines.clone(),
         ..document::Fill::default()
     });
-    let (fill, mends) = document::mend(&unusable, &expected, &described);
-    Ok(Synthesised {
-        fill,
-        described,
-        mends,
-    })
+    let (fill, mends) = snapshot.mend(&unusable);
+    Ok(Synthesised { fill, mends })
 }
 
-/// A directory's own slots, and what warlock had to write itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Synthesised {
-    pub fill: document::Fill,
-    /// The walk behind the check, kept because `render` needs the same one.
-    pub described: document::Described,
-    pub mends: Vec<document::Mend>,
+struct Synthesised {
+    fill: document::Fill,
+    mends: Vec<document::Mend>,
 }
 
 /// Every line a directory's document needs, asking only about what moved.
@@ -1150,58 +995,13 @@ pub struct Synthesised {
 /// line on the page is a document somebody edited, and a line with no hash is a
 /// file nobody has measured — and either way the answer is to ask again, which
 /// costs a pass and never a wrong line.
-///
-/// ```
-/// use std::cell::Cell;
-/// use std::fs;
-/// use warlock_engine::{Agent, Unwatched, agent, assemble_lines, file_hash};
-///
-/// struct Counting {
-///     passes: Cell<usize>,
-/// }
-///
-/// impl Agent for Counting {
-///     fn run(&self, _request: &agent::Request) -> Result<agent::Response, agent::Error> {
-///         self.passes.set(self.passes.get() + 1);
-///         Ok(agent::Response::new(r#"{"line": "A line about one file alone."}"#))
-///     }
-/// }
-///
-/// let dir = tempfile::tempdir()?;
-/// fs::write(dir.path().join("reading.rs"), "pub fn read_one() {}\n")?;
-/// fs::write(dir.path().join("writing.rs"), "fn scratch() {}\n")?;
-/// let agent = Counting { passes: Cell::new(0) };
-///
-/// // Nothing recorded: every file is asked about.
-/// let first = assemble_lines(dir.path(), None, &agent, &mut Unwatched)?;
-/// assert_eq!(agent.passes.get(), 2);
-/// assert_eq!(first.asked, ["reading.rs", "writing.rs"]);
-///
-/// // The page and the hashes from that run, and one file changed under them.
-/// fs::write(dir.path().join("writing.rs"), "fn scratch(at: usize) {}\n")?;
-/// let page = first
-///     .lines
-///     .iter()
-///     .map(|(path, line)| format!("- `{path}` (1 B) — {line}"))
-///     .collect::<Vec<_>>()
-///     .join("\n");
-/// let page = format!("\n## Files\n\n{page}\n");
-///
-/// let again = assemble_lines(dir.path(), Some((&page, &first.hashes)), &agent, &mut Unwatched)?;
-/// assert_eq!(agent.passes.get(), 3, "one changed file, one pass");
-/// assert_eq!(again.asked, ["writing.rs"]);
-/// assert_eq!(again.lines["reading.rs"], first.lines["reading.rs"]);
-/// assert_eq!(again.hashes["writing.rs"], file_hash(dir.path().join("writing.rs"))?);
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
-pub fn assemble_lines(
-    directory: impl AsRef<Path>,
+fn assemble_lines(
+    snapshot: &Snapshot,
     carried: Option<(&str, &BTreeMap<String, String>)>,
     agent: &dyn Agent,
     observer: &mut dyn Observer,
 ) -> Result<Assembled, Error> {
-    let directory = directory.as_ref();
-    let files = own_files(directory)?;
+    let directory = snapshot.directory();
     let (page, recorded) = match carried {
         Some((page, recorded)) => (document::lines_of(page), recorded.clone()),
         None => (BTreeMap::new(), BTreeMap::new()),
@@ -1209,24 +1009,18 @@ pub fn assemble_lines(
 
     // Every file is settled against the page before the first pass runs, so
     // that `Observer::describing` can be handed a denominator: what a front end
-    // needs is the count of files this directory will *pay* for, and that is
-    // not known until every hash has been compared. Hashing the whole directory
-    // up front costs one walk's worth of reads either way — the loop below did
-    // the same reads, one file later.
-    let planned: Vec<(String, PathBuf, Option<String>, Option<String>)> = files
-        .into_iter()
-        .map(|(name, path)| {
-            // A file that cannot be hashed is a file nothing can be said to
-            // know, so it is asked about rather than taken on trust. The hash is
-            // left out of the record, which costs a pass next run and no
-            // correctness.
-            let hash = crate::hash::file_hash(&path).ok();
-            let unmoved = hash
+    // needs is the count of files this directory will *pay* for.
+    let planned: Vec<(&String, &Measured, Option<String>)> = snapshot
+        .files()
+        .iter()
+        .map(|(name, measured)| {
+            let unmoved = measured
+                .hash
                 .as_ref()
-                .zip(recorded.get(&name))
+                .zip(recorded.get(name))
                 .is_some_and(|(now, before)| now == before);
-            let kept = unmoved.then(|| page.get(&name).cloned()).flatten();
-            (name, path, hash, kept)
+            let kept = unmoved.then(|| page.get(name).cloned()).flatten();
+            (name, measured, kept)
         })
         .collect();
 
@@ -1234,15 +1028,14 @@ pub fn assemble_lines(
 
     let mut assembled = Assembled::default();
     let mut position = 0;
-    for (name, path, hash, kept) in planned {
+    for (name, measured, kept) in planned {
         if let Some(line) = kept {
             assembled.lines.insert(name.clone(), line);
             assembled.kept.push(name.clone());
         } else {
             position += 1;
-            let bytes = fs::metadata(&path).map_or(0, |file| file.len());
-            observer.describing(directory, &name, bytes, position, paying);
-            let described = describe_file(directory, &name, agent, observer)?;
+            observer.describing(directory, name, measured.size, position, paying);
+            let described = describe_file(directory, name, agent, observer)?;
             if described.mended {
                 assembled.mended.push(name.clone());
             }
@@ -1251,74 +1044,39 @@ pub fn assemble_lines(
             assembled.asked.push(name.clone());
         }
 
-        if let Some(hash) = hash {
-            assembled.hashes.insert(name, hash);
+        if let Some(hash) = &measured.hash {
+            assembled.hashes.insert(name.clone(), hash.clone());
         }
     }
     Ok(assembled)
 }
 
-/// A directory's file lines, and what each one cost.
 #[derive(Debug, Default)]
-pub struct Assembled {
-    pub lines: BTreeMap<String, String>,
-    /// What each file hashed to as its line was settled, for the manifest to
-    /// record. A file that could not be hashed is absent and will be asked
-    /// about again.
-    pub hashes: BTreeMap<String, String>,
-    /// Files a pass was paid for this run.
-    pub asked: Vec<String>,
-    /// Files whose line came off the page unchanged.
-    pub kept: Vec<String>,
-    /// Files whose every attempt was spent, so warlock wrote the line.
-    pub mended: Vec<String>,
-    /// Files the pass was shown a name and a size for, and why.
-    pub problems: Vec<Problem>,
+struct Assembled {
+    lines: BTreeMap<String, String>,
+    // What each file hashed to as its line was settled, for the manifest to
+    // record. A file that could not be hashed is absent and will be asked about
+    // again.
+    hashes: BTreeMap<String, String>,
+    asked: Vec<String>,
+    kept: Vec<String>,
+    // Files whose every attempt was spent, so warlock wrote the line.
+    mended: Vec<String>,
+    problems: Vec<Problem>,
 }
 
-/// Describe one file: the unit of work per-file granularity is built on.
-///
-/// The asking is [`document::ATTEMPTS`] deep like a directory's, and ends the
-/// same way — with a line warlock wrote itself rather than a refusal, because
-/// one unusable answer about one file is no reason to lose the directory it
-/// sits in. What it cannot do is invent a file: a name that is not there is an
-/// error, since the caller walked the directory to get it.
-///
-/// ```
-/// use std::fs;
-/// use warlock_engine::{Agent, Unwatched, agent, describe_file, document};
-///
-/// struct Lining;
-///
-/// impl Agent for Lining {
-///     fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
-///         assert!(request.prompt().starts_with(document::FILE_PROMPT));
-///         assert_eq!(request.files().len(), 1, "one file, one pass");
-///         Ok(agent::Response::new(
-///             r#"{"line": "The reading half: one entry point and the type it hands back."}"#,
-///         ))
-///     }
-/// }
-///
-/// let dir = tempfile::tempdir()?;
-/// fs::write(dir.path().join("reading.rs"), "pub fn read_one() {}\n")?;
-///
-/// let described = describe_file(dir.path(), "reading.rs", &Lining, &mut Unwatched)?;
-/// assert_eq!(
-///     described.line,
-///     "The reading half: one entry point and the type it hands back."
-/// );
-/// assert!(!described.mended, "the pass answered, so warlock wrote nothing");
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
-pub fn describe_file(
-    directory: impl AsRef<Path>,
+// Ends with a line warlock wrote itself rather than a refusal, because one
+// unusable answer about one file is no reason to lose the directory it sits in.
+// What it cannot do is invent a file: a name that is not there is an error,
+// since the caller walked the directory to get it.
+fn describe_file(
+    directory: &Path,
     name: &str,
     agent: &dyn Agent,
     observer: &mut dyn Observer,
 ) -> Result<DescribedFile, Error> {
-    let directory = directory.as_ref();
-    let (request, described, problem) = one_file(document::FILE_PROMPT, directory, name)?;
+    let (request, described, problem) = one_file(document::FILE_PROMPT, directory, name)
+        .map_err(|source| Error::from_walk(directory, source))?;
     let expected = document::Expected::of(&request);
 
     let mut rejected = Vec::new();
@@ -1326,9 +1084,9 @@ pub fn describe_file(
         let asked = request
             .clone()
             .with_prompt(document::file_instructions(name, &rejected));
-        // A transport failure ends it at once, the same as a directory's pass:
-        // a pass that produced no answer is not a pass that produced a wrong
-        // one, and retrying a missing `claude` finds it still missing.
+        // A transport failure ends it at once: a pass that produced no answer
+        // is not a pass that produced a wrong one, and retrying a missing
+        // `claude` finds it still missing.
         let answer = agent.run(&asked).map_err(|source| Error::Refused {
             directory: directory.to_path_buf(),
             cause: Refusal::Agent { source },
@@ -1355,18 +1113,28 @@ pub fn describe_file(
     })
 }
 
-/// One file's line, and whether a pass wrote it.
 #[derive(Debug)]
-pub struct DescribedFile {
-    pub line: String,
-    /// True where every attempt was spent and warlock wrote the line itself
-    /// from the file's name, size and declared symbols.
-    pub mended: bool,
-    /// Why the pass was shown a name and a size instead of the file, where it
-    /// was: too large for the per-file cap, or unreadable.
-    pub problem: Option<Problem>,
+struct DescribedFile {
+    line: String,
+    mended: bool,
+    // Why the pass was shown a name and a size instead of the file, where it
+    // was: too large for the per-file cap, or unreadable.
+    problem: Option<Problem>,
 }
 
+/// ```
+/// use std::fs;
+/// use warlock_engine::{Viewed, view_file};
+///
+/// let dir = tempfile::tempdir()?;
+/// let path = dir.path().join("WARLOCK.md");
+/// fs::write(&path, "# engine\n\nThe core.\n")?;
+///
+/// let Viewed { text, cut } = view_file(&path)?;
+/// assert_eq!(text, "# engine\n\nThe core.\n");
+/// assert!(!cut);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn view_file(path: impl AsRef<Path>) -> Result<Viewed, Unviewable> {
     let path = path.as_ref();
     let mut bytes = read_capped(path).map_err(|source| Unviewable::Unreadable {
@@ -1636,6 +1404,20 @@ pub enum Error {
 }
 
 impl Error {
+    pub(crate) fn from_walk(directory: &Path, source: walk::Error) -> Self {
+        match source {
+            walk::Error::Walk(source) => Self::Walk {
+                directory: directory.to_path_buf(),
+                source,
+            },
+            walk::Error::Path { path, source } => Self::Path {
+                directory: directory.to_path_buf(),
+                path,
+                source,
+            },
+        }
+    }
+
     #[must_use]
     pub fn directory(&self) -> &Path {
         match self {
@@ -1765,6 +1547,7 @@ mod tests {
         unpact_subtree, view_file,
     };
     use crate::document::{self, STAMP};
+    use crate::fitting::Snapshot;
 
     use crate::fitting::Omission;
     use crate::ignores;
@@ -2090,6 +1873,93 @@ mod tests {
         }
     }
 
+    fn taken(dir: &Path) -> Snapshot {
+        Snapshot::take(dir).expect("walks")
+    }
+
+    #[test]
+    fn a_line_is_reused_only_where_the_file_has_not_moved() {
+        struct Counting {
+            passes: std::cell::Cell<usize>,
+        }
+
+        impl Agent for Counting {
+            fn run(&self, _request: &agent::Request) -> Result<agent::Response, agent::Error> {
+                self.passes.set(self.passes.get() + 1);
+                Ok(agent::Response::new(
+                    r#"{"line": "A line about one file alone."}"#,
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        fs::write(dir.path().join("reading.rs"), "pub fn read_one() {}\n").expect("writes");
+        fs::write(dir.path().join("writing.rs"), "fn scratch() {}\n").expect("writes");
+        let agent = Counting {
+            passes: std::cell::Cell::new(0),
+        };
+
+        // Nothing recorded: every file is asked about.
+        let first =
+            assemble_lines(&taken(dir.path()), None, &agent, &mut Unwatched).expect("lines");
+        assert_eq!(agent.passes.get(), 2);
+        assert_eq!(first.asked, ["reading.rs", "writing.rs"]);
+
+        // The page and the hashes from that run, and one file changed under them.
+        fs::write(dir.path().join("writing.rs"), "fn scratch(at: usize) {}\n").expect("writes");
+        let page = first
+            .lines
+            .iter()
+            .map(|(path, line)| format!("- `{path}` (1 B) — {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let page = format!("\n## Files\n\n{page}\n");
+
+        let again = assemble_lines(
+            &taken(dir.path()),
+            Some((&page, &first.hashes)),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("lines");
+        assert_eq!(agent.passes.get(), 3, "one changed file, one pass");
+        assert_eq!(again.asked, ["writing.rs"]);
+        assert_eq!(again.lines["reading.rs"], first.lines["reading.rs"]);
+        assert_eq!(
+            again.hashes["writing.rs"],
+            crate::file_hash(dir.path().join("writing.rs")).expect("hashes")
+        );
+    }
+
+    #[test]
+    fn one_file_is_one_pass_and_one_line() {
+        struct Lined;
+
+        impl Agent for Lined {
+            fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
+                assert!(request.prompt().starts_with(document::FILE_PROMPT));
+                assert_eq!(request.files().len(), 1, "one file, one pass");
+                Ok(agent::Response::new(
+                    r#"{"line": "The reading half: one entry point and the type it hands back."}"#,
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        fs::write(dir.path().join("reading.rs"), "pub fn read_one() {}\n").expect("writes");
+
+        let described =
+            describe_file(dir.path(), "reading.rs", &Lined, &mut Unwatched).expect("a line");
+        assert_eq!(
+            described.line,
+            "The reading half: one entry point and the type it hands back."
+        );
+        assert!(
+            !described.mended,
+            "the pass answered, so warlock wrote nothing"
+        );
+    }
+
     fn one_file_directory() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("a temporary directory");
         write(
@@ -2127,8 +1997,8 @@ mod tests {
         .into_iter()
         .collect();
 
-        let synthesised =
-            synthesise(dir.path(), &lines, &agent, &mut Unwatched).expect("a fill either way");
+        let synthesised = synthesise(&taken(dir.path()), &lines, &agent, &mut Unwatched)
+            .expect("a fill either way");
 
         assert_eq!(agent.passes.get(), 1, "a clean answer is taken at once");
         assert!(synthesised.mends.is_empty(), "{:?}", synthesised.mends);
@@ -2154,8 +2024,8 @@ mod tests {
         .into_iter()
         .collect();
 
-        let synthesised =
-            synthesise(dir.path(), &lines, &agent, &mut Unwatched).expect("a fill either way");
+        let synthesised = synthesise(&taken(dir.path()), &lines, &agent, &mut Unwatched)
+            .expect("a fill either way");
 
         assert_eq!(agent.passes.get(), document::ATTEMPTS);
         assert_eq!(
@@ -2181,8 +2051,13 @@ mod tests {
         let hash = crate::hash::file_hash(dir.path().join("reading.rs")).expect("hashes");
         let recorded = [("reading.rs".to_owned(), hash)].into_iter().collect();
 
-        let assembled = assemble_lines(dir.path(), Some(("", &recorded)), &agent, &mut Unwatched)
-            .expect("lines");
+        let assembled = assemble_lines(
+            &taken(dir.path()),
+            Some(("", &recorded)),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("lines");
 
         assert_eq!(assembled.asked, ["reading.rs"]);
         assert!(assembled.kept.is_empty());
@@ -2199,7 +2074,7 @@ mod tests {
         let page = page_of(&[("reading.rs", "The line already on the page.")]);
 
         let assembled = assemble_lines(
-            dir.path(),
+            &taken(dir.path()),
             Some((&page, &BTreeMap::new())),
             &agent,
             &mut Unwatched,
@@ -2224,9 +2099,13 @@ mod tests {
             .collect();
         let page = page_of(&[("reading.rs", "The line already on the page.")]);
 
-        let assembled =
-            assemble_lines(dir.path(), Some((&page, &recorded)), &agent, &mut Unwatched)
-                .expect("lines");
+        let assembled = assemble_lines(
+            &taken(dir.path()),
+            Some((&page, &recorded)),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("lines");
 
         assert_eq!(agent.passes.get(), 0, "the run paid for nothing");
         assert_eq!(assembled.kept, ["reading.rs"]);
@@ -2246,7 +2125,8 @@ mod tests {
         let dir = one_file_directory();
         let agent = Lining::saying("prose where an object was asked for");
 
-        let assembled = assemble_lines(dir.path(), None, &agent, &mut Unwatched).expect("lines");
+        let assembled =
+            assemble_lines(&taken(dir.path()), None, &agent, &mut Unwatched).expect("lines");
 
         assert_eq!(assembled.asked, ["reading.rs"]);
         assert_eq!(assembled.mended, ["reading.rs"]);
@@ -2547,7 +2427,7 @@ mod tests {
         // The loader is the authority on which directories exist, because it is
         // what the user is looking at when they press the key. Compared as sets,
         // since the two orders are deliberately opposite.
-        let Loaded { tree, problems } = load_tree(&subtree).expect("loads");
+        let Loaded { tree, problems, .. } = load_tree(&subtree).expect("loads");
         assert!(problems.is_empty(), "{problems:?}");
         let mut walked: Vec<PathBuf> = tree.walk().map(|(node, _)| node.path.clone()).collect();
         let mut sorted = pacted.clone();
@@ -3395,7 +3275,7 @@ mod tests {
         let agent = Lining::saying(r#"{"line": "A line about one file alone."}"#);
         let mut watched = Weighing::default();
 
-        assemble_lines(dir.path(), None, &agent, &mut watched).expect("lines");
+        assemble_lines(&taken(dir.path()), None, &agent, &mut watched).expect("lines");
 
         assert_eq!(
             watched.described,
@@ -3421,7 +3301,13 @@ mod tests {
         let page = page_of(&[("reading.rs", "The line already on the page.")]);
         let mut watched = Weighing::default();
 
-        assemble_lines(dir.path(), Some((&page, &recorded)), &agent, &mut watched).expect("lines");
+        assemble_lines(
+            &taken(dir.path()),
+            Some((&page, &recorded)),
+            &agent,
+            &mut watched,
+        )
+        .expect("lines");
 
         assert_eq!(watched.described, [("writing.rs".to_owned(), 18, 1, 1)]);
     }
@@ -3434,7 +3320,8 @@ mod tests {
         let agent = Lining::saying("prose where an object was asked for");
         let mut watched = Weighing::default();
 
-        let assembled = assemble_lines(dir.path(), None, &agent, &mut watched).expect("lines");
+        let assembled =
+            assemble_lines(&taken(dir.path()), None, &agent, &mut watched).expect("lines");
 
         assert_eq!(assembled.mended, ["reading.rs"], "every attempt was spent");
         assert!(agent.passes.get() > 1, "the retries this is about happened");
@@ -3452,7 +3339,7 @@ mod tests {
         let agent = Lining::saying("prose where an object was asked for");
         let mut watched = Weighing::default();
 
-        synthesise(dir.path(), &BTreeMap::new(), &agent, &mut watched).expect("a fill");
+        synthesise(&taken(dir.path()), &BTreeMap::new(), &agent, &mut watched).expect("a fill");
 
         assert_eq!(
             watched.requested,

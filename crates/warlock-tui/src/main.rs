@@ -62,7 +62,7 @@ use pacting::{Pact, Reloaded};
 use query::{Listing, list};
 use running::{pact, refresh};
 use scoping::{scope_edit, scope_press};
-use session::{Scope, Watched, load_app, load_manifest, start_watching};
+use session::{Scope, Watched, load_app, start_watching};
 use standing::{FOR_CLAUDE_MD, Standing};
 use terminal::{Screen, TerminalGuard, install_panic_hook};
 use viewing::view_press;
@@ -395,13 +395,7 @@ fn init() -> Result<(), Error> {
 /// cancels any run and kills the `claude` it was waiting on, and the guard
 /// drops after it. Nothing joins the worker.
 fn run() -> Result<(), Error> {
-    let (app, scope, tree) = load_app()?;
-    // Loaded before the terminal is touched, for the same reason the tree is:
-    // a manifest that will not parse should say so on the normal screen. This
-    // is a second read of the file the loader already parsed, which is cheap
-    // and keeps the front end from reaching into the loader's internals for a
-    // value it needs to keep and edit.
-    let manifest = load_manifest(&scope.repo_root)?;
+    let (app, scope, tree, manifest) = load_app()?;
     // Asked for once, over the tree the load just produced, and kept for as
     // long as warlock runs — dropping it stops the watch. Whether it was
     // granted is a fact for the footer and nothing more, which is why this is
@@ -776,6 +770,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
                     &mut self.app,
                     &mut self.screen,
                     &self.scope,
+                    &mut self.manifest,
                     self.document.as_deref(),
                     self.mouse_captured,
                     running,
@@ -923,8 +918,13 @@ impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
         {
             self.watched.caught_up(tree.as_ref(), now);
         }
-        self.watched
-            .round(&mut self.app, &self.scope, self.pact.running(), now);
+        self.watched.round(
+            &mut self.app,
+            &self.scope,
+            &mut self.manifest,
+            self.pact.running(),
+            now,
+        );
         // And the conversation's own bottom end. Nothing comes back: a `/write`
         // turn's answer opens the window that goes over it, and that window is the
         // conversation's, so it is opened in there rather than here out of two
@@ -1870,6 +1870,46 @@ mod tests {
             driven.manifest.entries().len(),
             4,
             "every directory the walk produced should have been granted"
+        );
+    }
+
+    #[test]
+    fn a_scope_written_outside_warlock_survives_the_next_run_after_a_reload() {
+        // `git pull`, or `warlock scope add` in another terminal: the manifest on
+        // disk moves while warlock is up. The reload that follows is what every
+        // key after it has to act on, or the next save writes the old copy back
+        // over the edit.
+        let repo = a_repository();
+        let mut driven = session_over(repo.path());
+        pressed(&mut driven, key(KeyCode::Char('p')));
+        rounds_until_settled(&mut driven);
+
+        let outside = Manifest::load(repo.path()).expect("the run saved a manifest");
+        let outside = Manifest::with_entries(outside.entries().iter().map(|entry| {
+            if entry.module() == "crates/engine/src" {
+                entry.clone().with_scope("data-plane")
+            } else {
+                entry.clone()
+            }
+        }));
+        outside.save(repo.path()).expect("saves");
+        fs::write(
+            repo.path().join("crates/engine/src/lib.rs"),
+            "//! Core engine, revised.\n",
+        )
+        .expect("a scratch file is writable");
+        crate::session::reload(&mut driven.app, &driven.scope, &mut driven.manifest);
+
+        pressed(&mut driven, key(KeyCode::Char('r')));
+        rounds_until_settled(&mut driven);
+
+        let after = Manifest::load(repo.path()).expect("a manifest that reads");
+        assert_eq!(
+            after
+                .entry("crates/engine/src")
+                .and_then(warlock_engine::PactEntry::scope),
+            Some("data-plane"),
+            "the refresh wrote warlock's stale copy back over the outside edit"
         );
     }
 
