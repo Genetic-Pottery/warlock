@@ -34,6 +34,7 @@ pub use document::Fill;
 pub use document::stub_answer;
 pub use fitting::Omission;
 pub use fitting::PER_FILE_BYTE_CAP;
+pub use hash::file_hash;
 pub use hash::subtree_hash;
 pub use load::Loaded;
 pub use load::load_tree;

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io::Write as _;
@@ -216,6 +217,19 @@ pub struct PactEntry {
     // safe to read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     carry_hash: Option<String>,
+    // One hash per file the document holds a line for, so a run can re-ask
+    // about the files that moved and keep the lines of the files that did not.
+    // Absent is "no lines recorded", which is every entry written before
+    // per-file granularity and every entry a whole-directory pass writes:
+    // nothing is reusable, so the pass runs, exactly as `carry_hash` reads when
+    // it is missing.
+    //
+    // In the entry rather than in a store of its own because a line and its
+    // grant have to be written by the same atomic save. Two files would drift,
+    // and a line believed current against a hash from another save is worse
+    // than no shortcut at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lines: Option<BTreeMap<String, String>>,
 }
 
 impl PactEntry {
@@ -243,6 +257,7 @@ impl PactEntry {
             granted_hash: None,
             granted_at: None,
             carry_hash: None,
+            lines: None,
         })
     }
 
@@ -260,6 +275,12 @@ impl PactEntry {
     #[must_use]
     pub fn with_carry_hash(mut self, carry_hash: impl Into<String>) -> Self {
         self.carry_hash = Some(carry_hash.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_lines(mut self, lines: BTreeMap<String, String>) -> Self {
+        self.lines = Some(lines);
         self
     }
 
@@ -304,6 +325,7 @@ impl PactEntry {
             granted_hash: None,
             granted_at: None,
             carry_hash: None,
+            lines: None,
         }
     }
 
@@ -328,6 +350,12 @@ impl PactEntry {
         self.granted_hash = granted_hash;
         self.granted_at = granted_at;
         self.carry_hash = carry_hash;
+        // The run wrote the document, so whatever lines were recorded against
+        // the last one describe a file that is no longer on the page. A caller
+        // that wrote per-file lines records them itself afterwards; everything
+        // else leaves the entry saying nothing is reusable, which is the only
+        // honest thing it can say.
+        self.lines = None;
     }
 
     #[must_use]
@@ -363,6 +391,13 @@ impl PactEntry {
     #[must_use]
     pub fn carry_hash(&self) -> Option<&str> {
         self.carry_hash.as_deref()
+    }
+
+    /// The hash each file had when its line was last written, or `None` where
+    /// no line was ever recorded against a file.
+    #[must_use]
+    pub fn lines(&self) -> Option<&BTreeMap<String, String>> {
+        self.lines.as_ref()
     }
 
     #[must_use]

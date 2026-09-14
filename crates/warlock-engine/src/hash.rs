@@ -40,6 +40,42 @@ const HASH_CONTEXT: &str = "warlock subtree hash v1 2026-08-19";
 /// assert_ne!(before, subtree_hash(dir.path())?);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+// The digest of one file's bytes, for the per-file record in a `PactEntry`.
+//
+// Its own context and not `HASH_CONTEXT`: this hashes bytes where the subtree
+// digest hashes a directory's paths and contents together, and two digests that
+// could ever be compared to one another must not be able to collide by having
+// been derived the same way. Bumping this restales every per-file line in
+// existence, the same as bumping the other.
+const FILE_CONTEXT: &str = "warlock file hash v1 2026-09-14";
+
+/// ```
+/// use std::fs;
+/// use warlock_engine::file_hash;
+///
+/// let dir = tempfile::tempdir()?;
+/// let path = dir.path().join("reading.rs");
+/// fs::write(&path, "pub fn read_one() {}\n")?;
+///
+/// let first = file_hash(&path)?;
+/// assert_eq!(first, file_hash(&path)?, "the same bytes hash the same");
+///
+/// fs::write(&path, "pub fn read_one(at: usize) {}\n")?;
+/// assert_ne!(first, file_hash(&path)?, "and moved bytes do not");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn file_hash(path: impl AsRef<Path>) -> Result<String, Error> {
+    let path = path.as_ref();
+    let bytes = fs::read(path).map_err(|source| Error::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut hasher = blake3::Hasher::new_derive_key(FILE_CONTEXT);
+    hasher.update(&length(bytes.len()).to_le_bytes());
+    hasher.update(&bytes);
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 pub fn subtree_hash(dir: impl AsRef<Path>) -> Result<String, Error> {
     let dir = dir.as_ref();
     let mut hasher = blake3::Hasher::new_derive_key(HASH_CONTEXT);

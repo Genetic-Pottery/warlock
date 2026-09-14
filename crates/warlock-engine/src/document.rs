@@ -512,6 +512,70 @@ impl Accepted {
     }
 }
 
+/// Read the file lines back out of a document warlock wrote.
+///
+/// This is what makes the document its own store: a run re-asks about the files
+/// whose hashes moved and takes the rest from the page, so nothing is kept
+/// twice and nothing can drift from what is committed.
+///
+/// The parse is deliberately strict about the shape `render` writes and
+/// deliberately lax about what a line says — the entry is whatever sits between
+/// the em dash and the declared names, because that is the only part a pass
+/// wrote. A line this cannot read is left out rather than guessed at: a run
+/// that cannot find a file's line asks for it again, which costs a pass and
+/// never a wrong line.
+///
+/// ```
+/// use warlock_engine::document::lines_of;
+///
+/// let page = "\n## Files\n\n\
+///     - `reading.rs` (40 B) — The reading half. · declares `read_one`\n\
+///     - `table.bin` (4 B) — not text; name and size only\n\
+///     \n## Rules\n\n- Something else entirely.\n";
+///
+/// let lines = lines_of(page);
+/// assert_eq!(lines.get("reading.rs").map(String::as_str), Some("The reading half."));
+/// assert_eq!(lines.len(), 2, "the rules are not a file");
+/// ```
+#[must_use]
+pub fn lines_of(document: &str) -> BTreeMap<String, String> {
+    let mut lines = BTreeMap::new();
+    let mut in_files = false;
+    for row in document.lines() {
+        if let Some(heading) = row.strip_prefix("## ") {
+            in_files = heading.trim() == "Files";
+            continue;
+        }
+        if !in_files {
+            continue;
+        }
+        let Some((path, entry)) = file_row(row) else {
+            continue;
+        };
+        lines.insert(path, entry);
+    }
+    lines
+}
+
+// ``- `name` (12.3 KB) — entry · declares `a`, `b` (+4)``, which is what
+// `render` writes and what `the_document_is_laid_out_by_warlock_and_not_by_the_pass`
+// pins. Split on the em dash rather than parsed as a whole: a size is warlock's
+// own and the declared names are too, so the only part to recover is between
+// them.
+fn file_row(row: &str) -> Option<(String, String)> {
+    let rest = row.strip_prefix("- `")?;
+    let (path, rest) = rest.split_once("` (")?;
+    let (_, entry) = rest.split_once(") — ")?;
+    let entry = entry
+        .split_once(" · declares ")
+        .map_or(entry, |(before, _)| before);
+    let entry = entry.trim();
+    if path.is_empty() || entry.is_empty() {
+        return None;
+    }
+    Some((path.to_owned(), entry.to_owned()))
+}
+
 // The per-file pass: one file in, one line out.
 //
 // A separate prompt rather than `PROMPT` with one key in "files", because the
@@ -1758,7 +1822,7 @@ mod tests {
     use super::{
         ATTEMPTS, Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Entry, Expected, Fill,
         LIST_CAP, Lookup, MEND_PASSES, Mend, Mended, PROMPT, PURPOSE_CHARS, Repair, STAMP, accept,
-        check, fallback, human, instructions, mend, mended, names_tool, render,
+        check, fallback, human, instructions, lines_of, mend, mended, names_tool, render,
         repair_instructions, skeleton, stub_answer,
     };
     use std::collections::{BTreeMap, BTreeSet};
@@ -2079,6 +2143,50 @@ mod tests {
             ],
             "the last two verify against a reduced file's own lines and a child document",
         );
+    }
+
+    #[test]
+    fn every_line_render_writes_is_a_line_lines_of_reads_back() {
+        // The round trip the store rests on. If `render` ever writes a file row
+        // this cannot read, a run takes that file to be unrecorded and pays for
+        // a pass it did not need — which is why this compares against the fill
+        // rather than against a string written out by hand here.
+        let request = request();
+        let expected = Expected::of(&request);
+        let described = Described {
+            declared: [("app.rs".to_owned(), vec!["draw".to_owned()])]
+                .into_iter()
+                .collect(),
+        };
+        let fill = good();
+
+        let read = lines_of(&render("engine", &fill, &expected, &described));
+
+        for (path, entry) in &fill.files {
+            assert_eq!(
+                read.get(path).map(String::as_str),
+                Some(entry.trim()),
+                "`{path}` did not survive the page",
+            );
+        }
+        // The two rows no pass wrote — a file that is not text and one that was
+        // never sent — are read back as well. They are warlock's own words and
+        // it would write them again identically, so there is nothing to gain by
+        // telling them apart here.
+        assert_eq!(read.len(), expected.files.len(), "{read:?}");
+    }
+
+    #[test]
+    fn a_row_that_is_not_a_file_line_is_left_out_rather_than_guessed_at() {
+        let read = lines_of(
+            "\n## Files\n\n\
+             - `reading.rs` (40 B) — The reading half.\n\
+             - a row with no backticks at all\n\
+             - `writing.rs` (16 B)\n\
+             - `shared.rs` (2 B) — \n",
+        );
+
+        assert_eq!(read.keys().collect::<Vec<_>>(), ["reading.rs"]);
     }
 
     #[test]
