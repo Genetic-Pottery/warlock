@@ -592,7 +592,7 @@ fn run_header_line(header: &RunHeader, width: usize) -> String {
         "{} {} ({}/{})",
         run_word(header.run()),
         header.directory(),
-        header.position(),
+        header.completed(),
         header.total(),
     );
 
@@ -2745,7 +2745,7 @@ mod tests {
         // tests cover the cutting-down an absolutely-rooted tree gets.
         assert_eq!(
             footer_line(&buffer, FOOTER_HEIGHT - 1),
-            "pacting warlock/crates/engine (3/12)"
+            "pacting warlock/crates/engine (2/12)"
         );
         // The tally has not moved, and no fourth line grew under the footer:
         // the progress line took the message line rather than adding one.
@@ -2760,7 +2760,7 @@ mod tests {
         let buffer = render(&app, KEYS_WIDTH, height);
         assert_eq!(
             footer_line(&buffer, FOOTER_HEIGHT - 1),
-            "pacting warlock/assets (4/12)"
+            "pacting warlock/assets (3/12)"
         );
 
         // And goes when the run does, leaving the line as blank as it started.
@@ -2786,7 +2786,7 @@ mod tests {
         // screen, which is the last row of the footer.
         assert_eq!(
             footer_line(&buffer, FOOTER_HEIGHT - 1),
-            "pacting warlock/crates/engine (3/12) — already running"
+            "pacting warlock/crates/engine (2/12) — already running"
         );
         // The keys line is still the pacting one: a press that started nothing
         // does not change what the keys do, and Esc still says cancel.
@@ -2815,7 +2815,7 @@ mod tests {
 
         // The two halves of the line, so the test can be drawn at a width that
         // fits one and not the other.
-        let progress = "pacting warlock/crates/engine (3/12)";
+        let progress = "pacting warlock/crates/engine (2/12)";
         let suffix = " — already running";
         assert_eq!(
             app.pact_line().expect("a pact is in flight"),
@@ -4882,7 +4882,7 @@ mod tests {
         let running = render_at(&app, WIDTH, HEIGHT, at(base, 99));
         let rows = panel_rows(&running);
         assert!(
-            rows[0].starts_with(&format!("{PACTING_RUN} {RUNNING_LABEL} (1/2)")),
+            rows[0].starts_with(&format!("{PACTING_RUN} {RUNNING_LABEL} (0/2)")),
             "{:?}",
             rows[0]
         );
@@ -5197,7 +5197,7 @@ mod tests {
             // directory it is working spelled against the tree on screen, where
             // it is in the run, and a bar in what is left over.
             assert!(
-                with[0].starts_with(&format!("{word} {RUNNING_LABEL} (2/5)")),
+                with[0].starts_with(&format!("{word} {RUNNING_LABEL} (1/5)")),
                 "{:?}",
                 with[0]
             );
@@ -5266,7 +5266,10 @@ mod tests {
                 "at {position}/{total}"
             );
             assert_eq!(row.matches(BAR_EMPTY).count(), columns - drawn);
-            assert!(row.contains(&format!("({position}/{total})")), "{row:?}");
+            assert!(
+                row.contains(&format!("({}/{total})", position - 1)),
+                "{row:?}"
+            );
             filled = drawn;
         }
 
@@ -5279,15 +5282,15 @@ mod tests {
 
     #[test]
     fn a_run_over_one_directory_draws_an_empty_bar_until_it_is_over() {
-        // The case the fraction used to get wrong: one directory is `(1/1)` the
-        // moment it starts, and counting the one in flight drew a full bar over
-        // a run that had finished nothing.
+        // The case the fraction used to get wrong: one directory read `(1/1)` and
+        // drew a full bar the moment it started, over a run that had finished
+        // nothing.
         let base = Instant::now();
         let mut app = running_app(base, WIDTH, HEIGHT, Run::Pact, 1, 1);
         fill_account(&mut app, base, usize::from(HEIGHT) * 2);
 
         let row = run_header_row(&app, WIDTH, HEIGHT, at(base, 9));
-        assert!(row.contains("(1/1)"), "{row:?}");
+        assert!(row.contains("(0/1)"), "{row:?}");
         assert_eq!(row.matches(BAR_FILLED).count(), 0, "{row:?}");
         assert!(row.matches(BAR_EMPTY).count() >= BAR_MIN_WIDTH, "{row:?}");
     }
@@ -5528,7 +5531,7 @@ mod tests {
 
         assert_eq!(during.len(), usize::from(whole));
         assert!(
-            during[0].starts_with(&format!("{PACTING_RUN} {RUNNING_LABEL} (2/5)")),
+            during[0].starts_with(&format!("{PACTING_RUN} {RUNNING_LABEL} (1/5)")),
             "{:?}",
             during[0]
         );

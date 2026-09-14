@@ -165,6 +165,15 @@ struct InFlight {
     run: Run,
 }
 
+impl InFlight {
+    // What is finished, which is the node being worked less itself. The header,
+    // its bar and the footer line all count this way, so the three cannot
+    // disagree about how far along a run is.
+    const fn done(&self) -> usize {
+        self.position.saturating_sub(1)
+    }
+}
+
 /// The run in flight, as the header draws it.
 ///
 /// [`RunHeader::position`] is the furthest node this run has reached, which is
@@ -523,8 +532,10 @@ impl App {
         self.status.in_flight.as_ref().map(|in_flight| {
             let label = self.label_for(&in_flight.path);
             let line = match in_flight.run {
-                Run::Pact => pacting_message(&label, in_flight.position, in_flight.total),
-                Run::Refresh => refreshing_message(&label, in_flight.position, in_flight.total),
+                // Finished, not started, the same as the bar and the header:
+                // see `RunHeader::completed`.
+                Run::Pact => pacting_message(&label, in_flight.done(), in_flight.total),
+                Run::Refresh => refreshing_message(&label, in_flight.done(), in_flight.total),
             };
             if self.status.pact_refused {
                 already_running_message(&line)
@@ -1300,12 +1311,12 @@ fn left_on_disk_message(label: &str) -> String {
     )
 }
 
-fn pacting_message(label: &str, position: usize, total: usize) -> String {
-    format!("pacting {label} ({position}/{total})")
+fn pacting_message(label: &str, done: usize, total: usize) -> String {
+    format!("pacting {label} ({done}/{total})")
 }
 
-fn refreshing_message(label: &str, position: usize, total: usize) -> String {
-    format!("refreshing {label} ({position}/{total})")
+fn refreshing_message(label: &str, done: usize, total: usize) -> String {
+    format!("refreshing {label} ({done}/{total})")
 }
 
 fn already_fresh_message(label: &str) -> String {
@@ -3095,7 +3106,7 @@ mod tests {
         // one-based place in the run beside it.
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("pacting crates/warlock-engine (3/12)")
+            Some("pacting crates/warlock-engine (2/12)")
         );
     }
 
@@ -3108,7 +3119,7 @@ mod tests {
         // The root cannot be named relative to itself, so it is named as it
         // stands rather than as the `"."` relative spelling would give — the
         // same rule every other label here follows.
-        assert_eq!(app.pact_line().as_deref(), Some("pacting /repo (1/5)"));
+        assert_eq!(app.pact_line().as_deref(), Some("pacting /repo (0/5)"));
     }
 
     #[test]
@@ -3127,9 +3138,9 @@ mod tests {
         assert_eq!(
             said,
             [
-                "pacting /repo (1/3)",
-                "pacting crates (2/3)",
-                "pacting crates/warlock-engine (3/3)",
+                "pacting /repo (0/3)",
+                "pacting crates (1/3)",
+                "pacting crates/warlock-engine (2/3)",
             ]
         );
     }
@@ -3137,8 +3148,8 @@ mod tests {
     #[test]
     fn the_progress_line_takes_its_verb_from_the_kind_of_run() {
         for (run, said) in [
-            (Run::Pact, "pacting crates/warlock-engine (3/12)"),
-            (Run::Refresh, "refreshing crates/warlock-engine (3/12)"),
+            (Run::Pact, "pacting crates/warlock-engine (2/12)"),
+            (Run::Refresh, "refreshing crates/warlock-engine (2/12)"),
         ] {
             let mut app = App::from_rows(rooted_rows());
 
@@ -3169,7 +3180,7 @@ mod tests {
 
         // `set_pact_in_flight` is `set_run_in_flight` with the kind filled in,
         // so every caller that predates the refresh goes on wording pacts.
-        assert_eq!(app.pact_line().as_deref(), Some("pacting /repo (1/5)"));
+        assert_eq!(app.pact_line().as_deref(), Some("pacting /repo (0/5)"));
     }
 
     #[test]
@@ -3190,7 +3201,7 @@ mod tests {
         // last.
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("refreshing crates/warlock-engine (3/7) — already running")
+            Some("refreshing crates/warlock-engine (2/7) — already running")
         );
 
         // The run moving on re-words the line around the new directory and
@@ -3198,7 +3209,7 @@ mod tests {
         app.set_run_in_flight(Run::Refresh, Path::new("/repo").join("crates"), 4, 7);
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("refreshing crates (4/7) — already running")
+            Some("refreshing crates (3/7) — already running")
         );
 
         // And the end of the run takes the whole line down, kind and all.
@@ -3329,7 +3340,7 @@ mod tests {
         assert_eq!(header.directory(), "crates/warlock-engine");
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("pacting crates/warlock-engine (3/12)")
+            Some("pacting crates/warlock-engine (2/12)")
         );
 
         // The root of the tree on screen is what it is spelled against, and a
@@ -3370,7 +3381,7 @@ mod tests {
         assert_eq!(header.total(), 12);
         // The footer is untouched by the high-water mark and goes on reporting
         // the directory and position it was just handed.
-        assert_eq!(app.pact_line().as_deref(), Some("pacting crates (2/12)"));
+        assert_eq!(app.pact_line().as_deref(), Some("pacting crates (1/12)"));
 
         // And it goes on rising the moment the run gets past where it had been.
         app.set_pact_in_flight(
@@ -3507,7 +3518,7 @@ mod tests {
         // keystroke, so it neither says anything nor takes anything down.
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("pacting warlock/crates (2/4)")
+            Some("pacting warlock/crates (1/4)")
         );
         assert_eq!(app.message(), Some("something the caller said"));
 
@@ -3546,7 +3557,7 @@ mod tests {
             assert!(app.is_pacting(), "{name} stopped the pact");
             assert_eq!(
                 app.pact_line().as_deref(),
-                Some("pacting warlock/crates/engine (3/12)"),
+                Some("pacting warlock/crates/engine (2/12)"),
                 "{name} blanked the line for a pact that is still running"
             );
         }
@@ -3561,7 +3572,7 @@ mod tests {
 
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("pacting warlock/crates/engine (3/12) — already running")
+            Some("pacting warlock/crates/engine (2/12) — already running")
         );
 
         // A second, third and fourth press say the same thing, because there is
@@ -3585,7 +3596,7 @@ mod tests {
 
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("pacting warlock/crates/tui (4/12) — already running")
+            Some("pacting warlock/crates/tui (3/12) — already running")
         );
     }
 
@@ -3614,7 +3625,7 @@ mod tests {
             // about goes on, and its line goes back to being about the run.
             assert_eq!(
                 app.pact_line().as_deref(),
-                Some("pacting warlock/crates/engine (3/12)"),
+                Some("pacting warlock/crates/engine (2/12)"),
                 "{name} left the refusal on the line"
             );
         }
@@ -3633,7 +3644,7 @@ mod tests {
         // keystroke's.
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("pacting warlock/crates (2/4) — already running")
+            Some("pacting warlock/crates (1/4) — already running")
         );
         assert_eq!(app.message(), Some("something the caller said"));
 

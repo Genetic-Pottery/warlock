@@ -2114,7 +2114,7 @@ mod tests {
         assert_eq!(app, refused, "the press did more than say so");
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("pacting engine (3/12) — already running"),
+            Some("pacting engine (2/12) — already running"),
             "the refusal is worded onto the line the reader is watching"
         );
         assert_eq!(
@@ -2156,7 +2156,7 @@ mod tests {
         assert_eq!(app, after_one, "pressing again changed something");
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("pacting engine (3/12) — already running")
+            Some("pacting engine (2/12) — already running")
         );
     }
 
@@ -2580,7 +2580,7 @@ mod tests {
         );
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("pacting /repo/crates (1/2) — already running")
+            Some("pacting /repo/crates (0/2) — already running")
         );
     }
 
@@ -2675,7 +2675,7 @@ mod tests {
         assert_eq!(app, refused, "the presses did more than say so");
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("refreshing engine (2/7) — already running"),
+            Some("refreshing engine (1/7) — already running"),
             "the refusal is worded onto the line the reader is watching"
         );
         assert_eq!(
@@ -2695,7 +2695,7 @@ mod tests {
         assert_eq!(refresh_press(&mut app, true, at(base, 3)), None);
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("pacting engine (3/12) — already running")
+            Some("pacting engine (2/12) — already running")
         );
     }
 
@@ -2757,7 +2757,7 @@ mod tests {
         assert_eq!(app, refused, "the presses did more than say so");
         assert_eq!(
             app.pact_line().as_deref(),
-            Some("pacting engine (3/12) — already running"),
+            Some("pacting engine (2/12) — already running"),
             "the refusal is worded onto the line the reader is watching"
         );
         assert_eq!(
@@ -5547,13 +5547,13 @@ mod tests {
         assert_eq!(
             progress,
             [
-                "refreshing crates/c3/src (1/7)",
-                "refreshing crates/c3 (2/7)",
-                "refreshing crates/c2/src (3/7)",
-                "refreshing crates/c2 (4/7)",
-                "refreshing crates/c1/src (5/7)",
-                "refreshing crates/c1 (6/7)",
-                "refreshing crates (7/7)",
+                "refreshing crates/c3/src (0/7)",
+                "refreshing crates/c3 (1/7)",
+                "refreshing crates/c2/src (2/7)",
+                "refreshing crates/c2 (3/7)",
+                "refreshing crates/c1/src (4/7)",
+                "refreshing crates/c1 (5/7)",
+                "refreshing crates (6/7)",
             ],
             "the footer counted something other than what the run visited"
         );
