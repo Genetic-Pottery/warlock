@@ -377,7 +377,6 @@ fn language_of(path: &Path) -> Option<&'static Language> {
         .find(|language| language.extensions.contains(&extension.as_str()))
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Elided {
     pub(crate) text: String,
@@ -512,5 +511,4 @@ mod tests {
         assert!(language_of(Path::new("a.wat")).is_none());
         assert!(elide(Path::new("a.wat"), "anything at all\n").is_none());
     }
-
 }

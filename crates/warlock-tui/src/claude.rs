@@ -48,11 +48,6 @@ const ARGS: [&str; 5] = [
 
 const MODEL: &str = "claude-sonnet-5";
 
-/// What [`ClaudeAgent::context_tokens`] answers, which is how the engine sizes a
-/// request before it builds one. It describes [`MODEL`], so the two move
-/// together.
-const CONTEXT_TOKENS: u64 = 200_000;
-
 const EFFORT: &str = "low";
 
 pub const BRIEF_EFFORT: &str = "high";
@@ -782,10 +777,6 @@ impl Agent for ClaudeAgent {
             &self.cancel,
             &self.activities,
         )
-    }
-
-    fn context_tokens(&self) -> u64 {
-        CONTEXT_TOKENS
     }
 }
 

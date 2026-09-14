@@ -3,26 +3,20 @@
 
 # crates
 
-crates is the workspace root holding the two crates that make up the project: warlock-engine, the domain/lifecycle core, and warlock-tui, the terminal front end and CLI that ships the `warlock` binary.
+The workspace's crates directory: the two-crate split between warlock-engine, the domain logic, and warlock-tui, the terminal front end shipping the warlock binary.
 
 ## Directories
 
-- `warlock-engine/` — The pact/refresh/document lifecycle core: Agent port, manifest/scope/sigil schemas, tree/hash/freshness machinery — go here for domain logic free of any TUI dependency.
-- `warlock-tui/` — The terminal front end and CLI that ships the `warlock` binary — go here for panel, key-handling, subcommand or process-spawning questions.
+- `warlock-engine/` — The domain crate — pacting, the freshness decision, the document schema, fitting and elision, the Agent port — no TUI, terminal, HTTP or Anthropic dependency; open for how the engine's contract works.
+- `warlock-tui/` — The terminal front end crate shipping the warlock binary — state, panels, composer, conversation, claude subprocess, filesystem watch, headless subcommands; open for terminal UI, keys, or subcommand behaviour.
 
 ## Structure
 
-- The dependency edge runs one way: warlock-tui depends on warlock-engine, never the reverse.
-- warlock-engine defines the domain and lifecycle types that warlock-tui's CLI subcommands and panel operate on.
-
-## Rules
-
-- warlock-engine forbids TUI, terminal, HTTP or Anthropic dependencies, keeping the dependency edge one-directional.
-- Lint configuration is shared from the workspace root manifest across both crates.
+- The dependency edge runs warlock-tui -> warlock-engine: the TUI crate depends on the engine crate for domain logic, never the reverse.
 
 ## Where to look
 
-- where the core lifecycle logic for pact/refresh/document lives → `warlock-engine` `pact_subtree`
-- where the terminal UI and CLI subcommands live → `warlock-tui` `main.rs`
-- why a dependency is or isn't allowed in the core crate → `warlock-engine` `Cargo.toml`
-- how the `warlock` binary is built and what it depends on → `warlock-tui` `Cargo.toml`
+- how the freshness document schema and pacting logic work → `warlock-engine` `pact_subtree`
+- how the terminal UI, keys, and panel behaviour work → `warlock-tui` `action_for`
+- why the engine has no HTTP or Anthropic dependency → `warlock-engine`
+- building or running the warlock binary → `warlock-tui` `warlock`

@@ -1132,12 +1132,11 @@ mod tests {
                 cancel.cancel();
             }
             if self.refused.iter().any(|name| Path::new(name) == relative) {
-                // Not the object the engine asked for, so it is turned down —
-                // on every attempt, since the answer never changes: the
-                // cheapest way to fail one directory of a pact for real,
-                // rather than by reaching into the engine's error types, which
-                // are `#[non_exhaustive]` and cannot be built from here.
-                return Ok(agent::Response::new("no."));
+                // A pass that produced no answer at all, which is the only way
+                // a directory fails now: an answer the engine cannot use is
+                // mended from what warlock measured rather than refused, so a
+                // double that merely answers badly fails nothing.
+                return Err(agent::Error::EmptyOutput);
             }
             if self
                 .over_the_cap

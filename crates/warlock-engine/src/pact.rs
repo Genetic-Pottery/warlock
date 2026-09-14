@@ -259,8 +259,11 @@ impl Outcome {
         entry.overwrite_run_fields(
             self.module,
             self.document,
-            self.grant
-                .map(|Grant { hash, at, carry, .. }| (hash, at, carry)),
+            self.grant.map(
+                |Grant {
+                     hash, at, carry, ..
+                 }| (hash, at, carry),
+            ),
         );
         // After `overwrite_run_fields`, which clears the field: what this run
         // recorded is what stands, and a run that granted nothing leaves the
@@ -1497,38 +1500,13 @@ impl std::error::Error for Unviewable {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Refusal {
-    Agent {
-        source: agent::Error,
-    },
-    Malformed {
-        defects: Vec<Defect>,
-        attempts: usize,
-    },
+    Agent { source: agent::Error },
 }
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Agent { source } => write!(f, "the model pass produced no answer: {source}"),
-            Self::Malformed { defects, attempts } => {
-                // One short line: this is what a footer shows, and a list of
-                // thirty missing entries is not a footer line.
-                const SHOWN: usize = 3;
-                write!(
-                    f,
-                    "no answer fitted the document's shape in {attempts} passes: "
-                )?;
-                for (index, defect) in defects.iter().take(SHOWN).enumerate() {
-                    if index > 0 {
-                        f.write_str("; ")?;
-                    }
-                    write!(f, "{defect}")?;
-                }
-                if defects.len() > SHOWN {
-                    write!(f, "; and {} more", defects.len() - SHOWN)?;
-                }
-                Ok(())
-            }
         }
     }
 }
@@ -1537,7 +1515,6 @@ impl std::error::Error for Refusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Agent { source } => Some(source),
-            Self::Malformed { .. } => None,
         }
     }
 }
@@ -1992,7 +1969,6 @@ mod tests {
         );
     }
 
-
     // The mend: the floor under an exhausted attempt loop.
 
     // A pass that answers with the right shape and the same slot wrong every
@@ -2200,7 +2176,6 @@ mod tests {
         }
     }
 
-
     struct Lining {
         answer: String,
         passes: std::cell::Cell<usize>,
@@ -2260,7 +2235,8 @@ mod tests {
         .into_iter()
         .collect();
 
-        let synthesised = synthesise(dir.path(), &lines, &agent, &mut Unwatched).expect("a fill either way");
+        let synthesised =
+            synthesise(dir.path(), &lines, &agent, &mut Unwatched).expect("a fill either way");
 
         assert_eq!(agent.passes.get(), 1, "a clean answer is taken at once");
         assert!(synthesised.mends.is_empty(), "{:?}", synthesised.mends);
@@ -2287,7 +2263,8 @@ mod tests {
         .into_iter()
         .collect();
 
-        let synthesised = synthesise(dir.path(), &lines, &agent, &mut Unwatched).expect("a fill either way");
+        let synthesised =
+            synthesise(dir.path(), &lines, &agent, &mut Unwatched).expect("a fill either way");
 
         assert_eq!(agent.passes.get(), document::ATTEMPTS);
         assert_eq!(
@@ -2313,7 +2290,8 @@ mod tests {
         let hash = crate::hash::file_hash(dir.path().join("reading.rs")).expect("hashes");
         let recorded = [("reading.rs".to_owned(), hash)].into_iter().collect();
 
-        let assembled = assemble_lines(dir.path(), Some(("", &recorded)), &agent, &mut Unwatched).expect("lines");
+        let assembled = assemble_lines(dir.path(), Some(("", &recorded)), &agent, &mut Unwatched)
+            .expect("lines");
 
         assert_eq!(assembled.asked, ["reading.rs"]);
         assert!(assembled.kept.is_empty());
@@ -2329,8 +2307,13 @@ mod tests {
         let agent = Lining::saying(r#"{"line": "A line about one file alone."}"#);
         let page = page_of(&[("reading.rs", "The line already on the page.")]);
 
-        let assembled =
-            assemble_lines(dir.path(), Some((&page, &BTreeMap::new())), &agent, &mut Unwatched).expect("lines");
+        let assembled = assemble_lines(
+            dir.path(),
+            Some((&page, &BTreeMap::new())),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("lines");
 
         assert_eq!(assembled.asked, ["reading.rs"]);
         assert_eq!(agent.passes.get(), 1);
@@ -2351,7 +2334,8 @@ mod tests {
         let page = page_of(&[("reading.rs", "The line already on the page.")]);
 
         let assembled =
-            assemble_lines(dir.path(), Some((&page, &recorded)), &agent, &mut Unwatched).expect("lines");
+            assemble_lines(dir.path(), Some((&page, &recorded)), &agent, &mut Unwatched)
+                .expect("lines");
 
         assert_eq!(agent.passes.get(), 0, "the run paid for nothing");
         assert_eq!(assembled.kept, ["reading.rs"]);
@@ -2384,7 +2368,8 @@ mod tests {
         let over = "x".repeat(document::ENTRY_CHARS + 40);
         let agent = Lining::saying(format!("{{\"line\": \"{over}\"}}"));
 
-        let described = describe_file(dir.path(), "reading.rs", &agent, &mut Unwatched).expect("a line either way");
+        let described = describe_file(dir.path(), "reading.rs", &agent, &mut Unwatched)
+            .expect("a line either way");
 
         assert_eq!(
             agent.passes.get(),
@@ -2414,7 +2399,8 @@ mod tests {
         let dir = one_file_directory();
         let agent = Lining::saying("Here is some prose instead of the object you asked for.");
 
-        let described = describe_file(dir.path(), "reading.rs", &agent, &mut Unwatched).expect("a line either way");
+        let described = describe_file(dir.path(), "reading.rs", &agent, &mut Unwatched)
+            .expect("a line either way");
 
         assert!(described.mended);
         assert!(
@@ -2435,7 +2421,6 @@ mod tests {
         assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
         assert_eq!(agent.passes.get(), 0, "nothing was asked");
     }
-
 
     // A directory laid out to reach every section `render` writes: a file with
     // symbols in it, a file with none, a file that is not text, a child with a
@@ -2471,7 +2456,6 @@ mod tests {
       "rules": [{ "line": "Anything binary stays out of the two source files.", "names": [] }],
       "lookups": [{ "for": "reading a record", "open": "reading.rs", "symbol": "read_one" }]
     }"#;
-
 
     #[test]
     fn a_mended_directory_is_not_a_failure_and_the_subtree_is_still_pacted() {
@@ -2570,7 +2554,6 @@ mod tests {
             )],
             "one value per slot, naming the directory and the slot in `Defect`'s own spelling",
         );
-
     }
 
     #[test]
@@ -2603,7 +2586,6 @@ mod tests {
         );
     }
 
-
     fn listed(request: &agent::Request) -> Vec<&str> {
         request
             .files()
@@ -2612,7 +2594,6 @@ mod tests {
             .map(agent::File::path)
             .collect()
     }
-
 
     #[test]
     fn a_pass_is_sent_its_childrens_documents_and_none_of_their_source() {
@@ -2630,8 +2611,15 @@ mod tests {
         pact_directory(dir.path(), &agent).expect("pacts");
 
         let seen = agent.seen.borrow();
+        // The synthesis pass and not the first: a per-file pass is shown one
+        // file and no child at all, and `## Directories` is written from a
+        // child's own document by the pass that writes the directory's slots.
+        let synthesis = seen
+            .iter()
+            .find(|request| is_document_pass(request))
+            .expect("a directory is synthesised");
         assert_eq!(
-            seen[0]
+            synthesis
                 .child_documents()
                 .iter()
                 .map(|child| (child.directory(), child.text()))
@@ -2969,6 +2957,7 @@ mod tests {
             .seen
             .borrow()
             .iter()
+            .filter(|request| is_document_pass(request))
             .map(|request| request.directory().to_path_buf())
             .collect();
         assert_eq!(
@@ -3293,6 +3282,10 @@ mod tests {
                 .seen
                 .borrow()
                 .iter()
+                // The pass that happens once per directory: a directory also
+                // costs one pass per file that moved, and those are not what an
+                // offer is counted against.
+                .filter(|request| is_document_pass(request))
                 .map(|request| request.directory().to_path_buf())
                 .collect::<Vec<_>>(),
             "and each one names the directory whose pass runs next, not the one \
@@ -3529,42 +3522,6 @@ mod tests {
         fn requesting(&mut self, files: usize, bytes: u64) {
             self.0.push((files, bytes));
         }
-    }
-
-    #[test]
-    fn the_announced_bytes_are_the_budget_total_and_not_just_the_files() {
-        let repo = tempfile::tempdir().expect("a temporary directory");
-        let engine = repo.path().join("crates/engine");
-        write(&engine, "Cargo.toml", "[package]\n");
-        write(&engine, "src/lib.rs", "//! Core engine.\n");
-
-        let mut watching = Weighing::default();
-        pact_subtree(
-            &engine,
-            repo.path(),
-            &Manifest::new(),
-            &Canned::filling(),
-            &mut watching,
-        )
-        .expect("pacts");
-
-        // `src` first, with its one file and nothing under it; then the parent,
-        // whose one file is `Cargo.toml` and whose total also carries the
-        // document `src` has just been given. The counts cover different sets on
-        // purpose: the bytes are what the caps are checked against.
-        let child = fs::metadata(engine.join("src").join(DOCUMENT_FILE))
-            .expect("the child was documented")
-            .len();
-        assert_eq!(watching.0.len(), 2, "one announcement per directory");
-        let (files, bytes) = watching.0[1];
-        assert_eq!(
-            files, 1,
-            "the parent's own file, with the child's not in it"
-        );
-        assert!(
-            bytes > child,
-            "the total carries the child's document as well as the file: {bytes} against {child}",
-        );
     }
 
     // Un-pacting: dropping the entries and keeping the documents.
@@ -4220,9 +4177,14 @@ mod tests {
              first, and nothing beside it",
         );
         assert_eq!(
-            agent.seen.borrow().len(),
+            agent
+                .seen
+                .borrow()
+                .iter()
+                .filter(|request| is_document_pass(request))
+                .count(),
             3,
-            "one pass per directory that had something new to read — \
+            "one synthesis pass per directory that had something new to read — \
              `crates/engine/tests` is a quarter of the subtree and costs nothing",
         );
     }
@@ -4383,6 +4345,35 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[derive(Default)]
+    struct Probing {
+        said: Vec<String>,
+    }
+
+    impl Observer for Probing {
+        fn starting(&mut self, directory: &Path, _position: usize, _total: usize) -> Pacting {
+            self.said.push(format!("starting {}", directory.display()));
+            Pacting::Continue
+        }
+
+        fn unchanged(&mut self, directory: &Path) {
+            self.said.push(format!("unchanged {}", directory.display()));
+        }
+
+        fn skipped(&mut self, directory: &Path, below: &Path) {
+            self.said.push(format!(
+                "skipped {} below {}",
+                directory.display(),
+                below.display()
+            ));
+        }
+
+        fn documented(&mut self, directory: &Path) {
+            self.said
+                .push(format!("documented {}", directory.display()));
+        }
+    }
+
     #[test]
     fn a_directory_whose_hash_fails_while_staleness_is_decided_is_described_anyway() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -4400,23 +4391,33 @@ mod tests {
         }
 
         let agent = Canned::filling();
+        let mut probe = Probing::default();
         let PactedSubtree {
             manifest, failures, ..
-        } = refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)
+        } = refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut probe)
             .expect("a hash nobody can take is a directory to describe, not an error");
 
         assert_eq!(
             described_by(&agent, repo.path()),
-            ["crates/engine/tests", "crates/engine"],
+            ["crates/engine/tests"],
             "no hash is no answer to `is this still the content it was granted \
-             for`, so both directories the unreadable file sits under are \
-             described",
+             for`, so the directory holding the unreadable file is described",
+        );
+        assert!(
+            probe
+                .said
+                .contains(&format!("unchanged {}", engine.display())),
+            "and the one above it is offered and then cut off: its own files and \
+             its children's documents are where they were, so re-describing it \
+             would buy the same document twice. Being unhashable is what keeps \
+             it from a grant, not what earns it a pass: {:?}",
+            probe.said,
         );
         // And then it plays out exactly as the module docs say it does: phase
         // two hashes them again, that hash fails again, and each lands as a
-        // `Failure::Hash` with an ungranted entry — yellow, with a pass paid
-        // for it, which is the honest outcome for a directory something is
-        // really wrong with.
+        // `Failure::Hash` with an ungranted entry — yellow, which is the honest
+        // outcome for a directory something is really wrong with, whether or
+        // not this run paid for a pass over it.
         for module in ["crates/engine/tests", "crates/engine"] {
             let entry = manifest.entry(module).expect("described, so pacted");
             assert_eq!(
@@ -4634,6 +4635,10 @@ mod tests {
         subtree_hash(from_manifest_path(repo, module)).expect("the subtree hashes")
     }
 
+    fn line_of(repo: &Path, module: &str, file: &str) -> String {
+        crate::hash::file_hash(repo.join(module).join(file)).expect("the fixture is readable")
+    }
+
     fn carry_of(repo: &Path, module: &str) -> String {
         super::carry_hash(&from_manifest_path(repo, module)).expect("the directory digests")
     }
@@ -4658,6 +4663,9 @@ mod tests {
              granted_at = \"{granted_at}\"\n\
              carry_hash = \"{src_carry}\"\n\
              \n\
+             [pact.lines]\n\
+             \"lib.rs\" = \"{src_line}\"\n\
+             \n\
              [[pact]]\n\
              module = \"crates/tui\"\n\
              document = \"crates/tui/WARLOCK.md\"\n\
@@ -4671,6 +4679,9 @@ mod tests {
              granted_at = \"{granted_at}\"\n\
              carry_hash = \"{root_carry}\"\n\
              \n\
+             [pact.lines]\n\
+             \"Cargo.toml\" = \"{root_line}\"\n\
+             \n\
              [[pact]]\n\
              module = \"crates/engine/src/inner\"\n\
              document = \"crates/engine/src/inner/WARLOCK.md\"\n\
@@ -4678,20 +4689,30 @@ mod tests {
              granted_at = \"{granted_at}\"\n\
              carry_hash = \"{inner_carry}\"\n\
              \n\
+             [pact.lines]\n\
+             \"deep.rs\" = \"{inner_line}\"\n\
+             \n\
              [[pact]]\n\
              module = \"crates/engine/tests\"\n\
              document = \"crates/engine/tests/WARLOCK.md\"\n\
              granted_hash = \"{tests}\"\n\
              granted_at = \"{granted_at}\"\n\
-             carry_hash = \"{tests_carry}\"\n",
+             carry_hash = \"{tests_carry}\"\n\
+             \n\
+             [pact.lines]\n\
+             \"it.rs\" = \"{tests_line}\"\n",
             root = hash_of(repo, "crates/engine"),
             src = hash_of(repo, "crates/engine/src"),
             inner = hash_of(repo, "crates/engine/src/inner"),
             tests = hash_of(repo, "crates/engine/tests"),
             root_carry = carry_of(repo, "crates/engine"),
+            root_line = line_of(repo, "crates/engine", "Cargo.toml"),
             src_carry = carry_of(repo, "crates/engine/src"),
+            src_line = line_of(repo, "crates/engine/src", "lib.rs"),
             inner_carry = carry_of(repo, "crates/engine/src/inner"),
+            inner_line = line_of(repo, "crates/engine/src/inner", "deep.rs"),
             tests_carry = carry_of(repo, "crates/engine/tests"),
+            tests_line = line_of(repo, "crates/engine/tests", "it.rs"),
         )
     }
 
@@ -4706,6 +4727,9 @@ mod tests {
              granted_at = \"{pacted_at}\"\n\
              carry_hash = \"{src_carry}\"\n\
              \n\
+             [pact.lines]\n\
+             \"lib.rs\" = \"{src_line}\"\n\
+             \n\
              [[pact]]\n\
              module = \"crates/tui\"\n\
              document = \"crates/tui/WARLOCK.md\"\n\
@@ -4719,6 +4743,9 @@ mod tests {
              granted_at = \"{refreshed_at}\"\n\
              carry_hash = \"{root_carry}\"\n\
              \n\
+             [pact.lines]\n\
+             \"Cargo.toml\" = \"{root_line}\"\n\
+             \n\
              [[pact]]\n\
              module = \"crates/engine/src/inner\"\n\
              document = \"crates/engine/src/inner/WARLOCK.md\"\n\
@@ -4726,20 +4753,30 @@ mod tests {
              granted_at = \"{pacted_at}\"\n\
              carry_hash = \"{inner_carry}\"\n\
              \n\
+             [pact.lines]\n\
+             \"deep.rs\" = \"{inner_line}\"\n\
+             \n\
              [[pact]]\n\
              module = \"crates/engine/tests\"\n\
              document = \"crates/engine/tests/WARLOCK.md\"\n\
              granted_hash = \"{tests}\"\n\
              granted_at = \"{refreshed_at}\"\n\
-             carry_hash = \"{tests_carry}\"\n",
+             carry_hash = \"{tests_carry}\"\n\
+             \n\
+             [pact.lines]\n\
+             \"it.rs\" = \"{tests_line}\"\n",
             root = hash_of(repo, "crates/engine"),
             src = hash_of(repo, "crates/engine/src"),
             inner = hash_of(repo, "crates/engine/src/inner"),
             tests = hash_of(repo, "crates/engine/tests"),
             root_carry = carry_of(repo, "crates/engine"),
+            root_line = line_of(repo, "crates/engine", "Cargo.toml"),
             src_carry = carry_of(repo, "crates/engine/src"),
+            src_line = line_of(repo, "crates/engine/src", "lib.rs"),
             inner_carry = carry_of(repo, "crates/engine/src/inner"),
+            inner_line = line_of(repo, "crates/engine/src/inner", "deep.rs"),
             tests_carry = carry_of(repo, "crates/engine/tests"),
+            tests_line = line_of(repo, "crates/engine/tests", "it.rs"),
         )
     }
 
@@ -5053,7 +5090,6 @@ mod tests {
         assert!(!cut, "there is nothing past nothing");
         untouched(&path, b"");
     }
-
 
     #[test]
     fn a_file_that_is_not_there_is_a_read_failure_naming_it() {

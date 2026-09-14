@@ -19,8 +19,6 @@ const WALK_DEPTH: usize = 2;
 
 pub const PER_FILE_BYTE_CAP: u64 = 1024 * 1024;
 
-
-
 fn elided_or_whole(path: &Path, relative: String, size: u64, bytes: Vec<u8>) -> agent::File {
     let Ok(text) = str::from_utf8(&bytes) else {
         return agent::File::present(relative, bytes);
@@ -134,10 +132,6 @@ pub(crate) fn one_file(
         problem,
     ))
 }
-
-
-
-
 
 const PROSE_EXTENSIONS: &[&str] = &["md", "markdown", "mdx"];
 
@@ -267,8 +261,6 @@ pub(crate) fn byte_count(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
-
-
 #[derive(Debug)]
 pub struct Problem {
     pub path: PathBuf,
@@ -360,8 +352,6 @@ mod tests {
         fs::write(&path, contents).expect("writes a file");
         path
     }
-
-
 
     fn request_for(dir: &Path, name: &str) -> agent::Request {
         let (request, _, problem) = super::one_file("summarise", dir, name).expect("reads");
@@ -473,7 +463,6 @@ mod tests {
         assert_eq!(file.kept(), None, "and nothing claims to have elided it");
     }
 
-
     fn file_paths(request: &agent::Request) -> Vec<&str> {
         request.files().iter().map(agent::File::path).collect()
     }
@@ -575,7 +564,6 @@ mod tests {
         );
     }
 
-
     #[cfg(unix)]
     #[test]
     fn a_symlink_is_neither_followed_nor_listed() {
@@ -588,19 +576,24 @@ mod tests {
         let files = super::own_files(dir.path()).expect("walks");
 
         assert_eq!(files.keys().collect::<Vec<_>>(), ["lib.rs"]);
-        assert!(super::child_documents(dir.path()).expect("walks").is_empty());
+        assert!(
+            super::child_documents(dir.path())
+                .expect("walks")
+                .is_empty()
+        );
     }
-
-
 
     #[test]
     fn an_empty_directory_is_a_request_with_nothing_in_it() {
         let dir = tempfile::tempdir().expect("a temporary directory");
 
         assert!(super::own_files(dir.path()).expect("walks").is_empty());
-        assert!(super::child_documents(dir.path()).expect("walks").is_empty());
+        assert!(
+            super::child_documents(dir.path())
+                .expect("walks")
+                .is_empty()
+        );
     }
-
 
     #[test]
     fn every_problem_says_what_was_left_out_and_why_on_one_line() {
