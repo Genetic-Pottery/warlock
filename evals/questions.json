@@ -1,0 +1,218 @@
+[
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "agent.rs",
+    "symbol": "summary",
+    "question": "which file lets you attach a short generated account of a large file's contents in place of its raw bytes when building a request"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "pact.rs",
+    "symbol": "Outcome",
+    "question": "which struct holds the narrow per-entry result a run is permitted to record, bundling the module, document, and optional grant, before it gets written into a stored entry"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "document.rs",
+    "symbol": "note_fill",
+    "question": "which code decides what value gets written into a field that a defect says is missing, before any rewriting of overlong or multiline values happens"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "clock.rs",
+    "symbol": "civil_from_days",
+    "question": "which function turns a unix day count into a proleptic gregorian year/month/day without ever hard-coding century leap-year rules"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "sigils.rs",
+    "symbol": "save_sigils",
+    "question": "where does the code write the sigil config out to disk in a way that avoids leaving a half-written file behind if serialization or the write fails partway through"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "hash.rs",
+    "symbol": "length",
+    "question": "where is the byte count of each name and file content given its own integer type before being written into the digest"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "state.rs",
+    "symbol": "NodeState",
+    "question": "where's the type that tracks whether a file is untouched, stale, or fresh, and why does it deliberately have no null/unknown variant"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "claude_md.rs",
+    "symbol": "Written",
+    "question": "which type tells me whether writing the claude md file actually created a new file versus just updated an existing one, and how do i distinguish those two outcomes when calling this"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "load.rs",
+    "symbol": "Directory",
+    "question": "which struct tracks whether a folder has already been recorded as having a document, so a file arriving before its parent doesn't wipe out that record"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "briefs.rs",
+    "symbol": "load_briefs",
+    "question": "if a repo has no .warlock directory at all, what value does the config lookup for the brief output folder return instead of erroring"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "panel.rs",
+    "symbol": "Shown",
+    "question": "where's the trait that defines how a card's lines get counted and produced so different kinds of content can share the same windowing logic"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "ui.rs",
+    "symbol": "laid_out_keys",
+    "question": "when the footer is too narrow to fit all the key hints, what decides which hints get dropped first and which get silently cut off without an ellipsis"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "running.rs",
+    "symbol": "Report",
+    "question": "which file builds the one-line-per-failing-directory summary and the failed/total count used to decide the process exit status"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "query.rs",
+    "symbol": "listed",
+    "question": "which function builds the vector of matching directory rows with their spelled paths and state words before json or plain output"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "writing.rs",
+    "symbol": "slugged",
+    "question": "where is a document's title turned into the actual filesystem-safe filename text, and what happens to punctuation and case when it does"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "account.rs",
+    "symbol": "Account",
+    "question": "which file holds the ordered, per-directory record of a pact's run, where each newest line's clock keeps ticking with `now` while live but freezes the instant the pass goes quiet"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pacting.rs",
+    "symbol": "pressed_p",
+    "question": "which test-only helper simulates a real toggle key press with its two irrelevant booleans locked down so tests can't diverge from the production behavior"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "edits.rs",
+    "symbol": "scoped_line",
+    "question": "where is the success message built that reports a module's new scope alongside whatever scope it previously had"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "check.rs",
+    "symbol": "prose",
+    "question": "why does printing an empty sigils list feel dishonest when warlock actually failed to read what a scope holds"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "wrap.rs",
+    "symbol": "wrapped",
+    "question": "which function breaks panel text into rows at word boundaries for display, as opposed to the one that fills every row to width for editing"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "input.rs",
+    "symbol": "click",
+    "question": "where does a mouse-down press on the left button get turned into an action like selecting a row or toggling a collapsed node"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "thread.rs",
+    "symbol": "answer",
+    "question": "where does the code decide which of several failure modes a stalled turn gets labeled with when the model seam errors out or the user cancels mid-reply"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "ignores.rs",
+    "symbol": "walk_one_deep",
+    "question": "how do we check whether a file was actually removed by an ignore rule versus just missing from disk, and what does the one-level directory listing used for that comparison look like"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "decide.rs",
+    "symbol": "decide_state",
+    "question": "where is the rule that turns a manifest entry plus a freshly computed hash into fresh, stale, or unmanaged, without touching the filesystem or clock"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "app.rs",
+    "symbol": "reseat_on",
+    "question": "when the tree is redrawn after a selection or collapse change, where does the code recompute which row the previously selected path now lands on, since the old row index can't be trusted anymore"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "claude.rs",
+    "symbol": "Wired",
+    "question": "which type is responsible for making calls that share the same effort or model settings stay pinned to the same underlying conversation session instead of accidentally starting a new one"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "fixture.rs",
+    "symbol": "files",
+    "question": "where does the hardcoded sample tree with its documented, packed, and freshness states for testing views come from if nothing reads a directory or computes staleness"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "watch.rs",
+    "symbol": "accepted",
+    "question": "where does the debounce logic decide which of a burst of filesystem events actually counts, resetting the quiet-period clock"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "chatting.rs",
+    "symbol": "Asked",
+    "question": "where is the distinction encoded between a message the user typed and a synthesized turn the code generated on its own, so the panel can tell which kind of question is being answered"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "confirm.rs",
+    "symbol": "Answered",
+    "question": "if a key event turns out to be a release or auto-repeat rather than a press, what result does the yes/no dialog's key handler return"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "boundary.rs",
+    "symbol": "Verdict",
+    "question": "where is the type that captures whether a directory operation is allowed outright, blocked by a scope right there, or blocked by scopes further down the tree"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "config.rs",
+    "symbol": "prompted",
+    "question": "which function decides the exact order of flushing the preamble, reading input, and confirming the file was written during the interactive setup"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "fitting.rs",
+    "symbol": "sampled",
+    "question": "when a file goes over its per-file byte cap, where does the code that trims it down to a smaller representation instead of just marking it omitted live"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "stubs.rs",
+    "symbol": "filling",
+    "question": "which file has the stand-in agent whose constructor for the no-op passing stub i need to check when a test wants a default response without wiring in cancellation or activity reporting"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "composer.rs",
+    "symbol": "Composer",
+    "question": "which struct tracks the draft text and byte-offset cursor for the input line and only draws on rows once a terminal width has actually been measured"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "prompt.rs",
+    "symbol": "Edited",
+    "question": "which type does pressing enter in the scope text field return to signal a submit, whatever the text happens to be, empty or not"
+  }
+]

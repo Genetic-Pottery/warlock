@@ -1,0 +1,1946 @@
+[
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "agent.rs",
+    "symbol": "summary",
+    "run": 0,
+    "said_file": "fitting.rs",
+    "said_symbol": "Described",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "agent.rs",
+    "symbol": "summary",
+    "run": 1,
+    "said_file": "agent.rs",
+    "said_symbol": "summarised",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "agent.rs",
+    "symbol": "summary",
+    "run": 2,
+    "said_file": "agent.rs",
+    "said_symbol": "Summarised",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "agent.rs",
+    "symbol": "summary",
+    "run": 0,
+    "said_file": "agent.rs",
+    "said_symbol": "summarised",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "agent.rs",
+    "symbol": "summary",
+    "run": 1,
+    "said_file": "agent.rs",
+    "said_symbol": "summarised",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "agent.rs",
+    "symbol": "summary",
+    "run": 2,
+    "said_file": "agent.rs",
+    "said_symbol": "summarised",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "pact.rs",
+    "symbol": "Outcome",
+    "run": 0,
+    "said_file": "pact.rs",
+    "said_symbol": "Pacting",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "pact.rs",
+    "symbol": "Outcome",
+    "run": 1,
+    "said_file": "pact.rs",
+    "said_symbol": "Pacting",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "pact.rs",
+    "symbol": "Outcome",
+    "run": 2,
+    "said_file": "pact.rs",
+    "said_symbol": "Pacting",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "pact.rs",
+    "symbol": "Outcome",
+    "run": 0,
+    "said_file": "pact.rs",
+    "said_symbol": "Pacted",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "pact.rs",
+    "symbol": "Outcome",
+    "run": 1,
+    "said_file": "manifest.rs",
+    "said_symbol": "PactEntry",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "pact.rs",
+    "symbol": "Outcome",
+    "run": 2,
+    "said_file": "pact.rs",
+    "said_symbol": "Pacted",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "document.rs",
+    "symbol": "note_fill",
+    "run": 0,
+    "said_file": "document.rs",
+    "said_symbol": "Repair",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "document.rs",
+    "symbol": "note_fill",
+    "run": 1,
+    "said_file": "document.rs",
+    "said_symbol": "Repair",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "document.rs",
+    "symbol": "note_fill",
+    "run": 2,
+    "said_file": "document.rs",
+    "said_symbol": "Repair",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "document.rs",
+    "symbol": "note_fill",
+    "run": 0,
+    "said_file": "document.rs",
+    "said_symbol": "Repair",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "document.rs",
+    "symbol": "note_fill",
+    "run": 1,
+    "said_file": "document.rs",
+    "said_symbol": "Repair",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "document.rs",
+    "symbol": "note_fill",
+    "run": 2,
+    "said_file": "document.rs",
+    "said_symbol": "Repair",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "clock.rs",
+    "symbol": "civil_from_days",
+    "run": 0,
+    "said_file": "clock.rs",
+    "said_symbol": "civil_from_days",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "clock.rs",
+    "symbol": "civil_from_days",
+    "run": 1,
+    "said_file": "clock.rs",
+    "said_symbol": "civil_from_days",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "clock.rs",
+    "symbol": "civil_from_days",
+    "run": 2,
+    "said_file": "clock.rs",
+    "said_symbol": "civil_from_days",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "clock.rs",
+    "symbol": "civil_from_days",
+    "run": 0,
+    "said_file": "clock.rs",
+    "said_symbol": "civil_from_days",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "clock.rs",
+    "symbol": "civil_from_days",
+    "run": 1,
+    "said_file": "clock.rs",
+    "said_symbol": "civil_from_days",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "clock.rs",
+    "symbol": "civil_from_days",
+    "run": 2,
+    "said_file": "clock.rs",
+    "said_symbol": "civil_from_days",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "sigils.rs",
+    "symbol": "save_sigils",
+    "run": 0,
+    "said_file": "sigils.rs",
+    "said_symbol": "save_sigils",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "sigils.rs",
+    "symbol": "save_sigils",
+    "run": 1,
+    "said_file": "sigils.rs",
+    "said_symbol": "save_sigils",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "sigils.rs",
+    "symbol": "save_sigils",
+    "run": 2,
+    "said_file": "sigils.rs",
+    "said_symbol": "save_sigils",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "sigils.rs",
+    "symbol": "save_sigils",
+    "run": 0,
+    "said_file": "sigils.rs",
+    "said_symbol": "save_sigils",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "sigils.rs",
+    "symbol": "save_sigils",
+    "run": 1,
+    "said_file": "sigils.rs",
+    "said_symbol": "save_sigils",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "sigils.rs",
+    "symbol": "save_sigils",
+    "run": 2,
+    "said_file": "sigils.rs",
+    "said_symbol": "save_sigils",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "hash.rs",
+    "symbol": "length",
+    "run": 0,
+    "said_file": "hash.rs",
+    "said_symbol": "length",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "hash.rs",
+    "symbol": "length",
+    "run": 1,
+    "said_file": "hash.rs",
+    "said_symbol": "length",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "hash.rs",
+    "symbol": "length",
+    "run": 2,
+    "said_file": "hash.rs",
+    "said_symbol": "length",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "hash.rs",
+    "symbol": "length",
+    "run": 0,
+    "said_file": "hash.rs",
+    "said_symbol": "length",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "hash.rs",
+    "symbol": "length",
+    "run": 1,
+    "said_file": "hash.rs",
+    "said_symbol": "length",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "hash.rs",
+    "symbol": "length",
+    "run": 2,
+    "said_file": "hash.rs",
+    "said_symbol": "length",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "state.rs",
+    "symbol": "NodeState",
+    "run": 0,
+    "said_file": "state.rs",
+    "said_symbol": "NodeState",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "state.rs",
+    "symbol": "NodeState",
+    "run": 1,
+    "said_file": "state.rs",
+    "said_symbol": "NodeState",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "state.rs",
+    "symbol": "NodeState",
+    "run": 2,
+    "said_file": "state.rs",
+    "said_symbol": "NodeState",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "state.rs",
+    "symbol": "NodeState",
+    "run": 0,
+    "said_file": "state.rs",
+    "said_symbol": "NodeState",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "state.rs",
+    "symbol": "NodeState",
+    "run": 1,
+    "said_file": "state.rs",
+    "said_symbol": "NodeState",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "state.rs",
+    "symbol": "NodeState",
+    "run": 2,
+    "said_file": "state.rs",
+    "said_symbol": "NodeState",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "claude_md.rs",
+    "symbol": "Written",
+    "run": 0,
+    "said_file": "claude_md.rs",
+    "said_symbol": "Written",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "claude_md.rs",
+    "symbol": "Written",
+    "run": 1,
+    "said_file": "claude_md.rs",
+    "said_symbol": "Written",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "claude_md.rs",
+    "symbol": "Written",
+    "run": 2,
+    "said_file": "claude_md.rs",
+    "said_symbol": "Written",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "claude_md.rs",
+    "symbol": "Written",
+    "run": 0,
+    "said_file": "claude_md.rs",
+    "said_symbol": "Written",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "claude_md.rs",
+    "symbol": "Written",
+    "run": 1,
+    "said_file": "claude_md.rs",
+    "said_symbol": "Written",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "claude_md.rs",
+    "symbol": "Written",
+    "run": 2,
+    "said_file": "claude_md.rs",
+    "said_symbol": "Written",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "load.rs",
+    "symbol": "Directory",
+    "run": 0,
+    "said_file": "load.rs",
+    "said_symbol": "Loaded",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "load.rs",
+    "symbol": "Directory",
+    "run": 1,
+    "said_file": "load.rs",
+    "said_symbol": "Loaded",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "load.rs",
+    "symbol": "Directory",
+    "run": 2,
+    "said_file": "load.rs",
+    "said_symbol": "Loaded",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "load.rs",
+    "symbol": "Directory",
+    "run": 0,
+    "said_file": "load.rs",
+    "said_symbol": "Directory",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "load.rs",
+    "symbol": "Directory",
+    "run": 1,
+    "said_file": "load.rs",
+    "said_symbol": "Builder",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "load.rs",
+    "symbol": "Directory",
+    "run": 2,
+    "said_file": "load.rs",
+    "said_symbol": "Builder",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "briefs.rs",
+    "symbol": "load_briefs",
+    "run": 0,
+    "said_file": "briefs.rs",
+    "said_symbol": "DEFAULT_BRIEF_DIRECTORY",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "briefs.rs",
+    "symbol": "load_briefs",
+    "run": 1,
+    "said_file": "briefs.rs",
+    "said_symbol": "DEFAULT_BRIEF_DIRECTORY",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "briefs.rs",
+    "symbol": "load_briefs",
+    "run": 2,
+    "said_file": "briefs.rs",
+    "said_symbol": "DEFAULT_BRIEF_DIRECTORY",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "briefs.rs",
+    "symbol": "load_briefs",
+    "run": 0,
+    "said_file": "briefs.rs",
+    "said_symbol": "DEFAULT_BRIEF_DIRECTORY",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "briefs.rs",
+    "symbol": "load_briefs",
+    "run": 1,
+    "said_file": "briefs.rs",
+    "said_symbol": "DEFAULT_BRIEF_DIRECTORY",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "briefs.rs",
+    "symbol": "load_briefs",
+    "run": 2,
+    "said_file": "briefs.rs",
+    "said_symbol": "DEFAULT_BRIEF_DIRECTORY",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "panel.rs",
+    "symbol": "Shown",
+    "run": 0,
+    "said_file": "panel.rs",
+    "said_symbol": "Shown",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "panel.rs",
+    "symbol": "Shown",
+    "run": 1,
+    "said_file": "panel.rs",
+    "said_symbol": "Shown",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "panel.rs",
+    "symbol": "Shown",
+    "run": 2,
+    "said_file": "panel.rs",
+    "said_symbol": "Shown",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "panel.rs",
+    "symbol": "Shown",
+    "run": 0,
+    "said_file": "panel.rs",
+    "said_symbol": "Shown",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "panel.rs",
+    "symbol": "Shown",
+    "run": 1,
+    "said_file": "panel.rs",
+    "said_symbol": "Shown",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "panel.rs",
+    "symbol": "Shown",
+    "run": 2,
+    "said_file": "panel.rs",
+    "said_symbol": "Shown",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "ui.rs",
+    "symbol": "laid_out_keys",
+    "run": 0,
+    "said_file": "ui.rs",
+    "said_symbol": "draw",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "ui.rs",
+    "symbol": "laid_out_keys",
+    "run": 1,
+    "said_file": "ui.rs",
+    "said_symbol": "draw",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "ui.rs",
+    "symbol": "laid_out_keys",
+    "run": 2,
+    "said_file": "ui.rs",
+    "said_symbol": "hit_test",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "ui.rs",
+    "symbol": "laid_out_keys",
+    "run": 0,
+    "said_file": "ui.rs",
+    "said_symbol": "hit_test",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "ui.rs",
+    "symbol": "laid_out_keys",
+    "run": 1,
+    "said_file": "ui.rs",
+    "said_symbol": "hit_test",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "ui.rs",
+    "symbol": "laid_out_keys",
+    "run": 2,
+    "said_file": "ui.rs",
+    "said_symbol": "hit_test",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "running.rs",
+    "symbol": "Report",
+    "run": 0,
+    "said_file": "running.rs",
+    "said_symbol": "Progress",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "running.rs",
+    "symbol": "Report",
+    "run": 1,
+    "said_file": "running.rs",
+    "said_symbol": "Progress",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "running.rs",
+    "symbol": "Report",
+    "run": 2,
+    "said_file": "running.rs",
+    "said_symbol": "Progress",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "running.rs",
+    "symbol": "Report",
+    "run": 0,
+    "said_file": "running.rs",
+    "said_symbol": "Report",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "running.rs",
+    "symbol": "Report",
+    "run": 1,
+    "said_file": "running.rs",
+    "said_symbol": "Report",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "running.rs",
+    "symbol": "Report",
+    "run": 2,
+    "said_file": "running.rs",
+    "said_symbol": "Report",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "query.rs",
+    "symbol": "listed",
+    "run": 0,
+    "said_file": "query.rs",
+    "said_symbol": "list",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "query.rs",
+    "symbol": "listed",
+    "run": 1,
+    "said_file": "query.rs",
+    "said_symbol": "list",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "query.rs",
+    "symbol": "listed",
+    "run": 2,
+    "said_file": "query.rs",
+    "said_symbol": "list",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "query.rs",
+    "symbol": "listed",
+    "run": 0,
+    "said_file": "query.rs",
+    "said_symbol": "listed_onto",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "query.rs",
+    "symbol": "listed",
+    "run": 1,
+    "said_file": "query.rs",
+    "said_symbol": "listing",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "query.rs",
+    "symbol": "listed",
+    "run": 2,
+    "said_file": "query.rs",
+    "said_symbol": "listing",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "writing.rs",
+    "symbol": "slugged",
+    "run": 0,
+    "said_file": "writing.rs",
+    "said_symbol": "slug_of",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "writing.rs",
+    "symbol": "slugged",
+    "run": 1,
+    "said_file": "writing.rs",
+    "said_symbol": "slug_of",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "writing.rs",
+    "symbol": "slugged",
+    "run": 2,
+    "said_file": "writing.rs",
+    "said_symbol": "slug_of",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "writing.rs",
+    "symbol": "slugged",
+    "run": 0,
+    "said_file": "writing.rs",
+    "said_symbol": "slug_of",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "writing.rs",
+    "symbol": "slugged",
+    "run": 1,
+    "said_file": "writing.rs",
+    "said_symbol": "slug_of",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "writing.rs",
+    "symbol": "slugged",
+    "run": 2,
+    "said_file": "writing.rs",
+    "said_symbol": "slug_of",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "account.rs",
+    "symbol": "Account",
+    "run": 0,
+    "said_file": "account.rs",
+    "said_symbol": "shown_at",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "account.rs",
+    "symbol": "Account",
+    "run": 1,
+    "said_file": "account.rs",
+    "said_symbol": "shown_at",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "account.rs",
+    "symbol": "Account",
+    "run": 2,
+    "said_file": "account.rs",
+    "said_symbol": "shown_at",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "account.rs",
+    "symbol": "Account",
+    "run": 0,
+    "said_file": "account.rs",
+    "said_symbol": "shown_at",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "account.rs",
+    "symbol": "Account",
+    "run": 1,
+    "said_file": "account.rs",
+    "said_symbol": "shown_at",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "account.rs",
+    "symbol": "Account",
+    "run": 2,
+    "said_file": "account.rs",
+    "said_symbol": "shown_at",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pacting.rs",
+    "symbol": "pressed_p",
+    "run": 0,
+    "said_file": "app.rs",
+    "said_symbol": "with_ignored",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pacting.rs",
+    "symbol": "pressed_p",
+    "run": 1,
+    "said_file": "app.rs",
+    "said_symbol": "with_child_count",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pacting.rs",
+    "symbol": "pressed_p",
+    "run": 2,
+    "said_file": "app.rs",
+    "said_symbol": "with_ignored",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pacting.rs",
+    "symbol": "pressed_p",
+    "run": 0,
+    "said_file": "app.rs",
+    "said_symbol": "PactToggle",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pacting.rs",
+    "symbol": "pressed_p",
+    "run": 1,
+    "said_file": "app.rs",
+    "said_symbol": "PactToggle",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pacting.rs",
+    "symbol": "pressed_p",
+    "run": 2,
+    "said_file": "app.rs",
+    "said_symbol": "PactToggle",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "edits.rs",
+    "symbol": "scoped_line",
+    "run": 0,
+    "said_file": "scoping.rs",
+    "said_symbol": "scope_submit",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "edits.rs",
+    "symbol": "scoped_line",
+    "run": 1,
+    "said_file": "prompt.rs",
+    "said_symbol": "Edited",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "edits.rs",
+    "symbol": "scoped_line",
+    "run": 2,
+    "said_file": "boundary.rs",
+    "said_symbol": "message",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "edits.rs",
+    "symbol": "scoped_line",
+    "run": 0,
+    "said_file": "edits.rs",
+    "said_symbol": "scoped_line",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "edits.rs",
+    "symbol": "scoped_line",
+    "run": 1,
+    "said_file": "edits.rs",
+    "said_symbol": "scoped_line",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "edits.rs",
+    "symbol": "scoped_line",
+    "run": 2,
+    "said_file": "edits.rs",
+    "said_symbol": "scoped_line",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "check.rs",
+    "symbol": "prose",
+    "run": 0,
+    "said_file": "boundary.rs",
+    "said_symbol": "verdict",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "check.rs",
+    "symbol": "prose",
+    "run": 1,
+    "said_file": "boundary.rs",
+    "said_symbol": "blocking_scopes_message",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "check.rs",
+    "symbol": "prose",
+    "run": 2,
+    "said_file": "boundary.rs",
+    "said_symbol": "Verdict",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "check.rs",
+    "symbol": "prose",
+    "run": 0,
+    "said_file": "config.rs",
+    "said_symbol": "sigils_in",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "check.rs",
+    "symbol": "prose",
+    "run": 1,
+    "said_file": "boundary.rs",
+    "said_symbol": "Verdict",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "check.rs",
+    "symbol": "prose",
+    "run": 2,
+    "said_file": "boundary.rs",
+    "said_symbol": "closed_scope_message",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "wrap.rs",
+    "symbol": "wrapped",
+    "run": 0,
+    "said_file": "wrap.rs",
+    "said_symbol": "rows",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "wrap.rs",
+    "symbol": "wrapped",
+    "run": 1,
+    "said_file": "wrap.rs",
+    "said_symbol": "rows",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "wrap.rs",
+    "symbol": "wrapped",
+    "run": 2,
+    "said_file": "wrap.rs",
+    "said_symbol": "rows",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "wrap.rs",
+    "symbol": "wrapped",
+    "run": 0,
+    "said_file": "wrap.rs",
+    "said_symbol": "wrapped",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "wrap.rs",
+    "symbol": "wrapped",
+    "run": 1,
+    "said_file": "wrap.rs",
+    "said_symbol": "rows",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "wrap.rs",
+    "symbol": "wrapped",
+    "run": 2,
+    "said_file": "wrap.rs",
+    "said_symbol": "rows",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "input.rs",
+    "symbol": "click",
+    "run": 0,
+    "said_file": "input.rs",
+    "said_symbol": "mouse_action",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "input.rs",
+    "symbol": "click",
+    "run": 1,
+    "said_file": "input.rs",
+    "said_symbol": "mouse_action",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "input.rs",
+    "symbol": "click",
+    "run": 2,
+    "said_file": "input.rs",
+    "said_symbol": "mouse_action",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "input.rs",
+    "symbol": "click",
+    "run": 0,
+    "said_file": "input.rs",
+    "said_symbol": "click",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "input.rs",
+    "symbol": "click",
+    "run": 1,
+    "said_file": "input.rs",
+    "said_symbol": "mouse_action",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "input.rs",
+    "symbol": "click",
+    "run": 2,
+    "said_file": "input.rs",
+    "said_symbol": "mouse_action",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "thread.rs",
+    "symbol": "answer",
+    "run": 0,
+    "said_file": "thread.rs",
+    "said_symbol": "ending_for",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "thread.rs",
+    "symbol": "answer",
+    "run": 1,
+    "said_file": "thread.rs",
+    "said_symbol": "Ending",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "thread.rs",
+    "symbol": "answer",
+    "run": 2,
+    "said_file": "thread.rs",
+    "said_symbol": "Ending",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "thread.rs",
+    "symbol": "answer",
+    "run": 0,
+    "said_file": "thread.rs",
+    "said_symbol": "Ending",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "thread.rs",
+    "symbol": "answer",
+    "run": 1,
+    "said_file": "thread.rs",
+    "said_symbol": "Ending",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "thread.rs",
+    "symbol": "answer",
+    "run": 2,
+    "said_file": "thread.rs",
+    "said_symbol": "Ending",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "ignores.rs",
+    "symbol": "walk_one_deep",
+    "run": 0,
+    "said_file": "ignores.rs",
+    "said_symbol": "walk_one_deep",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "ignores.rs",
+    "symbol": "walk_one_deep",
+    "run": 1,
+    "said_file": "ignores.rs",
+    "said_symbol": "walk_one_deep",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "ignores.rs",
+    "symbol": "walk_one_deep",
+    "run": 2,
+    "said_file": "ignores.rs",
+    "said_symbol": "walk_one_deep",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "ignores.rs",
+    "symbol": "walk_one_deep",
+    "run": 0,
+    "said_file": "ignores.rs",
+    "said_symbol": "walk_one_deep",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "ignores.rs",
+    "symbol": "walk_one_deep",
+    "run": 1,
+    "said_file": "ignores.rs",
+    "said_symbol": "walk_one_deep",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "ignores.rs",
+    "symbol": "walk_one_deep",
+    "run": 2,
+    "said_file": "ignores.rs",
+    "said_symbol": "walk_one_deep",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "decide.rs",
+    "symbol": "decide_state",
+    "run": 0,
+    "said_file": "decide.rs",
+    "said_symbol": "decide_state",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "decide.rs",
+    "symbol": "decide_state",
+    "run": 1,
+    "said_file": "decide.rs",
+    "said_symbol": "decide_state",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "decide.rs",
+    "symbol": "decide_state",
+    "run": 2,
+    "said_file": "decide.rs",
+    "said_symbol": "decide_state",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "decide.rs",
+    "symbol": "decide_state",
+    "run": 0,
+    "said_file": "decide.rs",
+    "said_symbol": "decide_state",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "decide.rs",
+    "symbol": "decide_state",
+    "run": 1,
+    "said_file": "decide.rs",
+    "said_symbol": "decide_state",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "decide.rs",
+    "symbol": "decide_state",
+    "run": 2,
+    "said_file": "decide.rs",
+    "said_symbol": "decide_state",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "app.rs",
+    "symbol": "reseat_on",
+    "run": 0,
+    "said_file": "app.rs",
+    "said_symbol": "reseat_on",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "app.rs",
+    "symbol": "reseat_on",
+    "run": 1,
+    "said_file": "app.rs",
+    "said_symbol": "reseat_on",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "app.rs",
+    "symbol": "reseat_on",
+    "run": 2,
+    "said_file": "app.rs",
+    "said_symbol": "reseat_on",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "app.rs",
+    "symbol": "reseat_on",
+    "run": 0,
+    "said_file": "app.rs",
+    "said_symbol": "reseat_on",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "app.rs",
+    "symbol": "reseat_on",
+    "run": 1,
+    "said_file": "app.rs",
+    "said_symbol": "reseat_on",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "app.rs",
+    "symbol": "reseat_on",
+    "run": 2,
+    "said_file": "app.rs",
+    "said_symbol": "reseat_on",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "claude.rs",
+    "symbol": "Wired",
+    "run": 0,
+    "said_file": "claude.rs",
+    "said_symbol": "ClaudeAgent",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "claude.rs",
+    "symbol": "Wired",
+    "run": 1,
+    "said_file": "claude.rs",
+    "said_symbol": "ClaudeAgent",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "claude.rs",
+    "symbol": "Wired",
+    "run": 2,
+    "said_file": "claude.rs",
+    "said_symbol": "BRIEF_MODEL",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "claude.rs",
+    "symbol": "Wired",
+    "run": 0,
+    "said_file": "claude.rs",
+    "said_symbol": "Wired",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "claude.rs",
+    "symbol": "Wired",
+    "run": 1,
+    "said_file": "claude.rs",
+    "said_symbol": "Wired",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "claude.rs",
+    "symbol": "Wired",
+    "run": 2,
+    "said_file": "claude.rs",
+    "said_symbol": "Wired",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "fixture.rs",
+    "symbol": "files",
+    "run": 0,
+    "said_file": "fixture.rs",
+    "said_symbol": "tree",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "fixture.rs",
+    "symbol": "files",
+    "run": 1,
+    "said_file": "fixture.rs",
+    "said_symbol": "tree",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "fixture.rs",
+    "symbol": "files",
+    "run": 2,
+    "said_file": "fixture.rs",
+    "said_symbol": "tree",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "fixture.rs",
+    "symbol": "files",
+    "run": 0,
+    "said_file": "fixture.rs",
+    "said_symbol": "tree",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "fixture.rs",
+    "symbol": "files",
+    "run": 1,
+    "said_file": "fixture.rs",
+    "said_symbol": "tree",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "fixture.rs",
+    "symbol": "files",
+    "run": 2,
+    "said_file": "fixture.rs",
+    "said_symbol": "tree_after_a_run",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "watch.rs",
+    "symbol": "accepted",
+    "run": 0,
+    "said_file": "watch.rs",
+    "said_symbol": "WatchPolicy",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "watch.rs",
+    "symbol": "accepted",
+    "run": 1,
+    "said_file": "watch.rs",
+    "said_symbol": "WatchPolicy",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "watch.rs",
+    "symbol": "accepted",
+    "run": 2,
+    "said_file": "watch.rs",
+    "said_symbol": "WatchPolicy",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "watch.rs",
+    "symbol": "accepted",
+    "run": 0,
+    "said_file": "watch.rs",
+    "said_symbol": "accepts",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "watch.rs",
+    "symbol": "accepted",
+    "run": 1,
+    "said_file": "watch.rs",
+    "said_symbol": "saw",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "watch.rs",
+    "symbol": "accepted",
+    "run": 2,
+    "said_file": "watch.rs",
+    "said_symbol": "WatchPolicy",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "chatting.rs",
+    "symbol": "Asked",
+    "run": 0,
+    "said_file": "thread.rs",
+    "said_symbol": "Turn",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "chatting.rs",
+    "symbol": "Asked",
+    "run": 1,
+    "said_file": "thread.rs",
+    "said_symbol": "Turn",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "chatting.rs",
+    "symbol": "Asked",
+    "run": 2,
+    "said_file": "thread.rs",
+    "said_symbol": "Turn",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "chatting.rs",
+    "symbol": "Asked",
+    "run": 0,
+    "said_file": "thread.rs",
+    "said_symbol": "Turn",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "chatting.rs",
+    "symbol": "Asked",
+    "run": 1,
+    "said_file": "thread.rs",
+    "said_symbol": "Turn",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "chatting.rs",
+    "symbol": "Asked",
+    "run": 2,
+    "said_file": "thread.rs",
+    "said_symbol": "Turn",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "confirm.rs",
+    "symbol": "Answered",
+    "run": 0,
+    "said_file": "confirm.rs",
+    "said_symbol": "answer_for",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "confirm.rs",
+    "symbol": "Answered",
+    "run": 1,
+    "said_file": "confirm.rs",
+    "said_symbol": "answer_for",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "confirm.rs",
+    "symbol": "Answered",
+    "run": 2,
+    "said_file": "confirm.rs",
+    "said_symbol": "answer_for",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "confirm.rs",
+    "symbol": "Answered",
+    "run": 0,
+    "said_file": "confirm.rs",
+    "said_symbol": "Answered",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "confirm.rs",
+    "symbol": "Answered",
+    "run": 1,
+    "said_file": "confirm.rs",
+    "said_symbol": "answer_for",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "confirm.rs",
+    "symbol": "Answered",
+    "run": 2,
+    "said_file": "confirm.rs",
+    "said_symbol": "answer_for",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "boundary.rs",
+    "symbol": "Verdict",
+    "run": 0,
+    "said_file": "boundary.rs",
+    "said_symbol": "Verdict",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "boundary.rs",
+    "symbol": "Verdict",
+    "run": 1,
+    "said_file": "boundary.rs",
+    "said_symbol": "Verdict",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "boundary.rs",
+    "symbol": "Verdict",
+    "run": 2,
+    "said_file": "boundary.rs",
+    "said_symbol": "Verdict",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "boundary.rs",
+    "symbol": "Verdict",
+    "run": 0,
+    "said_file": "boundary.rs",
+    "said_symbol": "Verdict",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "boundary.rs",
+    "symbol": "Verdict",
+    "run": 1,
+    "said_file": "boundary.rs",
+    "said_symbol": "Verdict",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "boundary.rs",
+    "symbol": "Verdict",
+    "run": 2,
+    "said_file": "boundary.rs",
+    "said_symbol": "Verdict",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "config.rs",
+    "symbol": "prompted",
+    "run": 0,
+    "said_file": "config.rs",
+    "said_symbol": "configure",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "config.rs",
+    "symbol": "prompted",
+    "run": 1,
+    "said_file": "config.rs",
+    "said_symbol": "configure",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "config.rs",
+    "symbol": "prompted",
+    "run": 2,
+    "said_file": "config.rs",
+    "said_symbol": "configure",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "config.rs",
+    "symbol": "prompted",
+    "run": 0,
+    "said_file": "config.rs",
+    "said_symbol": "configure",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "config.rs",
+    "symbol": "prompted",
+    "run": 1,
+    "said_file": "config.rs",
+    "said_symbol": "configure",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "config.rs",
+    "symbol": "prompted",
+    "run": 2,
+    "said_file": "config.rs",
+    "said_symbol": "configure",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "fitting.rs",
+    "symbol": "sampled",
+    "run": 0,
+    "said_file": "fitting.rs",
+    "said_symbol": "request_byte_cap",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "fitting.rs",
+    "symbol": "sampled",
+    "run": 1,
+    "said_file": "fitting.rs",
+    "said_symbol": "PER_FILE_BYTE_CAP",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "fitting.rs",
+    "symbol": "sampled",
+    "run": 2,
+    "said_file": "languages.rs",
+    "said_symbol": "elide",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "fitting.rs",
+    "symbol": "sampled",
+    "run": 0,
+    "said_file": "fitting.rs",
+    "said_symbol": "elide",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "fitting.rs",
+    "symbol": "sampled",
+    "run": 1,
+    "said_file": "fitting.rs",
+    "said_symbol": "PER_FILE_BYTE_CAP",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "fitting.rs",
+    "symbol": "sampled",
+    "run": 2,
+    "said_file": "fitting.rs",
+    "said_symbol": "PER_FILE_BYTE_CAP",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "stubs.rs",
+    "symbol": "filling",
+    "run": 0,
+    "said_file": "stubs.rs",
+    "said_symbol": "Passing",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "stubs.rs",
+    "symbol": "filling",
+    "run": 1,
+    "said_file": "stubs.rs",
+    "said_symbol": "Passing",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "stubs.rs",
+    "symbol": "filling",
+    "run": 2,
+    "said_file": "stubs.rs",
+    "said_symbol": "Passing",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "stubs.rs",
+    "symbol": "filling",
+    "run": 0,
+    "said_file": "stubs.rs",
+    "said_symbol": "Passing",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "stubs.rs",
+    "symbol": "filling",
+    "run": 1,
+    "said_file": "stubs.rs",
+    "said_symbol": "Passing",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "stubs.rs",
+    "symbol": "filling",
+    "run": 2,
+    "said_file": "stubs.rs",
+    "said_symbol": "Passing",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "composer.rs",
+    "symbol": "Composer",
+    "run": 0,
+    "said_file": "composer.rs",
+    "said_symbol": "Composer",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "composer.rs",
+    "symbol": "Composer",
+    "run": 1,
+    "said_file": "composer.rs",
+    "said_symbol": "Composer",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "composer.rs",
+    "symbol": "Composer",
+    "run": 2,
+    "said_file": "composer.rs",
+    "said_symbol": "Composer",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "composer.rs",
+    "symbol": "Composer",
+    "run": 0,
+    "said_file": "composer.rs",
+    "said_symbol": "Composer",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "composer.rs",
+    "symbol": "Composer",
+    "run": 1,
+    "said_file": "composer.rs",
+    "said_symbol": "Composer",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "composer.rs",
+    "symbol": "Composer",
+    "run": 2,
+    "said_file": "composer.rs",
+    "said_symbol": "Composer",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "prompt.rs",
+    "symbol": "Edited",
+    "run": 0,
+    "said_file": "prompt.rs",
+    "said_symbol": "Edited",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "prompt.rs",
+    "symbol": "Edited",
+    "run": 1,
+    "said_file": "prompt.rs",
+    "said_symbol": "Edited",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "prompt.rs",
+    "symbol": "Edited",
+    "run": 2,
+    "said_file": "prompt.rs",
+    "said_symbol": "Edited",
+    "arm": "declares8"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "prompt.rs",
+    "symbol": "Edited",
+    "run": 0,
+    "said_file": "prompt.rs",
+    "said_symbol": "Edited",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "prompt.rs",
+    "symbol": "Edited",
+    "run": 1,
+    "said_file": "prompt.rs",
+    "said_symbol": "Edited",
+    "arm": "declares16"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "prompt.rs",
+    "symbol": "Edited",
+    "run": 2,
+    "said_file": "prompt.rs",
+    "said_symbol": "Edited",
+    "arm": "declares16"
+  }
+]
