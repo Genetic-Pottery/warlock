@@ -117,6 +117,13 @@ fn elided_or_whole(path: &Path, relative: String, size: u64, bytes: Vec<u8>) -> 
     }
 }
 
+// The files a directory's document holds a line for: its own, one level deep,
+// prose excluded — the same set `gather_request` sends, decided by the same
+// walk so the two cannot disagree about what is in a directory.
+pub(crate) fn own_files(directory: &Path) -> Result<BTreeMap<String, PathBuf>, Error> {
+    Ok(walk(directory)?.files)
+}
+
 // One file, reduced the way the same file would be inside a directory's
 // request: the per-file cap still applies, `elide` still takes the bodies out,
 // and the declared names are still measured here rather than guessed at later.

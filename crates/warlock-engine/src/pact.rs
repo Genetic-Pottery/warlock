@@ -11,6 +11,7 @@ use ignore::WalkBuilder;
 use crate::document::{self, ATTEMPTS, Accepted, Defect, Fill};
 use crate::fitting::{
     Fitted, PER_FILE_BYTE_CAP, Problem, byte_count, carried_bytes, carry_hash, fit, one_file,
+    own_files,
 };
 use crate::ignores;
 use crate::manifest::{ROOT_MODULE, temp_file_name, write_and_sync};
@@ -987,6 +988,116 @@ pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
 /// assert!(!cut);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+/// Every line a directory's document needs, asking only about what moved.
+///
+/// The document is the store: a file whose bytes hash to what the manifest
+/// recorded keeps the line already on the page, and every other file costs one
+/// pass. Both halves have to agree before a line is reused — a hash with no
+/// line on the page is a document somebody edited, and a line with no hash is a
+/// file nobody has measured — and either way the answer is to ask again, which
+/// costs a pass and never a wrong line.
+///
+/// ```
+/// use std::cell::Cell;
+/// use std::fs;
+/// use warlock_engine::{Agent, agent, assemble_lines, file_hash};
+///
+/// struct Counting {
+///     passes: Cell<usize>,
+/// }
+///
+/// impl Agent for Counting {
+///     fn run(&self, _request: &agent::Request) -> Result<agent::Response, agent::Error> {
+///         self.passes.set(self.passes.get() + 1);
+///         Ok(agent::Response::new(r#"{"line": "A line about one file alone."}"#))
+///     }
+/// }
+///
+/// let dir = tempfile::tempdir()?;
+/// fs::write(dir.path().join("reading.rs"), "pub fn read_one() {}\n")?;
+/// fs::write(dir.path().join("writing.rs"), "fn scratch() {}\n")?;
+/// let agent = Counting { passes: Cell::new(0) };
+///
+/// // Nothing recorded: every file is asked about.
+/// let first = assemble_lines(dir.path(), None, &agent)?;
+/// assert_eq!(agent.passes.get(), 2);
+/// assert_eq!(first.asked, ["reading.rs", "writing.rs"]);
+///
+/// // The page and the hashes from that run, and one file changed under them.
+/// fs::write(dir.path().join("writing.rs"), "fn scratch(at: usize) {}\n")?;
+/// let page = first
+///     .lines
+///     .iter()
+///     .map(|(path, line)| format!("- `{path}` (1 B) — {line}"))
+///     .collect::<Vec<_>>()
+///     .join("\n");
+/// let page = format!("\n## Files\n\n{page}\n");
+///
+/// let again = assemble_lines(dir.path(), Some((&page, &first.hashes)), &agent)?;
+/// assert_eq!(agent.passes.get(), 3, "one changed file, one pass");
+/// assert_eq!(again.asked, ["writing.rs"]);
+/// assert_eq!(again.lines["reading.rs"], first.lines["reading.rs"]);
+/// assert_eq!(again.hashes["writing.rs"], file_hash(dir.path().join("writing.rs"))?);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn assemble_lines(
+    directory: impl AsRef<Path>,
+    carried: Option<(&str, &BTreeMap<String, String>)>,
+    agent: &dyn Agent,
+) -> Result<Assembled, Error> {
+    let directory = directory.as_ref();
+    let files = own_files(directory)?;
+    let (page, recorded) = match carried {
+        Some((page, recorded)) => (document::lines_of(page), recorded.clone()),
+        None => (BTreeMap::new(), BTreeMap::new()),
+    };
+
+    let mut assembled = Assembled::default();
+    for (name, path) in files {
+        // A file that cannot be hashed is a file nothing can be said to know,
+        // so it is asked about rather than taken on trust. The hash is left out
+        // of the record, which costs a pass next run and no correctness.
+        let hash = crate::hash::file_hash(&path).ok();
+        let unmoved = hash
+            .as_ref()
+            .zip(recorded.get(&name))
+            .is_some_and(|(now, before)| now == before);
+
+        if let (true, Some(line)) = (unmoved, page.get(&name)) {
+            assembled.lines.insert(name.clone(), line.clone());
+            assembled.kept.push(name.clone());
+        } else {
+            let described = describe_file(directory, &name, agent)?;
+            if described.mended {
+                assembled.mended.push(name.clone());
+            }
+            assembled.lines.insert(name.clone(), described.line);
+            assembled.asked.push(name.clone());
+        }
+
+        if let Some(hash) = hash {
+            assembled.hashes.insert(name, hash);
+        }
+    }
+    Ok(assembled)
+}
+
+/// A directory's file lines, and what each one cost.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Assembled {
+    pub lines: BTreeMap<String, String>,
+    /// What each file hashed to as its line was settled, for the manifest to
+    /// record. A file that could not be hashed is absent and will be asked
+    /// about again.
+    pub hashes: BTreeMap<String, String>,
+    /// Files a pass was paid for this run.
+    pub asked: Vec<String>,
+    /// Files whose line came off the page unchanged.
+    pub kept: Vec<String>,
+    /// Files whose every attempt was spent, so warlock wrote the line.
+    pub mended: Vec<String>,
+}
+
 /// Describe one file: the unit of work per-file granularity is built on.
 ///
 /// The asking is [`document::ATTEMPTS`] deep like a directory's, and ends the
@@ -1459,8 +1570,9 @@ mod tests {
 
     use super::{
         DOCUMENT_FILE, Failure, Observer, Pacted, PactedSubtree, Pacting, Refusal, Unviewable,
-        Unwatched, Viewed, closed_scopes_at_or_below, describe_file, pact_directory, pact_subtree,
-        pactable_directories, refresh_subtree, unpact_ignored, unpact_subtree, view_file,
+        Unwatched, Viewed, assemble_lines, closed_scopes_at_or_below, describe_file,
+        pact_directory, pact_subtree, pactable_directories, refresh_subtree, unpact_ignored,
+        unpact_subtree, view_file,
     };
     use crate::document::{self, STAMP};
     use crate::fitting::{
@@ -2168,6 +2280,89 @@ mod tests {
             "pub fn read_one() -> Reader { Reader }\n",
         );
         dir
+    }
+
+    fn page_of(lines: &[(&str, &str)]) -> String {
+        let rows: Vec<String> = lines
+            .iter()
+            .map(|(path, line)| format!("- `{path}` (1 B) — {line}"))
+            .collect();
+        format!("\n## Files\n\n{}\n", rows.join("\n"))
+    }
+
+    #[test]
+    fn a_hash_with_no_line_on_the_page_is_asked_about_again() {
+        // The document was edited by hand, or written by a warlock that did not
+        // record lines. The hash says the file has not moved and there is still
+        // nothing to reuse, so the pass runs.
+        let dir = one_file_directory();
+        let agent = Lining::saying(r#"{"line": "A line about one file alone."}"#);
+        let hash = crate::hash::file_hash(dir.path().join("reading.rs")).expect("hashes");
+        let recorded = [("reading.rs".to_owned(), hash)].into_iter().collect();
+
+        let assembled = assemble_lines(dir.path(), Some(("", &recorded)), &agent).expect("lines");
+
+        assert_eq!(assembled.asked, ["reading.rs"]);
+        assert!(assembled.kept.is_empty());
+        assert_eq!(agent.passes.get(), 1);
+    }
+
+    #[test]
+    fn a_line_with_no_hash_behind_it_is_asked_about_again() {
+        // The other half of the same rule: a page says what the file was, and
+        // nothing says the file still is that. Trusting the page here is how a
+        // document outlives the code it describes.
+        let dir = one_file_directory();
+        let agent = Lining::saying(r#"{"line": "A line about one file alone."}"#);
+        let page = page_of(&[("reading.rs", "The line already on the page.")]);
+
+        let assembled =
+            assemble_lines(dir.path(), Some((&page, &BTreeMap::new())), &agent).expect("lines");
+
+        assert_eq!(assembled.asked, ["reading.rs"]);
+        assert_eq!(agent.passes.get(), 1);
+        assert_eq!(
+            assembled.lines["reading.rs"], "A line about one file alone.",
+            "the answer, not the page",
+        );
+    }
+
+    #[test]
+    fn a_file_the_page_and_the_hashes_agree_on_costs_nothing() {
+        let dir = one_file_directory();
+        let agent = Lining::saying(r#"{"line": "A line no pass should be asked for."}"#);
+        let hash = crate::hash::file_hash(dir.path().join("reading.rs")).expect("hashes");
+        let recorded = [("reading.rs".to_owned(), hash.clone())]
+            .into_iter()
+            .collect();
+        let page = page_of(&[("reading.rs", "The line already on the page.")]);
+
+        let assembled =
+            assemble_lines(dir.path(), Some((&page, &recorded)), &agent).expect("lines");
+
+        assert_eq!(agent.passes.get(), 0, "the run paid for nothing");
+        assert_eq!(assembled.kept, ["reading.rs"]);
+        assert!(assembled.asked.is_empty());
+        assert_eq!(
+            assembled.lines["reading.rs"],
+            "The line already on the page."
+        );
+        assert_eq!(
+            assembled.hashes["reading.rs"], hash,
+            "recorded again as it stands"
+        );
+    }
+
+    #[test]
+    fn a_file_warlock_had_to_write_itself_is_named_as_such() {
+        let dir = one_file_directory();
+        let agent = Lining::saying("prose where an object was asked for");
+
+        let assembled = assemble_lines(dir.path(), None, &agent).expect("lines");
+
+        assert_eq!(assembled.asked, ["reading.rs"]);
+        assert_eq!(assembled.mended, ["reading.rs"]);
+        assert!(assembled.lines["reading.rs"].contains("reading.rs"));
     }
 
     #[test]
