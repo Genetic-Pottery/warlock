@@ -6109,9 +6109,9 @@ mod tests {
         use warlock_tui::{QUIET_PERIOD, RELOAD_CEILING, WatchPolicy, Watching};
 
         use super::{
-            CancelGuard, Canned, Loaded, Manifest, NodeState, Pact, PactEvent, Reloaded, Running,
-            Scope, Toggled, Unwatched, apply_toggle, load, load_tree, mpsc, one_crate_to_load,
-            pact_of, state_of, toggle,
+            CancelGuard, Canned, Loaded, Manifest, NodeState, Pact, PactEntry, PactEvent, Reloaded,
+            Running, Scope, Scratch, Toggled, Unwatched, apply_toggle, fs, load, load_tree, mpsc,
+            one_crate_to_load, pact_of, state_of, toggle,
         };
         use crate::POLL_INTERVAL;
         use crate::session::{NOT_WATCHING, Watched, note, start_watching};
@@ -6124,6 +6124,34 @@ mod tests {
                 policy: WatchPolicy::new(&tree),
                 manifest: manifest_path(&scope.repo_root),
             }
+        }
+
+        // A repository whose manifest still records a directory the rules have
+        // since excluded: `vendor` is granted and `vendor/` is ignored, which is
+        // the state a reload is supposed to repair. Spelled against `.` rather
+        // than against the scratch root, so a temporary directory reached
+        // through a symlink cannot make the modules disagree with what the
+        // cleanup walks.
+        fn one_pact_since_ignored(name: &str) -> Scratch {
+            let scratch = one_crate_to_load(name);
+            scratch.write(".warlockignore", "vendor/\n");
+            scratch.write("vendor/acme/src/lib.rs", "//! Acme.\n");
+            Manifest::with_entries(["crates", "vendor"].map(|module| {
+                PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+                    .expect("a module spelled relative to the root")
+            }))
+            .save(&scratch.root)
+            .expect("a manifest that writes");
+            scratch
+        }
+
+        fn modules(scratch: &Scratch) -> Vec<String> {
+            Manifest::load(&scratch.root)
+                .expect("a manifest that reads")
+                .entries()
+                .iter()
+                .map(|entry| entry.module().to_owned())
+                .collect()
         }
 
         #[test]
@@ -6302,6 +6330,136 @@ mod tests {
                     ended + RELOAD_CEILING + QUIET_PERIOD
                 ),
                 "the run reloaded twice: once at its end and once for the events it caused"
+            );
+        }
+
+        #[test]
+        fn the_cleanup_waits_for_a_run_in_flight_the_way_the_reload_does() {
+            // The manifest a run is about to save and the manifest the cleanup
+            // would rewrite are the same file, so a cleanup that ran mid-run
+            // would be a lost update — one of the two writes wins. Nothing
+            // guards against that except the order inside `round`: `in_flight`
+            // returns before `reload_tree` is reached, and the cleanup lives
+            // inside `reload_tree`. This is the test that keeps that ordering
+            // from being refactored into a lock or a queue.
+
+            const ROUNDS: u32 = 12;
+
+            let scratch = one_pact_since_ignored("watch-in-flight-cleanup");
+            let (mut app, scope) = load(&scratch);
+            let mut watched = unwatched(&scope);
+
+            let base = Instant::now();
+            watched.policy.accepted(base);
+
+            // Round after round with the pact in flight, past the quiet period
+            // and past the ceiling too.
+            for round in 1..=ROUNDS {
+                let at = base + QUIET_PERIOD * round;
+                assert!(
+                    !watched.round(&mut app, &scope, true, at),
+                    "the tree was read under a run in flight, {at:?} in"
+                );
+            }
+            assert!(
+                QUIET_PERIOD * ROUNDS > RELOAD_CEILING,
+                "the rounds above stopped short of the ceiling, so they proved nothing about it"
+            );
+
+            assert_eq!(
+                modules(&scratch),
+                ["crates", "vendor"],
+                "the manifest was rewritten under a run that was still writing it"
+            );
+            assert!(
+                watched.policy.owes_reload(),
+                "the trigger was dropped rather than remembered"
+            );
+
+            // And the same round with nothing in flight drops it, which is what
+            // makes the assertion above about the run rather than about a
+            // repository that had nothing to drop.
+            assert!(
+                watched.round(&mut app, &scope, false, base + QUIET_PERIOD * (ROUNDS + 1)),
+                "the disk went quiet, the run ended, and the tree was never read"
+            );
+            assert_eq!(
+                modules(&scratch),
+                ["crates"],
+                "`pacts.toml` still records a directory nothing will walk again"
+            );
+        }
+
+        #[test]
+        fn a_cleanup_that_saved_settles_after_one_more_reload() {
+            // `Watched::manifest` is compared for by name, so the cleanup's own
+            // save is an event the next drain accepts and a reload it asks for.
+            // That is fine exactly once: the second reload finds nothing left to
+            // drop, writes nothing, and so asks for no third. A cleanup that
+            // saved unconditionally would instead have every reload asking for
+            // the next one, for as long as warlock is up.
+
+            const ROUNDS: u32 = 12;
+
+            let scratch = one_pact_since_ignored("watch-cleanup-settles");
+            let (mut app, scope) = load(&scratch);
+            let mut watched = unwatched(&scope);
+            let path = manifest_path(&scope.repo_root);
+
+            let base = Instant::now();
+            watched.policy.accepted(base);
+            assert!(
+                watched.round(&mut app, &scope, false, base + QUIET_PERIOD),
+                "the disk went quiet and the tree was never read"
+            );
+            assert_eq!(
+                modules(&scratch),
+                ["crates"],
+                "the reload's cleanup left the excluded directory in the manifest"
+            );
+
+            let cleaned = fs::read(&path).expect("the manifest the cleanup wrote");
+            let written_at = fs::metadata(&path)
+                .and_then(|manifest| manifest.modified())
+                .expect("a modification time");
+
+            // The watcher is off here, so what stands in for a drain seeing the
+            // cleanup's own save is the policy being told the manifest path was
+            // accepted — which is all `round` does with it.
+            let saved_at = base + Duration::from_secs(1);
+            watched.policy.accepted(saved_at);
+            assert!(
+                watched.round(&mut app, &scope, false, saved_at + QUIET_PERIOD),
+                "the cleanup's own save was never answered by a reload"
+            );
+
+            assert_eq!(
+                fs::read(&path).expect("the manifest is still there"),
+                cleaned,
+                "the second reload rewrote a manifest with nothing to remove"
+            );
+            assert_eq!(
+                fs::metadata(&path)
+                    .and_then(|manifest| manifest.modified())
+                    .expect("a modification time"),
+                written_at,
+                "the file was written again, byte for byte, and so asked for a third reload"
+            );
+            assert!(
+                !watched.policy.owes_reload(),
+                "something is still owed after the second reload, so the rounds would not stop"
+            );
+            for round in 1..=ROUNDS {
+                let at = saved_at + RELOAD_CEILING + QUIET_PERIOD * round;
+                assert!(
+                    !watched.round(&mut app, &scope, false, at),
+                    "the reloads are chasing their own saves, {at:?} in"
+                );
+            }
+            assert_eq!(
+                app.message(),
+                None,
+                "a cleanup that did its work has nothing to say"
             );
         }
 

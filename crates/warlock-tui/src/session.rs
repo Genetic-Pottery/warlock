@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use warlock_engine::{
     Loaded, Manifest, Tree, load_sigils, load_tree, manifest_path, repository_root, sigils,
+    unpact_ignored,
 };
 use warlock_tui::{App, Chrome, Sigils, Watch, WatchPolicy, Watching, reseat_on};
 
@@ -39,6 +40,13 @@ pub(crate) const NOT_REFRESHED: &str = "the view could not be refreshed and is t
 // watcher is asked for, rather than on every frame — a line re-set ten times a
 // second talks over everything else the footer has to say.
 pub(crate) const NOT_WATCHING: &str = "live updates are off; the tree is the one loaded at startup";
+
+// Says what is still on disk, because that is what the reader has to act on:
+// the manifest keeps entries for directories the repository has since excluded,
+// so `warlock stale` can name a module no walk will ever reach again. Nothing
+// was drawn wrong and no run was lost, which is why it is a line rather than an
+// error.
+pub(crate) const NOT_CLEANED: &str = "entries under an ignored directory are still in the manifest";
 
 // Called on the event loop's thread and on no other. A worker thread must never
 // reach in here: it would be reading a tree while the thread that draws it is
@@ -61,6 +69,10 @@ pub(crate) const NOT_WATCHING: &str = "live updates are off; the tree is the one
 // has it, and the watcher's filter has to be rebuilt from the walk that produced
 // what is now on screen.
 pub(crate) fn reload_tree(app: &mut App, scope: &Scope) -> Option<Tree> {
+    if let Some(line) = clean_ignored(&scope.repo_root, &scope.root) {
+        note(app, line);
+    }
+
     match load_tree(&scope.root) {
         Ok(Loaded { tree, problems }) => {
             *app = reseat_on(app, &tree);
@@ -85,6 +97,42 @@ pub(crate) fn reload_tree(app: &mut App, scope: &Scope) -> Option<Tree> {
             None
         }
     }
+}
+
+// Before the load rather than after it, so the walk that produces the rows on
+// screen and the manifest that colours them are read in that order and a row
+// cannot be drawn from an entry this call was about to drop.
+//
+// Nothing is kept between calls and nothing is returned upwards: a cleanup that
+// could not be finished leaves the manifest as it was, which is the state the
+// next reload starts from and tries again over. The line is the whole of what
+// happens about a failure, and it must not stop the tree being read — warlock is
+// a way of reading a tree, and an entry that outlived its directory is no reason
+// to stop drawing one.
+//
+// The two roots are taken apart rather than as a `Scope` because the startup
+// load has neither a `Scope` nor an `App` yet — it has a working directory and
+// the repository root above it, and its line has to be carried as a value until
+// there is a footer to put it on.
+fn clean_ignored(repo_root: &Path, root: &Path) -> Option<String> {
+    let line = |error: Error| format!("{NOT_CLEANED}: {}", one_line(&error.to_string()));
+    dropped_ignored(repo_root, root).err().map(line)
+}
+
+// Saved only when something went, because `Manifest::save` rewrites the file:
+// an unconditional save would touch `pacts.toml` on every reload, and the
+// watcher compares for that path by name, so every load would ask for the next
+// one.
+fn dropped_ignored(repo_root: &Path, root: &Path) -> Result<(), Error> {
+    let manifest = load_manifest(repo_root)?;
+    let left =
+        unpact_ignored(&manifest, repo_root, root).map_err(|source| Error::Pact { source })?;
+    if left.entries().len() < manifest.entries().len() {
+        left.save(repo_root)
+            .map_err(|source| Error::Manifest { source })?;
+    }
+
+    Ok(())
 }
 
 // The footer's precedence in one place, because two lines have it: how the
@@ -314,19 +362,40 @@ pub(crate) fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
 // problems.
 pub(crate) fn load_app() -> Result<(App, Scope, Tree), Error> {
     let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
+    load_app_in(&working_dir)
+}
+
+// The working directory is a parameter so a test can load a repository it wrote
+// without calling `env::set_current_dir`, which is process-wide and would reach
+// into every other test running beside it. `load_app` is still the only caller
+// outside this module and still reads the directory itself.
+fn load_app_in(working_dir: &Path) -> Result<(App, Scope, Tree), Error> {
+    // Asked before the load rather than after it, because the cleanup has to
+    // run first and it is written under this root. A working directory with no
+    // repository above it is not refused here — `load_tree` is the one place
+    // that says so, in its own words, and it is about to.
+    let found = repository_root(working_dir);
+    let uncleaned = found
+        .as_deref()
+        .and_then(|repo_root| clean_ignored(repo_root, working_dir));
+
     let Loaded { tree, problems } =
-        load_tree(&working_dir).map_err(|source| Error::Load { source })?;
+        load_tree(working_dir).map_err(|source| Error::Load { source })?;
     if let Some(error) = Error::from_problems(&problems) {
         return Err(error);
     }
 
-    // The load succeeded, so a repository root was found; asking again is a
-    // walk up a path, not a second load. The fallback is unreachable, and
-    // labelling the root as itself is the closest thing to true if it ever is
-    // reached.
-    let repo_root = repository_root(tree.root_path()).unwrap_or(working_dir);
+    // The load succeeded, so a repository root was found: the fallback is
+    // unreachable, and labelling the root as itself is the closest thing to
+    // true if it ever is reached.
+    let repo_root = found.unwrap_or_else(|| working_dir.to_path_buf());
 
-    let app = App::from_tree(&tree);
+    let mut app = App::from_tree(&tree);
+    // A cleanup that could not be finished is a line and nothing more, said
+    // here because this is the first moment there is a footer to say it on.
+    if let Some(line) = uncleaned {
+        note(&mut app, line);
+    }
     // Resolved here and nowhere else. Neither half of the header line can
     // change under a running warlock — the roots are fixed for the session and a
     // sigil is written with warlock not running — so it is built once, kept
@@ -349,9 +418,9 @@ mod tests {
     use std::{env, fs, process};
 
     use warlock_engine::{Manifest, PactEntry, manifest_path, save_sigils, sigils_path};
-    use warlock_tui::{Chrome, Sigils};
+    use warlock_tui::{App, Chrome, Sigils};
 
-    use super::{Scope, load_manifest, sigils_under};
+    use super::{NOT_CLEANED, Scope, load_app_in, load_manifest, reload_tree, sigils_under};
     use crate::error::Error;
 
     #[test]
@@ -402,6 +471,13 @@ mod tests {
                 env::temp_dir().join(format!("warlock-session-{}-{name}-{unique}", process::id()));
             fs::create_dir_all(&root).expect("a scratch directory under the temp directory");
             Self { root }
+        }
+
+        fn write(&self, relative: &str, contents: &str) {
+            let path = self.root.join(relative);
+            fs::create_dir_all(path.parent().expect("a file has a directory above it"))
+                .expect("the directories above the file");
+            fs::write(&path, contents).expect("a file under the scratch directory");
         }
     }
 
@@ -515,6 +591,267 @@ mod tests {
         fs::write(&path, "not a config\n").expect("a file that is not TOML");
 
         assert_eq!(sigils_under(home.path(), repo.path()), Sigils::Unknown);
+    }
+
+    // A load walks up looking for `.git/` and refuses without one, so every
+    // repository here has a `HEAD` in it. `vendor/` is what the rules exclude
+    // and `crates/` is what survives them.
+    fn a_repository(name: &str) -> Scratch {
+        let scratch = Scratch::new(name);
+        scratch.write(".git/HEAD", "ref: refs/heads/main\n");
+        scratch.write(".warlockignore", "vendor/\n");
+        scratch.write("crates/engine/src/lib.rs", "//! Engine.\n");
+        scratch.write("vendor/acme/src/lib.rs", "//! Acme.\n");
+        scratch
+    }
+
+    // Spelled against `.` rather than against the scratch root, so a temporary
+    // directory reached through a symlink cannot make the modules disagree with
+    // what the cleanup walks.
+    fn pacted(modules: &[&str]) -> Manifest {
+        Manifest::with_entries(modules.iter().map(|module| {
+            PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+                .expect("a module spelled relative to the root")
+        }))
+    }
+
+    fn a_scope(scratch: &Scratch) -> Scope {
+        Scope {
+            root: scratch.root.clone(),
+            repo_root: scratch.root.clone(),
+            chrome: Chrome::of(&scratch.root, &scratch.root),
+        }
+    }
+
+    fn modules_on_disk(scratch: &Scratch) -> Vec<String> {
+        load_manifest(&scratch.root)
+            .expect("a manifest that reads")
+            .entries()
+            .iter()
+            .map(|entry| entry.module().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_load_drops_the_entries_the_repository_has_since_excluded() {
+        let scratch = a_repository("ignored-dropped");
+        pacted(&["crates", "vendor", "vendor/acme"])
+            .save(&scratch.root)
+            .expect("a manifest that writes");
+        let mut app = App::default();
+
+        assert!(
+            reload_tree(&mut app, &a_scope(&scratch)).is_some(),
+            "the tree was not read"
+        );
+
+        assert_eq!(
+            modules_on_disk(&scratch),
+            ["crates"],
+            "`pacts.toml` still records directories nothing will walk again"
+        );
+        assert_eq!(
+            app.message(),
+            None,
+            "a cleanup that did its work has nothing to say"
+        );
+    }
+
+    #[test]
+    fn a_load_with_nothing_to_drop_leaves_pacts_toml_exactly_as_it_was() {
+        // The watcher compares for `pacts.toml` by name, so a save here would
+        // ask for another reload, which would save again: every load writing
+        // the file is every load asking for the next one.
+        let scratch = a_repository("ignored-nothing");
+        pacted(&["crates"])
+            .save(&scratch.root)
+            .expect("a manifest that writes");
+        let path = manifest_path(&scratch.root);
+        let before = fs::read(&path).expect("the manifest just saved");
+        let written_at = fs::metadata(&path)
+            .and_then(|manifest| manifest.modified())
+            .expect("a modification time");
+        let mut app = App::default();
+
+        assert!(
+            reload_tree(&mut app, &a_scope(&scratch)).is_some(),
+            "the tree was not read"
+        );
+
+        assert_eq!(
+            fs::read(&path).expect("the manifest is still there"),
+            before,
+            "the manifest was rewritten with nothing to remove"
+        );
+        assert_eq!(
+            fs::metadata(&path)
+                .and_then(|manifest| manifest.modified())
+                .expect("a modification time"),
+            written_at,
+            "the file was written again, byte for byte"
+        );
+        assert_eq!(app.message(), None, "nothing happened, so nothing is said");
+    }
+
+    #[test]
+    fn a_cleanup_that_cannot_be_finished_is_one_line_and_not_an_ended_session() {
+        let scratch = a_repository("ignored-unreadable");
+        scratch.write(".warlock/pacts.toml", "not a manifest\n");
+        let mut app = App::default();
+
+        reload_tree(&mut app, &a_scope(&scratch));
+
+        let message = app
+            .message()
+            .expect("the reader is told nothing was dropped");
+        assert!(
+            message.starts_with(NOT_CLEANED),
+            "the cleanup's own line is the one on the footer: {message}"
+        );
+        assert!(
+            !message.contains('\n'),
+            "a footer line that wraps is a footer line that hides a row: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cleanup_that_cannot_save_says_so_and_still_draws_the_tree() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let scratch = a_repository("ignored-readonly");
+        let manifest = pacted(&["crates", "vendor"]);
+        manifest.save(&scratch.root).expect("the first save works");
+        let directory = scratch.root.join(".warlock");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o555))
+            .expect("chmods the manifest directory read-only");
+        let mut app = App::default();
+
+        let tree = reload_tree(&mut app, &a_scope(&scratch));
+
+        // Back to writable before anything can fail, so the scratch repository
+        // can still be removed.
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).expect("chmods it back");
+
+        assert!(
+            tree.is_some(),
+            "a cleanup that could not write kept the tree off the screen"
+        );
+        let message = app
+            .message()
+            .expect("the reader is told nothing was dropped");
+        assert!(
+            message.starts_with(NOT_CLEANED),
+            "the cleanup's own line is the one on the footer: {message}"
+        );
+        assert!(
+            !message.contains('\n'),
+            "a footer line that wraps is a footer line that hides a row: {message}"
+        );
+        assert_eq!(
+            load_manifest(&scratch.root).expect("a manifest that reads"),
+            manifest,
+            "a save that failed took entries with it"
+        );
+    }
+
+    #[test]
+    fn the_first_load_of_the_session_drops_the_entries_the_repository_has_since_excluded() {
+        // The rule can be added with warlock not running, so the startup load
+        // is the first chance anything has to notice it — waiting for a second
+        // load would draw one tree from a manifest the reader can see is wrong.
+        let scratch = a_repository("ignored-at-startup");
+        pacted(&["crates", "vendor", "vendor/acme"])
+            .save(&scratch.root)
+            .expect("a manifest that writes");
+
+        let (app, scope, _tree) = load_app_in(&scratch.root).expect("a repository that loads");
+
+        assert_eq!(
+            modules_on_disk(&scratch),
+            ["crates"],
+            "`pacts.toml` still records directories nothing will walk again"
+        );
+        assert_eq!(
+            scope.repo_root, scratch.root,
+            "the repository root resolved before the load is the one kept"
+        );
+        assert_eq!(
+            app.message(),
+            None,
+            "a cleanup that did its work has nothing to say"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cleanup_that_cannot_be_finished_at_startup_is_a_line_rather_than_a_refusal_to_start() {
+        // The startup load refuses a tree whose nodes it could not colour from
+        // what is on disk, and this is deliberately not that: the manifest the
+        // cleanup could not rewrite is exactly the one the rows were coloured
+        // from, so there is nothing dishonest to draw.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let scratch = a_repository("ignored-at-startup-readonly");
+        let manifest = pacted(&["crates", "vendor"]);
+        manifest.save(&scratch.root).expect("the first save works");
+        let directory = scratch.root.join(".warlock");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o555))
+            .expect("chmods the manifest directory read-only");
+
+        let started = load_app_in(&scratch.root);
+
+        // Back to writable before anything can fail, so the scratch repository
+        // can still be removed.
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).expect("chmods it back");
+
+        let (app, _scope, _tree) =
+            started.expect("a cleanup that could not save ended the session");
+        let message = app
+            .message()
+            .expect("the reader is told nothing was dropped");
+        assert!(
+            message.starts_with(NOT_CLEANED),
+            "the cleanup's own line is the one on the footer: {message}"
+        );
+        assert!(
+            !message.contains('\n'),
+            "a footer line that wraps is a footer line that hides a row: {message}"
+        );
+        assert_eq!(
+            load_manifest(&scratch.root).expect("a manifest that reads"),
+            manifest,
+            "a save that failed took entries with it"
+        );
+    }
+
+    #[test]
+    fn a_cleanup_that_failed_is_attempted_again_on_the_next_load() {
+        // Nothing remembers the failure, which is the point: a manifest fixed
+        // in another window between two reloads is cleaned by the second, with
+        // no key pressed and no restart.
+        let scratch = a_repository("ignored-again");
+        scratch.write(".warlock/pacts.toml", "not a manifest\n");
+        let scope = a_scope(&scratch);
+        let mut app = App::default();
+
+        reload_tree(&mut app, &scope);
+        assert!(
+            app.message()
+                .is_some_and(|line| line.starts_with(NOT_CLEANED)),
+            "the first load's cleanup was expected to fail"
+        );
+        pacted(&["crates", "vendor"])
+            .save(&scratch.root)
+            .expect("a manifest that writes");
+
+        reload_tree(&mut app, &scope);
+
+        assert_eq!(
+            modules_on_disk(&scratch),
+            ["crates"],
+            "the second load did not try the cleanup again"
+        );
     }
 
     // Every test here builds both its home *and* its repository root out of
