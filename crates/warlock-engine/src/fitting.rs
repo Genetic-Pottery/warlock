@@ -124,6 +124,28 @@ pub(crate) fn own_files(directory: &Path) -> Result<BTreeMap<String, PathBuf>, E
     Ok(walk(directory)?.files)
 }
 
+// What warlock knows about a directory without sending any of it: the declared
+// names of every file the document holds a line for. It is the second witness
+// `check` asks when the request carries something other than the files — a
+// synthesis pass over assembled lines, where no file's text is in the request
+// at all and every real name would otherwise be refused.
+pub(crate) fn measured(directory: &Path) -> Result<Described, Error> {
+    let mut described = Described::default();
+    for (name, path) in own_files(directory)? {
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let Ok(text) = str::from_utf8(&bytes) else {
+            continue;
+        };
+        let names = languages::declared_names(&path, text);
+        if !names.is_empty() {
+            described.declared.insert(name, names);
+        }
+    }
+    Ok(described)
+}
+
 // One file, reduced the way the same file would be inside a directory's
 // request: the per-file cap still applies, `elide` still takes the bodies out,
 // and the declared names are still measured here rather than guessed at later.

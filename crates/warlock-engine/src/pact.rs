@@ -10,8 +10,8 @@ use ignore::WalkBuilder;
 
 use crate::document::{self, ATTEMPTS, Accepted, Defect, Fill};
 use crate::fitting::{
-    Fitted, PER_FILE_BYTE_CAP, Problem, byte_count, carried_bytes, carry_hash, fit, one_file,
-    own_files,
+    Fitted, PER_FILE_BYTE_CAP, Problem, byte_count, carried_bytes, carry_hash, fit, measured,
+    one_file, own_files,
 };
 use crate::ignores;
 use crate::manifest::{ROOT_MODULE, temp_file_name, write_and_sync};
@@ -988,6 +988,86 @@ pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
 /// assert!(!cut);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+/// The directory-wide slots, written from the assembled lines.
+///
+/// The second half of a per-file document. It is shown the lines and never the
+/// source, and what it says is checked against warlock's own walk of the
+/// directory rather than against the request — see `Expected::knows`, which is
+/// what makes a pass that was shown no files checkable at all.
+///
+/// Ends in a fill either way, like every other road here: [`document::mend`] is
+/// the floor under an exhausted loop, so a directory is never lost because its
+/// synthesis could not be got right.
+pub fn synthesise(
+    directory: impl AsRef<Path>,
+    lines: &BTreeMap<String, String>,
+    agent: &dyn Agent,
+) -> Result<Synthesised, Error> {
+    let directory = directory.as_ref();
+    let described = measured(directory)?;
+
+    // Names and sizes, and no text: the lines are the evidence and the files
+    // are here so that a lookup can name one. `Expected` reads the sizes for
+    // the fallback line, which is why they are measured rather than invented.
+    let mut files = Vec::new();
+    for (name, path) in own_files(directory)? {
+        let size = std::fs::metadata(&path).map_or(0, |found| found.len());
+        files.push(agent::File::omitted(name, size));
+    }
+    let request = agent::Request::new(document::SYNTHESIS_PROMPT, directory).with_files(files);
+    let expected = document::Expected::of(&request);
+    let name = directory.file_name().map_or_else(
+        || directory.to_string_lossy().into_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+
+    let mut rejected = Vec::new();
+    let mut best = None;
+    for _ in 0..document::ATTEMPTS {
+        let asked = request
+            .clone()
+            .with_prompt(document::synthesis_instructions(&name, lines, &rejected));
+        let answer = agent.run(&asked).map_err(|source| Error::Refused {
+            directory: directory.to_path_buf(),
+            cause: Refusal::Agent { source },
+        })?;
+        match document::accept_synthesis(answer.text(), lines, &expected, &described) {
+            document::Accepted::Filled(fill) => {
+                return Ok(Synthesised {
+                    fill,
+                    described,
+                    mends: Vec::new(),
+                });
+            }
+            document::Accepted::Defective { fill, defects } => {
+                best = Some(fill);
+                rejected = defects;
+            }
+            document::Accepted::Unparsed(defect) => rejected = vec![defect],
+        }
+    }
+
+    let unusable = best.unwrap_or_else(|| document::Fill {
+        files: lines.clone(),
+        ..document::Fill::default()
+    });
+    let (fill, mends) = document::mend(&unusable, &expected, &described);
+    Ok(Synthesised {
+        fill,
+        described,
+        mends,
+    })
+}
+
+/// A directory's own slots, and what warlock had to write itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Synthesised {
+    pub fill: document::Fill,
+    /// The walk behind the check, kept because `render` needs the same one.
+    pub described: document::Described,
+    pub mends: Vec<document::Mend>,
+}
+
 /// Every line a directory's document needs, asking only about what moved.
 ///
 /// The document is the store: a file whose bytes hash to what the manifest
@@ -1571,8 +1651,8 @@ mod tests {
     use super::{
         DOCUMENT_FILE, Failure, Observer, Pacted, PactedSubtree, Pacting, Refusal, Unviewable,
         Unwatched, Viewed, assemble_lines, closed_scopes_at_or_below, describe_file,
-        pact_directory, pact_subtree, pactable_directories, refresh_subtree, unpact_ignored,
-        unpact_subtree, view_file,
+        pact_directory, pact_subtree, pactable_directories, refresh_subtree, synthesise,
+        unpact_ignored, unpact_subtree, view_file,
     };
     use crate::document::{self, STAMP};
     use crate::fitting::{
@@ -2288,6 +2368,69 @@ mod tests {
             .map(|(path, line)| format!("- `{path}` (1 B) — {line}"))
             .collect();
         format!("\n## Files\n\n{}\n", rows.join("\n"))
+    }
+
+    #[test]
+    fn synthesis_is_shown_the_lines_and_checked_against_the_directory() {
+        // The pass sees no source at all, so every name it uses is one the
+        // request cannot vouch for. What makes the answer checkable is
+        // warlock's own walk, and what makes this test worth having is that the
+        // answer names `read_one` — a symbol in the file and in no line.
+        let dir = one_file_directory();
+        let agent = Lining::saying(
+            r#"{"purpose": "A directory of one reading file, for the tests below it.",
+                "structure": [{"line": "`reading.rs` is the only file here.", "names": ["reading.rs"]}],
+                "rules": [{"line": "Nothing in here writes.", "names": []}],
+                "lookups": [{"for": "reading one record", "open": "reading.rs", "symbol": "read_one"}]}"#,
+        );
+        let lines = [(
+            "reading.rs".to_owned(),
+            "The reading half of the fixture.".to_owned(),
+        )]
+        .into_iter()
+        .collect();
+
+        let synthesised = synthesise(dir.path(), &lines, &agent).expect("a fill either way");
+
+        assert_eq!(agent.passes.get(), 1, "a clean answer is taken at once");
+        assert!(synthesised.mends.is_empty(), "{:?}", synthesised.mends);
+        assert_eq!(
+            synthesised.fill.files, lines,
+            "the lines are the caller's and pass through untouched",
+        );
+        assert_eq!(
+            synthesised.fill.lookups[0].symbol.as_deref(),
+            Some("read_one"),
+            "a symbol no line spells is still checkable against the walk",
+        );
+    }
+
+    #[test]
+    fn synthesis_that_cannot_be_got_right_is_mended_rather_than_lost() {
+        let dir = one_file_directory();
+        let agent =
+            Lining::saying(r#"{"purpose": "", "structure": [], "rules": [], "lookups": []}"#);
+        let lines = [(
+            "reading.rs".to_owned(),
+            "The reading half of the fixture.".to_owned(),
+        )]
+        .into_iter()
+        .collect();
+
+        let synthesised = synthesise(dir.path(), &lines, &agent).expect("a fill either way");
+
+        assert_eq!(agent.passes.get(), document::ATTEMPTS);
+        assert_eq!(
+            synthesised
+                .mends
+                .iter()
+                .map(|mend| mend.field.as_str())
+                .collect::<Vec<_>>(),
+            ["purpose"],
+            "{:?}",
+            synthesised.mends,
+        );
+        assert!(!synthesised.fill.purpose.is_empty());
     }
 
     #[test]

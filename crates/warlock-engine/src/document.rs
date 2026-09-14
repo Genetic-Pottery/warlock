@@ -512,6 +512,119 @@ impl Accepted {
     }
 }
 
+// The synthesis pass: the slots that are about a directory rather than about
+// one file in it, written from the lines and not from the source.
+//
+// Per-file granularity has no pass that reads the whole directory, so nothing
+// is left to write `purpose`, `## Structure`, `## Rules` and `## Where to look`
+// from except the lines already written. What makes that safe to check rather
+// than merely cheap is the second witness: `check` asks `Described` for a name
+// the request cannot vouch for, and a synthesis request carries no file text at
+// all.
+pub const SYNTHESIS_PROMPT: &str = "\
+Fill in the JSON object at the end of these instructions, describing the \
+directory whose file lines follow them, and output the filled object and \
+nothing else.
+
+You are writing the parts of a WARLOCK.md that are about the directory as a \
+whole. It is read by a model, not a person, before any source file is opened, \
+and its one job is routing: to say what is here and which file to open for a \
+given question. Warlock is the tool that lays the document out from your \
+answer; it is not the project being described, and its name belongs in no \
+value unless the files themselves use it.
+
+You are not shown the source. You are shown the directory's name and the line \
+already written for each file in it, and every claim you make has to come from \
+those lines.
+
+\"purpose\": one to three sentences. What this directory is and what it does, \
+in the words a question about it would use.
+
+\"structure\": how the files here fit together, one fact per entry: what calls \
+what, in what order, which way a dependency runs. Only what the lines you were \
+shown show. Each entry is {\"line\": ..., \"names\": [...]}, where \"names\" \
+lists every file, type, function or constant the line refers to, spelt as the \
+lines spell it. A structure entry names at least one. An empty list is fine.
+
+\"rules\": constraints the files state as rules, one per entry, in the same \
+{\"line\": ..., \"names\": [...]} shape. A rule that refers to nothing leaves \
+\"names\" empty. Not something inferred. An empty list is fine.
+
+\"lookups\": routes, each {\"for\": ..., \"open\": ..., \"symbol\": ...}. \
+\"for\" is a question a reader might arrive with, in plain words. \"open\" is \
+exactly one of the filenames below. \"symbol\" is optional and must be a name \
+one of these lines spells. Prefer the routes a reader could not guess from the \
+file names.
+
+Every value is one line. Write about the directory in its own voice: no first \
+person, and nothing about this request or about what you were or were not \
+shown.";
+
+#[must_use]
+pub fn synthesis_instructions(
+    name: &str,
+    lines: &BTreeMap<String, String>,
+    rejected: &[Defect],
+) -> String {
+    let mut text = SYNTHESIS_PROMPT.to_owned();
+    if !rejected.is_empty() {
+        text.push_str(
+            "\n\nA previous answer to exactly this request was turned down. Do not repeat \
+             these defects:",
+        );
+        for defect in rejected {
+            let _ = write!(text, "\n- {defect}");
+        }
+    }
+    let _ = write!(
+        text,
+        "\n\nCaps: {ENTRY_MINIMUM} to {ENTRY_CHARS} characters per value, {PURPOSE_CHARS} for \
+         the purpose, {LIST_CAP} entries per list.\n\nThe directory is `{name}`, and its \
+         files are:\n"
+    );
+    for (path, line) in lines {
+        let _ = write!(text, "\n- `{path}` — {line}");
+    }
+    text.push_str(
+        "\n\nReturn exactly this object with every empty string filled in and the lists \
+         populated, as JSON, with no code fence and nothing before or after it:\n\n\
+         {\"purpose\": \"\", \"structure\": [], \"rules\": [], \"lookups\": []}",
+    );
+    text
+}
+
+/// The directory-wide slots, checked the way a whole answer's are.
+///
+/// `files` and `directories` are the caller's: this pass is not shown them and
+/// is not asked about them, so a fill returned here carries the lines it was
+/// given and whatever the pass wrote about them together.
+#[must_use]
+pub fn accept_synthesis(
+    answer: &str,
+    lines: &BTreeMap<String, String>,
+    expected: &Expected<'_>,
+    described: &Described,
+) -> Accepted {
+    let parsed = match parse(answer) {
+        Ok(parsed) => parsed,
+        Err(defect) => return Accepted::Unparsed(defect),
+    };
+
+    // Checked without the lines and answered with them. The pass was asked
+    // about no file, so a file entry reaching `check` would be an entry nothing
+    // asked for; each line was checked as it was accepted, by `accept_file`.
+    let defects = check(&parsed, expected, described);
+    let fill = Fill {
+        files: lines.clone(),
+        ..parsed
+    };
+    if defects.is_empty() {
+        Accepted::Filled(fill)
+    } else {
+        Accepted::Defective { fill, defects }
+    }
+}
+
 /// Read the file lines back out of a document warlock wrote.
 ///
 /// This is what makes the document its own store: a run re-asks about the files
@@ -961,7 +1074,7 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
         });
     }
     for (index, lookup) in fill.lookups.iter().enumerate() {
-        route(index, lookup, expected, &mut defects);
+        route(index, lookup, expected, described, &mut defects);
     }
 
     // Measured, not hypothetical: told it is filling in "the WARLOCK.md" and
@@ -1121,7 +1234,13 @@ fn stated(
     }
 }
 
-fn route(index: usize, lookup: &Lookup, expected: &Expected<'_>, defects: &mut Vec<Defect>) {
+fn route(
+    index: usize,
+    lookup: &Lookup,
+    expected: &Expected<'_>,
+    described: &Described,
+    defects: &mut Vec<Defect>,
+) {
     line(
         &format!("lookups[{index}].for"),
         &lookup.topic,
@@ -1151,9 +1270,17 @@ fn route(index: usize, lookup: &Lookup, expected: &Expected<'_>, defects: &mut V
         defects.push(Defect::Empty { field });
         return;
     }
+    // Two witnesses, the same as `knows`: the file's own text where the request
+    // carried it, and warlock's own measurement of the directory where it did
+    // not. A route into a file too big to send, or one named by a pass shown
+    // assembled lines rather than source, is checkable either way.
     let verified = expected
         .checkable(open)
-        .is_some_and(|text| text.contains(symbol));
+        .is_some_and(|text| text.contains(symbol))
+        || described
+            .declared
+            .get(open)
+            .is_some_and(|names| names.iter().any(|name| name == symbol));
     if !verified {
         defects.push(Defect::UnverifiedSymbol {
             field,
@@ -1170,11 +1297,16 @@ pub fn render(name: &str, fill: &Fill, expected: &Expected<'_>, described: &Desc
     if !expected.files.is_empty() {
         text.push_str("\n## Files\n\n");
         for (path, (size, shown)) in &expected.files {
-            let entry = match shown {
-                Shown::Text(_) => fill.files.get(*path).map_or("", |line| line.trim()),
+            let written = fill
+                .files
+                .get(*path)
+                .map(|line| line.trim())
+                .filter(|line| !line.is_empty());
+            let entry = written.unwrap_or(match shown {
+                Shown::Text(_) => "",
                 Shown::NotText => "not text; name and size only",
                 Shown::Unsent => "not read by the pass; name and size only",
-            };
+            });
             let _ = write!(text, "- `{path}` ({}) — {entry}", human(*size));
             if let Some(names) = described
                 .declared
