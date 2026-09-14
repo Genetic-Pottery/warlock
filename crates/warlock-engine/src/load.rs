@@ -258,7 +258,7 @@ impl Builder {
             .unwrap_or_default();
         let ignored = found.is_some_and(|directory| directory.ignored);
 
-        let state = self.state_of(dir, problems);
+        let state = self.state_of(dir, ignored, problems);
         let scope = self.scope_of(dir, problems);
 
         Node::new(dir, document, state)
@@ -283,7 +283,16 @@ impl Builder {
     // The manifest is consulted before anything is hashed, and that ordering is
     // the whole of the "hash only pacted subtrees" rule: an unpacted node is
     // unpacted whatever is under it, so reading those bytes would buy nothing.
-    fn state_of(&self, dir: &Path, problems: &mut Vec<Problem>) -> NodeState {
+    fn state_of(&self, dir: &Path, ignored: bool, problems: &mut Vec<Problem>) -> NodeState {
+        // Before the manifest is read, so that an entry left over from before
+        // the rule was written cannot send an excluded directory to
+        // `subtree_hash`. That hash skips excluded content, so it could never
+        // match the grant again: the row would be yellow for good, and the only
+        // repair would be hand-editing the file this tree exists to replace.
+        if ignored {
+            return NodeState::Unpacted;
+        }
+
         // A path with no manifest form — not valid UTF-8, say — can match no
         // entry, so it is unpacted rather than an error: an oddly named
         // directory should not fail the load, and it is nobody's problem to
@@ -886,6 +895,52 @@ mod tests {
             states(&tree_of(repo.path()), repo.path()),
             before,
             "a covered edit still restales, or this test proves nothing",
+        );
+    }
+
+    #[test]
+    fn a_pacted_directory_a_rule_later_excludes_goes_gray_rather_than_yellow() {
+        let repo = fixture(&[], &["docs", "docs/notes"]);
+        write_file(&repo.path().join("docs/notes/one.md"), "a thought\n");
+        write_file(&repo.path().join("docs/src/lib.rs"), "pub fn one() {}\n");
+
+        // Granted before the rule exists, so both digests are taken over the
+        // content as it then stood: `docs/notes` was a module somebody pacted,
+        // and `docs` was granted with those files still inside it.
+        let module = repo.path().join("docs");
+        let notes = module.join("notes");
+        let granted_docs = subtree_hash(&module).expect("the module hashes");
+        let granted_notes = subtree_hash(&notes).expect("the module hashes");
+        hand_write_manifest(
+            repo.path(),
+            &[
+                ("docs", Some(&granted_docs)),
+                ("docs/notes", Some(&granted_notes)),
+            ],
+        );
+        let before = states(&tree_of(repo.path()), repo.path());
+        for module in ["docs", "docs/notes"] {
+            assert!(
+                before.contains(&(module.to_owned(), NodeState::PactedFresh)),
+                "the fixture has to start green for this test to mean \
+                 anything: {before:?}",
+            );
+        }
+
+        write_file(&repo.path().join(".warlockignore"), "notes/\n");
+
+        let tree = tree_of(repo.path());
+        assert_eq!(
+            tree.find(&notes).expect("the row stays").state,
+            NodeState::Unpacted,
+            "the rule excluded it, so its entry no longer says anything about \
+             it: gray, not a yellow nothing in the tree can clear",
+        );
+        assert_eq!(
+            tree.find(&module).expect("a node").state,
+            NodeState::PactedStale,
+            "the parent is another matter: the files it was granted over have \
+             left its digest, and that is a real change to covered content",
         );
     }
 
