@@ -1377,9 +1377,10 @@ mod tests {
     use super::{
         DOCUMENT_FILE, Failure, Observer, Pacted, PactedSubtree, Pacting, Refusal, Unviewable,
         Unwatched, Viewed, closed_scopes_at_or_below, pact_directory, pact_subtree,
-        pactable_directories, refresh_subtree, unpact_subtree, view_file,
+        pactable_directories, refresh_subtree, unpact_ignored, unpact_subtree, view_file,
     };
     use crate::document::{self, STAMP};
+    use crate::ignores;
     use crate::fitting::{
         Gathered, Omission, PER_FILE_BYTE_CAP, REQUEST_BYTE_CAP, byte_count, gather_request,
     };
@@ -3653,6 +3654,134 @@ mod tests {
             unpact_subtree("/elsewhere/crates", "/repo", &manifest),
             Err(manifest::Error::PathOutsideRoot { .. })
         ));
+    }
+
+    // The directories are made for real, because `is_ignored` reads an absent
+    // path as not excluded: a fixture of names alone would have every one of
+    // these tests pass without a rule ever being consulted.
+    fn ignoring(rules: &str, directories: &[&str]) -> tempfile::TempDir {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        for directory in directories {
+            fs::create_dir_all(repo.path().join(directory)).expect("creates a fixture directory");
+        }
+        write(repo.path(), ignores::FILENAME, rules);
+        repo
+    }
+
+    #[test]
+    fn an_excluded_entry_goes_and_takes_its_scope_with_it() {
+        let repo = ignoring("vendor/\n", &["vendor", "crates/engine"]);
+        let manifest = with_scopes(
+            &pacted(&["crates/engine", "vendor"]),
+            &[("vendor", "third-party")],
+        );
+
+        let left = unpact_ignored(&manifest, repo.path(), repo.path()).expect("the rules are read");
+
+        assert_eq!(
+            scopes(&left),
+            [("crates/engine", None)],
+            "the repository said the content is out, and a scope is no reason \
+             to keep the entry that held it",
+        );
+    }
+
+    #[test]
+    fn an_entry_below_an_excluded_directory_goes_though_that_directory_has_no_entry() {
+        let repo = ignoring("vendor/\n", &["vendor/acme/src", "crates"]);
+        let manifest = pacted(&["crates", "vendor/acme", "vendor/acme/src"]);
+
+        let left = unpact_ignored(&manifest, repo.path(), repo.path()).expect("the rules are read");
+
+        assert_eq!(
+            modules(&left),
+            ["crates"],
+            "the rule names an ancestor nothing pacted, so the ancestors are \
+             what gets asked, not the entries alone",
+        );
+    }
+
+    #[test]
+    fn a_negated_rule_keeps_the_directory_it_re_includes() {
+        // The negation sits beside the exclusion rather than under it: gitignore
+        // will not re-include anything below a directory already excluded.
+        let repo = ignoring("vendor/*\n!vendor/keep\n", &["vendor/acme", "vendor/keep"]);
+        let manifest = pacted(&["vendor/acme", "vendor/keep"]);
+
+        let left = unpact_ignored(&manifest, repo.path(), repo.path()).expect("the rules are read");
+
+        assert_eq!(
+            modules(&left),
+            ["vendor/keep"],
+            "exclusion is whatever the matcher says, negation included",
+        );
+    }
+
+    #[test]
+    fn a_manifest_with_nothing_excluded_comes_back_equal() {
+        let repo = ignoring("target/\n", &["crates/engine", "crates/tui", "target"]);
+        let manifest = with_scopes(
+            &pacted(&["crates/engine", "crates/tui"]),
+            &[("crates/engine", "data-plane")],
+        );
+
+        let left = unpact_ignored(&manifest, repo.path(), repo.path()).expect("the rules are read");
+
+        assert_eq!(
+            left, manifest,
+            "grant and scope intact: a rule that matches nothing pacted is not \
+             an edit to the manifest",
+        );
+    }
+
+    #[test]
+    fn an_excluded_entry_outside_the_loaded_root_is_left_alone() {
+        let repo = ignoring("vendor/\n", &["vendor", "crates/engine"]);
+        let manifest = pacted(&["crates/engine", "vendor"]);
+
+        let left = unpact_ignored(&manifest, repo.path(), repo.path().join("crates"))
+            .expect("the rules are read");
+
+        assert_eq!(
+            modules(&left),
+            ["crates/engine", "vendor"],
+            "`vendor` is excluded and stays anyway: this session loaded \
+             `crates` and never read the rules above it",
+        );
+    }
+
+    #[test]
+    fn removing_entries_writes_nothing_to_disk() {
+        let repo = ignoring("vendor/\n", &["vendor", "crates"]);
+        let manifest = pacted(&["crates", "vendor"]);
+        manifest.save(repo.path()).expect("saves");
+        let path = repo.path().join(".warlock").join("pacts.toml");
+        let before = fs::read(&path).expect("a readable manifest");
+
+        let left = unpact_ignored(&manifest, repo.path(), repo.path()).expect("the rules are read");
+
+        assert_eq!(modules(&left), ["crates"], "an entry really was removed");
+        assert_eq!(
+            fs::read(&path).expect("a readable manifest"),
+            before,
+            "and the file on disk is byte-identical: the caller owns the write",
+        );
+    }
+
+    #[test]
+    fn rules_that_cannot_be_used_fail_rather_than_guessing() {
+        // A range that runs backwards: a glob the matcher will not compile.
+        let repo = ignoring("a[z-a]\n", &["crates/engine"]);
+        let manifest = pacted(&["crates/engine"]);
+
+        let error = unpact_ignored(&manifest, repo.path(), repo.path())
+            .expect_err("a manifest cannot be cleaned against rules that cannot be read");
+
+        assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
+        assert!(
+            error.to_string().contains(ignores::FILENAME),
+            "the one line back names the file to go and fix: {error}",
+        );
     }
 
     fn scoped(modules: &[(&str, Option<&str>)]) -> Manifest {
