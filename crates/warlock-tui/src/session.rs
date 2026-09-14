@@ -69,7 +69,7 @@ pub(crate) const NOT_CLEANED: &str = "entries under an ignored directory are sti
 // has it, and the watcher's filter has to be rebuilt from the walk that produced
 // what is now on screen.
 pub(crate) fn reload_tree(app: &mut App, scope: &Scope) -> Option<Tree> {
-    if let Some(line) = clean_ignored(scope) {
+    if let Some(line) = clean_ignored(&scope.repo_root, &scope.root) {
         note(app, line);
     }
 
@@ -109,21 +109,26 @@ pub(crate) fn reload_tree(app: &mut App, scope: &Scope) -> Option<Tree> {
 // happens about a failure, and it must not stop the tree being read — warlock is
 // a way of reading a tree, and an entry that outlived its directory is no reason
 // to stop drawing one.
-fn clean_ignored(scope: &Scope) -> Option<String> {
+//
+// The two roots are taken apart rather than as a `Scope` because the startup
+// load has neither a `Scope` nor an `App` yet — it has a working directory and
+// the repository root above it, and its line has to be carried as a value until
+// there is a footer to put it on.
+fn clean_ignored(repo_root: &Path, root: &Path) -> Option<String> {
     let line = |error: Error| format!("{NOT_CLEANED}: {}", one_line(&error.to_string()));
-    dropped_ignored(scope).err().map(line)
+    dropped_ignored(repo_root, root).err().map(line)
 }
 
 // Saved only when something went, because `Manifest::save` rewrites the file:
 // an unconditional save would touch `pacts.toml` on every reload, and the
 // watcher compares for that path by name, so every load would ask for the next
 // one.
-fn dropped_ignored(scope: &Scope) -> Result<(), Error> {
-    let manifest = load_manifest(&scope.repo_root)?;
-    let left = unpact_ignored(&manifest, &scope.repo_root, &scope.root)
-        .map_err(|source| Error::Pact { source })?;
+fn dropped_ignored(repo_root: &Path, root: &Path) -> Result<(), Error> {
+    let manifest = load_manifest(repo_root)?;
+    let left =
+        unpact_ignored(&manifest, repo_root, root).map_err(|source| Error::Pact { source })?;
     if left.entries().len() < manifest.entries().len() {
-        left.save(&scope.repo_root)
+        left.save(repo_root)
             .map_err(|source| Error::Manifest { source })?;
     }
 
@@ -357,19 +362,40 @@ pub(crate) fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
 // problems.
 pub(crate) fn load_app() -> Result<(App, Scope, Tree), Error> {
     let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
+    load_app_in(&working_dir)
+}
+
+// The working directory is a parameter so a test can load a repository it wrote
+// without calling `env::set_current_dir`, which is process-wide and would reach
+// into every other test running beside it. `load_app` is still the only caller
+// outside this module and still reads the directory itself.
+fn load_app_in(working_dir: &Path) -> Result<(App, Scope, Tree), Error> {
+    // Asked before the load rather than after it, because the cleanup has to
+    // run first and it is written under this root. A working directory with no
+    // repository above it is not refused here — `load_tree` is the one place
+    // that says so, in its own words, and it is about to.
+    let found = repository_root(working_dir);
+    let uncleaned = found
+        .as_deref()
+        .and_then(|repo_root| clean_ignored(repo_root, working_dir));
+
     let Loaded { tree, problems } =
-        load_tree(&working_dir).map_err(|source| Error::Load { source })?;
+        load_tree(working_dir).map_err(|source| Error::Load { source })?;
     if let Some(error) = Error::from_problems(&problems) {
         return Err(error);
     }
 
-    // The load succeeded, so a repository root was found; asking again is a
-    // walk up a path, not a second load. The fallback is unreachable, and
-    // labelling the root as itself is the closest thing to true if it ever is
-    // reached.
-    let repo_root = repository_root(tree.root_path()).unwrap_or(working_dir);
+    // The load succeeded, so a repository root was found: the fallback is
+    // unreachable, and labelling the root as itself is the closest thing to
+    // true if it ever is reached.
+    let repo_root = found.unwrap_or_else(|| working_dir.to_path_buf());
 
-    let app = App::from_tree(&tree);
+    let mut app = App::from_tree(&tree);
+    // A cleanup that could not be finished is a line and nothing more, said
+    // here because this is the first moment there is a footer to say it on.
+    if let Some(line) = uncleaned {
+        note(&mut app, line);
+    }
     // Resolved here and nowhere else. Neither half of the header line can
     // change under a running warlock — the roots are fixed for the session and a
     // sigil is written with warlock not running — so it is built once, kept
@@ -394,7 +420,7 @@ mod tests {
     use warlock_engine::{Manifest, PactEntry, manifest_path, save_sigils, sigils_path};
     use warlock_tui::{App, Chrome, Sigils};
 
-    use super::{NOT_CLEANED, Scope, load_manifest, reload_tree, sigils_under};
+    use super::{NOT_CLEANED, Scope, load_app_in, load_manifest, reload_tree, sigils_under};
     use crate::error::Error;
 
     #[test]
@@ -711,6 +737,76 @@ mod tests {
             tree.is_some(),
             "a cleanup that could not write kept the tree off the screen"
         );
+        let message = app
+            .message()
+            .expect("the reader is told nothing was dropped");
+        assert!(
+            message.starts_with(NOT_CLEANED),
+            "the cleanup's own line is the one on the footer: {message}"
+        );
+        assert!(
+            !message.contains('\n'),
+            "a footer line that wraps is a footer line that hides a row: {message}"
+        );
+        assert_eq!(
+            load_manifest(&scratch.root).expect("a manifest that reads"),
+            manifest,
+            "a save that failed took entries with it"
+        );
+    }
+
+    #[test]
+    fn the_first_load_of_the_session_drops_the_entries_the_repository_has_since_excluded() {
+        // The rule can be added with warlock not running, so the startup load
+        // is the first chance anything has to notice it — waiting for a second
+        // load would draw one tree from a manifest the reader can see is wrong.
+        let scratch = a_repository("ignored-at-startup");
+        pacted(&["crates", "vendor", "vendor/acme"])
+            .save(&scratch.root)
+            .expect("a manifest that writes");
+
+        let (app, scope, _tree) = load_app_in(&scratch.root).expect("a repository that loads");
+
+        assert_eq!(
+            modules_on_disk(&scratch),
+            ["crates"],
+            "`pacts.toml` still records directories nothing will walk again"
+        );
+        assert_eq!(
+            scope.repo_root, scratch.root,
+            "the repository root resolved before the load is the one kept"
+        );
+        assert_eq!(
+            app.message(),
+            None,
+            "a cleanup that did its work has nothing to say"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cleanup_that_cannot_be_finished_at_startup_is_a_line_rather_than_a_refusal_to_start() {
+        // The startup load refuses a tree whose nodes it could not colour from
+        // what is on disk, and this is deliberately not that: the manifest the
+        // cleanup could not rewrite is exactly the one the rows were coloured
+        // from, so there is nothing dishonest to draw.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let scratch = a_repository("ignored-at-startup-readonly");
+        let manifest = pacted(&["crates", "vendor"]);
+        manifest.save(&scratch.root).expect("the first save works");
+        let directory = scratch.root.join(".warlock");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o555))
+            .expect("chmods the manifest directory read-only");
+
+        let started = load_app_in(&scratch.root);
+
+        // Back to writable before anything can fail, so the scratch repository
+        // can still be removed.
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).expect("chmods it back");
+
+        let (app, _scope, _tree) =
+            started.expect("a cleanup that could not save ended the session");
         let message = app
             .message()
             .expect("the reader is told nothing was dropped");
