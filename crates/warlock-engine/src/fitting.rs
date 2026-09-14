@@ -342,10 +342,9 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{Omission, PER_FILE_BYTE_CAP, Problem};
+    use super::{Omission, Problem};
 
     use crate::agent;
-    use crate::pact::DOCUMENT_FILE;
     fn write(dir: &Path, name: &str, contents: impl AsRef<[u8]>) -> PathBuf {
         let path = dir.join(name);
         fs::create_dir_all(path.parent().expect("a file has a parent")).expect("creates parents");
@@ -473,24 +472,6 @@ mod tests {
             .iter()
             .find(|file| file.path() == path)
             .unwrap_or_else(|| panic!("`{path}` is in the request: {:?}", file_paths(request)))
-    }
-
-    fn carried(request: &agent::Request) -> u64 {
-        let files: u64 = request
-            .files()
-            .iter()
-            .map(|file| {
-                let bytes = file.bytes().map_or(0, <[u8]>::len);
-                let summary = file.summary().map_or(0, str::len);
-                (bytes + summary) as u64
-            })
-            .sum();
-        let children: u64 = request
-            .child_documents()
-            .iter()
-            .map(|child| child.text().len() as u64)
-            .sum();
-        files + children
     }
 
     #[test]

@@ -29,7 +29,7 @@ pub(crate) const DOCUMENT_FILE: &str = "WARLOCK.md";
 /// use std::fs;
 /// use warlock_engine::{
 ///     Agent, Manifest, NodeState, PactedSubtree, Unwatched, agent, decide_state,
-///     document::Fill, pact_subtree, subtree_hash,
+///     document, pact_subtree, subtree_hash,
 /// };
 ///
 /// /// The engine's own tests reach a model exactly like this: they don't.
@@ -37,7 +37,7 @@ pub(crate) const DOCUMENT_FILE: &str = "WARLOCK.md";
 ///
 /// impl Agent for Canned {
 ///     fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
-///         Ok(agent::Response::new(Fill::stub(request).to_json()))
+///         Ok(agent::Response::new(document::stub_answer(request)))
 ///     }
 /// }
 ///
@@ -98,7 +98,7 @@ pub fn pact_subtree(
 /// use std::fs;
 /// use warlock_engine::{
 ///     Agent, Manifest, NodeState, PactedSubtree, Unwatched, agent, decide_state,
-///     document::Fill, pact_subtree, refresh_subtree, subtree_hash,
+///     document, pact_subtree, refresh_subtree, subtree_hash,
 /// };
 ///
 /// /// The engine's own tests reach a model exactly like this: they don't.
@@ -109,7 +109,7 @@ pub fn pact_subtree(
 /// impl Agent for Canned {
 ///     fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
 ///         self.passes.set(self.passes.get() + 1);
-///         Ok(agent::Response::new(Fill::stub(request).to_json()))
+///         Ok(agent::Response::new(document::stub_answer(request)))
 ///     }
 /// }
 ///
@@ -124,12 +124,14 @@ pub fn pact_subtree(
 /// // A pact first, to have something to refresh: both directories go green.
 /// let PactedSubtree { manifest, .. } =
 ///     pact_subtree(&engine, repo.path(), &Manifest::new(), &agent, &mut Unwatched)?;
-/// assert_eq!(agent.passes.get(), 2, "one pass each, children before parents");
+/// // One pass per file, then one over the lines to say how they fit together:
+/// // `src` has a file and the directory above it has none, so three.
+/// assert_eq!(agent.passes.get(), 3, "children before parents");
 ///
 /// // Nothing has moved, so a refresh describes nothing and costs nothing.
 /// let PactedSubtree { manifest, .. } =
 ///     refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)?;
-/// assert_eq!(agent.passes.get(), 2, "nothing stale, no pass");
+/// assert_eq!(agent.passes.get(), 3, "nothing stale, no pass");
 ///
 /// // Now a file changes in the parent directory only.
 /// let below = manifest.entry("crates/engine/src").expect("the child is pacted").clone();
@@ -139,7 +141,9 @@ pub fn pact_subtree(
 ///     refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)?;
 ///
 /// assert!(failures.is_empty());
-/// assert_eq!(agent.passes.get(), 3, "the changed directory, and not the one below it");
+/// // One new file to describe, and one pass over the lines to place it. The
+/// // directory below is untouched and costs nothing, which is the whole prize.
+/// assert_eq!(agent.passes.get(), 5, "the changed directory, and not the one below it");
 /// assert_eq!(manifest.entry("crates/engine/src"), Some(&below), "skipped, grant and all");
 /// let entry = manifest.entry("crates/engine").expect("the described directory is pacted");
 /// assert_eq!(decide_state(Some(entry), &subtree_hash(&engine)?), NodeState::PactedFresh);
@@ -776,7 +780,7 @@ pub fn closed_scopes_at_or_below<'manifest>(
 // manifest should then say needs the rest of the subtree and is the caller's.
 /// ```
 /// use std::fs;
-/// use warlock_engine::{agent, document::Fill, Agent, Pacted, pact_directory};
+/// use warlock_engine::{agent, document, Agent, Pacted, pact_directory};
 ///
 /// /// The engine's own tests reach a model exactly like this: they don't. A
 /// /// stub fill is the answer a pass would give with every slot filled in.
@@ -784,14 +788,14 @@ pub fn closed_scopes_at_or_below<'manifest>(
 ///
 /// impl Agent for Canned {
 ///     fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
-///         Ok(agent::Response::new(Fill::stub(request).to_json()))
+///         Ok(agent::Response::new(document::stub_answer(request)))
 ///     }
 /// }
 ///
 /// let dir = tempfile::tempdir()?;
 /// fs::write(dir.path().join("lib.rs"), "//! Core engine.\n")?;
 ///
-/// let Pacted { document, problems, repairs } = pact_directory(dir.path(), &Canned)?;
+/// let Pacted { document, problems, repairs, .. } = pact_directory(dir.path(), &Canned)?;
 ///
 /// assert_eq!(document, dir.path().join("WARLOCK.md"));
 ///
@@ -1106,7 +1110,7 @@ pub struct Synthesised {
 /// ```
 /// use std::cell::Cell;
 /// use std::fs;
-/// use warlock_engine::{Agent, agent, assemble_lines, file_hash};
+/// use warlock_engine::{Agent, Unwatched, agent, assemble_lines, file_hash};
 ///
 /// struct Counting {
 ///     passes: Cell<usize>,
@@ -1218,7 +1222,7 @@ pub struct Assembled {
 ///
 /// ```
 /// use std::fs;
-/// use warlock_engine::{Agent, agent, describe_file, document};
+/// use warlock_engine::{Agent, Unwatched, agent, describe_file, document};
 ///
 /// struct Lining;
 ///
@@ -1235,7 +1239,7 @@ pub struct Assembled {
 /// let dir = tempfile::tempdir()?;
 /// fs::write(dir.path().join("reading.rs"), "pub fn read_one() {}\n")?;
 ///
-/// let described = describe_file(dir.path(), "reading.rs", &Lining)?;
+/// let described = describe_file(dir.path(), "reading.rs", &Lining, &mut Unwatched)?;
 /// assert_eq!(
 ///     described.line,
 ///     "The reading half: one entry point and the type it hands back."
