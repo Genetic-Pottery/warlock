@@ -3,20 +3,26 @@
 
 # crates
 
-The workspace's crates directory: the two-crate split between warlock-engine, the domain logic, and warlock-tui, the terminal front end shipping the warlock binary.
+Holds the two crates that make up the workspace: warlock-engine for repo walking, pact-state decisions and document filling/rendering, and warlock-tui for the terminal panel and headless subcommands built on it.
 
 ## Directories
 
-- `warlock-engine/` — The domain crate — pacting, the freshness decision, the document schema, fitting and elision, the Agent port — no TUI, terminal, HTTP or Anthropic dependency; open for how the engine's contract works.
-- `warlock-tui/` — The terminal front end crate shipping the warlock binary — state, panels, composer, conversation, claude subprocess, filesystem watch, headless subcommands; open for terminal UI, keys, or subcommand behaviour.
+- `warlock-engine/` — The engine crate: tree walking, freshness decisions, WARLOCK.md filling and rendering, and manifest/scope/sigil persistence, kept free of TUI/HTTP deps.
+- `warlock-tui/` — The warlock binary and warlock_tui library: the panel, keypress handling, filesystem watching, and headless subcommands sharing its session logic.
 
 ## Structure
 
-- The dependency edge runs warlock-tui -> warlock-engine: the TUI crate depends on the engine crate for domain logic, never the reverse.
+- Manifest for warlock-engine: blake3, ignore, serde/serde_json and toml deps, kept free of TUI/terminal/HTTP/Anthropic crates by design.
+- Manifest for the warlock-tui crate: builds the warlock binary from src/main.rs and the warlock_tui library from src/lib.rs, wiring clap, ratatui, notify, ctrlc and warlock-engine.
 
 ## Where to look
 
-- how the freshness document schema and pacting logic work → `warlock-engine` `pact_subtree`
-- how the terminal UI, keys, and panel behaviour work → `warlock-tui` `action_for`
-- why the engine has no HTTP or Anthropic dependency → `warlock-engine`
-- building or running the warlock binary → `warlock-tui` `warlock`
+- how is a directory's freshness state decided → `warlock-engine` `decide_state`
+- how does the repo tree get walked and built → `warlock-engine` `load_tree`
+- what shape does a model implementation have to satisfy → `warlock-engine` `Agent`
+- where are per-directory pact grants stored → `warlock-engine` `Manifest`
+- how are scopes and sigils validated against each other → `warlock-engine` `scope_opens_to`
+- what crate builds the warlock binary → `warlock-tui` `warlock`
+- where is the terminal-free library surface defined → `warlock-tui` `warlock_tui`
+- what dependencies does the engine crate declare → `warlock-engine`
+- what dependencies does the tui pull in → `warlock-tui`

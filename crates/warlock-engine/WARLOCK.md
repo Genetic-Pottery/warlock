@@ -3,29 +3,31 @@
 
 # warlock-engine
 
-The warlock-engine crate root: the manifest holding the crate's package metadata and the strict dependency boundary that the domain logic in src depends on nothing TUI, terminal, HTTP or Anthropic related.
+The engine crate: walks a repo into a freshness ledger, decides pact state per directory, runs model passes to fill and render WARLOCK.md documents, and persists manifests, scopes and sigils to disk.
 
 ## Files
 
-- `Cargo.toml` (1.1 KB) — Package manifest for warlock-engine: pins blake3, ignore, serde, serde_json, toml as dependencies, serde_test and tempfile as dev-dependencies, and inherits `[lints]` from the workspace.
+- `Cargo.toml` (1.1 KB) — Manifest for warlock-engine: blake3, ignore, serde/serde_json and toml deps, kept free of TUI/terminal/HTTP/Anthropic crates by design.
 
 ## Directories
 
-- `src/` — The crate's core domain code — pacting, the freshness decision, the document schema, fitting and elision, the Agent port — open it for how any of those actually work.
+- `src/` — The crate's source: tree walking, freshness decisions, document filling and rendering, and manifest/scope/sigil persistence.
 
 ## Structure
 
-- Cargo.toml declares the dependencies that src's modules (manifest.rs, hash.rs, document.rs) draw on: serde/serde_json/toml for (de)serialisation and blake3 for hashing.
-- dev-dependencies serde_test and tempfile back src's manifest and document round-trip tests without appearing in the crate's own API.
-
-## Rules
-
-- No TUI, terminal, HTTP or Anthropic dependency belongs here: the dependency edge runs TUI -> engine and never back.
-- The engine owns the JSON document contract a pass fills in, so it owns the parser for it via serde_json.
-- Lint configuration lives in the root manifest so every crate is held to the same bar; this crate's [lints] is workspace = true.
+- Manifest for warlock-engine: blake3, ignore, serde/serde_json and toml deps, kept free of TUI/terminal/HTTP/Anthropic crates by design.
 
 ## Where to look
 
-- which dependencies the domain code is allowed to use → `Cargo.toml` `dependencies`
-- why no reqwest or anthropic crate appears here → `Cargo.toml`
-- where the actual pacting, document, and fitting logic lives → `src` `pact_subtree`
+- how is a directory's freshness state determined → `src` `decide_state`
+- how does the repo tree get walked and built → `src` `load_tree`
+- what does a WARLOCK.md pact request look like before it hits the model → `src`
+- what shape does a model implementation have to satisfy → `src` `Agent`
+- how is CLAUDE.md's warlock section written or updated → `src` `write_claude_md`
+- where are per-directory pact grants stored → `src` `Manifest`
+- how is a subtree's content hashed for staleness checks → `src` `subtree_hash`
+- how does .warlockignore affect a directory's own visibility → `src` `is_ignored`
+- how are scopes and sigils validated against each other → `src` `scope_opens_to`
+- where do sigils get loaded or saved per checkout → `src` `load_sigils`
+- how does pacting a directory run per-file then synthesis passes → `src` `pact_subtree`
+- what dependencies does the engine crate declare → `Cargo.toml`

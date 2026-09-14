@@ -3,31 +3,22 @@
 
 # warlock-tui
 
-The warlock-tui crate: the terminal front end shipping the `warlock` binary, built as a pure library (state, panel cards, composer, conversation, run account) plus the impure claude subprocess and filesystem watch, wired so the screen, keys and pact runs can be tested without a terminal; depends on warlock-engine for the domain.
+The warlock-tui crate: builds the warlock binary and the warlock_tui library, the terminal front end for warlock's pact state, plus the headless subcommands sharing its boundary and session logic.
 
 ## Files
 
-- `Cargo.toml` (1.6 KB) — Manifest for warlock-tui: bin `warlock` (src/main.rs), lib `warlock_tui` (src/lib.rs), deps clap/ctrlc/notify/ratatui/serde_json/warlock-engine, dev-dep tempfile, workspace lints.
+- `Cargo.toml` (1.6 KB) — Manifest for the warlock-tui crate: builds the `warlock` binary from src/main.rs and the warlock_tui library from src/lib.rs, wiring clap, ratatui, notify, ctrlc and warlock-engine.
 
 ## Directories
 
-- `src/` — The warlock_tui library and binary source: tree/panel/composer/conversation state, the claude and watch impurities, and every headless subcommand — go here for keys, colours, boundary checks, or subcommand wording.
+- `src/` — The panel, keypress handling, filesystem watching, and headless subcommands (check, config, stale, fresh, pact, refresh, unpact, scope); go there for how a key or run becomes screen state or a subcommand's output.
 
 ## Structure
 
-- The dependency edge runs TUI -> engine: warlock-tui knows terminal and domain vocabulary, warlock-engine knows neither terminals nor this crate.
-- The bin target `warlock` at src/main.rs is a thin shell around the lib target `warlock_tui` at src/lib.rs, which both the binary and tests use.
-- Only headless runs from src/running.rs press ctrlc into service, since a `warlock pact` run has no panel to press Esc in.
-- tempfile is a dev-dependency used by the `warlock config` tests to write a real config file under a throwaway home directory.
-
-## Rules
-
-- Lint configuration lives in the root manifest's [workspace.lints] so every crate is held to the same bar.
+- Manifest for the warlock-tui crate: builds the `warlock` binary from src/main.rs and the warlock_tui library from src/lib.rs, wiring clap, ratatui, notify, ctrlc and warlock-engine.
 
 ## Where to look
 
-- which key does what in the terminal UI → `src` `action_for`
-- how claude is invoked as a subprocess → `src` `ClaudeAgent`
-- why an operator is refused at a directory (the boundary) → `src` `verdict`
-- building or running the warlock binary → `Cargo.toml` `warlock`
-- why Ctrl-C exists in a headless run → `Cargo.toml` `ctrlc`
+- what crate builds the warlock binary → `Cargo.toml` `warlock`
+- what dependencies does the tui pull in → `Cargo.toml`
+- where is the terminal-free library surface defined → `Cargo.toml` `warlock_tui`
