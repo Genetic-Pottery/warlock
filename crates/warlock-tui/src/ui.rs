@@ -30,6 +30,11 @@ use crate::composer::Composer;
 use crate::confirm::{Answer, QuitConfirm};
 use crate::panel::Mode;
 use crate::prompt::{ScopeField, ScopePrompt};
+// Renamed for the reason `Entry` above is: `Span` here is ratatui's piece of a
+// drawn line, and the selection's is the cells of one row the highlight covers;
+// its `Window` is the panel's view of the card, which is neither of the
+// terminal windows this module knows about.
+use crate::selection::{Span as Selected, Window as Viewport, spans_at};
 use crate::wrap::shape;
 
 const INDENT: &str = "  ";
@@ -255,6 +260,13 @@ const SCOPE_CURSOR: &str = " ";
 const SCOPE_LINES: u16 = 5;
 
 const SCOPE_HEIGHT: u16 = SCOPE_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS;
+
+/// Reversed rather than a background colour of its own. Colour on the thread
+/// already means whose words these are — the model's, the reader's, warlock's —
+/// and painting over it would take that away from exactly the rows somebody is
+/// reading; swapping what the cell already had keeps every one of those apart
+/// under the highlight.
+const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
 
 const COMPOSER_CURSOR: &str = SCOPE_CURSOR;
 
@@ -582,6 +594,58 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
         .map(|line| panel_row(line, inner.width, conversation))
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);
+
+    // Only the conversation is selectable, so only the conversation is drawn
+    // with a highlight: the account and the document are read past, not copied
+    // out of, and a highlight measured against the thread would sit over
+    // whatever text took its place.
+    if conversation {
+        draw_highlight(frame, inner, app, now);
+    }
+}
+
+/// Painted over the rows after they are drawn rather than woven into them.
+/// [`panel_row`] truncates a row that still does not fit, so text built with a
+/// highlight in it would have to be cut by a second rule that agreed with that
+/// one; here the cut is [`Rect::intersection`], and a span reaching past the
+/// panel stops at its last column instead of on the border or the tree beside
+/// it.
+fn draw_highlight(frame: &mut Frame<'_>, rows: Rect, app: &App, now: Instant) {
+    let (Some(selection), Some(thread)) = (app.selection(), app.panel().thread()) else {
+        return;
+    };
+
+    // The panel's own offset, width and height — the three numbers the rows
+    // above were wrapped and cut by — rather than the area's, which a frame
+    // drawn before the panel was told its size would differ from. A highlight
+    // measured against a second window is a highlight over text that is not
+    // under it.
+    let window = Viewport {
+        scroll: app.panel().scroll_offset(),
+        width: app.panel().width(),
+        height: app.panel().height(),
+    };
+    for span in spans_at(thread, selection, window, now) {
+        let cells = highlighted(rows, span);
+        frame.buffer_mut().set_style(cells, SELECTED);
+    }
+}
+
+fn highlighted(rows: Rect, span: Selected) -> Rect {
+    let over = Rect {
+        x: rows.x.saturating_add(cells(span.from)),
+        y: rows.y.saturating_add(cells(span.row)),
+        width: cells(span.to.saturating_sub(span.from)),
+        height: 1,
+    };
+
+    rows.intersection(over)
+}
+
+/// Saturating rather than failing: a column count past `u16::MAX` is off every
+/// pane there could be, and the intersection above drops it either way.
+fn cells(count: usize) -> u16 {
+    u16::try_from(count).unwrap_or(u16::MAX)
 }
 
 fn draw_run_header(frame: &mut Frame<'_>, area: Rect, header: &RunHeader) {
@@ -1211,12 +1275,12 @@ mod tests {
         PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT, PATH_HEADING, PATH_RULES,
         PERCENT_WIDTH, QUIT_KEY, REFRESHING_RUN, ROW_KEY, RUN_HEADER_HEIGHT, SAID_MARKER,
         SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS,
-        SCROLLBACK_ARROW, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, areas,
-        centred, composer_height, composer_on_screen, confirm_area, confirm_size, display_width,
-        draw, footer_text_area, guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line,
-        pane_inner, panel_height, panel_row, panel_rows_area, panel_width, run_header_height,
-        run_header_line,
-        scope_size, tree_height, tree_rows_area, tree_width, truncated,
+        SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT,
+        areas, centred, composer_height, composer_on_screen, confirm_area, confirm_size,
+        display_width, draw, footer_text_area, guide_prefixes, hit_test, keys_line, mark_area,
+        pacting_keys_line, pane_inner, panel_height, panel_row, panel_rows_area, panel_width,
+        run_header_height, run_header_line, scope_size, tree_height, tree_rows_area, tree_width,
+        truncated,
     };
     use crate::COMPOSER_MAX_ROWS;
     use crate::account::{Line as Entry, Outcome};
@@ -1230,6 +1294,9 @@ mod tests {
     use crate::fixture;
     use crate::panel::Mode;
     use crate::prompt::{ScopeField, ScopePrompt};
+    // Renamed because `Position` in here is ratatui's point on the screen, and a
+    // selection's is a byte of the thread's text.
+    use crate::selection::Position as Spot;
     use crate::thread::Ending;
 
     const MANY: usize = 20;
@@ -1689,6 +1756,42 @@ mod tests {
         (0..buffer.area.height)
             .filter(|&y| buffer[(x, y)].modifier.contains(Modifier::REVERSED))
             .collect()
+    }
+
+    // Every column of one panel row is swept rather than the span's own, so a
+    // cell highlighted either side of the selected text fails the assertion
+    // instead of going unlooked at.
+    fn highlighted_columns(buffer: &Buffer, index: usize) -> Vec<u16> {
+        let area = panel_area(buffer);
+        let y = area.y + u16::try_from(index).expect("the panel is a few rows tall");
+        (0..area.width)
+            .filter(|column| {
+                buffer[(area.x + column, y)]
+                    .modifier
+                    .contains(SELECTED.add_modifier)
+            })
+            .collect()
+    }
+
+    fn highlighted_text(buffer: &Buffer, index: usize) -> String {
+        let area = panel_area(buffer);
+        let y = area.y + u16::try_from(index).expect("the panel is a few rows tall");
+
+        highlighted_columns(buffer, index)
+            .into_iter()
+            .map(|column| buffer[(area.x + column, y)].symbol())
+            .collect()
+    }
+
+    // How many columns of a drawn row are the panel's own prefix rather than the
+    // reader's text: a marker, or the blanks a wrapped row carries in its place.
+    fn prefix_columns(row: &str) -> u16 {
+        let columns = [SAID_MARKER, NOTE_MARKER]
+            .into_iter()
+            .find(|marker| row.starts_with(marker))
+            .map_or_else(|| row.len() - row.trim_start().len(), display_width);
+
+        u16::try_from(columns).expect("a prefix is a few columns")
     }
 
     fn mark_width() -> usize {
@@ -4847,6 +4950,285 @@ mod tests {
             let state = app.rows()[usize::from(index)].state;
             assert_eq!(first_glyph_colour(&buffer, index), colour_for(state));
         }
+    }
+
+    fn talking_app(base: Instant, width: u16, height: u16) -> App {
+        let mut app = pacting_app(base, width, height);
+        app.panel_mut().start_turn(QUESTION, base);
+        app.panel_mut()
+            .record_turn(&Activity::Thinking, at(base, 1));
+        app.panel_mut().answer_turn(ANSWER, at(base, 2));
+        app.panel_mut().note(NOTE, at(base, 3));
+        assert!(app.panel().showing_thread());
+        app
+    }
+
+    #[test]
+    fn the_highlight_covers_the_selected_text_and_no_other_cell() {
+        // A drag from inside the question, over the work row that separates it
+        // from the answer, and into the note: a marker-prefixed row at each end,
+        // the model's own row whole in the middle, and a row that is nobody's
+        // text under it all.
+        let base = Instant::now();
+        let mut app = talking_app(base, WIDTH, FIXTURE_HEIGHT);
+        app.start_selection(Spot::new(0, 5));
+        app.extend_selection(Spot::new(2, 6));
+
+        let buffer = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+        assert_eq!(
+            panel_rows(&buffer)[..4],
+            [
+                format!("{SAID_MARKER}{QUESTION}"),
+                format!("{PANEL_INDENT}0:02 thinking"),
+                ANSWER.to_owned(),
+                format!("{NOTE_MARKER}{NOTE}"),
+            ],
+        );
+
+        // The question from the sixth byte to its end, counted past the marker,
+        // which is the panel's own and holds no text to select.
+        let marker = prefix_columns(SAID_MARKER);
+        let question = u16::try_from(display_width(QUESTION)).expect("a short question");
+        assert_eq!(
+            highlighted_columns(&buffer, 0),
+            (marker + 5..marker + question).collect::<Vec<u16>>()
+        );
+        assert_eq!(highlighted_text(&buffer, 0), QUESTION[5..]);
+
+        // The work row holds the clock warlock kept and no piece of the thread,
+        // so a selection running over it covers nothing on it.
+        assert_eq!(highlighted_columns(&buffer, 1), Vec::<u16>::new());
+
+        // The answer whole, from the first column because the model's rows carry
+        // no marker, and the note up to where the drag stopped.
+        assert_eq!(highlighted_text(&buffer, 2), ANSWER);
+        let answer = u16::try_from(display_width(ANSWER)).expect("a short answer");
+        assert_eq!(
+            highlighted_columns(&buffer, 2),
+            (0..answer).collect::<Vec<u16>>()
+        );
+        assert_eq!(
+            highlighted_columns(&buffer, 3),
+            (marker..marker + 6).collect::<Vec<u16>>()
+        );
+        assert_eq!(highlighted_text(&buffer, 3), NOTE[..6]);
+
+        // And nothing below the note, which is past the end of the selection and
+        // past the end of the card both.
+        for index in 4..panel_rows(&buffer).len() {
+            assert_eq!(
+                highlighted_columns(&buffer, index),
+                Vec::<u16>::new(),
+                "row {index} is highlighted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_highlight_scrolled_past_the_top_of_the_card_is_drawn_from_the_rows_showing() {
+        // A card taller than the panel, wrapped by a panel too narrow for an
+        // answer, with the selection running from the first piece of the thread
+        // to the end of the last answer — so it starts above the window and ends
+        // one row short of the bottom of it.
+        const NARROW: u16 = 62;
+
+        let base = Instant::now();
+        let mut app = pacting_app(base, NARROW, FIXTURE_HEIGHT);
+        for turn in 0..4 {
+            app.panel_mut().start_turn(QUESTION, at(base, turn * 2));
+            app.panel_mut().answer_turn(ANSWER, at(base, turn * 2 + 1));
+        }
+        app.panel_mut().note(NOTE, at(base, 9));
+        app.start_selection(Spot::new(0, 0));
+        app.extend_selection(Spot::new(7, ANSWER.len()));
+
+        let buffer = render_at(&app, NARROW, FIXTURE_HEIGHT, at(base, 9));
+        let rows = panel_rows(&buffer);
+        assert!(
+            app.panel().scroll_offset() > 0,
+            "the card should be taller than the panel"
+        );
+        assert!(
+            !rows.contains(&ANSWER.to_owned()),
+            "the answer should wrap at this width: {rows:?}"
+        );
+
+        // Only the answer wraps at this width, and the model's rows carry no
+        // marker, so the blanks a wrapped row is given in a marker's place never
+        // appear here: an indented row is warlock's own clock and nothing else.
+        for row in rows.iter().filter(|row| row.starts_with(SAID_MARKER)) {
+            assert_eq!(*row, format!("{SAID_MARKER}{QUESTION}"));
+        }
+
+        // Every row showing is a row of the selection but the work rows and the
+        // last, which is the note the drag stopped before. Each of the rest is
+        // highlighted over its own text and not over the marker in front of it.
+        let last = rows.len() - 1;
+        for (index, row) in rows.iter().enumerate() {
+            let expected = if index == last || row.is_empty() || row.starts_with(PANEL_INDENT) {
+                Vec::new()
+            } else {
+                let width = u16::try_from(display_width(row)).expect("a narrow panel");
+                (prefix_columns(row)..width).collect()
+            };
+            assert_eq!(
+                highlighted_columns(&buffer, index),
+                expected,
+                "row {index}: {row:?}"
+            );
+        }
+        assert_eq!(rows[last], format!("{NOTE_MARKER}{NOTE}"));
+    }
+
+    #[test]
+    fn a_wrapped_question_is_highlighted_past_the_blanks_its_marker_left_behind() {
+        // The marker is drawn once and the rows under it are indented by blanks
+        // to line up with it, so the highlight has to start two columns in on
+        // every row of the question and not only on the one wearing the marker.
+        const NARROW: u16 = 62;
+        const LONG_QUESTION: &str =
+            "what does the engine do when the tree it was given has moved under it?";
+
+        let base = Instant::now();
+        let mut app = pacting_app(base, NARROW, FIXTURE_HEIGHT);
+        app.panel_mut().start_turn(LONG_QUESTION, base);
+        app.start_selection(Spot::new(0, 0));
+        app.extend_selection(Spot::new(0, LONG_QUESTION.len()));
+
+        let buffer = render_at(&app, NARROW, FIXTURE_HEIGHT, at(base, 1));
+        let rows = panel_rows(&buffer);
+        let marker = prefix_columns(SAID_MARKER);
+        let asked: Vec<&str> = rows
+            .iter()
+            .take_while(|row| !row.contains(':'))
+            .map(|row| row.trim_start_matches(SAID_MARKER).trim())
+            .collect();
+        assert!(asked.len() > 2, "the question should wrap: {rows:?}");
+        assert_eq!(asked.join(" "), LONG_QUESTION);
+
+        for (index, row) in rows.iter().enumerate().take(asked.len()) {
+            let width = u16::try_from(display_width(row)).expect("a narrow panel");
+            assert_eq!(
+                highlighted_columns(&buffer, index),
+                (marker..width).collect::<Vec<u16>>(),
+                "row {index}: {row:?}"
+            );
+            assert_eq!(highlighted_text(&buffer, index), asked[index]);
+        }
+
+        // The work row the question opened with is indented the same two columns
+        // and holds none of its text, so it keeps its clock unhighlighted.
+        let work = asked.len();
+        assert_eq!(rows[work], format!("{PANEL_INDENT}0:01 waiting"));
+        assert_eq!(highlighted_columns(&buffer, work), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn a_highlight_on_a_row_the_panel_had_to_cut_stops_at_the_panels_own_edge() {
+        // A panel measured on a wide terminal and drawn on a narrow one, which
+        // is the frame `panel_row` truncates: its rows were wrapped to columns
+        // the pane no longer has, so the spans reach past its right-hand edge.
+        const NARROW: u16 = 62;
+
+        let base = Instant::now();
+        let mut app = talking_app(base, WIDTH, FIXTURE_HEIGHT);
+        let plain = render_at(&app, NARROW, FIXTURE_HEIGHT, at(base, 9));
+        app.start_selection(Spot::new(0, 0));
+        app.extend_selection(Spot::new(2, NOTE.len()));
+
+        let buffer = render_at(&app, NARROW, FIXTURE_HEIGHT, at(base, 9));
+        let rows = panel_area(&buffer);
+        let drawn = panel_rows(&buffer);
+        assert!(
+            drawn.iter().any(|row| row.ends_with(ELLIPSIS)),
+            "the rows should be too wide for the pane: {drawn:?}"
+        );
+        assert!(
+            !highlighted_columns(&buffer, 0).is_empty(),
+            "the question should still be highlighted"
+        );
+
+        // Not one cell outside the panel's rows differs from the frame with
+        // nothing selected — not the border the rows were cut at, not the tree
+        // beyond it, and not the footer.
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if rows.contains(Position::new(x, y)) {
+                    continue;
+                }
+                assert_eq!(
+                    buffer[(x, y)],
+                    plain[(x, y)],
+                    "the highlight reached ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_with_nothing_selected_is_the_frame_drawn_before_any_of_this() {
+        // The three states that must not paint a cell: no selection at all, a
+        // press nobody dragged from, and a selection taken back down. Whole
+        // buffers rather than the panel's rows, because a highlight that leaked
+        // anywhere on the screen would fail here.
+        let base = Instant::now();
+        let mut app = talking_app(base, WIDTH, FIXTURE_HEIGHT);
+        let plain = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+
+        app.start_selection(Spot::new(0, 5));
+        assert_eq!(
+            render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9)),
+            plain,
+            "a press with no drag behind it drew a highlight"
+        );
+
+        app.extend_selection(Spot::new(2, 6));
+        assert_ne!(
+            render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9)),
+            plain,
+            "the drag drew nothing"
+        );
+
+        app.clear_selection();
+        assert_eq!(render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9)), plain);
+    }
+
+    #[test]
+    fn the_highlight_is_the_conversations_alone_and_no_other_card_wears_it() {
+        // A selection made on the thread and a file brought to the front under
+        // it: the spans are measured against the conversation, so a card that is
+        // not the conversation would be highlighted over whatever text happened
+        // to be in those columns.
+        let base = Instant::now();
+        let mut app = talking_app(base, WIDTH, FIXTURE_HEIGHT);
+        app.start_selection(Spot::new(0, 5));
+        app.extend_selection(Spot::new(2, 6));
+        app.panel_mut()
+            .show_document(["# The engine", "", ANSWER], false);
+        assert!(!app.panel().showing_thread());
+
+        let showing_document = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9));
+        assert_eq!(panel_rows(&showing_document)[0], "# The engine");
+        assert!(
+            app.selection().is_some(),
+            "the selection should outlive the card swapping under it"
+        );
+        for index in 0..panel_rows(&showing_document).len() {
+            assert_eq!(
+                highlighted_columns(&showing_document, index),
+                Vec::<u16>::new(),
+                "the document card is highlighted on row {index}"
+            );
+        }
+
+        // And the frame is the one the document draws with nothing selected at
+        // all, which is more than the rows: no title, no border and no edge of
+        // the pane moved either.
+        app.clear_selection();
+        assert_eq!(
+            render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 9)),
+            showing_document
+        );
     }
 
     const ROW_WIDTH: u16 = 24;
