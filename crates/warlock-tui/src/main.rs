@@ -2372,6 +2372,12 @@ mod tests {
         // rather than worked out from the layout, so these tests point at the
         // cells a reader would point at.
         fn drawn_at(driven: &Driven, word: &str) -> (u16, u16) {
+            found_at(driven, word).unwrap_or_else(|| panic!("the frame never drew {word:?}"))
+        }
+
+        // The same search, handing back the absence rather than panicking on it,
+        // for the tests that turn on a line *not* being on screen yet.
+        fn found_at(driven: &Driven, word: &str) -> Option<(u16, u16)> {
             let buffer = driven.screen.terminal.backend().buffer();
             let area = buffer.area;
             for row in 0..area.height {
@@ -2379,10 +2385,11 @@ mod tests {
                 if let Some(byte) = line.find(word) {
                     let column = line[..byte].chars().count();
                     let column = u16::try_from(column).expect("a column of the frame");
-                    return (column, row);
+                    return Some((column, row));
                 }
             }
-            panic!("the frame never drew {word:?}");
+
+            None
         }
 
         fn point(
@@ -2579,12 +2586,22 @@ mod tests {
         // round whether or not an event arrived, so a round with nothing in it
         // is `drag_scroll` on its own.
         mod past_the_edge {
+            use ratatui::crossterm::event::{KeyCode, MouseEventKind};
+
             use super::{
-                ANSWER, DRAG, Driven, Instant, PRESS, RELEASE, Size, drawn_at, point, redrawn,
-                session,
+                ANSWER, DRAG, Driven, Focus, Instant, PRESS, RELEASE, Size, drawn_at, found_at,
+                point, redrawn, session,
             };
             use crate::rows_per_tick;
-            use crate::tests::directory;
+            use crate::tests::{directory, key, pressed};
+
+            // A pointer moved with nothing held down, which is what a reader
+            // whose hand is off the button sends as they cross the footer.
+            const MOVED: MouseEventKind = MouseEventKind::Moved;
+
+            // Typed into the composer so there is a field on screen to press in,
+            // and a word to find it by.
+            const DRAFT: &str = "draft";
 
             // A conversation several screens tall, so there is somewhere for the
             // card to scroll, drawn once at the size the drags below land on.
@@ -2618,6 +2635,20 @@ mod tests {
 
             fn covered(driven: &Driven) -> usize {
                 crate::selected_text(&driven.app).chars().count()
+            }
+
+            // A draft typed into the composer, so that the field is drawn and
+            // there is somewhere in it to press. Typed rather than set, because
+            // the composer only takes letters with the keys pointed at it and
+            // that is the state a reader presses in it from.
+            fn drafting(driven: &mut Driven) {
+                driven.app.set_focus(Focus::Composer);
+                for letter in DRAFT.chars() {
+                    assert!(
+                        pressed(driven, key(KeyCode::Char(letter))),
+                        "typing into the composer ended the session"
+                    );
+                }
             }
 
             #[test]
@@ -2673,6 +2704,55 @@ mod tests {
                 assert!(
                     covered(&driven) > after_one_covered,
                     "the highlight stopped growing while the card went on scrolling"
+                );
+            }
+
+            #[test]
+            fn the_copy_on_release_takes_in_what_the_ticks_scrolled_into_view() {
+                // A turn far enough down the conversation that the frame the
+                // press lands on has not drawn it: nothing but the ticks can
+                // bring it inside the highlight, so finding it on the clipboard
+                // is the scrolling and the copy proving each other.
+                const LATER: &str = "question 11";
+
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                let size = wound_back(&mut driven);
+                let (column, row) = drawn_at(&driven, "question 0");
+                let past = below_the_card(size, column);
+                assert!(
+                    found_at(&driven, LATER).is_none(),
+                    "the whole conversation is on screen already: \
+                     {LATER} needs no scrolling to reach"
+                );
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                point(&mut driven, DRAG, past, size, now);
+                let anchored = driven.app.panel().scroll_offset();
+                for _ in 0..200 {
+                    driven.drag_scroll();
+                }
+                assert!(
+                    driven.app.panel().scroll_offset() > anchored,
+                    "the ticks left the card where the drag did"
+                );
+                assert!(covered(&driven) > 0, "the ticks grew no highlight");
+                point(&mut driven, RELEASE, past, size, now);
+
+                let [copied] = driven.clipboard.copied() else {
+                    panic!(
+                        "the release past the edge copied something other than once: {:?}",
+                        driven.clipboard.copied()
+                    )
+                };
+                assert!(
+                    copied.starts_with("question 0"),
+                    "the copy began somewhere other than where the press did: {copied:?}"
+                );
+                assert!(
+                    copied.contains(LATER),
+                    "the copy stopped at the edge the drag left rather than at \
+                     the line the ticks reached: {copied:?}"
                 );
             }
 
@@ -2827,6 +2907,68 @@ mod tests {
                     driven.app.selection(),
                     None,
                     "a drag that began in the tree highlighted the conversation"
+                );
+            }
+
+            #[test]
+            fn a_press_on_the_composer_dragged_past_the_card_scrolls_nothing() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                drafting(&mut driven);
+                // Pointed away again, so that the press taking the keys back is
+                // this test's proof that it landed in the field rather than on a
+                // line of the conversation behind it.
+                driven.app.set_focus(Focus::Tree);
+                let size = wound_back(&mut driven);
+                let field = drawn_at(&driven, DRAFT);
+                let (column, _) = drawn_at(&driven, "question");
+                let where_it_was = driven.app.panel().scroll_offset();
+
+                point(&mut driven, PRESS, field, size, now);
+                assert_eq!(
+                    driven.app.focus(),
+                    Focus::Composer,
+                    "the press landed somewhere other than the composer"
+                );
+                point(&mut driven, DRAG, below_the_card(size, column), size, now);
+                driven.drag_scroll();
+                driven.drag_scroll();
+
+                assert_eq!(
+                    driven.app.panel().scroll_offset(),
+                    where_it_was,
+                    "a drag that began in the composer scrolled the conversation"
+                );
+                assert_eq!(
+                    driven.app.selection(),
+                    None,
+                    "a drag that began in the composer highlighted the conversation"
+                );
+            }
+
+            #[test]
+            fn a_pointer_past_the_edge_with_no_button_held_scrolls_nothing() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                let size = wound_back(&mut driven);
+                let (column, _) = drawn_at(&driven, "question");
+                let where_it_was = driven.app.panel().scroll_offset();
+
+                point(&mut driven, MOVED, below_the_card(size, column), size, now);
+                driven.drag_scroll();
+                driven.drag_scroll();
+
+                assert_eq!(
+                    driven.app.panel().scroll_offset(),
+                    where_it_was,
+                    "a pointer crossing the footer with nothing held down \
+                     scrolled the conversation"
+                );
+                assert_eq!(
+                    driven.app.selection(),
+                    None,
+                    "a pointer crossing the footer with nothing held down \
+                     highlighted the conversation"
                 );
             }
 
