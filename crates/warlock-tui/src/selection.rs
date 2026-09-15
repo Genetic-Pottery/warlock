@@ -815,7 +815,10 @@ mod tests {
             spans_at(
                 &thread,
                 selection,
-                Window { height: 0, ..window },
+                Window {
+                    height: 0,
+                    ..window
+                },
                 frame(),
             ),
             Vec::new(),
@@ -884,8 +887,10 @@ mod tests {
             panic!("one row of the answer, so one span: {spans:?}");
         };
 
-        for (column, outside) in [(span.from - 1, "the cell in front"), (span.to, "the cell after")]
-        {
+        for (column, outside) in [
+            (span.from - 1, "the cell in front"),
+            (span.to, "the cell after"),
+        ] {
             let position = position_at(&thread, cell(column, span.row, NARROW), frame())
                 .expect("text under the cell");
             assert!(
@@ -901,8 +906,16 @@ mod tests {
         let pieces = thread.pieces();
 
         for width in 1..30 {
-            for start in [Position::new(0, 0), Position::new(0, 17), Position::new(1, 9)] {
-                for end in [Position::new(1, 1), Position::new(1, 30), Position::new(2, 22)] {
+            for start in [
+                Position::new(0, 0),
+                Position::new(0, 17),
+                Position::new(1, 9),
+            ] {
+                for end in [
+                    Position::new(1, 1),
+                    Position::new(1, 30),
+                    Position::new(2, 22),
+                ] {
                     let selection = Selection::new(&pieces, start, end);
                     let window = whole(width);
                     for span in spans_at(&thread, selection, window, frame()) {

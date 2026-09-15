@@ -6555,7 +6555,8 @@ mod tests {
 
         // New text arriving on the thread, under the selection and after it.
         app.panel_mut().note("a note nobody asked for", at(base, 6));
-        app.panel_mut().start_turn("and how long does it take?", at(base, 7));
+        app.panel_mut()
+            .start_turn("and how long does it take?", at(base, 7));
         app.panel_mut().answer_turn("About a second.", at(base, 8));
         assert_eq!(app.selection(), Some(held), "new text cleared it");
 

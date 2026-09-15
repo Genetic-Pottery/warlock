@@ -3886,7 +3886,8 @@ mod tests {
         assert!(rows.height > 0, "the panel should have rows to point at");
 
         let marker = u16::try_from(display_width(SAID_MARKER)).expect("a marker is a few columns");
-        let indent = u16::try_from(display_width(PANEL_INDENT)).expect("an indent is a few columns");
+        let indent =
+            u16::try_from(display_width(PANEL_INDENT)).expect("an indent is a few columns");
         for (x, column) in [
             (rows.x, 0),
             (rows.x + marker - 1, marker - 1),
