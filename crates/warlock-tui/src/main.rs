@@ -33,6 +33,7 @@ use warlock_tui::{
 mod boundary;
 mod chatting;
 mod check;
+mod clipboard;
 mod config;
 mod descent;
 mod editing;
@@ -53,6 +54,7 @@ mod writing;
 
 use chatting::Chat;
 use check::check;
+use clipboard::{Clip, Clipboard};
 use config::configure;
 use editing::edit_press;
 use edits::{scope_add, scope_remove, unpact};
@@ -419,6 +421,10 @@ fn run() -> Result<(), Error> {
         // timeout, so no `claude` exists until a key asks for a pass or a turn.
         pact: Pact::new(),
         chat: Chat::new(root),
+        // Opened here and nowhere else, and dropped when this function returns:
+        // a handle that does not outlive the copies made through it loses the
+        // text it put on an X11 selection. See `mod@clipboard`.
+        clipboard: Clipboard::open(),
         confirm: QuitConfirm::default(),
         prompt: ScopePrompt::default(),
         document: None,
@@ -484,17 +490,20 @@ fn run() -> Result<(), Error> {
 
 /// Everything one interactive session holds, and the seam the tests drive.
 ///
-/// Generic over all three impure things — the screen, the model, the
-/// conversation's model — so a test can press keys at a whole session with no
-/// terminal attached and no `claude` installed. `warlock` itself only ever
-/// instantiates it one way, in [`run`].
-struct Session<S: Screen, P: Wired + Agent, C: Converses> {
+/// Generic over all four impure things — the screen, the model, the
+/// conversation's model, the clipboard — so a test can press keys at a whole
+/// session with no terminal attached, no `claude` installed and no display.
+/// `warlock` itself only ever instantiates it one way, in [`run`].
+struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip> {
     app: App,
     screen: S,
     scope: Scope,
     manifest: Manifest,
     pact: Pact<P>,
     chat: Chat<C>,
+    /// The session's one clipboard handle, opened in [`run`] and held until it
+    /// returns because a copy does not outlive the handle that made it.
+    clipboard: B,
     confirm: QuitConfirm,
     prompt: ScopePrompt,
     /// Which file is on the document card, which the app is never told:
@@ -507,7 +516,7 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses> {
     watched: Watched,
 }
 
-impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
+impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
     fn size(&self) -> io::Result<Size> {
         self.screen.size()
     }
@@ -901,6 +910,22 @@ impl<S: Screen, P: Wired + Agent, C: Converses> Session<S, P, C> {
         self.chat.paste(pasted);
     }
 
+    /// Text onto the system clipboard, and a line on the footer either way.
+    ///
+    /// No key reaches this yet: the selection that decides *what* text is a
+    /// later slice of brief 19, and this is the seam it will call. The `allow`
+    /// is scoped to the build without `cfg(test)` for that reason and comes off
+    /// with the first key bound to it — the alternative was landing the handle
+    /// and the reporting in separate changes, which would have put an untested
+    /// footer line in the binary.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "the key that copies is a later slice")
+    )]
+    fn copy(&mut self, text: &str) {
+        clipboard::copy(&mut self.clipboard, &mut self.app, text);
+    }
+
     /// Everything that happened off this thread since the last round: what a
     /// run has said, what a turn has, and what the disk did while this thread
     /// was waiting on a keystroke.
@@ -1004,7 +1029,7 @@ mod tests {
     use crate::pacting::Pact;
     use crate::query::spelled;
     use crate::session::{Scope, Watched};
-    use crate::stubs::{Passing, Saying};
+    use crate::stubs::{Copying, Passing, Saying};
     use crate::terminal::Screen;
 
     // `try_parse_from` wants argv as the process gets it, program name and all,
@@ -1736,7 +1761,7 @@ mod tests {
         }
     }
 
-    type Driven = Session<FakeScreen, Passing, Saying>;
+    type Driven = Session<FakeScreen, Passing, Saying, Copying>;
 
     fn session(rows: Vec<Row>) -> Driven {
         let root = PathBuf::from("/warlock/no/such/repository");
@@ -1758,6 +1783,7 @@ mod tests {
             manifest: Manifest::new(),
             pact: Pact::with_agent(Passing::filling()),
             chat: Chat::with_agent(root, Saying::answering(ANSWER)),
+            clipboard: Copying::taking(),
             confirm: QuitConfirm::default(),
             prompt: ScopePrompt::default(),
             document: None,
@@ -1816,6 +1842,7 @@ mod tests {
             manifest: Manifest::new(),
             pact: Pact::with_agent(Passing::filling()),
             chat: Chat::with_agent(repo_root, Saying::answering(ANSWER)),
+            clipboard: Copying::taking(),
             confirm: QuitConfirm::default(),
             prompt: ScopePrompt::default(),
             document: None,
@@ -2044,6 +2071,83 @@ mod tests {
             ScopePrompt::Closed,
             "Esc closes the window rather than quitting warlock"
         );
+    }
+
+    mod copying {
+        use super::{Copying, directory, session};
+
+        // Not "no clipboard here": what arboard hands over is some other
+        // program's complaint, and the footer has one line to say it on.
+        const REFUSED: &str = "no clipboard on this session\nnothing was listening";
+
+        #[test]
+        fn a_copy_that_lands_says_how_much_went() {
+            let mut driven = session(vec![directory("/repo/crates")]);
+
+            driven.copy("crates/engine");
+
+            assert_eq!(
+                driven.clipboard.copied(),
+                ["crates/engine"],
+                "the text never reached the clipboard"
+            );
+            assert_eq!(driven.app.message(), Some("copied 13 characters"));
+        }
+
+        #[test]
+        fn one_character_is_counted_in_the_singular() {
+            let mut driven = session(vec![directory("/repo/crates")]);
+
+            driven.copy("p");
+
+            assert_eq!(driven.app.message(), Some("copied 1 character"));
+        }
+
+        #[test]
+        fn characters_are_counted_rather_than_the_bytes_utf_8_spells_them_with() {
+            let mut driven = session(vec![directory("/repo/crates")]);
+
+            // Five characters and seven bytes: a count of bytes would tell a
+            // reader something about UTF-8 rather than about what they copied.
+            let text = "péché";
+            assert_ne!(text.len(), text.chars().count(), "this text is all ASCII");
+            driven.copy(text);
+
+            assert_eq!(driven.app.message(), Some("copied 5 characters"));
+        }
+
+        #[test]
+        fn a_clipboard_that_refuses_says_so_on_one_line_and_claims_nothing() {
+            let mut driven = session(vec![directory("/repo/crates")]);
+            driven.clipboard = Copying::refusing(REFUSED);
+
+            driven.copy("crates/engine");
+
+            let said = driven
+                .app
+                .message()
+                .expect("a copy that did not happen is said rather than swallowed");
+            assert!(
+                !said.contains('\n'),
+                "the footer has one line and this wrapped: {said}"
+            );
+            assert!(
+                said.starts_with("nothing was copied"),
+                "the footer claims something happened: {said}"
+            );
+            assert!(
+                !said.contains("character"),
+                "a failed copy counted characters onto the clipboard: {said}"
+            );
+            assert!(
+                said.contains("no clipboard on this session"),
+                "what the clipboard said was thrown away: {said}"
+            );
+            assert!(
+                driven.clipboard.copied().is_empty(),
+                "a refused copy left text on the clipboard anyway"
+            );
+        }
     }
 
     mod pasting {

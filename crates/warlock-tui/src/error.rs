@@ -77,6 +77,14 @@ pub(crate) enum Error {
     Signal {
         source: ctrlc::Error,
     },
+    // The one failure here that is another program's: the selection owner, the
+    // compositor's helper, or nothing at all on a session with no display.
+    // Source-carrying like `Signal` above and for the same reason — the crate's
+    // own sentence is the whole of what went wrong, and what it cost is
+    // warlock's to say.
+    Clipboard {
+        source: arboard::Error,
+    },
     NoRepository {
         start: PathBuf,
         wanted: &'static str,
@@ -197,6 +205,15 @@ impl fmt::Display for Error {
                 "{source}, so no run was started — a pact nobody could stop with Ctrl-C is not \
                  one warlock will spend passes on"
             ),
+            // The crate's sentence about the clipboard, with what it cost on
+            // the end of it, in `Signal`'s shape: "the native clipboard is not
+            // accessible due to being held by another party" does not say by
+            // itself that the text a reader asked for is not on the clipboard,
+            // and that is the half they need. Flattened, because an unknown
+            // failure carries whatever some other program printed.
+            Self::Clipboard { source } => {
+                write!(f, "nothing was copied: {}", one_line(&source.to_string()))
+            }
             // The footer's own sentence, to the letter: the same fact refused
             // at a keystroke and at a shell prompt says the same thing, names
             // the same scope and points at the same `warlock config`.
@@ -279,6 +296,7 @@ impl std::error::Error for Error {
             Self::Sigil { rule, .. } | Self::Scope { rule } => Some(rule),
             Self::Sigils { source } => Some(source),
             Self::Signal { source } => Some(source),
+            Self::Clipboard { source } => Some(source),
             // No source, and there is none to have: a boundary this machine
             // does not hold, and a directory nobody has pacted, are facts about
             // two files agreeing rather than failures anything underneath
@@ -462,6 +480,9 @@ mod tests {
             Error::Signal {
                 source: ctrlc::Error::MultipleHandlers,
             },
+            Error::Clipboard {
+                source: arboard::Error::ClipboardOccupied,
+            },
         ];
 
         for error in errors {
@@ -469,6 +490,24 @@ mod tests {
             assert!(!message.contains('\n'), "{error:?} wrapped: {message}");
             assert!(!message.is_empty(), "{error:?} said nothing");
         }
+    }
+
+    #[test]
+    fn a_clipboard_that_refused_says_what_it_cost_and_prints_as_one_line() {
+        // What an unknown clipboard failure carries is another program's
+        // output — a helper the compositor started — so it arrives with
+        // newlines in it and leaves here without them.
+        let error = Error::Clipboard {
+            source: arboard::Error::Unknown {
+                description: "could not reach the compositor\nno such file".to_owned(),
+            },
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "nothing was copied: Unknown error while interacting with the \
+             clipboard: could not reach the compositor: no such file"
+        );
     }
 
     #[test]
