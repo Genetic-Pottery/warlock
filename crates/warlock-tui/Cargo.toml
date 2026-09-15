@@ -21,6 +21,10 @@ path = "src/lib.rs"
 # The dependency edge runs TUI -> engine: the front end knows the domain
 # vocabulary, and the engine knows nothing about terminals.
 [dependencies]
+# The system clipboard, and the only crate in the workspace that wants one: the
+# panel is the only place with text to copy. See the workspace manifest for why
+# the job is worth a crate and for what the Linux feature settles.
+arboard = { workspace = true }
 clap = { workspace = true }
 # Only the headless runs press it into service, and only from `src/running.rs`:
 # a `warlock pact` is minutes of model passes with no panel to press Esc in, so
