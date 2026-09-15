@@ -25,6 +25,7 @@ use std::time::Instant;
 use warlock_engine::{IntoDocument, NodeState, StateCounts, Tree, to_manifest_path};
 
 use crate::panel::{Panel, Showing};
+use crate::selection::{Position, Selection};
 
 /// One line of the flattened tree.
 ///
@@ -378,6 +379,10 @@ impl Chrome {
 /// rebuilds `rows` owes both of them a re-derivation. The three groups below
 /// are grouped so that [`reseat_on`] can carry them across a reload by moving
 /// three fields rather than by copying twenty.
+///
+/// `highlight` is positions in the panel's thread rather than anything the tree
+/// holds, so it goes wherever the panel goes and nowhere else: carried across a
+/// reload, kept by [`App::restore_from`] over the view it rolls back to.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct App {
     all_rows: Vec<Row>,
@@ -389,6 +394,20 @@ pub struct App {
     viewpoint: Viewpoint,
     status: Status,
     panel: Panel,
+    highlight: Option<Highlight>,
+}
+
+/// What the reader has highlighted in the thread card, and where the drag making
+/// it began.
+///
+/// The anchor is kept because it cannot be recovered from the selection:
+/// [`Selection::new`] puts its two positions in reading order, so a drag that
+/// has gone up past where it started is indistinguishable from one that has not,
+/// and extending from the wrong end would grow the selection the wrong way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Highlight {
+    anchor: Position,
+    selection: Selection,
 }
 
 // What the reader is looking at rather than what is being looked at, which is
@@ -452,6 +471,7 @@ impl App {
                 mouse_captured: false,
             },
             panel: Panel::default(),
+            highlight: None,
         };
         // The rows handed over may hold file rows, which the file toggle starts
         // off over, so the drawn list is derived rather than assumed even here.
@@ -610,6 +630,9 @@ impl App {
             return;
         };
         self.panel.show(card);
+        // The highlight is drawn on the thread card, so a card taking its place
+        // would leave it standing over text it was never measured against.
+        self.clear_selection();
         self.rescue_focus();
     }
 
@@ -622,13 +645,71 @@ impl App {
         &mut self.panel
     }
 
+    /// What the reader has highlighted in the thread card, if anything.
+    #[must_use]
+    pub fn selection(&self) -> Option<Selection> {
+        self.highlight.map(|highlight| highlight.selection)
+    }
+
+    /// Anchors a selection at `at` and drops whatever was highlighted before.
+    ///
+    /// It covers nothing until [`App::extend_selection`] moves its far end,
+    /// which is what makes a press nobody dragged from copy no text rather than
+    /// the character under the pointer.
+    ///
+    /// Does nothing when there is no conversation, since a position is an offset
+    /// into a thread's text and there is none to snap it against.
+    pub fn start_selection(&mut self, at: Position) {
+        let Some(selection) = self.selection_between(at, at) else {
+            return;
+        };
+        self.highlight = Some(Highlight {
+            anchor: at,
+            selection,
+        });
+    }
+
+    /// Moves the far end of the selection to `to`, leaving the anchor where the
+    /// press put it. Does nothing until a press has put one there: a drag with
+    /// no anchor behind it has no second position to make a selection from.
+    pub fn extend_selection(&mut self, to: Position) {
+        let Some(highlight) = self.highlight else {
+            return;
+        };
+        let Some(selection) = self.selection_between(highlight.anchor, to) else {
+            return;
+        };
+        self.highlight = Some(Highlight {
+            anchor: highlight.anchor,
+            selection,
+        });
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.highlight = None;
+    }
+
+    // Both positions go through `Selection::new` every time rather than being
+    // snapped once and stored: it is the only thing that puts them on a char
+    // boundary and in reading order, and a position that skipped it would be
+    // sliced with by everything in `selection.rs`.
+    fn selection_between(&self, anchor: Position, to: Position) -> Option<Selection> {
+        let thread = self.panel.thread()?;
+        Some(Selection::new(&thread.pieces(), anchor, to))
+    }
+
     /// Rolls the view back to an earlier copy — but keeps the live panel, since
     /// an account or a conversation is a record of what happened and rolling it
     /// back would discard it at the moment the reader turned to read it.
     pub fn restore_from(&mut self, view: Self) {
         let panel = mem::take(&mut self.panel);
+        // Positions in the thread on the panel that stayed, so the copy's idea
+        // of what was highlighted is about a conversation that is not the one
+        // being kept.
+        let highlight = self.highlight;
         *self = view;
         self.panel = panel;
+        self.highlight = highlight;
         // The focus comes from `view` and the card showing comes from the panel
         // that stayed, so this is the one place the two can arrive out of step:
         // a copy taken with the composer focused, put back over a panel that has
@@ -1190,10 +1271,13 @@ pub fn reseat_on(view: &App, tree: &Tree) -> App {
         scroll_offset,
         // Carried whole. Three values, three moves — and nothing to forget
         // inside them, because a field added to any of the three is carried by
-        // the move that already exists.
+        // the move that already exists. The highlight is a fourth because it is
+        // positions in the thread on the panel beside it: a tree read again off
+        // disk is not a word of the conversation changed.
         viewpoint,
         status,
         panel,
+        highlight,
     } = view;
 
     let mut reseated = App {
@@ -1208,6 +1292,7 @@ pub fn reseat_on(view: &App, tree: &Tree) -> App {
         viewpoint: viewpoint.clone(),
         status: status.clone(),
         panel: panel.clone(),
+        highlight: *highlight,
     };
 
     // Re-filter first, so the selection is looked up in the rows that will
@@ -1420,6 +1505,7 @@ mod tests {
     use crate::fixture;
     use crate::panel::Mode;
     use crate::panel::panel_offset_for;
+    use crate::selection::{Position, copied_text};
     use crate::thread::Ending;
 
     const MANY: usize = 20;
@@ -6360,6 +6446,186 @@ mod tests {
             );
         }
         app.panel_mut().answer_turn(ANSWER, at(base, 5));
+    }
+
+    // "does" out of the question, which is piece 0 of the thread
+    // `ask_and_answer` leaves behind.
+    const DOES: (Position, Position) = (Position::new(0, 5), Position::new(0, 9));
+
+    fn selected_text(app: &App) -> String {
+        let thread = app.panel().thread().expect("a conversation to select in");
+        let selection = app.selection().expect("something highlighted");
+        copied_text(&thread.pieces(), selection)
+    }
+
+    #[test]
+    fn a_press_highlights_nothing_until_a_drag_extends_it() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        ask_and_answer(&mut app, base);
+
+        let (from, to) = DOES;
+        app.start_selection(from);
+
+        // A press with no drag after it is a reader putting the pointer down,
+        // and it copies nothing: both ends on the same character.
+        let selection = app.selection().expect("the press anchored one");
+        assert_eq!(selection.start(), from);
+        assert_eq!(selection.end(), from);
+        assert_eq!(selected_text(&app), String::new());
+
+        app.extend_selection(to);
+        assert_eq!(selected_text(&app), "does");
+    }
+
+    #[test]
+    fn a_drag_back_past_its_anchor_selects_from_the_anchor() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        ask_and_answer(&mut app, base);
+
+        // The press lands at the end of the word and the drag goes left, which
+        // is the case an anchor is kept for: the selection reads the same way
+        // round as the same drag made rightwards.
+        let (left, right) = DOES;
+        app.start_selection(right);
+        app.extend_selection(left);
+        let selection = app.selection().expect("the drag extended one");
+        assert_eq!(selection.start(), left);
+        assert_eq!(selection.end(), right);
+        assert_eq!(selected_text(&app), "does");
+
+        // And the far end keeps moving from the same anchor rather than from
+        // wherever the last drag event left it.
+        app.extend_selection(Position::new(0, 0));
+        assert_eq!(selected_text(&app), "what does");
+    }
+
+    #[test]
+    fn a_drag_with_no_press_behind_it_highlights_nothing() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        ask_and_answer(&mut app, base);
+
+        app.extend_selection(DOES.1);
+
+        assert_eq!(app.selection(), None);
+    }
+
+    #[test]
+    fn a_press_with_no_conversation_to_measure_against_highlights_nothing() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        assert!(!app.panel().has_thread());
+
+        app.start_selection(DOES.0);
+        app.extend_selection(DOES.1);
+
+        assert_eq!(app.selection(), None);
+    }
+
+    #[test]
+    fn nothing_but_the_swap_takes_the_highlight_down() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        ask_and_answer(&mut app, base);
+        app.start_selection(DOES.0);
+        app.extend_selection(DOES.1);
+        let held = app.selection().expect("the drag made one");
+
+        // A wheel notch over the panel, either way.
+        app.scroll_panel_down(2);
+        assert_eq!(app.selection(), Some(held), "a wheel notch cleared it");
+        app.scroll_panel_up(1);
+        assert_eq!(app.selection(), Some(held), "a wheel notch cleared it");
+
+        // A key press: a movement in the tree, the focus key, and a keystroke
+        // that was refused and said so.
+        app.toggle_focus();
+        app.select_next();
+        app.select_previous();
+        app.set_message("something the last keystroke said");
+        assert_eq!(app.selection(), Some(held), "a key press cleared it");
+
+        // Esc, which is warlock's cancel while a run is in flight and its quit
+        // otherwise — neither of which is about the card.
+        app.set_pact_in_flight("repo/crates", 1, 4);
+        app.clear_pact_in_flight();
+        assert_eq!(app.selection(), Some(held), "Esc cleared it");
+
+        // New text arriving on the thread, under the selection and after it.
+        app.panel_mut().note("a note nobody asked for", at(base, 6));
+        app.panel_mut().start_turn("and how long does it take?", at(base, 7));
+        app.panel_mut().answer_turn("About a second.", at(base, 8));
+        assert_eq!(app.selection(), Some(held), "new text cleared it");
+
+        // A redraw, which is everything the draw path reads off the app.
+        let _drawn = app.panel().window(at(base, 9));
+        let _rows = app.rows().len();
+        assert_eq!(app.selection(), Some(held), "a redraw cleared it");
+
+        // The one thing that does clear it: the card it was drawn on going away.
+        app.swap_card();
+        assert_eq!(app.selection(), None, "the swap left it standing");
+    }
+
+    #[test]
+    fn text_arriving_under_a_selection_leaves_it_on_the_same_words() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        ask_and_answer(&mut app, base);
+        app.start_selection(DOES.0);
+        app.extend_selection(DOES.1);
+
+        // Positions are the thread's own, so a turn filed after them cannot move
+        // the text they name — which is the whole reason they are not cells.
+        app.panel_mut().note("a refusal", at(base, 6));
+        app.panel_mut().start_turn("and again?", at(base, 7));
+        app.panel_mut().answer_turn("Yes.", at(base, 8));
+        app.scroll_panel_down(4);
+
+        assert_eq!(selected_text(&app), "does");
+    }
+
+    #[test]
+    fn the_swap_takes_the_highlight_down_wherever_it_lands() {
+        let base = Instant::now();
+        let mut app = app_pacting(9, base);
+        ask_and_answer(&mut app, base);
+        app.show_document(document_lines(), false);
+        app.swap_card();
+        assert!(app.panel().showing_thread());
+
+        app.start_selection(DOES.0);
+        app.extend_selection(DOES.1);
+        assert!(app.selection().is_some());
+
+        // Round the whole cycle: the highlight is gone at the first card and
+        // does not come back when the conversation does.
+        app.swap_card();
+        assert_eq!(app.selection(), None);
+        app.swap_card();
+        app.swap_card();
+        assert!(app.panel().showing_thread());
+        assert_eq!(app.selection(), None, "the swap back put it back");
+    }
+
+    #[test]
+    fn a_swap_that_has_nowhere_to_go_leaves_the_highlight_alone() {
+        let base = Instant::now();
+        let mut app = App::from_rows(three_rows());
+        app.panel_mut().set_height(PANEL);
+        ask_and_answer(&mut app, base);
+        app.start_selection(DOES.0);
+        app.extend_selection(DOES.1);
+        let held = app.selection().expect("the drag made one");
+
+        // Nothing to swap to: the conversation is still the card showing, so
+        // the highlight is still over the text it was measured against.
+        app.swap_card();
+
+        assert!(app.panel().showing_thread());
+        assert_eq!(app.selection(), Some(held));
     }
 
     #[test]
