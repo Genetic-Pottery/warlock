@@ -26,8 +26,9 @@ use ratatui::crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use ratatui::layout::Size;
 use warlock_engine::{Agent, Manifest, Written, write_claude_md};
 use warlock_tui::{
-    App, Composer, Converses, Focus, QuitConfirm, Run, ScopePrompt, Wired, composer_on_screen,
-    draw, panel_height, panel_width, paste_for, tree_height,
+    App, Cell, Converses, Focus, Position, QuitConfirm, Run, ScopePrompt, Wired,
+    composer_on_screen, copied_text, draw, panel_height, panel_width, paste_for, position_at,
+    tree_height,
 };
 
 mod boundary;
@@ -468,7 +469,7 @@ fn run() -> Result<(), Error> {
                 // what it does reads the terminal and none of it draws: the
                 // round is the redraw, which is why a pointer swept across the
                 // screen costs nothing.
-                Event::Mouse(mouse) => session.point(mouse, size),
+                Event::Mouse(mouse) => session.point(mouse, size, now),
                 // A block of text the terminal handed over whole, because
                 // bracketed paste is on (see `take_terminal`). Nothing is
                 // returned and nothing can be: a paste never ends the session
@@ -560,16 +561,32 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
         })
     }
 
-    fn point(&mut self, mouse: MouseEvent, size: Size) {
-        apply_mouse(
-            &mut self.app,
+    /// `now` is the instant the event arrived, for the reason a keystroke's is
+    /// read once by the caller: a clock is part of a row's prefix, so the cell
+    /// under the pointer is worked out against the same instant the rest of this
+    /// round is.
+    ///
+    /// The copy is done here rather than in [`apply_mouse`] because the
+    /// clipboard is the session's, held open for as long as it runs — see
+    /// [`Clipboard`].
+    fn point(&mut self, mouse: MouseEvent, size: Size, now: Instant) {
+        // Read here rather than inside `apply_mouse` because every window and
+        // the draft the frame was drawn with are the session's: what the event
+        // means is decided against them, and what it then does is the app's
+        // alone.
+        let field = composer_on_screen(&self.app, self.chat.composer());
+        let action = mouse_action(
             mouse,
             size,
+            &self.app,
             self.confirm,
             &self.prompt,
             self.chat.write_prompt(),
-            self.chat.composer(),
+            field,
         );
+        if let Some(text) = apply_mouse(&mut self.app, action, now) {
+            self.copy(&text);
+        }
     }
 
     /// One keystroke. `Ok(false)` is the session being over and the only thing
@@ -912,16 +929,8 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
 
     /// Text onto the system clipboard, and a line on the footer either way.
     ///
-    /// No key reaches this yet: the selection that decides *what* text is a
-    /// later slice of brief 19, and this is the seam it will call. The `allow`
-    /// is scoped to the build without `cfg(test)` for that reason and comes off
-    /// with the first key bound to it — the alternative was landing the handle
-    /// and the reporting in separate changes, which would have put an untested
-    /// footer line in the binary.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "the key that copies is a later slice")
-    )]
+    /// Reached by the release that ends a drag over the conversation, and by
+    /// nothing else: what decides the text is the selection that drag built.
     fn copy(&mut self, text: &str) {
         clipboard::copy(&mut self.clipboard, &mut self.app, text);
     }
@@ -958,22 +967,22 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
     }
 }
 
-/// A pointer event, at the size the frame it lands on was drawn at.
+/// What a pointer event already read off the frame comes to on the app.
 ///
 /// Free rather than a method because none of it reads the terminal, spawns
 /// anything or draws: the round is the redraw, which is why a pointer swept
 /// across the screen costs nothing.
-fn apply_mouse(
-    app: &mut App,
-    mouse: MouseEvent,
-    size: Size,
-    confirm: QuitConfirm,
-    prompt: &ScopePrompt,
-    path_prompt: &ScopePrompt,
-    composer: &Composer,
-) {
-    let field = composer_on_screen(app, composer);
-    match mouse_action(mouse, size, app, confirm, prompt, path_prompt, field) {
+///
+/// `now` is the instant the event arrived, because a clock is part of a row's
+/// prefix and a row with a wider prefix breaks somewhere else — the cell under
+/// the pointer has to be worked out against the same instant everything else
+/// this round is.
+///
+/// What comes back is text a release asked for, which the caller puts on the
+/// clipboard it holds: the one thing a pointer event can want that is not on
+/// the app.
+fn apply_mouse(app: &mut App, action: Option<MouseAction>, now: Instant) -> Option<String> {
+    match action {
         // The wheel over the tree column, whichever pane the keys are pointed
         // at: the selection moves and the window follows it, exactly as it does
         // for a movement key.
@@ -1005,16 +1014,65 @@ fn apply_mouse(
         // space below its last row, a line of the panel. Taking the focus is
         // the whole of what it does.
         Some(MouseAction::Focus(focus)) => app.set_focus(focus),
-        // A press on the conversation is the focus arm above plus an anchor for
-        // a drag, and only the focus half is wired here. Dropping the focus
-        // while the other half is being built would take a press that works
-        // today away from a reader.
-        Some(MouseAction::StartSelection(_)) => app.set_focus(Focus::Panel),
-        // The cell a drag or a release carries is not yet put anywhere, so until
-        // the app holds a selection they are read and dropped — which is what
-        // they were before they had names here.
-        Some(MouseAction::ExtendSelection(_) | MouseAction::EndSelection(_)) | None => {}
+        // A press on the conversation is the focus arm above plus the anchor a
+        // drag extends from. Whatever was highlighted comes down first and
+        // comes down either way, cell with text under it or not: the reader has
+        // just pointed somewhere else, and a highlight left standing is one the
+        // next release would copy.
+        Some(MouseAction::StartSelection(cell)) => {
+            app.set_focus(Focus::Panel);
+            app.clear_selection();
+            if let Some(at) = position_under(app, cell, now) {
+                app.start_selection(at);
+            }
+        }
+        // A drag moves the far end and nothing else. A cell with no text under
+        // it leaves the selection where the last one put it rather than
+        // collapsing it: a pointer dragged off the end of the card is still
+        // that drag.
+        Some(MouseAction::ExtendSelection(cell)) => extend(app, cell, now),
+        // The release ends the drag where the button came up, and what it hands
+        // back is what the selection covers — nothing at all for a press nobody
+        // dragged from, since the two ends are one position and `copied_text`
+        // of that is empty. An empty copy is not a copy: the clipboard keeps
+        // what it had and the footer is left alone, so nothing tells a reader
+        // something went that did not.
+        //
+        // The highlight stays up. It is the only thing on screen saying what
+        // went, and taking it down in the same frame as the footer says how much
+        // would leave the reader to take warlock's word for it.
+        Some(MouseAction::EndSelection(cell)) => {
+            extend(app, cell, now);
+            let text = selected_text(app);
+            return (!text.is_empty()).then_some(text);
+        }
+        None => {}
     }
+
+    None
+}
+
+fn extend(app: &mut App, cell: Cell, now: Instant) {
+    if let Some(to) = position_under(app, cell, now) {
+        app.extend_selection(to);
+    }
+}
+
+/// Where in the conversation's own text a cell of the card is, which is `None`
+/// for a cell past its last row — a place a reader can put the pointer and not
+/// a position in anything.
+fn position_under(app: &App, cell: Cell, now: Instant) -> Option<Position> {
+    position_at(app.panel().thread()?, cell, now)
+}
+
+/// What the highlight covers, as the thread's own stored text: no marker, no
+/// indent and no break where the panel wrapped it (see [`copied_text`]).
+fn selected_text(app: &App) -> String {
+    let (Some(selection), Some(thread)) = (app.selection(), app.panel().thread()) else {
+        return String::new();
+    };
+
+    copied_text(&thread.pieces(), selection)
 }
 
 #[cfg(test)]
@@ -2154,6 +2212,249 @@ mod tests {
             assert!(
                 driven.clipboard.copied().is_empty(),
                 "a refused copy left text on the clipboard anyway"
+            );
+        }
+    }
+
+    mod dragging {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Size;
+
+        use super::{ANSWER, Copying, Driven, Focus, Instant, directory, session};
+
+        const PRESS: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
+        const DRAG: MouseEventKind = MouseEventKind::Drag(MouseButton::Left);
+        const RELEASE: MouseEventKind = MouseEventKind::Up(MouseButton::Left);
+
+        // Piece 0 of the conversation these tests drag over, so what a drag
+        // across the word `does` copies is `does` — the question as it was
+        // asked, not the row the panel drew it on.
+        const ASKED: &str = "what does the engine do?";
+
+        const REFUSED: &str = "no clipboard on this session\nnothing was listening";
+
+        // A session with a turn in the conversation, drawn once: a pointer event
+        // is read against the frame it landed on, and the frame is what tells
+        // the panel its width and height.
+        fn conversing(now: Instant) -> (Driven, Size) {
+            let mut driven = session(vec![directory("/repo/crates")]);
+            driven.app.panel_mut().start_turn(ASKED, now);
+            driven.app.panel_mut().answer_turn(ANSWER, now);
+            let size = redrawn(&mut driven);
+            (driven, size)
+        }
+
+        fn redrawn(driven: &mut Driven) -> Size {
+            let size = driven.size().expect("the fake screen has a size");
+            driven.draw(size).expect("the fake screen draws");
+            size
+        }
+
+        // Where a word the frame drew is, as screen cells: the column its first
+        // character landed on and the row it landed in. Read off the drawn frame
+        // rather than worked out from the layout, so these tests point at the
+        // cells a reader would point at.
+        fn drawn_at(driven: &Driven, word: &str) -> (u16, u16) {
+            let buffer = driven.screen.terminal.backend().buffer();
+            let area = buffer.area;
+            for row in 0..area.height {
+                let line: String = (0..area.width).map(|x| buffer[(x, row)].symbol()).collect();
+                if let Some(byte) = line.find(word) {
+                    let column = line[..byte].chars().count();
+                    let column = u16::try_from(column).expect("a column of the frame");
+                    return (column, row);
+                }
+            }
+            panic!("the frame never drew {word:?}");
+        }
+
+        fn point(
+            driven: &mut Driven,
+            kind: MouseEventKind,
+            at: (u16, u16),
+            size: Size,
+            now: Instant,
+        ) {
+            let (column, row) = at;
+            driven.point(
+                MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                },
+                size,
+                now,
+            );
+        }
+
+        #[test]
+        fn a_drag_across_the_conversation_copies_what_the_highlight_covers() {
+            let now = Instant::now();
+            let (mut driven, size) = conversing(now);
+            let (column, row) = drawn_at(&driven, "does");
+
+            point(&mut driven, PRESS, (column, row), size, now);
+            point(&mut driven, DRAG, (column + 2, row), size, now);
+            // The space after the `s`, which is the character the drag stopped
+            // on and the end of `does`.
+            point(&mut driven, DRAG, (column + 4, row), size, now);
+            point(&mut driven, RELEASE, (column + 4, row), size, now);
+
+            assert_eq!(
+                driven.clipboard.copied(),
+                ["does"],
+                "the release copied something other than what the drag covered"
+            );
+            assert_eq!(driven.app.message(), Some("copied 4 characters"));
+            // The one thing on screen saying what went: a footer line over a
+            // card with nothing highlighted would leave the reader taking
+            // warlock's word for it.
+            assert_eq!(
+                crate::selected_text(&driven.app),
+                "does",
+                "the copy took the highlight down with it"
+            );
+            assert_eq!(
+                driven.app.focus(),
+                Focus::Panel,
+                "the press no longer points the keys at the pane it landed in"
+            );
+        }
+
+        #[test]
+        fn a_drag_whose_copy_is_refused_says_so_and_claims_nothing() {
+            let now = Instant::now();
+            let (mut driven, size) = conversing(now);
+            driven.clipboard = Copying::refusing(REFUSED);
+            let (column, row) = drawn_at(&driven, "does");
+
+            point(&mut driven, PRESS, (column, row), size, now);
+            point(&mut driven, DRAG, (column + 4, row), size, now);
+            point(&mut driven, RELEASE, (column + 4, row), size, now);
+
+            let said = driven
+                .app
+                .message()
+                .expect("a copy that did not happen is said rather than swallowed");
+            assert!(
+                !said.contains('\n'),
+                "the footer has one line and this wrapped: {said}"
+            );
+            assert!(
+                !said.contains("character"),
+                "the footer counted characters onto a clipboard that refused: {said}"
+            );
+            assert!(
+                said.contains("no clipboard on this session"),
+                "what the clipboard said was thrown away: {said}"
+            );
+            assert!(
+                driven.clipboard.copied().is_empty(),
+                "a refused copy left text on the clipboard anyway"
+            );
+            assert_eq!(
+                crate::selected_text(&driven.app),
+                "does",
+                "the highlight came down over a copy that never happened"
+            );
+        }
+
+        #[test]
+        fn a_press_nobody_dragged_from_copies_nothing_and_says_nothing() {
+            let now = Instant::now();
+            let (mut driven, size) = conversing(now);
+            let (column, row) = drawn_at(&driven, "does");
+
+            point(&mut driven, PRESS, (column, row), size, now);
+            point(&mut driven, RELEASE, (column, row), size, now);
+
+            assert!(
+                driven.clipboard.copied().is_empty(),
+                "a press with no drag after it copied the character under it"
+            );
+            assert_eq!(
+                driven.app.message(),
+                None,
+                "a copy that never happened was reported anyway"
+            );
+            assert_eq!(
+                crate::selected_text(&driven.app),
+                String::new(),
+                "a press with no drag after it highlighted text"
+            );
+            assert_eq!(
+                driven.app.focus(),
+                Focus::Panel,
+                "a press in the panel stopped taking the keys"
+            );
+        }
+
+        #[test]
+        fn a_drag_over_the_tree_copies_nothing_and_selects_its_row() {
+            let now = Instant::now();
+            let (mut driven, size) = conversing(now);
+            let (column, row) = drawn_at(&driven, "crates");
+
+            point(&mut driven, PRESS, (column, row), size, now);
+            point(&mut driven, DRAG, (column + 3, row), size, now);
+            point(&mut driven, RELEASE, (column + 3, row), size, now);
+
+            assert!(
+                driven.clipboard.copied().is_empty(),
+                "a drag down the tree column copied something"
+            );
+            assert_eq!(
+                driven.app.message(),
+                None,
+                "a drag over the tree wrote a line on the footer"
+            );
+            assert_eq!(
+                driven.app.selection(),
+                None,
+                "a drag over the tree highlighted the conversation"
+            );
+            assert_eq!(
+                driven.app.focus(),
+                Focus::Tree,
+                "a press on a row stopped pointing the keys at the tree"
+            );
+        }
+
+        #[test]
+        fn a_drag_over_another_card_copies_nothing_and_says_nothing() {
+            let now = Instant::now();
+            // The size this one drags at is the one the frame with the document
+            // on it was drawn at, below.
+            let (mut driven, _) = conversing(now);
+            // The word is in the document rather than the conversation, so the
+            // cells the drag covers are cells of the card that is showing.
+            driven.app.show_document(["what a document does"], false);
+            assert!(
+                !driven.app.panel().showing_thread(),
+                "the document card never took the conversation's place"
+            );
+            let size = redrawn(&mut driven);
+            let said_before = driven.app.message().map(str::to_owned);
+            let (column, row) = drawn_at(&driven, "does");
+
+            point(&mut driven, PRESS, (column, row), size, now);
+            point(&mut driven, DRAG, (column + 4, row), size, now);
+            point(&mut driven, RELEASE, (column + 4, row), size, now);
+
+            assert!(
+                driven.clipboard.copied().is_empty(),
+                "a drag over the document card copied a line of it"
+            );
+            assert_eq!(
+                driven.app.message().map(str::to_owned),
+                said_before,
+                "a drag over the document card wrote a line on the footer"
+            );
+            assert_eq!(
+                driven.app.selection(),
+                None,
+                "a drag over the document card highlighted the conversation behind it"
             );
         }
     }
