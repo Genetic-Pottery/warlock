@@ -16,8 +16,8 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Size;
 use warlock_tui::{
-    Answered, App, Cell, Composed, Composer, Edited, Focus, Hit, QuitConfirm, ScopePrompt,
-    answer_for, compose_for, edit_for, hit_test,
+    Answered, App, Cell, Composed, Composer, Edited, Focus, Hit, QuitConfirm, Reach, ScopePrompt,
+    answer_for, compose_for, edit_for, hit_test, panel_reach,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +236,12 @@ const WHEEL_NOTCH: usize = 3;
 // that anchors a selection is the arm that has to take the keys as well, or a
 // press on the thread card would stop focusing the panel.
 //
+// The last two are the same drag and the same release once the pointer has left
+// the card's rows, where there is no cell to name: they carry which edge it went
+// past and by how many rows, which is the whole of what a scroll off the tick
+// needs. They are never `Reach::Inside` — `past_rows` refuses that, since a
+// pointer still level with the rows is a drag sideways and means nothing new.
+//
 // Still no variant for a hover or for a button other than the left one. Those
 // are read and dropped in `mouse_action`, and a name for one here would be an
 // invitation to behaviour warlock has decided against — a highlight following a
@@ -253,6 +259,22 @@ pub(crate) enum MouseAction {
     StartSelection(Cell),
     ExtendSelection(Cell),
     EndSelection(Cell),
+    ExtendPastEdge(Reach),
+    EndPastEdge(Reach),
+}
+
+// The left button still held after a press that landed on a line of the
+// conversation, which is the only gesture anything scrolls off the tick for.
+//
+// `past` is where the *latest* drag event left the card, and it is remembered
+// rather than acted on once because a pointer that has stopped moving sends no
+// further events: the round after it has nothing else to read, so the last
+// event to arrive has to go on meaning what it said until another one does.
+// `None` is a pointer still level with the rows, where the drag is the plain
+// cell-by-cell one and there is nothing to scroll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Drag {
+    pub(crate) past: Option<Reach>,
 }
 
 // `size` is the size the round measured before it drew, and `composer` the
@@ -298,13 +320,56 @@ pub(crate) fn mouse_action(
         // below is read for the drag it ends and for nothing else, which is why
         // it is asked about the conversation rather than handed to `click`.
         MouseEventKind::Down(MouseButton::Left) => click(hit, app),
-        MouseEventKind::Drag(MouseButton::Left) => {
-            cell_under(hit, app).map(MouseAction::ExtendSelection)
-        }
-        MouseEventKind::Up(MouseButton::Left) => {
-            cell_under(hit, app).map(MouseAction::EndSelection)
-        }
+        // A drag or a release with no cell under it is not nothing: the pointer
+        // may have been dragged clean off the card, and a stationary pointer
+        // past the edge sends no further events, so the direction it left by has
+        // to come back with this event or not at all.
+        MouseEventKind::Drag(MouseButton::Left) => cell_under(hit, app)
+            .map(MouseAction::ExtendSelection)
+            .or_else(|| past_rows(mouse, size, app, composer).map(MouseAction::ExtendPastEdge)),
+        MouseEventKind::Up(MouseButton::Left) => cell_under(hit, app)
+            .map(MouseAction::EndSelection)
+            .or_else(|| past_rows(mouse, size, app, composer).map(MouseAction::EndPastEdge)),
         _ => None,
+    }
+}
+
+// What one pointer event does to the drag being held, which is the whole of
+// what the loop's tick has to go on: `held` is what the last event left, and
+// what comes back is what this one leaves.
+//
+// `kind` is read for one thing only — whether this event is a button going down
+// — because the actions above do not distinguish a press on the footer from an
+// event nothing was read into, and a press is the one thing that has to clear a
+// drag it did not start. Everything a press *can* mean over the panes says so as
+// an action; the rest of them (the border, the footer, off the screen) say
+// nothing, and a drag left standing under one would scroll on with no button
+// held.
+pub(crate) fn drag_after(
+    held: Option<Drag>,
+    kind: MouseEventKind,
+    action: Option<MouseAction>,
+) -> Option<Drag> {
+    let pressed = matches!(kind, MouseEventKind::Down(_));
+    match action {
+        // The one press that starts one, level with the rows by definition.
+        Some(MouseAction::StartSelection(_)) => Some(Drag::default()),
+        // Back inside the card: there is a cell under the pointer again, so the
+        // drag extends off the event and this stops asking for a scroll.
+        Some(MouseAction::ExtendSelection(_)) => held.is_some().then(Drag::default),
+        Some(MouseAction::ExtendPastEdge(reach)) => {
+            held.is_some().then_some(Drag { past: Some(reach) })
+        }
+        // The button coming up, inside the card or past its edge, is the end of
+        // the gesture either way.
+        Some(MouseAction::EndSelection(_) | MouseAction::EndPastEdge(_)) => None,
+        // A press on the tree, the composer, the panel's header, one of the
+        // other two cards, the footer, the border, off the screen: whatever it
+        // begins, it is not a drag over the conversation's text.
+        _ if pressed => None,
+        // The wheel and every other button, none of which lets go of the left
+        // one.
+        _ => held,
     }
 }
 
@@ -374,17 +439,46 @@ fn cell_under(hit: Hit, app: &App) -> Option<Cell> {
     let Hit::PanelLine { offset, column } = hit else {
         return None;
     };
-    let panel = app.panel();
-    if !panel.showing_thread() || !panel.has_thread() {
+    if !selectable(app) {
         return None;
     }
 
+    let panel = app.panel();
     Some(Cell {
         column: usize::from(column),
         row: usize::from(offset),
         scroll: panel.scroll_offset(),
         width: panel.width(),
     })
+}
+
+// Which edge of the conversation's rows a pointer event is past, or `None` for
+// one that is still level with them.
+//
+// Gated on the very question `cell_under` is gated on, because it is the same
+// refusal: the account and the document are read past, not copied out of, and a
+// pointer dragged off the bottom of either has to go on meaning what it meant
+// before a drag off the thread card meant anything.
+fn past_rows(
+    mouse: MouseEvent,
+    size: Size,
+    app: &App,
+    composer: Option<&Composer>,
+) -> Option<Reach> {
+    if !selectable(app) {
+        return None;
+    }
+
+    let header = app.run_header();
+    match panel_reach(mouse.column, mouse.row, size, composer, header.as_ref()) {
+        Reach::Inside { .. } => None,
+        past => Some(past),
+    }
+}
+
+fn selectable(app: &App) -> bool {
+    let panel = app.panel();
+    panel.showing_thread() && panel.has_thread()
 }
 
 #[cfg(test)]
@@ -3172,11 +3266,11 @@ mod tests {
         use ratatui::layout::Size;
         use warlock_engine::NodeState;
         use warlock_tui::{
-            App, Cell, Composer, Focus, QuitConfirm, Row, ScopePrompt, panel_height, panel_width,
-            tree_height,
+            App, Cell, Composer, Focus, QuitConfirm, Reach, Row, ScopePrompt, panel_height,
+            panel_width, tree_height,
         };
 
-        use super::super::{MouseAction, mouse_action};
+        use super::super::{MouseAction, WHEEL_NOTCH, mouse_action};
 
         // The one terminal every test below points at, and the layout it comes
         // to. Eighty columns is wide enough that the tree takes its floor of
@@ -3355,7 +3449,13 @@ mod tests {
                 // tests assert about an app after a press, a drag or a release
                 // is what the binary would do with the same event.
                 Some(MouseAction::StartSelection(_)) => app.set_focus(Focus::Panel),
-                Some(MouseAction::ExtendSelection(_) | MouseAction::EndSelection(_)) | None => {}
+                Some(
+                    MouseAction::ExtendSelection(_)
+                    | MouseAction::EndSelection(_)
+                    | MouseAction::ExtendPastEdge(_)
+                    | MouseAction::EndPastEdge(_),
+                )
+                | None => {}
             }
         }
 
@@ -3783,21 +3883,77 @@ mod tests {
         #[test]
         fn a_gesture_anywhere_but_the_conversation_means_what_it_meant_before() {
             // Every other place the pointer can be, over an app whose card would
-            // answer a gesture if the pointer were on it: a drag and a release
-            // are dropped exactly as they were before this gesture existed, and a
-            // press goes on meaning what it means.
+            // answer a gesture if the pointer were on it. A press goes on meaning
+            // what it means everywhere; a drag means nothing anywhere it is still
+            // level with the card's rows, however far sideways it has gone —
+            // sideways is not a direction to scroll in, so the border, the tree
+            // and the column between them all answer as they did.
+            //
+            // The four points that do answer are past an edge, and the answer is
+            // which edge and how far: the last row of the card is 19, so row 20
+            // is one below it and the footer at 22 is three, and row 0 is one
+            // above the first. The column comes back clamped into the rows, which
+            // is why a point over the tree column answers with the card's last.
             let app = app_talking();
-            for (column, row, pressed) in [
-                (IN_TREE, TREE_HEADER, Some(MouseAction::Focus(Focus::Tree))),
-                (IN_TREE, FIRST_TREE_ROW, Some(MouseAction::ToggleCollapsed)),
-                (IN_TREE, FIRST_TREE_ROW + 4, Some(MouseAction::SelectRow(4))),
-                (IN_PANEL, FOOTER, None),
-                (IN_TREE, FOOTER, None),
-                (0, FIRST_PANEL_LINE, None),
-                (49, FIRST_TREE_ROW, None),
-                (50, FIRST_TREE_ROW, None),
-                (IN_TREE, 0, None),
-                (IN_PANEL, 20, None),
+            let last = u16::try_from(panel_cells() - 1).expect("the card is a few columns wide");
+            for (column, row, pressed, past) in [
+                (
+                    IN_TREE,
+                    TREE_HEADER,
+                    Some(MouseAction::Focus(Focus::Tree)),
+                    None,
+                ),
+                (
+                    IN_TREE,
+                    FIRST_TREE_ROW,
+                    Some(MouseAction::ToggleCollapsed),
+                    None,
+                ),
+                (
+                    IN_TREE,
+                    FIRST_TREE_ROW + 4,
+                    Some(MouseAction::SelectRow(4)),
+                    None,
+                ),
+                (
+                    IN_PANEL,
+                    FOOTER,
+                    None,
+                    Some(Reach::Below {
+                        rows: 3,
+                        column: IN_PANEL - 1,
+                    }),
+                ),
+                (
+                    IN_TREE,
+                    FOOTER,
+                    None,
+                    Some(Reach::Below {
+                        rows: 3,
+                        column: last,
+                    }),
+                ),
+                (0, FIRST_PANEL_LINE, None, None),
+                (49, FIRST_TREE_ROW, None, None),
+                (50, FIRST_TREE_ROW, None, None),
+                (
+                    IN_TREE,
+                    0,
+                    None,
+                    Some(Reach::Above {
+                        rows: 1,
+                        column: last,
+                    }),
+                ),
+                (
+                    IN_PANEL,
+                    20,
+                    None,
+                    Some(Reach::Below {
+                        rows: 1,
+                        column: IN_PANEL - 1,
+                    }),
+                ),
             ] {
                 assert_eq!(
                     asks(left_click(column, row), &app),
@@ -3806,22 +3962,143 @@ mod tests {
                 );
                 assert_eq!(
                     asks(drag(column, row), &app),
-                    None,
-                    "a drag at {column},{row} should mean nothing"
+                    past.map(MouseAction::ExtendPastEdge),
+                    "a drag at {column},{row} changed meaning"
                 );
                 assert_eq!(
                     asks(release(column, row), &app),
-                    None,
-                    "a release at {column},{row} should mean nothing"
+                    past.map(MouseAction::EndPastEdge),
+                    "a release at {column},{row} changed meaning"
                 );
             }
         }
 
         #[test]
-        fn a_gesture_over_the_composer_means_what_it_meant_before() {
+        fn a_drag_held_past_an_edge_says_how_many_rows_past_it_the_pointer_is() {
+            // The number a scroll off the tick is geared by, so it is counted
+            // from the edge rather than from anywhere else: the row beside the
+            // first line of the card is one above it, and the row beside the last
+            // is one below.
+            let app = app_talking();
+            let first = FIRST_PANEL_LINE;
+            let last = FIRST_PANEL_LINE + panel_height(SIZE, None, None) - 1;
+            assert_eq!(last, 19, "nineteen lines of card, ending at row 19");
+
+            for (row, past) in [
+                (0, Reach::Above { rows: 1, column: 9 }),
+                (last + 1, Reach::Below { rows: 1, column: 9 }),
+                (last + 2, Reach::Below { rows: 2, column: 9 }),
+                (SIZE.height - 1, Reach::Below { rows: 4, column: 9 }),
+            ] {
+                assert_eq!(
+                    asks(drag(IN_PANEL, row), &app),
+                    Some(MouseAction::ExtendPastEdge(past)),
+                    "a drag at row {row}"
+                );
+                assert_eq!(
+                    asks(release(IN_PANEL, row), &app),
+                    Some(MouseAction::EndPastEdge(past)),
+                    "a release at row {row} should end the gesture, not vanish"
+                );
+            }
+
+            // And the two rows either side of that pair are the card itself,
+            // which still answers with the cell under the pointer.
+            for row in [first, last] {
+                assert!(
+                    matches!(
+                        asks(drag(IN_PANEL, row), &app),
+                        Some(MouseAction::ExtendSelection(_))
+                    ),
+                    "row {row} is a line of the card"
+                );
+                assert!(
+                    matches!(
+                        asks(release(IN_PANEL, row), &app),
+                        Some(MouseAction::EndSelection(_))
+                    ),
+                    "row {row} is a line of the card"
+                );
+            }
+        }
+
+        #[test]
+        fn a_drag_past_the_edge_of_a_card_with_no_text_on_it_still_means_nothing() {
+            // The refusal `cell_under` makes is the refusal the edge makes: the
+            // account and the document are read past rather than copied out of,
+            // and an empty thread card has nothing to scroll a selection through.
+            let app = app_on_screen();
+            assert!(app.panel().showing_thread() && !app.panel().has_thread());
+            for row in [0, 20, FOOTER] {
+                assert_eq!(asks(drag(IN_PANEL, row), &app), None, "at row {row}");
+                assert_eq!(asks(release(IN_PANEL, row), &app), None, "at row {row}");
+            }
+
+            let mut app = app_talking();
+            app.start_account(Instant::now());
+            app.show_document(["a line of a file that was read"], false);
+            for card in 0..2 {
+                assert!(!app.panel().showing_thread(), "card {card}");
+                for row in [0, 20, FOOTER] {
+                    assert_eq!(
+                        asks(drag(IN_PANEL, row), &app),
+                        None,
+                        "card {card}, row {row}"
+                    );
+                    assert_eq!(
+                        asks(release(IN_PANEL, row), &app),
+                        None,
+                        "card {card}, row {row}"
+                    );
+                }
+                // The file first, which is the card `show_document` leaves
+                // showing, then round past the conversation to the account.
+                app.swap_card();
+                app.swap_card();
+            }
+        }
+
+        #[test]
+        fn nothing_but_a_held_left_button_answers_for_a_point_past_the_edge() {
+            // The wheel over the footer and the border is still nothing, a press
+            // out there is still nothing, and the other buttons are still read and
+            // dropped: only the two halves of a held drag learned a new answer.
+            let app = app_talking();
+            for row in [0, 20, FOOTER] {
+                for mouse in [
+                    wheel_down(IN_PANEL, row),
+                    wheel_up(IN_PANEL, row),
+                    left_click(IN_PANEL, row),
+                    event(MouseEventKind::Moved, IN_PANEL, row),
+                    event(MouseEventKind::Drag(MouseButton::Right), IN_PANEL, row),
+                    event(MouseEventKind::Up(MouseButton::Middle), IN_PANEL, row),
+                ] {
+                    assert_eq!(asks(mouse, &app), None, "{mouse:?} at row {row}");
+                }
+            }
+
+            // The wheel over the tree keeps both panes' notches, which a point
+            // level with the card's rows is what it always was.
+            assert_eq!(
+                asks(wheel_down(IN_TREE, FIRST_TREE_ROW), &app),
+                Some(MouseAction::SelectNextBy(WHEEL_NOTCH)),
+            );
+            assert_eq!(
+                asks(wheel_up(IN_PANEL, FIRST_PANEL_LINE), &app),
+                Some(MouseAction::ScrollPanelUp(WHEEL_NOTCH)),
+            );
+        }
+
+        #[test]
+        fn a_press_on_the_composer_still_points_the_keyboard_at_it() {
             // The field takes rows from the panel, so the hit test is handed the
             // draft the frame was drawn with; a press on it points the keyboard
-            // at the field, and neither half of a drag does anything there.
+            // at the field.
+            //
+            // A drag is the other half of this: the field sits under the card, so
+            // a pointer dragged down onto it is a pointer past the card's bottom
+            // edge and is answered as one. Anything else would stop the drag dead
+            // at the first row the reader drags onto.
             let mut app = app_talking();
             let composer = Composer::default();
             let rows = panel_height(SIZE, Some(&composer), None);
@@ -3830,37 +4107,72 @@ mod tests {
             // is the row after the last of them and the field's own top border
             // the row after that: the line to type on is the next one down.
             let field = FIRST_PANEL_LINE + rows + 2;
+            let past = Reach::Below {
+                rows: 3,
+                column: IN_PANEL - 1,
+            };
 
             assert_eq!(
                 asks_composing(left_click(IN_PANEL, field), &app, &composer),
                 Some(MouseAction::Focus(Focus::Composer)),
                 "the field takes the bottom of the panel's column"
             );
-            assert_eq!(asks_composing(drag(IN_PANEL, field), &app, &composer), None);
+            assert_eq!(
+                asks_composing(drag(IN_PANEL, field), &app, &composer),
+                Some(MouseAction::ExtendPastEdge(past)),
+            );
             assert_eq!(
                 asks_composing(release(IN_PANEL, field), &app, &composer),
-                None
+                Some(MouseAction::EndPastEdge(past)),
+            );
+
+            // The edge the field moved: the card's own last row is still the card,
+            // and the border under it is one row past rather than three.
+            assert!(matches!(
+                asks_composing(drag(IN_PANEL, FIRST_PANEL_LINE + rows - 1), &app, &composer),
+                Some(MouseAction::ExtendSelection(_))
+            ));
+            assert_eq!(
+                asks_composing(drag(IN_PANEL, FIRST_PANEL_LINE + rows), &app, &composer),
+                Some(MouseAction::ExtendPastEdge(Reach::Below {
+                    rows: 1,
+                    column: IN_PANEL - 1,
+                })),
             );
         }
 
         #[test]
-        fn a_gesture_over_the_run_header_means_what_it_meant_before() {
+        fn a_press_on_the_run_header_still_takes_the_keys_and_no_more() {
             // The header takes the top of the panel while a run is out, so the
             // rows of the card move down under it: a press on the header is the
             // focus a press in the panel has always been, and it anchors nothing
             // because the header is not the reader's text.
+            //
+            // A drag onto it is a drag above the card's rows — two rows above,
+            // since the header is that tall — for the reason a drag onto the
+            // composer is a drag below them.
             let mut app = app_talking();
             app.set_pact_in_flight("/repo/d00", 0, 24);
             let header = app.run_header();
             app.panel_mut()
                 .set_height(panel_height(SIZE, None, header.as_ref()));
+            let past = Reach::Above {
+                rows: 2,
+                column: IN_PANEL - 1,
+            };
 
             assert_eq!(
                 asks(left_click(IN_PANEL, FIRST_PANEL_LINE), &app),
                 Some(MouseAction::Focus(Focus::Panel)),
             );
-            assert_eq!(asks(drag(IN_PANEL, FIRST_PANEL_LINE), &app), None);
-            assert_eq!(asks(release(IN_PANEL, FIRST_PANEL_LINE), &app), None);
+            assert_eq!(
+                asks(drag(IN_PANEL, FIRST_PANEL_LINE), &app),
+                Some(MouseAction::ExtendPastEdge(past)),
+            );
+            assert_eq!(
+                asks(release(IN_PANEL, FIRST_PANEL_LINE), &app),
+                Some(MouseAction::EndPastEdge(past)),
+            );
 
             // And the first row of the card, which the header has pushed two rows
             // down: it is row zero of the rows area all the same, because the
@@ -4207,6 +4519,120 @@ mod tests {
             }
 
             assert_eq!(app, before, "the pointer moved nothing behind the prompt");
+        }
+    }
+
+    // What the session keeps between one pointer event and the next, which is
+    // the only thing the loop's tick has to go on.
+    mod holding {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        use warlock_tui::{Cell, Reach};
+
+        use super::super::{Drag, MouseAction, drag_after};
+
+        const PRESS: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
+        const DRAG: MouseEventKind = MouseEventKind::Drag(MouseButton::Left);
+        const RELEASE: MouseEventKind = MouseEventKind::Up(MouseButton::Left);
+        const WHEEL: MouseEventKind = MouseEventKind::ScrollDown;
+
+        const CELL: Cell = Cell {
+            column: 4,
+            row: 2,
+            scroll: 0,
+            width: 40,
+        };
+
+        const PAST: Reach = Reach::Below { rows: 3, column: 4 };
+
+        fn holding() -> Option<Drag> {
+            drag_after(None, PRESS, Some(MouseAction::StartSelection(CELL)))
+        }
+
+        #[test]
+        fn a_press_on_the_conversation_is_the_only_one_that_starts_a_drag() {
+            assert_eq!(holding(), Some(Drag { past: None }));
+            for action in [
+                Some(MouseAction::Focus(super::super::Focus::Panel)),
+                Some(MouseAction::SelectRow(2)),
+                Some(MouseAction::ToggleCollapsed),
+                // The footer, the border, off the screen: a press that reads as
+                // nothing at all.
+                None,
+            ] {
+                assert_eq!(
+                    drag_after(None, PRESS, action),
+                    None,
+                    "{action:?} started a drag over the conversation"
+                );
+                assert_eq!(
+                    drag_after(holding(), PRESS, action),
+                    None,
+                    "{action:?} left a drag standing that it did not start"
+                );
+            }
+        }
+
+        #[test]
+        fn the_last_drag_event_past_the_edge_is_what_is_kept() {
+            assert_eq!(
+                drag_after(holding(), DRAG, Some(MouseAction::ExtendPastEdge(PAST))),
+                Some(Drag { past: Some(PAST) })
+            );
+            let further = Reach::Above { rows: 9, column: 0 };
+            assert_eq!(
+                drag_after(
+                    Some(Drag { past: Some(PAST) }),
+                    DRAG,
+                    Some(MouseAction::ExtendPastEdge(further))
+                ),
+                Some(Drag {
+                    past: Some(further)
+                }),
+                "a drag back past the other edge was read against the first one"
+            );
+            assert_eq!(
+                drag_after(
+                    Some(Drag { past: Some(PAST) }),
+                    DRAG,
+                    Some(MouseAction::ExtendSelection(CELL))
+                ),
+                Some(Drag { past: None }),
+                "a pointer back level with the rows went on scrolling"
+            );
+        }
+
+        #[test]
+        fn a_drag_past_the_edge_with_no_press_behind_it_is_not_a_drag() {
+            // The press landed in the tree, the composer or on another card, and
+            // the pointer has since been dragged off the panel's rows.
+            for action in [
+                MouseAction::ExtendPastEdge(PAST),
+                MouseAction::ExtendSelection(CELL),
+            ] {
+                assert_eq!(drag_after(None, DRAG, Some(action)), None);
+            }
+        }
+
+        #[test]
+        fn the_button_coming_up_ends_it_wherever_the_pointer_is() {
+            for (held, action) in [
+                (holding(), MouseAction::EndSelection(CELL)),
+                (
+                    Some(Drag { past: Some(PAST) }),
+                    MouseAction::EndPastEdge(PAST),
+                ),
+            ] {
+                assert_eq!(drag_after(held, RELEASE, Some(action)), None);
+            }
+        }
+
+        #[test]
+        fn the_wheel_does_not_let_go_of_a_button_somebody_is_holding() {
+            let held = Some(Drag { past: Some(PAST) });
+            assert_eq!(
+                drag_after(held, WHEEL, Some(MouseAction::ScrollPanelDown(3))),
+                held
+            );
         }
     }
 }
