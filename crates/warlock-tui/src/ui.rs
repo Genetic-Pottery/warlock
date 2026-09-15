@@ -469,7 +469,7 @@ pub enum Hit {
     TreeRow { offset: u16 },
     TreeBelowRows,
     PanelHeader,
-    PanelLine { offset: u16 },
+    PanelLine { offset: u16, column: u16 },
     Composer,
 }
 
@@ -485,8 +485,13 @@ pub fn hit_test(
     // anything remembered from drawing it, so a click lands on what the reader
     // is looking at. Every test below is against a `pane_inner`, which is why a
     // border belongs to no pane and falls through to `Border` without being
-    // asked about. This knows the three numbers and nothing else: what a row
+    // asked about. This knows where the panes are and nothing else: what a row
     // offset stands for is the app's to say, and there is no hover.
+    //
+    // `PanelLine` reports the column beside the row, both counted from the first
+    // cell of the rows area the panel drew into, so a pointer event becomes a
+    // `selection::Cell` without measuring the layout a second time — a second
+    // measurement is what would drift from the frame under the pointer.
     let point = Position::new(column, row);
     let screen = Rect::from(size);
     if !screen.contains(point) {
@@ -510,6 +515,7 @@ pub fn hit_test(
         }
         return Hit::PanelLine {
             offset: row.saturating_sub(rows.y),
+            column: column.saturating_sub(rows.x),
         };
     }
 
@@ -1208,7 +1214,8 @@ mod tests {
         SCROLLBACK_ARROW, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, areas,
         centred, composer_height, composer_on_screen, confirm_area, confirm_size, display_width,
         draw, footer_text_area, guide_prefixes, hit_test, keys_line, mark_area, pacting_keys_line,
-        pane_inner, panel_height, panel_row, panel_width, run_header_height, run_header_line,
+        pane_inner, panel_height, panel_row, panel_rows_area, panel_width, run_header_height,
+        run_header_line,
         scope_size, tree_height, tree_rows_area, tree_width, truncated,
     };
     use crate::COMPOSER_MAX_ROWS;
@@ -3612,12 +3619,19 @@ mod tests {
         }
 
         // And the whole inside of the panel is a line of its window, drawn on
-        // or not: the panel has no selection for a point to land on.
+        // or not: the panel has no selection for a point to land on. The column
+        // comes back with the row, counted from the pane's first cell.
         let inside = pane_inner(panes.panel);
         assert_eq!(inside.height, panel_height(size, None, None));
         for offset in 0..inside.height {
-            for x in [inside.x, inside.x + inside.width - 1] {
-                assert_eq!(hit(x, inside.y + offset), Hit::PanelLine { offset });
+            for x in inside.x..inside.x + inside.width {
+                assert_eq!(
+                    hit(x, inside.y + offset),
+                    Hit::PanelLine {
+                        offset,
+                        column: x - inside.x
+                    }
+                );
             }
         }
     }
@@ -3714,7 +3728,10 @@ mod tests {
             let rows = tree_rows_area(panes.tree);
             assert_eq!(
                 hit_test(inside.x, inside.y, size, None, None),
-                Hit::PanelLine { offset: 0 },
+                Hit::PanelLine {
+                    offset: 0,
+                    column: 0
+                },
                 "at {width} columns"
             );
             assert_eq!(
@@ -3726,7 +3743,8 @@ mod tests {
                     None
                 ),
                 Hit::PanelLine {
-                    offset: inside.height - 1
+                    offset: inside.height - 1,
+                    column: inside.width - 1
                 },
                 "at {width} columns"
             );
@@ -3748,6 +3766,55 @@ mod tests {
     }
 
     #[test]
+    fn a_point_in_the_panel_answers_with_the_column_of_the_rows_area_it_landed_on() {
+        // The column a selection cell is built from, so it is counted from the
+        // first cell the rows were drawn into: not from the screen, and not
+        // from the border. A run header above the rows and a field beside them
+        // are here because neither may move it — only the pane's own left edge
+        // does.
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
+        let header = app.run_header().expect("a run in flight has a header");
+        let composer = Composer::new("a draft");
+        let field = Some(&composer);
+        let size = Size::new(WIDTH, FIXTURE_HEIGHT);
+        let cut = areas(Rect::from(size), field);
+        let rows = panel_rows_area(cut.panel, Some(&header));
+        assert!(rows.height > 0, "the panel should have rows to point at");
+
+        let marker = u16::try_from(display_width(SAID_MARKER)).expect("a marker is a few columns");
+        let indent = u16::try_from(display_width(PANEL_INDENT)).expect("an indent is a few columns");
+        for (x, column) in [
+            (rows.x, 0),
+            (rows.x + marker - 1, marker - 1),
+            (rows.x + indent, indent),
+            (rows.x + rows.width - 1, rows.width - 1),
+        ] {
+            assert_eq!(
+                hit_test(x, rows.y, size, field, Some(&header)),
+                Hit::PanelLine { offset: 0, column },
+                "at screen column {x}"
+            );
+        }
+
+        // Either side of the rows area is the pane's border, as it was before
+        // the column came back with the row, and the field below still answers
+        // for itself rather than for a column of the panel.
+        for x in [rows.x - 1, rows.x + rows.width] {
+            assert_eq!(
+                hit_test(x, rows.y, size, field, Some(&header)),
+                Hit::Border,
+                "at screen column {x}"
+            );
+        }
+        let inside = pane_inner(cut.composer.expect("this frame has a field"));
+        assert_eq!(
+            hit_test(inside.x, inside.y, size, field, Some(&header)),
+            Hit::Composer
+        );
+    }
+
+    #[test]
     fn no_point_is_answered_with_an_offset_its_window_has_no_room_for() {
         for (width, height) in [
             (WIDTH, HEIGHT),
@@ -3766,11 +3833,18 @@ mod tests {
                             "({x}, {y}) of {width}x{height} is row {offset} of a window {} tall",
                             tree_height(size)
                         ),
-                        Hit::PanelLine { offset } => assert!(
-                            offset < panel_height(size, None, None),
-                            "({x}, {y}) of {width}x{height} is line {offset} of a window {} tall",
-                            panel_height(size, None, None)
-                        ),
+                        Hit::PanelLine { offset, column } => {
+                            assert!(
+                                offset < panel_height(size, None, None),
+                                "({x}, {y}) of {width}x{height} is line {offset} of a window {} tall",
+                                panel_height(size, None, None)
+                            );
+                            assert!(
+                                column < panel_width(size),
+                                "({x}, {y}) of {width}x{height} is column {column} of a window {} wide",
+                                panel_width(size)
+                            );
+                        }
                         _ => {}
                     }
                 }
@@ -5514,10 +5588,11 @@ mod tests {
             assert_eq!(
                 hit,
                 Hit::PanelLine {
-                    offset: y - panel.y - RUN_HEADER_HEIGHT
+                    offset: y - panel.y - RUN_HEADER_HEIGHT,
+                    column: 0
                 }
             );
-            assert!(matches!(hit, Hit::PanelLine { offset } if offset < window));
+            assert!(matches!(hit, Hit::PanelLine { offset, .. } if offset < window));
         }
 
         // The row the header took would have been the account's, and the hit
@@ -5525,7 +5600,10 @@ mod tests {
         // run in flight.
         assert_eq!(
             hit_test(panel.x, panel.y, size, None, None),
-            Hit::PanelLine { offset: 0 }
+            Hit::PanelLine {
+                offset: 0,
+                column: 0
+            }
         );
     }
 
@@ -6397,17 +6475,19 @@ mod tests {
             assert_eq!(
                 hit,
                 Hit::PanelLine {
-                    offset: y - panel.y
+                    offset: y - panel.y,
+                    column: 0
                 }
             );
-            assert!(matches!(hit, Hit::PanelLine { offset } if offset < height));
+            assert!(matches!(hit, Hit::PanelLine { offset, .. } if offset < height));
         }
         // The rows the field took would have been the panel's, and the hit test
         // knows it: the same points answer differently on a frame with no field.
         assert_eq!(
             hit_test(inside.x, inside.y, size, None, None),
             Hit::PanelLine {
-                offset: inside.y - panel.y
+                offset: inside.y - panel.y,
+                column: inside.x - panel.x
             }
         );
     }

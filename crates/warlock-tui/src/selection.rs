@@ -112,7 +112,7 @@ pub fn copied_text(pieces: &[&str], selection: Selection) -> String {
 }
 
 /// A cell of the thread card, in the panel's own terms: `column` and `row`
-/// counted from the first cell of the panel's rows area, where `row` is what
+/// counted from the first cell of the panel's rows area, which is the pair
 /// [`Hit::PanelLine`](crate::Hit::PanelLine) reports, and `scroll` and `width`
 /// the panel's own — so `scroll + row` is the row of the card under the pointer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
