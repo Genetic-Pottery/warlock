@@ -3,7 +3,7 @@
 
 # warlock-engine
 
-The engine crate: walks a repo into a freshness-tracked tree, runs model passes to fill and mend WARLOCK.md documents, and persists pact state, scopes and sigils, kept free of TUI/terminal/HTTP/Anthropic deps.
+The engine crate: builds and maintains a repo's freshness ledger, hashing files, tracking pacted/unpacted state, walking directories and filling WARLOCK.md documents via an agent port, kept free of TUI, terminal, HTTP or Anthropic dependencies.
 
 ## Files
 
@@ -11,7 +11,7 @@ The engine crate: walks a repo into a freshness-tracked tree, runs model passes 
 
 ## Directories
 
-- `src/` — The crate's source: tree walking, pact/manifest state, document fill/mend/render, scope and sigil logic — go here for any implementation question.
+- `src/` — The crate root: modules for hashing, tree walking, manifest state, pact engine and document filling; start at lib.rs to see how they connect.
 
 ## Structure
 

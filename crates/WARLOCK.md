@@ -3,9 +3,9 @@
 
 # crates
 
-Workspace root holding the two crates that make up the tool: warlock-engine for repo-walking and document/pact logic, and warlock-tui for the terminal front end and headless commands.
+Workspace holding the two Rust crates that make up the project: warlock-engine, the TUI/HTTP/Anthropic-free freshness-ledger engine, and warlock-tui, the terminal front end and CLI that depend on it.
 
 ## Directories
 
-- `warlock-engine/` — The engine crate: tree walking, pact/manifest state, WARLOCK.md fill/mend/render, scope and sigil logic, no TUI/terminal/HTTP/Anthropic deps — go here for core logic questions.
-- `warlock-tui/` — The front-end crate: builds the warlock binary and warlock_tui library, panel rendering and headless subcommands atop warlock-engine — go here for CLI or panel questions.
+- `warlock-engine/` — The engine crate: hashing, tree walking, manifest state, pacted/unpacted tracking, and filling WARLOCK.md documents; kept free of TUI/terminal/HTTP/Anthropic deps.
+- `warlock-tui/` — The terminal-free front end and CLI, builds the warlock binary and warlock_tui library for pact/refresh/scope/view/write/chat, depends on warlock-engine.

@@ -3,7 +3,7 @@
 
 # warlock-tui
 
-The warlock-tui crate: builds the warlock binary and warlock_tui library, the terminal-free front end for the panel and its headless subcommands, wiring clap, ratatui, notify and ctrlc onto warlock-engine.
+The warlock-tui crate: builds the warlock binary and the warlock_tui library, the terminal-free front end and CLI for pact/refresh/scope/view/write/chat, wired to clap, ratatui, notify, ctrlc and warlock-engine.
 
 ## Files
 
@@ -11,8 +11,8 @@ The warlock-tui crate: builds the warlock binary and warlock_tui library, the te
 
 ## Directories
 
-- `src/` — App state, panel rendering, boundary-gated edits, and headless pact/refresh/check/scope/config/stale/fresh commands, tied together by main.rs and lib.rs.
+- `src/` — The terminal-free front end: flattened tree App, panel cards, key handling, the shared boundary check, and CLI subcommands — go here for how a keypress or subcommand is handled.
 
 ## Structure
 
-- Manifest for the warlock-tui crate: builds the `warlock` binary from src/main.rs and the warlock_tui library from src/lib.rs, wiring clap, ratatui, notify, ctrlc and warlock-engine.
+- Manifest for the warlock-tui crate: builds the warlock binary from src/main.rs and the warlock_tui library from src/lib.rs, wiring clap, ratatui, notify, ctrlc and warlock-engine.
