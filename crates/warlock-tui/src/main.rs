@@ -1005,7 +1005,15 @@ fn apply_mouse(
         // space below its last row, a line of the panel. Taking the focus is
         // the whole of what it does.
         Some(MouseAction::Focus(focus)) => app.set_focus(focus),
-        None => {}
+        // A press on the conversation is the focus arm above plus an anchor for
+        // a drag, and only the focus half is wired here. Dropping the focus
+        // while the other half is being built would take a press that works
+        // today away from a reader.
+        Some(MouseAction::StartSelection(_)) => app.set_focus(Focus::Panel),
+        // The cell a drag or a release carries is not yet put anywhere, so until
+        // the app holds a selection they are read and dropped — which is what
+        // they were before they had names here.
+        Some(MouseAction::ExtendSelection(_) | MouseAction::EndSelection(_)) | None => {}
     }
 }
 

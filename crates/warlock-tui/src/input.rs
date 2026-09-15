@@ -16,8 +16,8 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Size;
 use warlock_tui::{
-    Answered, App, Composed, Composer, Edited, Focus, Hit, QuitConfirm, ScopePrompt, answer_for,
-    compose_for, edit_for, hit_test,
+    Answered, App, Cell, Composed, Composer, Edited, Focus, Hit, QuitConfirm, ScopePrompt,
+    answer_for, compose_for, edit_for, hit_test,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,11 +227,20 @@ pub(crate) fn press_for(
 // crosses from one to the other.
 const WHEEL_NOTCH: usize = 3;
 
-// No variant for a hover, a drag, or a button other than the left one. Those
-// events are read and dropped in `mouse_action`, and a name for one here would
-// be an invitation to behaviour warlock has decided against — a highlight
-// following the pointer costs a redraw per pointer move to say what the
-// selection already says.
+// Three of these are one gesture over the conversation — press, drag, release —
+// each carrying the panel cell it landed on, measured once by `cell_under` from
+// the hit test the frame was cut by rather than a second time from the screen.
+//
+// `StartSelection` is the whole of that press rather than a second action
+// alongside `Focus(Focus::Panel)`: one event becomes one action here, so the arm
+// that anchors a selection is the arm that has to take the keys as well, or a
+// press on the thread card would stop focusing the panel.
+//
+// Still no variant for a hover or for a button other than the left one. Those
+// are read and dropped in `mouse_action`, and a name for one here would be an
+// invitation to behaviour warlock has decided against — a highlight following a
+// pointer nobody is dragging costs a redraw per move to say what the selection
+// already says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MouseAction {
     SelectNextBy(usize),
@@ -241,6 +250,9 @@ pub(crate) enum MouseAction {
     SelectRow(usize),
     ToggleCollapsed,
     Focus(Focus),
+    StartSelection(Cell),
+    ExtendSelection(Cell),
+    EndSelection(Cell),
 }
 
 // `size` is the size the round measured before it drew, and `composer` the
@@ -281,9 +293,17 @@ pub(crate) fn mouse_action(
             MouseAction::SelectPreviousBy(WHEEL_NOTCH),
             MouseAction::ScrollPanelUp(WHEEL_NOTCH),
         ),
-        // The press, not the release: it is the half of a click a reader means,
-        // and answering both would do everything twice.
+        // A click is answered on its press alone — the half a reader means, and
+        // answering both would select a row or collapse it twice. The release
+        // below is read for the drag it ends and for nothing else, which is why
+        // it is asked about the conversation rather than handed to `click`.
         MouseEventKind::Down(MouseButton::Left) => click(hit, app),
+        MouseEventKind::Drag(MouseButton::Left) => {
+            cell_under(hit, app).map(MouseAction::ExtendSelection)
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            cell_under(hit, app).map(MouseAction::EndSelection)
+        }
         _ => None,
     }
 }
@@ -324,12 +344,47 @@ fn click(hit: Hit, app: &App) -> Option<MouseAction> {
             }
         }
         Hit::TreeHeader | Hit::TreeBelowRows => Some(MouseAction::Focus(Focus::Tree)),
-        Hit::PanelHeader | Hit::PanelLine { .. } => Some(MouseAction::Focus(Focus::Panel)),
+        // Over a conversation the press anchors a selection, and that action
+        // takes the keys too: everywhere else in the panel — its header, either
+        // of the other two cards, a thread card with nothing on it yet — there is
+        // no text to anchor in, so the press is the plain focus it has always
+        // been.
+        Hit::PanelHeader | Hit::PanelLine { .. } => Some(cell_under(hit, app).map_or(
+            MouseAction::Focus(Focus::Panel),
+            MouseAction::StartSelection,
+        )),
         // The composer is hit-tested only when it is on screen, so a press on it
         // is somebody pointing at the field they mean to type in.
         Hit::Composer => Some(MouseAction::Focus(Focus::Composer)),
         Hit::Footer | Hit::Border | Hit::Offscreen => None,
     }
+}
+
+// The cell of the conversation a pointer event landed on, or `None` for an event
+// that landed on no conversation at all: somewhere other than a line of the
+// panel, another card showing, or a thread card with nothing recorded on it yet
+// — there is no text under the pointer in any of the three, and a gesture over
+// them has to go on meaning exactly what it meant before this one existed.
+//
+// The scroll and width are the panel's own rather than the frame's, for the
+// reason the highlight reads them there too: they are the numbers the rows under
+// the pointer were wrapped and windowed by, and a cell measured against a second
+// window names a character the reader is not pointing at.
+fn cell_under(hit: Hit, app: &App) -> Option<Cell> {
+    let Hit::PanelLine { offset, column } = hit else {
+        return None;
+    };
+    let panel = app.panel();
+    if !panel.showing_thread() || !panel.has_thread() {
+        return None;
+    }
+
+    Some(Cell {
+        column: usize::from(column),
+        row: usize::from(offset),
+        scroll: panel.scroll_offset(),
+        width: panel.width(),
+    })
 }
 
 #[cfg(test)]
@@ -3111,10 +3166,15 @@ mod tests {
     }
 
     mod pointer {
+        use std::time::{Duration, Instant};
+
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Size;
         use warlock_engine::NodeState;
-        use warlock_tui::{App, Focus, QuitConfirm, Row, ScopePrompt, panel_height, tree_height};
+        use warlock_tui::{
+            App, Cell, Composer, Focus, QuitConfirm, Row, ScopePrompt, panel_height, panel_width,
+            tree_height,
+        };
 
         use super::super::{MouseAction, mouse_action};
 
@@ -3165,6 +3225,14 @@ mod tests {
             event(MouseEventKind::Down(MouseButton::Left), column, row)
         }
 
+        fn drag(column: u16, row: u16) -> MouseEvent {
+            event(MouseEventKind::Drag(MouseButton::Left), column, row)
+        }
+
+        fn release(column: u16, row: u16) -> MouseEvent {
+            event(MouseEventKind::Up(MouseButton::Left), column, row)
+        }
+
         fn event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
             MouseEvent {
                 kind,
@@ -3199,7 +3267,29 @@ mod tests {
             let mut app = App::from_rows(rows());
             app.set_viewport_height(tree_height(SIZE));
             app.panel_mut().set_height(panel_height(SIZE, None, None));
+            app.panel_mut().set_width(panel_width(SIZE));
             app
+        }
+
+        // The same screen with something on the thread card, which is the one
+        // card a gesture selects in: an app with the conversation showing and
+        // nothing recorded on it is a card with no text under the pointer, and
+        // the fixture above is deliberately left that way.
+        fn app_talking() -> App {
+            let mut app = app_on_screen();
+            let base = Instant::now();
+            app.panel_mut().start_turn("what does the engine do?", base);
+            app.panel_mut().answer_turn(
+                "It walks the tree and writes what it finds.",
+                base + Duration::from_secs(1),
+            );
+            assert!(app.panel().showing_thread());
+            assert!(app.panel().has_thread());
+            app
+        }
+
+        fn panel_cells() -> usize {
+            usize::from(panel_width(SIZE))
         }
 
         fn asks(mouse: MouseEvent, app: &App) -> Option<MouseAction> {
@@ -3211,6 +3301,22 @@ mod tests {
                 &ScopePrompt::Closed,
                 &ScopePrompt::Closed,
                 None,
+            )
+        }
+
+        fn asks_composing(
+            mouse: MouseEvent,
+            app: &App,
+            composer: &Composer,
+        ) -> Option<MouseAction> {
+            mouse_action(
+                mouse,
+                SIZE,
+                app,
+                QuitConfirm::Closed,
+                &ScopePrompt::Closed,
+                &ScopePrompt::Closed,
+                Some(composer),
             )
         }
 
@@ -3245,7 +3351,11 @@ mod tests {
                     app.toggle_collapsed();
                 }
                 Some(MouseAction::Focus(focus)) => app.set_focus(focus),
-                None => {}
+                // The loop's own arms for the gesture and no more, so what these
+                // tests assert about an app after a press, a drag or a release
+                // is what the binary would do with the same event.
+                Some(MouseAction::StartSelection(_)) => app.set_focus(Focus::Panel),
+                Some(MouseAction::ExtendSelection(_) | MouseAction::EndSelection(_)) | None => {}
             }
         }
 
@@ -3503,6 +3613,328 @@ mod tests {
         }
 
         #[test]
+        fn a_press_on_the_conversation_anchors_a_selection_and_still_takes_the_keys() {
+            let mut app = app_talking();
+            let before = app.clone();
+
+            // Column nine, row two of the card: the pane's border is column zero
+            // and row zero of the screen, and neither is a cell of the rows area
+            // the text was drawn into.
+            assert_eq!(
+                asks(left_click(IN_PANEL, FIRST_PANEL_LINE + 2), &app),
+                Some(MouseAction::StartSelection(Cell {
+                    column: 9,
+                    row: 2,
+                    scroll: 0,
+                    width: panel_cells(),
+                })),
+            );
+
+            round(
+                &mut app,
+                QuitConfirm::Closed,
+                left_click(IN_PANEL, FIRST_PANEL_LINE + 2),
+            );
+            assert_eq!(
+                app.focus(),
+                Focus::Panel,
+                "a press on the conversation still points the keys at it"
+            );
+            assert_eq!(app.selected(), before.selected(), "the tree did not move");
+            assert_eq!(
+                app.panel().scroll_offset(),
+                before.panel().scroll_offset(),
+                "the panel's window did not move either"
+            );
+        }
+
+        #[test]
+        fn a_drag_extends_the_selection_and_the_release_ends_it() {
+            let app = app_talking();
+
+            // The three halves of one gesture over one card, each carrying the
+            // cell it landed on: the drag is what the press is anchored for, and
+            // the release is read for the drag it ends.
+            assert_eq!(
+                asks(left_click(IN_PANEL, FIRST_PANEL_LINE), &app),
+                Some(MouseAction::StartSelection(Cell {
+                    column: 9,
+                    row: 0,
+                    scroll: 0,
+                    width: panel_cells(),
+                })),
+            );
+            assert_eq!(
+                asks(drag(IN_PANEL + 4, FIRST_PANEL_LINE + 1), &app),
+                Some(MouseAction::ExtendSelection(Cell {
+                    column: 13,
+                    row: 1,
+                    scroll: 0,
+                    width: panel_cells(),
+                })),
+            );
+            assert_eq!(
+                asks(release(IN_PANEL + 4, FIRST_PANEL_LINE + 1), &app),
+                Some(MouseAction::EndSelection(Cell {
+                    column: 13,
+                    row: 1,
+                    scroll: 0,
+                    width: panel_cells(),
+                })),
+            );
+        }
+
+        #[test]
+        fn the_cell_a_gesture_carries_is_the_panel_s_own_window() {
+            // The panel's scroll and width rather than a second measurement of
+            // the frame: the row under the pointer is the row the card's own
+            // window put there, and a cell measured against another window names
+            // a character the reader is not pointing at. Scrolled back far enough
+            // that the offset is a number rather than zero, which is what a
+            // second measurement would answer.
+            let mut app = app_talking();
+            let base = Instant::now();
+            for turn in 0..12 {
+                app.panel_mut()
+                    .start_turn(format!("turn {turn}"), base + Duration::from_secs(turn));
+                app.panel_mut().answer_turn(
+                    format!("answer {turn}"),
+                    base + Duration::from_secs(turn + 1),
+                );
+            }
+            app.scroll_panel_up(4);
+            let scroll = app.panel().scroll_offset();
+            assert_ne!(scroll, 0, "the window is off the top of the card");
+
+            for mouse in [
+                left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
+                drag(IN_PANEL, FIRST_PANEL_LINE + 3),
+                release(IN_PANEL, FIRST_PANEL_LINE + 3),
+            ] {
+                let carried = match asks(mouse, &app) {
+                    Some(
+                        MouseAction::StartSelection(cell)
+                        | MouseAction::ExtendSelection(cell)
+                        | MouseAction::EndSelection(cell),
+                    ) => cell,
+                    other => panic!("{mouse:?} should be part of the gesture, not {other:?}"),
+                };
+
+                assert_eq!(
+                    carried,
+                    Cell {
+                        column: 9,
+                        row: 3,
+                        scroll,
+                        width: panel_cells(),
+                    }
+                );
+            }
+        }
+
+        #[test]
+        fn a_thread_card_with_nothing_on_it_takes_no_selection() {
+            // A press on an empty conversation is the focus it has always been:
+            // there is no text under the pointer to anchor in, and a drag across
+            // one selects nothing either.
+            let app = app_on_screen();
+            assert!(app.panel().showing_thread());
+            assert!(!app.panel().has_thread());
+
+            assert_eq!(
+                asks(left_click(IN_PANEL, FIRST_PANEL_LINE + 2), &app),
+                Some(MouseAction::Focus(Focus::Panel)),
+            );
+            assert_eq!(asks(drag(IN_PANEL, FIRST_PANEL_LINE + 2), &app), None);
+            assert_eq!(asks(release(IN_PANEL, FIRST_PANEL_LINE + 2), &app), None);
+        }
+
+        #[test]
+        fn the_other_two_cards_take_no_selection_either() {
+            // Selection is the conversation's alone: the account is a record of a
+            // run and the document is a file that was read, and neither is
+            // highlighted by this gesture. The conversation underneath is the one
+            // the fixture recorded, so this is the same app that *would* answer
+            // with the other card showing.
+            fn plain_focus(app: &App) {
+                assert!(!app.panel().showing_thread());
+                assert_eq!(
+                    asks(left_click(IN_PANEL, FIRST_PANEL_LINE + 2), app),
+                    Some(MouseAction::Focus(Focus::Panel)),
+                    "a press on this card is the focus it always was"
+                );
+                assert_eq!(asks(drag(IN_PANEL, FIRST_PANEL_LINE + 2), app), None);
+                assert_eq!(asks(release(IN_PANEL, FIRST_PANEL_LINE + 2), app), None);
+            }
+
+            let mut app = app_talking();
+            app.start_account(Instant::now());
+            app.show_document(["a line of a file that was read"], false);
+
+            // The file, which is the card `show_document` leaves showing, then
+            // round past the conversation to the account.
+            plain_focus(&app);
+            app.swap_card();
+            assert!(app.panel().showing_thread());
+            app.swap_card();
+            plain_focus(&app);
+        }
+
+        #[test]
+        fn a_gesture_anywhere_but_the_conversation_means_what_it_meant_before() {
+            // Every other place the pointer can be, over an app whose card would
+            // answer a gesture if the pointer were on it: a drag and a release
+            // are dropped exactly as they were before this gesture existed, and a
+            // press goes on meaning what it means.
+            let app = app_talking();
+            for (column, row, pressed) in [
+                (IN_TREE, TREE_HEADER, Some(MouseAction::Focus(Focus::Tree))),
+                (IN_TREE, FIRST_TREE_ROW, Some(MouseAction::ToggleCollapsed)),
+                (IN_TREE, FIRST_TREE_ROW + 4, Some(MouseAction::SelectRow(4))),
+                (IN_PANEL, FOOTER, None),
+                (IN_TREE, FOOTER, None),
+                (0, FIRST_PANEL_LINE, None),
+                (49, FIRST_TREE_ROW, None),
+                (50, FIRST_TREE_ROW, None),
+                (IN_TREE, 0, None),
+                (IN_PANEL, 20, None),
+            ] {
+                assert_eq!(
+                    asks(left_click(column, row), &app),
+                    pressed,
+                    "a press at {column},{row} changed meaning"
+                );
+                assert_eq!(
+                    asks(drag(column, row), &app),
+                    None,
+                    "a drag at {column},{row} should mean nothing"
+                );
+                assert_eq!(
+                    asks(release(column, row), &app),
+                    None,
+                    "a release at {column},{row} should mean nothing"
+                );
+            }
+        }
+
+        #[test]
+        fn a_gesture_over_the_composer_means_what_it_meant_before() {
+            // The field takes rows from the panel, so the hit test is handed the
+            // draft the frame was drawn with; a press on it points the keyboard
+            // at the field, and neither half of a drag does anything there.
+            let mut app = app_talking();
+            let composer = Composer::default();
+            let rows = panel_height(SIZE, Some(&composer), None);
+            app.panel_mut().set_height(rows);
+            // The panel's rows start at `FIRST_PANEL_LINE`, so its bottom border
+            // is the row after the last of them and the field's own top border
+            // the row after that: the line to type on is the next one down.
+            let field = FIRST_PANEL_LINE + rows + 2;
+
+            assert_eq!(
+                asks_composing(left_click(IN_PANEL, field), &app, &composer),
+                Some(MouseAction::Focus(Focus::Composer)),
+                "the field takes the bottom of the panel's column"
+            );
+            assert_eq!(asks_composing(drag(IN_PANEL, field), &app, &composer), None);
+            assert_eq!(
+                asks_composing(release(IN_PANEL, field), &app, &composer),
+                None
+            );
+        }
+
+        #[test]
+        fn a_gesture_over_the_run_header_means_what_it_meant_before() {
+            // The header takes the top of the panel while a run is out, so the
+            // rows of the card move down under it: a press on the header is the
+            // focus a press in the panel has always been, and it anchors nothing
+            // because the header is not the reader's text.
+            let mut app = app_talking();
+            app.set_pact_in_flight("/repo/d00", 0, 24);
+            let header = app.run_header();
+            app.panel_mut()
+                .set_height(panel_height(SIZE, None, header.as_ref()));
+
+            assert_eq!(
+                asks(left_click(IN_PANEL, FIRST_PANEL_LINE), &app),
+                Some(MouseAction::Focus(Focus::Panel)),
+            );
+            assert_eq!(asks(drag(IN_PANEL, FIRST_PANEL_LINE), &app), None);
+            assert_eq!(asks(release(IN_PANEL, FIRST_PANEL_LINE), &app), None);
+
+            // And the first row of the card, which the header has pushed two rows
+            // down: it is row zero of the rows area all the same, because the
+            // cell is counted from where the card was drawn.
+            assert_eq!(
+                asks(left_click(IN_PANEL, FIRST_PANEL_LINE + 2), &app),
+                Some(MouseAction::StartSelection(Cell {
+                    column: 9,
+                    row: 0,
+                    scroll: 0,
+                    width: panel_cells(),
+                })),
+            );
+        }
+
+        #[test]
+        fn only_the_left_button_selects() {
+            // Over a conversation, where the left button's drag and release do
+            // mean something: the other two buttons and a hover mean nothing
+            // there either, which is what keeps a pointer swept across the card
+            // from costing a redraw per move.
+            let app = app_talking();
+            for kind in [
+                MouseEventKind::Moved,
+                MouseEventKind::Drag(MouseButton::Right),
+                MouseEventKind::Drag(MouseButton::Middle),
+                MouseEventKind::Up(MouseButton::Right),
+                MouseEventKind::Up(MouseButton::Middle),
+                MouseEventKind::Down(MouseButton::Right),
+                MouseEventKind::Down(MouseButton::Middle),
+                MouseEventKind::ScrollLeft,
+                MouseEventKind::ScrollRight,
+            ] {
+                assert_eq!(
+                    asks(event(kind, IN_PANEL, FIRST_PANEL_LINE + 2), &app),
+                    None,
+                    "{kind:?} over the conversation should mean nothing"
+                );
+            }
+        }
+
+        #[test]
+        fn a_window_swallows_the_gesture_as_it_swallows_everything_else() {
+            // The confirmation and both prompts are answered from the keyboard,
+            // and a gesture that got through one would drag a highlight across a
+            // card the reader cannot see, behind a window they are in the middle
+            // of answering. Over a conversation, which is the one card where the
+            // three halves would otherwise mean something.
+            let app = app_talking();
+            let open = ScopePrompt::open("crates/warlock-engine", "data-plane");
+            for (confirm, scope, write) in [
+                (
+                    QuitConfirm::open(),
+                    &ScopePrompt::Closed,
+                    &ScopePrompt::Closed,
+                ),
+                (QuitConfirm::Closed, &open, &ScopePrompt::Closed),
+                (QuitConfirm::Closed, &ScopePrompt::Closed, &open),
+            ] {
+                for mouse in [
+                    left_click(IN_PANEL, FIRST_PANEL_LINE + 2),
+                    drag(IN_PANEL + 3, FIRST_PANEL_LINE + 3),
+                    release(IN_PANEL + 3, FIRST_PANEL_LINE + 3),
+                ] {
+                    assert_eq!(
+                        mouse_action(mouse, SIZE, &app, confirm, scope, write, None),
+                        None,
+                        "{mouse:?} should mean nothing while a window is up"
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn a_click_on_the_tree_header_takes_the_keys_and_no_more() {
             let mut app = app_on_screen();
             app.set_focus(Focus::Panel);
@@ -3577,10 +4009,13 @@ mod tests {
         #[test]
         fn everything_but_the_wheel_and_the_left_press_is_read_and_dropped() {
             let app = app_on_screen();
-            // Out of scope by decision: hovering, dragging, the release half of
-            // a click, the other two buttons and the horizontal wheel. Asked at
-            // every kind of point, because dropping them is what keeps a pointer
-            // swept across the screen from costing anything — a highlight that
+            // Out of scope by decision: hovering, the other two buttons and the
+            // horizontal wheel. The left button's own drag and release are in
+            // the list too, because this app's thread card has nothing recorded
+            // on it: with no text under the pointer there is nothing to select,
+            // and they mean here what everything else here means. Asked at every
+            // kind of point, because dropping them is what keeps a pointer swept
+            // across the screen from costing anything — a highlight that
             // followed it would cost a redraw per move to say what the selection
             // already says.
             for kind in [
