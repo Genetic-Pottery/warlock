@@ -338,19 +338,19 @@ pub(crate) fn mouse_action(
 // what the loop's tick has to go on: `held` is what the last event left, and
 // what comes back is what this one leaves.
 //
-// `kind` is read for one thing only — whether this event is a button going down
-// — because the actions above do not distinguish a press on the footer from an
-// event nothing was read into, and a press is the one thing that has to clear a
-// drag it did not start. Everything a press *can* mean over the panes says so as
-// an action; the rest of them (the border, the footer, off the screen) say
-// nothing, and a drag left standing under one would scroll on with no button
-// held.
+// `kind` is read where the actions cannot answer: they do not distinguish a
+// press on the border, the footer or off the screen — or a release over a card
+// that went up mid-drag — from an event nothing was read into at all. Everything
+// a button going down or coming up *can* mean over the conversation says so as
+// an action; the rest say nothing, and a drag left standing under one of them
+// would go on scrolling and holding the card with nobody's hand on the button.
 pub(crate) fn drag_after(
     held: Option<Drag>,
     kind: MouseEventKind,
     action: Option<MouseAction>,
 ) -> Option<Drag> {
     let pressed = matches!(kind, MouseEventKind::Down(_));
+    let released = matches!(kind, MouseEventKind::Up(MouseButton::Left));
     match action {
         // The one press that starts one, level with the rows by definition.
         Some(MouseAction::StartSelection(_)) => Some(Drag::default()),
@@ -363,6 +363,12 @@ pub(crate) fn drag_after(
         // The button coming up, inside the card or past its edge, is the end of
         // the gesture either way.
         Some(MouseAction::EndSelection(_) | MouseAction::EndPastEdge(_)) => None,
+        // And so is a release the panel answered nothing for. A card put up
+        // mid-drag leaves no cell of the conversation under the pointer and no
+        // edge of it to be past, so that release reads as nothing at all — and a
+        // drag left standing under a button that is up would hold the
+        // conversation still long after the hand came off it.
+        _ if released => None,
         // A press on the tree, the composer, the panel's header, one of the
         // other two cards, the footer, the border, off the screen: whatever it
         // begins, it is not a drag over the conversation's text.
@@ -4616,13 +4622,17 @@ mod tests {
         #[test]
         fn the_button_coming_up_ends_it_wherever_the_pointer_is() {
             for (held, action) in [
-                (holding(), MouseAction::EndSelection(CELL)),
+                (holding(), Some(MouseAction::EndSelection(CELL))),
                 (
                     Some(Drag { past: Some(PAST) }),
-                    MouseAction::EndPastEdge(PAST),
+                    Some(MouseAction::EndPastEdge(PAST)),
                 ),
+                // Another card went up mid-drag: there is nothing of the
+                // conversation under the pointer to end the drag on, and the
+                // button is up all the same.
+                (holding(), None),
             ] {
-                assert_eq!(drag_after(held, RELEASE, Some(action)), None);
+                assert_eq!(drag_after(held, RELEASE, action), None);
             }
         }
 

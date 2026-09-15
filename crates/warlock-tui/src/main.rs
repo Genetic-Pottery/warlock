@@ -601,6 +601,14 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
         // gesture rather than part of it: what the app does with a press or a
         // drag is the same whether or not the button stays down afterwards.
         self.drag = drag_after(self.drag, mouse.kind, action);
+        // Derived from the drag rather than kept beside it: `drag_after` already
+        // says exactly "the left button is still down after a press on a line of
+        // the conversation", which is the whole of what suspends following. Said
+        // on every pointer event, so the release that ends the drag — wherever
+        // the pointer was when the button came up — is the one that lets the card
+        // go back to the newest line, and a press that landed anywhere else never
+        // holds it at all.
+        self.app.panel_mut().hold_thread(self.drag.is_some());
         if let Some(text) = apply_mouse(&mut self.app, action, now) {
             self.copy(&text);
         }
@@ -2334,10 +2342,12 @@ mod tests {
     }
 
     mod dragging {
-        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::crossterm::event::{
+            KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
         use ratatui::layout::Size;
 
-        use super::{ANSWER, Copying, Driven, Focus, Instant, directory, session};
+        use super::{ANSWER, Copying, Driven, Focus, Instant, directory, key, pressed, session};
 
         const PRESS: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
         const DRAG: MouseEventKind = MouseEventKind::Drag(MouseButton::Left);
@@ -2582,73 +2592,72 @@ mod tests {
             );
         }
 
+        // Typed into the composer so there is a field on screen to press in, and
+        // a word to find it by.
+        const DRAFT: &str = "draft";
+
+        // A conversation several screens tall, so there is somewhere for the
+        // card to scroll, drawn once at the size the drags below land on.
+        fn scrollback(now: Instant) -> (Driven, Size) {
+            let mut driven = session(vec![directory("/repo/crates")]);
+            for turn in 0..12 {
+                let asked = format!("question {turn} about the engine");
+                driven.app.panel_mut().start_turn(&asked, now);
+                driven.app.panel_mut().answer_turn(ANSWER, now);
+            }
+            let size = redrawn(&mut driven);
+            assert!(
+                driven.app.panel().scroll_offset() > 0,
+                "the conversation fits on the card: nothing here would scroll"
+            );
+            (driven, size)
+        }
+
+        // The card wound back to its first line, where a drag downwards has the
+        // whole conversation below it.
+        fn wound_back(driven: &mut Driven) -> Size {
+            driven.app.scroll_panel_up(usize::MAX);
+            redrawn(driven)
+        }
+
+        // A point below every row of the card: the footer, which is inside the
+        // screen and outside the panel.
+        fn below_the_card(size: Size, column: u16) -> (u16, u16) {
+            (column, size.height - 1)
+        }
+
+        // A draft typed into the composer, so that the field is drawn and there
+        // is somewhere in it to press. Typed rather than set, because the
+        // composer only takes letters with the keys pointed at it and that is
+        // the state a reader presses in it from.
+        fn drafting(driven: &mut Driven) {
+            driven.app.set_focus(Focus::Composer);
+            for letter in DRAFT.chars() {
+                assert!(
+                    pressed(driven, key(KeyCode::Char(letter))),
+                    "typing into the composer ended the session"
+                );
+            }
+        }
+
         // The tick, driven by hand: `run`'s loop calls `drag_scroll` once a
         // round whether or not an event arrived, so a round with nothing in it
         // is `drag_scroll` on its own.
         mod past_the_edge {
-            use ratatui::crossterm::event::{KeyCode, MouseEventKind};
+            use ratatui::crossterm::event::MouseEventKind;
 
             use super::{
-                ANSWER, DRAG, Driven, Focus, Instant, PRESS, RELEASE, Size, drawn_at, found_at,
-                point, redrawn, session,
+                DRAFT, DRAG, Driven, Focus, Instant, PRESS, RELEASE, below_the_card, drafting,
+                drawn_at, found_at, point, scrollback, wound_back,
             };
             use crate::rows_per_tick;
-            use crate::tests::{directory, key, pressed};
 
             // A pointer moved with nothing held down, which is what a reader
             // whose hand is off the button sends as they cross the footer.
             const MOVED: MouseEventKind = MouseEventKind::Moved;
 
-            // Typed into the composer so there is a field on screen to press in,
-            // and a word to find it by.
-            const DRAFT: &str = "draft";
-
-            // A conversation several screens tall, so there is somewhere for the
-            // card to scroll, drawn once at the size the drags below land on.
-            fn scrollback(now: Instant) -> (Driven, Size) {
-                let mut driven = session(vec![directory("/repo/crates")]);
-                for turn in 0..12 {
-                    let asked = format!("question {turn} about the engine");
-                    driven.app.panel_mut().start_turn(&asked, now);
-                    driven.app.panel_mut().answer_turn(ANSWER, now);
-                }
-                let size = redrawn(&mut driven);
-                assert!(
-                    driven.app.panel().scroll_offset() > 0,
-                    "the conversation fits on the card: nothing here would scroll"
-                );
-                (driven, size)
-            }
-
-            // The card wound back to its first line, where a drag downwards has
-            // the whole conversation below it.
-            fn wound_back(driven: &mut Driven) -> Size {
-                driven.app.scroll_panel_up(usize::MAX);
-                redrawn(driven)
-            }
-
-            // A point below every row of the card: the footer, which is inside
-            // the screen and outside the panel.
-            fn below_the_card(size: Size, column: u16) -> (u16, u16) {
-                (column, size.height - 1)
-            }
-
             fn covered(driven: &Driven) -> usize {
                 crate::selected_text(&driven.app).chars().count()
-            }
-
-            // A draft typed into the composer, so that the field is drawn and
-            // there is somewhere in it to press. Typed rather than set, because
-            // the composer only takes letters with the keys pointed at it and
-            // that is the state a reader presses in it from.
-            fn drafting(driven: &mut Driven) {
-                driven.app.set_focus(Focus::Composer);
-                for letter in DRAFT.chars() {
-                    assert!(
-                        pressed(driven, key(KeyCode::Char(letter))),
-                        "typing into the composer ended the session"
-                    );
-                }
             }
 
             #[test]
@@ -2996,6 +3005,308 @@ mod tests {
                     where_it_was,
                     "the held drag scrolled the document that replaced the conversation"
                 );
+            }
+        }
+
+        // Following, held off for the length of a drag. A turn is long, so
+        // copying an earlier answer while a later one arrives is an ordinary
+        // thing to want, and a card that went on pulling itself to the newest
+        // line would take the text out from under the pointer mid-gesture.
+        mod pausing {
+            use warlock_tui::Activity;
+            use warlock_tui::panel::Showing;
+
+            use super::{
+                DRAFT, DRAG, Driven, Instant, PRESS, RELEASE, below_the_card, drafting, drawn_at,
+                found_at, point, redrawn, scrollback, wound_back,
+            };
+
+            // A word nothing in the conversation has until the appends below put
+            // it there, short enough that the panel cannot wrap it: finding it on
+            // the frame is the card having gone to the newest line and nothing
+            // else.
+            const NEWEST: &str = "ozymandias";
+
+            // Everything a live turn puts into the conversation: the question, a
+            // line of activity, one of warlock's own notes, the answer. The
+            // question and the note go through `Card::accrue`, which is the one
+            // path that sets following; the other two are written into the turn
+            // already there and ride the flag it left.
+            fn a_turn_arrives(driven: &mut Driven, now: Instant) {
+                let panel = driven.app.panel_mut();
+                panel.start_turn("question 12 about the engine", now);
+                panel.record_turn(&Activity::Thinking, now);
+                panel.note("warlock has something to say", now);
+                panel.answer_turn(NEWEST, now);
+            }
+
+            // The conversation growing under a gesture that is not a drag held
+            // over it, which has to move the card to the newest line exactly as
+            // it does with no button down anywhere. `before` is where the
+            // conversation's window was, read by the caller while the card was
+            // showing: some of these gestures put another card in front of it,
+            // and a turn arriving brings the conversation back.
+            fn the_conversation_still_follows(driven: &mut Driven, before: usize, now: Instant) {
+                a_turn_arrives(driven, now);
+
+                let panel = driven.app.panel();
+                assert!(
+                    panel.showing_thread(),
+                    "a turn arriving left another card in front of the conversation"
+                );
+                let after = panel.scroll_offset();
+                assert!(
+                    after > before,
+                    "the conversation stayed where it was: {before} to {after}"
+                );
+                assert!(
+                    panel.follows(),
+                    "the card came out of the gesture not following"
+                );
+                assert_eq!(
+                    panel.lines_below(),
+                    0,
+                    "the card stopped short of the newest line"
+                );
+            }
+
+            #[test]
+            fn a_held_drag_keeps_the_card_still_while_the_conversation_grows() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                // An earlier part of the conversation, with everything the turn
+                // is about to say far below it.
+                let size = wound_back(&mut driven);
+                let (column, row) = drawn_at(&driven, "question 0");
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                point(&mut driven, DRAG, (column + 8, row), size, now);
+                let offset = driven.app.panel().scroll_offset();
+                let rows = driven.app.panel().window(now);
+                let covered = crate::selected_text(&driven.app);
+                assert!(
+                    !covered.is_empty(),
+                    "the drag covered nothing: there is no highlight here to disturb"
+                );
+
+                a_turn_arrives(&mut driven, now);
+
+                assert_eq!(
+                    driven.app.panel().scroll_offset(),
+                    offset,
+                    "the arriving turn pulled the held card to the newest line"
+                );
+                assert_eq!(
+                    driven.app.panel().window(now),
+                    rows,
+                    "the rows under the pointer changed while the button was held"
+                );
+                assert_eq!(
+                    crate::selected_text(&driven.app),
+                    covered,
+                    "what the highlight covers changed under the held drag"
+                );
+                redrawn(&mut driven);
+                assert!(
+                    found_at(&driven, NEWEST).is_none(),
+                    "the frame drew the newest line over a drag held on an earlier one"
+                );
+            }
+
+            #[test]
+            fn the_release_hands_the_newest_line_back_mid_turn() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                // A question out and unanswered, which is the state a reader
+                // copies an earlier answer in. The card is following it, so the
+                // drag below is over the newest screenful — an earlier part of
+                // the conversation than the answer still to come, and a card
+                // that was following when the button went down.
+                driven
+                    .app
+                    .panel_mut()
+                    .start_turn("question 12 about the engine", now);
+                let size = redrawn(&mut driven);
+                let (column, row) = drawn_at(&driven, "question 12");
+                let held = driven.app.panel().scroll_offset();
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                point(&mut driven, DRAG, (column + 8, row), size, now);
+                // A line of its own, unlike the turn's first activity line,
+                // which takes the place of the one the log draws for a turn
+                // that has heard nothing yet.
+                driven
+                    .app
+                    .panel_mut()
+                    .note("warlock has something to say", now);
+
+                assert_eq!(
+                    driven.app.panel().scroll_offset(),
+                    held,
+                    "the note pulled the held card down"
+                );
+
+                point(&mut driven, RELEASE, (column + 8, row), size, now);
+
+                let released = driven.app.panel().scroll_offset();
+                assert!(
+                    released > held,
+                    "the card came out of the drag still parked where it was held"
+                );
+
+                driven.app.panel_mut().answer_turn(NEWEST, now);
+
+                assert!(
+                    driven.app.panel().scroll_offset() > released,
+                    "the answer left the card where the drag had it"
+                );
+                assert_eq!(
+                    driven.app.panel().lines_below(),
+                    0,
+                    "the card stopped short of the newest line"
+                );
+                redrawn(&mut driven);
+                assert!(
+                    found_at(&driven, NEWEST).is_some(),
+                    "the answer that ended the turn was never drawn"
+                );
+            }
+
+            #[test]
+            fn a_release_past_the_card_hands_the_newest_line_back_too() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                let size = wound_back(&mut driven);
+                let (column, row) = drawn_at(&driven, "question 0");
+                let past = below_the_card(size, column);
+
+                let where_it_was = driven.app.panel().scroll_offset();
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                point(&mut driven, DRAG, past, size, now);
+                // The button let go out here, where there is no cell of the card
+                // under it: a release all the same, and the end of the hold.
+                point(&mut driven, RELEASE, past, size, now);
+
+                the_conversation_still_follows(&mut driven, where_it_was, now);
+            }
+
+            #[test]
+            fn a_card_put_up_mid_drag_does_not_leave_the_conversation_held() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                let size = wound_back(&mut driven);
+                let (column, row) = drawn_at(&driven, "question 0");
+
+                let where_it_was = driven.app.panel().scroll_offset();
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                point(&mut driven, DRAG, (column + 8, row), size, now);
+                // A key pressed with the button still down, which is the one way
+                // another card takes the conversation's place mid-drag.
+                driven.app.show_document(["what a document does"], false);
+                point(&mut driven, RELEASE, (column + 8, row), size, now);
+
+                the_conversation_still_follows(&mut driven, where_it_was, now);
+            }
+
+            #[test]
+            fn a_press_nobody_dragged_from_leaves_the_card_following() {
+                let now = Instant::now();
+                let (mut driven, size) = scrollback(now);
+                let (column, row) = drawn_at(&driven, "question");
+
+                let where_it_was = driven.app.panel().scroll_offset();
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                point(&mut driven, RELEASE, (column, row), size, now);
+
+                the_conversation_still_follows(&mut driven, where_it_was, now);
+            }
+
+            #[test]
+            fn a_drag_that_began_in_the_tree_leaves_the_card_following() {
+                let now = Instant::now();
+                let (mut driven, size) = scrollback(now);
+                let (column, row) = drawn_at(&driven, "crates");
+
+                let where_it_was = driven.app.panel().scroll_offset();
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                point(&mut driven, DRAG, (column + 3, row), size, now);
+
+                the_conversation_still_follows(&mut driven, where_it_was, now);
+            }
+
+            #[test]
+            fn a_drag_that_began_in_the_composer_leaves_the_card_following() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                drafting(&mut driven);
+                let size = redrawn(&mut driven);
+                let field = drawn_at(&driven, DRAFT);
+                let (column, row) = drawn_at(&driven, "question");
+
+                let where_it_was = driven.app.panel().scroll_offset();
+
+                point(&mut driven, PRESS, field, size, now);
+                point(&mut driven, DRAG, (column, row), size, now);
+
+                the_conversation_still_follows(&mut driven, where_it_was, now);
+            }
+
+            #[test]
+            fn a_drag_that_began_on_the_footer_leaves_the_card_following() {
+                let now = Instant::now();
+                let (mut driven, size) = scrollback(now);
+                let (column, row) = drawn_at(&driven, "question");
+
+                let where_it_was = driven.app.panel().scroll_offset();
+
+                point(&mut driven, PRESS, below_the_card(size, column), size, now);
+                point(&mut driven, DRAG, (column, row), size, now);
+
+                the_conversation_still_follows(&mut driven, where_it_was, now);
+            }
+
+            #[test]
+            fn a_drag_over_the_document_card_leaves_the_conversation_following() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                // Read while the conversation is still the card showing, which
+                // is the one moment the panel answers for it.
+                let where_it_was = driven.app.panel().scroll_offset();
+                driven.app.show_document(["what a document does"], false);
+                let size = redrawn(&mut driven);
+                let (column, row) = drawn_at(&driven, "document");
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                point(&mut driven, DRAG, (column + 4, row), size, now);
+
+                the_conversation_still_follows(&mut driven, where_it_was, now);
+            }
+
+            #[test]
+            fn a_drag_over_the_account_card_leaves_the_conversation_following() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                let where_it_was = driven.app.panel().scroll_offset();
+                driven.app.start_account(now);
+                driven
+                    .app
+                    .panel_mut()
+                    .write_run(|account| account.open_section("crates/engine", now));
+                // The conversation has content, so a run does not put its own
+                // account up: the swap key is what a reader would press, and this
+                // is that press without the keyboard.
+                driven.app.panel_mut().show(Showing::Account);
+                let size = redrawn(&mut driven);
+                let (column, row) = drawn_at(&driven, "crates/engine");
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                point(&mut driven, DRAG, (column + 4, row), size, now);
+
+                the_conversation_still_follows(&mut driven, where_it_was, now);
             }
         }
     }

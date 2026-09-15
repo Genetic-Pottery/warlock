@@ -46,10 +46,12 @@ use crate::wrap::rows as wrap_rows;
 ///
 /// Each card carries its own `offset` and `follows`, which is what lets the
 /// account go on following the newest line while the document is up. `height`
-/// and `width` are shared, because there is one panel. While `follows` is set,
-/// `offset` is not read at all: the offset is worked out from the line count at
-/// the moment it is asked for, so appending a line moves the window without
-/// anybody having to tell the window that a line was appended.
+/// and `width` are shared, because there is one panel. While a card is
+/// following, `offset` is not read at all: the offset is worked out from the
+/// line count at the moment it is asked for, so appending a line moves the
+/// window without anybody having to tell the window that a line was appended.
+/// [`Panel::hold_thread`] is the one thing that suspends that, for the length of
+/// a drag.
 ///
 /// `mode` is here rather than beside `focus` because it too has to survive a run
 /// that ended with nothing recorded: a reader who has spent ten turns converging
@@ -131,6 +133,7 @@ struct Card<T> {
     held: Option<T>,
     offset: usize,
     follows: bool,
+    paused: bool,
 }
 
 /// Written out rather than derived, because a derived `Default` would demand one
@@ -142,6 +145,7 @@ impl<T> Default for Card<T> {
             held: None,
             offset: 0,
             follows: false,
+            paused: false,
         }
     }
 }
@@ -160,16 +164,46 @@ impl<T: Shown> Card<T> {
     /// wrong for a conversation. One session is one thread, so a question asked
     /// ten minutes in goes under the nine before it.
     ///
-    /// It follows, every time. Somebody who has just asked something is asking
-    /// to see the answer, so the window goes back to the newest line even if they
-    /// had scrolled up — the one thing that moves a card's window without a
-    /// movement key, and it is their own keystroke that does it.
+    /// It follows, every time it can. Somebody who has just asked something is
+    /// asking to see the answer, so the window goes back to the newest line even
+    /// if they had scrolled up — the one thing that moves a card's window without
+    /// a movement key, and it is their own keystroke that does it. The exception
+    /// is a card paused by [`Card::pause`], where text arriving must leave both
+    /// the window and the flag alone.
     fn accrue(&mut self) -> &mut T
     where
         T: Default,
     {
-        self.follows = true;
+        if !self.paused {
+            self.follows = true;
+        }
         self.held.get_or_insert_with(T::default)
+    }
+
+    /// Freeze the window where the frame being drawn has it, and leave `follows`
+    /// exactly as it was. A reader holding a drag has asked for the text to stop
+    /// moving under them, not to stop following, so the flag is what puts the
+    /// card back on the newest line when they let go — clearing it here and
+    /// writing it back in [`Card::resume`] would leave a saved copy that
+    /// [`Card::scroll_to`] then contradicts. Following is masked at read time
+    /// ([`Card::following`]) rather than cleared, for the same reason: `scroll_to`
+    /// recomputes `follows` from where the window ended up, so a drag that
+    /// scrolls to the bottom of the card would otherwise start following
+    /// mid-drag.
+    fn pause(&mut self, height: usize, width: usize) {
+        if self.paused {
+            return;
+        }
+        self.offset = self.scroll_offset(height, width);
+        self.paused = true;
+    }
+
+    const fn resume(&mut self) {
+        self.paused = false;
+    }
+
+    const fn following(&self) -> bool {
+        self.follows && !self.paused
     }
 
     /// A count of rows on screen rather than of lines held: a line too long for
@@ -180,7 +214,12 @@ impl<T: Shown> Card<T> {
     }
 
     fn scroll_offset(&self, height: usize, width: usize) -> usize {
-        panel_offset_for(self.line_count(width), height, self.offset, self.follows)
+        panel_offset_for(
+            self.line_count(width),
+            height,
+            self.offset,
+            self.following(),
+        )
     }
 
     fn window(&self, height: usize, width: usize, now: Instant) -> Vec<Line> {
@@ -316,6 +355,17 @@ impl Panel {
             Showing::Account => self.account.lines_below(self.height, self.width),
             Showing::Thread => self.thread.lines_below(self.height, self.width),
             Showing::Document => self.document.lines_below(self.height, self.width),
+        }
+    }
+
+    /// One call for both directions, so whoever owns the gesture can say what it
+    /// is on every tick rather than having to catch both edges of it. The thread
+    /// and nothing else, because a drag selects in the conversation.
+    pub fn hold_thread(&mut self, holding: bool) {
+        if holding {
+            self.thread.pause(self.height, self.width);
+        } else {
+            self.thread.resume();
         }
     }
 
@@ -621,6 +671,12 @@ impl Panel {
     ///
     /// The card that is not showing keeps its own answer, which is what puts the
     /// newest line of a run on screen when the reader swaps back to it.
+    ///
+    /// A thread card held by [`Panel::hold_thread`] still answers `true`: this is
+    /// the flag the card was left with, and a hold suspends it for the length of
+    /// a drag rather than changing what the card is doing. Where the window
+    /// actually is comes from [`Panel::scroll_offset`], which is where the hold is
+    /// accounted for.
     #[must_use]
     pub const fn follows(&self) -> bool {
         match self.showing {
@@ -816,6 +872,72 @@ mod tests {
         assert!(
             panel.lines_below() > 0,
             "a hundred lines in a ten-line window has nothing below it"
+        );
+    }
+
+    fn talked_at() -> Panel {
+        let mut panel = sized();
+        panel.start_turn("a question", base());
+        for n in 0..30 {
+            panel.note(format!("note {n}"), base());
+        }
+        panel
+    }
+
+    #[test]
+    fn a_held_thread_card_stays_where_it_was_while_text_arrives_under_it() {
+        let mut panel = talked_at();
+        let (offset, follows) = panel.window_of(Showing::Thread);
+        let rows = panel.window(base());
+
+        panel.hold_thread(true);
+        panel.note("arriving while the button is down", base());
+
+        assert!(follows, "a conversation nobody scrolled stopped following");
+        assert_eq!(
+            panel.window_of(Showing::Thread).0,
+            offset,
+            "the window moved under a held drag"
+        );
+        assert_eq!(panel.window(base()), rows, "the rows drawn changed");
+    }
+
+    #[test]
+    fn a_held_card_that_was_following_goes_back_to_the_newest_line_on_release() {
+        let mut panel = talked_at();
+        panel.hold_thread(true);
+        panel.note("arriving while the button is down", base());
+
+        panel.hold_thread(false);
+        panel.note("arriving after it came up", base());
+
+        assert!(
+            panel.window_of(Showing::Thread).1,
+            "following was cleared by the hold rather than suspended"
+        );
+        assert_eq!(
+            panel.lines_below(),
+            0,
+            "the window is not at the newest row"
+        );
+    }
+
+    #[test]
+    fn a_card_that_was_not_following_is_not_following_after_a_release() {
+        let mut panel = talked_at();
+        panel.scroll_to(2);
+        panel.hold_thread(true);
+        panel.note("arriving while the button is down", base());
+        panel.hold_thread(false);
+
+        assert!(
+            !panel.window_of(Showing::Thread).1,
+            "a card the reader had scrolled up started following on release"
+        );
+        assert_eq!(
+            panel.window_of(Showing::Thread).0,
+            2,
+            "the reader's place was lost"
         );
     }
 }
