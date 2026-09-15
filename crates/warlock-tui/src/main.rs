@@ -1046,7 +1046,20 @@ fn apply_mouse(app: &mut App, action: Option<MouseAction>, now: Instant) -> Opti
             let text = selected_text(app);
             return (!text.is_empty()).then_some(text);
         }
-        None => {}
+        // The release that ends a drag held past the card's edge. The far end is
+        // left where the last cell under the pointer put it — there is no cell
+        // out here to move it to — and what the highlight covers is handed back
+        // exactly as the arm above hands it back, so a button let go past the
+        // edge still copies rather than dropping the gesture on the floor.
+        Some(MouseAction::EndPastEdge(_)) => {
+            let text = selected_text(app);
+            return (!text.is_empty()).then_some(text);
+        }
+        // A drag held past that edge, next to the events that mean nothing at
+        // all, because for now it does as little as they do: the scrolling it
+        // asks for is driven off the loop's tick rather than off this event, and
+        // the event that says the pointer left carries nothing this needs.
+        Some(MouseAction::ExtendPastEdge(_)) | None => {}
     }
 
     None

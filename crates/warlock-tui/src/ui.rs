@@ -553,6 +553,58 @@ pub fn hit_test(
     Hit::Border
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Reach {
+    Above { rows: u16, column: u16 },
+    Inside { column: u16 },
+    Below { rows: u16, column: u16 },
+}
+
+/// How far past the panel's rows a point is, measured by the same [`areas`] cut
+/// [`hit_test`] and [`draw`] go through.
+///
+/// A pointer held past the card arrives as [`Hit::Footer`], [`Hit::Border`],
+/// [`Hit::Composer`] or [`Hit::Offscreen`], none of which says which way it left
+/// or by how much, so this answers the question [`Hit`] cannot. The row is
+/// counted against the rows area alone: the run header and the composer are not
+/// in it, so a point on either is past an edge here even though it is inside the
+/// panel's column.
+///
+/// `column` is clamped into the rows area rather than refused, so a pointer that
+/// wandered sideways — onto the border, the tree, past the right edge of the
+/// screen — still names the cell of the card nearest it.
+#[must_use]
+pub fn panel_reach(
+    column: u16,
+    row: u16,
+    size: Size,
+    composer: Option<&Composer>,
+    header: Option<&RunHeader>,
+) -> Reach {
+    let rows = panel_rows_area(areas(Rect::from(size), composer).panel, header);
+    let column = column
+        .saturating_sub(rows.x)
+        .min(rows.width.saturating_sub(1));
+
+    // Tested against the rows area's own bounds rather than against its height,
+    // so an area with no rows in it — a terminal too short for the panel to hold
+    // a line — is all edge and no inside, and no point is answered as a row that
+    // was never drawn.
+    if row < rows.y {
+        Reach::Above {
+            rows: rows.y - row,
+            column,
+        }
+    } else if row < rows.bottom() {
+        Reach::Inside { column }
+    } else {
+        Reach::Below {
+            rows: (row - rows.bottom()).saturating_add(1),
+            column,
+        }
+    }
+}
+
 fn pane_block(focused: bool) -> Block<'static> {
     let style = if focused {
         Style::new().fg(FOCUS_COLOUR).add_modifier(Modifier::BOLD)
@@ -1273,14 +1325,14 @@ mod tests {
         GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS,
         LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOVE_KEYS, NO_MARKER, NOTE_MARKER,
         PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT, PATH_HEADING, PATH_RULES,
-        PERCENT_WIDTH, QUIT_KEY, REFRESHING_RUN, ROW_KEY, RUN_HEADER_HEIGHT, SAID_MARKER,
+        PERCENT_WIDTH, QUIT_KEY, REFRESHING_RUN, ROW_KEY, RUN_HEADER_HEIGHT, Reach, SAID_MARKER,
         SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS,
         SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT,
         areas, centred, composer_height, composer_on_screen, confirm_area, confirm_size,
         display_width, draw, footer_text_area, guide_prefixes, hit_test, keys_line, mark_area,
-        pacting_keys_line, pane_inner, panel_height, panel_row, panel_rows_area, panel_width,
-        run_header_height, run_header_line, scope_size, tree_height, tree_rows_area, tree_width,
-        truncated,
+        pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row, panel_rows_area,
+        panel_width, run_header_height, run_header_line, scope_size, tree_height, tree_rows_area,
+        tree_width, truncated,
     };
     use crate::COMPOSER_MAX_ROWS;
     use crate::account::{Line as Entry, Outcome};
@@ -3916,6 +3968,140 @@ mod tests {
             hit_test(inside.x, inside.y, size, field, Some(&header)),
             Hit::Composer
         );
+    }
+
+    #[test]
+    fn a_point_says_which_edge_of_the_panels_rows_it_is_past_and_by_how_many() {
+        let size = Size::new(WIDTH, FIXTURE_HEIGHT);
+        let rows = panel_rows_area(areas(Rect::from(size), None).panel, None);
+        assert!(rows.height > 2, "the panel should have rows to be past");
+        let reach = |y| panel_reach(rows.x, y, size, None, None);
+
+        for offset in 0..rows.height {
+            assert_eq!(
+                reach(rows.y + offset),
+                Reach::Inside { column: 0 },
+                "row {offset} of the rows area"
+            );
+        }
+
+        // The row either side of the rows area is one past it, not none: the
+        // first row past an edge is where a scroll off the tick starts.
+        assert_eq!(reach(rows.y - 1), Reach::Above { rows: 1, column: 0 });
+        assert_eq!(reach(rows.bottom()), Reach::Below { rows: 1, column: 0 });
+        assert_eq!(
+            reach(0),
+            Reach::Above {
+                rows: rows.y,
+                column: 0
+            }
+        );
+        assert_eq!(
+            reach(FIXTURE_HEIGHT - 1),
+            Reach::Below {
+                rows: FIXTURE_HEIGHT - rows.bottom(),
+                column: 0
+            },
+            "the last row of the screen is past the bottom edge"
+        );
+        assert_eq!(
+            reach(u16::MAX),
+            Reach::Below {
+                rows: u16::MAX - rows.bottom() + 1,
+                column: 0
+            },
+            "a pointer dragged off the terminal is past the edge, not on it"
+        );
+    }
+
+    #[test]
+    fn the_edges_move_with_the_field_and_the_header_the_frame_was_drawn_with() {
+        // The point of measuring this from `areas` rather than from the pane:
+        // the run header is above the rows and the field below them, so both
+        // move an edge, and a pointer level with the last row of a card drawn
+        // without a field is past the bottom of the same card drawn with one.
+        let mut app = App::from_tree(&fixture::tree());
+        app.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
+        let header = app.run_header().expect("a run in flight has a header");
+        let composer = Composer::new("a draft");
+        let field = Some(&composer);
+        let size = Size::new(WIDTH, FIXTURE_HEIGHT);
+        let bare = panel_rows_area(areas(Rect::from(size), None).panel, None);
+        let rows = panel_rows_area(areas(Rect::from(size), field).panel, Some(&header));
+        assert!(rows.y > bare.y, "the header takes the top of the panel");
+        assert!(
+            rows.bottom() < bare.bottom(),
+            "the field takes the bottom of the column"
+        );
+
+        let reach = |y| panel_reach(rows.x, y, size, field, Some(&header));
+        assert_eq!(reach(rows.y), Reach::Inside { column: 0 });
+        assert_eq!(reach(rows.bottom() - 1), Reach::Inside { column: 0 });
+        assert_eq!(
+            reach(rows.y - 1),
+            Reach::Above { rows: 1, column: 0 },
+            "the header's own last row is one above the card"
+        );
+        assert_eq!(
+            reach(bare.y),
+            Reach::Above {
+                rows: rows.y - bare.y,
+                column: 0
+            },
+            "the first row of a card drawn with no header is above this one"
+        );
+        assert_eq!(
+            reach(bare.bottom() - 1),
+            Reach::Below {
+                rows: bare.bottom() - rows.bottom(),
+                column: 0
+            },
+            "the last row of a card drawn with no field is below this one"
+        );
+    }
+
+    #[test]
+    fn a_point_past_the_side_of_the_rows_is_clamped_to_the_column_nearest_it() {
+        let size = Size::new(WIDTH, FIXTURE_HEIGHT);
+        let rows = panel_rows_area(areas(Rect::from(size), None).panel, None);
+        let last = rows.width - 1;
+
+        for (x, column) in [
+            (0, 0),
+            (rows.x, 0),
+            (rows.x + 1, 1),
+            (rows.x + last, last),
+            (rows.right(), last),
+            (WIDTH - 1, last),
+            (u16::MAX, last),
+        ] {
+            assert_eq!(
+                panel_reach(x, rows.y, size, None, None),
+                Reach::Inside { column },
+                "at screen column {x}"
+            );
+            assert_eq!(
+                panel_reach(x, rows.bottom(), size, None, None),
+                Reach::Below { rows: 1, column },
+                "at screen column {x}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_screen_too_short_for_a_line_of_panel_is_all_edge_and_no_inside() {
+        for height in 0..=FOOTER_HEIGHT + 2 * BORDER_THICKNESS {
+            let size = Size::new(WIDTH, height);
+            assert_eq!(panel_height(size, None, None), 0, "in {height} rows");
+
+            for y in 0..=height {
+                let reach = panel_reach(0, y, size, None, None);
+                assert!(
+                    !matches!(reach, Reach::Inside { .. }),
+                    "row {y} of {height} answered {reach:?}"
+                );
+            }
+        }
     }
 
     #[test]
