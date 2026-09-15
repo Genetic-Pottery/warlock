@@ -122,6 +122,31 @@ clap = { version = "4", features = ["derive"] }
 # end its descent between directories and kill the pass in flight, instead of
 # dying somewhere in the middle of writing somebody's document.
 ctrlc = { version = "3" }
+# Putting text on the system clipboard, which is a different API on every
+# platform — X11 selections, the Wayland data-control protocol, NSPasteboard,
+# the Win32 clipboard — and nothing in std at all. The terminal is no help
+# either: handing the pointer back with `m` gets the user a rectangle of screen
+# cells, not the text warlock knows it drew. The alternative to the crate is
+# owning an X11 selection by hand, which means a connection, an atom table and
+# an event loop answering conversion requests for as long as warlock holds the
+# clipboard.
+#
+# `default-features = false` drops `image-data`, which is there to put pictures
+# on the clipboard and pulls in `image` to encode them; warlock copies text.
+#
+# `wayland-data-control` is not on by default, and without it arboard's Linux
+# backend is X11 only — on a Wayland session the copy would go through XWayland
+# and stay invisible to native clients. With it, arboard uses the Wayland
+# data-control protocol when `WAYLAND_DISPLAY` is set and falls back to X11 on
+# its own when the compositor does not offer that protocol, so the feature costs
+# nothing on an X11 session. It links no system library: arboard has no build
+# script, and on Linux it is x11rb and wl-clipboard-rs, which speak both
+# protocols over a socket in Rust rather than binding libX11 or
+# libwayland-client. That matters here because Rust comes from nixpkgs, and it
+# is why `cargo build` needed nothing added to this machine.
+arboard = { version = "3", default-features = false, features = [
+    "wayland-data-control",
+] }
 # Dev-only: round-trips a value through serde's own token stream, so the derives
 # can be tested in memory, independently of how any one format spells them.
 serde_test = { version = "1" }
