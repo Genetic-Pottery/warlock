@@ -179,6 +179,12 @@ impl Turn {
         said.chain(self.log.rows(now)).chain(answer)
     }
 
+    fn pieces(&self) -> Vec<&str> {
+        let mut pieces = vec![self.message.as_str()];
+        pieces.extend(self.answer.as_deref());
+        pieces
+    }
+
     /// What a newer turn does to the one above it. It adds no line: an
     /// overtaken turn is frozen where it got to, with what it had said still on
     /// screen.
@@ -231,6 +237,13 @@ impl Entry {
         match self {
             Self::Turn(turn) => Box::new(turn.rows(now)),
             Self::Note { text, .. } => Box::new(std::iter::once(Line::Note { text: text.clone() })),
+        }
+    }
+
+    fn pieces(&self) -> Vec<&str> {
+        match self {
+            Self::Turn(turn) => turn.pieces(),
+            Self::Note { text, .. } => vec![text.as_str()],
         }
     }
 
@@ -378,6 +391,20 @@ impl Thread {
     #[must_use]
     pub fn turns(&self) -> Vec<&Turn> {
         self.entries.iter().filter_map(Entry::turn).collect()
+    }
+
+    /// The addressable texts, in thread order: a turn's message, that turn's
+    /// answer once there is one, and a note. Work rows are left out, because the
+    /// live one's clock is recomputed every frame and no stable position can sit
+    /// inside it.
+    ///
+    /// An answer follows its own message and nothing filed later, which is what
+    /// keeps a [`Position`](crate::Position) taken while a turn was still
+    /// running pointing at the same text once the answer lands. Reordering this
+    /// moves every position taken before the answer arrived.
+    #[must_use]
+    pub fn pieces(&self) -> Vec<&str> {
+        self.entries.iter().flat_map(Entry::pieces).collect()
     }
 
     /// A card with one note on it is not empty — a refusal before the first
