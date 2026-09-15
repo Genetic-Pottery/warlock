@@ -1270,7 +1270,14 @@ mod tests {
             let cancel = super::super::CancelGuard::new();
             // The real five-minute timeout: the only thing that can end this
             // turn in time is the cancel.
-            let received = spawn_turn(ASKED, &stand_in("sleep 300"), cancel.handle());
+            //
+            // `exec`, because the disconnect below is the stdout reader
+            // dropping its sender at EOF. A shell that forks `sleep` rather
+            // than exec'ing it (dash, CI's `/bin/sh`) leaves a grandchild the
+            // kill does not reach holding stdout open for the full 300s, and
+            // whether the cancel lands before or after that fork is a race.
+            // Not waiting on such a survivor is pinned in `claude.rs`, not here.
+            let received = spawn_turn(ASKED, &stand_in("exec sleep 300"), cancel.handle());
 
             let started = Instant::now();
             cancel.cancel();
