@@ -26,7 +26,7 @@ use ratatui::crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use ratatui::layout::Size;
 use warlock_engine::{Agent, Manifest, Written, write_claude_md};
 use warlock_tui::{
-    App, Cell, Converses, Focus, Position, QuitConfirm, Run, ScopePrompt, Wired,
+    App, Cell, Converses, Focus, Position, QuitConfirm, Reach, Run, ScopePrompt, Wired,
     composer_on_screen, copied_text, draw, panel_height, panel_width, paste_for, position_at,
     tree_height,
 };
@@ -60,7 +60,7 @@ use config::configure;
 use editing::edit_press;
 use edits::{scope_add, scope_remove, unpact};
 use error::Error;
-use input::{Action, MouseAction, Pressed, mouse_action, press_for};
+use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_for};
 use pacting::{Pact, Reloaded};
 use query::{Listing, list};
 use running::{pact, refresh};
@@ -428,6 +428,7 @@ fn run() -> Result<(), Error> {
         clipboard: Clipboard::open(),
         confirm: QuitConfirm::default(),
         prompt: ScopePrompt::default(),
+        drag: None,
         document: None,
         // The terminal has just been asked to report its pointer, and `m` is
         // the one thing that changes the answer.
@@ -482,6 +483,12 @@ fn run() -> Result<(), Error> {
             }
         }
 
+        // The one thing that happens on the round rather than on an event, and
+        // so outside the poll above: a pointer held past the conversation's edge
+        // sends nothing at all while it sits there, so the scrolling it asks for
+        // has to come round with the loop or not at all.
+        session.drag_scroll();
+
         // And then everything that happened off this thread: what a run has
         // said since the last round, what a turn has, and what the disk did
         // while this one was waiting on a keystroke.
@@ -507,6 +514,12 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip> {
     clipboard: B,
     confirm: QuitConfirm,
     prompt: ScopePrompt,
+    /// The left button held down over the conversation, if it is: the one piece
+    /// of a gesture that outlives the event carrying it, because the rounds
+    /// between one drag event and the next are what [`Session::drag_scroll`]
+    /// runs on. `None` is no button held, or one held after a press that landed
+    /// anywhere else.
+    drag: Option<Drag>,
     /// Which file is on the document card, which the app is never told:
     /// `App::show_document` takes lines and never a path. The edit key is what
     /// asks, so that it re-reads the card only when the file it just handed to
@@ -584,9 +597,80 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             self.chat.write_prompt(),
             field,
         );
+        // Before the action is acted on, because this is bookkeeping about the
+        // gesture rather than part of it: what the app does with a press or a
+        // drag is the same whether or not the button stays down afterwards.
+        self.drag = drag_after(self.drag, mouse.kind, action);
         if let Some(text) = apply_mouse(&mut self.app, action, now) {
             self.copy(&text);
         }
+    }
+
+    /// The conversation scrolled under a drag held past its edge, once per
+    /// round, with the highlight taken along.
+    ///
+    /// Called off the loop's tick rather than off an event because a pointer
+    /// held still past the card sends nothing: the last drag event said which
+    /// edge it went past and by how far, and every round after it reads that
+    /// again. Does nothing at all on a round with no button held, one held after
+    /// a press that landed elsewhere, or a pointer still level with the rows.
+    fn drag_scroll(&mut self) {
+        let Some(past) = self.drag.and_then(|drag| drag.past) else {
+            return;
+        };
+        // A key pressed with the button still down can put another card in the
+        // panel, and the drag outlives it: without this the held pointer would
+        // go on scrolling, now through the account or the document, neither of
+        // which a drag has ever been able to move.
+        if !self.app.panel().showing_thread() {
+            return;
+        }
+        let (rows, column, downwards) = match past {
+            Reach::Above { rows, column } => (rows, column, false),
+            Reach::Below { rows, column } => (rows, column, true),
+            // Never recorded: a pointer level with the rows has a cell under it,
+            // and `mouse_action` hands that over as the cell rather than as a
+            // reach past anything.
+            Reach::Inside { .. } => return,
+        };
+
+        let before = self.app.panel().scroll_offset();
+        let by = rows_per_tick(rows);
+        if downwards {
+            self.app.scroll_panel_down(by);
+        } else {
+            self.app.scroll_panel_up(by);
+        }
+
+        let (scroll, height, width) = {
+            let panel = self.app.panel();
+            (panel.scroll_offset(), panel.height(), panel.width())
+        };
+        if scroll == before {
+            // Either end of the thread, where the panel clamped and nothing new
+            // came into view. The highlight stops growing with it: there is no
+            // newly revealed row for the pointer to be pulling towards, and
+            // extending anyway would drag the far end across the same edge row
+            // once a tick for as long as the button is held.
+            return;
+        }
+
+        // The row the scroll just uncovered — the bottom one going down, the top
+        // one going up — at the column the pointer left the card by. Measured
+        // from the panel's own scroll and width, as a cell under the pointer is,
+        // so the endpoint maps back through the wrapping this frame was drawn
+        // with.
+        let cell = Cell {
+            column: usize::from(column),
+            row: if downwards {
+                height.saturating_sub(1)
+            } else {
+                0
+            },
+            scroll,
+            width,
+        };
+        extend(&mut self.app, cell, Instant::now());
     }
 
     /// One keystroke. `Ok(false)` is the session being over and the only thing
@@ -1055,14 +1139,32 @@ fn apply_mouse(app: &mut App, action: Option<MouseAction>, now: Instant) -> Opti
             let text = selected_text(app);
             return (!text.is_empty()).then_some(text);
         }
-        // A drag held past that edge, next to the events that mean nothing at
-        // all, because for now it does as little as they do: the scrolling it
-        // asks for is driven off the loop's tick rather than off this event, and
-        // the event that says the pointer left carries nothing this needs.
+        // A drag held past that edge does nothing to the app *here*, which is
+        // why it sits with the events that mean nothing at all: what it asks for
+        // is a scroll a round at a time, and a round is not an event. The reach
+        // it carries is kept on the session by [`Session::point`] and read by
+        // [`Session::drag_scroll`] for as long as the button is down.
         Some(MouseAction::ExtendPastEdge(_)) | None => {}
     }
 
     None
+}
+
+/// How many rows one tick scrolls the card by, for a pointer `past` rows past
+/// its edge.
+///
+/// The tick is [`POLL_INTERVAL`], ten a second, so a row per tick is ten rows a
+/// second: slow enough to stop on the line you meant, which is what the first
+/// row past the edge has to be. The ceiling is five, or fifty rows a second —
+/// about a screenful a half-second, fast enough to cross a long answer and slow
+/// enough to see what is going past. Between them a row of speed per three rows
+/// of reach, so the whole range is available inside a few rows of pointer travel
+/// rather than needing the reader to drag off the bottom of the terminal.
+fn rows_per_tick(past: u16) -> usize {
+    const FASTEST: usize = 5;
+    const ROWS_PER_STEP: usize = 3;
+
+    usize::from(past).div_ceil(ROWS_PER_STEP).clamp(1, FASTEST)
 }
 
 fn extend(app: &mut App, cell: Cell, now: Instant) {
@@ -1865,6 +1967,7 @@ mod tests {
             clipboard: Copying::taking(),
             confirm: QuitConfirm::default(),
             prompt: ScopePrompt::default(),
+            drag: None,
             document: None,
             mouse_captured: true,
             watched,
@@ -1924,6 +2027,7 @@ mod tests {
             clipboard: Copying::taking(),
             confirm: QuitConfirm::default(),
             prompt: ScopePrompt::default(),
+            drag: None,
             document: None,
             mouse_captured: true,
             watched,
@@ -2469,6 +2573,288 @@ mod tests {
                 None,
                 "a drag over the document card highlighted the conversation behind it"
             );
+        }
+
+        // The tick, driven by hand: `run`'s loop calls `drag_scroll` once a
+        // round whether or not an event arrived, so a round with nothing in it
+        // is `drag_scroll` on its own.
+        mod past_the_edge {
+            use super::{
+                ANSWER, DRAG, Driven, Instant, PRESS, RELEASE, Size, drawn_at, point, redrawn,
+                session,
+            };
+            use crate::rows_per_tick;
+            use crate::tests::directory;
+
+            // A conversation several screens tall, so there is somewhere for the
+            // card to scroll, drawn once at the size the drags below land on.
+            fn scrollback(now: Instant) -> (Driven, Size) {
+                let mut driven = session(vec![directory("/repo/crates")]);
+                for turn in 0..12 {
+                    let asked = format!("question {turn} about the engine");
+                    driven.app.panel_mut().start_turn(&asked, now);
+                    driven.app.panel_mut().answer_turn(ANSWER, now);
+                }
+                let size = redrawn(&mut driven);
+                assert!(
+                    driven.app.panel().scroll_offset() > 0,
+                    "the conversation fits on the card: nothing here would scroll"
+                );
+                (driven, size)
+            }
+
+            // The card wound back to its first line, where a drag downwards has
+            // the whole conversation below it.
+            fn wound_back(driven: &mut Driven) -> Size {
+                driven.app.scroll_panel_up(usize::MAX);
+                redrawn(driven)
+            }
+
+            // A point below every row of the card: the footer, which is inside
+            // the screen and outside the panel.
+            fn below_the_card(size: Size, column: u16) -> (u16, u16) {
+                (column, size.height - 1)
+            }
+
+            fn covered(driven: &Driven) -> usize {
+                crate::selected_text(&driven.app).chars().count()
+            }
+
+            #[test]
+            fn one_row_past_the_edge_is_a_row_a_tick_and_far_past_it_is_several() {
+                assert_eq!(
+                    rows_per_tick(1),
+                    1,
+                    "the row just past the edge is not the slow, aimable one"
+                );
+                assert_eq!(rows_per_tick(6), 2, "the middle of the curve moved");
+                assert_eq!(
+                    rows_per_tick(40),
+                    5,
+                    "a pointer dragged to the bottom of the terminal is not at the ceiling"
+                );
+            }
+
+            #[test]
+            fn a_drag_held_below_the_card_keeps_scrolling_and_takes_the_highlight_with_it() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                let size = wound_back(&mut driven);
+                let (column, row) = drawn_at(&driven, "question");
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                point(&mut driven, DRAG, below_the_card(size, column), size, now);
+                let anchored = driven.app.panel().scroll_offset();
+                assert_eq!(
+                    covered(&driven),
+                    0,
+                    "the drag past the edge highlighted text off its own event"
+                );
+
+                driven.drag_scroll();
+                let after_one = driven.app.panel().scroll_offset();
+                assert!(
+                    after_one > anchored,
+                    "the tick left the card where the drag did: {after_one}"
+                );
+                let after_one_covered = covered(&driven);
+                assert!(
+                    after_one_covered > 0,
+                    "the card scrolled out from under the highlight"
+                );
+
+                // No further event: the pointer is being held still, which is
+                // the whole reason this runs off the tick.
+                driven.drag_scroll();
+                assert!(
+                    driven.app.panel().scroll_offset() > after_one,
+                    "the scrolling stopped when the pointer did"
+                );
+                assert!(
+                    covered(&driven) > after_one_covered,
+                    "the highlight stopped growing while the card went on scrolling"
+                );
+            }
+
+            #[test]
+            fn the_scrolling_stops_at_the_end_of_the_thread() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                let size = wound_back(&mut driven);
+                let (column, row) = drawn_at(&driven, "question");
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                point(&mut driven, DRAG, below_the_card(size, column), size, now);
+                for _ in 0..200 {
+                    driven.drag_scroll();
+                }
+
+                assert_eq!(
+                    driven.app.panel().lines_below(),
+                    0,
+                    "the ticks left the card short of the end of the conversation"
+                );
+                let end = driven.app.panel().scroll_offset();
+                let held = covered(&driven);
+
+                driven.drag_scroll();
+
+                assert_eq!(
+                    driven.app.panel().scroll_offset(),
+                    end,
+                    "the card scrolled past the last line of the conversation"
+                );
+                assert_eq!(
+                    covered(&driven),
+                    held,
+                    "the highlight went on growing over a card that had stopped"
+                );
+            }
+
+            #[test]
+            fn a_drag_held_above_the_card_scrolls_the_other_way_and_stops_at_the_top() {
+                let now = Instant::now();
+                // Left where a conversation sits: at the newest line, with
+                // everything else above it.
+                let (mut driven, size) = scrollback(now);
+                let (column, row) = drawn_at(&driven, "engine");
+                let at_the_end = driven.app.panel().scroll_offset();
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                // Row zero is the top border of the panes, which is past every
+                // row of the card.
+                point(&mut driven, DRAG, (column, 0), size, now);
+                driven.drag_scroll();
+
+                assert!(
+                    driven.app.panel().scroll_offset() < at_the_end,
+                    "the tick scrolled the wrong way for a pointer above the card"
+                );
+                assert!(
+                    covered(&driven) > 0,
+                    "the highlight did not follow the card upwards"
+                );
+
+                for _ in 0..200 {
+                    driven.drag_scroll();
+                }
+                let top = driven.app.panel().scroll_offset();
+                assert_eq!(top, 0, "the ticks stopped short of the first line");
+
+                driven.drag_scroll();
+
+                assert_eq!(
+                    driven.app.panel().scroll_offset(),
+                    0,
+                    "the card scrolled above its first line"
+                );
+            }
+
+            #[test]
+            fn the_release_that_ends_the_drag_ends_the_scrolling() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                let size = wound_back(&mut driven);
+                let (column, row) = drawn_at(&driven, "question");
+                let past = below_the_card(size, column);
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                point(&mut driven, DRAG, past, size, now);
+                driven.drag_scroll();
+                point(&mut driven, RELEASE, past, size, now);
+                let let_go = driven.app.panel().scroll_offset();
+                let held = covered(&driven);
+
+                driven.drag_scroll();
+
+                assert_eq!(
+                    driven.app.panel().scroll_offset(),
+                    let_go,
+                    "the card went on scrolling after the button came up"
+                );
+                assert_eq!(
+                    covered(&driven),
+                    held,
+                    "the highlight went on growing after the button came up"
+                );
+                assert_eq!(
+                    driven.clipboard.copied().len(),
+                    1,
+                    "the release past the edge copied something other than once"
+                );
+            }
+
+            #[test]
+            fn a_round_with_no_button_held_scrolls_nothing() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                let where_it_was = driven.app.panel().scroll_offset();
+
+                driven.drag_scroll();
+
+                assert_eq!(
+                    driven.app.panel().scroll_offset(),
+                    where_it_was,
+                    "a card nobody is dragging over scrolled by itself"
+                );
+                assert_eq!(
+                    driven.app.selection(),
+                    None,
+                    "a tick with no drag behind it highlighted something"
+                );
+            }
+
+            #[test]
+            fn a_press_on_the_tree_dragged_past_the_card_scrolls_nothing() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                let size = wound_back(&mut driven);
+                let (tree_column, tree_row) = drawn_at(&driven, "crates");
+                let (column, _) = drawn_at(&driven, "question");
+                let where_it_was = driven.app.panel().scroll_offset();
+
+                point(&mut driven, PRESS, (tree_column, tree_row), size, now);
+                point(&mut driven, DRAG, below_the_card(size, column), size, now);
+                driven.drag_scroll();
+                driven.drag_scroll();
+
+                assert_eq!(
+                    driven.app.panel().scroll_offset(),
+                    where_it_was,
+                    "a drag that began in the tree scrolled the conversation"
+                );
+                assert_eq!(
+                    driven.app.selection(),
+                    None,
+                    "a drag that began in the tree highlighted the conversation"
+                );
+            }
+
+            #[test]
+            fn a_card_put_up_while_the_button_is_held_is_not_scrolled_by_it() {
+                let now = Instant::now();
+                let (mut driven, _) = scrollback(now);
+                let size = wound_back(&mut driven);
+                let (column, row) = drawn_at(&driven, "question");
+
+                point(&mut driven, PRESS, (column, row), size, now);
+                point(&mut driven, DRAG, below_the_card(size, column), size, now);
+                // The one way another card can take the conversation's place
+                // without the button coming up first: a key pressed mid-drag.
+                driven
+                    .app
+                    .show_document(std::iter::repeat_n("a line of the file", 200), false);
+                let where_it_was = driven.app.panel().scroll_offset();
+
+                driven.drag_scroll();
+                driven.drag_scroll();
+
+                assert_eq!(
+                    driven.app.panel().scroll_offset(),
+                    where_it_was,
+                    "the held drag scrolled the document that replaced the conversation"
+                );
+            }
         }
     }
 

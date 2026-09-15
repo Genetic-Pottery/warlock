@@ -263,6 +263,20 @@ pub(crate) enum MouseAction {
     EndPastEdge(Reach),
 }
 
+// The left button still held after a press that landed on a line of the
+// conversation, which is the only gesture anything scrolls off the tick for.
+//
+// `past` is where the *latest* drag event left the card, and it is remembered
+// rather than acted on once because a pointer that has stopped moving sends no
+// further events: the round after it has nothing else to read, so the last
+// event to arrive has to go on meaning what it said until another one does.
+// `None` is a pointer still level with the rows, where the drag is the plain
+// cell-by-cell one and there is nothing to scroll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Drag {
+    pub(crate) past: Option<Reach>,
+}
+
 // `size` is the size the round measured before it drew, and `composer` the
 // draft that frame was drawn with, because the hit test has to agree with the
 // frame the reader is pointing at: a second opinion about the layout — or one
@@ -317,6 +331,45 @@ pub(crate) fn mouse_action(
             .map(MouseAction::EndSelection)
             .or_else(|| past_rows(mouse, size, app, composer).map(MouseAction::EndPastEdge)),
         _ => None,
+    }
+}
+
+// What one pointer event does to the drag being held, which is the whole of
+// what the loop's tick has to go on: `held` is what the last event left, and
+// what comes back is what this one leaves.
+//
+// `kind` is read for one thing only — whether this event is a button going down
+// — because the actions above do not distinguish a press on the footer from an
+// event nothing was read into, and a press is the one thing that has to clear a
+// drag it did not start. Everything a press *can* mean over the panes says so as
+// an action; the rest of them (the border, the footer, off the screen) say
+// nothing, and a drag left standing under one would scroll on with no button
+// held.
+pub(crate) fn drag_after(
+    held: Option<Drag>,
+    kind: MouseEventKind,
+    action: Option<MouseAction>,
+) -> Option<Drag> {
+    let pressed = matches!(kind, MouseEventKind::Down(_));
+    match action {
+        // The one press that starts one, level with the rows by definition.
+        Some(MouseAction::StartSelection(_)) => Some(Drag::default()),
+        // Back inside the card: there is a cell under the pointer again, so the
+        // drag extends off the event and this stops asking for a scroll.
+        Some(MouseAction::ExtendSelection(_)) => held.is_some().then(Drag::default),
+        Some(MouseAction::ExtendPastEdge(reach)) => {
+            held.is_some().then_some(Drag { past: Some(reach) })
+        }
+        // The button coming up, inside the card or past its edge, is the end of
+        // the gesture either way.
+        Some(MouseAction::EndSelection(_) | MouseAction::EndPastEdge(_)) => None,
+        // A press on the tree, the composer, the panel's header, one of the
+        // other two cards, the footer, the border, off the screen: whatever it
+        // begins, it is not a drag over the conversation's text.
+        _ if pressed => None,
+        // The wheel and every other button, none of which lets go of the left
+        // one.
+        _ => held,
     }
 }
 
@@ -4466,6 +4519,120 @@ mod tests {
             }
 
             assert_eq!(app, before, "the pointer moved nothing behind the prompt");
+        }
+    }
+
+    // What the session keeps between one pointer event and the next, which is
+    // the only thing the loop's tick has to go on.
+    mod holding {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        use warlock_tui::{Cell, Reach};
+
+        use super::super::{Drag, MouseAction, drag_after};
+
+        const PRESS: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
+        const DRAG: MouseEventKind = MouseEventKind::Drag(MouseButton::Left);
+        const RELEASE: MouseEventKind = MouseEventKind::Up(MouseButton::Left);
+        const WHEEL: MouseEventKind = MouseEventKind::ScrollDown;
+
+        const CELL: Cell = Cell {
+            column: 4,
+            row: 2,
+            scroll: 0,
+            width: 40,
+        };
+
+        const PAST: Reach = Reach::Below { rows: 3, column: 4 };
+
+        fn holding() -> Option<Drag> {
+            drag_after(None, PRESS, Some(MouseAction::StartSelection(CELL)))
+        }
+
+        #[test]
+        fn a_press_on_the_conversation_is_the_only_one_that_starts_a_drag() {
+            assert_eq!(holding(), Some(Drag { past: None }));
+            for action in [
+                Some(MouseAction::Focus(super::super::Focus::Panel)),
+                Some(MouseAction::SelectRow(2)),
+                Some(MouseAction::ToggleCollapsed),
+                // The footer, the border, off the screen: a press that reads as
+                // nothing at all.
+                None,
+            ] {
+                assert_eq!(
+                    drag_after(None, PRESS, action),
+                    None,
+                    "{action:?} started a drag over the conversation"
+                );
+                assert_eq!(
+                    drag_after(holding(), PRESS, action),
+                    None,
+                    "{action:?} left a drag standing that it did not start"
+                );
+            }
+        }
+
+        #[test]
+        fn the_last_drag_event_past_the_edge_is_what_is_kept() {
+            assert_eq!(
+                drag_after(holding(), DRAG, Some(MouseAction::ExtendPastEdge(PAST))),
+                Some(Drag { past: Some(PAST) })
+            );
+            let further = Reach::Above { rows: 9, column: 0 };
+            assert_eq!(
+                drag_after(
+                    Some(Drag { past: Some(PAST) }),
+                    DRAG,
+                    Some(MouseAction::ExtendPastEdge(further))
+                ),
+                Some(Drag {
+                    past: Some(further)
+                }),
+                "a drag back past the other edge was read against the first one"
+            );
+            assert_eq!(
+                drag_after(
+                    Some(Drag { past: Some(PAST) }),
+                    DRAG,
+                    Some(MouseAction::ExtendSelection(CELL))
+                ),
+                Some(Drag { past: None }),
+                "a pointer back level with the rows went on scrolling"
+            );
+        }
+
+        #[test]
+        fn a_drag_past_the_edge_with_no_press_behind_it_is_not_a_drag() {
+            // The press landed in the tree, the composer or on another card, and
+            // the pointer has since been dragged off the panel's rows.
+            for action in [
+                MouseAction::ExtendPastEdge(PAST),
+                MouseAction::ExtendSelection(CELL),
+            ] {
+                assert_eq!(drag_after(None, DRAG, Some(action)), None);
+            }
+        }
+
+        #[test]
+        fn the_button_coming_up_ends_it_wherever_the_pointer_is() {
+            for (held, action) in [
+                (holding(), MouseAction::EndSelection(CELL)),
+                (
+                    Some(Drag { past: Some(PAST) }),
+                    MouseAction::EndPastEdge(PAST),
+                ),
+            ] {
+                assert_eq!(drag_after(held, RELEASE, Some(action)), None);
+            }
+        }
+
+        #[test]
+        fn the_wheel_does_not_let_go_of_a_button_somebody_is_holding() {
+            let held = Some(Drag { past: Some(PAST) });
+            assert_eq!(
+                drag_after(held, WHEEL, Some(MouseAction::ScrollPanelDown(3))),
+                held
+            );
         }
     }
 }
