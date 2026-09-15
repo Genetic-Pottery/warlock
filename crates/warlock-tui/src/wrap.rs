@@ -125,24 +125,41 @@ fn continued(line: &Line, first: &str, shape: &Shape) -> Line {
 // is not a width to break at — the frame that measures the panel is the one that
 // wraps it.
 pub(crate) fn wrapped(text: &str, width: usize) -> Vec<String> {
+    wrapped_at(text, width)
+        .into_iter()
+        .map(|(_, row)| row.to_owned())
+        .collect()
+}
+
+// The same rows [`wrapped`] gives, each with where it starts in `text`. The
+// trimmed space at a break belongs to no row, so the rows do not concatenate
+// back byte for byte the way `folded`'s do and an offset cannot be counted up
+// from their lengths — it has to be carried through the trim, which is what this
+// is for. Keep the two as one function: a second wrapper beside this one is two
+// answers about where a line breaks, and the offsets would be counted against
+// rows nobody drew.
+pub(crate) fn wrapped_at(text: &str, width: usize) -> Vec<(usize, &str)> {
     if width == 0 || display_width(text) <= width {
-        return vec![text.to_owned()];
+        return vec![(0, text)];
     }
 
     let mut rows = Vec::new();
-    let mut rest = text;
+    let mut start = 0;
     loop {
+        let rest = &text[start..];
         if display_width(rest) <= width {
-            rows.push(rest.to_owned());
+            rows.push((start, rest));
             return rows;
         }
 
         let end = break_at(rest, width);
-        rows.push(rest[..end].trim_end().to_owned());
+        rows.push((start, rest[..end].trim_end()));
         // The space the break was made at goes with the row above it. A break
         // made mid-word has no space to eat, so this takes nothing off the text.
-        rest = rest[end..].trim_start();
-        if rest.is_empty() {
+        let after = &rest[end..];
+        let next = after.trim_start();
+        start += end + (after.len() - next.len());
+        if next.is_empty() {
             // A line that came out even. Falling through would put a blank row
             // under it, which is a paragraph break the file does not have.
             return rows;
@@ -251,7 +268,7 @@ fn first_character(text: &str) -> usize {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Line, first_character, folded, rows, shape, wrapped};
+    use super::{Line, first_character, folded, rows, shape, wrapped, wrapped_at};
     use crate::account::Voice;
     use crate::ui::display_width;
 
@@ -581,6 +598,33 @@ mod tests {
 
         assert_eq!(rows[0], "    indent");
         assert_eq!(rows.concat().replace(' ', ""), "indentedtexthere");
+    }
+
+    #[test]
+    fn a_wrapped_row_says_where_in_the_line_it_started() {
+        // The rows are the panel's own rows, and each offset is the byte the row
+        // was cut from — which is what a caller turning a cell into an offset
+        // has instead of adding the rows' lengths up, since the space at a break
+        // is in none of them.
+        for draft in DRAFTS {
+            for width in 0..40 {
+                let rows = wrapped_at(draft, width);
+                assert_eq!(
+                    rows.iter()
+                        .map(|&(_, row)| row.to_owned())
+                        .collect::<Vec<_>>(),
+                    wrapped(draft, width),
+                    "{draft:?} at {width}",
+                );
+                for (offset, row) in rows {
+                    assert_eq!(
+                        &draft[offset..offset + row.len()],
+                        row,
+                        "{draft:?} at {width}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

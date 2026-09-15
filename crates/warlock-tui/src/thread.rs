@@ -162,21 +162,56 @@ impl Turn {
                 .map_or(0, |answer| broken(answer).count())
     }
 
+    /// `piece` is where this turn's message sits in [`Thread::pieces`], so the
+    /// answer's is the one after it. Everything a turn draws is made here and
+    /// [`Entry::rows`] throws the tags away: two flattenings would be a row
+    /// tagged with text that is not under it.
+    ///
     /// An ending needs no arm of its own: it is filed as an ordinary line when
     /// the turn closes, so it clocks and freezes like everything else.
-    fn rows(&self, now: Instant) -> impl Iterator<Item = Line> + '_ {
-        let said = broken(&self.message).map(|text| Line::Said {
-            text: text.to_owned(),
-        });
-        let answer = self
-            .answer
-            .iter()
-            .flat_map(|answer| broken(answer))
-            .map(|text| Line::Text {
-                text: text.to_owned(),
-            });
+    fn sourced(&self, piece: usize, now: Instant) -> Vec<Sourced> {
+        let mut rows: Vec<Sourced> = broken(&self.message)
+            .map(|(offset, text)| Sourced {
+                line: Line::Said {
+                    text: text.to_owned(),
+                },
+                piece,
+                offset,
+                work: false,
+            })
+            .collect();
 
-        said.chain(self.log.rows(now)).chain(answer)
+        // A work row is nobody's text — the live one's clock is recomputed every
+        // frame — so it stands for the end of the question above it, which is
+        // there before the answer is.
+        rows.extend(self.log.rows(now).map(|line| Sourced {
+            line,
+            piece,
+            offset: self.message.len(),
+            work: true,
+        }));
+
+        rows.extend(
+            self.answer
+                .iter()
+                .flat_map(|answer| broken(answer))
+                .map(|(offset, text)| Sourced {
+                    line: Line::Text {
+                        text: text.to_owned(),
+                    },
+                    piece: piece + 1,
+                    offset,
+                    work: false,
+                }),
+        );
+
+        rows
+    }
+
+    fn pieces(&self) -> Vec<&str> {
+        let mut pieces = vec![self.message.as_str()];
+        pieces.extend(self.answer.as_deref());
+        pieces
     }
 
     /// What a newer turn does to the one above it. It adds no line: an
@@ -200,6 +235,22 @@ impl Turn {
         self.ending = Some(ending.clone());
         self.log.freeze(at);
     }
+}
+
+/// A row of the card and the text it was drawn from: which of
+/// [`Thread::pieces`] it came out of, where in that piece its own text starts,
+/// and whether the row is one that stands for a position rather than holding
+/// text of its own.
+///
+/// [`Thread::window`] flattens entries to [`Line`]s and keeps none of this,
+/// which is why a cell cannot be read back into the conversation from a
+/// [`Line`] alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Sourced {
+    pub(crate) line: Line,
+    pub(crate) piece: usize,
+    pub(crate) offset: usize,
+    pub(crate) work: bool,
 }
 
 /// One sequence and not two lists, because a note's whole meaning is where it
@@ -227,10 +278,31 @@ impl Entry {
         }
     }
 
-    fn rows(&self, now: Instant) -> Box<dyn Iterator<Item = Line> + '_> {
+    /// The rows [`Entry::sourced`] makes, with the tags dropped: one flattening,
+    /// so a row on screen and the row a cell is resolved against cannot come to
+    /// disagree about what an entry draws.
+    fn rows(&self, now: Instant) -> impl Iterator<Item = Line> + '_ {
+        self.sourced(0, now).into_iter().map(|row| row.line)
+    }
+
+    /// A note is one row and one piece, whole: [`Thread::note`] flattened it on
+    /// the way in, so the row is the piece rather than a line of it.
+    fn sourced(&self, piece: usize, now: Instant) -> Vec<Sourced> {
         match self {
-            Self::Turn(turn) => Box::new(turn.rows(now)),
-            Self::Note { text, .. } => Box::new(std::iter::once(Line::Note { text: text.clone() })),
+            Self::Turn(turn) => turn.sourced(piece, now),
+            Self::Note { text, .. } => vec![Sourced {
+                line: Line::Note { text: text.clone() },
+                piece,
+                offset: 0,
+                work: false,
+            }],
+        }
+    }
+
+    fn pieces(&self) -> Vec<&str> {
+        match self {
+            Self::Turn(turn) => turn.pieces(),
+            Self::Note { text, .. } => vec![text.as_str()],
         }
     }
 
@@ -380,6 +452,36 @@ impl Thread {
         self.entries.iter().filter_map(Entry::turn).collect()
     }
 
+    /// The addressable texts, in thread order: a turn's message, that turn's
+    /// answer once there is one, and a note. Work rows are left out, because the
+    /// live one's clock is recomputed every frame and no stable position can sit
+    /// inside it.
+    ///
+    /// An answer follows its own message and nothing filed later, which is what
+    /// keeps a [`Position`](crate::Position) taken while a turn was still
+    /// running pointing at the same text once the answer lands. Reordering this
+    /// moves every position taken before the answer arrived.
+    #[must_use]
+    pub fn pieces(&self) -> Vec<&str> {
+        self.entries.iter().flat_map(Entry::pieces).collect()
+    }
+
+    /// [`Thread::lines`] again, row for row and in the same order, with each row
+    /// tagged with the piece it was drawn from. Unwrapped, as `lines` is: the
+    /// width is the panel's business, and the piece a row came from is the same
+    /// whatever width it is broken at.
+    #[must_use]
+    pub(crate) fn sourced(&self, now: Instant) -> Vec<Sourced> {
+        let mut piece = 0;
+        let mut rows = Vec::new();
+        for entry in &self.entries {
+            rows.extend(entry.sourced(piece, now));
+            piece += entry.pieces().len();
+        }
+
+        rows
+    }
+
     /// A card with one note on it is not empty — a refusal before the first
     /// question is exactly that case.
     #[must_use]
@@ -451,10 +553,30 @@ impl Thread {
 /// Never empty, for [`wrapped`](crate::wrap)'s reason: a blank line is a
 /// paragraph break, and a message or an answer that came to no rows at all would
 /// be a turn with a hole in it.
-fn broken(text: &str) -> impl Iterator<Item = &str> {
-    let mut lines = text.lines().peekable();
-    let empty = lines.peek().is_none().then_some("");
-    empty.into_iter().chain(lines)
+///
+/// Each row carries where it starts in `text`, which is the only record of which
+/// of the text's own bytes a row on screen is drawn from.
+fn broken(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut rows = Vec::new();
+    let mut offset = 0;
+    for line in text.lines() {
+        rows.push((offset, line));
+        offset += line.len();
+        // The break itself belongs to no row: `lines` splits at `\n` and takes
+        // the `\r` of a `\r\n` with it, so both have to be stepped over for the
+        // next row's offset to be the text's own.
+        if text[offset..].starts_with('\r') {
+            offset += 1;
+        }
+        if text[offset..].starts_with('\n') {
+            offset += 1;
+        }
+    }
+    if rows.is_empty() {
+        rows.push((0, ""));
+    }
+
+    rows.into_iter()
 }
 
 /// Nothing is cut. The account refuses to truncate for the same reason: the
@@ -514,6 +636,47 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn every_row_says_which_of_the_threads_own_texts_it_was_drawn_from() {
+        let base = Instant::now();
+        let mut thread = Thread::new();
+        thread.ask("what does\nthe engine do?", base);
+        thread.record(&Activity::Thinking, at(base, 2));
+        thread.answer("It pacts a tree.\n\nSlowly.", at(base, 42));
+        thread.note("no such command", at(base, 43));
+        thread.ask("a question with no answer yet", at(base, 44));
+
+        let now = at(base, 50);
+        let pieces = thread.pieces();
+        let sourced = thread.sourced(now);
+
+        // Row for row the rows the panel is drawn from, in the same order: the
+        // tags are what `lines` throws away and nothing else.
+        assert_eq!(
+            sourced
+                .iter()
+                .map(|row| row.line.clone())
+                .collect::<Vec<_>>(),
+            thread.lines(now),
+        );
+
+        for row in sourced {
+            let text = pieces[row.piece];
+            if row.work {
+                // A work row is nobody's text and stands for the end of the
+                // question above it.
+                assert_eq!(row.offset, text.len(), "{row:?}");
+                continue;
+            }
+            let drawn = crate::wrap::shape(&row.line).text;
+            assert_eq!(
+                text[row.offset..row.offset + drawn.len()],
+                *drawn,
+                "{row:?}"
+            );
+        }
     }
 
     #[test]
