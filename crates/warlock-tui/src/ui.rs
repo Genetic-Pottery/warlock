@@ -160,11 +160,10 @@ const KEY_DROP_ORDER: &[&str] = &[
 
 fn laid_out_keys(width: usize, pieces: &[&str], drop_order: &[&str]) -> String {
     let mut kept: Vec<&str> = pieces.to_vec();
-    let mut order = drop_order.iter();
-    while display_width(&kept.join(KEY_GAP)) > width {
-        let Some(name) = order.next() else {
+    for name in drop_order {
+        if display_width(&kept.join(KEY_GAP)) <= width {
             break;
-        };
+        }
         if let Some(at) = kept.iter().position(|piece| piece == name) {
             kept.remove(at);
         }
@@ -182,19 +181,23 @@ fn clipped(text: &str, width: usize) -> String {
         return text.to_owned();
     }
 
+    fitted(text, width).to_owned()
+}
+
+fn fitted(text: &str, columns: usize) -> &str {
     let mut taken = 0;
     let mut end = 0;
     for (index, character) in text.char_indices() {
         let next = index + character.len_utf8();
-        let columns = display_width(&text[index..next]);
-        if taken + columns > width {
+        let width = display_width(&text[index..next]);
+        if taken + width > columns {
             break;
         }
-        taken += columns;
+        taken += width;
         end = next;
     }
 
-    text[..end].to_owned()
+    &text[..end]
 }
 
 fn keys_line(width: usize) -> String {
@@ -413,11 +416,13 @@ fn pane_inner(area: Rect) -> Rect {
     inner
 }
 
-fn tree_rows_area(tree: Rect) -> Rect {
-    let [_header, rows] = Layout::vertical([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)])
-        .areas(pane_inner(tree));
+fn tree_split(tree: Rect) -> [Rect; 2] {
+    Layout::vertical([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)])
+        .areas(pane_inner(tree))
+}
 
-    rows
+fn tree_rows_area(tree: Rect) -> Rect {
+    tree_split(tree)[1]
 }
 
 fn panel_split(panel: Rect, header: Option<&RunHeader>) -> (Option<Rect>, Rect) {
@@ -616,11 +621,12 @@ fn pane_block(focused: bool) -> Block<'static> {
 }
 
 fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
-    let below = app.panel().lines_below();
-    let conversation = app.panel().showing_thread();
+    let panel = app.panel();
+    let below = panel.lines_below();
+    let conversation = panel.showing_thread();
     let mut block = pane_block(app.focus() == Focus::Panel);
     if conversation {
-        block = block.title_top(Line::from(thread_title(app.panel().mode())).bold());
+        block = block.title_top(Line::from(thread_title(panel.mode())).bold());
     }
     if below > 0 {
         block = block.title_bottom(Line::from(scrollback(below)).right_aligned().dim());
@@ -634,13 +640,12 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
         draw_run_header(frame, area, header);
     }
 
-    if !app.panel().has_content() {
+    if !panel.has_content() {
         draw_mark(frame, inner);
         return;
     }
 
-    let rows: Vec<Line<'static>> = app
-        .panel()
+    let rows: Vec<Line<'static>> = panel
         .window(now)
         .iter()
         .map(|line| panel_row(line, inner.width, conversation))
@@ -663,7 +668,8 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
 /// panel stops at its last column instead of on the border or the tree beside
 /// it.
 fn draw_highlight(frame: &mut Frame<'_>, rows: Rect, app: &App, now: Instant) {
-    let (Some(selection), Some(thread)) = (app.selection(), app.panel().thread()) else {
+    let panel = app.panel();
+    let (Some(selection), Some(thread)) = (app.selection(), panel.thread()) else {
         return;
     };
 
@@ -673,9 +679,9 @@ fn draw_highlight(frame: &mut Frame<'_>, rows: Rect, app: &App, now: Instant) {
     // measured against a second window is a highlight over text that is not
     // under it.
     let window = Viewport {
-        scroll: app.panel().scroll_offset(),
-        width: app.panel().width(),
-        height: app.panel().height(),
+        scroll: panel.scroll_offset(),
+        width: panel.width(),
+        height: panel.height(),
     };
     for span in spans_at(thread, selection, window, now) {
         let cells = highlighted(rows, span);
@@ -933,19 +939,8 @@ fn truncated(text: &str, width: usize) -> String {
     }
 
     let budget = width.saturating_sub(display_width(ELLIPSIS));
-    let mut taken = 0;
-    let mut end = 0;
-    for (index, character) in text.char_indices() {
-        let next = index + character.len_utf8();
-        let columns = display_width(&text[index..next]);
-        if taken + columns > budget {
-            break;
-        }
-        taken += columns;
-        end = next;
-    }
 
-    format!("{}{ELLIPSIS}", &text[..end])
+    format!("{}{ELLIPSIS}", fitted(text, budget))
 }
 
 pub(crate) fn display_width(text: &str) -> usize {
@@ -953,11 +948,9 @@ pub(crate) fn display_width(text: &str) -> usize {
 }
 
 fn draw_tree_pane(frame: &mut Frame<'_>, area: Rect, app: &App, chrome: &Chrome, now: Instant) {
-    let inner = pane_inner(area);
     frame.render_widget(pane_block(app.focus() == Focus::Tree), area);
 
-    let [header_area, rows_area] =
-        Layout::vertical([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)]).areas(inner);
+    let [header_area, rows_area] = tree_split(area);
     draw_header(frame, header_area, chrome);
     draw_tree(frame, rows_area, app, now);
 }
@@ -1096,28 +1089,27 @@ fn guide_prefixes(all: &[Row], first: usize, height: usize) -> Vec<String> {
         open[row.depth] = true;
     }
 
+    // Every unit is one `INDENT` wide: a glyph in the first column and blanks
+    // for the rest of the level, whichever glyph it is. Built from `INDENT`
+    // rather than from two literal columns so that the guides keep step with the
+    // indent if it ever changes width.
+    let blanks = " ".repeat(INDENT.chars().count() - 1);
+
     // Forwards: `stack[level]` is whether the ancestor sitting at that level has
     // rows of its own still to come, which is the vertical the levels above a
     // row are drawn with.
     let mut stack: Vec<bool> = Vec::new();
     let mut prefixes = Vec::with_capacity(last - first);
     for (index, row) in all.iter().enumerate().take(last) {
-        stack.truncate(row.depth);
         stack.resize(row.depth, false);
         if index >= first {
             // The root's own column is never drawn — a depth-0 row carries no
             // guide — so the verticals start one level in, and the row's own
             // level is the corner rather than a vertical.
-            //
-            // Every unit is one `INDENT` wide: a glyph in the first column and
-            // blanks for the rest of the level, whichever glyph it is. Built
-            // from `INDENT` rather than from two literal columns so that the
-            // guides keep step with the indent if it ever changes width.
-            let level = INDENT.chars().count();
             let mut prefix = String::new();
             for open in stack.iter().skip(1) {
                 prefix.push_str(if *open { GUIDE } else { " " });
-                prefix.push_str(&" ".repeat(level - 1));
+                prefix.push_str(&blanks);
             }
             if row.depth > 0 {
                 prefix.push_str(if continues[index] {
@@ -1125,7 +1117,7 @@ fn guide_prefixes(all: &[Row], first: usize, height: usize) -> Vec<String> {
                 } else {
                     GUIDE_LAST
                 });
-                prefix.push_str(&" ".repeat(level - 1));
+                prefix.push_str(&blanks);
             }
             prefixes.push(prefix);
         }
@@ -1203,20 +1195,25 @@ const fn noun(state: NodeState) -> &'static str {
 }
 
 fn draw_confirm(frame: &mut Frame<'_>, screen: Rect, highlighted: Answer) {
-    let area = confirm_area(screen);
-    let block = Block::bordered().padding(Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS));
+    draw_over(
+        frame,
+        confirm_area(screen),
+        Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
+        vec![
+            Line::from(CONFIRM_QUESTION).centered(),
+            Line::default(),
+            answers_line(highlighted),
+        ],
+    );
+}
+
+fn draw_over(frame: &mut Frame<'_>, area: Rect, padding: Padding, lines: Vec<Line<'_>>) {
+    let block = Block::bordered().padding(padding);
     let inner = block.inner(area);
 
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(CONFIRM_QUESTION).centered(),
-            Line::default(),
-            answers_line(highlighted),
-        ]),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn answers_line(highlighted: Answer) -> Line<'static> {
@@ -1255,22 +1252,24 @@ fn confirm_size() -> Size {
     let answers =
         display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
     let widest = display_width(CONFIRM_QUESTION).max(answers);
-    let width = u16::try_from(widest)
-        .unwrap_or(u16::MAX)
-        .saturating_add(2 * CONFIRM_MARGIN)
-        .saturating_add(2 * BORDER_THICKNESS);
 
-    Size::new(width, CONFIRM_HEIGHT)
+    Size::new(padded_width(widest, CONFIRM_MARGIN), CONFIRM_HEIGHT)
+}
+
+fn padded_width(widest: usize, margin: u16) -> u16 {
+    u16::try_from(widest)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2 * margin)
+        .saturating_add(2 * BORDER_THICKNESS)
 }
 
 fn draw_scope(frame: &mut Frame<'_>, screen: Rect, field: &ScopeField, heading: &str, rules: &str) {
-    let area = centred(screen, scope_size(field, heading, rules));
-    let block = Block::bordered().padding(Padding::symmetric(SCOPE_MARGIN, SCOPE_MARGIN_ROWS));
-    let inner = block.inner(area);
-
-    frame.render_widget(Clear, area);
-    frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(scope_lines(field, heading, rules)), inner);
+    draw_over(
+        frame,
+        centred(screen, scope_size(field, heading, rules)),
+        Padding::symmetric(SCOPE_MARGIN, SCOPE_MARGIN_ROWS),
+        scope_lines(field, heading, rules),
+    );
 }
 
 fn scope_lines<'a>(field: &'a ScopeField, heading: &'a str, rules: &'a str) -> Vec<Line<'a>> {
@@ -1307,12 +1306,8 @@ fn scope_size(field: &ScopeField, heading: &str, rules: &str) -> Size {
         .max(typed)
         .max(field.rule().map_or(0, display_width))
         .max(display_width(rules));
-    let width = u16::try_from(widest)
-        .unwrap_or(u16::MAX)
-        .saturating_add(2 * SCOPE_MARGIN)
-        .saturating_add(2 * BORDER_THICKNESS);
 
-    Size::new(width, SCOPE_HEIGHT)
+    Size::new(padded_width(widest, SCOPE_MARGIN), SCOPE_HEIGHT)
 }
 
 #[cfg(test)]
@@ -1508,7 +1503,10 @@ mod tests {
     }
 
     fn panel_rows(buffer: &Buffer) -> Vec<String> {
-        let area = panel_area(buffer);
+        rows_in(buffer, panel_area(buffer))
+    }
+
+    fn rows_in(buffer: &Buffer, area: Rect) -> Vec<String> {
         (0..area.height)
             .map(|index| text_in(buffer, area, area.y + index))
             .collect()
@@ -1554,10 +1552,7 @@ mod tests {
     }
 
     fn tree_rows(buffer: &Buffer) -> Vec<String> {
-        let area = rows_area(buffer);
-        (0..area.height)
-            .map(|index| text_in(buffer, area, area.y + index))
-            .collect()
+        rows_in(buffer, rows_area(buffer))
     }
 
     fn tree_row(buffer: &Buffer, index: u16) -> String {

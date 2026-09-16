@@ -100,25 +100,12 @@ impl<P: Wired + Agent> Pact<P> {
         // Read here, off the one run this type keeps, rather than handed in by a
         // caller who would have had to look at the same field to know it.
         let running = self.running();
+        let (repo_root, sigils) = (&scope.repo_root, scope.chrome.sigils());
         let work = match kind {
-            Run::Refresh => refresh_press(
-                app,
-                manifest,
-                &scope.repo_root,
-                scope.chrome.sigils(),
-                running,
-                now,
-            )
-            .map(Work::Refresh),
-            Run::Pact => pact_press(
-                app,
-                manifest,
-                &scope.repo_root,
-                scope.chrome.sigils(),
-                running,
-                now,
-            )
-            .map(Work::Pact),
+            Run::Refresh => {
+                refresh_press(app, manifest, repo_root, sigils, running, now).map(Work::Refresh)
+            }
+            Run::Pact => pact_press(app, manifest, repo_root, sigils, running, now).map(Work::Pact),
         };
         if let Some(work) = work {
             // The worker, the channel and the say-when, in the one value this
@@ -317,6 +304,25 @@ fn cancelled(toggled: Toggled) -> Toggled {
     }
 }
 
+// The two refusals both keys share, in the order they have to be asked in. A
+// run already in flight is answered by rewording a line that is already on
+// screen, which is the whole of the refusal and says the same thing however
+// often it is pressed; the boundary is asked second, and both are past before
+// anything that paints rather than asks.
+fn turned_down(
+    app: &mut App,
+    manifest: &Manifest,
+    repo_root: &Path,
+    sigils: &Sigils,
+    in_flight: bool,
+) -> bool {
+    if in_flight {
+        app.set_pact_refused();
+        return true;
+    }
+    closed_scope(app, manifest, repo_root, sigils).is_some()
+}
+
 fn pact_press(
     app: &mut App,
     manifest: &Manifest,
@@ -325,20 +331,12 @@ fn pact_press(
     in_flight: bool,
     at: Instant,
 ) -> Option<PactToggle> {
-    if in_flight {
-        // The whole of the refusal: a bit of wording on a line that is already
-        // on screen. Setting it again says the same thing, so a reader leaning
-        // on the key changes nothing after the first press.
-        app.set_pact_refused();
+    if turned_down(app, manifest, repo_root, sigils, in_flight) {
         return None;
     }
-    // Before the toggle, which paints rather than asks. See above.
-    if closed_scope(app, manifest, repo_root, sigils).is_some() {
-        return None;
-    }
-    // And the downward question, asked in the same place and for the same
-    // reason. Second, because "may this operator act here at all" is settled
-    // before "what would this press reach".
+    // The downward question, asked before the toggle for the reason the two
+    // above it are. Last of the three, because "may this operator act here at
+    // all" is settled before "what would this press reach".
     if blocked_unpact(app, manifest, repo_root, sigils) {
         return None;
     }
@@ -415,13 +413,7 @@ fn refresh_press(
     in_flight: bool,
     at: Instant,
 ) -> Option<PathBuf> {
-    if in_flight {
-        // The whole of the refusal, and the very one a second pact press gets:
-        // a bit of wording on a line that is already on screen.
-        app.set_pact_refused();
-        return None;
-    }
-    if closed_scope(app, manifest, repo_root, sigils).is_some() {
+    if turned_down(app, manifest, repo_root, sigils, in_flight) {
         return None;
     }
     // No downward question here, unlike `pact_press`: a refresh never drops a
@@ -545,8 +537,7 @@ fn drain(
             // events should have to infer which. Nothing is done with it here:
             // the line lands where every line of a pass lands, in the section
             // the `Starting` before it opened, which is that same directory's.
-            Ok(PactEvent::Run(RunEvent::Repaired { directory, mend })) => {
-                let _ = directory;
+            Ok(PactEvent::Run(RunEvent::Repaired { mend, .. })) => {
                 app.panel_mut()
                     .write_run(|account| account.record_repaired(&mend, now));
             }
@@ -720,10 +711,13 @@ fn section_outcome(
     skipped: &[(PathBuf, PathBuf)],
     root: &Path,
 ) -> Outcome {
-    let refused = refusals
+    let is_this_section =
+        |directory: &Path| Path::new(&section_label(root, directory)) == section.directory();
+
+    if let Some(refusal) = refusals
         .iter()
-        .find(|refusal| Path::new(&section_label(root, &refusal.directory)) == section.directory());
-    if let Some(refusal) = refused {
+        .find(|refusal| is_this_section(&refusal.directory))
+    {
         return Outcome::Refused {
             reason: refusal.reason.clone(),
         };
@@ -732,10 +726,10 @@ fn section_outcome(
     // Asked before the filesystem for the reason the carry below is: this
     // directory has a `WARLOCK.md` and did not write it, so metadata would read
     // as a write that never happened.
-    let passed_over = skipped
+    if let Some((_, below)) = skipped
         .iter()
-        .find(|(directory, _)| Path::new(&section_label(root, directory)) == section.directory());
-    if let Some((_, below)) = passed_over {
+        .find(|(directory, _)| is_this_section(directory))
+    {
         return Outcome::Skipped {
             below: PathBuf::from(section_label(root, below)),
         };
@@ -750,10 +744,7 @@ fn section_outcome(
     // a document this run carried forward and one it wrote a moment ago are
     // indistinguishable on disk, and calling the first one written would put a
     // write in the panel that never happened.
-    if unchanged
-        .iter()
-        .any(|carried| Path::new(&section_label(root, carried)) == section.directory())
-    {
+    if unchanged.iter().any(|carried| is_this_section(carried)) {
         return Outcome::Unchanged { document };
     }
     match fs::metadata(root.join(&document)) {
@@ -880,15 +871,16 @@ fn pact_message(
     problems: &[fitting::Problem],
     repairs: &[pact::Repaired],
 ) -> Option<String> {
-    let (first, rest) = match (failures.split_first(), problems.split_first()) {
-        (Some((first, others)), _) => (first.to_string(), others.len() + problems.len()),
-        (None, Some((first, others))) => (first.to_string(), others.len()),
+    let (first, rest) = if let Some((first, others)) = failures.split_first() {
+        (first.to_string(), others.len() + problems.len())
+    } else if let Some((first, others)) = problems.split_first() {
+        (first.to_string(), others.len())
+    } else if let Some((first, others)) = repairs.split_first() {
         // The repair's own sentence, not a parallel wording of it: `Repaired`
         // already says which directory and what was done to which slot.
-        (None, None) => match repairs.split_first() {
-            Some((first, others)) => (first.to_string(), others.len()),
-            None => return None,
-        },
+        (first.to_string(), others.len())
+    } else {
+        return None;
     };
 
     let first = one_line(&first);
@@ -1135,6 +1127,13 @@ mod tests {
         fn path(&self, relative: &str) -> PathBuf {
             self.root.join(relative)
         }
+
+        fn relative(&self, directory: &Path) -> PathBuf {
+            directory
+                .strip_prefix(&self.root)
+                .unwrap_or(directory)
+                .to_path_buf()
+        }
     }
 
     impl Drop for Scratch {
@@ -1225,6 +1224,18 @@ mod tests {
         as_text(&app.panel().window(now))
     }
 
+    fn refusing(before: &App) -> App {
+        let mut refused = before.clone();
+        refused.set_pact_refused();
+        refused
+    }
+
+    fn saying(before: &App, message: impl Into<String>) -> App {
+        let mut said = before.clone();
+        said.set_message(message);
+        said
+    }
+
     // Paths that are on no disk, so the reload at the foot of a run fails —
     // which is the case where the tree already on screen is kept.
     fn nowhere() -> Scope {
@@ -1250,12 +1261,7 @@ mod tests {
                     .file_name()
                     .is_some_and(|name| name == DOCUMENT_FILE)
             })
-            .map(|row| {
-                row.path
-                    .strip_prefix(&scratch.root)
-                    .unwrap_or(&row.path)
-                    .to_path_buf()
-            })
+            .map(|row| scratch.relative(&row.path))
             .collect()
     }
 
@@ -1672,12 +1678,9 @@ mod tests {
         events
             .iter()
             .filter_map(|event| match event {
-                PactEvent::Run(RunEvent::Starting { directory, .. }) => Some(
-                    directory
-                        .strip_prefix(&scratch.root)
-                        .unwrap_or(directory)
-                        .to_path_buf(),
-                ),
+                PactEvent::Run(RunEvent::Starting { directory, .. }) => {
+                    Some(scratch.relative(directory))
+                }
                 PactEvent::Doing(_)
                 | PactEvent::Run(
                     RunEvent::Describing { .. }
@@ -2071,11 +2074,7 @@ mod tests {
         // Saying so is the whole of it: the same app with the flag set and
         // nothing else moved — no colour, no selection, no account started
         // and the rows exactly as they were.
-        let refused = {
-            let mut refused = before.clone();
-            refused.set_pact_refused();
-            refused
-        };
+        let refused = refusing(&before);
         assert_eq!(app, refused, "the press did more than say so");
         assert_eq!(
             app.pact_line().as_deref(),
@@ -2198,11 +2197,7 @@ mod tests {
             "an account was opened for no run"
         );
         assert_eq!(app.pact_line(), None, "nothing is running to be refused by");
-        let refused = {
-            let mut refused = before.clone();
-            refused.set_message(app.message().expect("the app said why"));
-            refused
-        };
+        let refused = saying(&before, app.message().expect("the app said why"));
         assert_eq!(app, refused, "the press did more than say so");
     }
 
@@ -2247,11 +2242,7 @@ mod tests {
             !app.panel().has_account(),
             "a refused press opened an account for a run that never happened"
         );
-        let said = {
-            let mut said = before.clone();
-            said.set_message(CLOSED);
-            said
-        };
+        let said = saying(&before, CLOSED);
         assert_eq!(app, said, "the refusal did more to the app than say so");
     }
 
@@ -2277,11 +2268,7 @@ mod tests {
 
             assert_eq!(toggle, None, "{state:?} was un-pacted across a boundary");
             assert_eq!(app.message(), Some(CLOSED));
-            let said = {
-                let mut said = before.clone();
-                said.set_message(CLOSED);
-                said
-            };
+            let said = saying(&before, CLOSED);
             assert_eq!(app, said, "{state:?} moved under a refused press");
         }
     }
@@ -2327,11 +2314,7 @@ mod tests {
 
             assert_eq!(toggle, None, "{state:?} un-pacted a boundary below it");
             assert_eq!(app.message(), Some(CLOSED_BELOW));
-            let said = {
-                let mut said = before.clone();
-                said.set_message(CLOSED_BELOW);
-                said
-            };
+            let said = saying(&before, CLOSED_BELOW);
             assert_eq!(app, said, "{state:?} moved under a refused press");
         }
     }
@@ -2415,11 +2398,7 @@ mod tests {
             !app.panel().has_account(),
             "a refused refresh opened an account"
         );
-        let said = {
-            let mut said = before.clone();
-            said.set_message(CLOSED);
-            said
-        };
+        let said = saying(&before, CLOSED);
         assert_eq!(app, said, "the refusal did more to the app than say so");
     }
 
@@ -2632,11 +2611,7 @@ mod tests {
             "and not by the other key either"
         );
 
-        let refused = {
-            let mut refused = before.clone();
-            refused.set_pact_refused();
-            refused
-        };
+        let refused = refusing(&before);
         assert_eq!(app, refused, "the presses did more than say so");
         assert_eq!(
             app.pact_line().as_deref(),
@@ -2714,11 +2689,7 @@ mod tests {
 
         // The same wording as the refusal with no conversation behind it, on the
         // same line, and the flag is the whole of what the presses moved.
-        let refused = {
-            let mut refused = before.clone();
-            refused.set_pact_refused();
-            refused
-        };
+        let refused = refusing(&before);
         assert_eq!(app, refused, "the presses did more than say so");
         assert_eq!(
             app.pact_line().as_deref(),
@@ -2976,12 +2947,9 @@ mod tests {
         let carried: Vec<PathBuf> = events
             .iter()
             .filter_map(|event| match event {
-                PactEvent::Run(RunEvent::Unchanged { directory }) => Some(
-                    directory
-                        .strip_prefix(&scratch.root)
-                        .unwrap_or(directory)
-                        .to_path_buf(),
-                ),
+                PactEvent::Run(RunEvent::Unchanged { directory }) => {
+                    Some(scratch.relative(directory))
+                }
                 _ => None,
             })
             .collect();
@@ -2996,12 +2964,9 @@ mod tests {
         let documented: Vec<PathBuf> = events
             .iter()
             .filter_map(|event| match event {
-                PactEvent::Run(RunEvent::Documented { directory }) => Some(
-                    directory
-                        .strip_prefix(&scratch.root)
-                        .unwrap_or(directory)
-                        .to_path_buf(),
-                ),
+                PactEvent::Run(RunEvent::Documented { directory }) => {
+                    Some(scratch.relative(directory))
+                }
                 _ => None,
             })
             .collect();
@@ -3610,15 +3575,7 @@ mod tests {
         let base = Instant::now();
         app.start_account(base);
         let mut manifest = Manifest::new();
-        let (events, received) = mpsc::channel();
-        let mut pact = Pact::with_run(Running {
-            events: received,
-            cancel: CancelGuard::new(),
-            work: pact_of("/repo/crates"),
-            before: app.clone(),
-            unchanged: Vec::new(),
-            skipped: Vec::new(),
-        });
+        let (events, mut pact) = running_over(&app, pact_of("/repo/crates"));
 
         // The deepest directory's pass delivers, and the run moves on to the
         // one above it without ending.
@@ -3890,15 +3847,7 @@ mod tests {
         app.set_viewport_height(10);
         app.start_account(base);
         let mut manifest = Manifest::new();
-        let (events, received) = mpsc::channel();
-        let mut pact = Pact::with_run(Running {
-            events: received,
-            cancel: CancelGuard::new(),
-            work: pact_of("/repo/crates"),
-            before: app.clone(),
-            unchanged: Vec::new(),
-            skipped: Vec::new(),
-        });
+        let (events, mut pact) = running_over(&app, pact_of("/repo/crates"));
 
         // The reader parks on `docs`, which is nowhere near the subtree
         // being pacted.
@@ -5019,15 +4968,7 @@ mod tests {
         let said = recorded(&scratch, "crates/engine", &Cancel::new(), |events| {
             Canned::new(&scratch, []).reporting(activity_port(events))
         });
-        let (events, received) = mpsc::channel();
-        let mut pact = Pact::with_run(Running {
-            events: received,
-            cancel: CancelGuard::new(),
-            work: pact_of(scope.root.clone()),
-            before: app.clone(),
-            unchanged: Vec::new(),
-            skipped: Vec::new(),
-        });
+        let (events, mut pact) = running_over(&app, pact_of(scope.root.clone()));
         let mut lengths = Vec::new();
         for (frame, event) in said.into_iter().enumerate() {
             let frame = u64::try_from(frame).expect("a run of fewer than 2^64 events");
@@ -5224,15 +5165,7 @@ mod tests {
                 said.len() > 1,
                 "the run had nothing to say, so nothing was driven: {refreshing_it}"
             );
-            let (events, received) = mpsc::channel();
-            let mut pact = Pact::with_run(Running {
-                events: received,
-                cancel: CancelGuard::new(),
-                work,
-                before: app.clone(),
-                unchanged: Vec::new(),
-                skipped: Vec::new(),
-            });
+            let (events, mut pact) = running_over(&app, work);
             for (frame, event) in said.into_iter().enumerate() {
                 let frame = u64::try_from(frame).expect("a run of fewer than 2^64 events");
                 let now = at(base, frame * FRAME);
@@ -5681,15 +5614,7 @@ mod tests {
         let before = App::from_tree(&tree);
         let mut app = before.clone();
         let mut manifest = Manifest::new();
-        let (events, received) = mpsc::channel();
-        let mut pact = Pact::with_run(Running {
-            events: received,
-            cancel: CancelGuard::new(),
-            work: pact_of("/repo/crates"),
-            before: before.clone(),
-            unchanged: Vec::new(),
-            skipped: Vec::new(),
-        });
+        let (events, mut pact) = running_over(&app, pact_of("/repo/crates"));
 
         events
             .send(PactEvent::Run(RunEvent::Starting {
@@ -5916,15 +5841,7 @@ mod tests {
         let before = App::from_tree(&tree);
         let mut app = before.clone();
         let mut manifest = Manifest::new();
-        let (events, received) = mpsc::channel();
-        let mut pact = Pact::with_run(Running {
-            events: received,
-            cancel: CancelGuard::new(),
-            work: pact_of("/repo/crates"),
-            before: before.clone(),
-            unchanged: Vec::new(),
-            skipped: Vec::new(),
-        });
+        let (events, mut pact) = running_over(&app, pact_of("/repo/crates"));
 
         events
             .send(PactEvent::Finished(Ok(Toggled {
@@ -5982,18 +5899,9 @@ mod tests {
                 None::<PathBuf>,
                 NodeState::Unpacted,
             ));
-            let before = App::from_tree(&tree);
-            let mut app = before.clone();
+            let mut app = App::from_tree(&tree);
             let mut manifest = Manifest::new();
-            let (events, received) = mpsc::channel();
-            let mut pact = Pact::with_run(Running {
-                events: received,
-                cancel: CancelGuard::new(),
-                work: pact_of("/repo/crates"),
-                before,
-                unchanged: Vec::new(),
-                skipped: Vec::new(),
-            });
+            let (events, mut pact) = running_over(&app, pact_of("/repo/crates"));
 
             events
                 .send(PactEvent::Finished(Ok(Toggled {
@@ -6057,15 +5965,7 @@ mod tests {
         let unreadable = scratch.path("crates/engine/src/lib.rs");
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmods");
 
-        let (events, received) = mpsc::channel();
-        let mut pact = Pact::with_run(Running {
-            events: received,
-            cancel: CancelGuard::new(),
-            work: pact_of(scratch.path("crates/engine")),
-            before: app.clone(),
-            unchanged: Vec::new(),
-            skipped: Vec::new(),
-        });
+        let (events, mut pact) = running_over(&app, pact_of(scratch.path("crates/engine")));
         events
             .send(PactEvent::Finished(Ok(Toggled {
                 manifest: manifest.clone(),
@@ -6109,9 +6009,9 @@ mod tests {
         use warlock_tui::{QUIET_PERIOD, RELOAD_CEILING, WatchPolicy, Watching};
 
         use super::{
-            CancelGuard, Canned, Loaded, Manifest, NodeState, Pact, PactEntry, PactEvent, Reloaded,
-            Running, Scope, Scratch, Toggled, apply_toggle, fs, load, load_tree, mpsc,
-            one_crate_to_load, pact_of, state_of, toggle,
+            Canned, Loaded, Manifest, NodeState, PactEntry, PactEvent, Reloaded, Scope, Scratch,
+            Toggled, apply_toggle, fs, load, load_tree, one_crate_to_load, pact_of, running_over,
+            state_of, toggle,
         };
         use crate::POLL_INTERVAL;
         use crate::session::{NOT_WATCHING, Watched, note, start_watching};
@@ -6293,15 +6193,7 @@ mod tests {
             // The run ends the way every run ends — one reload at the
             // bottom of `apply_progress` — and the tree it read is what
             // the loop hands back to the policy.
-            let (events, received) = mpsc::channel();
-            let mut pact = Pact::with_run(Running {
-                events: received,
-                cancel: CancelGuard::new(),
-                work: pact_of(scratch.path("crates/engine")),
-                before: app.clone(),
-                unchanged: Vec::new(),
-                skipped: Vec::new(),
-            });
+            let (events, mut pact) = running_over(&app, pact_of(scratch.path("crates/engine")));
             events
                 .send(PactEvent::Finished(Ok(Toggled {
                     manifest: manifest.clone(),

@@ -261,32 +261,32 @@ fn render(request: &agent::Request) -> String {
     rendered
 }
 
-fn default_args() -> Vec<OsString> {
+fn args_for(tools: &str, system_prompt: &str) -> Vec<OsString> {
     let mut args: Vec<OsString> = ARGS.iter().map(OsString::from).collect();
-    args.push(OsString::from("--model"));
-    args.push(overridden(MODEL_VAR, MODEL));
-    args.push(OsString::from("--effort"));
-    args.push(overridden(EFFORT_VAR, EFFORT));
-    args.push(OsString::from("--tools"));
-    args.push(OsString::from(NO_TOOLS));
-    args.push(OsString::from("--system-prompt"));
-    args.push(OsString::from(SYSTEM_PROMPT));
-    args.push(OsString::from("--setting-sources"));
-    args.push(OsString::from(NO_SETTINGS));
+    args.extend([
+        OsString::from("--model"),
+        overridden(MODEL_VAR, MODEL),
+        OsString::from("--effort"),
+        overridden(EFFORT_VAR, EFFORT),
+        OsString::from("--tools"),
+        OsString::from(tools),
+        OsString::from("--system-prompt"),
+        OsString::from(system_prompt),
+    ]);
+    args
+}
+
+fn default_args() -> Vec<OsString> {
+    let mut args = args_for(NO_TOOLS, SYSTEM_PROMPT);
+    args.extend([
+        OsString::from("--setting-sources"),
+        OsString::from(NO_SETTINGS),
+    ]);
     args
 }
 
 fn chat_args() -> Vec<OsString> {
-    let mut args: Vec<OsString> = ARGS.iter().map(OsString::from).collect();
-    args.push(OsString::from("--model"));
-    args.push(overridden(MODEL_VAR, MODEL));
-    args.push(OsString::from("--effort"));
-    args.push(overridden(EFFORT_VAR, EFFORT));
-    args.push(OsString::from("--tools"));
-    args.push(OsString::from(CHAT_TOOLS));
-    args.push(OsString::from("--system-prompt"));
-    args.push(OsString::from(CHAT_SYSTEM_PROMPT));
-    args
+    args_for(CHAT_TOOLS, CHAT_SYSTEM_PROMPT)
 }
 
 /// The one id every turn of a [`ChatAgent`] names, and which flag names it.
@@ -869,8 +869,9 @@ impl ChatAgent {
     /// it.
     fn replacing(&self, flag: &str, value: OsString) -> Self {
         let mut agent = self.clone();
-        let at = agent.args.iter().position(|arg| arg == flag);
-        if let Some(slot) = at.and_then(|at| agent.args.get_mut(at + 1)) {
+        if let Some(at) = agent.args.iter().position(|arg| arg == flag)
+            && let Some(slot) = agent.args.get_mut(at + 1)
+        {
             *slot = value;
         }
         agent
@@ -990,7 +991,7 @@ fn invoke(
     // Configured as pipes by the caller, so all three are `Some`; taking them
     // hands each stream to the thread that owns it for the rest of the call,
     // and leaves the `Child` itself holding nothing but the process.
-    let stdin = child.stdin.take().expect("stdin was piped");
+    let mut stdin = child.stdin.take().expect("stdin was piped");
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
 
@@ -1001,7 +1002,6 @@ fn invoke(
     // breaks the pipe, and that is not the failure worth reporting. Its exit
     // status and stderr are.
     let writer = thread::spawn(move || {
-        let mut stdin = stdin;
         let _ = stdin.write_all(input.as_bytes());
         let _ = stdin.flush();
     });
@@ -1165,13 +1165,22 @@ mod stream {
         pub(super) opens_text: bool,
     }
 
+    fn kind(value: &Value) -> Option<&str> {
+        value.get("type").and_then(Value::as_str)
+    }
+
+    fn event<'a>(value: &'a Value, of: &str) -> Option<&'a Value> {
+        let event = value.get("event")?;
+        (kind(event)? == of).then_some(event)
+    }
+
     pub(super) fn read_line(line: &str) -> Reading {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             // Not JSON at all. `claude` is entitled to print a warning, and a
             // warning is not a reason to fail a pass.
             return Reading::default();
         };
-        match value.get("type").and_then(Value::as_str) {
+        match kind(&value) {
             Some("assistant") => Reading {
                 activities: read_activities(&value),
                 ..Reading::default()
@@ -1213,8 +1222,8 @@ mod stream {
             Some("stream_event") => match read_block_start(&value) {
                 Some(activity) => Reading {
                     activities: vec![activity],
-                    text: None,
                     opens_text: true,
+                    ..Reading::default()
                 },
                 None => Reading {
                     activities: read_text_delta(&value)
@@ -1241,27 +1250,16 @@ mod stream {
     }
 
     fn read_block_start(value: &Value) -> Option<Activity> {
-        let event = value.get("event")?;
-        if event.get("type").and_then(Value::as_str)? != "content_block_start" {
-            return None;
-        }
-        match event
-            .get("content_block")
-            .and_then(|block| block.get("type"))
-            .and_then(Value::as_str)?
-        {
+        let block = event(value, "content_block_start")?.get("content_block")?;
+        match kind(block)? {
             "text" => Some(Activity::Writing { bytes: 0 }),
             _ => None,
         }
     }
 
     fn read_text_delta(value: &Value) -> Option<u64> {
-        let event = value.get("event")?;
-        if event.get("type").and_then(Value::as_str)? != "content_block_delta" {
-            return None;
-        }
-        let delta = event.get("delta")?;
-        if delta.get("type").and_then(Value::as_str)? != "text_delta" {
+        let delta = event(value, "content_block_delta")?.get("delta")?;
+        if kind(delta)? != "text_delta" {
             return None;
         }
         delta
@@ -1271,7 +1269,7 @@ mod stream {
     }
 
     fn read_block(block: &Value) -> Option<Activity> {
-        match block.get("type").and_then(Value::as_str)? {
+        match kind(block)? {
             "tool_use" => {
                 let name = block.get("name").and_then(Value::as_str)?;
                 Some(Activity::Tool {
@@ -1305,7 +1303,7 @@ mod stream {
                 .get("result")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
-            opens_text: false,
+            ..Reading::default()
         }
     }
 }
@@ -1358,9 +1356,8 @@ fn read<R: Read + Send + 'static>(
 /// Stderr, whole. Nothing looks at it until the run has been judged, so there is
 /// nothing to report as it arrives — but it still has to be read concurrently, or
 /// a child that fills the pipe blocks forever.
-fn drain<R: Read + Send + 'static>(source: R) -> JoinHandle<io::Result<Vec<u8>>> {
+fn drain<R: Read + Send + 'static>(mut source: R) -> JoinHandle<io::Result<Vec<u8>>> {
     thread::spawn(move || {
-        let mut source = source;
         let mut buffer = Vec::new();
         source.read_to_end(&mut buffer)?;
         Ok(buffer)
@@ -1465,20 +1462,19 @@ mod tests {
     // a machine with no `claude` installed.
     const NOT_A_PROGRAM: &str = "warlock-test-no-such-program-8f3a1c";
 
-    fn args(agent: &ClaudeAgent) -> Vec<String> {
-        agent
-            .args()
+    fn words(vector: &[OsString]) -> Vec<String> {
+        vector
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
     }
 
+    fn args(agent: &ClaudeAgent) -> Vec<String> {
+        words(agent.args())
+    }
+
     fn turn_args(agent: &ChatAgent) -> Vec<String> {
-        agent
-            .args()
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
+        words(&agent.args())
     }
 
     // The vector is flags and values in pairs, so a value is the word after its flag.
@@ -3030,6 +3026,19 @@ mod tests {
             (!pid.is_empty()).then_some(pid)
         }
 
+        // Stopped once the child is genuinely running, which it says by writing its pid
+        // — a sleep here would be a race dressed up as a delay.
+        fn cancel_once_running(cancel: Cancel, pid_file: &Path) -> thread::JoinHandle<()> {
+            let pid_file = pid_file.to_owned();
+            thread::spawn(move || {
+                let waited = Instant::now();
+                while pid(&pid_file).is_none() && waited.elapsed() < AT_MOST {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                cancel.cancel();
+            })
+        }
+
         // Hand-rolled rather than a dependency: this crate's manifest gains nothing for
         // a temp directory.
         fn scratch(name: &str) -> PathBuf {
@@ -3468,19 +3477,7 @@ mod tests {
             // call in time is the cancel.
             let agent = stand_in("echo $$ > pid; sleep 30").with_cancel(cancel.clone());
 
-            let stopper = {
-                let pid_file = pid_file.clone();
-                thread::spawn(move || {
-                    // Stopped once it is genuinely running, which it says by
-                    // writing its pid — a sleep here would be a race dressed
-                    // up as a delay.
-                    let waited = Instant::now();
-                    while pid(&pid_file).is_none() && waited.elapsed() < AT_MOST {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    cancel.cancel();
-                })
-            };
+            let stopper = cancel_once_running(cancel, &pid_file);
 
             let started = Instant::now();
             let error = agent
@@ -3511,16 +3508,7 @@ mod tests {
             let agent = stand_in("sleep 30 & echo $! > survivor; echo $$ > pid; wait")
                 .with_cancel(cancel.clone());
 
-            let stopper = {
-                let pid_file = pid_file.clone();
-                thread::spawn(move || {
-                    let waited = Instant::now();
-                    while pid(&pid_file).is_none() && waited.elapsed() < AT_MOST {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    cancel.cancel();
-                })
-            };
+            let stopper = cancel_once_running(cancel, &pid_file);
 
             let started = Instant::now();
             let error = agent
@@ -3551,16 +3539,7 @@ mod tests {
             let cancel = Cancel::new();
             let agent = stand_in("echo $$ > pid; sleep 30").with_cancel(cancel.clone());
 
-            let stopper = {
-                let pid_file = pid_file.clone();
-                thread::spawn(move || {
-                    let waited = Instant::now();
-                    while pid(&pid_file).is_none() && waited.elapsed() < AT_MOST {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    cancel.cancel();
-                })
-            };
+            let stopper = cancel_once_running(cancel, &pid_file);
 
             let error = agent
                 .run(&agent::Request::new("anything", &directory))
@@ -3626,7 +3605,9 @@ mod tests {
             use warlock_engine::agent;
 
             use super::super::NOT_A_PROGRAM;
-            use super::{AT_MOST, clean_up, drained, is_cancelled, pid, printing, scratch};
+            use super::{
+                cancel_once_running, clean_up, drained, is_cancelled, pid, printing, scratch,
+            };
             use crate::{Activities, Activity, Cancel, ChatAgent};
 
             // [`PASS`](super::PASS)'s counterpart, deliberately not the same canned stream: a
@@ -3862,19 +3843,7 @@ mod tests {
                 let agent = stand_in(&format!("echo $$ > '{}'; sleep 30", pid_file.display()))
                     .with_cancel(cancel.clone());
 
-                let stopper = {
-                    let pid_file = pid_file.clone();
-                    thread::spawn(move || {
-                        // Stopped once it is genuinely running, which it says
-                        // by writing its pid — a sleep here would be a race
-                        // dressed up as a delay.
-                        let waited = Instant::now();
-                        while pid(&pid_file).is_none() && waited.elapsed() < AT_MOST {
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                        cancel.cancel();
-                    })
-                };
+                let stopper = cancel_once_running(cancel, &pid_file);
 
                 let started = Instant::now();
                 let error = agent
@@ -3900,16 +3869,7 @@ mod tests {
                 let agent = stand_in(&format!("echo $$ > '{}'; sleep 30", pid_file.display()))
                     .with_cancel(cancel.clone());
 
-                let stopper = {
-                    let pid_file = pid_file.clone();
-                    thread::spawn(move || {
-                        let waited = Instant::now();
-                        while pid(&pid_file).is_none() && waited.elapsed() < AT_MOST {
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                        cancel.cancel();
-                    })
-                };
+                let stopper = cancel_once_running(cancel, &pid_file);
 
                 let error = agent
                     .turn("anything")

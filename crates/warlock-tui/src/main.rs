@@ -407,13 +407,12 @@ fn init() -> Result<(), Error> {
 /// cancels any run and kills the `claude` it was waiting on, and the guard
 /// drops after it. Nothing joins the worker.
 fn run() -> Result<(), Error> {
-    let (app, scope, tree, manifest) = load_app()?;
+    let (mut app, scope, tree, manifest) = load_app()?;
     // Asked for once, over the tree the load just produced, and kept for as
     // long as warlock runs — dropping it stops the watch. Whether it was
     // granted is a fact for the footer and nothing more, which is why this is
     // not a `?` and why the line about it is put up in there rather than here:
     // warlock with no live updates is warlock as it was. See [`start_watching`].
-    let mut app = app;
     let watched = start_watching(&mut app, &scope, &tree);
 
     // The terminal, taken last, so everything above that can fail says so on
@@ -568,10 +567,9 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
         let field = composer_on_screen(&self.app, self.chat.composer());
         let header = self.app.run_header();
         self.app.set_viewport_height(tree_height(size));
-        self.app
-            .panel_mut()
-            .set_height(panel_height(size, field, header.as_ref()));
-        self.app.panel_mut().set_width(width);
+        let panel = self.app.panel_mut();
+        panel.set_height(panel_height(size, field, header.as_ref()));
+        panel.set_width(width);
 
         let (app, chrome, confirm, prompt) =
             (&self.app, &self.scope.chrome, self.confirm, &self.prompt);
@@ -1276,11 +1274,10 @@ mod tests {
     fn subcommand(names: &[&str]) -> clap::Command {
         let mut command = Cli::command();
         for name in names {
-            let found = command
+            command = command
                 .find_subcommand(name)
                 .unwrap_or_else(|| panic!("warlock has a `{name}` subcommand"))
                 .clone();
-            command = found;
         }
 
         command
@@ -1992,21 +1989,11 @@ mod tests {
 
     type Driven = Session<FakeScreen, Passing, Saying, Copying>;
 
-    fn session(rows: Vec<Row>) -> Driven {
-        let root = PathBuf::from("/warlock/no/such/repository");
-        let scope = Scope {
-            chrome: Chrome::of(&root, &root),
-            root: root.clone(),
-            repo_root: root.clone(),
-        };
-        // A one-node tree for the watcher to be started over. Nothing is there,
-        // so no watcher is granted and `Watching` says why — which is exactly
-        // the state a session runs in when the platform refuses one, and costs
-        // these tests nothing.
-        let tree = Tree::new(Node::new(&root, None::<PathBuf>, NodeState::Unpacted));
-        let watched = Watched::start(&scope, &tree);
+    fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
+        let watched = Watched::start(&scope, tree);
+        let root = scope.repo_root.clone();
         Session {
-            app: App::from_rows(rows),
+            app,
             screen: FakeScreen::of(80, 24),
             scope,
             manifest: Manifest::new(),
@@ -2021,6 +2008,21 @@ mod tests {
             mouse_captured: true,
             watched,
         }
+    }
+
+    fn session(rows: Vec<Row>) -> Driven {
+        let root = PathBuf::from("/warlock/no/such/repository");
+        let scope = Scope {
+            chrome: Chrome::of(&root, &root),
+            root: root.clone(),
+            repo_root: root.clone(),
+        };
+        // A one-node tree for the watcher to be started over. Nothing is there,
+        // so no watcher is granted and `Watching` says why — which is exactly
+        // the state a session runs in when the platform refuses one, and costs
+        // these tests nothing.
+        let tree = Tree::new(Node::new(&root, None::<PathBuf>, NodeState::Unpacted));
+        driving(App::from_rows(rows), scope, &tree)
     }
 
     fn pressed(driven: &mut Driven, key: KeyEvent) -> bool {
@@ -2063,25 +2065,9 @@ mod tests {
         let scope = Scope {
             chrome: Chrome::of(&repo_root, tree.root_path()),
             root: tree.root_path().to_path_buf(),
-            repo_root: repo_root.clone(),
+            repo_root,
         };
-        let watched = Watched::start(&scope, &tree);
-        Session {
-            app: App::from_tree(&tree),
-            screen: FakeScreen::of(80, 24),
-            scope,
-            manifest: Manifest::new(),
-            pact: Pact::with_agent(Passing::filling()),
-            chat: Chat::with_agent(repo_root, Saying::answering(ANSWER)),
-            clipboard: Copying::taking(),
-            confirm: QuitConfirm::default(),
-            prompt: ScopePrompt::default(),
-            drag: None,
-            said: None,
-            document: None,
-            mouse_captured: true,
-            watched,
-        }
+        driving(App::from_tree(&tree), scope, &tree)
     }
 
     fn rounds_until_settled(driven: &mut Driven) {
@@ -2500,16 +2486,13 @@ mod tests {
         fn found_at(driven: &Driven, word: &str) -> Option<(u16, u16)> {
             let buffer = driven.screen.terminal.backend().buffer();
             let area = buffer.area;
-            for row in 0..area.height {
+            (0..area.height).find_map(|row| {
                 let line: String = (0..area.width).map(|x| buffer[(x, row)].symbol()).collect();
-                if let Some(byte) = line.find(word) {
-                    let column = line[..byte].chars().count();
-                    let column = u16::try_from(column).expect("a column of the frame");
-                    return Some((column, row));
-                }
-            }
-
-            None
+                let byte = line.find(word)?;
+                let column = line[..byte].chars().count();
+                let column = u16::try_from(column).expect("a column of the frame");
+                Some((column, row))
+            })
         }
 
         fn point(

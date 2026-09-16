@@ -3309,6 +3309,21 @@ mod tests {
 
         const FOOTER: u16 = 22;
 
+        // The footer is nobody's pane; a border is the line between two of
+        // them rather than a place a reader means to point at. The columns are
+        // the panel's left border, the two panes' shared edge and the tree's
+        // right, and the rows are the panes' top and bottom.
+        const NOWHERE: [(u16, u16); 8] = [
+            (IN_PANEL, FOOTER),
+            (IN_TREE, FOOTER),
+            (0, FIRST_PANEL_LINE),
+            (49, FIRST_TREE_ROW),
+            (50, FIRST_TREE_ROW),
+            (79, FIRST_TREE_ROW),
+            (IN_TREE, 0),
+            (IN_PANEL, 20),
+        ];
+
         fn viewport() -> usize {
             usize::from(tree_height(SIZE))
         }
@@ -3340,6 +3355,19 @@ mod tests {
                 row,
                 modifiers: KeyModifiers::NONE,
             }
+        }
+
+        fn whole_pointer() -> [MouseEvent; 8] {
+            [
+                wheel_down(IN_TREE, FIRST_TREE_ROW),
+                wheel_up(IN_TREE, FIRST_TREE_ROW),
+                wheel_down(IN_PANEL, FIRST_PANEL_LINE),
+                wheel_up(IN_PANEL, FIRST_PANEL_LINE),
+                left_click(IN_TREE, FIRST_TREE_ROW),
+                left_click(IN_TREE, FIRST_TREE_ROW + 9),
+                left_click(IN_TREE, TREE_HEADER),
+                left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
+            ]
         }
 
         fn rows() -> Vec<Row> {
@@ -3393,15 +3421,23 @@ mod tests {
         }
 
         fn asks(mouse: MouseEvent, app: &App) -> Option<MouseAction> {
-            mouse_action(
+            asks_under(
                 mouse,
-                SIZE,
                 app,
                 QuitConfirm::Closed,
                 &ScopePrompt::Closed,
                 &ScopePrompt::Closed,
-                None,
             )
+        }
+
+        fn asks_under(
+            mouse: MouseEvent,
+            app: &App,
+            confirm: QuitConfirm,
+            prompt: &ScopePrompt,
+            write: &ScopePrompt,
+        ) -> Option<MouseAction> {
+            mouse_action(mouse, SIZE, app, confirm, prompt, write, None)
         }
 
         fn asks_composing(
@@ -3437,7 +3473,7 @@ mod tests {
             write: &ScopePrompt,
             mouse: MouseEvent,
         ) {
-            match mouse_action(mouse, SIZE, app, confirm, prompt, write, None) {
+            match asks_under(mouse, app, confirm, prompt, write) {
                 Some(MouseAction::SelectNextBy(rows)) => app.select_next_by(rows),
                 Some(MouseAction::SelectPreviousBy(rows)) => app.select_previous_by(rows),
                 Some(MouseAction::ScrollPanelDown(lines)) => app.scroll_panel_down(lines),
@@ -3584,20 +3620,7 @@ mod tests {
         #[test]
         fn a_notch_over_the_footer_or_a_border_does_nothing() {
             let app = app_on_screen();
-            // The footer is nobody's pane; a border is the line between two of
-            // them rather than a place a reader means to scroll. The columns are
-            // the panel's left border, the two panes' shared edge and the tree's
-            // right, and the rows are the panes' top and bottom.
-            for (column, row) in [
-                (IN_PANEL, FOOTER),
-                (IN_TREE, FOOTER),
-                (0, FIRST_PANEL_LINE),
-                (49, FIRST_TREE_ROW),
-                (50, FIRST_TREE_ROW),
-                (79, FIRST_TREE_ROW),
-                (IN_TREE, 0),
-                (IN_PANEL, 20),
-            ] {
+            for (column, row) in NOWHERE {
                 assert_eq!(
                     asks(wheel_down(column, row), &app),
                     None,
@@ -4244,7 +4267,7 @@ mod tests {
                     release(IN_PANEL + 3, FIRST_PANEL_LINE + 3),
                 ] {
                     assert_eq!(
-                        mouse_action(mouse, SIZE, &app, confirm, scope, write, None),
+                        asks_under(mouse, &app, confirm, scope, write),
                         None,
                         "{mouse:?} should mean nothing while a window is up"
                     );
@@ -4306,16 +4329,7 @@ mod tests {
         #[test]
         fn a_click_on_the_footer_or_a_border_does_nothing_at_all() {
             let app = app_on_screen();
-            for (column, row) in [
-                (IN_PANEL, FOOTER),
-                (IN_TREE, FOOTER),
-                (0, FIRST_PANEL_LINE),
-                (49, FIRST_TREE_ROW),
-                (50, FIRST_TREE_ROW),
-                (79, FIRST_TREE_ROW),
-                (IN_TREE, 0),
-                (IN_PANEL, 20),
-            ] {
+            for (column, row) in NOWHERE {
                 assert_eq!(
                     asks(left_click(column, row), &app),
                     None,
@@ -4389,25 +4403,14 @@ mod tests {
                 "the tree's window has not moved, so drawn row nine is row nine"
             );
 
-            for mouse in [
-                wheel_down(IN_TREE, FIRST_TREE_ROW),
-                wheel_up(IN_TREE, FIRST_TREE_ROW),
-                wheel_down(IN_PANEL, FIRST_PANEL_LINE),
-                wheel_up(IN_PANEL, FIRST_PANEL_LINE),
-                left_click(IN_TREE, FIRST_TREE_ROW),
-                left_click(IN_TREE, FIRST_TREE_ROW + 9),
-                left_click(IN_TREE, TREE_HEADER),
-                left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
-            ] {
+            for mouse in whole_pointer() {
                 assert_eq!(
-                    mouse_action(
+                    asks_under(
                         mouse,
-                        SIZE,
                         &app,
                         QuitConfirm::open(),
                         &ScopePrompt::Closed,
-                        &ScopePrompt::Closed,
-                        None
+                        &ScopePrompt::Closed
                     ),
                     None,
                     "{mouse:?} should mean nothing while the question is up"
@@ -4446,25 +4449,14 @@ mod tests {
                 ScopePrompt::open("crates/warlock-engine", ""),
                 ScopePrompt::open("crates/warlock-engine", "data-plane"),
             ] {
-                for mouse in [
-                    wheel_down(IN_TREE, FIRST_TREE_ROW),
-                    wheel_up(IN_TREE, FIRST_TREE_ROW),
-                    wheel_down(IN_PANEL, FIRST_PANEL_LINE),
-                    wheel_up(IN_PANEL, FIRST_PANEL_LINE),
-                    left_click(IN_TREE, FIRST_TREE_ROW),
-                    left_click(IN_TREE, FIRST_TREE_ROW + 9),
-                    left_click(IN_TREE, TREE_HEADER),
-                    left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
-                ] {
+                for mouse in whole_pointer() {
                     assert_eq!(
-                        mouse_action(
+                        asks_under(
                             mouse,
-                            SIZE,
                             &app,
                             QuitConfirm::Closed,
                             &prompt,
-                            &ScopePrompt::Closed,
-                            None
+                            &ScopePrompt::Closed
                         ),
                         None,
                         "{mouse:?} should mean nothing while the prompt is up"
@@ -4492,25 +4484,14 @@ mod tests {
             let before = app.clone();
             let write = ScopePrompt::open("Write the brief to", "docs/warlock-brief-13-x.md");
 
-            for mouse in [
-                wheel_down(IN_TREE, FIRST_TREE_ROW),
-                wheel_up(IN_TREE, FIRST_TREE_ROW),
-                wheel_down(IN_PANEL, FIRST_PANEL_LINE),
-                wheel_up(IN_PANEL, FIRST_PANEL_LINE),
-                left_click(IN_TREE, FIRST_TREE_ROW),
-                left_click(IN_TREE, FIRST_TREE_ROW + 9),
-                left_click(IN_TREE, TREE_HEADER),
-                left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
-            ] {
+            for mouse in whole_pointer() {
                 assert_eq!(
-                    mouse_action(
+                    asks_under(
                         mouse,
-                        SIZE,
                         &app,
                         QuitConfirm::Closed,
                         &ScopePrompt::Closed,
-                        &write,
-                        None
+                        &write
                     ),
                     None,
                     "{mouse:?} should mean nothing while the path prompt is up"

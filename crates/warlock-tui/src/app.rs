@@ -990,16 +990,14 @@ impl App {
 
     fn reflow(&mut self) {
         let selected = self.rows.get(self.selected).map(|row| row.path.clone());
-        let kept: Cow<'_, [Row]> = if self.viewpoint.show_files {
+        let mut kept: Cow<'_, [Row]> = if self.viewpoint.show_files {
             Cow::Borrowed(&self.all_rows)
         } else {
             Cow::Owned(node_rows(&self.all_rows))
         };
-        let kept: Cow<'_, [Row]> = if self.viewpoint.pacted_only {
-            Cow::Owned(pacted_rows(&kept))
-        } else {
-            kept
-        };
+        if self.viewpoint.pacted_only {
+            kept = Cow::Owned(pacted_rows(&kept));
+        }
         (self.rows, self.collapsible) = drawn_rows(&kept, &self.viewpoint.collapsed);
         self.selected = selected
             .and_then(|path| index_for(&self.rows, &path))
@@ -1100,7 +1098,11 @@ impl App {
         }
     }
 
-    pub fn refresh(&mut self) -> Option<PathBuf> {
+    // For the keys that refuse a file row outright. `view_target` deliberately
+    // does not come through here: `v` hands a file row back rather than
+    // refusing it, so routing it here would turn the one key that reads a file
+    // into a key that says a file cannot be read.
+    fn selected_directory(&mut self) -> Option<(PathBuf, NodeState)> {
         let row = self.rows.get(self.selected)?;
         let path = row.path.clone();
         let state = row.state;
@@ -1109,6 +1111,11 @@ impl App {
             self.say(file_row_message(&self.label_for(&path)));
             return None;
         }
+        Some((path, state))
+    }
+
+    pub fn refresh(&mut self) -> Option<PathBuf> {
+        let (path, state) = self.selected_directory()?;
         match state {
             NodeState::Unpacted => {
                 self.say(unpacted_message(&self.label_for(&path)));
@@ -1126,14 +1133,7 @@ impl App {
     }
 
     pub fn scope_target(&mut self) -> Option<PathBuf> {
-        let row = self.rows.get(self.selected)?;
-        let path = row.path.clone();
-        let state = row.state;
-
-        if row.is_file() {
-            self.say(file_row_message(&self.label_for(&path)));
-            return None;
-        }
+        let (path, state) = self.selected_directory()?;
         match state {
             NodeState::Unpacted => {
                 self.say(unpacted_scope_message(&self.label_for(&path)));
@@ -1263,14 +1263,13 @@ impl App {
 }
 
 fn file_row_position(rows: &[Row], directory: usize, depth: usize, path: &Path) -> usize {
-    let mut at = directory + 1;
-    for row in rows.iter().skip(directory + 1) {
-        if !row.is_file() || row.depth != depth || row.path.as_path() > path {
-            break;
-        }
-        at += 1;
-    }
-    at
+    let after = directory + 1;
+    let before_it = rows
+        .iter()
+        .skip(after)
+        .take_while(|row| row.is_file() && row.depth == depth && row.path.as_path() <= path)
+        .count();
+    after + before_it
 }
 
 #[must_use]
@@ -1376,11 +1375,7 @@ fn paint_subtree(rows: &mut [Row], path: &Path, state: NodeState) {
 }
 
 fn moves_with_subtree(row: &Row, root: &Path, state: NodeState) -> bool {
-    in_subtree(&row.path, root) && !(state.is_pacted() && row.is_ignored())
-}
-
-fn in_subtree(path: &Path, root: &Path) -> bool {
-    path.starts_with(root)
+    row.path.starts_with(root) && !(state.is_pacted() && row.is_ignored())
 }
 
 fn drawn_rows(all: &[Row], collapsed: &BTreeSet<PathBuf>) -> (Vec<Row>, BTreeSet<PathBuf>) {
@@ -1543,6 +1538,27 @@ mod tests {
 
     type Movement = fn(&mut App);
 
+    const MOVEMENTS: [(&str, Movement); 6] = [
+        ("select_previous", App::select_previous),
+        ("select_next", App::select_next),
+        ("select_page_up", App::select_page_up),
+        ("select_page_down", App::select_page_down),
+        ("select_first", App::select_first),
+        ("select_last", App::select_last),
+    ];
+
+    const KEYSTROKES: [(&str, Movement); 9] = [
+        ("select_previous", App::select_previous),
+        ("select_next", App::select_next),
+        ("select_page_up", App::select_page_up),
+        ("select_page_down", App::select_page_down),
+        ("select_first", App::select_first),
+        ("select_last", App::select_last),
+        ("toggle_collapsed", App::toggle_collapsed),
+        ("toggle_pacted_only", App::toggle_pacted_only),
+        ("toggle_files", App::toggle_files),
+    ];
+
     fn three_rows() -> Vec<Row> {
         vec![
             Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale),
@@ -1578,6 +1594,18 @@ mod tests {
                 NodeState::PactedFresh,
             ),
         ]
+    }
+
+    // Joined rather than spelled out as one literal: what these tests are
+    // holding the label to is that a path carrying the platform's own separator
+    // comes back in the engine's forward-slash manifest spelling, and a literal
+    // would hand over forward slashes to begin with and prove nothing.
+    fn rooted_crates() -> PathBuf {
+        Path::new("/repo").join("crates")
+    }
+
+    fn rooted_engine() -> PathBuf {
+        rooted_crates().join("warlock-engine")
     }
 
     fn tally(app: &App) -> StateCounts {
@@ -2614,16 +2642,7 @@ mod tests {
 
     #[test]
     fn every_movement_clears_a_message() {
-        let movements: [(&str, Movement); 6] = [
-            ("select_next", App::select_next),
-            ("select_previous", App::select_previous),
-            ("select_page_down", App::select_page_down),
-            ("select_page_up", App::select_page_up),
-            ("select_first", App::select_first),
-            ("select_last", App::select_last),
-        ];
-
-        for (name, movement) in movements {
+        for (name, movement) in MOVEMENTS {
             let mut app = app_selecting("warlock/crates");
             app.set_message("something to forget");
 
@@ -3243,11 +3262,7 @@ mod tests {
     fn a_pact_in_flight_names_the_directory_relative_to_the_root_with_its_place() {
         let mut app = App::from_rows(rooted_rows());
 
-        app.set_pact_in_flight(
-            Path::new("/repo").join("crates").join("warlock-engine"),
-            3,
-            12,
-        );
+        app.set_pact_in_flight(rooted_engine(), 3, 12);
 
         assert!(app.is_pacting());
         // Relative to the tree's own root, in the engine's forward-slash
@@ -3302,22 +3317,14 @@ mod tests {
         ] {
             let mut app = App::from_rows(rooted_rows());
 
-            app.set_run_in_flight(
-                run,
-                Path::new("/repo").join("crates").join("warlock-engine"),
-                3,
-                12,
-            );
+            app.set_run_in_flight(run, rooted_engine(), 3, 12);
 
             // One word apart: the directory, the fraction and the shape of the
             // line are the same, because it is the same kind of work.
             assert_eq!(app.pact_line().as_deref(), Some(said), "{run:?}");
             // And a refresh is a run in flight for everything else that asks.
             assert!(app.is_pacting(), "{run:?}");
-            assert!(
-                app.is_in_flight(&Path::new("/repo").join("crates").join("warlock-engine")),
-                "{run:?}"
-            );
+            assert!(app.is_in_flight(&rooted_engine()), "{run:?}");
         }
     }
 
@@ -3338,12 +3345,7 @@ mod tests {
 
         // Seven of the subtree's forty directories are stale, which is the
         // engine's counting for the refresh and is passed straight through.
-        app.set_run_in_flight(
-            Run::Refresh,
-            Path::new("/repo").join("crates").join("warlock-engine"),
-            3,
-            7,
-        );
+        app.set_run_in_flight(Run::Refresh, rooted_engine(), 3, 7);
         app.set_pact_refused();
 
         // The refusal is worded exactly as it is for a pact, and still goes
@@ -3355,7 +3357,7 @@ mod tests {
 
         // The run moving on re-words the line around the new directory and
         // carries the refusal along, refresh or not.
-        app.set_run_in_flight(Run::Refresh, Path::new("/repo").join("crates"), 4, 7);
+        app.set_run_in_flight(Run::Refresh, rooted_crates(), 4, 7);
         assert_eq!(
             app.pact_line().as_deref(),
             Some("refreshing crates (3/7) — already running")
@@ -3393,7 +3395,7 @@ mod tests {
         // draws no header and keeps those rows for the account.
         assert!(app.run_header().is_none());
 
-        app.set_pact_in_flight(Path::new("/repo").join("crates"), 2, 4);
+        app.set_pact_in_flight(rooted_crates(), 2, 4);
         assert!(app.run_header().is_some());
 
         // And the run being over takes the header down with the footer's line,
@@ -3410,7 +3412,7 @@ mod tests {
         app.panel_mut().start_turn("what does this do", base);
         app.panel_mut()
             .answer_turn("it walks the tree", at(base, 1));
-        app.set_run_in_flight(Run::Pact, Path::new("/repo").join("crates"), 1, 4);
+        app.set_run_in_flight(Run::Pact, rooted_crates(), 1, 4);
 
         let before = app.panel().window(at(base, 2));
         let header = app.run_header().expect("a run in flight has a header");
@@ -3455,12 +3457,7 @@ mod tests {
         for run in [Run::Pact, Run::Refresh] {
             let mut app = App::from_rows(rooted_rows());
 
-            app.set_run_in_flight(
-                run,
-                Path::new("/repo").join("crates").join("warlock-engine"),
-                3,
-                12,
-            );
+            app.set_run_in_flight(run, rooted_engine(), 3, 12);
 
             let header = app.run_header().expect("a run in flight has a header");
             // The kind is the caller's, said back unchanged: the header is the
@@ -3477,11 +3474,7 @@ mod tests {
     fn the_run_headers_directory_is_spelled_the_way_the_footer_spells_it() {
         let mut app = App::from_rows(rooted_rows());
 
-        app.set_pact_in_flight(
-            Path::new("/repo").join("crates").join("warlock-engine"),
-            3,
-            12,
-        );
+        app.set_pact_in_flight(rooted_engine(), 3, 12);
 
         // One speller, so the header and the footer drawn in the same frame
         // cannot name one directory two ways.
@@ -3513,7 +3506,7 @@ mod tests {
     fn the_run_headers_position_never_goes_backwards_within_one_run() {
         let mut app = App::from_rows(rooted_rows());
 
-        app.set_pact_in_flight(Path::new("/repo").join("crates"), 3, 12);
+        app.set_pact_in_flight(rooted_crates(), 3, 12);
         assert_eq!(
             app.run_header()
                 .expect("a run in flight has a header")
@@ -3524,7 +3517,7 @@ mod tests {
         // A position lower than one already seen leaves the fill where it is: a
         // bar that goes backwards mid-run is a bar that is reporting the event
         // order rather than the progress.
-        app.set_pact_in_flight(Path::new("/repo").join("crates"), 2, 12);
+        app.set_pact_in_flight(rooted_crates(), 2, 12);
         let header = app.run_header().expect("a run in flight has a header");
         assert_eq!(header.position(), 3);
         assert_eq!(header.total(), 12);
@@ -3533,11 +3526,7 @@ mod tests {
         assert_eq!(app.pact_line().as_deref(), Some("pacting crates (1/12)"));
 
         // And it goes on rising the moment the run gets past where it had been.
-        app.set_pact_in_flight(
-            Path::new("/repo").join("crates").join("warlock-engine"),
-            5,
-            12,
-        );
+        app.set_pact_in_flight(rooted_engine(), 5, 12);
         assert_eq!(
             app.run_header()
                 .expect("a run in flight has a header")
@@ -3550,12 +3539,12 @@ mod tests {
     fn a_fresh_run_starts_the_headers_fraction_again() {
         let mut app = App::from_rows(rooted_rows());
 
-        app.set_pact_in_flight(Path::new("/repo").join("crates"), 12, 12);
+        app.set_pact_in_flight(rooted_crates(), 12, 12);
         app.clear_pact_in_flight();
 
         // The high-water mark went with the record that held it, so run two is
         // one of twelve rather than a bar that starts full.
-        app.set_run_in_flight(Run::Refresh, Path::new("/repo").join("crates"), 1, 12);
+        app.set_run_in_flight(Run::Refresh, rooted_crates(), 1, 12);
         let header = app.run_header().expect("a run in flight has a header");
         assert_eq!(header.run(), Run::Refresh);
         assert_eq!(header.position(), 1);
@@ -3565,7 +3554,7 @@ mod tests {
     #[test]
     fn the_app_says_which_row_is_the_one_being_worked() {
         let mut app = App::from_rows(rooted_rows());
-        let engine = Path::new("/repo").join("crates").join("warlock-engine");
+        let engine = rooted_engine();
 
         // Nothing is in flight, so no row is.
         assert!(!app.is_in_flight(&engine));
@@ -3576,19 +3565,19 @@ mod tests {
         // not anything beneath it.
         assert!(app.is_in_flight(&engine));
         assert!(!app.is_in_flight(Path::new("/repo")));
-        assert!(!app.is_in_flight(&Path::new("/repo").join("crates")));
+        assert!(!app.is_in_flight(&rooted_crates()));
         assert!(!app.is_in_flight(&engine.join("src")));
 
         // And it follows the run to the next directory.
-        app.set_pact_in_flight(Path::new("/repo").join("crates"), 4, 12);
+        app.set_pact_in_flight(rooted_crates(), 4, 12);
         assert!(!app.is_in_flight(&engine));
-        assert!(app.is_in_flight(&Path::new("/repo").join("crates")));
+        assert!(app.is_in_flight(&rooted_crates()));
     }
 
     #[test]
     fn the_pass_in_flight_covers_its_directory_and_the_files_it_holds() {
         let mut app = App::from_rows(rooted_rows());
-        let engine = Path::new("/repo").join("crates").join("warlock-engine");
+        let engine = rooted_engine();
         let covered = |app: &App, row: &Row| app.in_flight_covers(row);
 
         // Nothing is in flight, so nothing is covered.
@@ -3624,27 +3613,18 @@ mod tests {
         // it.
         assert!(!covered(
             &app,
-            &Row::new(
-                1,
-                Path::new("/repo").join("crates"),
-                None::<PathBuf>,
-                NodeState::PactedStale
-            )
+            &Row::new(1, rooted_crates(), None::<PathBuf>, NodeState::PactedStale)
         ));
         assert!(!covered(
             &app,
-            &Row::file(
-                2,
-                Path::new("/repo").join("crates").join("README.md"),
-                NodeState::PactedStale
-            )
+            &Row::file(2, rooted_crates().join("README.md"), NodeState::PactedStale)
         ));
     }
 
     #[test]
     fn no_row_is_in_flight_once_the_run_is_over() {
         let mut app = App::from_rows(rooted_rows());
-        let engine = Path::new("/repo").join("crates").join("warlock-engine");
+        let engine = rooted_engine();
 
         app.set_pact_in_flight(engine.clone(), 3, 12);
         app.clear_pact_in_flight();
@@ -3679,19 +3659,7 @@ mod tests {
 
     #[test]
     fn a_keystroke_clears_a_message_and_leaves_the_pact_in_flight_alone() {
-        let keystrokes: [(&str, Movement); 9] = [
-            ("select_next", App::select_next),
-            ("select_previous", App::select_previous),
-            ("select_page_down", App::select_page_down),
-            ("select_page_up", App::select_page_up),
-            ("select_first", App::select_first),
-            ("select_last", App::select_last),
-            ("toggle_collapsed", App::toggle_collapsed),
-            ("toggle_pacted_only", App::toggle_pacted_only),
-            ("toggle_files", App::toggle_files),
-        ];
-
-        for (name, keystroke) in keystrokes {
+        for (name, keystroke) in KEYSTROKES {
             // `warlock/crates` has children, so the collapse key is a keystroke
             // that does something here rather than a no-op.
             let mut app = app_selecting("warlock/crates");
@@ -3751,19 +3719,7 @@ mod tests {
 
     #[test]
     fn a_keystroke_takes_the_refusal_down_the_way_it_takes_a_message_down() {
-        let keystrokes: [(&str, Movement); 9] = [
-            ("select_next", App::select_next),
-            ("select_previous", App::select_previous),
-            ("select_page_down", App::select_page_down),
-            ("select_page_up", App::select_page_up),
-            ("select_first", App::select_first),
-            ("select_last", App::select_last),
-            ("toggle_collapsed", App::toggle_collapsed),
-            ("toggle_pacted_only", App::toggle_pacted_only),
-            ("toggle_files", App::toggle_files),
-        ];
-
-        for (name, keystroke) in keystrokes {
+        for (name, keystroke) in KEYSTROKES {
             let mut app = app_selecting("warlock/crates");
             app.set_pact_in_flight("warlock/crates/engine", 3, 12);
             app.set_pact_refused();
@@ -5049,15 +5005,6 @@ mod tests {
         assert!(selection_is_on_screen(&app));
     }
 
-    const MOVEMENTS: [(&str, Movement); 6] = [
-        ("select_previous", App::select_previous),
-        ("select_next", App::select_next),
-        ("select_page_up", App::select_page_up),
-        ("select_page_down", App::select_page_down),
-        ("select_first", App::select_first),
-        ("select_last", App::select_last),
-    ];
-
     fn panel_focused() -> App {
         let mut app = scrolled_to(MANY / 2);
         app.set_focus(Focus::Panel);
@@ -5439,22 +5386,22 @@ mod tests {
         app
     }
 
+    // A document's line is its own text and nothing else, which is exactly what
+    // a test asserting on what is drawn wants back.
+    fn line_text(line: &Line) -> String {
+        match line {
+            Line::Directory { path } => path.display().to_string(),
+            Line::Clocked { text, .. }
+            | Line::Summary { text }
+            | Line::Text { text }
+            | Line::Said { text }
+            | Line::Note { text }
+            | Line::Wrapped { text, .. } => text.clone(),
+        }
+    }
+
     fn panel_text(app: &App, now: Instant) -> Vec<String> {
-        app.panel()
-            .window(now)
-            .into_iter()
-            .map(|line| match line {
-                Line::Directory { path } => path.display().to_string(),
-                // A document's line is its own text and nothing else, which is
-                // exactly what a test asserting on what is drawn wants back.
-                Line::Clocked { text, .. }
-                | Line::Summary { text }
-                | Line::Text { text }
-                | Line::Said { text }
-                | Line::Note { text }
-                | Line::Wrapped { text, .. } => text,
-            })
-            .collect()
+        app.panel().window(now).iter().map(line_text).collect()
     }
 
     #[test]
@@ -6009,19 +5956,7 @@ mod tests {
     }
 
     fn document_text(app: &App) -> Vec<String> {
-        app.panel
-            .document_lines()
-            .iter()
-            .map(|line| match line {
-                Line::Directory { path } => path.display().to_string(),
-                Line::Clocked { text, .. }
-                | Line::Summary { text }
-                | Line::Text { text }
-                | Line::Said { text }
-                | Line::Note { text }
-                | Line::Wrapped { text, .. } => text.clone(),
-            })
-            .collect()
+        app.panel.document_lines().iter().map(line_text).collect()
     }
 
     #[test]
