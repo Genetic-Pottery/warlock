@@ -451,12 +451,9 @@ impl Account {
     /// newest one is frozen: a line filed under a worded section would
     /// contradict a line already on screen.
     pub fn record(&mut self, activity: &Activity, at: Instant) {
-        let Some(section) = self.sections.last_mut() else {
+        let Some(section) = self.live_section() else {
             return;
         };
-        if section.is_closed() {
-            return;
-        }
 
         match activity {
             Activity::Cost { usd } => *section.cost.get_or_insert(0.0) += usd,
@@ -495,12 +492,9 @@ impl Account {
     /// reaches this once, after its last file. Same silence as
     /// [`Account::record`] when there is no live section.
     pub fn record_waiting(&mut self, files: usize, bytes: u64, at: Instant) {
-        let Some(section) = self.sections.last_mut() else {
+        let Some(section) = self.live_section() else {
             return;
         };
-        if section.is_closed() {
-            return;
-        }
 
         let files = plural(files, "file", "files");
         section
@@ -519,12 +513,9 @@ impl Account {
     /// came to. Same silence as [`Account::record`] when there is no live
     /// section.
     pub fn record_describing(&mut self, position: usize, total: usize, bytes: u64, at: Instant) {
-        let Some(section) = self.sections.last_mut() else {
+        let Some(section) = self.live_section() else {
             return;
         };
-        if section.is_closed() {
-            return;
-        }
 
         section.described_bytes = section.described_bytes.saturating_add(bytes);
         let text = format!(
@@ -545,12 +536,9 @@ impl Account {
         attempts: usize,
         at: Instant,
     ) {
-        let Some(section) = self.sections.last_mut() else {
+        let Some(section) = self.live_section() else {
             return;
         };
-        if section.is_closed() {
-            return;
-        }
 
         // The first defect and a count of the rest: a line, not the list. The
         // engine's own refusal carries the whole list, and the footer shows
@@ -574,14 +562,17 @@ impl Account {
     /// this panel is where a reader of the document finds it out. Same silence
     /// as [`Account::record`] when there is no live section.
     pub fn record_repaired(&mut self, mend: &str, at: Instant) {
-        let Some(section) = self.sections.last_mut() else {
+        let Some(section) = self.live_section() else {
             return;
         };
-        if section.is_closed() {
-            return;
-        }
 
         section.log.push(format!("{REPAIRED} · {mend}"), at);
+    }
+
+    fn live_section(&mut self) -> Option<&mut Section> {
+        self.sections
+            .last_mut()
+            .filter(|section| !section.is_closed())
     }
 
     /// [`Account::finish`] without the wording or the money. Crate-private
@@ -609,12 +600,12 @@ impl Account {
         at: Instant,
         mut outcome: impl FnMut(&Section) -> Outcome,
     ) {
-        for index in 0..self.sections.len() {
-            if self.sections[index].has_outcome {
+        for section in &mut self.sections {
+            if section.has_outcome {
                 continue;
             }
-            let ending = outcome(&self.sections[index]);
-            self.sections[index].word(&ending, at);
+            let ending = outcome(section);
+            section.word(&ending, at);
         }
     }
 

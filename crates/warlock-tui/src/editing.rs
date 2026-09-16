@@ -39,7 +39,7 @@ const NO_EDITOR: &str = "`$EDITOR` names no editor to run, so nothing was opened
 
 // A pair rather than a `Command`, so the whole of what was read out of the
 // environment can be compared and asserted about without spawning anything.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct Editor {
     program: String,
     args: Vec<String>,
@@ -460,7 +460,7 @@ mod tests {
     mod outcomes {
         use std::path::Path;
 
-        use super::{Editor, NOT_A_PROGRAM, run_editor};
+        use super::{Editor, NOT_A_PROGRAM, editor, run_editor};
 
         fn file() -> &'static Path {
             Path::new("/repo/crates/engine/WARLOCK.md")
@@ -468,10 +468,7 @@ mod tests {
 
         // A `/bin/sh` that does `script` and nothing else.
         fn stand_in(script: &str) -> Editor {
-            Editor {
-                program: "/bin/sh".to_owned(),
-                args: vec!["-c".to_owned(), script.to_owned()],
-            }
+            editor("/bin/sh", &["-c", script])
         }
 
         #[test]
@@ -489,12 +486,8 @@ mod tests {
 
         #[test]
         fn an_editor_that_will_not_start_is_one_line_naming_the_program() {
-            let editor = Editor {
-                program: NOT_A_PROGRAM.to_owned(),
-                args: Vec::new(),
-            };
-
-            let line = run_editor(&editor, file()).expect("a spawn that failed says so");
+            let line = run_editor(&editor(NOT_A_PROGRAM, &[]), file())
+                .expect("a spawn that failed says so");
 
             assert!(line.contains(NOT_A_PROGRAM), "{line}");
             assert!(line.contains("$EDITOR"), "{line}");

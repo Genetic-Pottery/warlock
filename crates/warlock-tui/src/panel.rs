@@ -262,19 +262,11 @@ trait Shown {
 /// settles.
 impl Shown for Account {
     fn line_count(&self, width: usize) -> usize {
-        self.lines(self.started())
-            .iter()
-            .map(|line| rows_of(line, width).len())
-            .sum()
+        row_count(&self.lines(self.started()), width)
     }
 
     fn window(&self, offset: usize, height: usize, width: usize, now: Instant) -> Vec<Line> {
-        self.lines(now)
-            .iter()
-            .flat_map(|line| rows_of(line, width))
-            .skip(offset)
-            .take(height)
-            .collect()
+        row_window(&self.lines(now), offset, height, width)
     }
 }
 
@@ -286,21 +278,12 @@ impl Shown for Thread {
         // clock *says* and never whether it is a row, and nothing else in a
         // turn moves — so the first entry's own instant, the one a thread that
         // has rows can always name, is as good as the frame's.
-        self.started().map_or(0, |started| {
-            self.lines(started)
-                .iter()
-                .map(|line| rows_of(line, width).len())
-                .sum()
-        })
+        self.started()
+            .map_or(0, |started| row_count(&self.lines(started), width))
     }
 
     fn window(&self, offset: usize, height: usize, width: usize, now: Instant) -> Vec<Line> {
-        self.lines(now)
-            .iter()
-            .flat_map(|line| rows_of(line, width))
-            .skip(offset)
-            .take(height)
-            .collect()
+        row_window(&self.lines(now), offset, height, width)
     }
 }
 
@@ -310,24 +293,29 @@ impl Shown for Thread {
 /// whoever did the reading.
 impl Shown for Vec<Line> {
     fn line_count(&self, width: usize) -> usize {
-        self.iter().map(|line| rows_of(line, width).len()).sum()
+        row_count(self, width)
     }
 
     fn window(&self, offset: usize, height: usize, width: usize, _now: Instant) -> Vec<Line> {
-        self.iter()
-            .flat_map(|line| rows_of(line, width))
-            .skip(offset)
-            .take(height)
-            .collect()
+        row_window(self, offset, height, width)
     }
 }
 
-/// The wrap module's answer and not this one's, so what the app counts and what
-/// the renderer draws are the same rows from the same code. See
-/// [`rows`](crate::wrap::rows), which is also where the shape of a continuation
-/// row is decided.
-fn rows_of(line: &Line, width: usize) -> Vec<Line> {
-    wrap_rows(line, width)
+/// Rows on screen, counted through [`rows`](crate::wrap::rows) — the renderer's
+/// own — rather than by arithmetic here, so what the app counts and what is
+/// drawn cannot come apart. That module also decides the shape of a
+/// continuation row.
+fn row_count(lines: &[Line], width: usize) -> usize {
+    lines.iter().map(|line| wrap_rows(line, width).len()).sum()
+}
+
+fn row_window(lines: &[Line], offset: usize, height: usize, width: usize) -> Vec<Line> {
+    lines
+        .iter()
+        .flat_map(|line| wrap_rows(line, width))
+        .skip(offset)
+        .take(height)
+        .collect()
 }
 
 impl Panel {

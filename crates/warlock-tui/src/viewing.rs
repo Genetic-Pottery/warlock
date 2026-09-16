@@ -145,11 +145,7 @@ mod tests {
         let mut app = App::from_tree(&tree(root));
         app.toggle_files();
         app.panel_mut().set_height(PANEL);
-        while app.selected_row().expect("the fixture has rows").path != path {
-            let before = app.selected();
-            app.select_next();
-            assert_ne!(app.selected(), before, "no row for {}", path.display());
-        }
+        walk_to(&mut app, path);
         // After the selection, because moving the selection is what takes a
         // message down: every assertion below about the footer needs there to be
         // a line on it already.
@@ -435,6 +431,10 @@ mod tests {
 
     fn select(app: &mut App, path: &Path) {
         app.select_first();
+        walk_to(app, path);
+    }
+
+    fn walk_to(app: &mut App, path: &Path) {
         while app.selected_row().expect("the fixture has rows").path != path {
             let before = app.selected();
             app.select_next();

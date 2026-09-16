@@ -140,6 +140,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{FOR_CHECK, Standing};
+    use crate::error::Error;
 
     fn standing(root: &Path) -> Standing {
         Standing::at(root.to_path_buf(), root.to_path_buf())
@@ -226,6 +227,4 @@ mod tests {
             "the tail is what tells a reader which command could not be answered: {error}"
         );
     }
-
-    use crate::error::Error;
 }

@@ -125,8 +125,9 @@ pub(crate) fn reload(app: &mut App, scope: &Scope, manifest: &mut Manifest) -> O
 // the repository root above it, and its line has to be carried as a value until
 // there is a footer to put it on.
 fn clean_ignored(repo_root: &Path, root: &Path) -> Option<String> {
-    let line = |error: Error| format!("{NOT_CLEANED}: {}", one_line(&error.to_string()));
-    dropped_ignored(repo_root, root).err().map(line)
+    dropped_ignored(repo_root, root)
+        .err()
+        .map(|error| format!("{NOT_CLEANED}: {}", one_line(&error.to_string())))
 }
 
 // Saved only when something went, because `Manifest::save` rewrites the file:
@@ -459,8 +460,8 @@ mod tests {
         // A load from a path that is not there fails, which is the arm that
         // keeps the tree already drawn — and the arm that would be the last
         // chance to lose a header if one could still be lost here.
-        let mut app = warlock_tui::App::default();
-        assert_eq!(super::reload(&mut app, &scope, &mut Manifest::new()), None);
+        let mut app = App::default();
+        assert_eq!(reload(&mut app, &scope, &mut Manifest::new()), None);
 
         assert_eq!(scope.chrome.header(), "crates");
         assert_eq!(

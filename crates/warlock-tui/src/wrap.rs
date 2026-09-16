@@ -145,26 +145,24 @@ pub(crate) fn wrapped_at(text: &str, width: usize) -> Vec<(usize, &str)> {
 
     let mut rows = Vec::new();
     let mut start = 0;
-    loop {
-        let rest = &text[start..];
-        if display_width(rest) <= width {
-            rows.push((start, rest));
-            return rows;
-        }
-
+    let mut rest = text;
+    while display_width(rest) > width {
         let end = break_at(rest, width);
         rows.push((start, rest[..end].trim_end()));
         // The space the break was made at goes with the row above it. A break
         // made mid-word has no space to eat, so this takes nothing off the text.
         let after = &rest[end..];
-        let next = after.trim_start();
-        start += end + (after.len() - next.len());
-        if next.is_empty() {
-            // A line that came out even. Falling through would put a blank row
-            // under it, which is a paragraph break the file does not have.
-            return rows;
-        }
+        rest = after.trim_start();
+        start += end + (after.len() - rest.len());
     }
+
+    // Only when something is left: a line that came out even has nothing for a
+    // last row, and pushing one anyway would be a blank row — a paragraph break
+    // the file does not have.
+    if !rest.is_empty() {
+        rows.push((start, rest));
+    }
+    rows
 }
 
 // Keeps every byte: the cut is the width itself, wherever in a word that lands,
@@ -183,21 +181,18 @@ pub(crate) fn folded(text: &str, width: usize) -> Vec<String> {
 
     let mut rows = Vec::new();
     let mut rest = text;
-    loop {
-        if display_width(rest) <= width {
-            rows.push(rest.to_owned());
-            return rows;
-        }
-
+    while display_width(rest) > width {
         let end = filled(rest, width);
         rows.push(rest[..end].to_owned());
         rest = &rest[end..];
-        if rest.is_empty() {
-            // A text that came out even. Falling through would put a blank row
-            // under it, which is a row the text does not have.
-            return rows;
-        }
     }
+
+    // Only when something is left: a text that came out even has nothing for a
+    // last row, and pushing one anyway would be a row the text does not have.
+    if !rest.is_empty() {
+        rows.push(rest.to_owned());
+    }
+    rows
 }
 
 // Never zero for a text with anything in it, which is where `folded`'s loop gets

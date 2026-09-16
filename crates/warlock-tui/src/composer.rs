@@ -173,7 +173,6 @@ impl Composer {
     #[must_use]
     pub fn window(&self, width: u16, height: u16) -> ComposerWindow {
         let (row, column) = self.place(self.cursor, width);
-        let rows = self.rows(width);
         let height = usize::from(height);
         if height == 0 {
             return ComposerWindow {
@@ -183,6 +182,7 @@ impl Composer {
             };
         }
 
+        let rows = self.rows(width);
         let first = row
             .saturating_sub(MARGIN)
             // Never past the last window there is rows for...
@@ -244,11 +244,10 @@ impl Composer {
     // sense: its own byte lies between the two rows and belongs to the upper one.
     fn place(&self, offset: usize, width: u16) -> (usize, usize) {
         let placed = self.placed_rows(width);
-        let (row, start, text) = placed
+        let (row, (start, text)) = placed
             .iter()
             .enumerate()
             .rfind(|(_, (start, _))| *start <= offset)
-            .map(|(row, (start, text))| (row, *start, text.as_str()))
             .expect("the first row starts at zero, so a row starts at or before every offset");
 
         (row, display_width(&text[..offset - start]))
@@ -328,13 +327,21 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
     }
 
     let unchanged = || Composed::Typing(composer.clone());
-    // The three builders below are written literally rather than through
+    // The builders below are written literally rather than through
     // `Composer::at`, and each holds that constructor's invariant by
     // construction: `composer.cursor` is a boundary of the draft, so the halves
     // it splits into are whole strings and the offset after a whole character of
-    // the result is a boundary of the result. Every one of them carries `width`
-    // and `muted` through untouched — this function is neither a redraw nor
-    // where a turn starts or ends.
+    // the result is a boundary of the result. `typing` is the one place
+    // `width` and `muted` are carried through, and it carries them untouched —
+    // this function is neither a redraw nor where a turn starts or ends.
+    let typing = |draft: String, cursor: usize| {
+        Composed::Typing(Composer {
+            draft,
+            cursor,
+            width: composer.width,
+            muted: composer.muted,
+        })
+    };
     let inserted = |character: char| {
         let cursor = composer.cursor;
         let mut draft = String::with_capacity(composer.draft.len() + character.len_utf8());
@@ -342,12 +349,7 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
         draft.push(character);
         draft.push_str(&composer.draft[cursor..]);
 
-        Composed::Typing(Composer {
-            cursor: cursor + character.len_utf8(),
-            draft,
-            width: composer.width,
-            muted: composer.muted,
-        })
+        typing(draft, cursor + character.len_utf8())
     };
     // `start` and `end` are the two ends of a whole `char`, which is what makes
     // this deletion by character rather than by byte: half a character left
@@ -358,23 +360,11 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
         draft.push_str(&composer.draft[..start]);
         draft.push_str(&composer.draft[end..]);
 
-        Composed::Typing(Composer {
-            draft,
-            cursor: start,
-            width: composer.width,
-            muted: composer.muted,
-        })
+        typing(draft, start)
     };
     // Every offset handed to this comes off `char_indices`, `place` or
     // `offset_at`, all three of which answer with boundaries of this draft.
-    let moved = |cursor: usize| {
-        Composed::Typing(Composer {
-            draft: composer.draft.clone(),
-            cursor,
-            width: composer.width,
-            muted: composer.muted,
-        })
-    };
+    let moved = |cursor: usize| typing(composer.draft.clone(), cursor);
     // A closure rather than a value because working it out folds the whole draft
     // into rows, and every key but the four row-wise ones never asks.
     let placed = || composer.place(composer.cursor, composer.width);
@@ -531,6 +521,17 @@ mod tests {
             .map(|row| format!("row {row}"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn lined(lines: usize) -> String {
+        (1..=lines)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn boundaries(draft: &str) -> impl Iterator<Item = usize> + '_ {
+        (0..=draft.len()).filter(|at| draft.is_char_boundary(*at))
     }
 
     fn at_row(draft: &str, row: usize) -> Composer {
@@ -848,7 +849,7 @@ mod tests {
         // split one of them, and the offset it left behind would be inside a
         // character rather than in front of one.
         for draft in ["wéb", "web 🜁 fire"] {
-            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+            for offset in boundaries(draft) {
                 let next = after(press(KeyCode::Char('x')), &composer(draft).at(offset));
 
                 assert_eq!(
@@ -936,7 +937,7 @@ mod tests {
         // an emoji in it, since a deletion done by byte would split one of them
         // at some offsets and not at others.
         for draft in ["wéb", "web 🜁 fire"] {
-            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+            for offset in boundaries(draft) {
                 let next = after(press(KeyCode::Backspace), &composer(draft).at(offset));
                 let gone = draft[..offset].chars().next_back();
                 let start = offset - gone.map_or(0, char::len_utf8);
@@ -1043,7 +1044,7 @@ mod tests {
         // The same sweep Backspace gets, from the other side of the cursor: an
         // accent and an emoji, from every boundary there is.
         for draft in ["wéb", "web 🜁 fire"] {
-            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+            for offset in boundaries(draft) {
                 let next = after(press(KeyCode::Delete), &composer(draft).at(offset));
                 let gone = draft[offset..].chars().next();
                 let end = offset + gone.map_or(0, char::len_utf8);
@@ -1144,7 +1145,7 @@ mod tests {
         // included.
         let draft = "one\ntwo\nsix";
 
-        for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+        for offset in boundaries(draft) {
             assert_eq!(
                 compose_for(press(KeyCode::Enter), &composer(draft).at(offset)),
                 Composed::Submit,
@@ -1161,7 +1162,7 @@ mod tests {
         // whether there is anything here is a question about the buffer and
         // never about where in it the cursor is sitting.
         for draft in ["", " ", "   \t  ", "\n", " \n \n "] {
-            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+            for offset in boundaries(draft) {
                 let before = composer(draft).at(offset);
 
                 assert_eq!(
@@ -1182,7 +1183,7 @@ mod tests {
         // of focus rather than an abandonment. Asserted from the middle of the
         // draft as well as its ends.
         for draft in ["", "half a question", "one\ntwo"] {
-            for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+            for offset in boundaries(draft) {
                 let before = composer(draft).at(offset);
 
                 assert_eq!(
@@ -1393,7 +1394,7 @@ mod tests {
         // by accident would do it at one place rather than at all of them.
         let draft = "one two six\nfour";
 
-        for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+        for offset in boundaries(draft) {
             let before = drawn(draft, 4).at(offset);
             assert!(before.rows(4).len() > 3, "the draft should wrap and break");
 
@@ -1676,10 +1677,7 @@ mod tests {
         // cursor on the last row leaves the window at the last rows — so the
         // end of what was pasted, where the next character will go, is what is
         // on screen.
-        let block = (1..=20)
-            .map(|line| format!("line {line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let block = lined(20);
         let next = pasted(&block, &composer(""));
 
         assert_eq!(next.height(40), COMPOSER_MAX_ROWS);
@@ -1810,11 +1808,7 @@ mod tests {
         // the end: the row it appears on is the last row, and the window that
         // follows the cursor there is the tail the field drew before it followed
         // anything, since there are no rows below to keep.
-        let draft = (1..=20)
-            .map(|line| format!("line {line}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
+        let draft = lined(20) + "\n";
         let composer = composer(&draft);
         let window = window_rows(&composer, 40);
 
@@ -1932,11 +1926,7 @@ mod tests {
         // Nothing has to be reset when a long draft is backspaced short again,
         // because there is no offset to reset.
         for lines in 1..usize::from(COMPOSER_MAX_ROWS) {
-            let draft = (1..=lines)
-                .map(|line| format!("line {line}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let composer = composer(&draft);
+            let composer = composer(&lined(lines));
 
             assert_eq!(composer.height(40), u16::try_from(lines).expect("small"));
             assert_eq!(window_rows(&composer, 40).len(), lines);
@@ -1990,7 +1980,7 @@ mod tests {
         for draft in DRAFTS {
             let composer = composer(draft);
             for width in [0, 1, 4, 40] {
-                for offset in (0..=draft.len()).filter(|at| draft.is_char_boundary(*at)) {
+                for offset in boundaries(draft) {
                     let (row, column) = composer.place(offset, width);
 
                     assert_eq!(

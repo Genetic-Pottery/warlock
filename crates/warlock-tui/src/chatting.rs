@@ -223,57 +223,59 @@ impl<C: Converses> Chat<C> {
         match outcome {
             Composed::Typing(next) => self.composer = next,
             Composed::Leave => app.set_focus(Focus::Panel),
-            Composed::Submit => {
-                // Taken before the field is emptied, and emptied by replacing it
-                // outright rather than by unmuting: the muting comes back from
-                // `settle_field` on the turn alone.
-                let draft = self.composer.draft().to_owned();
-                self.composer = Composer::default();
+            Composed::Submit => self.submit(app, now),
+        }
+    }
 
-                match submitted_for(&draft) {
-                    Submitted::Message => self.ask(app, &draft, now),
-                    // The load, then the mode, then the turn. Both files are read
-                    // before the mode is touched so a refusal cannot leave the
-                    // conversation in a register it never entered; the mode is set
-                    // before the turn is sent so the instruction that enters brief
-                    // mode is asked at brief mode's level. The note is on the
-                    // *change*, so a second `/brief` costs a turn and no line.
-                    Submitted::Brief => match brief_reading(&self.root) {
-                        Ok((instruction, directory)) => {
-                            self.directory = directory;
-                            if app.panel_mut().set_mode(Mode::Brief) {
-                                app.panel_mut().note(BRIEF_NOTE, now);
-                            }
-                            self.say(app, BRIEF_COMMAND, &instruction, Asked::Answer, now);
-                        }
-                        Err(line) => app.panel_mut().note(line, now),
-                    },
-                    Submitted::Chat => {
-                        if app.panel_mut().set_mode(Mode::Chat) {
-                            app.panel_mut().note(CHAT_NOTE, now);
-                            self.say(app, CHAT_COMMAND, CHAT_INSTRUCTION, Asked::Answer, now);
-                        } else {
-                            app.panel_mut().note(ALREADY_CHATTING, now);
-                        }
+    fn submit(&mut self, app: &mut App, now: Instant) {
+        // Taken before the field is emptied, and emptied by replacing it
+        // outright rather than by unmuting: the muting comes back from
+        // `settle_field` on the turn alone.
+        let draft = self.composer.draft().to_owned();
+        self.composer = Composer::default();
+
+        match submitted_for(&draft) {
+            Submitted::Message => self.ask(app, &draft, now),
+            // The load, then the mode, then the turn. Both files are read before
+            // the mode is touched so a refusal cannot leave the conversation in a
+            // register it never entered; the mode is set before the turn is sent
+            // so the instruction that enters brief mode is asked at brief mode's
+            // level. The note is on the *change*, so a second `/brief` costs a
+            // turn and no line.
+            Submitted::Brief => match brief_reading(&self.root) {
+                Ok((instruction, directory)) => {
+                    self.directory = directory;
+                    if app.panel_mut().set_mode(Mode::Brief) {
+                        app.panel_mut().note(BRIEF_NOTE, now);
                     }
-                    // Asked of the app rather than of anything this value
-                    // remembers, because that is the state the border title is
-                    // drawn from: two readings of the register would eventually be
-                    // two answers, and the refusal would contradict the header.
-                    Submitted::Write => {
-                        if app.panel().mode() == Mode::Brief {
-                            self.say(app, WRITE_COMMAND, WRITE_INSTRUCTION, Asked::Document, now);
-                        } else {
-                            app.panel_mut().note(NOT_BRIEFING, now);
-                        }
-                    }
-                    // The line is asked of the value rather than restated here, so
-                    // the list of commands that exist is written down in one place.
-                    said @ Submitted::Refused => {
-                        if let Some(line) = said.refusal() {
-                            app.panel_mut().note(line, now);
-                        }
-                    }
+                    self.say(app, BRIEF_COMMAND, &instruction, Asked::Answer, now);
+                }
+                Err(line) => app.panel_mut().note(line, now),
+            },
+            Submitted::Chat => {
+                if app.panel_mut().set_mode(Mode::Chat) {
+                    app.panel_mut().note(CHAT_NOTE, now);
+                    self.say(app, CHAT_COMMAND, CHAT_INSTRUCTION, Asked::Answer, now);
+                } else {
+                    app.panel_mut().note(ALREADY_CHATTING, now);
+                }
+            }
+            // Asked of the app rather than of anything this value remembers,
+            // because that is the state the border title is drawn from: two
+            // readings of the register would eventually be two answers, and the
+            // refusal would contradict the header.
+            Submitted::Write => {
+                if app.panel().mode() == Mode::Brief {
+                    self.say(app, WRITE_COMMAND, WRITE_INSTRUCTION, Asked::Document, now);
+                } else {
+                    app.panel_mut().note(NOT_BRIEFING, now);
+                }
+            }
+            // The line is asked of the value rather than restated here, so the
+            // list of commands that exist is written down in one place.
+            said @ Submitted::Refused => {
+                if let Some(line) = said.refusal() {
+                    app.panel_mut().note(line, now);
                 }
             }
         }
@@ -456,8 +458,14 @@ pub(crate) fn apply_turn(
     // key that cancels — is answered by an empty slot rather than by a receiver
     // nobody will ever hear from again.
     chat.take();
+    let finished = finished.unwrap_or_else(|| {
+        Err(Ending::Broke {
+            reason: TURN_LOST.to_owned(),
+        })
+    });
+
     match finished {
-        Some(Ok(answer)) => {
+        Ok(answer) => {
             // Cloned only for the turn that asked for a document, and cloned
             // rather than moved because the answer belongs on the card first:
             // the reply is a turn of the conversation whatever is done with it,
@@ -467,18 +475,8 @@ pub(crate) fn apply_turn(
             app.panel_mut().answer_turn(answer, now);
             document
         }
-        Some(Err(ending)) => {
+        Err(ending) => {
             end(app, &ending, now);
-            None
-        }
-        None => {
-            end(
-                app,
-                &Ending::Broke {
-                    reason: TURN_LOST.to_owned(),
-                },
-                now,
-            );
             None
         }
     }
@@ -506,18 +504,27 @@ mod tests {
     }
 
     fn asking(base: Instant) -> (App, Sender<TurnEvent>, Option<Chatting>) {
+        started(ASKED, Asked::Answer, base)
+    }
+
+    fn writing(base: Instant) -> (App, Sender<TurnEvent>, Option<Chatting>) {
+        started("/write", Asked::Document, base)
+    }
+
+    fn started(
+        shown: &str,
+        asked: Asked,
+        base: Instant,
+    ) -> (App, Sender<TurnEvent>, Option<Chatting>) {
         let (events, received) = mpsc::channel();
         let mut app = App::default();
-        app.panel_mut().start_turn(ASKED, base);
-        (app, events, Some(chatting(received)))
+        app.panel_mut().start_turn(shown, base);
+
+        (app, events, Some(turn_for(received, asked)))
     }
 
     fn chatting(received: Receiver<TurnEvent>) -> Chatting {
         turn_for(received, Asked::Answer)
-    }
-
-    fn writing(received: Receiver<TurnEvent>) -> Chatting {
-        turn_for(received, Asked::Document)
     }
 
     fn turn_for(received: Receiver<TurnEvent>, asked: Asked) -> Chatting {
@@ -630,10 +637,7 @@ mod tests {
         const DOCUMENT: &str = "# Scopes\n\nA boundary somebody drew.";
 
         let base = Instant::now();
-        let (events, received) = mpsc::channel();
-        let mut app = App::default();
-        app.panel_mut().start_turn("/write", base);
-        let mut chat = Some(writing(received));
+        let (mut app, events, mut chat) = writing(base);
 
         events
             .send(TurnEvent::Finished(Ok(DOCUMENT.to_owned())))
@@ -689,10 +693,7 @@ mod tests {
 
         for ending in endings {
             let base = Instant::now();
-            let (events, received) = mpsc::channel();
-            let mut app = App::default();
-            app.panel_mut().start_turn("/write", base);
-            let mut chat = Some(writing(received));
+            let (mut app, events, mut chat) = writing(base);
 
             events
                 .send(TurnEvent::Finished(Err(ending.clone())))
@@ -713,10 +714,7 @@ mod tests {
         // The sixth ending, which arrives as a closed channel rather than as a
         // message: the same nothing, by the road that has no `Ending` on it.
         let base = Instant::now();
-        let (events, received) = mpsc::channel();
-        let mut app = App::default();
-        app.panel_mut().start_turn("/write", base);
-        let mut chat = Some(writing(received));
+        let (mut app, events, mut chat) = writing(base);
 
         drop(events);
 
@@ -730,10 +728,7 @@ mod tests {
         // The round in the middle: work has arrived, the answer has not, and
         // the prompt has nothing to open over yet.
         let base = Instant::now();
-        let (events, received) = mpsc::channel();
-        let mut app = App::default();
-        app.panel_mut().start_turn("/write", base);
-        let mut chat = Some(writing(received));
+        let (mut app, events, mut chat) = writing(base);
 
         events
             .send(TurnEvent::Doing(Activity::Thinking))
@@ -1095,6 +1090,14 @@ mod tests {
         fn printing(lines: &[&str]) -> String {
             let arguments: Vec<String> = lines.iter().map(|line| format!("'{line}'")).collect();
             format!("printf '%s\\n' {}", arguments.join(" "))
+        }
+
+        fn failing_once(marker: &Path) -> String {
+            format!(
+                "if [ -f '{marker}' ]; then {answer}; else : > '{marker}'; echo boom >&2; exit 3; fi",
+                marker = marker.display(),
+                answer = printing(&TURN),
+            )
         }
 
         fn turned(agent: &ChatAgent, cancel: &Cancel) -> Vec<TurnEvent> {
@@ -1471,13 +1474,7 @@ mod tests {
             const AGAIN: &str = "and which of those is the biggest?";
 
             let directory = scratch("usable");
-            let asked_once = directory.join("asked-once");
-            // Fails the first time it is asked and answers the second.
-            let script = format!(
-                "if [ -f '{marker}' ]; then {answer}; else : > '{marker}'; echo boom >&2; exit 3; fi",
-                marker = asked_once.display(),
-                answer = printing(&TURN),
-            );
+            let script = failing_once(&directory.join("asked-once"));
             let base = Instant::now();
             let mut app = App::default();
             let mut chat = Chat::with_agent(NO_REPOSITORY, stand_in(&script));
@@ -1592,14 +1589,7 @@ mod tests {
             const AGAIN: &str = "what did that leave out?";
 
             let directory = scratch("write-fails");
-            let asked_once = directory.join("asked-once");
-            // Fails the first time it is asked and answers the second, exactly
-            // as the ordinary failed turn above does.
-            let script = format!(
-                "if [ -f '{marker}' ]; then {answer}; else : > '{marker}'; echo boom >&2; exit 3; fi",
-                marker = asked_once.display(),
-                answer = printing(&TURN),
-            );
+            let script = failing_once(&directory.join("asked-once"));
             let base = Instant::now();
             let mut app = App::default();
             app.panel_mut().set_mode(Mode::Brief);

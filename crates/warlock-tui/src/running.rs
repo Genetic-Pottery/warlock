@@ -93,8 +93,10 @@ impl<W: Write> Progress<W> {
                 total,
             } => {
                 self.total = total;
-                let named = named(&self.root, &directory);
-                self.say(&format!("[{position}/{total}] documenting {named}"));
+                self.say(&format!(
+                    "[{position}/{total}] documenting {}",
+                    named(&self.root, &directory)
+                ));
             }
             // On stdout with the progress and not on stderr with the report,
             // because a mended slot is a document that was written, not a
@@ -104,25 +106,23 @@ impl<W: Write> Progress<W> {
             // entry from a written one, so it says which slot and what was done
             // to it.
             RunEvent::Repaired { directory, mend } => {
-                let named = named(&self.root, &directory);
-                self.say(&format!("{named} — {mend}"));
+                self.say(&format!("{} — {mend}", named(&self.root, &directory)));
             }
             RunEvent::Documented { directory } => {
-                let named = named(&self.root, &directory);
-                self.say(&format!("documented {named}"));
+                self.say(&format!("documented {}", named(&self.root, &directory)));
             }
             RunEvent::Unchanged { directory } => {
-                let named = named(&self.root, &directory);
-                self.say(&format!("unchanged {named}"));
+                self.say(&format!("unchanged {}", named(&self.root, &directory)));
             }
             // Both names on the line. A headless run is read in a log after the
             // fact, often by whoever has to explain why a directory is still
             // yellow, and `skipped crates/tui` on its own is the half of the
             // answer that does not help.
             RunEvent::Skipped { directory, below } => {
-                let (named, below) = (named(&self.root, &directory), named(&self.root, &below));
                 self.say(&format!(
-                    "skipped {named} — {below} below it was not documented"
+                    "skipped {} — {} below it was not documented",
+                    named(&self.root, &directory),
+                    named(&self.root, &below)
                 ));
             }
             // A pipe is read a line per directory; the panel's per-file
@@ -254,13 +254,11 @@ fn ending<W: Write>(cancelled: bool, report: Option<&Report>, err: &mut W) -> Re
     if cancelled {
         return Err(Error::Cancelled);
     }
-    match report {
-        None => Ok(()),
-        Some(report) => {
-            report.onto(err);
-            Err(report.status())
-        }
-    }
+    let Some(report) = report else {
+        return Ok(());
+    };
+    report.onto(err);
+    Err(report.status())
 }
 
 // The one place in this module that reads the working directory, the home
@@ -376,7 +374,7 @@ mod tests {
 
     use warlock_tui::Cancel;
 
-    use super::{Descent, Report, descended};
+    use super::{Descent, Report, descended, named};
     use crate::edits::Opened;
     use crate::error::Error;
     use crate::session::load_manifest;
@@ -409,9 +407,12 @@ mod tests {
         fs::write(&path, contents).expect("a file");
     }
 
+    fn owned(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(|text| (*text).to_owned()).collect()
+    }
+
     fn holding(home: &Path, repo_root: &Path, sigils: &[&str]) {
-        let sigils: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
-        save_sigils(home, repo_root, &sigils).expect("a config that writes");
+        save_sigils(home, repo_root, &owned(sigils)).expect("a config that writes");
     }
 
     fn scoped(repo_root: &Path, module: &str, scope: &str) {
@@ -451,7 +452,7 @@ mod tests {
         fn refusing(root: &Path, refused: &[&str]) -> Self {
             Self {
                 root: root.to_path_buf(),
-                refused: refused.iter().map(|module| (*module).to_owned()).collect(),
+                refused: owned(refused),
                 blanked: Vec::new(),
                 cancel_at: None,
                 seen: RefCell::new(Vec::new()),
@@ -466,10 +467,7 @@ mod tests {
         // the directory. Built by blanking one field of the engine's own stub
         // answer, so the only thing wrong with it is the thing under test.
         fn blanking(mut self, directories: &[&str]) -> Self {
-            self.blanked = directories
-                .iter()
-                .map(|module| (*module).to_owned())
-                .collect();
+            self.blanked = owned(directories);
             self
         }
 
@@ -497,26 +495,27 @@ mod tests {
     impl Agent for Canned {
         fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
             let directory = request.directory().to_path_buf();
+            let module = named(&self.root, &directory);
             self.seen
                 .borrow_mut()
-                .push((directory.clone(), manifest_path(&self.root).is_file()));
+                .push((directory, manifest_path(&self.root).is_file()));
             // Pressed while this pass is running, and the pass still answers:
             // the press beats the engine to the *next* directory rather than to
             // this one's answer. A real Ctrl-C kills the child as well, and the
             // pass it kills comes back as a failure — which is what `refused`
             // already produces, so a test that wants both asks for both.
             if let Some((at, cancel)) = &self.cancel_at
-                && *at == named(&self.root, &directory)
+                && *at == module
             {
                 cancel.cancel();
             }
-            if self.refused.contains(&named(&self.root, &directory)) {
+            if self.refused.contains(&module) {
                 return Err(agent::Error::NotFound {
                     program: CLAUDE.to_owned(),
                 });
             }
             let answer = stub_answer(request);
-            if self.blanked.contains(&named(&self.root, &directory)) {
+            if self.blanked.contains(&module) {
                 return Ok(agent::Response::new(without_a_purpose(&answer)));
             }
             Ok(agent::Response::new(answer))
@@ -541,10 +540,6 @@ mod tests {
             "warlock: {module} — purpose was not answered and was filled in from what warlock \
              measured"
         )
-    }
-
-    fn named(root: &Path, directory: &Path) -> String {
-        super::named(root, directory)
     }
 
     #[derive(Debug)]

@@ -116,8 +116,7 @@ pub(crate) fn write_submit(
     }
 
     let Some(document) = document_on(app) else {
-        app.set_message(NOTHING_TO_WRITE);
-        return ScopePrompt::Closed;
+        return closed_saying(app, NOTHING_TO_WRITE);
     };
     // The shape the document is held to, read now rather than remembered. Both
     // of the next two answers come down the prompt and go to the footer rather
@@ -126,19 +125,14 @@ pub(crate) fn write_submit(
     // fixes it — the keyboard is theirs again only once the window is down.
     let shape = match brief_template(repo_root) {
         Ok(shape) => shape,
-        Err(source) => {
-            app.set_message(unreadable_shape_line(&source));
-            return ScopePrompt::Closed;
-        }
+        Err(source) => return closed_saying(app, unreadable_shape_line(&source)),
     };
     let missing = missing_sections(&shape, &document);
     if !missing.is_empty() {
-        app.set_message(missing_line(&missing));
-        return ScopePrompt::Closed;
+        return closed_saying(app, missing_line(&missing));
     }
     if let Err(error) = put(&path, document.as_bytes()) {
-        app.set_message(failure_line(&stored, &error));
-        return ScopePrompt::Closed;
+        return closed_saying(app, failure_line(&stored, &error));
     }
 
     // The size is the bytes just handed to the disk rather than a `stat` of what
@@ -151,6 +145,11 @@ pub(crate) fn write_submit(
 
 fn refused(field: &ScopeField, rule: impl Into<String>) -> ScopePrompt {
     ScopePrompt::Open(field.clone().refused(rule))
+}
+
+fn closed_saying(app: &mut App, line: impl Into<String>) -> ScopePrompt {
+    app.set_message(line);
+    ScopePrompt::Closed
 }
 
 fn document(reply: &str) -> String {
@@ -252,7 +251,7 @@ pub(crate) fn slug_of(document: &str) -> String {
         .unwrap_or_default();
     let slug = slugged(title);
     if slug.is_empty() {
-        return UNTITLED.to_string();
+        return UNTITLED.to_owned();
     }
     slug
 }

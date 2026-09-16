@@ -208,10 +208,7 @@ impl Opened {
         let folded = scope.to_ascii_lowercase();
         validate_scope(&folded).map_err(|rule| Error::Scope { rule })?;
 
-        let was = self.scope_on(&module)?.map(str::to_owned);
-        with_scope_on(&self.manifest, &module, Some(&folded))
-            .save(&self.repo_root)
-            .map_err(|source| Error::Manifest { source })?;
+        let was = self.rescoped(&module, Some(&folded))?;
 
         Ok(scoped_line(&module, &folded, was.as_deref()))
     }
@@ -222,12 +219,21 @@ impl Opened {
     // write is a thing a caller then has to reason about.
     fn unscoped(&self) -> Result<String, Error> {
         let module = spelled(&self.repo_root, &self.target)?;
-        let was = self.scope_on(&module)?.map(str::to_owned);
-        with_scope_on(&self.manifest, &module, None)
+        let was = self.rescoped(&module, None)?;
+
+        Ok(unscoped_line(&module, was.as_deref()))
+    }
+
+    // `scope_on` is the existence check as well as the old scope, so it stays
+    // above the save: a directory with no entry is refused with nothing written,
+    // and both scope writes inherit that from being one function.
+    fn rescoped(&self, module: &str, scope: Option<&str>) -> Result<Option<String>, Error> {
+        let was = self.scope_on(module)?.map(str::to_owned);
+        with_scope_on(&self.manifest, module, scope)
             .save(&self.repo_root)
             .map_err(|source| Error::Manifest { source })?;
 
-        Ok(unscoped_line(&module, was.as_deref()))
+        Ok(was)
     }
 
     // The existence check and the "what was there before" both, because they are
@@ -442,40 +448,29 @@ mod tests {
     }
 
     // The production road exactly, with what the environment would have settled
-    // handed in instead: the boundary through `Opened::new` and then the edit,
-    // with no way to reach the second without the first. The two below are the
-    // same road.
-    fn unpact(repo_root: &Path, home: &Path, path: &str) -> Result<String, Error> {
+    // handed in instead. The three writes below reach their edit through this
+    // and only through this, so there is no way to the second half without the
+    // first.
+    fn open(repo_root: &Path, home: &Path, path: &str) -> Result<Opened, Error> {
         let manifest = load_manifest(repo_root).expect("a manifest that reads");
         Opened::new(
             repo_root.to_path_buf(),
             Some(home),
             manifest,
             repo_root.join(path),
-        )?
-        .unpacted()
+        )
+    }
+
+    fn unpact(repo_root: &Path, home: &Path, path: &str) -> Result<String, Error> {
+        open(repo_root, home, path)?.unpacted()
     }
 
     fn scope_add(repo_root: &Path, home: &Path, path: &str, scope: &str) -> Result<String, Error> {
-        let manifest = load_manifest(repo_root).expect("a manifest that reads");
-        Opened::new(
-            repo_root.to_path_buf(),
-            Some(home),
-            manifest,
-            repo_root.join(path),
-        )?
-        .scoped(scope)
+        open(repo_root, home, path)?.scoped(scope)
     }
 
     fn scope_remove(repo_root: &Path, home: &Path, path: &str) -> Result<String, Error> {
-        let manifest = load_manifest(repo_root).expect("a manifest that reads");
-        Opened::new(
-            repo_root.to_path_buf(),
-            Some(home),
-            manifest,
-            repo_root.join(path),
-        )?
-        .unscoped()
+        open(repo_root, home, path)?.unscoped()
     }
 
     fn stored(repo_root: &Path, module: &str) -> PactEntry {

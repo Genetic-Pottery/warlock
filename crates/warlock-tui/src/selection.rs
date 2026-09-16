@@ -84,35 +84,27 @@ impl Selection {
 #[must_use]
 pub fn copied_text(pieces: &[&str], selection: Selection) -> String {
     let Selection { start, end } = selection;
-    let mut copied = String::new();
 
-    for (index, text) in pieces
+    pieces
         .iter()
         .enumerate()
         .take(end.piece.saturating_add(1))
         .skip(start.piece)
-    {
-        let from = if index == start.piece {
-            start.offset
-        } else {
-            0
-        };
-        let to = if index == end.piece {
-            end.offset
-        } else {
-            text.len()
-        };
-        let slice = text.get(from..to).unwrap_or_default();
-        if slice.is_empty() {
-            continue;
-        }
-        if !copied.is_empty() {
-            copied.push_str("\n\n");
-        }
-        copied.push_str(slice);
-    }
-
-    copied
+        .filter_map(|(index, text)| {
+            let from = if index == start.piece {
+                start.offset
+            } else {
+                0
+            };
+            let to = if index == end.piece {
+                end.offset
+            } else {
+                text.len()
+            };
+            text.get(from..to).filter(|slice| !slice.is_empty())
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// A cell of the thread card, in the panel's own terms: `column` and `row`

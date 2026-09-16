@@ -194,6 +194,11 @@ pub fn edit_for(key: KeyEvent, field: &ScopeField) -> Edited {
     };
     let before = || field.text[..field.cursor].chars().next_back();
     let after = || field.text[field.cursor..].chars().next();
+    let removed = |at: usize| {
+        let mut text = field.text.clone();
+        text.remove(at);
+        text
+    };
 
     match key.code {
         KeyCode::Enter => Edited::Submit,
@@ -214,18 +219,12 @@ pub fn edit_for(key: KeyEvent, field: &ScopeField) -> Edited {
             // an offset landing inside one would panic the next slice.
             Some(character) => {
                 let start = field.cursor - character.len_utf8();
-                let mut text = field.text.clone();
-                text.remove(start);
-                edited(text, start)
+                edited(removed(start), start)
             }
             None => unchanged(),
         },
         KeyCode::Delete => match after() {
-            Some(_) => {
-                let mut text = field.text.clone();
-                text.remove(field.cursor);
-                edited(text, field.cursor)
-            }
+            Some(_) => edited(removed(field.cursor), field.cursor),
             None => unchanged(),
         },
         // A chord is a command somebody sent, not a character somebody typed,

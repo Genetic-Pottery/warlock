@@ -73,16 +73,16 @@ pub(crate) fn verdict(
     let covering = scope_covering(directory, repo_root, manifest)
         .ok()
         .flatten();
-    if !scope_opens_to(covering, held) {
-        // `scope_opens_to` answers `true` for everything nothing covers, so a
-        // refusal here is always a refusal by a named scope. Written out rather
-        // than unwrapped, because the one thing this arm must never do is invent
-        // a scope to refuse in the name of.
-        if let Some(scope) = covering {
-            return Verdict::Closed {
-                scope: scope.to_owned(),
-            };
-        }
+    // `scope_opens_to` answers `true` for everything nothing covers, so a
+    // refusal here is always a refusal by a named scope. Matched rather than
+    // unwrapped, because the one thing this arm must never do is invent a scope
+    // to refuse in the name of.
+    if !scope_opens_to(covering, held)
+        && let Some(scope) = covering
+    {
+        return Verdict::Closed {
+            scope: scope.to_owned(),
+        };
     }
 
     if reach == Reach::Here {

@@ -71,11 +71,8 @@ impl TerminalGuard {
     // `m` cannot have been pressed yet — which is why `suspended` takes the flag
     // and this does not.
     pub(crate) fn enter() -> io::Result<Self> {
-        if let Err(error) = take_terminal(true) {
-            restore_terminal();
-            return Err(error);
-        }
-        match Terminal::new(CrosstermBackend::new(io::stdout())) {
+        let backend = CrosstermBackend::new(io::stdout());
+        match take_terminal(true).and_then(|()| Terminal::new(backend)) {
             Ok(terminal) => Ok(Self { terminal }),
             Err(error) => {
                 restore_terminal();
