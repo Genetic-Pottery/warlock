@@ -82,7 +82,11 @@ Two habits follow from that, and they matter more than anything else here:
   pass had no room for it, or because nobody thought it worth a line — and a
   document covering a large directory necessarily leaves things out. Never
   conclude that a thing does not exist because no document says it does. Go
-  and look.
+  and look. This holds for every search that comes back empty and not only
+  for a document: a grep, a guessed path, a listing of somewhere the thing
+  was never kept. Report what you did not find as not found rather than as
+  not there, and say how you looked, so somebody who knows the answer can
+  tell you where to look instead.
 
 One caveat, and it is what the colours below exist for: **a document can be
 behind the code it describes.** Where a document and the code disagree, the
@@ -145,6 +149,15 @@ holding none opens none: an operator who has recorded nothing is refused by ever
 scoped directory, exactly as one holding the wrong sigil is. The permissive
 default sits on the directory instead — a pacted directory with no scope above it
 is open to anyone.
+
+**Ask warlock what is held rather than going to look for it.** `warlock check
+<path>` names the scope covering that path, the sigils this machine holds, and
+whether the one opens the other — the whole question, in three lines, for the
+directory you are about to touch. It runs headless and reads the machine's own
+store, wherever that is: the store is warlock's business and not a path to go
+searching for, and a sigil that is held is held whether or not you found the
+file it sits in. A search that missed it is a search that missed it, and not a
+finding that nothing is held.
 
 **A scope is a term of the pact, not a thing beside it.** An unpacted
 directory cannot carry one, and un-pacting a directory takes its scope away

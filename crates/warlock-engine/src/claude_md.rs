@@ -64,7 +64,11 @@ Two habits follow from that, and they matter more than anything else here:
   pass had no room for it, or because nobody thought it worth a line — and a
   document covering a large directory necessarily leaves things out. Never
   conclude that a thing does not exist because no document says it does. Go
-  and look.
+  and look. This holds for every search that comes back empty and not only
+  for a document: a grep, a guessed path, a listing of somewhere the thing
+  was never kept. Report what you did not find as not found rather than as
+  not there, and say how you looked, so somebody who knows the answer can
+  tell you where to look instead.
 
 One caveat, and it is what the colours below exist for: **a document can be
 behind the code it describes.** Where a document and the code disagree, the
@@ -127,6 +131,15 @@ holding none opens none: an operator who has recorded nothing is refused by ever
 scoped directory, exactly as one holding the wrong sigil is. The permissive
 default sits on the directory instead — a pacted directory with no scope above it
 is open to anyone.
+
+**Ask warlock what is held rather than going to look for it.** `warlock check
+<path>` names the scope covering that path, the sigils this machine holds, and
+whether the one opens the other — the whole question, in three lines, for the
+directory you are about to touch. It runs headless and reads the machine's own
+store, wherever that is: the store is warlock's business and not a path to go
+searching for, and a sigil that is held is held whether or not you found the
+file it sits in. A search that missed it is a search that missed it, and not a
+finding that nothing is held.
 
 **A scope is a term of the pact, not a thing beside it.** An unpacted
 directory cannot carry one, and un-pacting a directory takes its scope away
@@ -401,6 +414,29 @@ mod tests {
     }
 
     #[test]
+    fn the_body_generalises_silence_past_the_documents() {
+        // The habit is stated about documents, where a reader meets it, but the
+        // mistake it names is not about documents at all: an agent that cannot
+        // find a thing reports that the thing does not exist, and a wrong
+        // negative asserted confidently is worse than an admitted ignorance. It
+        // is written down here because the version limited to documents demonstrably
+        // does not transfer — agents that had read it still turned a missed path
+        // into a finding about what this machine holds.
+        for phrase in [
+            "Silence is not absence",
+            "every search that comes back empty",
+            "a grep, a guessed path",
+            "as not found rather than as\nnot there",
+            "say how you looked",
+        ] {
+            assert!(
+                flat(BODY).contains(&flat(phrase)),
+                "the body should mention {phrase:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_body_says_the_things_it_exists_to_say_about_scopes_and_sigils() {
         // Same standard as above, for the second half of the vocabulary: each
         // phrase is a fact an agent gets wrong by default if nobody says it.
@@ -418,6 +454,10 @@ mod tests {
             "any one of them opens a matching scope",
             "membership test, not an expression to\nevaluate",
             "`warlock config` prints what is held",
+            "Ask warlock what is held rather than going to look for it",
+            "`warlock check\n<path>`",
+            "not a path to go\nsearching for",
+            "A search that missed it is a search that missed it",
             // Was "unrestricted", from the sentence "Holding nothing means
             // unrestricted, not shut out" — which `scope_opens_to` contradicts:
             // an empty `held` falls through to the membership test and matches
@@ -475,7 +515,15 @@ mod tests {
                 "the body should say what the refusal is not: {phrase:?}"
             );
         }
-        for phrase in ["warlock check", "not allowed", "permission", "exit code"] {
+        // `warlock check` was on this list and has been taken off it: the
+        // subcommand shipped, so naming it is no longer a promise of machinery
+        // that does not exist. It went the same way the assertion above it did
+        // — a negative pinned to what the workspace happened to lack, which
+        // outlives the lack the moment somebody builds the thing, and holds the
+        // document short of the truth with a green test. What is left is the
+        // vocabulary warlock genuinely does not have: it opens scopes and
+        // refuses keys, and says nothing about permissions or process exits.
+        for phrase in ["not allowed", "permission", "exit code"] {
             assert!(
                 !BODY.contains(phrase),
                 "and should still promise no machinery that does not exist: {phrase:?}"
