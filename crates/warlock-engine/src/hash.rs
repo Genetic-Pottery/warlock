@@ -2,6 +2,7 @@
 //! agree: nothing but the sorted relative paths and the file bytes goes into
 //! the digest.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -56,8 +57,7 @@ pub fn file_hash(path: impl AsRef<Path>) -> Result<String, Error> {
 
 pub(crate) fn bytes_hash(bytes: &[u8]) -> String {
     let mut hasher = blake3::Hasher::new_derive_key(FILE_CONTEXT);
-    hasher.update(&length(bytes.len()).to_le_bytes());
-    hasher.update(bytes);
+    update_prefixed(&mut hasher, bytes);
     hasher.finalize().to_hex().to_string()
 }
 
@@ -87,8 +87,7 @@ pub fn subtree_hash(dir: impl AsRef<Path>) -> Result<String, Error> {
         // Length-prefixed, so no arrangement of names and contents can be
         // mistaken for another: `a/b` holding `c` and `a` holding `bc` are
         // different inputs and must be different digests.
-        hasher.update(&length(relative.len()).to_le_bytes());
-        hasher.update(relative.as_bytes());
+        update_prefixed(&mut hasher, relative.as_bytes());
 
         // Read whole rather than streamed: the length goes in ahead of the
         // bytes, and a length taken from metadata can disagree with what is
@@ -100,12 +99,8 @@ pub fn subtree_hash(dir: impl AsRef<Path>) -> Result<String, Error> {
         // where it merely could not be opened — a false green. Hashing the
         // error text instead would make the digest depend on the operating
         // system's wording.
-        let bytes = fs::read(&path).map_err(|source| Error::Read {
-            path: path.clone(),
-            source,
-        })?;
-        hasher.update(&length(bytes.len()).to_le_bytes());
-        hasher.update(&bytes);
+        let bytes = fs::read(&path).map_err(|source| Error::Read { path, source })?;
+        update_prefixed(&mut hasher, &bytes);
     }
 
     Ok(hasher.finalize().to_hex().to_string())
@@ -124,23 +119,8 @@ pub(crate) fn carry_hash(directory: &Path) -> Option<String> {
     // arrangement of one can be read as the other: a directory holding a file
     // named `x` and one holding a child `x` with a document are different
     // inputs and must be different digests.
-    hasher.update(&length(found.files.len()).to_le_bytes());
-    for (relative, path) in &found.files {
-        hasher.update(&length(relative.len()).to_le_bytes());
-        hasher.update(relative.as_bytes());
-        let bytes = fs::read(path).ok()?;
-        hasher.update(&length(bytes.len()).to_le_bytes());
-        hasher.update(&bytes);
-    }
-
-    hasher.update(&length(found.child_documents.len()).to_le_bytes());
-    for (child, path) in &found.child_documents {
-        hasher.update(&length(child.len()).to_le_bytes());
-        hasher.update(child.as_bytes());
-        let bytes = fs::read(path).ok()?;
-        hasher.update(&length(bytes.len()).to_le_bytes());
-        hasher.update(&bytes);
-    }
+    update_section(&mut hasher, &found.files)?;
+    update_section(&mut hasher, &found.child_documents)?;
 
     // The third section: the document itself, absent and empty told apart by
     // the marker byte, so a directory with no document cannot digest as one
@@ -148,8 +128,7 @@ pub(crate) fn carry_hash(directory: &Path) -> Option<String> {
     match fs::read(directory.join(DOCUMENT_FILE)) {
         Ok(bytes) => {
             hasher.update(&[1]);
-            hasher.update(&length(bytes.len()).to_le_bytes());
-            hasher.update(&bytes);
+            update_prefixed(&mut hasher, &bytes);
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             hasher.update(&[0]);
@@ -158,6 +137,20 @@ pub(crate) fn carry_hash(directory: &Path) -> Option<String> {
     }
 
     Some(hasher.finalize().to_hex().to_string())
+}
+
+fn update_section(hasher: &mut blake3::Hasher, entries: &BTreeMap<String, PathBuf>) -> Option<()> {
+    hasher.update(&length(entries.len()).to_le_bytes());
+    for (name, path) in entries {
+        update_prefixed(hasher, name.as_bytes());
+        update_prefixed(hasher, &fs::read(path).ok()?);
+    }
+    Some(())
+}
+
+fn update_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&length(bytes.len()).to_le_bytes());
+    hasher.update(bytes);
 }
 
 /// Saturating rather than fallible or panicking: the clamp is unreachable on

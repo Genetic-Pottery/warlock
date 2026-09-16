@@ -341,19 +341,24 @@ fn outside_blocks<'a>(language: &Language, lines: &'a [&'a str]) -> Vec<&'a str>
             index += 1;
             continue;
         };
-        let Some(end) = lines
-            .iter()
-            .enumerate()
-            .skip(index + 1)
-            .find(|(_, line)| line.trim_end() == block.closer)
-            .map(|(at, _)| at)
-        else {
+        let Some(end) = closes_after(lines, block, index) else {
             outside.extend(&lines[index..]);
             break;
         };
         index = end + 1;
     }
     outside
+}
+
+// The closer is the next line equal to it at column zero. Searching from the
+// line after the opener, so a one-line block cannot close on its own opener.
+fn closes_after(lines: &[&str], block: &Block, opener: usize) -> Option<usize> {
+    let from = opener + 1;
+    lines
+        .get(from..)?
+        .iter()
+        .position(|line| line.trim_end() == block.closer)
+        .map(|offset| from + offset)
 }
 
 fn without_visibility(line: &str) -> &str {
@@ -394,18 +399,16 @@ fn first_identifier(line: &str) -> Option<&str> {
     let line = past_receiver(line);
     let separators =
         |c: char| c.is_whitespace() || matches!(c, '(' | '<' | '{' | ':' | '=' | ';' | ',' | '!');
-    for word in line.split(separators) {
-        if word.is_empty() || KEYWORDS.contains(&word) || VISIBILITY.contains(&word) {
-            continue;
-        }
-        let identifier = word.trim_matches(|c: char| !(c.is_alphanumeric() || c == '_'));
-        let starts_like_one = identifier
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_alphabetic() || c == '_');
-        return starts_like_one.then_some(identifier);
-    }
-    None
+    let word = line
+        .split(separators)
+        .find(|word| !word.is_empty() && !KEYWORDS.contains(word) && !VISIBILITY.contains(word))?;
+
+    let identifier = word.trim_matches(|c: char| !(c.is_alphanumeric() || c == '_'));
+    let starts_like_one = identifier
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_');
+    starts_like_one.then_some(identifier)
 }
 
 fn language_of(path: &Path) -> Option<&'static Language> {
@@ -421,10 +424,6 @@ pub(crate) struct Elided {
     pub(crate) dropped: u64,
 }
 
-fn marker_for(lines: usize, dropped: &str) -> String {
-    format!("… {lines} lines of {dropped} elided …")
-}
-
 pub(crate) fn elide(path: &Path, text: &str) -> Option<Elided> {
     let language = language_of(path)?;
     let name = path.file_name()?.to_str()?;
@@ -438,7 +437,7 @@ pub(crate) fn elide(path: &Path, text: &str) -> Option<Elided> {
 
     let text = kept.join("\n");
     let before = byte_length(&lines);
-    let after = byte_length(&kept.iter().map(String::as_str).collect::<Vec<_>>());
+    let after = byte_length(&kept);
     if after >= before {
         return None;
     }
@@ -448,34 +447,22 @@ pub(crate) fn elide(path: &Path, text: &str) -> Option<Elided> {
     })
 }
 
-fn byte_length(lines: &[&str]) -> u64 {
-    let content: usize = lines.iter().map(|line| line.len()).sum();
+fn byte_length(lines: &[impl AsRef<str>]) -> u64 {
+    let content: usize = lines.iter().map(|line| line.as_ref().len()).sum();
     let separators = lines.len().saturating_sub(1);
     (content + separators) as u64
 }
 
 fn keep_declarations(language: &Language, lines: &[&str], from: usize, to: usize) -> Vec<String> {
-    keep_declarations_marked(language, lines, from, to, "test bodies")
-}
-fn keep_declarations_marked(
-    language: &Language,
-    lines: &[&str],
-    from: usize,
-    to: usize,
-    dropped_are: &str,
-) -> Vec<String> {
-    let mut kept: Vec<String> = Vec::new();
-    let mut dropped = 0usize;
+    let mut kept: Vec<String> = lines[from..to]
+        .iter()
+        .filter(|line| language.declares(line.trim_start()))
+        .map(|line| (*line).to_string())
+        .collect();
 
-    for line in &lines[from..to] {
-        if language.declares(line.trim_start()) {
-            kept.push((*line).to_string());
-        } else {
-            dropped += 1;
-        }
-    }
+    let dropped = (to - from) - kept.len();
     if dropped > 0 {
-        kept.push(marker_for(dropped, dropped_are));
+        kept.push(format!("… {dropped} lines of test bodies elided …"));
     }
     kept
 }
@@ -497,15 +484,7 @@ fn keep_outside_blocks(language: &Language, lines: &[&str]) -> Option<Vec<String
             continue;
         };
 
-        // The closer is the next line equal to it at column zero. Searching
-        // from the line after the opener, so a one-line block cannot close on
-        // its own opener.
-        let end = lines
-            .iter()
-            .enumerate()
-            .skip(index + 1)
-            .find(|(_, line)| line.trim_end() == block.closer)
-            .map(|(at, _)| at)?;
+        let end = closes_after(lines, block, index)?;
 
         found = true;
         // The opening lines stay: they say a test module is here, which is a

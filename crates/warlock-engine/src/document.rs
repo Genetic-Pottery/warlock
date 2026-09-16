@@ -149,7 +149,8 @@ impl Described {
     pub fn mentions_tool(&self) -> bool {
         self.tokens
             .values()
-            .any(|tokens| tokens.iter().any(|token| names_tool(token)))
+            .flatten()
+            .any(|token| names_tool(token))
     }
 }
 
@@ -174,6 +175,7 @@ pub fn identifiers(text: &str) -> impl Iterator<Item = &str> {
 impl Fill {
     #[must_use]
     pub fn stub(request: &Request) -> Self {
+        const ENTRY: &str = "a stand-in entry, filled by a test double";
         let expected = Expected::of(request);
         Self {
             purpose: format!(
@@ -184,22 +186,12 @@ impl Fill {
             ),
             files: expected
                 .asked()
-                .map(|path| {
-                    (
-                        path.to_owned(),
-                        "a stand-in entry, filled by a test double".to_owned(),
-                    )
-                })
+                .map(|path| (path.to_owned(), ENTRY.to_owned()))
                 .collect(),
             directories: expected
                 .directories
                 .keys()
-                .map(|name| {
-                    (
-                        (*name).to_owned(),
-                        "a stand-in entry, filled by a test double".to_owned(),
-                    )
-                })
+                .map(|name| ((*name).to_owned(), ENTRY.to_owned()))
                 .collect(),
             structure: Vec::new(),
         }
@@ -326,6 +318,16 @@ impl<'a> Evidence<'a> {
         self.expected
     }
 
+    fn sent(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.expected
+            .files
+            .values()
+            .filter_map(|(_, shown)| match shown {
+                Shown::Text(text) => Some(*text),
+                Shown::NotText | Shown::Unsent => None,
+            })
+    }
+
     // A name warlock can find, asked of both witnesses because the request is
     // not always one of them.
     //
@@ -345,12 +347,10 @@ impl<'a> Evidence<'a> {
                 .described
                 .declared
                 .values()
-                .any(|names| names.iter().any(|declared| declared == name))
+                .flatten()
+                .any(|declared| declared == name)
             || self.described.written_anywhere(name)
-            || self.expected.files.values().any(|(_, shown)| match shown {
-                Shown::Text(text) => text.contains(name),
-                Shown::NotText | Shown::Unsent => false,
-            })
+            || self.sent().any(|text| text.contains(name))
     }
 
     // Whether the directory itself uses the tool's name, which is what stands
@@ -359,11 +359,7 @@ impl<'a> Evidence<'a> {
     // of them — which, in warlock's own repository, refused every true claim
     // about warlock until the second witness was asked here.
     fn mentions_tool(&self) -> bool {
-        let in_files = self.expected.files.values().any(|(_, shown)| match shown {
-            Shown::Text(text) => names_tool(text),
-            Shown::NotText | Shown::Unsent => false,
-        });
-        in_files
+        self.sent().any(names_tool)
             || self
                 .expected
                 .directories
@@ -512,6 +508,19 @@ Every value is one line. Write about the directory in its own voice: no first \
 person, and nothing about this request or about what you were or were not \
 shown.";
 
+fn turned_down(text: &mut String, rejected: &[Defect]) {
+    if rejected.is_empty() {
+        return;
+    }
+    text.push_str(
+        "\n\nA previous answer to exactly this request was turned down. Do not repeat \
+         these defects:",
+    );
+    for defect in rejected {
+        let _ = write!(text, "\n- {defect}");
+    }
+}
+
 #[must_use]
 pub fn synthesis_instructions(
     name: &str,
@@ -520,15 +529,7 @@ pub fn synthesis_instructions(
     rejected: &[Defect],
 ) -> String {
     let mut text = SYNTHESIS_PROMPT.to_owned();
-    if !rejected.is_empty() {
-        text.push_str(
-            "\n\nA previous answer to exactly this request was turned down. Do not repeat \
-             these defects:",
-        );
-        for defect in rejected {
-            let _ = write!(text, "\n- {defect}");
-        }
-    }
+    turned_down(&mut text, rejected);
     let _ = write!(
         text,
         "\n\nCaps: {ENTRY_MINIMUM} to {ENTRY_CHARS} characters per value, {PURPOSE_CHARS} for \
@@ -710,15 +711,7 @@ text is right.";
 #[must_use]
 pub fn file_instructions(path: &str, rejected: &[Defect]) -> String {
     let mut text = FILE_PROMPT.to_owned();
-    if !rejected.is_empty() {
-        text.push_str(
-            "\n\nA previous answer to exactly this request was turned down. Do not repeat \
-             these defects:",
-        );
-        for defect in rejected {
-            let _ = write!(text, "\n- {defect}");
-        }
-    }
+    turned_down(&mut text, rejected);
     let _ = write!(
         text,
         "\n\nBetween {ENTRY_MINIMUM} and {ENTRY_CHARS} characters, on one line.\n\n\
@@ -772,23 +765,15 @@ pub fn file_fallback(path: &str, expected: &Expected<'_>, described: &Described)
 }
 
 fn parse(answer: &str) -> Result<Fill, Defect> {
-    parse_object(answer)
-}
-
-fn parse_object<T: serde::de::DeserializeOwned>(answer: &str) -> Result<T, Defect> {
-    let start = answer.find('{');
-    let end = answer.rfind('}');
-    let (Some(start), Some(end)) = (start, end) else {
-        return Err(Defect::NotJson {
-            detail: "no object found in the answer".to_owned(),
-        });
+    let object = match (answer.find('{'), answer.rfind('}')) {
+        (Some(start), Some(end)) if start <= end => &answer[start..=end],
+        _ => {
+            return Err(Defect::NotJson {
+                detail: "no object found in the answer".to_owned(),
+            });
+        }
     };
-    if end < start {
-        return Err(Defect::NotJson {
-            detail: "no object found in the answer".to_owned(),
-        });
-    }
-    serde_json::from_str(&answer[start..=end]).map_err(|error| Defect::NotJson {
+    serde_json::from_str(object).map_err(|error| Defect::NotJson {
         detail: error.to_string(),
     })
 }
@@ -799,6 +784,7 @@ fn parse_object<T: serde::de::DeserializeOwned>(answer: &str) -> Result<T, Defec
 // one of them as a slot nothing asked for.
 fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Defect> {
     let mut defects = Vec::new();
+    let evidence = Evidence::new(expected, described);
 
     line(
         "purpose",
@@ -811,22 +797,16 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
     let children: Vec<&str> = expected.directories.keys().copied().collect();
     keyed("directories", &fill.directories, &children, &mut defects);
 
-    stated(
-        "structure",
-        &fill.structure,
-        expected,
-        described,
-        &mut defects,
-    );
+    stated("structure", &fill.structure, evidence, &mut defects);
 
     // Measured, not hypothetical: told it is filling in "the WARLOCK.md" and
     // that "warlock lays the document out", a pass over a crate that never
     // mentions warlock called it "a toy freshness ledger belonging to
     // Warlock". The instructions say the name is the tool's; this is the check
     // behind the sentence, and it stands down the moment the files use it.
-    if !Evidence::new(expected, described).mentions_tool() {
+    if !evidence.mentions_tool() {
         for (field, value) in values(fill) {
-            if names_tool(&value) {
+            if names_tool(value) {
                 defects.push(Defect::ToolNamed { field });
             }
         }
@@ -835,20 +815,19 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
     defects
 }
 
-fn values(fill: &Fill) -> Vec<(String, String)> {
-    let mut all = vec![("purpose".to_owned(), fill.purpose.clone())];
-    all.extend(
-        fill.directories
-            .iter()
-            .map(|(k, v)| (format!("directories[{k:?}]"), v.clone())),
-    );
-    all.extend(
-        fill.structure
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (format!("structure[{i}]"), v.line.clone())),
-    );
-    all
+fn values(fill: &Fill) -> impl Iterator<Item = (String, &str)> {
+    std::iter::once(("purpose".to_owned(), fill.purpose.as_str()))
+        .chain(
+            fill.directories
+                .iter()
+                .map(|(key, line)| (format!("directories[{key:?}]"), line.as_str())),
+        )
+        .chain(
+            fill.structure
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| (format!("structure[{index}]"), entry.line.as_str())),
+        )
 }
 
 fn line(field: &str, value: &str, minimum: usize, cap: usize, defects: &mut Vec<Defect>) {
@@ -921,13 +900,7 @@ fn keyed(name: &str, given: &BTreeMap<String, String>, wanted: &[&str], defects:
 //
 // An entry must name something — it is a statement about how the files here
 // fit together, and one that names no file is not that statement.
-fn stated(
-    name: &str,
-    given: &[Entry],
-    expected: &Expected<'_>,
-    described: &Described,
-    defects: &mut Vec<Defect>,
-) {
+fn stated(name: &str, given: &[Entry], evidence: Evidence<'_>, defects: &mut Vec<Defect>) {
     if given.len() > LIST_CAP {
         defects.push(Defect::TooMany {
             field: name.to_owned(),
@@ -954,7 +927,7 @@ fn stated(
             let field = format!("{name}[{index}].names[{which}]");
             if named.is_empty() {
                 defects.push(Defect::Empty { field });
-            } else if !Evidence::new(expected, described).knows(named) {
+            } else if !evidence.knows(named) {
                 defects.push(Defect::UnknownTarget {
                     field,
                     name: named.to_owned(),
@@ -987,12 +960,12 @@ pub fn render(name: &str, fill: &Fill, expected: &Expected<'_>, described: &Desc
                 .get(*path)
                 .filter(|names| !names.is_empty())
             {
-                let shown: Vec<String> = names
+                let listed: Vec<String> = names
                     .iter()
                     .take(DECLARED_SHOWN)
                     .map(|name| format!("`{name}`"))
                     .collect();
-                let _ = write!(text, " · declares {}", shown.join(", "));
+                let _ = write!(text, " · declares {}", listed.join(", "));
                 if names.len() > DECLARED_SHOWN {
                     let _ = write!(text, " (+{})", names.len() - DECLARED_SHOWN);
                 }
@@ -1092,9 +1065,8 @@ mod fallback {
         for name in described
             .declared
             .get(path)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-            .iter()
+            .into_iter()
+            .flatten()
             .filter(|name| !(name.trim().is_empty() || guarded && names_tool(name)))
             .take(DECLARED_SHOWN)
         {
@@ -1177,14 +1149,7 @@ mod fallback {
     // Whitespace of any kind collapses to one space: a name or a symbol that
     // carried a newline would otherwise make a one-line value into two.
     fn flattened(text: &str) -> String {
-        let mut line = String::new();
-        for word in text.split_whitespace() {
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(word);
-        }
-        line
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 }
 
@@ -1417,20 +1382,20 @@ impl Plan {
         else {
             return;
         };
-        let recorded = match slot(field) {
-            Slot::Purpose => !std::mem::replace(&mut self.purpose, true),
-            Slot::Directory(key) => {
-                !self.dropped_directories.contains(&key) && self.filled_directories.insert(key)
-            }
-            Slot::Entry(index) => self.dropped_structure.insert(index),
-            Slot::List(_) | Slot::Unknown => false,
+        let (recorded, done) = match slot(field) {
+            Slot::Purpose => (
+                !std::mem::replace(&mut self.purpose, true),
+                Mended::Supplied,
+            ),
+            Slot::Directory(key) => (
+                !self.dropped_directories.contains(&key) && self.filled_directories.insert(key),
+                Mended::Supplied,
+            ),
+            // A list entry is dropped rather than filled, and says so.
+            Slot::Entry(index) => (self.dropped_structure.insert(index), Mended::Dropped),
+            Slot::List(_) | Slot::Unknown => (false, Mended::Dropped),
         };
         if recorded {
-            // A list entry is dropped rather than filled, and says so.
-            let done = match slot(field) {
-                Slot::Purpose | Slot::Directory(_) => Mended::Supplied,
-                _ => Mended::Dropped,
-            };
             mends.push(Mend {
                 field: field.clone(),
                 done,

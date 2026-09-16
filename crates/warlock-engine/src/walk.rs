@@ -101,16 +101,14 @@ pub(crate) fn own(dir: &Path) -> Result<Own, Error> {
     let mut found = Own::default();
     for entry in honouring_ignores(dir).max_depth(Some(OWN_DEPTH)).build() {
         let entry = usable(entry)?;
-        let depth = entry.depth();
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
         }
+        let depth = entry.depth();
         let path = entry.into_path();
 
-        if depth == 1 {
-            if !is_prose(&path) {
-                found.files.insert(relative(dir, &path)?, path);
-            }
+        if depth == 1 && !is_prose(&path) {
+            found.files.insert(relative(dir, &path)?, path);
         } else if depth == OWN_DEPTH && path.file_name() == Some(OsStr::new(DOCUMENT_FILE)) {
             let Some(child) = path.parent().map(Path::to_path_buf) else {
                 continue;

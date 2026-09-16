@@ -96,16 +96,17 @@ fn project_dir(home: &Path, root: &Path) -> PathBuf {
 // never be indistinguishable from holds-nothing.
 pub fn load_sigils(home: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<Vec<String>, Error> {
     let path = sigils_path(home, root);
-    match fs::read_to_string(&path) {
-        Ok(text) => match toml::from_str::<Config>(&text) {
-            Ok(config) => Ok(config.sigils),
-            Err(source) => Err(Error::Syntax { path, source }),
-        },
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-            Err(Error::NotFound { path })
+            return Err(Error::NotFound { path });
         }
-        Err(source) => Err(Error::Io { path, source }),
-    }
+        Err(source) => return Err(Error::Io { path, source }),
+    };
+
+    toml::from_str::<Config>(&text)
+        .map(|config| config.sigils)
+        .map_err(|source| Error::Syntax { path, source })
 }
 
 /// ```
@@ -139,26 +140,28 @@ pub fn save_sigils(
     // The temporary must sit in the same directory as the target, so the rename
     // below cannot cross a filesystem and stops being atomic.
     let temp = dir.join(temp_file_name(SIGIL_FILE));
-    if let Err(source) = write_and_sync(&temp, text.as_bytes()) {
-        drop(fs::remove_file(&temp));
-        return Err(Error::Io { path: temp, source });
-    }
-
-    if let Err(source) = fs::rename(&temp, &target) {
-        drop(fs::remove_file(&temp));
-        return Err(Error::Io {
-            path: target,
+    let written = write_and_sync(&temp, text.as_bytes())
+        .map_err(|source| Error::Io {
+            path: temp.clone(),
             source,
+        })
+        .and_then(|()| {
+            fs::rename(&temp, &target).map_err(|source| Error::Io {
+                path: target.clone(),
+                source,
+            })
         });
+
+    if written.is_err() {
+        drop(fs::remove_file(&temp));
     }
-    Ok(())
+    written
 }
 
 fn readable_name(canonical: &Path) -> String {
-    let name = canonical.file_name().map_or_else(
-        || UNNAMED_ROOT.to_owned(),
-        |name| OsStr::to_string_lossy(name).into_owned(),
-    );
+    let name = canonical
+        .file_name()
+        .map_or_else(|| UNNAMED_ROOT.into(), OsStr::to_string_lossy);
 
     name.chars()
         .take(MAXIMUM_NAME_CHARACTERS)

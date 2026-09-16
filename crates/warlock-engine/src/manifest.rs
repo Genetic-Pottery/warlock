@@ -90,23 +90,26 @@ impl Manifest {
             });
         }
 
-        let mut entries = Vec::with_capacity(raw.pact.len());
-        for (index, value) in raw.pact.into_iter().enumerate() {
-            // Read the module path out of the raw table first: if the entry
-            // fails to parse, this is what makes the error nameable.
-            let module = value
-                .get("module")
-                .and_then(toml::Value::as_str)
-                .map(ToOwned::to_owned);
-            let entry = value
-                .try_into::<PactEntry>()
-                .map_err(|source| Error::Entry {
-                    index,
-                    module,
-                    source,
-                })?;
-            entries.push(entry);
-        }
+        let entries = raw
+            .pact
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                // Read the module path out of the raw table first: if the entry
+                // fails to parse, this is what makes the error nameable.
+                let module = value
+                    .get("module")
+                    .and_then(toml::Value::as_str)
+                    .map(ToOwned::to_owned);
+                value
+                    .try_into::<PactEntry>()
+                    .map_err(|source| Error::Entry {
+                        index,
+                        module,
+                        source,
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self {
             version: SCHEMA_VERSION,
@@ -139,20 +142,24 @@ impl Manifest {
         // The temporary must sit in the same directory as the target, so the
         // rename below cannot cross a filesystem and stops being atomic.
         let temp = dir.join(temp_file_name(MANIFEST_FILE));
-        if let Err(source) = write_and_sync(&temp, text.as_bytes()) {
-            drop(fs::remove_file(&temp));
-            return Err(Error::Io { path: temp, source });
-        }
-
         let target = dir.join(MANIFEST_FILE);
-        if let Err(source) = fs::rename(&temp, &target) {
-            drop(fs::remove_file(&temp));
-            return Err(Error::Io {
-                path: target,
+
+        let written = write_and_sync(&temp, text.as_bytes())
+            .map_err(|source| Error::Io {
+                path: temp.clone(),
                 source,
+            })
+            .and_then(|()| {
+                fs::rename(&temp, &target).map_err(|source| Error::Io {
+                    path: target,
+                    source,
+                })
             });
+
+        if written.is_err() {
+            drop(fs::remove_file(&temp));
         }
-        Ok(())
+        written
     }
 
     /// ```
@@ -250,15 +257,10 @@ impl PactEntry {
         document: impl AsRef<Path>,
     ) -> Result<Self, Error> {
         let root = root.as_ref();
-        Ok(Self {
-            module: to_manifest_path(root, module)?,
-            document: to_manifest_path(root, document)?,
-            scope: None,
-            granted_hash: None,
-            granted_at: None,
-            carry_hash: None,
-            lines: None,
-        })
+        Ok(Self::stored(
+            to_manifest_path(root, module)?,
+            to_manifest_path(root, document)?,
+        ))
     }
 
     #[must_use]

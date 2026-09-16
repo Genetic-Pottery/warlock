@@ -140,14 +140,7 @@ pub fn scope_covering(
     manifest: &Manifest,
 ) -> Result<Option<&str>, manifest::Error> {
     let stored = to_manifest_path(root, path)?;
-    Ok(at_or_above(&stored).find_map(|module| valid_scope_on(manifest, module)))
-}
-
-fn valid_scope_on<'manifest>(
-    manifest: &'manifest Manifest,
-    module: &str,
-) -> Option<&'manifest str> {
-    valid_scope(manifest.entry(module)?)
+    Ok(at_or_above(&stored).find_map(|module| valid_scope(manifest.entry(module)?)))
 }
 
 // A scope the validator refuses reads as no scope, indistinguishable from an

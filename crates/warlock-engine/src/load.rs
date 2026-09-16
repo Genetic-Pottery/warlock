@@ -139,9 +139,11 @@ fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
     let mut directories: BTreeMap<PathBuf, Directory> = BTreeMap::new();
     for entry in walk::listing(root).build() {
         let entry = entry.map_err(|source| Error::Walk { source })?;
-        let file_type = entry.file_type();
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
         let path = entry.into_path();
-        if file_type.is_some_and(|kind| kind.is_dir()) {
+        if file_type.is_dir() {
             // Asked for directly rather than inferred from the walk's file
             // entries: a document is what makes a module, so an ignore rule
             // that happens to cover it should not quietly unmake one.
@@ -150,7 +152,7 @@ fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
             // have arrived first and already opened the record, and overwriting
             // it here would drop the listing.
             directories.entry(path).or_default().has_document = has_document;
-        } else if file_type.is_some_and(|kind| kind.is_file()) {
+        } else if file_type.is_file() {
             // Regular files only, so a symlink is neither descended into nor
             // listed. Widening this to "not a directory" would put links back in
             // the listing that `follow_links(false)` above keeps out of the
@@ -223,14 +225,14 @@ impl Builder {
             .map(|child| self.node(child, problems))
             .collect();
 
-        let found = self.directories.get(dir);
-        let document = found
-            .is_some_and(|directory| directory.has_document)
-            .then(|| dir.join(DOCUMENT_FILE));
-        let files = found
-            .map(|directory| directory.files.clone())
-            .unwrap_or_default();
-        let ignored = found.is_some_and(|directory| directory.ignored);
+        let (document, files, ignored) = match self.directories.get(dir) {
+            Some(directory) => (
+                directory.has_document.then(|| dir.join(DOCUMENT_FILE)),
+                directory.files.clone(),
+                directory.ignored,
+            ),
+            None => (None, Vec::new(), false),
+        };
 
         let state = self.state_of(dir, ignored, problems);
         let scope = self.scope_of(dir, problems);
@@ -406,13 +408,9 @@ mod tests {
         validate_scope,
     };
 
-    fn fixture(dirs: &[&str], documents: &[&str]) -> tempfile::TempDir {
+    fn documented_fixture(documents: &[&str]) -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("a temporary directory");
         fs::create_dir_all(repo.path().join(".git")).expect("creates .git");
-        fs::create_dir_all(repo.path().join(".warlock")).expect("creates .warlock");
-        for dir in dirs {
-            fs::create_dir_all(repo.path().join(dir)).expect("creates a directory");
-        }
         for dir in documents {
             let path = repo.path().join(dir);
             fs::create_dir_all(&path).expect("creates a directory");
@@ -421,14 +419,17 @@ mod tests {
         repo
     }
 
-    fn git_only_fixture(documents: &[&str]) -> tempfile::TempDir {
-        let repo = tempfile::tempdir().expect("a temporary directory");
-        fs::create_dir_all(repo.path().join(".git")).expect("creates .git");
-        for dir in documents {
-            let path = repo.path().join(dir);
-            fs::create_dir_all(&path).expect("creates a directory");
-            fs::write(path.join("WARLOCK.md"), "# module\n").expect("writes a document");
+    fn fixture(dirs: &[&str], documents: &[&str]) -> tempfile::TempDir {
+        let repo = documented_fixture(documents);
+        fs::create_dir_all(repo.path().join(".warlock")).expect("creates .warlock");
+        for dir in dirs {
+            fs::create_dir_all(repo.path().join(dir)).expect("creates a directory");
         }
+        repo
+    }
+
+    fn git_only_fixture(documents: &[&str]) -> tempfile::TempDir {
+        let repo = documented_fixture(documents);
         assert!(
             !repo.path().join(".warlock").exists(),
             "the point of this fixture is that there is no `.warlock/` in it",
@@ -494,7 +495,7 @@ mod tests {
             .collect()
     }
 
-    fn relative_paths(tree: &crate::Tree, root: &Path) -> Vec<String> {
+    fn relative_paths(tree: &Tree, root: &Path) -> Vec<String> {
         tree.walk()
             .map(|(node, _)| {
                 node.path

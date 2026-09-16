@@ -50,11 +50,7 @@ impl Snapshot {
             let measured = match fs::read(&path) {
                 Ok(bytes) => {
                     if let Ok(text) = str::from_utf8(&bytes) {
-                        let names = languages::declared_names(&path, text);
-                        if !names.is_empty() {
-                            described.declared.insert(name.clone(), names);
-                        }
-                        described.tokens.insert(name.clone(), tokens_of(text));
+                        describe(&mut described, &path, &name, text);
                     }
                     Measured {
                         size: byte_count(bytes.len()),
@@ -70,12 +66,14 @@ impl Snapshot {
             files.insert(name, measured);
         }
 
-        let mut children = Vec::new();
-        for (child, path) in own.child_documents {
-            if let Ok(text) = fs::read_to_string(&path) {
-                children.push(agent::ChildDocument::new(child, text));
-            }
-        }
+        let children: Vec<agent::ChildDocument> = own
+            .child_documents
+            .into_iter()
+            .filter_map(|(child, path)| {
+                let text = fs::read_to_string(&path).ok()?;
+                Some(agent::ChildDocument::new(child, text))
+            })
+            .collect();
 
         // The name and not the path: the path is absolute, it is the reader's
         // home directory, and it would be committed.
@@ -101,17 +99,17 @@ impl Snapshot {
         &self.files
     }
 
+    fn expected(&self) -> document::Expected<'_> {
+        document::Expected::of(&self.request)
+    }
+
     pub(crate) fn synthesis_request(
         &self,
         lines: &BTreeMap<String, String>,
         rejected: &[document::Defect],
     ) -> agent::Request {
-        let instructions = document::synthesis_instructions(
-            &self.name,
-            lines,
-            &document::Expected::of(&self.request),
-            rejected,
-        );
+        let instructions =
+            document::synthesis_instructions(&self.name, lines, &self.expected(), rejected);
         self.request.clone().with_prompt(instructions)
     }
 
@@ -120,29 +118,15 @@ impl Snapshot {
         answer: &str,
         lines: &BTreeMap<String, String>,
     ) -> document::Accepted {
-        document::accept_synthesis(
-            answer,
-            lines,
-            &document::Expected::of(&self.request),
-            &self.described,
-        )
+        document::accept_synthesis(answer, lines, &self.expected(), &self.described)
     }
 
     pub(crate) fn mend(&self, fill: &document::Fill) -> (document::Fill, Vec<document::Mend>) {
-        document::mend(
-            fill,
-            &document::Expected::of(&self.request),
-            &self.described,
-        )
+        document::mend(fill, &self.expected(), &self.described)
     }
 
     pub(crate) fn render(&self, fill: &document::Fill) -> String {
-        document::render(
-            &self.name,
-            fill,
-            &document::Expected::of(&self.request),
-            &self.described,
-        )
+        document::render(&self.name, fill, &self.expected(), &self.described)
     }
 
     // What the synthesis request carries: the lines, and the documents of the
@@ -160,6 +144,14 @@ impl Snapshot {
                 .map(|child| byte_count(child.text().len()))
                 .sum::<u64>()
     }
+}
+
+fn describe(described: &mut Described, path: &Path, name: &str, text: &str) {
+    let names = languages::declared_names(path, text);
+    if !names.is_empty() {
+        described.declared.insert(name.to_owned(), names);
+    }
+    described.tokens.insert(name.to_owned(), tokens_of(text));
 }
 
 // Read whole rather than capped, and for the same reason the declared list is
@@ -186,37 +178,30 @@ pub(crate) fn one_file(
     // Reported rather than passed over in silence, the same as a file a
     // directory's request had to give up: a line written from a name and a size
     // is a line the caller is owed the reason for.
-    let mut problem = None;
-    let file = if size > PER_FILE_BYTE_CAP {
-        problem = Some(Problem {
-            path: path.clone(),
-            cause: Omission::TooLarge { size },
-        });
-        agent::File::omitted(name.to_owned(), size)
+    let left_out = |cause| {
+        (
+            agent::File::omitted(name.to_owned(), size),
+            Some(Problem {
+                path: path.clone(),
+                cause,
+            }),
+        )
+    };
+    let (file, problem) = if size > PER_FILE_BYTE_CAP {
+        left_out(Omission::TooLarge { size })
     } else {
         match fs::read(&path) {
-            Ok(bytes) => elided_or_whole(&path, name.to_owned(), size, bytes),
-            Err(source) => {
-                problem = Some(Problem {
-                    path: path.clone(),
-                    cause: Omission::Unreadable { source },
-                });
-                agent::File::omitted(name.to_owned(), size)
-            }
+            Ok(bytes) => (elided_or_whole(&path, name.to_owned(), size, bytes), None),
+            Err(source) => left_out(Omission::Unreadable { source }),
         }
     };
 
     let mut described = Described::default();
-    let text = file.kept().or_else(|| {
-        file.bytes()
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-    });
+    let text = file
+        .kept()
+        .or_else(|| file.bytes().and_then(|bytes| str::from_utf8(bytes).ok()));
     if let Some(text) = text {
-        let names = languages::declared_names(&path, text);
-        if !names.is_empty() {
-            described.declared.insert(name.to_owned(), names);
-        }
-        described.tokens.insert(name.to_owned(), tokens_of(text));
+        describe(&mut described, &path, name, text);
     }
 
     Ok((

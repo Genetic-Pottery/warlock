@@ -155,28 +155,25 @@ pub fn refresh_subtree(
         .collect();
 
     // Read here, where the manifest is, so `describe_and_grant` keeps knowing
-    // nothing about manifests: it is handed digests the same way it is handed
-    // directories.
-    let recorded: BTreeMap<PathBuf, String> = stale
-        .iter()
-        .filter_map(|candidate| {
-            let module = to_manifest_path(root, candidate).ok()?;
-            let carry = manifest.entry(&module)?.carry_hash()?;
-            Some((candidate.clone(), carry.to_string()))
-        })
-        .collect();
-
-    // Read here, where the manifest is, for the same reason the carry hashes
-    // are: `describe_and_grant` is handed what a directory was last known to
-    // hold and keeps knowing nothing about manifests.
-    let line_hashes: BTreeMap<PathBuf, BTreeMap<String, String>> = stale
-        .iter()
-        .filter_map(|candidate| {
-            let module = to_manifest_path(root, candidate).ok()?;
-            let lines = manifest.entry(&module)?.lines()?;
-            Some((candidate.clone(), lines.clone()))
-        })
-        .collect();
+    // nothing about manifests: it is handed the digest a directory was granted
+    // on and the lines it was last known to hold the same way it is handed the
+    // directories themselves.
+    let mut recorded: BTreeMap<PathBuf, String> = BTreeMap::new();
+    let mut line_hashes: BTreeMap<PathBuf, BTreeMap<String, String>> = BTreeMap::new();
+    for candidate in &stale {
+        let entry = to_manifest_path(root, candidate)
+            .ok()
+            .and_then(|module| manifest.entry(&module));
+        let Some(entry) = entry else {
+            continue;
+        };
+        if let Some(carry) = entry.carry_hash() {
+            recorded.insert(candidate.clone(), carry.to_string());
+        }
+        if let Some(lines) = entry.lines() {
+            line_hashes.insert(candidate.clone(), lines.clone());
+        }
+    }
 
     let Described {
         outcomes,
@@ -271,26 +268,24 @@ impl Outcome {
 
     fn into_entry(self) -> PactEntry {
         let entry = PactEntry::stored(self.module, self.document);
-        match self.grant {
-            Some(Grant {
-                hash,
-                at,
-                carry,
-                lines,
-            }) => {
-                let entry = entry.with_grant(hash, at);
-                let entry = match carry {
-                    Some(carry) => entry.with_carry_hash(carry),
-                    None => entry,
-                };
-                if lines.is_empty() {
-                    entry
-                } else {
-                    entry.with_lines(lines)
-                }
-            }
-            None => entry,
+        let Some(Grant {
+            hash,
+            at,
+            carry,
+            lines,
+        }) = self.grant
+        else {
+            return entry;
+        };
+
+        let mut entry = entry.with_grant(hash, at);
+        if let Some(carry) = carry {
+            entry = entry.with_carry_hash(carry);
         }
+        if !lines.is_empty() {
+            entry = entry.with_lines(lines);
+        }
+        entry
     }
 }
 
@@ -786,13 +781,12 @@ pub fn closed_scopes_at_or_below<'manifest>(
     let selected = to_manifest_path(root, directory)?;
 
     let mut blocking: Vec<&str> = Vec::new();
-    for entry in manifest.entries() {
-        if !at_or_below(entry.module(), &selected) {
-            continue;
-        }
-        let Some(scope) = valid_scope(entry) else {
-            continue;
-        };
+    let below = manifest
+        .entries()
+        .iter()
+        .filter(|entry| at_or_below(entry.module(), &selected))
+        .filter_map(valid_scope);
+    for scope in below {
         if !scope_opens_to(Some(scope), held) && !blocking.contains(&scope) {
             blocking.push(scope);
         }
@@ -866,27 +860,23 @@ fn pact_directory_watched(
         ..
     } = assemble_lines(&snapshot, carried, agent, observer)?;
 
-    let mut repairs: Vec<Repaired> = Vec::new();
-    for name in &mended {
-        let mend = document::Mend {
-            field: format!("files[{name:?}]"),
-            done: document::Mended::Supplied,
-        };
-        observer.repaired(directory, &mend);
-        repairs.push(Repaired {
-            directory: directory.to_path_buf(),
-            mend,
-        });
-    }
+    let mut repairs: Vec<Repaired> = mended
+        .iter()
+        .map(|name| {
+            let mend = document::Mend {
+                field: format!("files[{name:?}]"),
+                done: document::Mended::Supplied,
+            };
+            announce_repair(directory, mend, observer)
+        })
+        .collect();
 
     let Synthesised { fill, mends } = synthesise(&snapshot, &lines, agent, observer)?;
-    for mend in mends {
-        observer.repaired(directory, &mend);
-        repairs.push(Repaired {
-            directory: directory.to_path_buf(),
-            mend,
-        });
-    }
+    repairs.extend(
+        mends
+            .into_iter()
+            .map(|mend| announce_repair(directory, mend, observer)),
+    );
 
     let document = write_document(directory, &snapshot.render(&fill))?;
 
@@ -896,6 +886,18 @@ fn pact_directory_watched(
         repairs,
         hashes,
     })
+}
+
+fn announce_repair(
+    directory: &Path,
+    mend: document::Mend,
+    observer: &mut dyn Observer,
+) -> Repaired {
+    observer.repaired(directory, &mend);
+    Repaired {
+        directory: directory.to_path_buf(),
+        mend,
+    }
 }
 
 // Written beside and renamed over, the same idiom as `Manifest::save`. A front
@@ -1547,9 +1549,7 @@ mod tests {
         unpact_subtree, view_file,
     };
     use crate::document::{self, STAMP};
-    use crate::fitting::Snapshot;
-
-    use crate::fitting::Omission;
+    use crate::fitting::{Omission, Snapshot};
     use crate::ignores;
     use crate::{
         Agent, Loaded, Manifest, NodeState, PactEntry, agent, decide_state, from_manifest_path,
@@ -1557,14 +1557,12 @@ mod tests {
     };
 
     struct Canned {
-        text: Option<String>,
         seen: std::cell::RefCell<Vec<agent::Request>>,
     }
 
     impl Canned {
         fn filling() -> Self {
             Self {
-                text: None,
                 seen: std::cell::RefCell::new(Vec::new()),
             }
         }
@@ -1573,11 +1571,7 @@ mod tests {
     impl Agent for Canned {
         fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
             self.seen.borrow_mut().push(request.clone());
-            let text = self
-                .text
-                .clone()
-                .unwrap_or_else(|| crate::document::stub_answer(request));
-            Ok(agent::Response::new(text))
+            Ok(agent::Response::new(document::stub_answer(request)))
         }
     }
 
@@ -1587,12 +1581,6 @@ mod tests {
         fn run(&self, _request: &agent::Request) -> Result<agent::Response, agent::Error> {
             Err(self.0())
         }
-    }
-
-    fn document(bytes: usize) -> String {
-        let head = "# engine\n\nCore engine for warlock. ";
-        assert!(bytes > head.len(), "a document has room for its heading");
-        format!("{head}{}", "x".repeat(bytes - head.len()))
     }
 
     fn written(dir: &Path) -> Option<Vec<u8>> {
@@ -1811,19 +1799,13 @@ mod tests {
             .expect("one directory in, one name out")
     }
 
+    #[derive(Default)]
     struct Mending {
         rejections: Vec<(PathBuf, usize)>,
         repairs: Vec<(PathBuf, document::Mend)>,
     }
 
     impl Mending {
-        fn new() -> Self {
-            Self {
-                rejections: Vec::new(),
-                repairs: Vec::new(),
-            }
-        }
-
         fn turned_down(&self, root: &Path) -> Vec<(String, usize)> {
             self.rejections
                 .iter()
@@ -1907,13 +1889,13 @@ mod tests {
 
         // The page and the hashes from that run, and one file changed under them.
         fs::write(dir.path().join("writing.rs"), "fn scratch(at: usize) {}\n").expect("writes");
-        let page = first
-            .lines
-            .iter()
-            .map(|(path, line)| format!("- `{path}` (1 B) — {line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let page = format!("\n## Files\n\n{page}\n");
+        let page = page_of(
+            &first
+                .lines
+                .iter()
+                .map(|(path, line)| (path.as_str(), line.as_str()))
+                .collect::<Vec<_>>(),
+        );
 
         let again = assemble_lines(
             &taken(dir.path()),
@@ -2255,7 +2237,7 @@ mod tests {
         let repo = project();
         let src = repo.path().join("crates/tui/src");
         let agent = Defective::with(blank_purpose_and_overlong_entries);
-        let mut observer = Mending::new();
+        let mut observer = Mending::default();
 
         let PactedSubtree {
             failures, repairs, ..
@@ -2301,7 +2283,6 @@ mod tests {
         // reworded, shortened or dropped under a long request.
         let dir = tempfile::tempdir().expect("a temporary directory");
         write(dir.path(), "lib.rs", "//! Core engine.\n");
-        let _answer = document(300);
 
         pact_directory(dir.path(), &Canned::filling()).expect("pacts");
 
@@ -2548,6 +2529,7 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct Watching {
         stop_after: Option<usize>,
         calls: Vec<(PathBuf, usize, usize)>,
@@ -2557,32 +2539,20 @@ mod tests {
 
     impl Watching {
         fn patient() -> Self {
-            Self {
-                stop_after: None,
-                calls: Vec::new(),
-                documented: Vec::new(),
-                skipped: Vec::new(),
-            }
+            Self::default()
         }
 
         fn stopping_after(directories: usize) -> Self {
             Self {
                 stop_after: Some(directories),
-                calls: Vec::new(),
-                documented: Vec::new(),
-                skipped: Vec::new(),
+                ..Self::default()
             }
         }
 
         fn calls(&self, root: &Path) -> Vec<(String, usize, usize)> {
             self.calls
                 .iter()
-                .map(|(directory, position, total)| {
-                    let named = relative_to(root, std::slice::from_ref(directory))
-                        .pop()
-                        .expect("one directory in, one name out");
-                    (named, *position, *total)
-                })
+                .map(|(directory, position, total)| (named(root, directory), *position, *total))
                 .collect()
         }
 
@@ -2602,14 +2572,7 @@ mod tests {
         fn passed_over(&self, root: &Path) -> Vec<(String, String)> {
             self.skipped
                 .iter()
-                .map(|(directory, below)| {
-                    let named = |path: &PathBuf| {
-                        relative_to(root, std::slice::from_ref(path))
-                            .pop()
-                            .expect("one directory in, one name out")
-                    };
-                    (named(directory), named(below))
-                })
+                .map(|(directory, below)| (named(root, directory), named(root, below)))
                 .collect()
         }
     }
@@ -4476,71 +4439,14 @@ mod tests {
             .to_owned()
     }
 
-    fn expected_after_the_pact(repo: &Path, granted_at: &str) -> String {
-        format!(
-            "version = 1\n\
-             \n\
-             [[pact]]\n\
-             module = \"crates/engine/src\"\n\
-             document = \"crates/engine/src/WARLOCK.md\"\n\
-             granted_hash = \"{src}\"\n\
-             granted_at = \"{granted_at}\"\n\
-             carry_hash = \"{src_carry}\"\n\
-             \n\
-             [pact.lines]\n\
-             \"lib.rs\" = \"{src_line}\"\n\
-             \n\
-             [[pact]]\n\
-             module = \"crates/tui\"\n\
-             document = \"crates/tui/WARLOCK.md\"\n\
-             granted_hash = \"othercrate\"\n\
-             granted_at = \"2026-02-02T00:00:00Z\"\n\
-             \n\
-             [[pact]]\n\
-             module = \"crates/engine\"\n\
-             document = \"crates/engine/WARLOCK.md\"\n\
-             granted_hash = \"{root}\"\n\
-             granted_at = \"{granted_at}\"\n\
-             carry_hash = \"{root_carry}\"\n\
-             \n\
-             [pact.lines]\n\
-             \"Cargo.toml\" = \"{root_line}\"\n\
-             \n\
-             [[pact]]\n\
-             module = \"crates/engine/src/inner\"\n\
-             document = \"crates/engine/src/inner/WARLOCK.md\"\n\
-             granted_hash = \"{inner}\"\n\
-             granted_at = \"{granted_at}\"\n\
-             carry_hash = \"{inner_carry}\"\n\
-             \n\
-             [pact.lines]\n\
-             \"deep.rs\" = \"{inner_line}\"\n\
-             \n\
-             [[pact]]\n\
-             module = \"crates/engine/tests\"\n\
-             document = \"crates/engine/tests/WARLOCK.md\"\n\
-             granted_hash = \"{tests}\"\n\
-             granted_at = \"{granted_at}\"\n\
-             carry_hash = \"{tests_carry}\"\n\
-             \n\
-             [pact.lines]\n\
-             \"it.rs\" = \"{tests_line}\"\n",
-            root = hash_of(repo, "crates/engine"),
-            src = hash_of(repo, "crates/engine/src"),
-            inner = hash_of(repo, "crates/engine/src/inner"),
-            tests = hash_of(repo, "crates/engine/tests"),
-            root_carry = carry_of(repo, "crates/engine"),
-            root_line = line_of(repo, "crates/engine", "Cargo.toml"),
-            src_carry = carry_of(repo, "crates/engine/src"),
-            src_line = line_of(repo, "crates/engine/src", "lib.rs"),
-            inner_carry = carry_of(repo, "crates/engine/src/inner"),
-            inner_line = line_of(repo, "crates/engine/src/inner", "deep.rs"),
-            tests_carry = carry_of(repo, "crates/engine/tests"),
-            tests_line = line_of(repo, "crates/engine/tests", "it.rs"),
-        )
+    struct Stamps<'at> {
+        engine: &'at str,
+        src: &'at str,
+        inner: &'at str,
+        tests: &'at str,
     }
 
-    fn expected_after_the_refresh(repo: &Path, pacted_at: &str, refreshed_at: &str) -> String {
+    fn expected_manifest(repo: &Path, at: &Stamps<'_>) -> String {
         format!(
             "version = 1\n\
              \n\
@@ -4548,7 +4454,7 @@ mod tests {
              module = \"crates/engine/src\"\n\
              document = \"crates/engine/src/WARLOCK.md\"\n\
              granted_hash = \"{src}\"\n\
-             granted_at = \"{pacted_at}\"\n\
+             granted_at = \"{src_at}\"\n\
              carry_hash = \"{src_carry}\"\n\
              \n\
              [pact.lines]\n\
@@ -4564,7 +4470,7 @@ mod tests {
              module = \"crates/engine\"\n\
              document = \"crates/engine/WARLOCK.md\"\n\
              granted_hash = \"{root}\"\n\
-             granted_at = \"{refreshed_at}\"\n\
+             granted_at = \"{engine_at}\"\n\
              carry_hash = \"{root_carry}\"\n\
              \n\
              [pact.lines]\n\
@@ -4574,7 +4480,7 @@ mod tests {
              module = \"crates/engine/src/inner\"\n\
              document = \"crates/engine/src/inner/WARLOCK.md\"\n\
              granted_hash = \"{inner}\"\n\
-             granted_at = \"{pacted_at}\"\n\
+             granted_at = \"{inner_at}\"\n\
              carry_hash = \"{inner_carry}\"\n\
              \n\
              [pact.lines]\n\
@@ -4584,11 +4490,15 @@ mod tests {
              module = \"crates/engine/tests\"\n\
              document = \"crates/engine/tests/WARLOCK.md\"\n\
              granted_hash = \"{tests}\"\n\
-             granted_at = \"{refreshed_at}\"\n\
+             granted_at = \"{tests_at}\"\n\
              carry_hash = \"{tests_carry}\"\n\
              \n\
              [pact.lines]\n\
              \"it.rs\" = \"{tests_line}\"\n",
+            engine_at = at.engine,
+            src_at = at.src,
+            inner_at = at.inner,
+            tests_at = at.tests,
             root = hash_of(repo, "crates/engine"),
             src = hash_of(repo, "crates/engine/src"),
             inner = hash_of(repo, "crates/engine/src/inner"),
@@ -4648,7 +4558,15 @@ mod tests {
 
         assert_eq!(
             manifest.to_toml_string().expect("serialises"),
-            expected_after_the_pact(repo.path(), &pacted_at),
+            expected_manifest(
+                repo.path(),
+                &Stamps {
+                    engine: &pacted_at,
+                    src: &pacted_at,
+                    inner: &pacted_at,
+                    tests: &pacted_at,
+                },
+            ),
             "the whole file, not a fragment of it",
         );
 
@@ -4687,7 +4605,15 @@ mod tests {
 
         assert_eq!(
             manifest.to_toml_string().expect("serialises"),
-            expected_after_the_refresh(repo.path(), &pacted_at, &refreshed_at),
+            expected_manifest(
+                repo.path(),
+                &Stamps {
+                    engine: &refreshed_at,
+                    src: &pacted_at,
+                    inner: &pacted_at,
+                    tests: &refreshed_at,
+                },
+            ),
             "the whole file again: two entries re-granted where they sat, three \
              carried through untouched",
         );

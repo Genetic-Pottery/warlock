@@ -159,30 +159,23 @@ fn splice(existing: &str) -> String {
     let section = section();
 
     if let Some(start) = existing.find(BEGIN) {
-        let rest = &existing[start + BEGIN.len()..];
-        let finish = rest
+        let after_begin = start + BEGIN.len();
+        let finish = existing[after_begin..]
             .find(END)
-            .map_or(existing.len(), |at| start + BEGIN.len() + at + END.len());
-        let mut spliced = String::with_capacity(existing.len() + section.len());
-        spliced.push_str(&existing[..start]);
-        spliced.push_str(&section);
-        spliced.push_str(&existing[finish..]);
-        return spliced;
+            .map_or(existing.len(), |at| after_begin + at + END.len());
+        return format!("{}{section}{}", &existing[..start], &existing[finish..]);
     }
 
-    let mut spliced = String::with_capacity(existing.len() + section.len() + 2);
-    spliced.push_str(existing);
-    if !spliced.is_empty() {
-        // A file that does not end in a newline is a file whose last line would
-        // otherwise have the marker glued onto it.
-        if !spliced.ends_with('\n') {
-            spliced.push('\n');
-        }
-        spliced.push('\n');
-    }
-    spliced.push_str(&section);
-    spliced.push('\n');
-    spliced
+    // A file that does not end in a newline is a file whose last line would
+    // otherwise have the marker glued onto it.
+    let separator = if existing.is_empty() {
+        ""
+    } else if existing.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    };
+    format!("{existing}{separator}{section}\n")
 }
 
 /// ```
@@ -219,13 +212,14 @@ pub fn write_claude_md(root: impl AsRef<Path>) -> Result<Written, Error> {
     };
     let created = existing.is_none();
 
-    let existing = match existing {
-        Some(bytes) => Some(String::from_utf8(bytes).map_err(|_| Error::NotText {
-            path: target.clone(),
-        })?),
-        None => None,
-    };
-    let text = splice(existing.as_deref().unwrap_or_default());
+    let existing = existing
+        .map(|bytes| {
+            String::from_utf8(bytes).map_err(|_| Error::NotText {
+                path: target.clone(),
+            })
+        })
+        .transpose()?;
+    let text = splice(&existing.unwrap_or_default());
 
     // The same idiom, through the same two helpers, as `Manifest::save` and
     // `write_document`: written beside and renamed over. The temporary is a dot
