@@ -3,9 +3,9 @@
 
 # crates
 
-Workspace holding the two Rust crates that make up the project: warlock-engine, the TUI/HTTP/Anthropic-free freshness-ledger engine, and warlock-tui, the terminal front end and CLI that depend on it.
+Holds the two crates that make up the workspace: warlock-engine, the freshness-ledger core, and warlock-tui, the terminal front end that builds the warlock binary over it.
 
 ## Directories
 
-- `warlock-engine/` — The engine crate: hashing, tree walking, manifest state, pacted/unpacted tracking, and filling WARLOCK.md documents; kept free of TUI/terminal/HTTP/Anthropic deps.
-- `warlock-tui/` — The terminal-free front end and CLI, builds the warlock binary and warlock_tui library for pact/refresh/scope/view/write/chat, depends on warlock-engine.
+- `warlock-engine/` — The engine crate: hashing, tree walking, manifest state, pact engine and document filling; go here for freshness-ledger or WARLOCK.md-generation questions.
+- `warlock-tui/` — The front-end crate building the warlock binary: App state, Panel/Composer/Thread cards, boundary check and subcommand dispatch; go here for terminal UI or CLI questions.

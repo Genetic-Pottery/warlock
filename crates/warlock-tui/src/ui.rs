@@ -1274,6 +1274,16 @@ fn draw_scope(frame: &mut Frame<'_>, screen: Rect, field: &ScopeField, heading: 
 }
 
 fn scope_lines<'a>(field: &'a ScopeField, heading: &'a str, rules: &'a str) -> Vec<Line<'a>> {
+    let text = field.text();
+    let (before, rest) = text.split_at(field.cursor());
+    // The character the cursor is on is the caret, and past the last one it is a
+    // blank of its own — `scope_size` leaves the column for it either way, so
+    // the window does not change width as the cursor walks the text.
+    let (at, after) = match rest.chars().next() {
+        Some(character) => rest.split_at(character.len_utf8()),
+        None => (SCOPE_CURSOR, ""),
+    };
+
     vec![
         Line::from(vec![
             Span::raw(heading),
@@ -1281,8 +1291,9 @@ fn scope_lines<'a>(field: &'a ScopeField, heading: &'a str, rules: &'a str) -> V
         ]),
         Line::default(),
         Line::from(vec![
-            Span::raw(field.text()),
-            Span::styled(SCOPE_CURSOR, Style::new().add_modifier(Modifier::REVERSED)),
+            Span::raw(before),
+            Span::styled(at, Style::new().add_modifier(Modifier::REVERSED)),
+            Span::raw(after),
         ]),
         Line::from(field.rule().unwrap_or_default()),
         Line::from(rules).dim(),
@@ -7701,8 +7712,8 @@ mod tests {
         let rows = scope_rows(&buffer, &field);
         let line = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + FIELD_LINE);
         assert_eq!(inside_the_border(&rows[line]), CARRIED, "{rows:?}");
-        // And the cursor is where the next character will land: one column past
-        // the text, which is the only place it can be — see `crate::prompt`.
+        // And the cursor is where the next character will land, which on a
+        // prompt nobody has moved it on is one column past the text.
         let cursor = cursor_cell(&buffer, &field);
         assert!(
             buffer[cursor].modifier.contains(Modifier::REVERSED),
@@ -7713,6 +7724,56 @@ mod tests {
         assert!(
             !buffer[before].modifier.contains(Modifier::REVERSED),
             "the cursor is over the text rather than after it"
+        );
+    }
+
+    #[test]
+    fn the_caret_is_drawn_on_the_character_the_cursor_was_moved_onto() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
+        use crate::prompt::{Edited, edit_for};
+
+        let base = Instant::now();
+        let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+        // Two presses in, so the caret is over a character with text either
+        // side of it rather than at an edge where an off-by-one would still
+        // look right.
+        let mut prompt = ScopePrompt::open(SCOPED, CARRIED);
+        for _ in 0..2 {
+            let field = prompt.field().expect("the prompt is open");
+            prompt = match edit_for(KeyEvent::from(KeyCode::Left), field) {
+                Edited::Open(moved) => ScopePrompt::Open(moved),
+                other => panic!("an arrow closed or submitted the prompt: {other:?}"),
+            };
+        }
+        let field = prompt.field().expect("the prompt is open").clone();
+
+        let buffer = render_scope(&app, WIDTH, FIXTURE_HEIGHT, base, &prompt);
+
+        // The window is the width it was, so the field does not shuffle sideways
+        // under the reader as the cursor walks it: `cursor_cell` is the column
+        // one past the text either way, and the caret is two columns before it.
+        let end = cursor_cell(&buffer, &field);
+        let caret = Position::new(end.x - 2, end.y);
+        let rows = scope_rows(&buffer, &field);
+        assert_eq!(
+            buffer[caret].symbol(),
+            &CARRIED[CARRIED.len() - 2..CARRIED.len() - 1],
+            "the caret is not on the character the cursor is on: {rows:?}"
+        );
+        assert!(
+            buffer[caret].modifier.contains(Modifier::REVERSED),
+            "no caret at {caret:?}: {rows:?}"
+        );
+        assert!(
+            !buffer[end].modifier.contains(Modifier::REVERSED),
+            "the caret was drawn past the text as well as on it"
+        );
+        let line = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + FIELD_LINE);
+        assert_eq!(
+            inside_the_border(&rows[line]),
+            CARRIED,
+            "moving the cursor changed the text"
         );
     }
 

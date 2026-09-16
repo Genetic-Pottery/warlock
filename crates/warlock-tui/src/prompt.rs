@@ -4,10 +4,10 @@
 //! [`ScopePrompt`] is a value of its own and *not* a field on
 //! [`App`](crate::App), because Esc has to leave the app exactly as it was and
 //! an app that never heard of the prompt is a cheaper guarantee of that than
-//! putting every field back. Nothing moves the cursor, so it is always at the
-//! end of the text and is not a field anybody has to keep true; arrow-key
-//! editing would break that and would claim keys that are otherwise characters.
-//! Nothing here judges the text either — Enter comes back as
+//! putting every field back. The cursor is a byte offset into that text and
+//! every key here keeps it on a character boundary, because the text is sliced
+//! at it — by the edits below and by the frame, which draws the caret on the
+//! character it names. Nothing here judges the text either — Enter comes back as
 //! [`Edited::Submit`] whatever has been typed, empty included, because that is
 //! how a scope is cleared.
 //!
@@ -36,6 +36,9 @@ pub struct ScopeField {
     // module only ever prints it.
     directory: String,
     text: String,
+    // Where the next character lands, as a byte offset into `text` and never
+    // anywhere but a character boundary — see the module docs.
+    cursor: usize,
     // One line, put here by the caller after the engine refused, and worded by
     // the engine.
     rule: Option<String>,
@@ -48,9 +51,14 @@ impl ScopeField {
     // complaining is complaining about somebody else's typing.
     #[must_use]
     pub fn new(directory: impl Into<String>, text: impl Into<String>) -> Self {
+        let text = text.into();
         Self {
             directory: directory.into(),
-            text: text.into(),
+            // At the end of what is already there, which is where a reader who
+            // opened the prompt to add to a scope wants it and one press of
+            // Home from where the other one does.
+            cursor: text.len(),
+            text,
             rule: None,
         }
     }
@@ -79,6 +87,13 @@ impl ScopeField {
     #[must_use]
     pub fn rule(&self) -> Option<&str> {
         self.rule.as_deref()
+    }
+
+    /// A byte offset into [`ScopeField::text`], on a character boundary, so the
+    /// frame can slice the text at it to put the caret down.
+    #[must_use]
+    pub const fn cursor(&self) -> usize {
+        self.cursor
     }
 }
 
@@ -137,9 +152,15 @@ pub enum Edited {
 /// What `key` does to a prompt open over `field`.
 ///
 /// Backspace on an empty field does nothing rather than closing the prompt: one
-/// press past the start is a typo and not an abandonment. An edit clears the
-/// rule line, because that line names a rule the text broke and the text has
-/// just changed; a key that changes nothing leaves it up, complaint and all.
+/// press past the start is a typo and not an abandonment, and Left at the start
+/// and Right at the end are the same kind of nothing. An edit clears the rule
+/// line, because that line names a rule the text broke and the text has just
+/// changed; a key that changes nothing — a move included — leaves it up,
+/// complaint and all.
+///
+/// The cursor answers the keys the composer's does and no others: Left, Right,
+/// Home, End, Backspace behind it and Delete in front of it. There is no Up or
+/// Down, because this field is one line however long the text on it gets.
 ///
 /// Every other key leaves the field byte for byte as it was, the tree's own
 /// bindings included — while this is up, `j`, `k`, `p`, `r` and the rest are
@@ -154,34 +175,66 @@ pub fn edit_for(key: KeyEvent, field: &ScopeField) -> Edited {
     }
 
     let unchanged = || Edited::Open(field.clone());
-    let edited = |text| {
+    let edited = |text: String, cursor: usize| {
         Edited::Open(ScopeField {
             directory: field.directory.clone(),
             text,
+            cursor,
             rule: None,
         })
     };
+    // A move is not an edit: the rule line names something wrong with the text,
+    // and walking the cursor over it leaves it just as wrong. Only the arms that
+    // change the text go through `edited`, which is what drops that line.
+    let moved = |cursor: usize| {
+        Edited::Open(ScopeField {
+            cursor,
+            ..field.clone()
+        })
+    };
+    let before = || field.text[..field.cursor].chars().next_back();
+    let after = || field.text[field.cursor..].chars().next();
 
     match key.code {
         KeyCode::Enter => Edited::Submit,
         KeyCode::Esc => Edited::Close,
-        KeyCode::Backspace => {
-            let mut text = field.text.clone();
-            // `pop` takes a whole character, not a byte: half a character left
-            // in the buffer would not be a `String` at all.
-            if text.pop().is_some() {
-                edited(text)
-            } else {
-                unchanged()
+        KeyCode::Left => match before() {
+            Some(character) => moved(field.cursor - character.len_utf8()),
+            None => unchanged(),
+        },
+        KeyCode::Right => match after() {
+            Some(character) => moved(field.cursor + character.len_utf8()),
+            None => unchanged(),
+        },
+        KeyCode::Home => moved(0),
+        KeyCode::End => moved(field.text.len()),
+        KeyCode::Backspace => match before() {
+            // Whole characters on both sides of the cursor, never bytes: half a
+            // character left in the buffer would not be a `String` at all, and
+            // an offset landing inside one would panic the next slice.
+            Some(character) => {
+                let start = field.cursor - character.len_utf8();
+                let mut text = field.text.clone();
+                text.remove(start);
+                edited(text, start)
             }
-        }
+            None => unchanged(),
+        },
+        KeyCode::Delete => match after() {
+            Some(_) => {
+                let mut text = field.text.clone();
+                text.remove(field.cursor);
+                edited(text, field.cursor)
+            }
+            None => unchanged(),
+        },
         // A chord is a command somebody sent, not a character somebody typed,
         // and control characters are not text however they arrived — Ctrl-C
         // among them, which the loop above has already had its chance at.
         KeyCode::Char(character) if !key.modifiers.intersects(CHORD) && !character.is_control() => {
             let mut text = field.text.clone();
-            text.push(character);
-            edited(text)
+            text.insert(field.cursor, character);
+            edited(text, field.cursor + character.len_utf8())
         }
         _ => unchanged(),
     }
@@ -511,17 +564,13 @@ mod tests {
     }
 
     #[test]
-    fn the_arrows_and_the_editing_keys_this_field_does_not_have_do_nothing() {
-        // No selection, no history, no left-arrow editing: the cursor is at the
-        // end because nothing here can put it anywhere else.
+    fn the_editing_keys_this_field_still_does_not_have_do_nothing() {
+        // No selection, no history, and one line, so no Up and no Down: what
+        // the cursor answers is Left, Right, Home, End and the two deletes, and
+        // the tests below are those.
         let before = field("web");
 
         for code in [
-            KeyCode::Left,
-            KeyCode::Right,
-            KeyCode::Home,
-            KeyCode::End,
-            KeyCode::Delete,
             KeyCode::Insert,
             KeyCode::BackTab,
             KeyCode::Up,
@@ -533,5 +582,104 @@ mod tests {
                 "{code:?} is not an editing key this field has"
             );
         }
+    }
+
+    // Pressed one at a time from a field that opens with its cursor at the end,
+    // because that is the only way in: the cursor is not a thing a caller sets.
+    fn walked(text: &str, keys: &[KeyCode]) -> ScopeField {
+        keys.iter()
+            .fold(field(text), |current, code| after(press(*code), &current))
+    }
+
+    #[test]
+    fn a_field_opens_with_its_cursor_after_what_is_already_there() {
+        assert_eq!(field("web").cursor(), 3);
+        assert_eq!(field("").cursor(), 0);
+    }
+
+    #[test]
+    fn the_cursor_walks_one_character_at_a_time_and_stops_at_both_ends() {
+        assert_eq!(walked("web", &[KeyCode::Left]).cursor(), 2);
+        assert_eq!(walked("web", &[KeyCode::Left, KeyCode::Left]).cursor(), 1);
+        assert_eq!(walked("web", &[KeyCode::Left, KeyCode::Right]).cursor(), 3);
+
+        // Walked past both ends and still on the text: one press past the edge
+        // is a key that changes nothing, exactly as Backspace on an empty field
+        // is.
+        let left = [KeyCode::Left; 5];
+        assert_eq!(walked("web", &left).cursor(), 0);
+        assert_eq!(walked("web", &[KeyCode::Right; 5]).cursor(), 3);
+    }
+
+    #[test]
+    fn the_cursor_moves_by_characters_and_not_by_bytes() {
+        // Two bytes, one character, one press: a cursor counted in bytes would
+        // land inside `é` and panic the next slice of this text.
+        assert_eq!(walked("wéb", &[KeyCode::Left, KeyCode::Left]).cursor(), 1);
+        assert_eq!(walked("wéb", &[KeyCode::Home, KeyCode::Right]).cursor(), 1);
+    }
+
+    #[test]
+    fn home_goes_to_the_start_and_end_goes_back_to_the_finish() {
+        assert_eq!(walked("web", &[KeyCode::Home]).cursor(), 0);
+        assert_eq!(walked("web", &[KeyCode::Home, KeyCode::End]).cursor(), 3);
+    }
+
+    #[test]
+    fn a_character_lands_where_the_cursor_is_and_the_cursor_follows_it() {
+        let typed = walked(
+            "web",
+            &[KeyCode::Home, KeyCode::Char('m'), KeyCode::Char('y')],
+        );
+
+        assert_eq!(typed.text(), "myweb");
+        assert_eq!(typed.cursor(), 2, "the cursor stayed behind what was typed");
+    }
+
+    #[test]
+    fn backspace_takes_the_character_behind_the_cursor_and_delete_the_one_in_front() {
+        let back = walked("web", &[KeyCode::Left, KeyCode::Backspace]);
+        assert_eq!(back.text(), "wb");
+        assert_eq!(back.cursor(), 1);
+
+        let forward = walked("web", &[KeyCode::Left, KeyCode::Delete]);
+        assert_eq!(forward.text(), "we");
+        assert_eq!(
+            forward.cursor(),
+            2,
+            "a delete in front of the cursor moved it"
+        );
+    }
+
+    #[test]
+    fn a_delete_at_either_edge_changes_nothing_and_does_not_close() {
+        let start = walked("web", &[KeyCode::Home]);
+        assert_eq!(
+            edit_for(press(KeyCode::Backspace), &start),
+            Edited::Open(start.clone()),
+            "Backspace with nothing behind the cursor"
+        );
+
+        let end = field("web");
+        assert_eq!(
+            edit_for(press(KeyCode::Delete), &end),
+            Edited::Open(end.clone()),
+            "Delete with nothing in front of the cursor"
+        );
+    }
+
+    #[test]
+    fn a_move_leaves_the_rule_line_up_and_an_edit_takes_it_down() {
+        // The line names something wrong with the text. Walking the cursor over
+        // it leaves it just as wrong, so the complaint stands; changing a
+        // character is what makes it stale.
+        let refused = field("web team").refused("a scope is one word");
+
+        assert_eq!(
+            after(press(KeyCode::Left), &refused).rule(),
+            Some("a scope is one word"),
+            "a move made the complaint stale"
+        );
+        assert_eq!(after(press(KeyCode::Backspace), &refused).rule(), None);
     }
 }
