@@ -77,6 +77,15 @@ use viewing::view_press;
 /// sleeping: the worker threads have no way to wake this one.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How long the footer keeps what it was told.
+///
+/// The footer says what the last thing that happened was, and nothing on it says
+/// when: `copied 104 characters` an hour after the copy reads as a copy that
+/// just happened. So a message is dropped once it is older than this, and the
+/// footer says nothing rather than something out of its time. The highlight a
+/// copy leaves on the conversation is what stays.
+const MESSAGE_LIFETIME: Duration = Duration::from_secs(10);
+
 /// The two words [`init`] reports with. Everything the engine can return that
 /// is not a brand-new file is an update, which is why this is a `matches!` on
 /// one variant rather than a match over an `#[non_exhaustive]` enum.
@@ -430,6 +439,7 @@ fn run() -> Result<(), Error> {
         prompt: ScopePrompt::default(),
         drag: None,
         document: None,
+        said: None,
         // The terminal has just been asked to report its pointer, and `m` is
         // the one thing that changes the answer.
         mouse_captured: true,
@@ -526,6 +536,12 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip> {
     /// an editor is the one on it. A press that read nothing leaves this as it
     /// was rather than clearing it.
     document: Option<PathBuf>,
+    /// Which saying is on the footer and the instant it landed, for
+    /// [`Session::forget_stale_message`]. Held here rather than on the app
+    /// because the app is told every instant it works with and keeps no clock of
+    /// its own, and a message's age is the one thing about it that moves without
+    /// anybody touching it.
+    said: Option<(u64, Instant)>,
     mouse_captured: bool,
     watched: Watched,
 }
@@ -1030,8 +1046,32 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
     /// Everything that happened off this thread since the last round: what a
     /// run has said, what a turn has, and what the disk did while this thread
     /// was waiting on a keystroke.
+    /// Takes `now` rather than reading the clock, so a test can hand it an
+    /// instant ten seconds on instead of sitting there for ten seconds.
+    ///
+    /// The count and not the words: the same sentence said again is a new
+    /// saying, and comparing the text would leave a second copy of the same
+    /// length wearing out what was left of the first one's ten seconds.
+    fn forget_stale_message(&mut self, now: Instant) {
+        if self.app.message().is_none() {
+            self.said = None;
+            return;
+        }
+        let said = self.app.said();
+        match self.said {
+            Some((seen, at)) if seen == said => {
+                if now.duration_since(at) >= MESSAGE_LIFETIME {
+                    self.app.forget_message();
+                    self.said = None;
+                }
+            }
+            _ => self.said = Some((said, now)),
+        }
+    }
+
     fn keep_up(&mut self) {
         let now = Instant::now();
+        self.forget_stale_message(now);
         // The one round in a run's life the watcher has to hear about, and it says
         // so itself: a `Reloaded` comes back on the round the run ended and on no
         // other, carrying the tree that reload read. This loop used to work that
@@ -1976,6 +2016,7 @@ mod tests {
             confirm: QuitConfirm::default(),
             prompt: ScopePrompt::default(),
             drag: None,
+            said: None,
             document: None,
             mouse_captured: true,
             watched,
@@ -2036,6 +2077,7 @@ mod tests {
             confirm: QuitConfirm::default(),
             prompt: ScopePrompt::default(),
             drag: None,
+            said: None,
             document: None,
             mouse_captured: true,
             watched,
@@ -2338,6 +2380,74 @@ mod tests {
                 driven.clipboard.copied().is_empty(),
                 "a refused copy left text on the clipboard anyway"
             );
+        }
+    }
+
+    mod forgetting {
+        use std::time::Instant;
+
+        use super::super::MESSAGE_LIFETIME;
+        use super::{directory, session};
+
+        #[test]
+        fn a_message_stays_up_for_its_lifetime_and_is_gone_after_it() {
+            let base = Instant::now();
+            let mut driven = session(vec![directory("/repo/crates")]);
+
+            driven.copy("crates/engine");
+            driven.forget_stale_message(base);
+
+            driven.forget_stale_message(base + MESSAGE_LIFETIME / 2);
+            assert_eq!(
+                driven.app.message(),
+                Some("copied 13 characters"),
+                "the footer dropped what it was told before its time"
+            );
+
+            driven.forget_stale_message(base + MESSAGE_LIFETIME);
+            assert_eq!(
+                driven.app.message(),
+                None,
+                "the footer is still claiming a copy that has passed"
+            );
+        }
+
+        #[test]
+        fn the_same_sentence_said_again_gets_its_own_lifetime() {
+            let base = Instant::now();
+            let mut driven = session(vec![directory("/repo/crates")]);
+
+            driven.copy("crates/engine");
+            driven.forget_stale_message(base);
+
+            // Most of the way through the first saying's life, the same text
+            // again, so the footer's line is the same line to the character.
+            // Nothing about the words says it is new, which is what the count
+            // rather than a comparison of them is for.
+            let again = base + MESSAGE_LIFETIME / 2;
+            driven.copy("crates/engine");
+            driven.forget_stale_message(again);
+
+            driven.forget_stale_message(base + MESSAGE_LIFETIME);
+            assert_eq!(
+                driven.app.message(),
+                Some("copied 13 characters"),
+                "the second copy was timed from the first one's saying"
+            );
+
+            driven.forget_stale_message(again + MESSAGE_LIFETIME);
+            assert_eq!(driven.app.message(), None);
+        }
+
+        #[test]
+        fn a_footer_with_nothing_on_it_is_left_alone() {
+            let base = Instant::now();
+            let mut driven = session(vec![directory("/repo/crates")]);
+
+            driven.forget_stale_message(base);
+            driven.forget_stale_message(base + MESSAGE_LIFETIME);
+
+            assert_eq!(driven.app.message(), None);
         }
     }
 

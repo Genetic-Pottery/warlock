@@ -428,6 +428,11 @@ struct Status {
     // `in_flight`, which outlives any number of keystrokes and must survive
     // them.
     message: Option<String>,
+    // How many times the footer has been told something, which is what lets the
+    // session time a message out: the same sentence said twice is two sayings,
+    // and a reader who has just copied the same number of characters again is
+    // owed the full ten seconds rather than what was left of the first.
+    said: u64,
     in_flight: Option<InFlight>,
     pact_refused: bool,
     mouse_captured: bool,
@@ -466,6 +471,7 @@ impl App {
             },
             status: Status {
                 message: None,
+                said: 0,
                 in_flight: None,
                 pact_refused: false,
                 mouse_captured: false,
@@ -501,7 +507,30 @@ impl App {
     }
 
     pub fn set_message(&mut self, message: impl Into<String>) {
-        self.status.message = Some(message.into());
+        self.say(message.into());
+    }
+
+    /// The one door onto the footer's line, so that nothing sets it without
+    /// counting: a saying nobody counted is one the session's timer reads as
+    /// the saying before it, and it goes off the screen early.
+    fn say(&mut self, message: String) {
+        self.status.message = Some(message);
+        self.status.said = self.status.said.saturating_add(1);
+    }
+
+    /// The count of sayings, whatever they were. Paired with [`App::message`] by
+    /// the session, which holds the clock this side has none of.
+    #[must_use]
+    pub const fn said(&self) -> u64 {
+        self.status.said
+    }
+
+    /// Said long enough ago that the footer would be claiming a moment that has
+    /// passed. Not a keystroke's business — [`App::forget_last_keystroke`] is
+    /// what a movement clears — so it is separate from that and from the run
+    /// line, which outlives any number of messages.
+    pub fn forget_message(&mut self) {
+        self.status.message = None;
     }
 
     pub fn set_pact_in_flight(&mut self, path: impl Into<PathBuf>, position: usize, total: usize) {
@@ -1023,7 +1052,7 @@ impl App {
                 Some(toggle)
             }
             PactIntent::Refused(message) => {
-                self.status.message = Some(message);
+                self.say(message);
                 None
             }
             PactIntent::NoRow => None,
@@ -1066,8 +1095,9 @@ impl App {
                 NodeState::Unpacted
             },
         );
-        self.status.message =
-            (!toggle.pacted).then(|| left_on_disk_message(&self.label_for(&toggle.path)));
+        if !toggle.pacted {
+            self.say(left_on_disk_message(&self.label_for(&toggle.path)));
+        }
     }
 
     pub fn refresh(&mut self) -> Option<PathBuf> {
@@ -1076,16 +1106,16 @@ impl App {
         let state = row.state;
 
         if row.is_file() {
-            self.status.message = Some(file_row_message(&self.label_for(&path)));
+            self.say(file_row_message(&self.label_for(&path)));
             return None;
         }
         match state {
             NodeState::Unpacted => {
-                self.status.message = Some(unpacted_message(&self.label_for(&path)));
+                self.say(unpacted_message(&self.label_for(&path)));
                 None
             }
             NodeState::PactedFresh => {
-                self.status.message = Some(already_fresh_message(&self.label_for(&path)));
+                self.say(already_fresh_message(&self.label_for(&path)));
                 None
             }
             NodeState::PactedStale => {
@@ -1101,12 +1131,12 @@ impl App {
         let state = row.state;
 
         if row.is_file() {
-            self.status.message = Some(file_row_message(&self.label_for(&path)));
+            self.say(file_row_message(&self.label_for(&path)));
             return None;
         }
         match state {
             NodeState::Unpacted => {
-                self.status.message = Some(unpacted_scope_message(&self.label_for(&path)));
+                self.say(unpacted_scope_message(&self.label_for(&path)));
                 None
             }
             // Fresh or stale, the pact is there and so is the entry the scope
@@ -1123,7 +1153,7 @@ impl App {
         if row.is_file() {
             return Some(path);
         }
-        self.status.message = Some(document.map_or_else(
+        self.say(document.map_or_else(
             || undocumented_view_message(&self.label_for(&path)),
             |document| directory_view_message(&self.label_for(&path), &self.label_for(&document)),
         ));
