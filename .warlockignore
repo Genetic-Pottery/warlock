@@ -10,3 +10,16 @@
 /assets/
 
 /evals/
+
+# Test modules. They used to sit inside the files they test, where
+# `languages::elide` dropped them by their `#[cfg(test)]` block before any of
+# them reached a pass. Split out under `#[path]` they are ordinary `.rs` files
+# that no table recognises, so each would be sent whole — this file is where
+# that is fixed, rather than by teaching warlock that a directory called
+# `tests` is special in every repository it manages.
+#
+# It follows that a test-only edit no longer makes its directory stale, the
+# same as an edit under `/docs/` above. That is the trade and it is the right
+# way round: a document describes what the code does, and a rewritten
+# assertion does not change that.
+crates/*/src/tests/
