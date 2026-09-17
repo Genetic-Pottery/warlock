@@ -61,6 +61,27 @@ pub(crate) fn bytes_hash(bytes: &[u8]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
+// Bumping this restales every `[pact.lines]` table in existence: nothing
+// recorded under the old string can match, so the first refresh after the bump
+// re-describes every file once and is cheap again after that.
+const LINE_CONTEXT: &str = "warlock line hash v1 2026-09-17";
+
+// What a `[pact.lines]` entry records: the file's digest and the line warlock
+// wrote about it, together, so that reuse asks both questions at once.
+//
+// The source hash alone was not enough. Reuse keyed on it says a line may be
+// kept because the file behind it has not moved, and says nothing about where
+// the line came from — so a line somebody typed into the document by hand was
+// carried forward and granted as though a pass had written it. Binding the two
+// means an edited line fails to match and is re-described, at the cost of that
+// one file.
+pub(crate) fn line_hash(file: &str, line: &str) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key(LINE_CONTEXT);
+    update_prefixed(&mut hasher, file.as_bytes());
+    update_prefixed(&mut hasher, line.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
 /// ```
 /// use std::fs;
 /// use warlock_engine::subtree_hash;

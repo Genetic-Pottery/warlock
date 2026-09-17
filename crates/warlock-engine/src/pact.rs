@@ -798,15 +798,13 @@ pub fn closed_scopes_at_or_below<'manifest>(
 // `None` down as `carried` — so every file is described from source and the
 // document is written over without being read first.
 //
-// That is this function, and not the system. `describe_and_grant` reads the
-// page off disk and passes it down whenever `AboveFailure::Skip` is in force,
-// which is what a refresh runs under: there a line is reused wherever the
-// source file's hash has not moved, and nothing checks that the line on the
-// page is one a pass wrote. A document edited by hand therefore keeps the edit
-// through a refresh and loses it to a pact. `assemble_lines` is where that is
-// decided, and
-// `a_hand_edited_line_stands_through_a_refresh_and_falls_to_a_pact` is the test
-// that pins both directions.
+// A refresh does read it: `describe_and_grant` passes the page down under
+// `AboveFailure::Skip`, and `assemble_lines` keeps a line from it wherever the
+// recorded digest still matches. That digest covers the file *and* the line
+// (`hash::line_hash`), so what is reused is only ever a line warlock wrote
+// about a file that has not moved. A document is warlock's to write: an edit
+// somebody makes by hand is described again on the next run and disappears,
+// silently and at the cost of that one file.
 //
 // Nothing is recorded either — no entry, no hash, no grant. Deciding what the
 // manifest should then say needs the rest of the subtree and is the caller's.
@@ -1021,16 +1019,24 @@ fn assemble_lines(
     // Every file is settled against the page before the first pass runs, so
     // that `Observer::describing` can be handed a denominator: what a front end
     // needs is the count of files this directory will *pay* for.
+    //
+    // A line is kept only where the recorded digest matches the file as it
+    // stands *and* the line as it sits on the page — `hash::line_hash` binds
+    // the two. A document is warlock's to write, so a line somebody edited by
+    // hand simply fails to match and is described again, silently and at the
+    // cost of that one file. Testing the file's hash alone was what let an
+    // edited line be carried forward and then granted as though a pass had
+    // written it.
     let planned: Vec<(&String, &Measured, Option<String>)> = snapshot
         .files()
         .iter()
         .map(|(name, measured)| {
-            let unmoved = measured
+            let kept = measured
                 .hash
                 .as_ref()
-                .zip(recorded.get(name))
-                .is_some_and(|(now, before)| now == before);
-            let kept = unmoved.then(|| page.get(name).cloned()).flatten();
+                .zip(page.get(name))
+                .filter(|(hash, line)| recorded.get(name) == Some(&hash::line_hash(hash, line)))
+                .map(|(_, line)| line.clone());
             (name, measured, kept)
         })
         .collect();
@@ -1055,8 +1061,13 @@ fn assemble_lines(
             assembled.asked.push(name.clone());
         }
 
-        if let Some(hash) = &measured.hash {
-            assembled.hashes.insert(name.clone(), hash.clone());
+        // Recorded from the line that actually went into the document, kept or
+        // freshly described, so the next run compares against what is on the
+        // page rather than against what this one meant to put there.
+        if let Some((hash, line)) = measured.hash.as_ref().zip(assembled.lines.get(name)) {
+            assembled
+                .hashes
+                .insert(name.clone(), hash::line_hash(hash, line));
         }
     }
     Ok(assembled)
@@ -1918,7 +1929,11 @@ mod tests {
         assert_eq!(again.lines["reading.rs"], first.lines["reading.rs"]);
         assert_eq!(
             again.hashes["writing.rs"],
-            crate::file_hash(dir.path().join("writing.rs")).expect("hashes")
+            crate::hash::line_hash(
+                &crate::file_hash(dir.path().join("writing.rs")).expect("hashes"),
+                &again.lines["writing.rs"],
+            ),
+            "the file as it stands and the line now on the page, together",
         );
     }
 
@@ -2082,13 +2097,15 @@ mod tests {
 
     #[test]
     fn a_file_the_page_and_the_hashes_agree_on_costs_nothing() {
+        const LINE: &str = "The line already on the page.";
+
         let dir = one_file_directory();
         let agent = Lining::saying(r#"{"line": "A line no pass should be asked for."}"#);
         let hash = crate::hash::file_hash(dir.path().join("reading.rs")).expect("hashes");
-        let recorded = [("reading.rs".to_owned(), hash.clone())]
+        let recorded = [("reading.rs".to_owned(), crate::hash::line_hash(&hash, LINE))]
             .into_iter()
             .collect();
-        let page = page_of(&[("reading.rs", "The line already on the page.")]);
+        let page = page_of(&[("reading.rs", LINE)]);
 
         let assembled = assemble_lines(
             &taken(dir.path()),
@@ -2101,26 +2118,53 @@ mod tests {
         assert_eq!(agent.passes.get(), 0, "the run paid for nothing");
         assert_eq!(assembled.kept, ["reading.rs"]);
         assert!(assembled.asked.is_empty());
+        assert_eq!(assembled.lines["reading.rs"], LINE);
         assert_eq!(
-            assembled.lines["reading.rs"],
-            "The line already on the page."
-        );
-        assert_eq!(
-            assembled.hashes["reading.rs"], hash,
+            assembled.hashes["reading.rs"],
+            crate::hash::line_hash(&hash, LINE),
             "recorded again as it stands"
         );
     }
 
-    // Whether a hand-edited line survives a refresh is the difference between a
-    // document warlock derived and one somebody typed and then had granted as
-    // though warlock had. Both directions below are asserted, because the two
-    // entry points genuinely differ: `pact_subtree` passes
-    // `AboveFailure::Describe`, which is what the reuse filter tests for, so a
-    // pact re-describes every file and the edit is overwritten. A refresh
-    // passes `Skip`, reuse is live, and the edit stands wherever its source
-    // file has not moved.
     #[test]
-    fn a_hand_edited_line_stands_through_a_refresh_and_falls_to_a_pact() {
+    fn a_line_edited_on_the_page_is_described_again_however_still_its_file_is() {
+        // The reason the digest binds the two. The file has not moved, so the
+        // old rule would have kept whatever the page said; the line is not the
+        // one warlock recorded, so it is bought again and the edit is gone from
+        // the document without a word about it.
+        let dir = one_file_directory();
+        let agent = Lining::saying(r#"{"line": "The line a pass wrote."}"#);
+        let hash = crate::hash::file_hash(dir.path().join("reading.rs")).expect("hashes");
+        let recorded = [(
+            "reading.rs".to_owned(),
+            crate::hash::line_hash(&hash, "The line a pass wrote."),
+        )]
+        .into_iter()
+        .collect();
+        let page = page_of(&[("reading.rs", "maintained by a unicorn, actually")]);
+
+        let assembled = assemble_lines(
+            &taken(dir.path()),
+            Some((&page, &recorded)),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("lines");
+
+        assert_eq!(agent.passes.get(), 1, "the edited line costs one pass");
+        assert_eq!(assembled.asked, ["reading.rs"]);
+        assert!(assembled.kept.is_empty());
+        assert_eq!(assembled.lines["reading.rs"], "The line a pass wrote.");
+    }
+
+    // The end-to-end half of `a_line_edited_on_the_page_is_described_again`:
+    // that one settles `assemble_lines`, this one settles that a real refresh
+    // reaches it. A refresh is the path that reuses lines at all — a pact runs
+    // under `AboveFailure::Describe` and re-describes everything regardless —
+    // so a refresh that kept the edit is the way this could regress without a
+    // single other test noticing.
+    #[test]
+    fn a_hand_edited_line_survives_neither_a_refresh_nor_a_pact() {
         const LIE: &str = "maintained by a unicorn that files its own taxes";
 
         fn tamper(src: &Path) {
@@ -2172,15 +2216,14 @@ mod tests {
 
         let after_refresh = String::from_utf8(written(&src).expect("a document")).expect("utf-8");
         assert!(
-            after_refresh.contains(LIE),
-            "a refresh reuses the line on the page wherever the source file has \
-             not moved, and it never checks that the line is one a pass wrote: \
-             {after_refresh}",
+            !after_refresh.contains(LIE),
+            "the recorded digest covers the line as well as the file, so an \
+             edited line does not match and is described again: {after_refresh}",
         );
         assert_eq!(
             state(&refreshed, repo.path(), "crates/engine/src"),
             NodeState::PactedFresh,
-            "and the directory is granted fresh with the planted line in it",
+            "and what is granted fresh is a document warlock wrote every line of",
         );
 
         tamper(&src);
@@ -3353,6 +3396,8 @@ mod tests {
 
     #[test]
     fn a_file_taken_off_the_page_is_never_announced_and_never_counted() {
+        const LINE: &str = "The line already on the page.";
+
         // The denominator is the run that is left, which is what makes it worth
         // drawing a bar against: a directory of two files with one moved counts
         // to one, not to two with the first already behind it.
@@ -3361,8 +3406,10 @@ mod tests {
         write(dir.path(), "writing.rs", "pub fn write() {}\n");
         let agent = Lining::saying(r#"{"line": "A line about one file alone."}"#);
         let hash = crate::hash::file_hash(dir.path().join("reading.rs")).expect("hashes");
-        let recorded = [("reading.rs".to_owned(), hash)].into_iter().collect();
-        let page = page_of(&[("reading.rs", "The line already on the page.")]);
+        let recorded = [("reading.rs".to_owned(), crate::hash::line_hash(&hash, LINE))]
+            .into_iter()
+            .collect();
+        let page = page_of(&[("reading.rs", LINE)]);
         let mut watched = Weighing::default();
 
         assemble_lines(
@@ -4523,8 +4570,20 @@ mod tests {
         subtree_hash(from_manifest_path(repo, module)).expect("the subtree hashes")
     }
 
+    // Read back off the written document rather than passed in: what a
+    // `[pact.lines]` entry records is the file and the line together, so the
+    // expected value cannot be derived from the source alone.
     fn line_of(repo: &Path, module: &str, file: &str) -> String {
-        crate::hash::file_hash(repo.join(module).join(file)).expect("the fixture is readable")
+        let directory = repo.join(module);
+        let page = String::from_utf8(written(&directory).expect("a document")).expect("utf-8");
+        let line = document::lines_of(&page)
+            .remove(file)
+            .unwrap_or_else(|| panic!("`{file}` has a line on `{module}`'s page"));
+
+        crate::hash::line_hash(
+            &crate::hash::file_hash(directory.join(file)).expect("the fixture is readable"),
+            &line,
+        )
     }
 
     fn carry_of(repo: &Path, module: &str) -> String {
