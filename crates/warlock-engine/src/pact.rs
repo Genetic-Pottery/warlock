@@ -2247,6 +2247,56 @@ mod tests {
     }
 
     #[test]
+    fn a_line_for_a_file_that_is_gone_is_left_off_the_page() {
+        // The page outlives the directory, so a deleted file's line is still
+        // sitting in it with a hash still recorded against it. Assembly walks
+        // the snapshot and not the page, which is what keeps a document from
+        // describing a file that is not there — and the whole point of a map is
+        // that everything on it can be opened.
+        let dir = one_file_directory();
+        let agent = Lining::saying(r#"{"line": "A line about the file that is left."}"#);
+        let hash = crate::hash::file_hash(dir.path().join("reading.rs")).expect("hashes");
+        let gone = "writing.rs";
+        let recorded = [
+            (
+                "reading.rs".to_owned(),
+                crate::hash::line_hash(&hash, "The line already on the page."),
+            ),
+            (
+                gone.to_owned(),
+                "a hash for a file nobody deleted it with".to_owned(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let page = page_of(&[
+            ("reading.rs", "The line already on the page."),
+            (gone, "A line about a file that has since been deleted."),
+        ]);
+
+        let assembled = assemble_lines(
+            &taken(dir.path()),
+            Some((&page, &recorded)),
+            &agent,
+            &mut Unwatched,
+        )
+        .expect("lines");
+
+        assert_eq!(agent.passes.get(), 0, "the file that is left was reused");
+        assert_eq!(assembled.kept, ["reading.rs"]);
+        assert!(
+            !assembled.lines.contains_key(gone),
+            "the deleted file's line is gone from the page: {:?}",
+            assembled.lines,
+        );
+        assert!(
+            !assembled.hashes.contains_key(gone),
+            "and its hash is gone from the manifest with it: {:?}",
+            assembled.hashes,
+        );
+    }
+
+    #[test]
     fn a_file_warlock_had_to_write_itself_is_named_as_such() {
         let dir = one_file_directory();
         let agent = Lining::saying("prose where an object was asked for");
