@@ -28,34 +28,6 @@ pub(crate) struct Language {
     declarations: &'static [&'static str],
 }
 
-const TEST_DIRECTORY: &str = "tests";
-
-// A file's name is not always what says it is a test. Rust names them for what
-// they test — `pact.rs` beside `pact.rs` — and carries the fact in the
-// directory instead, which is also where Python and JavaScript put theirs. So
-// the directory is asked as well as the name, and a file sitting directly in
-// one called `tests` is a test file whatever it is called.
-//
-// This matters more than it looks. Rust sets no `test_suffixes` and no
-// `test_prefixes`, because until a test module was split out under `#[path]`
-// there was never a Rust file that was only tests — they lived inside the file
-// they tested and `elide` dropped them by their `#[cfg(test)]` block. Split
-// out, the block is gone and the name says nothing, so without this every one
-// of them would be sent whole.
-fn is_test_path(language: &Language, path: &Path) -> bool {
-    let named = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| language.is_test_file(name));
-
-    named
-        || path
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == TEST_DIRECTORY)
-}
-
 impl Language {
     fn is_test_file(&self, name: &str) -> bool {
         self.test_suffixes
@@ -157,15 +129,13 @@ static TABLE: &[Language] = &[
     // extension no row claimed, so the file was sent whole and 641 of its
     // neighbours with it.
     //
-    // Recognising a test file by the directory holding it was once refused
-    // here, on the grounds that there was no repository to check such a rule
-    // against. There is one now — warlock's own test modules sit in
-    // `src/tests/`, named for what they test rather than for being tests — so
-    // `is_test_path` asks the parent directory as well as the name.
-    //
-    // It matches `tests` and nothing else. Jest's `__tests__/thing.ts` is still
-    // sent whole, which remains the safe direction, and the row to add when a
-    // repository turns up to check it against.
+    // Known limitation, deliberately not fixed here: a test file recognised
+    // only by the directory holding it (`__tests__/thing.ts`, the Jest
+    // convention) is not matched, because the table asks about names and this
+    // is a question about paths. Adding a directory rule with no repository
+    // here to check it against would be exactly the untested mechanism the
+    // module docs argue against; the cost of missing it is a file sent whole,
+    // which is the safe direction.
     Language {
         extensions: &["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"],
         test_suffixes: &[
@@ -311,7 +281,11 @@ pub(crate) fn declared_names(path: &Path, text: &str) -> Vec<String> {
     };
     // A test file declares tests, and a test's name is a sentence about the
     // code under test rather than a name anyone will look up in this file.
-    if is_test_path(language, path) {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| language.is_test_file(name))
+    {
         return Vec::new();
     }
     let lines: Vec<&str> = text.lines().collect();
@@ -452,13 +426,10 @@ pub(crate) struct Elided {
 
 pub(crate) fn elide(path: &Path, text: &str) -> Option<Elided> {
     let language = language_of(path)?;
-    // The guard rather than the value, which `is_test_path` now reads for
-    // itself: a path with no file name, or one that is not UTF-8, is left whole
-    // rather than elided. Deleting this as dead code changes that.
-    path.file_name()?.to_str()?;
+    let name = path.file_name()?.to_str()?;
 
     let lines: Vec<&str> = text.lines().collect();
-    let kept = if is_test_path(language, path) {
+    let kept = if language.is_test_file(name) {
         keep_declarations(language, &lines, 0, lines.len())
     } else {
         keep_outside_blocks(language, &lines)?
