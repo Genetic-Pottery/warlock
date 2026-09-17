@@ -794,10 +794,19 @@ pub fn closed_scopes_at_or_below<'manifest>(
     Ok(blocking)
 }
 
-// A pass is never shown the directory's previous document: it is the last
-// pass's claim rather than evidence, and a pass that had it carried its
-// sentences forward whether or not the files still supported them. So the
+// This entry point is never shown the directory's previous document — it hands
+// `None` down as `carried` — so every file is described from source and the
 // document is written over without being read first.
+//
+// That is this function, and not the system. `describe_and_grant` reads the
+// page off disk and passes it down whenever `AboveFailure::Skip` is in force,
+// which is what a refresh runs under: there a line is reused wherever the
+// source file's hash has not moved, and nothing checks that the line on the
+// page is one a pass wrote. A document edited by hand therefore keeps the edit
+// through a refresh and loses it to a pact. `assemble_lines` is where that is
+// decided, and
+// `a_hand_edited_line_stands_through_a_refresh_and_falls_to_a_pact` is the test
+// that pins both directions.
 //
 // Nothing is recorded either — no entry, no hash, no grant. Deciding what the
 // manifest should then say needs the rest of the subtree and is the caller's.
@@ -2099,6 +2108,98 @@ mod tests {
         assert_eq!(
             assembled.hashes["reading.rs"], hash,
             "recorded again as it stands"
+        );
+    }
+
+    // Whether a hand-edited line survives a refresh is the difference between a
+    // document warlock derived and one somebody typed and then had granted as
+    // though warlock had. Both directions below are asserted, because the two
+    // entry points genuinely differ: `pact_subtree` passes
+    // `AboveFailure::Describe`, which is what the reuse filter tests for, so a
+    // pact re-describes every file and the edit is overwritten. A refresh
+    // passes `Skip`, reuse is live, and the edit stands wherever its source
+    // file has not moved.
+    #[test]
+    fn a_hand_edited_line_stands_through_a_refresh_and_falls_to_a_pact() {
+        const LIE: &str = "maintained by a unicorn that files its own taxes";
+
+        fn tamper(src: &Path) {
+            let page = String::from_utf8(written(src).expect("a document")).expect("utf-8");
+            let edited: Vec<String> = page
+                .lines()
+                .map(|line| match line.split_once(" — ") {
+                    Some((head, _)) if head.starts_with("- `lib.rs`") => {
+                        format!("{head} — {LIE}")
+                    }
+                    _ => line.to_owned(),
+                })
+                .collect();
+            let edited = edited.join("\n") + "\n";
+            assert!(edited.contains(LIE), "the planted line went in: {edited}");
+            fs::write(src.join("WARLOCK.md"), edited).expect("writes the edited document");
+        }
+
+        let repo = project();
+        let src = repo.path().join("crates/engine/src");
+
+        let PactedSubtree {
+            manifest, failures, ..
+        } = pact_subtree(
+            &src,
+            repo.path(),
+            &Manifest::new(),
+            &Canned::filling(),
+            &mut Unwatched,
+        )
+        .expect("pacts");
+        assert!(failures.is_empty(), "{failures:?}");
+
+        tamper(&src);
+
+        let PactedSubtree {
+            manifest: refreshed,
+            failures,
+            ..
+        } = refresh_subtree(
+            &src,
+            repo.path(),
+            &manifest,
+            &Canned::filling(),
+            &mut Unwatched,
+        )
+        .expect("refreshes");
+        assert!(failures.is_empty(), "{failures:?}");
+
+        let after_refresh = String::from_utf8(written(&src).expect("a document")).expect("utf-8");
+        assert!(
+            after_refresh.contains(LIE),
+            "a refresh reuses the line on the page wherever the source file has \
+             not moved, and it never checks that the line is one a pass wrote: \
+             {after_refresh}",
+        );
+        assert_eq!(
+            state(&refreshed, repo.path(), "crates/engine/src"),
+            NodeState::PactedFresh,
+            "and the directory is granted fresh with the planted line in it",
+        );
+
+        tamper(&src);
+
+        let PactedSubtree { failures, .. } = pact_subtree(
+            &src,
+            repo.path(),
+            &refreshed,
+            &Canned::filling(),
+            &mut Unwatched,
+        )
+        .expect("pacts again");
+        assert!(failures.is_empty(), "{failures:?}");
+
+        let after_pact = String::from_utf8(written(&src).expect("a document")).expect("utf-8");
+        assert!(
+            !after_pact.contains(LIE),
+            "a pact reuses nothing, so the planted line is written over: \
+             {after_pact}",
         );
     }
 
