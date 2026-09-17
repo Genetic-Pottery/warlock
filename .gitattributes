@@ -1,0 +1,14 @@
+# A grant records a digest of raw file bytes (`hash.rs`), and the promise is
+# that two clones of one commit agree on it. Git's default `core.autocrlf` on
+# Windows rewrites LF to CRLF on checkout, which changes every byte count and
+# every digest in `.warlock/pacts.toml` — the whole tree would read stale on a
+# Windows clone, permanently, and each pass would re-grant a hash that is then
+# stale for everyone else.
+#
+# So line endings are normalised to LF on commit and never converted on
+# checkout, on every platform. `text=auto` leaves files git detects as binary
+# alone; the two below say so outright rather than relying on that detection.
+* text=auto eol=lf
+
+*.png binary
+*.bin binary
