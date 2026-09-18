@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    DIGEST_CHARACTERS, Error, MAXIMUM_NAME_CHARACTERS, SIGIL_FILE, load_sigils, project_directory,
-    save_sigils, sigils_path,
+    DIGEST_CHARACTERS, Error, MAXIMUM_NAME_CHARACTERS, SIGIL_FILE, load_key_binding, load_sigils,
+    project_directory, save_key_binding, save_sigils, sigils_path,
 };
 
 fn a_dir() -> tempfile::TempDir {
@@ -292,6 +292,130 @@ fn sigils_are_stored_and_read_back_exactly_as_written() {
 }
 
 #[test]
+fn a_config_written_before_bindings_existed_reads_as_unbound() {
+    let (home, elsewhere) = (a_dir(), a_dir());
+    let root = named(elsewhere.path(), "warlock");
+
+    hand_write(home.path(), &root, "sigils = [\"billing\", \"web\"]\n");
+    assert_eq!(
+        load_sigils(home.path(), &root).expect("loads"),
+        ["billing", "web"],
+        "the field is optional, so yesterday's file is still today's file"
+    );
+    assert_eq!(
+        load_key_binding(home.path(), &root).expect("loads"),
+        None,
+        "no binding, rather than a default one"
+    );
+
+    // And unbound stays distinguishable from never configured.
+    let never = named(elsewhere.path(), "other");
+    assert!(matches!(
+        load_key_binding(home.path(), &never),
+        Err(Error::NotFound { .. })
+    ));
+}
+
+#[test]
+fn a_config_that_names_a_key_still_gives_its_sigils_back() {
+    let (home, elsewhere) = (a_dir(), a_dir());
+    let root = named(elsewhere.path(), "warlock");
+    hand_write(
+        home.path(),
+        &root,
+        "sigils = [\"billing\", \"web\"]\nkey = \"work\"\n",
+    );
+
+    assert_eq!(
+        load_sigils(home.path(), &root).expect("loads"),
+        ["billing", "web"]
+    );
+    assert_eq!(
+        load_key_binding(home.path(), &root).expect("loads"),
+        Some("work".to_owned())
+    );
+}
+
+#[test]
+fn a_binding_and_a_set_of_sigils_do_not_overwrite_each_other() {
+    let (home, elsewhere) = (a_dir(), a_dir());
+    let root = named(elsewhere.path(), "warlock");
+
+    save_sigils(home.path(), &root, &owned(&["billing", "web"])).expect("saves");
+    save_key_binding(home.path(), &root, "work").expect("binds");
+    assert_eq!(
+        load_sigils(home.path(), &root).expect("loads"),
+        ["billing", "web"],
+        "binding a key is not a way to lose the sigils already held"
+    );
+    assert_eq!(
+        fs::read_to_string(sigils_path(home.path(), &root)).expect("reads"),
+        "sigils = [\"billing\", \"web\"]\nkey = \"work\"\n",
+    );
+
+    save_sigils(home.path(), &root, &owned(&["data-plane"])).expect("saves again");
+    assert_eq!(
+        load_key_binding(home.path(), &root).expect("loads"),
+        Some("work".to_owned()),
+        "and changing the sigils is not a way to lose the binding"
+    );
+
+    // A rebinding replaces the name rather than accumulating names or files.
+    save_key_binding(home.path(), &root, "personal").expect("rebinds");
+    assert_eq!(
+        load_key_binding(home.path(), &root).expect("loads"),
+        Some("personal".to_owned())
+    );
+    assert_eq!(project_dir_listing(home.path(), &root), [SIGIL_FILE]);
+}
+
+#[test]
+fn binding_the_first_key_for_a_checkout_needs_no_config_to_already_exist() {
+    let (home, elsewhere) = (a_dir(), a_dir());
+    let root = named(elsewhere.path(), "warlock");
+
+    save_key_binding(home.path(), &root, "work").expect("binds");
+    assert_eq!(
+        load_key_binding(home.path(), &root).expect("loads"),
+        Some("work".to_owned())
+    );
+    assert_eq!(
+        load_sigils(home.path(), &root).expect("loads"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_key_name_that_is_not_a_name_is_refused_and_nothing_is_written() {
+    let (home, elsewhere) = (a_dir(), a_dir());
+    let root = named(elsewhere.path(), "warlock");
+    save_sigils(home.path(), &root, &owned(&["web"])).expect("saves");
+    let before = fs::read_to_string(sigils_path(home.path(), &root)).expect("reads");
+
+    for name in ["", "Work", "-work", "work-", "work key", &"w".repeat(25)] {
+        match save_key_binding(home.path(), &root, name) {
+            Err(Error::Name {
+                name: refused,
+                rule,
+            }) => {
+                assert_eq!(refused, name);
+                assert!(
+                    !rule.to_string().is_empty(),
+                    "the refusal names the rule broken"
+                );
+            }
+            other => panic!("expected `{name}` to be refused, got {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        fs::read_to_string(sigils_path(home.path(), &root)).expect("reads"),
+        before,
+        "a refused name never reaches the file"
+    );
+}
+
+#[test]
 fn every_error_variant_says_what_happened_and_where() {
     let not_found = Error::NotFound {
         path: PathBuf::from("/home/someone/.warlock/warlock-abc/config.toml"),
@@ -319,6 +443,16 @@ fn every_error_variant_says_what_happened_and_where() {
             "malformed sigil config at `/home/someone/.warlock/warlock-abc/config.toml`: "
         ),
         "{syntax}"
+    );
+
+    let name = Error::Name {
+        name: "Work".to_owned(),
+        rule: crate::scope::validate_scope("Work").expect_err("a capital is not a scope character"),
+    };
+    assert_eq!(
+        name.to_string(),
+        "`Work` is not a key name: a scope holds only lowercase letters, \
+         digits, `-` and `_`, and this one holds `W`"
     );
 }
 
