@@ -1,36 +1,57 @@
 # Engine work: stop sending the pass prose it will repeat as fact
 
-Work plan for a fresh agent. Starting point is this file's commit on `main`.
+Work plan. Starting point is this file's commit on `main`.
 
-Read `../warlock-test-repo/HANDOFF.md` first. `check.sh` there is the
-specification and this engine is what has to fit it; the two documents are meant
-to be worked in that order.
+Read `../warlock-test-repo/HANDOFF.md` alongside it. That one used to be the
+specification this engine had to fit; it has been cut down, because most of what
+it asked for was work on the harness rather than on warlock.
 
-Everything below was measured on 2026-09-18 against real passes over the
-fixture. Where a number appears, it was counted, not estimated.
+Everything below with a number attached was measured on 2026-09-18 against real
+passes over the fixture. Where a number appears, it was counted.
+
+## The plan, in order
+
+1. **Verify and merge `a-comment-is-not-a-declaration`.** The comment change is
+   already built. It does not need rewriting.
+2. **Build the head sample**, so a file too big to send whole is still
+   described. This is the only capability warlock is actually missing.
+3. **Cut the fixture's section 4** and the planted lies it existed to catch, and
+   strengthen its section 2 once step 2 can satisfy it.
+
+Steps 1 and 2 are the feature work. Step 3 is cleanup and takes about an hour.
+Nothing else in either document is being done — see "Considered and dropped".
 
 ## Decisions already made — do not reopen these
 
 - **Comments do not reach a pass.** Settled. Do not re-argue it, and do not
   build a check that polices comment-derived claims in the output instead.
 - **A file too big to send whole is still described**, not just named and
-  sized. See "Describing a file too big to send" below.
-- **There is a working implementation of the comment change** on the
-  `a-comment-is-not-a-declaration` branch (4 commits, unmerged, 1,850 tests
-  passing, clippy and fmt clean). Read it before writing your own — it is where
-  every measurement in this file came from. It is not necessarily right, and
-  one thing in it is known to be wasted work: it grew a comment-form table
-  covering C, Terraform, SQL, Lua and a dozen more, built to close a channel
-  that this change closes completely anyway. That breadth costs nothing but is
-  not why the table should exist.
+  sized.
 
 ---
 
-## The change
+## Step 1 — merge the comment branch
+
+`a-comment-is-not-a-declaration`, 6 commits, unmerged. It is where every
+measurement in this file came from.
+
+What has been checked so far is placement, not the suite: the per-file name
+check sits in `document::accept_file`, which is the correct home for it (see
+"The trap" below), and the reasoning is recorded in the code. Before merging,
+run `cargo test`, `cargo clippy` and `cargo fmt --all --check` and read the
+diff. The branch claims 1,850 tests passing and clean lints; confirm rather
+than inherit that claim.
+
+One thing in it is known to be wasted work, and is being kept anyway: it grew a
+comment-form table covering C, Terraform, SQL, Lua and a dozen more, built to
+close a channel this change closes completely. The breadth costs nothing but is
+not why the table should exist.
+
+### What the change is
 
 **A pass is shown the file's code. Comments never reach it.**
 
-Today every byte of a file goes to the pass, comments included. That is the
+Before it, every byte of a file went to the pass, comments included. That is the
 input side of a defect that cannot be fixed on the output side, and the whole
 justification is this loop:
 
@@ -53,26 +74,20 @@ Observed, in a single run, both escapes:
 
 There is no bottom to that well, because what is wrong is the input.
 
-### Where to make it
+### Where it is made
 
 `fitting::elided_or_whole` is the **single funnel** every byte of file text
-passes through on its way to a pass. Confirm that before relying on it:
-
-```bash
-grep -rn "elided_or_whole\|File::present" crates/warlock-engine/src/*.rs
-```
-
-Strip there, before the elision, and send the stripped text even when `elide`
-finds nothing to drop — otherwise a file with comments but no test module is
-sent whole.
+passes through on its way to a pass. Stripping happens there, before the
+elision, and the stripped text is sent even when `elide` finds nothing to drop —
+otherwise a file with comments but no test module goes whole.
 
 `fitting::describe` builds `Described.tokens` from the file's text read off
-disk, not from the request, so it needs the same stripping or a comment goes on
-witnessing its own claim in the evidence even after it stops reaching the pass.
+disk, not from the request, so it is stripped too; otherwise a comment goes on
+witnessing its own claim in the evidence after it stops reaching the pass.
 
 ### The comment table
 
-Comment form belongs in its own extension-keyed table, **not** as a field on
+Comment form lives in its own extension-keyed table, **not** as a field on
 `languages::Language`. The two tables answer questions of different difficulty:
 where a language writes prose is settled by its grammar and can be looked up,
 while what a line must start with to be a declaration is a guess that wants a
@@ -91,19 +106,19 @@ Two rows encode a decision rather than a lookup, and both are traps:
   Adding `%` would eat every `@"%d"` format string. Slashes cost MATLAB
   nothing, since `//` is not code there either.
 
-An extension no row claims must be left completely alone — sent whole, comments
-and all. That is the same conservatism as the rest of the module: a row that is
+An extension no row claims is left completely alone — sent whole, comments and
+all. That is the same conservatism as the rest of the module: a row that is
 absent cannot be wrong about a language.
 
-Two guardrail tests are worth writing, because nothing in the type system ties
+Two guardrail tests earn their place, because nothing in the type system ties
 the tables together: every row in the language table must have a comment form,
 and no extension may be claimed by two comment rows.
 
 ### Doctests go too
 
-Strip `///` and `//!` like any other comment. A carve-out to keep the fenced
-examples was built and then thrown away on the right question: does it help the
-reader?
+`///` and `//!` are stripped like any other comment. A carve-out to keep the
+fenced examples was built and then thrown away on the right question: does it
+help the reader?
 
 It does not. A doctest is a usage example. The output is a ~280-character
 routing line naming the types and functions a reader would come to the file
@@ -139,28 +154,27 @@ codec.c     in : "…encode() stamping LEDGER_VERSION and dropping frames past V
 
 Shorter, carries the real signature, and true. Lines got better, not worse.
 
-Update `document::FILE_PROMPT`, which currently tells the pass it is given "the
-file's name and size, and its text with function bodies elided". It is now
-given code with comments removed.
+`document::FILE_PROMPT` is updated with it — it previously told the pass it was
+given "the file's name and size, and its text with function bodies elided".
 
 ### One channel stays open
 
 `walk::own` keeps `.md` out of the file list, so no README and no previous
 document reaches a pass — but it still collects `child_documents`, and every
 child directory's `WARLOCK.md` goes to the parent's synthesis pass. That is
-prose written by an earlier pass reaching a later one. Low risk, since a
-child's lines are checked against that child's code, but it is second-order
-drift rather than nothing. Not acted on. Do not claim in a commit message that
-no prose reaches a pass.
+prose written by an earlier pass reaching a later one. Low risk, since a child's
+lines are checked against that child's code, but it is second-order drift rather
+than nothing. Not acted on, and not planned. Do not claim in a commit message
+that no prose reaches a pass, and do not let the fixture cleanup in step 3 be
+written up as though this were closed.
 
 ---
 
-## Describing a file too big to send
+## Step 2 — describing a file too big to send
 
 `data/inventory.json` is 1,755,356 bytes and its line reads *"contents not
 loaded, structure and fields unknown"*, which routes nowhere. It should say what
-the file holds. `../warlock-test-repo/check.sh` asserts this and will be failing
-until it does.
+the file holds.
 
 **The cap is not the problem, and raising it is not the fix.**
 
@@ -187,15 +201,15 @@ So the change in `fitting::one_file` is to stop returning
 head marked as truncated, so the pass knows it is describing a sample and not a
 whole file. A sample cap wants to be much smaller than the send cap — the shape
 of a record-per-line file is in its first few KB — and unlike
-`PER_FILE_BYTE_CAP`, that number should carry a comment saying what it was
-chosen against.
+`PER_FILE_BYTE_CAP`, that number carries a comment saying what it was chosen
+against.
 
-What was there before and should **not** come back: a chunked map-reduce over
-the whole file with a disk cache under `.warlock/summaries/`. That was removed
-with the budget ladder and `fitting.rs` still argues for its removal. It is a
-model pass per chunk to learn what 2 KB already says.
+What was there before and must **not** come back: a chunked map-reduce over the
+whole file with a disk cache under `.warlock/summaries/`. That was removed with
+the budget ladder and `fitting.rs` still argues for its removal. It is a model
+pass per chunk to learn what 2 KB already says.
 
-## The trap to avoid while doing it
+### The trap in the middle of it
 
 **Do not put a per-file line check in `document::check`.** It will not run.
 
@@ -214,13 +228,13 @@ something else. This exact mistake was made, shipped with a commit message
 claiming it worked, and its tests passed the whole time because they built a
 `Fill` by hand and called `check` directly.
 
-**The check belongs in `document::accept_file`**, which is the one place a
-per-file line is ever looked at, and which today checks only the length and the
-tool-name guard. Check the names there, against **that one file's** evidence,
-not the directory's: a line naming a symbol some neighbour declares is spending
-this file's characters routing a reader out of this file. It costs nothing in
-true lines — a file that really calls `ledger::post()` has `post` in its own
-text.
+The branch in step 1 fixes it: **the check lives in `document::accept_file`**,
+the one place a per-file line is ever looked at, checked against **that one
+file's** evidence and not the directory's. A line naming a symbol some neighbour
+declares is spending this file's characters routing a reader out of this file.
+It costs nothing in true lines — a file that really calls `ledger::post()` has
+`post` in its own text. Do not move it back, and do not add a second copy in
+`check`.
 
 Measured: `Decoder::decode()` refused, the pass re-asked, and not one line in
 seventeen directories fell back to warlock's own text.
@@ -240,16 +254,56 @@ Two more things to know before touching `Evidence`:
 
 ---
 
+## Considered and dropped
+
+These were written up as work and are not being done. Recorded so the next
+person does not rediscover them as open.
+
+**Two of the fixture's four sections are work on the harness.** Replacing
+`present` with a word-exact `declares` helper, and reading the pacted directory
+list from `.warlock/pacts.toml` instead of a hardcoded list. Both findings are
+real — five of eleven symbol checks are answered by an English word in prose,
+and `monolith` has never been checked. Neither makes warlock better at its job.
+A session spent making a test suite test itself is a session not spent on the
+two capabilities above. If they are ever done, they are an afternoon, not a
+project.
+
+**`## Structure` restates `## Files` in small directories** and does real work
+in large ones. Verbatim copies, by directory size, across this repository and
+the fixture:
+
+```
+ 1-4 files:  23/29 structure lines are verbatim copies (79%)
+ 5-11 files: 10/11 (90%)
+ 12+ files:   9/36 (25%)
+```
+
+The mechanism: the synthesis pass is handed the file lines, not the code, so
+below about a dozen files there is nothing to join and it restates. Above that
+it produces genuine cross-file wiring — `check.rs, query.rs and running.rs
+implement warlock check/stale/fresh/pact/refresh via boundary.rs and
+descent.rs` — which is the one part of a document grep cannot reproduce.
+
+A floor of "an entry must relate at least two files of the directory" would drop
+the restatements and keep the wiring, and `Entry` already carries `names`. It
+removes noise without adding routing, which is why it is here and not above. Not
+a recommendation — a measurement, so the next person arguing about that section
+argues from numbers.
+
+---
+
 ## Pitfalls that cost real time
 
 **A full `../warlock-test-repo/check.sh` takes about 25 minutes** and costs real
 model spend. `monolith` is 51 files and dominates it. Use `cargo test` as the
-inner loop and the fixture sparingly.
+inner loop and the fixture sparingly — in particular, a stripping regression
+belongs in `cargo test`, not in a 25-minute fixture run.
 
 **`5dba3c6` on the `a-comment-is-not-a-declaration` branch is not rustfmt-clean**
-— `fitting.rs` and `tests/document.rs`. CI runs the fmt gate before the tests,
-so anything built on that branch is red before a test runs. Check
-`cargo fmt --all --check` before assuming a failure is yours.
+— `fitting.rs` and `tests/document.rs`. `4d4a4bc` pays it off, so the branch tip
+is clean and only a build from that one commit is red. CI runs the fmt gate
+before the tests, so check `cargo fmt --all --check` before assuming a failure
+is yours.
 
 **Never edit a script while a pact is reading it.** Bash reads a script
 incrementally by byte offset; inserting lines shifts everything after it and the
@@ -274,29 +328,3 @@ four checks for eleven days.
 
 **Snapshot the fixture's documents before re-running** if you want to compare
 output across two engine versions. A run deletes them all at the start.
-
----
-
-## Measured, not acted on
-
-`## Structure` restates `## Files` in small directories and does real work in
-large ones. Verbatim copies, by directory size, across this repository and the
-fixture:
-
-```
- 1-4 files:  23/29 structure lines are verbatim copies (79%)
- 5-11 files: 10/11 (90%)
- 12+ files:   9/36 (25%)
-```
-
-The mechanism: the synthesis pass is handed the file lines, not the code, so
-below about a dozen files there is nothing to join and it restates. Above that
-it produces genuine cross-file wiring — `check.rs, query.rs and running.rs
-implement warlock check/stale/fresh/pact/refresh via boundary.rs and
-descent.rs` — which is the one part of a document grep cannot reproduce.
-
-A floor of "an entry must relate at least two files of the directory" would drop
-the restatements and keep the wiring, and `Entry` already carries `names`. It
-was **not** done, and it is polish rather than value: it removes noise without
-adding routing. Not a recommendation — a measurement, so the next person
-arguing about that section argues from numbers.
