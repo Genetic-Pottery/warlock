@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use warlock_engine::{claude_md, manifest, scope, sigils};
 
@@ -59,28 +59,35 @@ fn further_problems_are_counted_rather_than_listed() {
     assert_eq!(error.to_string(), format!("{PROBLEM} (and 3 more like it)"));
 }
 
+// The assertion both lists below are held to, in one place so that neither can
+// drift into testing something weaker than the other.
+fn each_prints_as_one_line(errors: impl IntoIterator<Item = Error>) {
+    for error in errors {
+        let message = error.to_string();
+        assert!(!message.contains('\n'), "{error:?} wrapped: {message}");
+        assert!(!message.is_empty(), "{error:?} said nothing");
+    }
+}
+
+// Split from the list below rather than kept as one, because one array of every
+// variant had outgrown being readable in a screen. The line is where a variant
+// gets its words: these quote something raised outside this crate — an
+// `io::Error`, an engine error, a rule, another library — so the flattening is
+// what keeps them on one line.
 #[test]
-fn every_message_is_one_line_so_it_prints_as_one() {
-    let errors = [
+fn every_message_quoting_another_error_is_one_line_so_it_prints_as_one() {
+    each_prints_as_one_line([
         Error::WorkingDirectory {
             source: std::io::Error::other("boom"),
         },
         Error::Terminal {
             source: std::io::Error::other("boom"),
         },
-        Error::Problems {
-            first: PROBLEM.to_owned(),
-            rest: 2,
-        },
         Error::Manifest {
             source: manifest::Error::Io {
                 path: PathBuf::from("/repo/.warlock/pacts.toml"),
                 source: std::io::Error::other("boom"),
             },
-        },
-        Error::NoRepository {
-            start: PathBuf::from("/elsewhere"),
-            wanted: FOR_CLAUDE_MD,
         },
         Error::Unspellable {
             source: manifest::Error::PathOutsideRoot {
@@ -93,10 +100,6 @@ fn every_message_is_one_line_so_it_prints_as_one() {
                 path: PathBuf::from("/repo/odd"),
             },
         },
-        Error::NoRepository {
-            start: PathBuf::from("/elsewhere"),
-            wanted: FOR_SIGILS,
-        },
         Error::ClaudeMd {
             source: claude_md::Error::Write {
                 path: PathBuf::from("/repo/CLAUDE.md"),
@@ -108,7 +111,6 @@ fn every_message_is_one_line_so_it_prints_as_one() {
                 path: PathBuf::from("/repo/CLAUDE.md"),
             },
         },
-        Error::NoHome,
         Error::Prompt {
             source: std::io::Error::other("boom"),
         },
@@ -127,12 +129,59 @@ fn every_message_is_one_line_so_it_prints_as_one() {
                 source: std::io::Error::other("boom"),
             },
         },
-        Error::ClosedScope {
-            path: "crates/engine".to_owned(),
-            scope: "data-plane".to_owned(),
+        Error::KeyName {
+            name: "Acme!".to_owned(),
+            rule: scope::Rule::Character { character: '!' },
+        },
+        // Built through the engine rather than by hand: `keys::Error` is
+        // `#[non_exhaustive]`, so nothing outside that crate can name a variant
+        // in a constructor. A name the store refuses is judged before anything
+        // is opened, so this reaches no filesystem.
+        Error::Keys {
+            source: warlock_engine::save_key(Path::new("/nowhere"), "Acme!", "lin_api_example")
+                .expect_err("a name that is not a scope name is refused"),
         },
         Error::Scope {
             rule: scope::Rule::Empty,
+        },
+        Error::Signal {
+            source: ctrlc::Error::MultipleHandlers,
+        },
+        Error::Clipboard {
+            source: arboard::Error::ClipboardOccupied,
+        },
+    ]);
+}
+
+// The other half: these carry values warlock was handed — a path, a name, a
+// count — and word the whole sentence themselves, so what is held here is that
+// no wording above grew a newline of its own.
+#[test]
+fn every_message_warlock_words_itself_is_one_line_so_it_prints_as_one() {
+    each_prints_as_one_line([
+        Error::Problems {
+            first: PROBLEM.to_owned(),
+            rest: 2,
+        },
+        Error::NoRepository {
+            start: PathBuf::from("/elsewhere"),
+            wanted: FOR_CLAUDE_MD,
+        },
+        Error::NoRepository {
+            start: PathBuf::from("/elsewhere"),
+            wanted: FOR_SIGILS,
+        },
+        Error::NoHome,
+        Error::NoKey {
+            name: "acme".to_owned(),
+        },
+        Error::UnknownKey {
+            name: "acme".to_owned(),
+            wanted: "bind",
+        },
+        Error::ClosedScope {
+            path: "crates/engine".to_owned(),
+            scope: "data-plane".to_owned(),
         },
         Error::NoPact {
             module: "crates/engine".to_owned(),
@@ -146,19 +195,7 @@ fn every_message_is_one_line_so_it_prints_as_one() {
             total: 1,
         },
         Error::Cancelled,
-        Error::Signal {
-            source: ctrlc::Error::MultipleHandlers,
-        },
-        Error::Clipboard {
-            source: arboard::Error::ClipboardOccupied,
-        },
-    ];
-
-    for error in errors {
-        let message = error.to_string();
-        assert!(!message.contains('\n'), "{error:?} wrapped: {message}");
-        assert!(!message.is_empty(), "{error:?} said nothing");
-    }
+    ]);
 }
 
 #[test]
