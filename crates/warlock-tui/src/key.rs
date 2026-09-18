@@ -342,3 +342,7 @@ fn read_line() -> Result<Option<String>, Error> {
         Err(source) => Err(Error::Prompt { source }),
     }
 }
+
+#[cfg(test)]
+#[path = "tests/key.rs"]
+mod tests;
