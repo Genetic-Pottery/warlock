@@ -1779,8 +1779,8 @@ fn a_comment_is_not_a_declaration_but_the_pass_still_reads_it() {
     // nothing else: the request still carries every byte of the file, so a pass
     // still reads the comment and may still say what it claims — attributed.
     let text = *b"//! A gorilla reconciles balances overnight.\npub fn post() {}\n";
-    let request =
-        Request::new("describe", "/repo/engine/core").with_files([File::present("ledger.rs", text)]);
+    let request = Request::new("describe", "/repo/engine/core")
+        .with_files([File::present("ledger.rs", text)]);
     let expected = Expected::of(&request);
 
     let sent = request.files()[0].bytes().expect("the text is sent whole");

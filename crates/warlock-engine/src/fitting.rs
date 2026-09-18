@@ -152,9 +152,10 @@ fn describe(described: &mut Described, path: &Path, name: &str, text: &str) {
         described.declared.insert(name.to_owned(), names);
     }
     let evidence = languages::without_comments(path, text);
-    described
-        .tokens
-        .insert(name.to_owned(), tokens_of(evidence.as_deref().unwrap_or(text)));
+    described.tokens.insert(
+        name.to_owned(),
+        tokens_of(evidence.as_deref().unwrap_or(text)),
+    );
 }
 
 // Read whole rather than capped, and for the same reason the declared list is
