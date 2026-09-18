@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{File, Request};
+use crate::languages;
 
 pub const ENTRY_CHARS: usize = 280;
 
@@ -328,12 +330,31 @@ impl<'a> Evidence<'a> {
             })
     }
 
+    // The same text with each file's comments cut out, which is what a claim's
+    // names are held against. `sent` itself is unchanged and still answers the
+    // tool-naming guard below, where a comment naming warlock is a directory
+    // naming warlock and the guard should stand down for it.
+    fn sent_code(&self) -> impl Iterator<Item = String> + '_ {
+        self.expected.files.iter().filter_map(|(path, (_, shown))| {
+            let Shown::Text(text) = shown else {
+                return None;
+            };
+            Some(
+                languages::without_comments(Path::new(path), text)
+                    .unwrap_or_else(|| (*text).to_owned()),
+            )
+        })
+    }
+
     // A name warlock can find, asked of both witnesses because the request is
     // not always one of them.
     //
     // The request is the better witness where it has the file: containment
     // rather than a declaration on purpose — a claim may name a lint, a
-    // manifest key or a constant that no language table declares.
+    // manifest key or a constant that no language table declares. Containment
+    // over its code and not its comments, though: a comment is the one place a
+    // name can appear with nothing behind it, and an invented mechanism written
+    // in one witnessed its own repetition into a document.
     //
     // `Described` is warlock's own measurement, taken while the request was
     // built and true of the directory whatever the request ended up carrying.
@@ -350,7 +371,7 @@ impl<'a> Evidence<'a> {
                 .flatten()
                 .any(|declared| declared == name)
             || self.described.written_anywhere(name)
-            || self.sent().any(|text| text.contains(name))
+            || self.sent_code().any(|code| code.contains(name))
     }
 
     // Whether the directory itself uses the tool's name, which is what stands
@@ -704,9 +725,9 @@ the file in its own voice: no first person, nothing about this request or \
 about what you were or were not shown, and no guess at what the rest of the \
 directory holds — you have not been shown it.
 
-You are given the file's name and size, and its text with function bodies \
-elided where that was needed to fit. Where the name and the text disagree, the \
-text is right.";
+You are given the file's name and size, and its code with the comments removed \
+and with function bodies elided where that was needed to fit. Describe what the \
+code does. Where the name and the code disagree, the code is right.";
 
 #[must_use]
 pub fn file_instructions(path: &str, rejected: &[Defect]) -> String {
@@ -744,9 +765,41 @@ pub fn accept_file(
 
     let mut defects = Vec::new();
     self::line(&field, line, ENTRY_MINIMUM, ENTRY_CHARS, &mut defects);
-    if !Evidence::new(expected, described).mentions_tool() && names_tool(line) {
-        defects.push(Defect::ToolNamed { field });
+    let evidence = Evidence::new(expected, described);
+    if !evidence.mentions_tool() && names_tool(line) {
+        defects.push(Defect::ToolNamed {
+            field: field.clone(),
+        });
     }
+
+    // The names are checked here, against this one file, because this is the
+    // only place a per-file line is ever looked at. `check` grew a loop over
+    // `fill.files` for this and never ran it: `accept_synthesis` clears that map
+    // before checking and merges the lines back in afterwards, so the loop sees
+    // an empty map on every real pass and fires only from `mend`, which runs
+    // only once an answer has already failed for something else. The comment
+    // above `check` claimed this function did the job; it did not, and
+    // `Decoder::decode()` reached engine/core's document while every test of the
+    // check passed, because those tests build a `Fill` by hand and call `check`
+    // directly.
+    //
+    // One file's evidence and not the directory's, which is the narrower rule
+    // and the right one. A line naming a symbol some neighbour declares is
+    // spending this file's characters routing a reader out of this file, which
+    // is what the line exists not to do. It costs nothing in true lines: a file
+    // that really does call `ledger::post()` has `post` in its own text, so the
+    // name is witnessed and stands. What it refuses is a name with nothing
+    // behind it here — which, once comments stop counting, means a name with
+    // nothing behind it at all.
+    for name in referenced(line) {
+        if !evidence.knows(&name) {
+            defects.push(Defect::UnknownTarget {
+                field: field.clone(),
+                name,
+            });
+        }
+    }
+
     if defects.is_empty() {
         Ok(line.trim().to_owned())
     } else {
@@ -778,10 +831,18 @@ fn parse(answer: &str) -> Result<Fill, Defect> {
     })
 }
 
-// `files` is never looked at here. Every line in it was checked by `accept_file`
-// as it was accepted, and a synthesis request sends no text, so
-// `Expected::asked` is empty and keying the lines against it would report every
-// one of them as a slot nothing asked for.
+// The `files` loop below is reached from `mend` and never from
+// `accept_synthesis`, which clears that map before calling this and merges the
+// lines in afterwards. That is not a hole any more — `accept_file` checks each
+// line's names as it accepts it, against the one file the line is about — but it
+// was one for as long as this comment claimed otherwise, so do not read the loop
+// as the guard on a fresh line. It guards a fill being repaired: lines carried
+// forward off the page, and lines already standing when something else about the
+// answer failed.
+//
+// Keying the lines is a separate matter and still not done here: a synthesis
+// request sends no text, so `Expected::asked` is empty and keying against it
+// would report every line as a slot nothing asked for.
 fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Defect> {
     let mut defects = Vec::new();
     let evidence = Evidence::new(expected, described);
@@ -799,6 +860,23 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
 
     stated("structure", &fill.structure, evidence, &mut defects);
 
+    // The per-file lines went unchecked entirely until this: not their names,
+    // and not even the tool-naming guard below, which `values` still does not
+    // reach. `Decoder::decode()` arrived in one of them.
+    for (path, line) in &fill.files {
+        if !expected.files.contains_key(path.as_str()) {
+            continue;
+        }
+        for name in referenced(line) {
+            if !evidence.knows(&name) {
+                defects.push(Defect::UnknownTarget {
+                    field: format!("files[{path:?}]"),
+                    name,
+                });
+            }
+        }
+    }
+
     // Measured, not hypothetical: told it is filling in "the WARLOCK.md" and
     // that "warlock lays the document out", a pass over a crate that never
     // mentions warlock called it "a toy freshness ledger belonging to
@@ -813,6 +891,60 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
     }
 
     defects
+}
+
+// The references in a prose line that are about code rather than about English.
+// A structure entry carries its own `names` and is checked against those; a
+// files line is bare prose, so what it leans on has to be recognised instead of
+// read off.
+//
+// Two shapes only: a call, and a qualified path whose tail is capitalised.
+// `decode()` and `Decoder::decode` are claims about code; `caps`, `postings` and
+// `balance.rs` are not. A bare noun therefore goes unchecked, which is the cost
+// — a lie written without parentheses is missed. Widening this to every
+// identifier was the alternative and it is worse: `identifiers` puts every
+// English word in the line through `knows`, and a document whose prose reads
+// like prose loses most of its lines.
+fn referenced(line: &str) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut opened: Option<usize> = None;
+    for (index, character) in line.char_indices() {
+        if character.is_alphanumeric() || character == '_' || character == ':' || character == '.' {
+            opened = opened.or(Some(index));
+            continue;
+        }
+        if let Some(from) = opened.take() {
+            note_reference(&line[from..index], character == '(', &mut found);
+        }
+    }
+    if let Some(from) = opened {
+        note_reference(&line[from..], false, &mut found);
+    }
+    found
+}
+
+fn note_reference(chunk: &str, called: bool, found: &mut BTreeSet<String>) {
+    let name = chunk.trim_matches(|c| c == '.' || c == ':');
+    if !name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_')
+    {
+        return;
+    }
+    if called || qualified(name) {
+        found.insert(name.to_owned());
+    }
+}
+
+// `::` always separates, but `.` only counts when what follows it is
+// capitalised. Without that, `e.g` is a claim about an identifier `e` and a
+// `.rs` filename is a claim about a module named after a language.
+fn qualified(name: &str) -> bool {
+    name.contains("::")
+        || name
+            .rsplit_once('.')
+            .is_some_and(|(_, tail)| tail.chars().next().is_some_and(char::is_uppercase))
 }
 
 fn values(fill: &Fill) -> impl Iterator<Item = (String, &str)> {
@@ -954,7 +1086,13 @@ pub fn render(name: &str, fill: &Fill, expected: &Expected<'_>, described: &Desc
                 Shown::NotText => "not text; name and size only",
                 Shown::Unsent => "not read by the pass; name and size only",
             });
-            let _ = write!(text, "- `{path}` ({}) — {entry}", human(*size));
+            let _ = write!(text, "- `{path}` ({})", human(*size));
+            // A sent file whose line was dropped has nothing to say here, and
+            // the `· declares` list below is then the whole entry. Writing the
+            // dash anyway leaves it dangling in front of it.
+            if !entry.is_empty() {
+                let _ = write!(text, " — {entry}");
+            }
             if let Some(names) = described
                 .declared
                 .get(*path)
@@ -1319,6 +1457,7 @@ struct Plan {
     purpose: bool,
     filled_directories: BTreeSet<String>,
     dropped_directories: BTreeSet<String>,
+    filled_files: BTreeSet<String>,
     dropped_structure: BTreeSet<usize>,
     // The lists to cut back to `LIST_CAP`, by the names `check` and `Slot`
     // spell them.
@@ -1360,6 +1499,13 @@ impl Plan {
                 Mended::Supplied,
             ),
             Slot::Directory(key) => (self.dropped_directories.insert(key), Mended::Dropped),
+            // A files line falls to `fallback::file` rather than going: the
+            // document renders one line per file whatever happens, so dropping
+            // the key leaves an entry with nothing after its size, while the
+            // fallback is the name, the size and the symbols `languages.rs`
+            // found — every one of them measured, and none of them the thing
+            // the line was wrong about.
+            Slot::FileLine(path) => (self.filled_files.insert(path), Mended::Supplied),
             // A list entry has no name, size or symbols behind it, and the
             // prompt says an empty list is fine, so there is nothing to fall
             // back to and nothing lost by the gap.
@@ -1393,6 +1539,7 @@ impl Plan {
             ),
             // A list entry is dropped rather than filled, and says so.
             Slot::Entry(index) => (self.dropped_structure.insert(index), Mended::Dropped),
+            Slot::FileLine(path) => (self.filled_files.insert(path), Mended::Supplied),
             Slot::List(_) | Slot::Unknown => (false, Mended::Dropped),
         };
         if recorded {
@@ -1414,6 +1561,7 @@ impl Plan {
             Slot::Entry(index) => {
                 self.dropped_structure.contains(&index) || self.cut_off("structure", index)
             }
+            Slot::FileLine(path) => self.filled_files.contains(&path),
             Slot::List(_) | Slot::Unknown => false,
         }
     }
@@ -1434,6 +1582,10 @@ impl Plan {
         }
         fill.directories
             .retain(|key, _| !self.dropped_directories.contains(key));
+        for path in &self.filled_files {
+            fill.files
+                .insert(path.clone(), fallback::file(path, expected, described));
+        }
 
         // Dropped by the index the defects named, then cut to the cap: both
         // read the same pre-pass list, so they are applied in that order and
@@ -1463,6 +1615,7 @@ fn drop_indexes<T>(list: &mut Vec<T>, dropped: &BTreeSet<usize>) {
 enum Slot {
     Purpose,
     Directory(String),
+    FileLine(String),
     List(&'static str),
     Entry(usize),
     Unknown,
@@ -1487,6 +1640,12 @@ fn slot(field: &str) -> Slot {
             };
             Slot::Directory(key)
         }
+        "files" => {
+            let Ok(key) = serde_json::from_str::<String>(inside) else {
+                return Slot::Unknown;
+            };
+            Slot::FileLine(key)
+        }
         "structure" => {
             let Ok(index) = inside.parse::<usize>() else {
                 return Slot::Unknown;
@@ -1503,6 +1662,7 @@ fn target<'f>(fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
         Slot::Purpose => Some(&mut fill.purpose),
         Slot::Directory(key) => fill.directories.get_mut(&key),
         Slot::Entry(index) => fill.structure.get_mut(index).map(|e| &mut e.line),
+        Slot::FileLine(path) => fill.files.get_mut(&path),
         Slot::List(_) | Slot::Unknown => None,
     }
 }

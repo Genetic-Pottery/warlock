@@ -8,13 +8,40 @@ use crate::{agent, hash, languages, walk};
 
 pub const PER_FILE_BYTE_CAP: u64 = 1024 * 1024;
 
+// Comments come off before anything else, and they come off for the pass and
+// not just for the check.
+//
+// Cutting them out of the evidence only was half a measure, and the half that
+// remained is a loop: the pass reads a comment, believes it, writes the claim
+// into a line, the line is refused, and the pass writes the same claim in a
+// shape no name check can see. `engine/core` did exactly that within one run —
+// refused for `Decoder::decode()`, re-asked, and back came "VAULT_LIMIT = 512
+// applied post-decode", the same invention with the names filed off. There is
+// no narrowing that closes it, because the input was wrong rather than the
+// output.
+//
+// What is lost is real and was weighed: a pass shown a comment sometimes
+// catches one that is wrong about its own code and says so. That clause costs
+// `ENTRY_CHARS` that a document has for routing, and a reader who wants to know
+// why a file exists is a model that will infer it from the code — so what
+// letting comments in reliably buys is somebody's stale prose, presented to the
+// next reader as fact.
+//
+// A file whose comments came off is sent stripped even where `elide` found
+// nothing to drop, which is why the `None` arm no longer returns the original
+// bytes. An extension with no comment form is still sent exactly as it is.
 fn elided_or_whole(path: &Path, relative: String, size: u64, bytes: Vec<u8>) -> agent::File {
     let Ok(text) = str::from_utf8(&bytes) else {
         return agent::File::present(relative, bytes);
     };
-    match languages::elide(path, text) {
+    let stripped = languages::without_comments(path, text);
+    let source = stripped.as_deref().unwrap_or(text);
+    match languages::elide(path, source) {
         Some(elided) => agent::File::elided(relative, size, elided.text),
-        None => agent::File::present(relative, bytes),
+        None => match stripped {
+            Some(stripped) => agent::File::present(relative, stripped.into_bytes()),
+            None => agent::File::present(relative, bytes),
+        },
     }
 }
 
@@ -151,13 +178,29 @@ fn describe(described: &mut Described, path: &Path, name: &str, text: &str) {
     if !names.is_empty() {
         described.declared.insert(name.to_owned(), names);
     }
-    described.tokens.insert(name.to_owned(), tokens_of(text));
+    let evidence = languages::without_comments(path, text);
+    described.tokens.insert(
+        name.to_owned(),
+        tokens_of(evidence.as_deref().unwrap_or(text)),
+    );
 }
 
 // Read whole rather than capped, and for the same reason the declared list is
 // no longer capped: this is evidence and not a rendered line. Nothing here
 // reaches a document or a request — it is compared against, and the comparison
 // is the only thing standing between a true claim and a dropped one.
+//
+// Comments are cut out of that comparison above. A module comment asserting a
+// mechanism its file does not implement put every name in the assertion into
+// this set, which then witnessed the claim that repeated it: `VAULT_LIMIT caps
+// postings validated by Decoder::decode()` reached a document with `Decoder`
+// declared two directories away and no call to it anywhere.
+//
+// The cut has to hold on both sides. `elided_or_whole` keeps comments out of
+// the text a pass is sent, and `describe` keeps them out of this set; putting
+// either one back alone rebuilds the loop the other exists to close — evidence
+// witnessing prose no pass ever read, or a pass reading a claim nothing will
+// witness, which is the shape that sent `Decoder::decode()` round twice.
 fn tokens_of(text: &str) -> BTreeSet<String> {
     document::identifiers(text).map(str::to_owned).collect()
 }

@@ -3,7 +3,7 @@ use std::error::Error as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{Omission, Problem};
+use super::{Omission, Problem, one_file};
 
 use crate::agent;
 fn write(dir: &Path, name: &str, contents: impl AsRef<[u8]>) -> PathBuf {
@@ -287,4 +287,91 @@ fn every_problem_says_what_was_left_out_and_why_on_one_line() {
             .is_some(),
         "and an unreadable file's cause names the io error under it",
     );
+}
+
+#[test]
+fn a_name_only_a_comment_writes_is_not_token_evidence() {
+    // The arm a synthesis pass leans on. `Described` is measured here and
+    // answers for a directory whose files were never sent, so a comment
+    // counting as evidence in this map is a lie witnessing itself in every
+    // document too big to send whole.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    write(
+        dir.path(),
+        "balance.rs",
+        "//! Every Posting is validated by Decoder::decode().\n\
+         \n\
+         pub const VAULT_LIMIT: usize = 512;\n\
+         pub fn is_settled(open: usize) -> bool {\n\
+             open == 0\n\
+         }\n",
+    );
+
+    let snapshot = super::Snapshot::take(dir.path()).expect("reads the directory");
+    let described = &snapshot.described;
+
+    assert!(
+        described.written_anywhere("is_settled"),
+        "code is evidence for a claim"
+    );
+    assert!(
+        described.written_anywhere("VAULT_LIMIT"),
+        "so is a constant the table declares"
+    );
+    assert!(
+        !described.written_anywhere("Decoder"),
+        "a comment is not evidence"
+    );
+    assert!(
+        !described.written_anywhere("Posting"),
+        "nor is the rest of the same sentence"
+    );
+}
+
+#[test]
+fn a_pass_is_shown_the_code_and_not_the_comments() {
+    // The root of the loop this closes, asserted at the one funnel every byte
+    // of text passes through on its way to a pass. Cutting comments out of the
+    // evidence alone left the pass reading the lie and rewording it until no
+    // check could see it; there is nothing to reword if it was never sent.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    write(
+        dir.path(),
+        "balance.rs",
+        "//! Every Posting is validated by Decoder::decode().\n\
+         \n\
+         /* A gorilla reconciles overnight. */\n\
+         pub const VAULT_LIMIT: usize = 512;\n\
+         pub fn is_settled(open: usize) -> bool {\n\
+             open == 0 // counts the open ones\n\
+         }\n",
+    );
+    // No comment form for `.wat`, so it is sent exactly as it is. A language
+    // nobody has described is left alone here as everywhere else.
+    write(dir.path(), "raw.wat", ";; a griffin wrote this\n(module)\n");
+
+    let shown = |name: &str| {
+        let (request, ..) =
+            one_file(crate::document::FILE_PROMPT, dir.path(), name).expect("reads the file");
+        let file = &request.files()[0];
+        file.bytes()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .or_else(|| file.kept().map(str::to_owned))
+            .expect("the file is sent")
+    };
+
+    let rust = shown("balance.rs");
+    for gone in ["Posting", "Decoder", "gorilla", "counts the open ones"] {
+        assert!(!rust.contains(gone), "{gone} reached the pass: {rust}");
+    }
+    for stands in ["VAULT_LIMIT", "is_settled", "open == 0"] {
+        assert!(rust.contains(stands), "{stands} was lost: {rust}");
+    }
+    assert!(
+        !rust.contains("\n\n\n"),
+        "an emptied line is dropped rather than left blank: {rust:?}"
+    );
+
+    let wat = shown("raw.wat");
+    assert!(wat.contains("griffin"), "left entirely alone: {wat}");
 }

@@ -19,6 +19,32 @@ pub(crate) struct Block {
     closer: &'static str,
 }
 
+// Where a language writes prose instead of code. Only [`without_comments`] reads
+// these, and only to decide what counts as evidence for a claim — never to
+// change a byte that reaches a document, a request or a hash.
+//
+// The module docs above refuse to lex for `elide`, because over-stripping there
+// silently deletes real code. The direction of harm reverses here: a comment
+// left standing is evidence for a claim the code does not support, which is the
+// defect this exists to close, while a string literal mistaken for a comment
+// costs one true claim its witness and `mend` drops the line. So this strips
+// bluntly and on purpose, and `//` inside a URL is a cost already paid for.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Comments {
+    line: &'static [&'static str],
+    block: &'static [(&'static str, &'static str)],
+}
+
+const SLASHES: Comments = Comments {
+    line: &["//"],
+    block: &[("/*", "*/")],
+};
+
+const HASH: Comments = Comments {
+    line: &["#"],
+    block: &[],
+};
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Language {
     extensions: &'static [&'static str],
@@ -220,6 +246,128 @@ static TABLE: &[Language] = &[
     },
 ];
 
+// Keyed by extension and not by row in `TABLE`, because the two tables answer
+// questions of different difficulty. Where a language writes prose is settled by
+// its grammar and can be looked up; what a line has to start with to be a
+// declaration, and which filenames hold tests, are guesses that want a real
+// repository to check them against. Carrying the comment form on `Language`
+// priced the first question at the second: covering C's comments meant inventing
+// C's declaration prefixes and test-suffix conventions with nothing here to
+// falsify them, so the eight rows above were the whole of the coverage and a
+// lying comment in every other language still witnessed its own claim.
+//
+// An extension neither table claims is still left alone, and a row here still
+// buys only one thing: the file's comments stop counting as evidence. It changes
+// no byte sent to a pass, no hash, and nothing `elide` or `declared_names` does.
+static COMMENTS: &[(&[&str], Comments)] = &[
+    // `.m` is Objective-C here and not MATLAB, which shares the extension and
+    // writes `%`. Adding `%` to serve MATLAB would cut every Objective-C format
+    // string — `@"%d items"` — off at the specifier, which is real code taken
+    // for prose and the one direction this must not be wrong in. Slashes cost
+    // MATLAB nothing, because `//` is not code there either.
+    (
+        &[
+            "rs", "zig", "go", "ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs", "java", "kt",
+            "kts", "cs", "swift", "c", "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "cu", "cuh",
+            "m", "mm", "scala", "dart", "groovy", "gradle", "proto", "glsl", "wgsl",
+        ],
+        SLASHES,
+    ),
+    (
+        &[
+            "sh", "bash", "zsh", "ksh", "yaml", "yml", "toml", "mk", "cmake", "pl", "pm", "r",
+            "tcl", "awk",
+        ],
+        HASH,
+    ),
+    // Both line forms are legal HCL, and Terraform's own documentation writes
+    // `#` while every generator writes `//`.
+    (
+        &["tf", "tfvars", "hcl", "nix", "php"],
+        Comments {
+            line: &["#", "//"],
+            block: &[("/*", "*/")],
+        },
+    ),
+    (
+        &["py"],
+        Comments {
+            line: &["#"],
+            block: &[("\"\"\"", "\"\"\""), ("'''", "'''")],
+        },
+    ),
+    (
+        &["rb"],
+        Comments {
+            line: &["#"],
+            block: &[("=begin", "=end")],
+        },
+    ),
+    (
+        &["ex", "exs"],
+        Comments {
+            line: &["#"],
+            block: &[("\"\"\"", "\"\"\"")],
+        },
+    ),
+    (
+        &["jl"],
+        Comments {
+            line: &["#"],
+            block: &[("#=", "=#")],
+        },
+    ),
+    (
+        &["sql"],
+        Comments {
+            line: &["--"],
+            block: &[("/*", "*/")],
+        },
+    ),
+    (
+        &["lua"],
+        Comments {
+            line: &["--"],
+            block: &[("--[[", "]]")],
+        },
+    ),
+    (
+        &["hs", "elm", "purs"],
+        Comments {
+            line: &["--"],
+            block: &[("{-", "-}")],
+        },
+    ),
+    (
+        &[
+            "clj", "cljs", "cljc", "edn", "el", "lisp", "scm", "ss", "rkt",
+        ],
+        Comments {
+            line: &[";"],
+            block: &[],
+        },
+    ),
+    (
+        &["html", "htm", "xml", "xhtml", "svg", "xsl"],
+        Comments {
+            line: &[],
+            block: &[("<!--", "-->")],
+        },
+    ),
+    // Block only for `.css`: `//` is not a comment there, and stripping from it
+    // would cut `url(https://…)` off at the scheme — a declaration taken for
+    // prose, which is the one direction this is not allowed to be wrong in. The
+    // preprocessor dialects do have it.
+    (
+        &["css"],
+        Comments {
+            line: &[],
+            block: &[("/*", "*/")],
+        },
+    ),
+    (&["scss", "sass", "less"], SLASHES),
+];
+
 const VISIBILITY: &[&str] = &[
     "pub",
     "pub(crate)",
@@ -416,6 +564,88 @@ fn language_of(path: &Path) -> Option<&'static Language> {
     TABLE
         .iter()
         .find(|language| language.extensions.contains(&extension.as_str()))
+}
+
+fn comments_of(path: &Path) -> Option<&'static Comments> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    COMMENTS
+        .iter()
+        .find(|(extensions, _)| extensions.contains(&extension.as_str()))
+        .map(|(_, comments)| comments)
+}
+
+/// The file with its comments cut out: what a pass is shown, and what a claim
+/// in its answer may rest on.
+///
+/// `None` for an extension [`COMMENTS`] does not claim, which leaves that
+/// language alone entirely — its comments are sent and are evidence. That is the
+/// same conservatism as the rest of the module: a row that is not there cannot
+/// be wrong about a language, and adding one can only tighten warlock on it.
+///
+/// A line the stripping empties is dropped rather than left blank, which is
+/// worth about a tenth of what the stripping saves on a comment-dense file. A
+/// line that was already blank stays: those are the file's own paragraphing, and
+/// a wall of code with every gap closed up is harder to read, for a model as
+/// much as for anyone.
+pub(crate) fn without_comments(path: &Path, text: &str) -> Option<String> {
+    let comments = comments_of(path)?;
+    let mut kept = String::with_capacity(text.len());
+    let mut closing: Option<&'static str> = None;
+
+    for line in text.lines() {
+        let emptied = !line.trim().is_empty();
+        let before = kept.len();
+        let mut rest = line;
+        while !rest.is_empty() {
+            if let Some(closer) = closing {
+                match rest.find(closer) {
+                    Some(at) => {
+                        rest = &rest[at + closer.len()..];
+                        closing = None;
+                    }
+                    None => break,
+                }
+                continue;
+            }
+            let mut first: Option<(usize, usize, Option<&'static str>)> = None;
+            let mut note = |at: usize, width: usize, closer: Option<&'static str>| {
+                if first.is_none_or(|(seen, _, _)| at < seen) {
+                    first = Some((at, width, closer));
+                }
+            };
+            for marker in comments.line {
+                if let Some(at) = rest.find(marker) {
+                    note(at, marker.len(), None);
+                }
+            }
+            for (opener, closer) in comments.block {
+                if let Some(at) = rest.find(opener) {
+                    note(at, opener.len(), Some(closer));
+                }
+            }
+            match first {
+                None => {
+                    kept.push_str(rest);
+                    break;
+                }
+                Some((at, _, None)) => {
+                    kept.push_str(&rest[..at]);
+                    break;
+                }
+                Some((at, width, Some(closer))) => {
+                    kept.push_str(&rest[..at]);
+                    rest = &rest[at + width..];
+                    closing = Some(closer);
+                }
+            }
+        }
+        if emptied && kept[before..].trim().is_empty() {
+            kept.truncate(before);
+            continue;
+        }
+        kept.push('\n');
+    }
+    Some(kept)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1705,3 +1705,163 @@ fn a_multibyte_name_is_cut_on_a_character_boundary() {
         &Described::default(),
     ));
 }
+
+#[test]
+fn a_files_line_may_not_assert_a_mechanism_only_a_comment_claims() {
+    // The one planted lie that ever reached a document. balance.rs's module
+    // comment says every Posting is validated by `Decoder::decode()`; the file
+    // holds no such call and `Decoder` is declared two directories away, so
+    // every name in the claim is real somewhere and only the mechanism is
+    // invented. It survived because a comment counted as evidence and because
+    // nothing checked a files line at all.
+    let request = Request::new("describe", "/repo/engine/core").with_files([File::present(
+        "balance.rs",
+        *b"//! Every Posting is validated by Decoder::decode() before VAULT_LIMIT.\n\
+           \n\
+           pub const VAULT_LIMIT: usize = 512;\n\
+           pub fn is_settled(open: usize) -> bool {\n\
+               open == 0\n\
+           }\n",
+    )]);
+    let expected = Expected::of(&request);
+    let described = Described::default();
+
+    let mut fill = Fill::stub(&request);
+    fill.purpose = "Balance checks over the ledger's open accounts.".to_owned();
+    fill.structure = Vec::new();
+    fill.files.insert(
+        "balance.rs".to_owned(),
+        "is_settled(open) reports whether the open count is zero; VAULT_LIMIT (512) \
+         caps postings validated by Decoder::decode()."
+            .to_owned(),
+    );
+
+    let defects = check(&fill, &expected, &described);
+    assert!(
+        defects.iter().any(|defect| matches!(
+            defect,
+            Defect::UnknownTarget { name, .. } if name == "Decoder::decode"
+        )),
+        "the invented call is refused: {defects:?}"
+    );
+    // The same line's true call is not: `is_settled` is in the code, and a
+    // check that took the whole line down would be refusing both.
+    assert!(
+        !defects.iter().any(|defect| matches!(
+            defect,
+            Defect::UnknownTarget { name, .. } if name == "is_settled"
+        )),
+        "a call the file does declare stands: {defects:?}"
+    );
+
+    let (mended, mends) = mend(&fill, &expected, &described);
+    assert!(
+        check(&mended, &expected, &described).is_empty(),
+        "a mended fill is not defective"
+    );
+    let line = mended.files.get("balance.rs").expect("a line per file");
+    assert!(!line.contains("Decoder"), "the claim is gone: {line}");
+    assert!(
+        mends
+            .iter()
+            .any(|mend| mend.field == "files[\"balance.rs\"]"),
+        "the mend says which line it replaced: {mends:?}"
+    );
+
+    let document = render("core", &mended, &expected, &described);
+    assert!(!document.contains("Decoder"), "{document}");
+    assert!(!document.contains("— \n"), "no dangling dash: {document}");
+}
+
+#[test]
+fn the_pass_that_writes_a_files_line_is_the_one_that_checks_its_names() {
+    // The live line, verbatim, from the run that put it in the fixture's
+    // engine/core document: `Decoder` is a C++ class two directories away and
+    // balance.rs never calls it. It reached the page with the files-line check
+    // already written and passing its own tests, because those tests called
+    // `check` with a hand-built `Fill` while the road that writes a line goes
+    // through here — and `accept_synthesis` empties `files` before `check` sees
+    // it. So this asserts the defect at the door a real line comes in by.
+    let request = Request::new(FILE_PROMPT, "/repo/engine/core").with_files([File::present(
+        "balance.rs",
+        *b"//! Every Posting is validated by Decoder::decode() before VAULT_LIMIT.\n\
+           \n\
+           pub const VAULT_LIMIT: usize = 512;\n\
+           pub fn is_settled(open: usize) -> bool {\n\
+               open == 0\n\
+           }\n",
+    )]);
+    let expected = Expected::of(&request);
+    let mut described = Described::default();
+    described.declared.insert(
+        "balance.rs".to_owned(),
+        vec!["is_settled".to_owned(), "VAULT_LIMIT".to_owned()],
+    );
+
+    let asserted = "Defines VAULT_LIMIT constant and is_settled(open) checking if open \
+                    account count is zero; referenced by Decoder::decode()'s validation flow.";
+    let refused = accept_file(
+        &format!("{{\"line\": {asserted:?}}}"),
+        "balance.rs",
+        &expected,
+        &described,
+    )
+    .expect_err("the invented mechanism is refused");
+    assert!(
+        refused.iter().any(|defect| matches!(
+            defect,
+            Defect::UnknownTarget { name, .. } if name == "Decoder::decode"
+        )),
+        "{refused:?}"
+    );
+
+    // The same line without the clause stands, and so does a call the file
+    // really makes: narrowing the evidence to one file must not cost a line
+    // that routes to the file it is about.
+    let honest = "Defines VAULT_LIMIT constant and is_settled(open), which reports whether \
+                  the open account count is zero.";
+    accept_file(
+        &format!("{{\"line\": {honest:?}}}"),
+        "balance.rs",
+        &expected,
+        &described,
+    )
+    .expect("a line resting on the file's own code is accepted");
+}
+
+#[test]
+fn a_claim_resting_on_a_comment_is_refused_even_where_one_reached_a_pass() {
+    // The check outlives the reason it was written for. A pass is no longer
+    // shown a comment at all — `fitting::elided_or_whole` cuts them out of the
+    // request — so the claim below is one the pass had no way to read. The check
+    // stays because the request is not the only road: a file in a language no
+    // `COMMENTS` row claims is sent whole, comments and all, and a name may
+    // reach a line from somewhere nobody has thought of.
+    //
+    // This test used to assert the opposite, that the comment reached the model
+    // untouched, on the reasoning that a pass may repeat a comment's claim so
+    // long as it attributes it. That was measured and abandoned: attributing a
+    // claim spends the same characters as asserting it, and `engine/core` showed
+    // a refused claim coming back as "applied post-decode" — the invention
+    // reworded past the check rather than dropped.
+    let text = *b"//! A gorilla reconciles balances overnight.\npub fn post() {}\n";
+    let request = Request::new("describe", "/repo/engine/core")
+        .with_files([File::present("ledger.rs", text)]);
+    let expected = Expected::of(&request);
+
+    let mut fill = Fill::stub(&request);
+    fill.purpose = "The ledger core.".to_owned();
+    fill.structure = Vec::new();
+    fill.files.insert(
+        "ledger.rs".to_owned(),
+        "Posts entries with reconcile(); a gorilla comment aside.".to_owned(),
+    );
+    let defects = check(&fill, &expected, &Described::default());
+    assert!(
+        defects.iter().any(|defect| matches!(
+            defect,
+            Defect::UnknownTarget { name, .. } if name == "reconcile"
+        )),
+        "a call that only the comment supports is refused: {defects:?}"
+    );
+}
