@@ -9,6 +9,21 @@ to be worked in that order.
 Everything below was measured on 2026-09-18 against real passes over the
 fixture. Where a number appears, it was counted, not estimated.
 
+## Decisions already made — do not reopen these
+
+- **Comments do not reach a pass.** Settled. Do not re-argue it, and do not
+  build a check that polices comment-derived claims in the output instead.
+- **A file too big to send whole is still described**, not just named and
+  sized. See "Describing a file too big to send" below.
+- **There is a working implementation of the comment change** on the
+  `a-comment-is-not-a-declaration` branch (4 commits, unmerged, 1,850 tests
+  passing, clippy and fmt clean). Read it before writing your own — it is where
+  every measurement in this file came from. It is not necessarily right, and
+  one thing in it is known to be wasted work: it grew a comment-form table
+  covering C, Terraform, SQL, Lua and a dozen more, built to close a channel
+  that this change closes completely anyway. That breadth costs nothing but is
+  not why the table should exist.
+
 ---
 
 ## The change
@@ -139,6 +154,46 @@ drift rather than nothing. Not acted on. Do not claim in a commit message that
 no prose reaches a pass.
 
 ---
+
+## Describing a file too big to send
+
+`data/inventory.json` is 1,755,356 bytes and its line reads *"contents not
+loaded, structure and fields unknown"*, which routes nowhere. It should say what
+the file holds. `../warlock-test-repo/check.sh` asserts this and will be failing
+until it does.
+
+**The cap is not the problem, and raising it is not the fix.**
+
+`PER_FILE_BYTE_CAP` is `1024 * 1024` in `fitting.rs` with no comment justifying
+it — no measurement, no reasoning, a round number. So the *number* is arbitrary
+and you may change it. But the file it is keeping out is 60,000 repetitions of
+
+```json
+{ "id": 0, "sku": "SKU-0000000", "qty": 464 }
+```
+
+The first 120 bytes carry the entire shape. Sending 1.7 MB buys nothing over
+sending 2 KB, and a cap large enough to admit this file admits every file, which
+is what the cap is for. Removing it would be answering "the number is made up"
+with unbounded spend.
+
+**Send a head sample instead, and the primitive already exists.**
+`pact::read_capped` reads to `PER_FILE_BYTE_CAP + 1`, and `view_file` truncates,
+sets a `cut` flag, and handles a cut landing mid-character. That is exactly the
+shape wanted, already written and already tested, for the `v` key.
+
+So the change in `fitting::one_file` is to stop returning
+`left_out(Omission::TooLarge)` for an over-cap file and instead send a truncated
+head marked as truncated, so the pass knows it is describing a sample and not a
+whole file. A sample cap wants to be much smaller than the send cap — the shape
+of a record-per-line file is in its first few KB — and unlike
+`PER_FILE_BYTE_CAP`, that number should carry a comment saying what it was
+chosen against.
+
+What was there before and should **not** come back: a chunked map-reduce over
+the whole file with a disk cache under `.warlock/summaries/`. That was removed
+with the budget ladder and `fitting.rs` still argues for its removal. It is a
+model pass per chunk to learn what 2 KB already says.
 
 ## The trap to avoid while doing it
 
