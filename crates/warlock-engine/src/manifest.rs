@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::scope::{Rule, validate_scope};
 use crate::walk::MANIFEST_DIR;
 
 const MANIFEST_FILE: &str = "pacts.toml";
@@ -26,6 +27,12 @@ pub struct Manifest {
     version: u32,
     #[serde(rename = "pact", default, skip_serializing_if = "Vec::is_empty")]
     entries: Vec<PactEntry>,
+    // After `entries` so the `[[scope]]` tables follow the `[[pact]]` rows, and
+    // both after `version`: TOML puts every scalar before the first table, so a
+    // field declared above `version` would move the version line into whichever
+    // table happened to come first.
+    #[serde(rename = "scope", default, skip_serializing_if = "Vec::is_empty")]
+    scopes: Vec<ScopeRecord>,
 }
 
 impl Manifest {
@@ -34,6 +41,7 @@ impl Manifest {
         Self {
             version: SCHEMA_VERSION,
             entries: Vec::new(),
+            scopes: Vec::new(),
         }
     }
 
@@ -42,7 +50,14 @@ impl Manifest {
         Self {
             version: SCHEMA_VERSION,
             entries: entries.into_iter().collect(),
+            scopes: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_scopes(mut self, scopes: impl IntoIterator<Item = ScopeRecord>) -> Self {
+        self.scopes = scopes.into_iter().collect();
+        self
     }
 
     #[must_use]
@@ -53,6 +68,11 @@ impl Manifest {
     #[must_use]
     pub fn entries(&self) -> &[PactEntry] {
         &self.entries
+    }
+
+    #[must_use]
+    pub fn scopes(&self) -> &[ScopeRecord] {
+        &self.scopes
     }
 
     pub fn push(&mut self, entry: PactEntry) {
@@ -81,6 +101,15 @@ impl Manifest {
     }
 
     pub fn from_toml_str(text: &str) -> Result<Self, Error> {
+        Self::read(text, None)
+    }
+
+    // The path is threaded through rather than reached for, because this is also
+    // the parser `from_toml_str` exposes and there is no file behind that one. A
+    // record error names the file when `load` read it and says only which record
+    // when a caller handed over text — as against carrying a made-up path, which
+    // would send somebody to hand-edit a file that is not the one at fault.
+    fn read(text: &str, path: Option<&Path>) -> Result<Self, Error> {
         let raw: RawManifest = toml::from_str(text).map_err(|source| Error::Syntax { source })?;
 
         if u32::try_from(raw.version) != Ok(SCHEMA_VERSION) {
@@ -111,9 +140,43 @@ impl Manifest {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        let mut scopes: Vec<ScopeRecord> = Vec::new();
+        for (index, value) in raw.scope.into_iter().enumerate() {
+            // Same reason as the module above: read the name out of the raw
+            // table first, so a record that will not parse is still nameable by
+            // the name it did spell.
+            let named = value
+                .get("name")
+                .and_then(toml::Value::as_str)
+                .map(ToOwned::to_owned);
+            let refused = |source| Error::Scope {
+                path: path.map(Path::to_path_buf),
+                index,
+                name: named.clone(),
+                source,
+            };
+
+            let record = value
+                .try_into::<ScopeRecord>()
+                .map_err(|source| refused(ScopeFault::Malformed(Box::new(source))))?;
+            // The one rule, borrowed rather than restated: a record name is a
+            // scope, so `validate_scope` judges it and nothing here does.
+            validate_scope(&record.name).map_err(|rule| refused(ScopeFault::Refused(rule)))?;
+
+            if scopes.iter().any(|existing| existing.name == record.name) {
+                return Err(Error::DuplicateScope {
+                    path: path.map(Path::to_path_buf),
+                    index,
+                    name: record.name,
+                });
+            }
+            scopes.push(record);
+        }
+
         Ok(Self {
             version: SCHEMA_VERSION,
             entries,
+            scopes,
         })
     }
 
@@ -182,7 +245,7 @@ impl Manifest {
     pub fn load(root: impl AsRef<Path>) -> Result<Self, Error> {
         let path = manifest_path(root);
         match fs::read_to_string(&path) {
-            Ok(text) => Self::from_toml_str(&text),
+            Ok(text) => Self::read(&text, Some(&path)),
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
                 Err(Error::NotFound { path })
             }
@@ -417,6 +480,70 @@ impl PactEntry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeRecord {
+    // All four are read back exactly as written, for the reason on
+    // `PactEntry::scope`: these bytes are committed and hand-edited, so folding
+    // one on the way through would put a line in the diff of somebody who only
+    // asked to pact something else. `name` is judged by `validate_scope` when
+    // the manifest is read and never repaired; the other three are not judged at
+    // all, because what a team slug, a review state or a label may contain is
+    // the tracker's business and not this crate's.
+    name: String,
+    team: String,
+    review_state: String,
+    label: String,
+}
+
+impl ScopeRecord {
+    /// ```
+    /// use warlock_engine::ScopeRecord;
+    ///
+    /// let record = ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data");
+    ///
+    /// assert_eq!(record.name(), "data-plane");
+    /// // Stored as spelled: no folding, no trimming, no judgement.
+    /// assert_eq!(record.team(), "Data Plane");
+    /// assert_eq!(record.review_state(), "In Review");
+    /// assert_eq!(record.label(), "area/data");
+    /// ```
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        team: impl Into<String>,
+        review_state: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            team: team.into(),
+            review_state: review_state.into(),
+            label: label.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn team(&self) -> &str {
+        &self.team
+    }
+
+    #[must_use]
+    pub fn review_state(&self) -> &str {
+        &self.review_state
+    }
+
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+
 /// ```
 /// use std::path::Path;
 /// use warlock_engine::to_manifest_path;
@@ -541,6 +668,17 @@ pub enum Error {
         module: Option<String>,
         source: toml::de::Error,
     },
+    Scope {
+        path: Option<PathBuf>,
+        index: usize,
+        name: Option<String>,
+        source: ScopeFault,
+    },
+    DuplicateScope {
+        path: Option<PathBuf>,
+        index: usize,
+        name: String,
+    },
     Serialize {
         source: toml::ser::Error,
     },
@@ -577,6 +715,28 @@ impl fmt::Display for Error {
                 module: None,
                 source,
             } => write!(f, "pact entry {index} is malformed: {source}"),
+            Self::Scope {
+                path,
+                index,
+                name,
+                source,
+            } => {
+                write!(f, "scope record {index}")?;
+                if let Some(name) = name {
+                    write!(f, " (`{name}`)")?;
+                }
+                if let Some(path) = path {
+                    write!(f, " in `{}`", path.display())?;
+                }
+                write!(f, " is refused: {source}")
+            }
+            Self::DuplicateScope { path, index, name } => {
+                write!(f, "scope record {index}")?;
+                if let Some(path) = path {
+                    write!(f, " in `{}`", path.display())?;
+                }
+                write!(f, " repeats the name `{name}`")
+            }
             Self::Serialize { source } => {
                 write!(f, "could not write the pact manifest as TOML: {source}")
             }
@@ -600,25 +760,63 @@ impl std::error::Error for Error {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::Syntax { source } | Self::Entry { source, .. } => Some(source),
+            Self::Scope { source, .. } => Some(source),
             Self::Serialize { source } => Some(source),
             Self::NotFound { .. }
             | Self::UnsupportedVersion { .. }
+            | Self::DuplicateScope { .. }
             | Self::PathOutsideRoot { .. }
             | Self::NonUtf8Path { .. } => None,
         }
     }
 }
 
+// Two ways one record can be turned down, kept apart rather than flattened into
+// a string: a key that is missing or wrongly typed is the TOML reader's finding,
+// and a name the character rule refuses is `validate_scope`'s. A caller that
+// wants to tell them apart can, and neither has to be reconstructed by reading
+// the message.
+#[derive(Debug)]
+pub enum ScopeFault {
+    // Boxed because `toml::de::Error` is 88 bytes on its own, and this variant
+    // also carries a path and a name: inline it and `manifest::Error` grows past
+    // the size at which every `Result` in the workspace that can fail this way
+    // is paying for the failure. `Error::Entry` sits right at that line already.
+    Malformed(Box<toml::de::Error>),
+    Refused(Rule),
+}
+
+impl fmt::Display for ScopeFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Malformed(source) => write!(f, "{source}"),
+            Self::Refused(rule) => write!(f, "{rule}"),
+        }
+    }
+}
+
+impl std::error::Error for ScopeFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Malformed(source) => Some(source),
+            Self::Refused(rule) => Some(rule),
+        }
+    }
+}
+
 // Reading in two passes — the version as whatever integer the file says, the
-// entries still raw — is what buys the two error variants that name something:
-// the version before it is trusted, and each entry by index. Deserialising
-// straight into `Manifest` instead would give one blanket "this file is wrong".
+// pact entries and scope records still raw — is what buys the error variants
+// that name something: the version before it is trusted, and each entry or
+// record by its index and by the name it did spell. Deserialising straight into
+// `Manifest` instead would give one blanket "this file is wrong".
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawManifest {
     version: i64,
     #[serde(default)]
     pact: Vec<toml::Value>,
+    #[serde(default)]
+    scope: Vec<toml::Value>,
 }
 
 // Looks redundant beside the check in `from_toml_str` and is not: this is the
