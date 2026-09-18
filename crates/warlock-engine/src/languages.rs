@@ -40,6 +40,11 @@ const SLASHES: Comments = Comments {
     block: &[("/*", "*/")],
 };
 
+const HASH: Comments = Comments {
+    line: &["#"],
+    block: &[],
+};
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Language {
     extensions: &'static [&'static str],
@@ -47,7 +52,6 @@ pub(crate) struct Language {
     test_prefixes: &'static [&'static str],
     blocks: &'static [Block],
     declarations: &'static [&'static str],
-    comments: Comments,
 }
 
 impl Language {
@@ -92,7 +96,6 @@ impl Language {
 static TABLE: &[Language] = &[
     Language {
         extensions: &["rs"],
-        comments: SLASHES,
         test_suffixes: &[],
         test_prefixes: &[],
         blocks: &[Block {
@@ -130,7 +133,6 @@ static TABLE: &[Language] = &[
     // Zig. `test "name" { … }` sits at the top level of the file it tests.
     Language {
         extensions: &["zig"],
-        comments: SLASHES,
         test_suffixes: &[],
         test_prefixes: &[],
         blocks: &[Block {
@@ -143,7 +145,6 @@ static TABLE: &[Language] = &[
     // Go. `_test.go` is the toolchain's own rule, not a convention.
     Language {
         extensions: &["go"],
-        comments: SLASHES,
         test_suffixes: &["_test.go"],
         test_prefixes: &[],
         blocks: &[],
@@ -163,7 +164,6 @@ static TABLE: &[Language] = &[
     // which is the safe direction.
     Language {
         extensions: &["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"],
-        comments: SLASHES,
         test_suffixes: &[
             ".test.ts",
             ".test.tsx",
@@ -195,10 +195,6 @@ static TABLE: &[Language] = &[
     // Python. Both halves of pytest's discovery rule.
     Language {
         extensions: &["py"],
-        comments: Comments {
-            line: &["#"],
-            block: &[("\"\"\"", "\"\"\""), ("'''", "'''")],
-        },
         test_suffixes: &["_test.py"],
         test_prefixes: &["test_"],
         blocks: &[],
@@ -207,10 +203,6 @@ static TABLE: &[Language] = &[
     // Ruby.
     Language {
         extensions: &["rb"],
-        comments: Comments {
-            line: &["#"],
-            block: &[("=begin", "=end")],
-        },
         test_suffixes: &["_spec.rb", "_test.rb"],
         test_prefixes: &[],
         blocks: &[],
@@ -220,7 +212,6 @@ static TABLE: &[Language] = &[
     // enough that one row serves and the declarations overlap almost entirely.
     Language {
         extensions: &["java", "kt", "cs", "swift"],
-        comments: SLASHES,
         test_suffixes: &[
             "Test.java",
             "Tests.java",
@@ -248,15 +239,133 @@ static TABLE: &[Language] = &[
     // Elixir, whose test files are the only `.exs` most projects have.
     Language {
         extensions: &["ex", "exs"],
-        comments: Comments {
-            line: &["#"],
-            block: &[("\"\"\"", "\"\"\"")],
-        },
         test_suffixes: &["_test.exs"],
         test_prefixes: &[],
         blocks: &[],
         declarations: &["def ", "defp ", "defmodule ", "test ", "describe "],
     },
+];
+
+// Keyed by extension and not by row in `TABLE`, because the two tables answer
+// questions of different difficulty. Where a language writes prose is settled by
+// its grammar and can be looked up; what a line has to start with to be a
+// declaration, and which filenames hold tests, are guesses that want a real
+// repository to check them against. Carrying the comment form on `Language`
+// priced the first question at the second: covering C's comments meant inventing
+// C's declaration prefixes and test-suffix conventions with nothing here to
+// falsify them, so the eight rows above were the whole of the coverage and a
+// lying comment in every other language still witnessed its own claim.
+//
+// An extension neither table claims is still left alone, and a row here still
+// buys only one thing: the file's comments stop counting as evidence. It changes
+// no byte sent to a pass, no hash, and nothing `elide` or `declared_names` does.
+static COMMENTS: &[(&[&str], Comments)] = &[
+    // `.m` is Objective-C here and not MATLAB, which shares the extension and
+    // writes `%`. Adding `%` to serve MATLAB would cut every Objective-C format
+    // string — `@"%d items"` — off at the specifier, which is real code taken
+    // for prose and the one direction this must not be wrong in. Slashes cost
+    // MATLAB nothing, because `//` is not code there either.
+    (
+        &[
+            "rs", "zig", "go", "ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs", "java", "kt",
+            "kts", "cs", "swift", "c", "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "cu", "cuh",
+            "m", "mm", "scala", "dart", "groovy", "gradle", "proto", "glsl", "wgsl",
+        ],
+        SLASHES,
+    ),
+    (
+        &[
+            "sh", "bash", "zsh", "ksh", "yaml", "yml", "toml", "mk", "cmake", "pl", "pm", "r",
+            "tcl", "awk",
+        ],
+        HASH,
+    ),
+    // Both line forms are legal HCL, and Terraform's own documentation writes
+    // `#` while every generator writes `//`.
+    (
+        &["tf", "tfvars", "hcl", "nix", "php"],
+        Comments {
+            line: &["#", "//"],
+            block: &[("/*", "*/")],
+        },
+    ),
+    (
+        &["py"],
+        Comments {
+            line: &["#"],
+            block: &[("\"\"\"", "\"\"\""), ("'''", "'''")],
+        },
+    ),
+    (
+        &["rb"],
+        Comments {
+            line: &["#"],
+            block: &[("=begin", "=end")],
+        },
+    ),
+    (
+        &["ex", "exs"],
+        Comments {
+            line: &["#"],
+            block: &[("\"\"\"", "\"\"\"")],
+        },
+    ),
+    (
+        &["jl"],
+        Comments {
+            line: &["#"],
+            block: &[("#=", "=#")],
+        },
+    ),
+    (
+        &["sql"],
+        Comments {
+            line: &["--"],
+            block: &[("/*", "*/")],
+        },
+    ),
+    (
+        &["lua"],
+        Comments {
+            line: &["--"],
+            block: &[("--[[", "]]")],
+        },
+    ),
+    (
+        &["hs", "elm", "purs"],
+        Comments {
+            line: &["--"],
+            block: &[("{-", "-}")],
+        },
+    ),
+    (
+        &[
+            "clj", "cljs", "cljc", "edn", "el", "lisp", "scm", "ss", "rkt",
+        ],
+        Comments {
+            line: &[";"],
+            block: &[],
+        },
+    ),
+    (
+        &["html", "htm", "xml", "xhtml", "svg", "xsl"],
+        Comments {
+            line: &[],
+            block: &[("<!--", "-->")],
+        },
+    ),
+    // Block only for `.css`: `//` is not a comment there, and stripping from it
+    // would cut `url(https://…)` off at the scheme — a declaration taken for
+    // prose, which is the one direction this is not allowed to be wrong in. The
+    // preprocessor dialects do have it.
+    (
+        &["css"],
+        Comments {
+            line: &[],
+            block: &[("/*", "*/")],
+        },
+    ),
+    (&["scss", "sass", "less"], SLASHES),
 ];
 
 const VISIBILITY: &[&str] = &[
@@ -457,15 +566,22 @@ fn language_of(path: &Path) -> Option<&'static Language> {
         .find(|language| language.extensions.contains(&extension.as_str()))
 }
 
+fn comments_of(path: &Path) -> Option<&'static Comments> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    COMMENTS
+        .iter()
+        .find(|(extensions, _)| extensions.contains(&extension.as_str()))
+        .map(|(_, comments)| comments)
+}
+
 /// The file with its comments blanked, for deciding what a claim may rest on.
 ///
-/// `None` for an extension no row claims, which leaves that language's comments
-/// standing as evidence. That is the same conservatism as the rest of the table:
-/// a row that is not there cannot be wrong about a language, and adding one can
-/// only tighten warlock on it.
+/// `None` for an extension [`COMMENTS`] does not claim, which leaves that
+/// language's comments standing as evidence. That is the same conservatism as
+/// the rest of the module: a row that is not there cannot be wrong about a
+/// language, and adding one can only tighten warlock on it.
 pub(crate) fn without_comments(path: &Path, text: &str) -> Option<String> {
-    let language = language_of(path)?;
-    let comments = &language.comments;
+    let comments = comments_of(path)?;
     let mut kept = String::with_capacity(text.len());
     let mut closing: Option<&'static str> = None;
 
