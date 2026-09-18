@@ -192,12 +192,15 @@ fn describe(described: &mut Described, path: &Path, name: &str, text: &str) {
 //
 // Comments are cut out of that comparison above. A module comment asserting a
 // mechanism its file does not implement put every name in the assertion into
-// this set, which witnessed the claim that repeated it: `VAULT_LIMIT caps
+// this set, which then witnessed the claim that repeated it: `VAULT_LIMIT caps
 // postings validated by Decoder::decode()` reached a document with `Decoder`
-// declared two directories away and no call to it anywhere. A comment is not a
-// declaration, and the text that reaches the model is untouched — a pass still
-// reads every comment, and may still say what one claims, so long as it says
-// whose claim it is.
+// declared two directories away and no call to it anywhere.
+//
+// The cut has to hold on both sides. `elided_or_whole` keeps comments out of
+// the text a pass is sent, and `describe` keeps them out of this set; putting
+// either one back alone rebuilds the loop the other exists to close — evidence
+// witnessing prose no pass ever read, or a pass reading a claim nothing will
+// witness, which is the shape that sent `Decoder::decode()` round twice.
 fn tokens_of(text: &str) -> BTreeSet<String> {
     document::identifiers(text).map(str::to_owned).collect()
 }
