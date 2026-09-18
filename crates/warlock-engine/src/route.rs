@@ -222,3 +222,7 @@ impl std::error::Error for Error {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/route.rs"]
+mod tests;
