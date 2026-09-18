@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{Error, KEY_FILE, Unparseable, keys_path, load_key, load_key_names};
+use super::{
+    Error, Forgotten, KEY_FILE, Unparseable, forget_key, keys_path, load_key, load_key_names,
+    save_key,
+};
 
 // The string every test that must not see a key looks for. It is a plausible
 // Linear key rather than the word "secret", so a test that passes proves the
@@ -25,6 +28,23 @@ fn parse_error(text: &str) -> toml::de::Error {
         Err(error) => error,
         Ok(_) => panic!("`{text}` was meant to be unparseable"),
     }
+}
+
+fn key_dir_listing(home: &Path) -> Vec<String> {
+    let path = keys_path(home);
+    let dir = path.parent().expect("the store has a directory");
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .expect("the directory a save just created")
+        .map(|entry| {
+            entry
+                .expect("a readable entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
 }
 
 fn rendered(error: &Error) -> String {
@@ -195,6 +215,255 @@ fn a_store_that_cannot_be_read_is_an_io_error_and_never_no_keys() {
 }
 
 #[test]
+fn saving_creates_the_store_and_a_second_save_replaces_a_name() {
+    let home = a_dir();
+    assert!(!home.path().join(".warlock").exists(), "nothing there yet");
+
+    save_key(home.path(), "work", KEY).expect("saves");
+    save_key(home.path(), "personal", "lin_api_other").expect("saves a second name");
+    assert_eq!(
+        load_key(home.path(), "work").expect("looks up").as_deref(),
+        Some(KEY)
+    );
+    assert_eq!(
+        load_key_names(home.path()).expect("loads"),
+        ["personal", "work"]
+    );
+
+    save_key(home.path(), "work", "lin_api_rotated").expect("replaces");
+    assert_eq!(
+        load_key(home.path(), "work").expect("looks up").as_deref(),
+        Some("lin_api_rotated"),
+        "a name is the identity, so the second save replaces rather than doubles"
+    );
+    assert_eq!(
+        load_key_names(home.path()).expect("loads"),
+        ["personal", "work"]
+    );
+    assert_eq!(
+        key_dir_listing(home.path()),
+        [KEY_FILE],
+        "the temporary is renamed over the target, not left beside it"
+    );
+}
+
+#[test]
+fn forgetting_a_stored_name_is_told_apart_from_forgetting_one_that_is_not() {
+    let home = a_dir();
+
+    assert!(
+        matches!(forget_key(home.path(), "work"), Err(Error::NotFound { .. })),
+        "a store nobody wrote is not a store that has no `work` in it"
+    );
+
+    save_key(home.path(), "work", KEY).expect("saves");
+    save_key(home.path(), "personal", "lin_api_other").expect("saves");
+
+    assert_eq!(
+        forget_key(home.path(), "work").expect("forgets"),
+        Forgotten::Key
+    );
+    assert_eq!(
+        forget_key(home.path(), "work").expect("forgets"),
+        Forgotten::Nothing,
+        "gone is an answer, and never the same answer as removed"
+    );
+    assert_eq!(
+        load_key(home.path(), "work").expect("looks up"),
+        None,
+        "and the key really is out of the file"
+    );
+    assert_eq!(
+        load_key_names(home.path()).expect("loads"),
+        ["personal"],
+        "forgetting one name leaves the rest of the store alone"
+    );
+    assert_eq!(key_dir_listing(home.path()), [KEY_FILE]);
+
+    // A name `validate_scope` would refuse can still be sitting in a
+    // hand-edited file, and it has to be removable.
+    hand_write(home.path(), "Work = \"lin_api_capital\"\n");
+    assert_eq!(
+        forget_key(home.path(), "Work").expect("forgets"),
+        Forgotten::Key
+    );
+    assert_eq!(
+        load_key_names(home.path()).expect("loads"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_key_name_that_is_not_a_name_is_refused_and_nothing_is_written() {
+    let home = a_dir();
+
+    for name in ["", "Work", "-work", "work-", "work key", &"w".repeat(25)] {
+        match save_key(home.path(), name, KEY) {
+            Err(Error::Name {
+                name: refused,
+                rule,
+            }) => {
+                assert_eq!(refused, name);
+                assert!(
+                    !rule.to_string().is_empty(),
+                    "the refusal names the rule broken"
+                );
+            }
+            other => panic!("expected `{name}` to be refused, got {other:?}"),
+        }
+    }
+    assert!(
+        !keys_path(home.path()).exists(),
+        "a refused name never creates the store it was going to be written to"
+    );
+
+    save_key(home.path(), "work", KEY).expect("saves");
+    let before = fs::read_to_string(keys_path(home.path())).expect("reads");
+    assert!(save_key(home.path(), "Work", "lin_api_other").is_err());
+    assert_eq!(
+        fs::read_to_string(keys_path(home.path())).expect("reads"),
+        before,
+        "and never reaches a store that already exists"
+    );
+}
+
+#[test]
+fn a_store_that_will_not_parse_is_never_replaced_by_a_save() {
+    let home = a_dir();
+    let broken = format!("work = \"{KEY}\" oops\n");
+    hand_write(home.path(), &broken);
+
+    let error = save_key(home.path(), "personal", "lin_api_other").expect_err("refuses");
+    assert!(matches!(error, Error::Syntax { .. }), "{error:?}");
+    assert!(!rendered(&error).contains(KEY), "{}", rendered(&error));
+    assert!(
+        matches!(forget_key(home.path(), "work"), Err(Error::Syntax { .. })),
+        "forgetting from a store nobody can parse is broken, not absent"
+    );
+    assert_eq!(
+        fs::read_to_string(keys_path(home.path())).expect("reads"),
+        broken,
+        "a key store holds credentials that exist nowhere else on the \
+         machine, so a file warlock cannot read is one it does not overwrite"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_saved_store_is_readable_only_by_its_owner() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = a_dir();
+    save_key(home.path(), "work", KEY).expect("saves");
+
+    let mode = fs::metadata(keys_path(home.path()))
+        .expect("the store a save just wrote")
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "a Linear API key is not a file for the rest of the machine to read"
+    );
+
+    // And the mode survives a save onto a store somebody chmodded open.
+    fs::set_permissions(keys_path(home.path()), fs::Permissions::from_mode(0o644))
+        .expect("chmods open");
+    save_key(home.path(), "personal", "lin_api_other").expect("saves again");
+    assert_eq!(
+        fs::metadata(keys_path(home.path()))
+            .expect("the store")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_other_savers_write_the_files_they_always_wrote() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (home, elsewhere) = (a_dir(), a_dir());
+    let root = elsewhere.path().join("warlock");
+    fs::create_dir_all(&root).expect("creates the checkout");
+
+    // A file written the ordinary way, as the reference: comparing against it
+    // rather than against a literal keeps this about "unchanged by the key
+    // store's 0o600" and not about whatever umask this machine runs under.
+    let control = elsewhere.path().join("control");
+    fs::write(&control, "x").expect("writes");
+    let ordinary = fs::metadata(&control).expect("reads").permissions().mode() & 0o777;
+
+    crate::sigils::save_sigils(home.path(), &root, &["web".to_owned()]).expect("saves");
+    assert_eq!(
+        fs::metadata(crate::sigils::sigils_path(home.path(), &root))
+            .expect("the config")
+            .permissions()
+            .mode()
+            & 0o777,
+        ordinary,
+        "the sigil config goes through the same `write_and_sync`, and this \
+         module's mode is not applied to it"
+    );
+
+    crate::Manifest::new().save(&root).expect("saves");
+    assert_eq!(
+        fs::metadata(crate::manifest_path(&root))
+            .expect("the manifest")
+            .permissions()
+            .mode()
+            & 0o777,
+        ordinary,
+        "the manifest is committed, and a committed file nobody else can read \
+         is a broken checkout"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_save_that_fails_leaves_no_temporary_and_the_store_that_was_held() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = a_dir();
+    save_key(home.path(), "work", KEY).expect("saves");
+
+    let dir = home.path().join(".warlock");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).expect("chmods");
+    if fs::File::create(dir.join("probe")).is_ok() {
+        // Running as root: there is no such thing as an unwritable directory
+        // here, so there is nothing to assert against.
+        fs::remove_file(dir.join("probe")).expect("removes the probe");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("chmods back");
+        return;
+    }
+
+    let error = save_key(home.path(), "personal", "lin_api_other").expect_err("cannot be written");
+    assert!(matches!(error, Error::Io { .. }), "{error:?}");
+    assert!(
+        !rendered(&error).contains(KEY) && !rendered(&error).contains("lin_api_other"),
+        "not even the key being written reaches the error: {}",
+        rendered(&error)
+    );
+    let error = forget_key(home.path(), "work").expect_err("cannot be written");
+    assert!(matches!(error, Error::Io { .. }), "{error:?}");
+    assert!(!rendered(&error).contains(KEY), "{}", rendered(&error));
+
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("chmods back");
+    assert_eq!(
+        key_dir_listing(home.path()),
+        [KEY_FILE],
+        "the temporary is cleaned up rather than left holding a key beside the store"
+    );
+    assert_eq!(
+        load_key(home.path(), "work").expect("looks up").as_deref(),
+        Some(KEY),
+        "and the store that was held is the store that is still held"
+    );
+}
+
+#[test]
 fn every_error_variant_says_what_happened_and_where() {
     let not_found = Error::NotFound {
         path: PathBuf::from("/home/someone/.warlock/keys.toml"),
@@ -224,6 +493,21 @@ fn every_error_variant_says_what_happened_and_where() {
          line 2 is not `name = \"key\"`",
         "the line is the whole of the parse error that is safe to keep"
     );
+
+    assert_eq!(
+        Error::Serialize.to_string(),
+        "could not write the key store as TOML"
+    );
+
+    let name = Error::Name {
+        name: "Work".to_owned(),
+        rule: crate::scope::validate_scope("Work").expect_err("a capital is not a scope character"),
+    };
+    assert_eq!(
+        name.to_string(),
+        "`Work` is not a key name: a scope holds only lowercase letters, \
+         digits, `-` and `_`, and this one holds `W`"
+    );
 }
 
 #[test]
@@ -249,10 +533,23 @@ fn errors_expose_the_cause_they_wrap() {
         .is_some()
     );
     assert!(
+        Error::Name {
+            name: "Work".to_owned(),
+            rule: crate::scope::validate_scope("Work").expect_err("a capital"),
+        }
+        .source()
+        .is_some()
+    );
+    assert!(
         Error::NotFound {
             path: PathBuf::from("x")
         }
         .source()
         .is_none()
+    );
+    assert!(
+        Error::Serialize.source().is_none(),
+        "a `toml::ser::Error` can carry the value it choked on, and here the \
+         values are the keys"
     );
 }
