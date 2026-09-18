@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    Error, MANIFEST_FILE, Manifest, PactEntry, SCHEMA_VERSION, from_manifest_path, manifest_path,
-    to_manifest_path,
+    Error, MANIFEST_FILE, Manifest, PactEntry, SCHEMA_VERSION, ScopeFault, ScopeRecord,
+    from_manifest_path, manifest_path, to_manifest_path,
 };
 
 fn unjudged() -> PactEntry {
@@ -279,6 +279,263 @@ fn a_scope_is_stored_as_written_however_odd() {
 }
 
 #[test]
+fn a_scope_record_round_trips_byte_for_byte() {
+    let root = a_root();
+    // Hand-written, so this says where the table sits in the file and in what
+    // order its keys are written, not merely that the serialiser agrees with
+    // itself.
+    let original = concat!(
+        "version = 1\n\n",
+        "[[pact]]\n",
+        "module = \"crates/warlock-engine\"\n",
+        "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+        "scope = \"data-plane\"\n\n",
+        "[[scope]]\n",
+        "name = \"data-plane\"\n",
+        "team = \"Data Plane \"\n",
+        "review_state = \"In Review\"\n",
+        "label = \"area/Data_Plane\"\n",
+    );
+    hand_write(root.path(), original);
+
+    let loaded = Manifest::load(root.path()).expect("loads");
+    assert_eq!(
+        loaded,
+        Manifest::with_entries([unjudged().with_scope("data-plane")]).with_scopes([
+            ScopeRecord::new("data-plane", "Data Plane ", "In Review", "area/Data_Plane")
+        ]),
+        "the file and the constructed manifest are the same manifest"
+    );
+
+    let record = &loaded.scopes()[0];
+    assert_eq!(record.name(), "data-plane");
+    assert_eq!(record.team(), "Data Plane ", "not trimmed");
+    assert_eq!(record.review_state(), "In Review", "not folded");
+    assert_eq!(record.label(), "area/Data_Plane", "not folded either");
+
+    loaded.save(root.path()).expect("saves");
+    assert_eq!(
+        fs::read_to_string(manifest_path(root.path())).expect("reads"),
+        original,
+        "a load-then-save is a no-op on the bytes of a record too"
+    );
+}
+
+#[test]
+fn a_scope_a_pact_names_and_no_record_declares_loads() {
+    let root = a_root();
+    // Every manifest written before records existed is this file: scopes on
+    // the pacts and nothing declaring them. A reader that treated a scope with
+    // no record as a hole would refuse every one of them.
+    let original = concat!(
+        "version = 1\n\n",
+        "[[pact]]\n",
+        "module = \"crates/warlock-engine\"\n",
+        "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+        "scope = \"data-plane\"\n\n",
+        "[[pact]]\n",
+        "module = \"crates/warlock-tui\"\n",
+        "document = \"crates/warlock-tui/WARLOCK.md\"\n",
+        "scope = \"billing\"\n",
+    );
+    hand_write(root.path(), original);
+
+    let loaded = Manifest::load(root.path()).expect("a scope with no record is not a failure");
+    assert_eq!(
+        loaded
+            .entries()
+            .iter()
+            .map(PactEntry::scope)
+            .collect::<Vec<_>>(),
+        [Some("data-plane"), Some("billing")],
+        "both entries kept the scope they spelled"
+    );
+    assert!(
+        loaded.scopes().is_empty(),
+        "a scope that routes to nothing is nothing, not an invented record"
+    );
+
+    loaded.save(root.path()).expect("saves");
+    assert_eq!(
+        fs::read_to_string(manifest_path(root.path())).expect("reads"),
+        original,
+        "and nothing was written down on the scopes' behalf"
+    );
+}
+
+#[test]
+fn a_record_no_pact_names_is_loaded_and_written_back_unchanged() {
+    let root = a_root();
+    // `third-party` is spelled by no entry here and is still where work under
+    // it would be filed: a record is written down before anything is pacted
+    // under it and outlives the last pact that named it, so pruning it to what
+    // the entries happen to say would lose the only copy.
+    let original = concat!(
+        "version = 1\n\n",
+        "[[pact]]\n",
+        "module = \"crates/warlock-engine\"\n",
+        "document = \"crates/warlock-engine/WARLOCK.md\"\n\n",
+        "[[scope]]\n",
+        "name = \"third-party\"\n",
+        "team = \"Vendor\"\n",
+        "review_state = \"Triage\"\n",
+        "label = \"area/vendor\"\n",
+    );
+    hand_write(root.path(), original);
+
+    let loaded = Manifest::load(root.path()).expect("loads");
+    assert_eq!(
+        loaded.scopes(),
+        [ScopeRecord::new(
+            "third-party",
+            "Vendor",
+            "Triage",
+            "area/vendor"
+        )],
+        "the record nothing points at is read like any other"
+    );
+    assert!(
+        loaded
+            .entries()
+            .iter()
+            .all(|entry| entry.scope() != Some("third-party")),
+        "no entry names it, which is the whole point of this fixture"
+    );
+
+    loaded.save(root.path()).expect("saves");
+    assert_eq!(
+        fs::read_to_string(manifest_path(root.path())).expect("reads"),
+        original,
+        "an unused record survives a load and a save byte for byte"
+    );
+}
+
+#[test]
+fn a_manifest_with_no_records_writes_the_bytes_it_always_did() {
+    let with_none = Manifest::with_entries([unjudged(), judged()]);
+    // Emptied rather than never set, which is the case `skip_serializing_if`
+    // is there for: a manifest that lost its last record writes no key.
+    let emptied = Manifest::with_entries([unjudged(), judged()])
+        .with_scopes([ScopeRecord::new(
+            "data-plane",
+            "Data Plane",
+            "In Review",
+            "area",
+        )])
+        .with_scopes(Vec::new());
+
+    for manifest in [&with_none, &emptied] {
+        let text = manifest.to_toml_string().expect("serialises");
+        assert_eq!(
+            text,
+            concat!(
+                "version = 1\n\n",
+                "[[pact]]\n",
+                "module = \"crates/warlock-engine\"\n",
+                "document = \"crates/warlock-engine/WARLOCK.md\"\n\n",
+                "[[pact]]\n",
+                "module = \"crates/warlock-engine\"\n",
+                "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+                "granted_hash = \"d0f5a1\"\n",
+                "granted_at = \"2026-08-19T07:32:00Z\"\n",
+            ),
+            "a manifest with no records is byte-identical to one written before \
+             records existed"
+        );
+        assert!(manifest.scopes().is_empty());
+        assert_eq!(Manifest::from_toml_str(&text).expect("parses"), with_none);
+    }
+}
+
+#[test]
+fn a_malformed_record_is_named_rather_than_read_as_absent() {
+    // A missing key, a wrong-typed value and a key nothing declares. Each one
+    // is the record being wrong, never the record being missing: a reader that
+    // skipped it would route work under `data-plane` nowhere and say nothing.
+    let bodies = [
+        "[[scope]]\nname = \"data-plane\"\nteam = \"Data Plane\"\nlabel = \"area\"\n",
+        "[[scope]]\nname = \"data-plane\"\nteam = 7\nreview_state = \"In Review\"\nlabel = \"area\"\n",
+        "[[scope]]\nname = \"data-plane\"\nteam = \"Data Plane\"\nreview_state = \"In Review\"\nlabel = \"area\"\nlead = \"someone\"\n",
+    ];
+
+    for body in bodies {
+        let text = format!("version = 1\n\n{body}");
+        match Manifest::from_toml_str(&text) {
+            Err(Error::Scope {
+                path: None,
+                index: 0,
+                name: Some(name),
+                source: ScopeFault::Malformed(_),
+            }) => assert_eq!(name, "data-plane", "named by the name it did spell"),
+            other => panic!("expected a malformed-record error for `{body}`, got {other:?}"),
+        }
+
+        let root = a_root();
+        hand_write(root.path(), &text);
+        let error = Manifest::load(root.path()).expect_err("the record is not readable");
+        let message = error.to_string();
+        assert!(message.contains("data-plane"), "{message}");
+        assert!(
+            message.contains(&manifest_path(root.path()).display().to_string()),
+            "the message points at the file to go and hand-edit: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_record_name_the_scope_rule_refuses_is_named_rather_than_skipped() {
+    // The same rule `validate_scope` applies everywhere else, asked here and
+    // nowhere restated. A record is the one place a bad scope is fatal: a pact
+    // reads an unreadable scope as unscoped and widens to its parent, but a
+    // record nobody can match is a routing table with a hole in it.
+    for name in ["", "Data-Plane", "data-", "*", "abcdefghijklmnopqrstuvwxy"] {
+        let text = format!(
+            "version = 1\n\n[[scope]]\nname = \"{name}\"\nteam = \"Data Plane\"\nreview_state = \"In Review\"\nlabel = \"area\"\n"
+        );
+        match Manifest::from_toml_str(&text) {
+            Err(Error::Scope {
+                index: 0,
+                name: Some(spelled),
+                source: ScopeFault::Refused(_),
+                ..
+            }) => assert_eq!(spelled, name, "quoted back as written, not repaired"),
+            other => panic!("expected `{name}` to be refused, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn two_records_with_the_same_name_are_a_duplicate_error() {
+    let record = "team = \"Data Plane\"\nreview_state = \"In Review\"\nlabel = \"area\"\n";
+    let text = format!(
+        "version = 1\n\n[[scope]]\nname = \"data-plane\"\n{record}\n[[scope]]\nname = \"billing\"\n{record}\n[[scope]]\nname = \"data-plane\"\n{record}"
+    );
+
+    match Manifest::from_toml_str(&text) {
+        Err(Error::DuplicateScope {
+            path: None,
+            index: 2,
+            name,
+        }) => assert_eq!(name, "data-plane"),
+        other => panic!("expected a duplicate-record error, got {other:?}"),
+    }
+
+    let root = a_root();
+    hand_write(root.path(), &text);
+    let error = Manifest::load(root.path()).expect_err("one name, twice");
+    assert!(
+        matches!(error, Error::DuplicateScope { index: 2, .. }),
+        "{error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains(&manifest_path(root.path()).display().to_string()),
+        "{error}"
+    );
+}
+
+#[test]
 fn dropping_a_grant_drops_both_keys_again() {
     let text = Manifest::with_entries([judged().without_grant()])
         .to_toml_string()
@@ -529,6 +786,37 @@ fn every_error_variant_says_what_happened() {
             "pact manifest schema version 999 is not supported; this build reads version 1",
         ),
         (
+            Error::Scope {
+                path: Some(PathBuf::from("/repo/.warlock/pacts.toml")),
+                index: 1,
+                name: Some("Data-Plane".to_owned()),
+                source: ScopeFault::Refused(
+                    crate::scope::validate_scope("Data-Plane").expect_err("a capital is refused"),
+                ),
+            },
+            "scope record 1 (`Data-Plane`) in `/repo/.warlock/pacts.toml` is refused: a scope \
+             holds only lowercase letters, digits, `-` and `_`, and this one holds `D`",
+        ),
+        (
+            Error::DuplicateScope {
+                path: Some(PathBuf::from("/repo/.warlock/pacts.toml")),
+                index: 2,
+                name: "data-plane".to_owned(),
+            },
+            "scope record 2 in `/repo/.warlock/pacts.toml` repeats the name `data-plane`",
+        ),
+        (
+            // No file behind it: `from_toml_str` was handed text, so the
+            // message says which record and stops rather than naming a path
+            // that would send somebody to the wrong file.
+            Error::DuplicateScope {
+                path: None,
+                index: 2,
+                name: "data-plane".to_owned(),
+            },
+            "scope record 2 repeats the name `data-plane`",
+        ),
+        (
             Error::PathOutsideRoot {
                 root: PathBuf::from("/repo"),
                 path: PathBuf::from("/elsewhere"),
@@ -610,8 +898,27 @@ fn errors_expose_the_cause_they_wrap() {
         .is_some()
     );
     assert!(
+        Error::Scope {
+            path: None,
+            index: 0,
+            name: None,
+            source: ScopeFault::Malformed(Box::new(a_de_error())),
+        }
+        .source()
+        .is_some()
+    );
+    assert!(
         Error::NotFound {
             path: PathBuf::from("x")
+        }
+        .source()
+        .is_none()
+    );
+    assert!(
+        Error::DuplicateScope {
+            path: None,
+            index: 0,
+            name: "data-plane".to_owned(),
         }
         .source()
         .is_none()

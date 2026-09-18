@@ -11,8 +11,8 @@ use crate::document::{self, STAMP};
 use crate::fitting::{Omission, Snapshot};
 use crate::ignores;
 use crate::{
-    Agent, Loaded, Manifest, NodeState, PactEntry, agent, decide_state, from_manifest_path,
-    load_tree, manifest, subtree_hash,
+    Agent, Loaded, Manifest, NodeState, PactEntry, ScopeRecord, agent, decide_state,
+    from_manifest_path, load_tree, manifest, subtree_hash,
 };
 
 struct Canned {
@@ -79,7 +79,7 @@ fn with_scopes(manifest: &Manifest, scoped: &[(&str, &str)]) -> Manifest {
             "`{module}` is not pacted, so nothing can scope it",
         );
     }
-    Manifest::with_entries(manifest.entries().iter().map(|entry| {
+    manifest.rebuilt_with(manifest.entries().iter().map(|entry| {
         match scoped.iter().find(|(module, _)| *module == entry.module()) {
             Some((_, scope)) => entry.clone().with_scope(*scope),
             None => entry.clone(),
@@ -2179,6 +2179,106 @@ fn rules_that_cannot_be_used_fail_rather_than_guessing() {
     assert!(
         error.to_string().contains(ignores::FILENAME),
         "the one line back names the file to go and fix: {error}",
+    );
+}
+
+// The `[[scope]]` records across every rebuild in this module. `third-party` is
+// named by no entry in any fixture below, and `data-plane` loses the only entry
+// that named it in two of these tests: a record is written down before anything
+// is pacted under it and outlives the last pact that spelled it, so neither is
+// ever pruned.
+fn records() -> Vec<ScopeRecord> {
+    vec![
+        ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane"),
+        ScopeRecord::new("third-party", "Vendor", "Triage", "area/vendor"),
+    ]
+}
+
+// The written bytes and not the parsed records, because the order the tables
+// come back in and the order they are written in are two different claims.
+fn record_bytes(manifest: &Manifest) -> String {
+    let text = manifest.to_toml_string().expect("serialises");
+    let at = text.find("[[scope]]").unwrap_or(text.len());
+    text[at..].to_owned()
+}
+
+#[test]
+fn an_un_pact_keeps_every_record_including_the_one_it_orphaned() {
+    let manifest = with_scopes(
+        &pacted(&["crates/engine", "crates/tui"]),
+        &[("crates/engine", "data-plane")],
+    )
+    .with_scopes(records());
+
+    let left = unpact_subtree("crates/engine", ".", &manifest).expect("un-pacts");
+
+    assert_eq!(modules(&left), ["crates/tui"], "the entry really did go");
+    assert_eq!(
+        record_bytes(&left),
+        record_bytes(&manifest),
+        "the records are the same records, in the same order, written the same way",
+    );
+}
+
+#[test]
+fn an_un_pact_of_the_whole_repository_still_leaves_the_records() {
+    let manifest = pacted(&[".", "crates/engine"]).with_scopes(records());
+
+    let left = unpact_subtree(".", ".", &manifest).expect("un-pacts");
+
+    assert!(left.entries().is_empty(), "nothing is pacted any more");
+    assert_eq!(
+        left.scopes(),
+        records(),
+        "and the records are all still here"
+    );
+}
+
+#[test]
+fn cleaning_an_ignored_subtree_keeps_the_records() {
+    let repo = ignoring("vendor/\n", &["vendor", "crates/engine"]);
+    let manifest = with_scopes(
+        &pacted(&["crates/engine", "vendor"]),
+        &[("vendor", "third-party")],
+    )
+    .with_scopes(records());
+
+    let left = unpact_ignored(&manifest, repo.path(), repo.path()).expect("the rules are read");
+
+    assert_eq!(
+        scopes(&left),
+        [("crates/engine", None)],
+        "the excluded entry went, and took the boundary it stated with it",
+    );
+    assert_eq!(
+        record_bytes(&left),
+        record_bytes(&manifest),
+        "`third-party` routes nothing now and is still written down",
+    );
+}
+
+#[test]
+fn a_run_that_rewrites_the_entries_leaves_the_records_alone() {
+    let repo = project();
+    let before = pacted(&["crates/tui"]).with_scopes(records());
+
+    let PactedSubtree { manifest, .. } = pact_subtree(
+        repo.path().join("crates/engine"),
+        repo.path(),
+        &before,
+        &Canned::filling(),
+        &mut Unwatched,
+    )
+    .expect("pacts");
+
+    assert!(
+        manifest.entries().len() > before.entries().len(),
+        "the run really did add entries",
+    );
+    assert_eq!(
+        record_bytes(&manifest),
+        record_bytes(&before),
+        "a pass writes documents and grants, and no record is its to move",
     );
 }
 

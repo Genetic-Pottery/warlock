@@ -152,9 +152,11 @@ pub(crate) fn scope_submit(
 }
 
 // A rebuild rather than a mutation, because [`Manifest`] has no mutating scope
-// setter and should not grow one for this. Every other entry is cloned as it
-// stands and the map preserves order, so the saved file differs from the one on
-// disk in one place; the edited entry keeps its document, granted hash and
+// setter and should not grow one for this. [`Manifest::rebuilt_with`] and not
+// `Manifest::with_entries`: that one starts from an empty manifest and would
+// drop the `[[scope]]` records out of the file. Every other entry is cloned as
+// it stands and the map preserves order, so the saved file differs from the one
+// on disk in one place; the edited entry keeps its document, granted hash and
 // granted timestamp, none of which are this edit's to move.
 //
 // A `module` no entry matches hands back a copy. No caller reaches that:
@@ -163,7 +165,7 @@ pub(crate) fn scope_submit(
 // Shared with the headless `warlock scope add`/`remove` rather than copied,
 // since a second rebuild would be a second chance to forget the above.
 pub(crate) fn with_scope_on(manifest: &Manifest, module: &str, scope: Option<&str>) -> Manifest {
-    Manifest::with_entries(manifest.entries().iter().map(|entry| {
+    manifest.rebuilt_with(manifest.entries().iter().map(|entry| {
         let entry = entry.clone();
         if entry.module() != module {
             return entry;

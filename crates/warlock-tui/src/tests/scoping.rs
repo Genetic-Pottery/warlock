@@ -3,7 +3,9 @@ use std::{fs, io};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
-use warlock_engine::{Manifest, Node, NodeState, PactEntry, Tree, manifest, validate_scope};
+use warlock_engine::{
+    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest, validate_scope,
+};
 use warlock_tui::{App, Edited, ScopeField, ScopePrompt, Sigils, edit_for};
 
 use super::{scope_edit, scope_submit};
@@ -516,6 +518,51 @@ fn enter_sets_the_scope_and_leaves_the_document_and_the_grant_alone() {
             .map(PactEntry::module)
             .collect::<Vec<_>>(),
         ["crates/engine", "crates/tui"]
+    );
+}
+
+// `third-party` is named by no entry in the fixture and `data-plane` loses its
+// only entry to the clear below: a write that pruned the records to what the
+// entries spell would drop both, and a record is the one thing here that is
+// allowed to outlive the pacts that named it.
+fn records() -> Vec<ScopeRecord> {
+    vec![
+        ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane"),
+        ScopeRecord::new("third-party", "Vendor", "Triage", "area/vendor"),
+    ]
+}
+
+#[test]
+fn a_set_and_a_clear_both_leave_the_records_in_the_file() {
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), ENGINE_ROW);
+    let mut manifest = pacts().with_scopes(records());
+
+    for text in ["billing", ""] {
+        let prompt = scope_submit(
+            &mut app,
+            &mut manifest,
+            repo.path(),
+            &field("crates/engine", text),
+        );
+
+        assert_eq!(prompt, ScopePrompt::Closed);
+        let written = saved(repo.path()).expect("the submit wrote the manifest");
+        assert_eq!(
+            written.scopes(),
+            records(),
+            "writing `{text}` over the scope moved a record",
+        );
+        assert_eq!(
+            written, manifest,
+            "and what is on disk is what this thread believes"
+        );
+    }
+
+    assert_eq!(
+        scope_on(&manifest, "crates/engine"),
+        None,
+        "the clear really did take the last entry naming `data-plane`",
     );
 }
 

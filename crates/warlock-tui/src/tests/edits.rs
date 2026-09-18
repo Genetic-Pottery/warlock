@@ -2,7 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use warlock_engine::{
-    Manifest, Node, NodeState, PactEntry, Tree, manifest_path, save_sigils, validate_scope,
+    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest_path, save_sigils,
+    validate_scope,
 };
 use warlock_tui::App;
 
@@ -493,6 +494,85 @@ fn removing_a_scope_from_a_directory_that_carries_none_is_success_and_writes_the
         Some(&before[..]),
         "an idempotent clear rewrote the file differently"
     );
+}
+
+// `third-party` is named by no entry at all, and `data-plane` loses the only
+// entry that named it to the un-pact below: a writer that pruned the records to
+// what the entries spell would drop both, and where work under a scope is filed
+// is not the un-pact's to forget.
+fn records() -> Vec<ScopeRecord> {
+    vec![
+        ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane"),
+        ScopeRecord::new("third-party", "Vendor", "Triage", "area/vendor"),
+    ]
+}
+
+// The same repository every other test here works over, with the records added
+// before the first write rather than after: what these assert is that a command
+// found them in the file and put them back.
+fn a_repository_of_records() -> tempfile::TempDir {
+    let repo = a_repository();
+    a_manifest()
+        .with_scopes(records())
+        .save(repo.path())
+        .expect("a manifest that saves");
+    repo
+}
+
+// The written bytes from the first `[[scope]]` table on, because the order the
+// records come back in and the order they are written in are two claims.
+fn record_bytes(repo_root: &Path) -> String {
+    let text = String::from_utf8(manifest_bytes(repo_root).expect("a manifest on disk"))
+        .expect("a manifest is UTF-8");
+    let at = text.find("[[scope]]").unwrap_or(text.len());
+    text[at..].to_owned()
+}
+
+#[test]
+fn both_scope_writes_leave_the_records_where_they_found_them() {
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    holding(home.path(), repo.path(), &["platform", "data-plane"]);
+    let before = record_bytes(repo.path());
+    assert!(before.contains("third-party"), "the fixture has records");
+
+    scope_add(repo.path(), home.path(), "docs", "billing").expect("nothing scopes `docs`");
+    assert_eq!(
+        record_bytes(repo.path()),
+        before,
+        "`scope add` moved a record"
+    );
+
+    scope_remove(repo.path(), home.path(), "crates/engine").expect("the machine holds the scope");
+    assert_eq!(
+        record_bytes(repo.path()),
+        before,
+        "`scope remove` moved a record",
+    );
+    assert_eq!(stored(repo.path(), "crates/engine").scope(), None);
+}
+
+#[test]
+fn an_unpact_keeps_the_records_including_the_one_it_orphaned() {
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    holding(home.path(), repo.path(), &["platform", "data-plane"]);
+    let before = record_bytes(repo.path());
+
+    unpact(repo.path(), home.path(), "crates").expect("an open boundary writes");
+
+    let after = load_manifest(repo.path()).expect("a manifest that reads");
+    assert_eq!(
+        after
+            .entries()
+            .iter()
+            .map(PactEntry::module)
+            .collect::<Vec<_>>(),
+        ["docs"],
+        "the only entry naming `data-plane` really did go",
+    );
+    assert_eq!(after.scopes(), records());
+    assert_eq!(record_bytes(repo.path()), before);
 }
 
 #[test]
